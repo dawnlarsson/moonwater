@@ -115,7 +115,7 @@ static bool link_groups_for_change(link_groups address_to groups)
 
         if (read >= 0 && old)
                 (void)link_groups_scrub(old);
-        return link_records_for_change(read);
+        return read >= 0 || read == -ENOENT;
 }
 
 /* The groups as the file says, with no groups and the reason when it cannot
@@ -742,11 +742,14 @@ static fn link_nearby_ask(void)
 }
 
 // Goodbye, with TTL zero, when the listener stops.
+static COLD fn link_mdns_end(void);
+
 static fn link_nearby_stop(void)
 {
         if (link_nearby.socket >= 0 && link_nearby.groups.count)
                 link_nearby_announce(0);
         link_nearby_close();
+        link_mdns_end();
 }
 
 // The same place is greeted once in a while, not at every announcement.
@@ -877,6 +880,192 @@ static bool link_pair_greeted(positive group, p8 address_to key,
 }
 
 /*
+        The mDNS reader, apart.
+
+        Every host on the link may send this listener mDNS, and reading it is a
+        walk of names, compression pointers and records of the sender's own
+        lengths (waterlink_mdns_read). The listener is root, keeps the link's
+        key and runs commands for linked machines, so the walk runs in a
+        reader of its own: a child that is nobody, cannot be dumped, dies with
+        the listener, holds only its end of a socket of whole messages and
+        stdio, and kills itself at any call but reading a packet from it and
+        sending the reading back (link_mdns_filter_build). What it answers is
+        the fixed-size waterlink_found, believed only with every count and
+        length inside its array. A reader that cannot be confined (no seccomp,
+        qemu-user) reads nothing: the listener then hears no machine nearby,
+        which is the link without discovery, not discovery unconfined. One
+        that dies or answers what cannot be believed is ended and started
+        again for the next packet.
+*/
+#define LINK_MDNS_SOCK_SEQPACKET 5
+#define LINK_MDNS_ANSWER_SECONDS 1
+
+struct link_mdns_said
+{
+        b64 read;
+        struct waterlink_found found;
+};
+
+static struct
+{
+        b32 channel;
+        bipolar pid;
+        bool refused;
+} link_mdns = {-1, -1, false};
+
+static COLD fn link_mdns_filter_build(net_filter address_to filter)
+{
+        static const p32 plain[] = {
+            (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(munmap), (p32)syscall(madvise),
+            (p32)syscall(exit_group), (p32)syscall(exit), (p32)syscall(rt_sigreturn),
+            (p32)syscall(restart_syscall),
+#ifdef NET_APART_RISCV_HWPROBE
+            NET_APART_RISCV_HWPROBE,
+#endif
+        };
+        positive count = array_count(plain);
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - at), 0, plain[at]);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+}
+
+static DEAD_END COLD fn link_mdns_child(b32 channel, bipolar parent)
+{
+        p32 kept[1] = {(p32)channel};
+        net_filter filter;
+
+        link_mdns_filter_build(address_of filter);
+        if (!descriptors_close_outside(3, kept, 1) || !net_apart_nobody() ||
+            !net_apart_tie(parent) || !net_filter_install(address_of filter))
+                system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
+        for (;;)
+        {
+                p8 packet[WATERLINK_MDNS_MAX + 1];
+                struct link_mdns_said said;
+                network_deadline deadline;
+                bipolar ready;
+                bipolar got;
+
+                if (!network_deadline_begin(address_of deadline, 3600, 0))
+                        break;
+                ready = network_wait_readable_until(channel, address_of deadline);
+                if (!ready)
+                        continue;
+                got = ready < 0 ? -1
+                                : socket_receive(channel, packet, sizeof packet, MSG_DONTWAIT,
+                                                 null, null);
+                if (got <= 0)
+                        break;
+                memory_zero(address_of said, sizeof said);
+                said.read = waterlink_mdns_read(packet, (positive)got, address_of said.found);
+                if (socket_send(channel, address_of said, sizeof said, MSG_NOSIGNAL, null, 0) !=
+                    (bipolar)sizeof said)
+                        break;
+        }
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+static COLD fn link_mdns_end(void)
+{
+        positive raw = 0;
+
+        if (link_mdns.channel >= 0)
+                system_close(link_mdns.channel);
+        if (link_mdns.pid > 0)
+        {
+                system_call_2(syscall(kill), (positive)link_mdns.pid, SIGKILL);
+                (void)system_wait4_retry(link_mdns.pid, address_of raw, 0, null);
+        }
+        link_mdns.channel = -1;
+        link_mdns.pid = -1;
+}
+
+static COLD bool link_mdns_start(void)
+{
+        b32 ends[2];
+        bipolar parent = system_call(syscall(getpid));
+        bipolar child;
+
+        if (system_call_4(syscall(socketpair), AF_UNIX,
+                          LINK_MDNS_SOCK_SEQPACKET | SOCK_CLOEXEC, 0, (positive)ends) < 0)
+                return false;
+        child = system_fork();
+        if (!child)
+        {
+                system_close(ends[0]);
+                link_mdns_child(ends[1], parent);
+        }
+        system_close(ends[1]);
+        if (child < 0)
+        {
+                system_close(ends[0]);
+                return false;
+        }
+        link_mdns.channel = ends[0];
+        link_mdns.pid = child;
+        return true;
+}
+
+static PURE COLD bool link_mdns_believed(const struct waterlink_found address_to found)
+{
+        if (found->count > WATERLINK_FOUND_MAX ||
+            found->question_length > sizeof(found->question))
+                return false;
+        for (positive at = 0; at < found->count; at++)
+                if (found->instance[at].label_length > sizeof(found->instance[at].label))
+                        return false;
+        return true;
+}
+
+/* waterlink_mdns_read, apart: the reading the reader made, or false. */
+static COLD bool link_mdns_read_apart(const p8 address_to packet, positive length,
+                                      struct waterlink_found address_to found)
+{
+        struct link_mdns_said said;
+        network_deadline deadline;
+
+        memory_zero(found, sizeof(*found));
+        if (link_mdns.refused || length > WATERLINK_MDNS_MAX)
+                return false;
+        if (link_mdns.channel < 0 && !link_mdns_start())
+                return false;
+        if (socket_send(link_mdns.channel, packet, length, MSG_NOSIGNAL | MSG_DONTWAIT, null,
+                        0) != (bipolar)length ||
+            !network_deadline_begin(address_of deadline, LINK_MDNS_ANSWER_SECONDS, 0) ||
+            network_wait_readable_until(link_mdns.channel, address_of deadline) <= 0 ||
+            socket_receive(link_mdns.channel, address_of said, sizeof said, MSG_DONTWAIT, null,
+                           null) != (bipolar)sizeof said ||
+            !link_mdns_believed(address_of said.found))
+        {
+                positive raw = 0;
+
+                //      A reader that could not be confined says so by its exit,
+                //      once: there is no reading here from then on.
+                if (link_mdns.pid > 0 &&
+                    system_wait4_retry(link_mdns.pid, address_of raw, 1 /* WNOHANG */, null) ==
+                        link_mdns.pid &&
+                    (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == NET_APART_EXIT_UNCONFINED)
+                {
+                        link_mdns.pid = -1;
+                        link_mdns.refused = true;
+                }
+                link_mdns_end();
+                return false;
+        }
+        address_to found = said.found;
+        return said.read != 0;
+}
+
+/*
         One mDNS packet from the local link: a question about the service is
         answered, and every machine an announcement names is greeted for
         each group, unless a member of that group is already known there.
@@ -888,7 +1077,7 @@ static fn link_nearby_heard(p8 address_to packet, positive length,
         struct waterlink_found found;
         link_peers peers;
 
-        if (!waterlink_mdns_read(packet, length, address_of found))
+        if (!link_mdns_read_apart(packet, length, address_of found))
                 return;
 
         if (found.asked && link_nearby.groups.count)

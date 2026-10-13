@@ -5533,6 +5533,8 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_CMD_SET_STATION 18
 #define NL80211_CMD_NEW_STATION 19
 #define NL80211_CMD_CONNECT 46
+#define NL80211_CMD_AUTHENTICATE 37
+#define NL80211_CMD_ASSOCIATE 38
 #define NL80211_CMD_DEAUTHENTICATE 39
 #define NL80211_CMD_DISASSOCIATE 40
 #define NL80211_CMD_DISCONNECT 48
@@ -5558,6 +5560,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_ATTR_REASON_CODE 54
 #define NL80211_ATTR_KEY_TYPE 55
 #define NL80211_ATTR_TIMED_OUT 65
+#define NL80211_ATTR_USE_MFP 66
 #define NL80211_ATTR_STA_FLAGS2 67
 #define NL80211_ATTR_CONTROL_PORT 68
 #define NL80211_ATTR_PRIVACY 70
@@ -5570,6 +5573,7 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_REKEY_DATA_KEK 1
 #define NL80211_REKEY_DATA_KCK 2
 #define NL80211_REKEY_DATA_REPLAY_CTR 3
+#define NL80211_ATTR_AUTH_DATA 156
 #define NL80211_ATTR_SCAN_FLAGS 158
 #define NL80211_ATTR_SPLIT_WIPHY_DUMP 174
 #define NL80211_ATTR_EXT_FEATURES 217
@@ -5580,13 +5584,16 @@ static b32 host_bios(string_address address_to arguments, positive count)
 #define NL80211_IFTYPE_P2P_CLIENT 8
 #define NL80211_SCAN_FLAG_FLUSH 2
 #define NL80211_AUTHTYPE_OPEN 0
+#define NL80211_AUTHTYPE_SAE 4
+#define NL80211_MFP_REQUIRED 1
 #define NL80211_WPA_VERSION_2 2
 #define NL80211_KEYTYPE_GROUP 0
 #define NL80211_KEYTYPE_PAIRWISE 1
 #define NL80211_STA_FLAG_AUTHORIZED 1
 #define NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK 15
 #define WLAN_CIPHER_CCMP 0x000fac04u
-#define WLAN_AKM_PSK 0x000fac02u
+#define WLAN_CIPHER_BIP_CMAC_128 0x000fac06u
+#define WLAN_SUITE_IEEE 0x000fac00u
 #define NL80211_CONNECT_SECONDS 20
 #define WIFI_EAPOL_SECONDS 8
 #define WIFI_EAPOL_HDR 99
@@ -5952,8 +5959,18 @@ static COLD bool wifi_psk(p8 address_to ssid, positive ssid_length,
         return true;
 }
 
+/*
+        The PTK of a handshake: the PMK over the two addresses and the two
+        nonces, each pair smaller first. PSK (suite 2) takes 802.11i's
+        PRF-512 of HMAC-SHA1, all 64 bytes of it; PSK-SHA256 (6) and SAE (8)
+        take the KDF of 802.11-2016 12.7.1.7.2, HMAC-SHA-256 of a counter
+        from 1, the label, the data and the length in bits, 384 bits of it.
+        Either way the KCK, the KEK and the TK are its first three sixteen
+        bytes.
+*/
 static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
-                   p8 address_to anonce, p8 address_to snonce, p8 address_to ptk)
+                   p8 address_to anonce, p8 address_to snonce, p8 address_to ptk,
+                   p8 akm)
 {
         p8 label[] = "Pairwise key expansion";
         p8 data[6 + 6 + 32 + 32];
@@ -5991,6 +6008,30 @@ static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
         memory_copy(data + 6, max_mac, 6);
         memory_copy(data + 12, min_nonce, 32);
         memory_copy(data + 44, max_nonce, 32);
+        if (akm != 2)
+        {
+                p8 block[2 + 22 + 76 + 2];
+                p8 sum[32];
+
+                memory_fill(ptk, 0, 64);
+                for (which = 1; used < 48; which++)
+                {
+                        block[0] = (p8)which;
+                        block[1] = 0;
+                        memory_copy(block + 2, label, 22);
+                        memory_copy(block + 24, data, 76);
+                        //      384, little endian.
+                        block[100] = 0x80;
+                        block[101] = 0x01;
+                        crypto_hmac_sha256(pmk, 32, block, sizeof(block), sum);
+                        memory_copy(ptk + used, sum, used + 32 > 48 ? 48 - used : 32);
+                        used += 32;
+                }
+                crypto_forget(block, sizeof(block));
+                crypto_forget(sum, sizeof(sum));
+                crypto_forget(data, sizeof(data));
+                return;
+        }
         memory_copy(input, label, 22);
         input[22] = 0;
         memory_copy(input + 23, data, 76);
@@ -6006,9 +6047,245 @@ static COLD fn wifi_ptk(p8 address_to pmk, p8 address_to ap, p8 address_to sta,
         crypto_forget(hash, sizeof(hash));
 }
 
-static const p8 wifi_rsn_ie[] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
-                                 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
-                                 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
+/* The key descriptor version an access point's key frames carry for a key
+   management suite: 2 (HMAC-SHA1-128) for PSK, 3 (AES-128-CMAC) for
+   PSK-SHA256, and 0, "as the suite defines", for SAE, whose MIC is the CMAC
+   all the same. */
+static COLD p8 wifi_key_version(p8 akm)
+{
+        return akm == 2 ? 2 : akm == 8 ? 0 : 3;
+}
+
+/*
+        What an access point's RSN element offers, as far as a join cares:
+        its key management suites, management frame protection, the group
+        cipher and the pairwise set, each a mask, and whether its RSN
+        extension element takes SAE's hash-to-element. The kernel keeps two
+        frames of an access point, its latest (a probe response anybody can
+        send in its name) and its last beacon, and a join takes what either
+        offers: a forged frame that takes an offer away -- protection, WPA3,
+        hash-to-element -- would have the join ask for less, while one that
+        adds an offer costs a join that a forger can stop anyway. Message 3
+        of the handshake is then held to the elements read here
+        (wifi_eapol_step).
+*/
+#define WIFI_AKM_PSK 1
+#define WIFI_AKM_PSK_SHA256 2
+#define WIFI_AKM_SAE 4
+#define WIFI_AKM_OTHER 8
+#define WIFI_PMF_CAPABLE 1
+#define WIFI_PMF_REQUIRED 2
+#define WIFI_CIPHER_CCMP 1
+#define WIFI_CIPHER_TKIP 2
+#define WIFI_CIPHER_OTHER 4
+
+typedef struct
+{
+        p8 akms;
+        p8 pmf;
+        p8 group;
+        p8 pairwise;
+        p8 h2e;
+} wifi_rsn_caps;
+
+static COLD fn wifi_caps_merge(wifi_rsn_caps address_to into, const wifi_rsn_caps address_to from)
+{
+        into->akms |= from->akms;
+        into->pmf |= from->pmf;
+        into->group |= from->group;
+        into->pairwise |= from->pairwise;
+        into->h2e |= from->h2e;
+}
+
+/*
+        What a saved network has taught the join, or its owner has said of
+        it (radio_rules): an access point by its name offered management
+        frame protection; it was joined with WPA3; its owner lets the tight
+        tier join it with WPA2.
+*/
+#define WIFI_RULE_PMF 1
+#define WIFI_RULE_SAE 2
+#define WIFI_RULE_WPA2 4
+
+/* A join's refusals of its own, which it makes having chosen an access
+   point and before it sends anything, and the one message 3 can bring:
+   below every errno and every -1000-R reason a join reports. */
+#define WIFI_REFUSE_TKIP (-70001)
+#define WIFI_REFUSE_CIPHER (-70002)
+#define WIFI_REFUSE_PMF_GONE (-70003)
+#define WIFI_REFUSE_SAE_GONE (-70004)
+#define WIFI_REFUSE_NO_PMF (-70005)
+#define WIFI_REFUSE_WPA2 (-70006)
+#define WIFI_REFUSE_KEY_ONLY (-70007)
+#define WIFI_REFUSE_SUITE (-70008)
+#define WIFI_REFUSE_SAE_BUDGET (-70009)
+#define WIFI_REFUSE_ELEMENTS (-70010)
+#define WIFI_REFUSE_FIRST WIFI_REFUSE_ELEMENTS
+#define WIFI_REFUSE_LAST WIFI_REFUSE_TKIP
+//      The machine's doing, not the network's: no station could be confined
+//      here, so nothing was joined; or the station ended without a status.
+#define WIFI_REFUSE_CONFINE (-70101)
+#define WIFI_REFUSE_APART (-70102)
+
+/* What a join asks of an access point: the key management suite (2, 6 or
+   8), the protection it asks for, and the PSK suite it may try when WPA3
+   came to nothing for a reason that is not the password, or 0. */
+typedef struct
+{
+        p8 akm;
+        p8 pmf;
+        p8 fallback;
+} wifi_plan;
+
+/*
+        The join's choice for an access point that offers caps, at a tier,
+        for a saved network with rules, whose secret is a passphrase or a
+        key of 64 hex digits (key_only, which is a PMK and no SAE password).
+        0 with the plan, or the refusal.
+
+          ciphers   CCMP for the group and among the pairwise ones, or
+                    nothing: TKIP (WPA1, and the group cipher of a mixed
+                    WPA/WPA2 network) is broken
+          memory    an access point of a name that once offered protection
+                    is never joined without it, and one joined with WPA3
+                    is never joined with WPA2: a twin that offers less is
+                    what a forged deauthentication, or a password guessed
+                    from a captured handshake, needs
+          WPA3      whenever it is offered and there is a password for it,
+                    with protection required, and WPA2 after it only when
+                    that is offered too, the memory allows it and the tier
+                    does
+          WPA2      PSK-SHA256 when it is offered with protection, else
+                    PSK; protection asked for whenever it is offered, as
+                    required, since the kernel takes no optional form from a
+                    driver with no connect of its own
+          tight     protection always, and WPA2 only for a network whose
+                    owner said so (WIFI_RULE_WPA2)
+*/
+static COLD bipolar wifi_join_plan(positive tier, const wifi_rsn_caps address_to caps,
+                                   p8 rules, bool key_only, wifi_plan address_to plan)
+{
+        bool tight = tier >= STRICT_TIGHT;
+        bool pmf = caps->pmf != 0;
+        bool sae = (caps->akms & WIFI_AKM_SAE) && !key_only;
+        p8 psk = (caps->akms & WIFI_AKM_PSK_SHA256) && (pmf || !(caps->akms & WIFI_AKM_PSK))
+                     ? 6
+                 : caps->akms & WIFI_AKM_PSK ? 2
+                                             : 0;
+
+        memory_fill(plan, 0, sizeof(*plan));
+        if (!(caps->group & WIFI_CIPHER_CCMP) || (caps->group & ~WIFI_CIPHER_CCMP) ||
+            !(caps->pairwise & WIFI_CIPHER_CCMP))
+                return (caps->group | caps->pairwise) & WIFI_CIPHER_TKIP ? WIFI_REFUSE_TKIP
+                                                                         : WIFI_REFUSE_CIPHER;
+        if (!sae && !psk)
+                return caps->akms & WIFI_AKM_SAE ? WIFI_REFUSE_KEY_ONLY : WIFI_REFUSE_SUITE;
+        if ((rules & WIFI_RULE_PMF) && !pmf)
+                return WIFI_REFUSE_PMF_GONE;
+        if ((rules & WIFI_RULE_SAE) && !sae)
+                return caps->akms & WIFI_AKM_SAE ? WIFI_REFUSE_KEY_ONLY : WIFI_REFUSE_SAE_GONE;
+        if (sae)
+        {
+                plan->akm = 8;
+                plan->pmf = WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED;
+                if (psk && !(rules & WIFI_RULE_SAE) &&
+                    (!tight || (pmf && (rules & WIFI_RULE_WPA2))))
+                        plan->fallback = psk;
+                return 0;
+        }
+        if (tight && !pmf)
+                return WIFI_REFUSE_NO_PMF;
+        if (tight && !(rules & WIFI_RULE_WPA2))
+                return WIFI_REFUSE_WPA2;
+        plan->akm = psk;
+        plan->pmf = pmf ? WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED : 0;
+        return 0;
+}
+
+/* The RSN element a station offers, in the association request and again
+   in message 2, which the access point compares with it: CCMP for both
+   ciphers and the one key management suite asked for; with protection,
+   the capable and required bits, the PMKID when there is one (SAE's) and
+   BIP-CMAC-128 as the group management cipher. With no protection it is
+   the element the join always sent. */
+static COLD positive wifi_rsn_build(p8 address_to out, p8 akm, p8 pmf, const p8 address_to pmkid)
+{
+        static const p8 head[] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+                                  0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+                                  0x00, 0x0f, 0xac};
+        positive at = sizeof(head);
+
+        memory_copy(out, head, sizeof(head));
+        out[at++] = akm;
+        out[at++] = (p8)((pmf & WIFI_PMF_CAPABLE ? 0x80 : 0) | (pmf & WIFI_PMF_REQUIRED ? 0x40 : 0));
+        out[at++] = 0;
+        if (!(pmf & WIFI_PMF_CAPABLE))
+                return at;
+        out[at++] = pmkid ? 1 : 0;
+        out[at++] = 0;
+        if (pmkid)
+        {
+                memory_copy(out + at, pmkid, 16);
+                at += 16;
+        }
+        out[at++] = 0x00;
+        out[at++] = 0x0f;
+        out[at++] = 0xac;
+        out[at++] = 0x06;
+        out[1] = (p8)(at - 2);
+        return at;
+}
+
+/*
+        The access point's RSN element and RSN extension element as the
+        frames a join chose it from showed them, whole, element id and
+        length first: [0] its latest frame's, [1] its last beacon's where
+        the kernel kept that apart. A handshake's message 3 carries the
+        access point's own, under the MIC of a key only it and this station
+        have: one that matches neither is not what the join was decided
+        from, which a forged beacon or probe response that took an offer
+        away makes, and it is refused (802.11-2020 12.7.6.4, as
+        wpa_supplicant refuses it).
+*/
+#define WIFI_ELEMENT_ROOM (2 + 255)
+
+typedef struct
+{
+        p8 rsn[2][WIFI_ELEMENT_ROOM];
+        p8 rsnx[2][WIFI_ELEMENT_ROOM];
+        p16 rsn_length[2];
+        p16 rsnx_length[2];
+} wifi_seen;
+
+/* Whether an element of message 3 is one of the two seen (none, when
+   neither frame had one). */
+static COLD bool wifi_seen_one(p8 (address_to seen)[WIFI_ELEMENT_ROOM],
+                               const p16 address_to lengths, const p8 address_to got,
+                               positive length)
+{
+        if (!lengths[0] && !lengths[1])
+                return !length;
+        for (positive at = 0; at < 2; at++)
+                if (lengths[at] && lengths[at] == length && !memory_compare(seen[at], got, length))
+                        return true;
+        return false;
+}
+
+/* Whether message 3's RSN element is one the access point showed, and its
+   RSN extension element too, or none where neither frame had one: an
+   extension element stripped from what the station saw would have it hunt
+   for the password element where the access point takes hash-to-element.
+   A join that saw no RSN element at all (no scan could be had) has nothing
+   to hold it to. */
+static COLD bool wifi_seen_matches(wifi_seen address_to seen, const p8 address_to rsn,
+                                   positive rsn_length, const p8 address_to rsnx,
+                                   positive rsnx_length)
+{
+        if (!seen->rsn_length[0] && !seen->rsn_length[1])
+                return true;
+        return wifi_seen_one(seen->rsn, seen->rsn_length, rsn, rsn_length) &&
+               wifi_seen_one(seen->rsnx, seen->rsnx_length, rsnx, rsnx_length);
+}
 
 static COLD bool nl80211_ext_bit(p8 address_to bits, positive length, positive which)
 {
@@ -6107,11 +6384,10 @@ static COLD bipolar nl80211_station(nl80211 address_to session, p32 index,
 static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 idx,
                                p32 type, p8 address_to mac, p8 address_to key,
                                positive key_length, p8 address_to seq,
-                               positive seq_length, bool group_default)
+                               positive seq_length, bool group_default, p32 cipher)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
-        p32 ccmp = WLAN_CIPHER_CCMP;
 
         if (!nl80211_begin(address_of request, session->family, NL80211_CMD_NEW_KEY,
                            NLM_REQUEST | NLM_ACK, sequence))
@@ -6121,7 +6397,7 @@ static COLD bipolar nl80211_new_key(nl80211 address_to session, p32 index, p8 id
                               key_length);
         netlink_attribute_add(address_of request, NL80211_ATTR_KEY_IDX, address_of idx,
                               1);
-        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, ccmp);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_CIPHER, cipher);
         nl80211_attribute_u32(address_of request, NL80211_ATTR_KEY_TYPE, type);
         if (mac)
                 netlink_attribute_add(address_of request, NL80211_ATTR_MAC, mac, 6);
@@ -6172,7 +6448,6 @@ static COLD bipolar nl80211_authorize(nl80211 address_to session, p32 index,
 #define WIFI_KEY_REQUEST 0x0800
 #define WIFI_KEY_ENCRYPTED 0x1000
 #define WIFI_KEEP_CHECK_SECONDS 30
-#define WIFI_NETLINK_DROP_MEMBERSHIP 2
 
 typedef struct
 {
@@ -6187,12 +6462,29 @@ typedef struct
         p8 ptk[64];
         p8 pending[64];
         p8 gtk[4][16];
+        p8 gtk_installed; // one bit per driver slot; zero bytes are a valid key
+        p8 igtk[2][16];
+        p8 igtk_installed; // bit 0 key id 4, bit 1 key id 5, as gtk_installed
         p8 replay[8];
         p8 answered;
         bool replay_set;
         bool installed;
         bool pending_set;
         bool nonce_used;
+        //      What was asked of the access point: the suite (2, 6 or 8), the
+        //      key descriptor version its frames carry, protection, and the
+        //      RSN element (with the RSN extension element after it for
+        //      hash-to-element) that the association request and message 2
+        //      carry.
+        p8 akm;
+        p8 version;
+        p8 pmf;
+        p8 rsn[48];
+        p8 rsn_length;
+        wifi_seen seen;
+        //      The access point's Transition Disable bits from an
+        //      authenticated message 3 (WIFI_TRANSITION_*).
+        p8 transition_disable;
 } wifi_link;
 
 static COLD fn wifi_link_close(wifi_link address_to link)
@@ -6220,11 +6512,12 @@ static COLD positive wifi_eapol_length(p8 address_to frame, positive got)
         return length;
 }
 
-/* HMAC-SHA1-128 over the frame with its MIC field zero: written into the
-   frame, or compared in constant time with the MIC it carries, which is
-   left in place so that another key can be tried. */
-static COLD bool wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive length,
-                                bool check)
+/* The frame's MIC with its MIC field zero, HMAC-SHA1-128 for PSK and
+   AES-128-CMAC for PSK-SHA256 and SAE: written into the frame, or compared
+   in constant time with the MIC it carries, which is left in place so that
+   another key can be tried. */
+static COLD bool wifi_eapol_mic(const wifi_link address_to link, p8 address_to kck,
+                                p8 address_to frame, positive length, bool check)
 {
         p8 hash[20];
         p8 carried[16];
@@ -6232,21 +6525,25 @@ static COLD bool wifi_eapol_mic(p8 address_to kck, p8 address_to frame, positive
 
         memory_copy(carried, frame + 81, 16);
         memory_fill(frame + 81, 0, 16);
-        crypto_hmac(DIGEST_SHA1, 20, kck, 16, frame, length, hash);
+        if (link->akm == 2)
+                crypto_hmac(DIGEST_SHA1, 20, kck, 16, frame, length, hash);
+        else
+                crypto_aes_cmac(kck, frame, length, hash);
         same = crypto_same(carried, hash, 16);
         memory_copy(frame + 81, check ? carried : hash, 16);
         crypto_forget(hash, sizeof(hash));
         return same;
 }
 
-/* A key frame to the access point: its key information, the replay
-   counter it answers, the SNonce and RSN element for message 2, and its
-   MIC under kck. The key length is 0, as wpa_supplicant sends for RSN. */
+/* A key frame to the access point: its key information with the link's
+   descriptor version, the replay counter it answers, the SNonce and RSN
+   element for message 2, and its MIC under kck. The key length is 0, as
+   wpa_supplicant sends for RSN. */
 static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kck,
                                      p16 info, p8 address_to replay, bool nonce)
 {
-        p8 frame[WIFI_EAPOL_HDR + sizeof(wifi_rsn_ie)];
-        positive length = WIFI_EAPOL_HDR + (nonce ? sizeof(wifi_rsn_ie) : 0);
+        p8 frame[WIFI_EAPOL_HDR + sizeof(link->rsn)];
+        positive length = WIFI_EAPOL_HDR + (nonce ? link->rsn_length : 0);
         socket_address_packet to = {.family = AF_PACKET,
                                     .protocol = network_order_16(ETH_P_PAE),
                                     .index = link->index,
@@ -6258,55 +6555,111 @@ static COLD bipolar wifi_eapol_reply(wifi_link address_to link, p8 address_to kc
         frame[1] = 3;
         network_store_16(frame + 2, (p16)(length - 4));
         frame[4] = 2;
-        network_store_16(frame + 5, info);
+        network_store_16(frame + 5, (p16)((info & ~7) | link->version));
         memory_copy(frame + 9, replay, 8);
         if (nonce)
         {
                 memory_copy(frame + 17, link->snonce, 32);
-                network_store_16(frame + 97, (p16)sizeof(wifi_rsn_ie));
-                memory_copy(frame + 99, wifi_rsn_ie, sizeof(wifi_rsn_ie));
+                network_store_16(frame + 97, link->rsn_length);
+                memory_copy(frame + 99, link->rsn, link->rsn_length);
         }
-        wifi_eapol_mic(kck, frame, length, false);
+        wifi_eapol_mic(link, kck, frame, length, false);
         memory_copy(to.addr, link->bssid, 6);
         sent = socket_send(link->eapol, frame, length, 0, address_of to, sizeof(to));
         crypto_forget(frame, sizeof(frame));
         return sent == (bipolar)length ? 0 : -1;
 }
 
-/* The GTK out of key data wrapped under the KEK: 1 with it, 0 when the
-   data unwraps and holds none, -1 when it does not unwrap. */
+/* What key data holds that a station takes: the first GTK and its id, the
+   first IGTK (key id 4 or 5, its packet number then the key), the access
+   point's own RSN element and RSN extension element, whole, and the
+   Transition Disable bitmap (IEEE 802.11-2020 12.7.2: KDE 00-0F-AC:32;
+   WPA3 specification 13.5), whose first bit says this network is never to
+   be joined with WPA2 again. */
+#define WIFI_TRANSITION_WPA3_PERSONAL 1
+
+typedef struct
+{
+        p8 gtk[16];
+        p8 gtk_id;
+        p8 igtk[6 + 16];
+        p8 igtk_id;
+        p8 transition_disable;
+        p8 rsn[WIFI_ELEMENT_ROOM];
+        p8 rsnx[WIFI_ELEMENT_ROOM];
+        p16 rsn_length;
+        p16 rsnx_length;
+} wifi_key_data;
+
+/* Key data wrapped under the KEK, into what: 1 with a GTK, 0 when the data
+   unwraps and holds none, -1 when it does not unwrap. Each kind is the
+   first of it; a GTK or IGTK element of any other length is no key. */
 static COLD bipolar wifi_gtk_take(p8 address_to kek, p8 address_to data, positive length,
-                                  p8 address_to gtk, p8 address_to idx)
+                                  wifi_key_data address_to what)
 {
         p8 plain[CRYPTO_WRAP_MOST];
         positive size = 0;
         bipolar found = 0;
         byte_reader reader;
 
+        memory_fill(what, 0, sizeof(*what));
         if (!crypto_aes_key_unwrap(kek, data, length, plain, address_of size))
                 return -1;
         reader = byte_reader_open(plain, size);
         while (byte_reader_left(&reader))
         {
+                byte_reader whole = reader;
                 p8 kind = byte_reader_u8(&reader);
                 byte_reader element = byte_reader_vector8(&reader);
+                positive span = byte_reader_left(&element);
+                p32 type;
 
                 if (!byte_reader_ok(&reader))
                         break;
+                //      The access point's elements, as they are, to be held
+                //      to what its beacon said.
+                if ((kind == 0x30 && !what->rsn_length) ||
+                    (kind == 0xf4 && !what->rsnx_length))
+                {
+                        p8 address_to into = kind == 0x30 ? what->rsn : what->rsnx;
+
+                        memory_copy(into, byte_reader_take(&whole, 2 + span), 2 + span);
+                        if (kind == 0x30)
+                                what->rsn_length = (p16)(2 + span);
+                        else
+                                what->rsnx_length = (p16)(2 + span);
+                        continue;
+                }
+                if (kind != 0xdd || span < 4)
+                        continue;
+                //      The OUI and data type, read once: each test below is of
+                //      the same four bytes.
+                type = byte_reader_u32(&element);
                 //      The GTK KDE: 00-0F-AC:1, the key id, a reserved
                 //      byte, then a CCMP key of sixteen bytes.
-                if (kind == 0xdd && byte_reader_left(&element) == 4 + 2 + 16 &&
-                    byte_reader_u32(&element) == 0x000fac01)
+                if (span == 4 + 2 + 16 && type == 0x000fac01 && !found)
                 {
                         p8 key_id = byte_reader_u8(&element);
 
                         (void)byte_reader_u8(&element);
-                        if (key_id & 3)
+                        what->gtk_id = (p8)(key_id & 3);
+                        memory_copy(what->gtk, byte_reader_take(&element, 16), 16);
+                        found = 1;
+                }
+                //      Transition Disable: 00-0F-AC:32 and its bitmap.
+                else if (span >= 4 + 1 && type == 0x000fac20)
+                        what->transition_disable |= byte_reader_u8(&element);
+                //      The IGTK KDE: 00-0F-AC:9, the key id (4 or 5, two
+                //      bytes little endian), the six byte packet number the
+                //      key starts at, and a BIP-CMAC-128 key of sixteen bytes.
+                else if (span == 4 + 2 + 6 + 16 && type == 0x000fac09 && !what->igtk_id)
+                {
+                        p16 key_id = byte_reader_u16le(&element);
+
+                        if (key_id == 4 || key_id == 5)
                         {
-                                address_to idx = (p8)(key_id & 3);
-                                memory_copy(gtk, byte_reader_take(&element, 16), 16);
-                                found = 1;
-                                break;
+                                memory_copy(what->igtk, byte_reader_take(&element, 22), 22);
+                                what->igtk_id = (p8)key_id;
                         }
                 }
         }
@@ -6347,7 +6700,11 @@ static COLD fn wifi_rekey_offload(wifi_link address_to link)
         makes a pending PTK, which replaces the installed one once a message
         3 carrying the same ANonce checks under it. A key already in is not
         put in again when a message is resent: that reinstallation is the
-        one KRACK used to reset the nonces.
+        one KRACK used to reset the nonces. The group management key of a
+        link with protection is held the same way. A fresh message 3 whose
+        RSN elements are not what the access point showed when it was
+        chosen is a downgrade, and is neither answered nor keyed:
+        WIFI_REFUSE_ELEMENTS.
 */
 static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to frame,
                                     positive got)
@@ -6357,12 +6714,12 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         bool pairwise = (info & WIFI_KEY_PAIRWISE) != 0;
         bool fresh = false;
         p8 address_to kck = null;
-        p8 gtk[16];
-        p8 idx = 0;
+        wifi_key_data what;
+        p8 idx;
         bipolar found;
         bipolar failed = 0;
 
-        if (!length || (info & 7) != 2 || !(info & WIFI_KEY_ACK) ||
+        if (!length || (info & 7) != link->version || !(info & WIFI_KEY_ACK) ||
             (info & WIFI_KEY_REQUEST) ||
             (link->replay_set && memory_compare(frame + 9, link->replay, 8) <= 0))
                 return 0;
@@ -6377,7 +6734,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 link->nonce_used = true;
                 memory_copy(link->anonce, frame + 17, 32);
                 wifi_ptk(link->pmk, link->bssid, link->sta, link->anonce, link->snonce,
-                         link->pending);
+                         link->pending, link->akm);
                 link->pending_set = true;
                 if (link->answered < 255)
                         link->answered++;
@@ -6390,7 +6747,7 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         if (!pairwise)
         {
                 if (link->installed && (info & WIFI_KEY_SECURE) &&
-                    wifi_eapol_mic(link->ptk, frame, length, true))
+                    wifi_eapol_mic(link, link->ptk, frame, length, true))
                         kck = link->ptk;
         }
         else if (info & WIFI_KEY_INSTALL)
@@ -6398,32 +6755,47 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
                 //      The pending key for a new handshake's message 3; the
                 //      installed one for a message 3 resent after it.
                 fresh = link->pending_set && !memory_compare(frame + 17, link->anonce, 32) &&
-                        wifi_eapol_mic(link->pending, frame, length, true);
+                        wifi_eapol_mic(link, link->pending, frame, length, true);
                 if (fresh)
                         kck = link->pending;
-                else if (link->installed && wifi_eapol_mic(link->ptk, frame, length, true))
+                else if (link->installed && wifi_eapol_mic(link, link->ptk, frame, length, true))
                         kck = link->ptk;
         }
         if (!kck)
                 return 0;
 
-        found = wifi_gtk_take(kck + 16, frame + 99, network_load_16(frame + 97), gtk,
-                              address_of idx);
+        found = wifi_gtk_take(kck + 16, frame + 99, network_load_16(frame + 97),
+                              address_of what);
+        idx = what.gtk_id;
         if (found < 0 || (!pairwise && !found))
         {
-                crypto_forget(gtk, sizeof(gtk));
+                crypto_forget(address_of what, sizeof(what));
                 return 0;
         }
-        memory_copy(link->replay, frame + 9, 8);
-        link->replay_set = true;
-
-        failed = wifi_eapol_reply(link, kck, pairwise ? 0x030a : 0x0302, link->replay,
-                                  false);
+        if (fresh && !wifi_seen_matches(address_of link->seen, what.rsn, what.rsn_length,
+                                        what.rsnx, what.rsnx_length))
+        {
+                crypto_forget(address_of what, sizeof(what));
+                return WIFI_REFUSE_ELEMENTS;
+        }
+        //      Only from a message 3 whose MIC checked: what the access point
+        //      said under the key, not what anyone in range may say.
+        link->transition_disable |= what.transition_disable;
+        /* A failed group-key install is retried under the same replay
+           counter. Do not acknowledge or consume it until the driver has
+           the key. The joining handshake fails as a whole on an error, so
+           its existing early reply remains part of that transaction. */
+        if (pairwise)
+        {
+                memory_copy(link->replay, frame + 9, 8);
+                link->replay_set = true;
+                failed = wifi_eapol_reply(link, kck, 0x030a, link->replay, false);
+        }
         if (!failed && fresh && (!link->installed || memory_compare(link->ptk + 32,
                                                                     kck + 32, 16)))
                 failed = nl80211_new_key(address_of link->session, link->index, 0,
                                          NL80211_KEYTYPE_PAIRWISE, link->bssid, kck + 32,
-                                         16, null, 0, false);
+                                         16, null, 0, false, WLAN_CIPHER_CCMP);
         if (!failed && fresh)
         {
                 memory_copy(link->ptk, link->pending, sizeof(link->ptk));
@@ -6437,15 +6809,48 @@ static COLD bipolar wifi_eapol_step(wifi_link address_to link, p8 address_to fra
         //      from, and putting that in again would reset its replay
         //      counter. Each key id also keeps its own last key.
         if (!failed && found && (fresh || !pairwise) &&
-            memory_compare(gtk, link->gtk[idx], 16))
+            (!(link->gtk_installed & (1u << idx)) ||
+             memory_compare(what.gtk, link->gtk[idx], 16)))
         {
                 failed = nl80211_new_key(address_of link->session, link->index, idx,
-                                         NL80211_KEYTYPE_GROUP, null, gtk, 16, frame + 65,
-                                         6, true);
+                                         NL80211_KEYTYPE_GROUP, null, what.gtk, 16, frame + 65,
+                                         6, true, WLAN_CIPHER_CCMP);
                 if (!failed)
-                        memory_copy(link->gtk[idx], gtk, 16);
+                {
+                        memory_copy(link->gtk[idx], what.gtk, 16);
+                        link->gtk_installed |= (p8)(1u << idx);
+                }
         }
-        crypto_forget(gtk, sizeof(gtk));
+        //      The group management key, for the broadcast deauthentication
+        //      and disassociation frames of an access point that protects
+        //      them: only on a link that asked for protection, once per key
+        //      id and key, and before the group handshake is answered, as
+        //      the group key is.
+        if (!failed && link->pmf && what.igtk_id && (fresh || !pairwise) &&
+            (!(link->igtk_installed & (1u << (what.igtk_id - 4))) ||
+             memory_compare(what.igtk + 6, link->igtk[what.igtk_id - 4], 16)))
+        {
+                //      The IGTK is a group key of its own cipher, its packet
+                //      number the six bytes at what.igtk.
+                failed = nl80211_new_key(address_of link->session, link->index, what.igtk_id,
+                                         NL80211_KEYTYPE_GROUP, null, what.igtk + 6, 16,
+                                         what.igtk, 6, false, WLAN_CIPHER_BIP_CMAC_128);
+                if (!failed)
+                {
+                        memory_copy(link->igtk[what.igtk_id - 4], what.igtk + 6, 16);
+                        link->igtk_installed |= (p8)(1u << (what.igtk_id - 4));
+                }
+        }
+        crypto_forget(address_of what, sizeof(what));
+        if (!failed && !pairwise)
+        {
+                failed = wifi_eapol_reply(link, kck, 0x0302, frame + 9, false);
+                if (!failed)
+                {
+                        memory_copy(link->replay, frame + 9, 8);
+                        link->replay_set = true;
+                }
+        }
         if (!failed && pairwise && !link->installed)
                 failed = nl80211_authorize(address_of link->session, link->index,
                                            link->bssid);
@@ -6608,24 +7013,168 @@ static COLD bipolar wifi_handshake(wifi_link address_to link)
 }
 
 /*
-        The keeper: the link the machine joined, held past the join for as long
-        as it stands, in a process of its own with nothing else open. With
-        keys of its own to keep it answers the access point's rekeys; with a
-        driver that does its own handshake, or an open network, it only
-        watches. It ends when the link goes, and the machine's next pass joins
-        again. One at a time: it holds a write lock on wifi.keeper, which
-        names it to whatever joins or leaves next (host_lock_owner), which ends
-        it and waits until it is gone; and what a pass finds of it is what
-        says the link is there, without asking the kernel. It is started with
-        the radio lock still held, and not returned from until the lock is
-        taken, so that no join can start between the two and find nobody to
-        end. wifi.kept says a keeper was started and has not ended of its
-        own: a link with no keeper and that file is one whose keeper died.
+        The station, apart, and its keeper.
+
+        Everything the join and the keeper read comes from the air: scan
+        elements of any access point in range, SAE commits and confirms,
+        EAPOL-Key frames. So all of it -- the scan, the choice, WPA3's
+        exchange, the association, the four-way handshake and, for as long
+        as the link stands, its rekeys -- runs in the station, a process that
+        is nobody with CAP_NET_ADMIN and CAP_NET_RAW and nothing else (no
+        capability can come back through exec, which it may not make), not
+        dumpable, killed with its broker, and under a filter that kills any
+        call but its netlink and EAPOL sockets' (radio_filter_build). It opens
+        no file. The little it needs of the machine's state -- what a saved
+        network has taught the join, the access points to try last, when the
+        air was last scanned for a name, the WPA3 budget -- and the little it
+        has to leave there it asks of its broker over a channel of fixed-size
+        questions (radio_ask): the broker is root, does the one thing each
+        question names to the one file it names, and reads nothing else from
+        the station but the join's status.
+
+        The broker is the keeper the rest of the machine knows: it holds a
+        write lock on wifi.keeper for as long as its station lives, which
+        names it to whatever joins or leaves next (host_lock_owner), which
+        ends it and waits until it is gone (and the station with it); what a
+        pass finds of it is what says the link is there, without asking the
+        kernel. wifi.kept says a station joined and has not ended of its own:
+        a link with no keeper and that file is one whose keeper died. The
+        joining process waits for the join's status and nothing else, holding
+        the radio lock, so no join can start between the two.
+
+        It fails closed: a kernel that will not take the filter joins nothing
+        (WIFI_REFUSE_CONFINE), and a station that ends without a status is
+        WIFI_REFUSE_APART.
 */
 #define RADIO_KEEPER_PATH NET_STATE_DIR "/wifi.keeper"
 #define RADIO_KEPT_PATH NET_STATE_DIR "/wifi.kept"
-#define RADIO_KEEPER_START_NANOSECONDS 1000000000
-#define RADIO_KEEPER_ASK_NANOSECONDS 2000000
+
+//      A socket of whole messages for the broker's channel: a question is
+//      read whole or not at all.
+#define RADIO_SOCK_SEQPACKET 5
+
+#define RADIO_ASK_RULES_GET 1
+#define RADIO_ASK_RULES_PUT 2
+#define RADIO_ASK_AVOID_LOAD 3
+#define RADIO_ASK_AVOID_ADD 4
+#define RADIO_ASK_SCAN_AGE 5
+#define RADIO_ASK_SCAN_NOTE 6
+#define RADIO_ASK_SAE_BUDGET 7
+#define RADIO_ASK_SAID 8
+#define RADIO_ASK_JOINED 9
+//      What the station may have logged, by number: the broker logs its
+//      own literal for it, so nothing the station holds reaches the log.
+#define RADIO_SAID_NO_CLOCK 1
+#define RADIO_SAID_SOCKETS 2
+//      How long the station waits for its broker to answer, which it does
+//      at once: one that does not is gone.
+#define RADIO_ASK_SECONDS 10
+//      RADIO_AVOID_MOST of radio_avoid, sixteen bytes each.
+#define RADIO_ASK_AVOID_ROOM 1024
+
+//      One question, every field of it a fixed size the broker checks.
+typedef struct
+{
+        p32 what;
+        p8 ssid_length;
+        p8 mask;
+        p8 rules;
+        p8 named;
+        p8 ssid[32];
+        p8 bssid[6];
+        p8 unused[2];
+        bipolar status;
+} radio_ask;
+
+typedef struct
+{
+        bipolar answer;
+        p64 count;
+        p8 avoid[RADIO_ASK_AVOID_ROOM];
+} radio_answer;
+
+//      The station's end of its broker's channel; -1 everywhere else.
+static b32 radio_station = -1;
+
+/* A question to the broker and its answer, which every question has, so a
+   write is made before the station goes on. A broker that does not answer
+   is gone, and its station with it. */
+static COLD fn radio_station_ask(radio_ask address_to ask, radio_answer address_to answer)
+{
+        network_deadline deadline;
+
+        memory_fill(answer, 0, sizeof(*answer));
+        if (socket_send(radio_station, ask, sizeof(*ask), MSG_NOSIGNAL, null, 0) !=
+                (bipolar)sizeof(*ask) ||
+            !network_deadline_begin(address_of deadline, RADIO_ASK_SECONDS, 0) ||
+            network_wait_readable_until(radio_station, address_of deadline) <= 0 ||
+            socket_receive(radio_station, answer, sizeof(*answer), MSG_DONTWAIT, null, null) !=
+                (bipolar)sizeof(*answer))
+                system_call_1(syscall(exit_group), 1);
+}
+
+//      A question about a name or an access point, its answer's number.
+static COLD bipolar radio_station_number(p32 what, const p8 address_to ssid, positive ssid_length,
+                                     const p8 address_to bssid, p8 mask, p8 rules)
+{
+        radio_ask ask;
+        radio_answer answer;
+
+        memory_fill(address_of ask, 0, sizeof(ask));
+        ask.what = what;
+        if (ssid && ssid_length <= sizeof(ask.ssid))
+        {
+                memory_copy(ask.ssid, ssid, ssid_length);
+                ask.ssid_length = (p8)ssid_length;
+                ask.named = 1;
+        }
+        if (bssid)
+                memory_copy(ask.bssid, bssid, 6);
+        ask.mask = mask;
+        ask.rules = rules;
+        radio_station_ask(address_of ask, address_of answer);
+        return answer.answer;
+}
+
+/*
+        Where passwords are in this process when a join forks: the saved
+        networks a pass loaded, a password a person typed. The broker, which
+        never needs one, and the station, once its join is over, wipe every
+        region held here, as the keeper used to be started only after the
+        joining process had forgotten them.
+*/
+#define RADIO_SECRETS 4
+
+static struct
+{
+        address_any at;
+        positive length;
+} radio_secrets[RADIO_SECRETS];
+
+static fn radio_secret_hold(address_any at, positive length)
+{
+        for (positive slot = 0; slot < RADIO_SECRETS; slot++)
+                if (!radio_secrets[slot].at)
+                {
+                        radio_secrets[slot].at = at;
+                        radio_secrets[slot].length = length;
+                        return;
+                }
+}
+
+static fn radio_secret_let_go(address_any at)
+{
+        for (positive slot = 0; slot < RADIO_SECRETS; slot++)
+                if (radio_secrets[slot].at == at)
+                        radio_secrets[slot].at = null;
+}
+
+static fn radio_secrets_forget(void)
+{
+        for (positive slot = 0; slot < RADIO_SECRETS; slot++)
+                if (radio_secrets[slot].at)
+                        crypto_forget(radio_secrets[slot].at, radio_secrets[slot].length);
+}
 
 /* What the keeper or whoever starts it has to say, in the kernel log: its
    output is /dev/null. The reason is a literal at every call. */
@@ -6634,6 +7183,18 @@ static COLD fn radio_keeper_said(string_address reason)
         string_address line[] = {"wifi keeper: ", reason, null};
 
         host_kmsg(line);
+}
+
+//      The station's line for the log, said by its broker (RADIO_SAID_*).
+static COLD fn radio_station_said(positive which)
+{
+        radio_ask ask;
+        radio_answer answer;
+
+        memory_fill(address_of ask, 0, sizeof(ask));
+        ask.what = RADIO_ASK_SAID;
+        ask.status = (bipolar)which;
+        radio_station_ask(address_of ask, address_of answer);
 }
 
 static COLD fn radio_keeper_stop(void)
@@ -6649,13 +7210,19 @@ static COLD fn radio_keeper_stop(void)
 static COLD fn radio_avoid_add(p8 address_to bssid);
 
 /* The link roamed: the station is another access point's, with a handshake
-   of its own to come. What was held of the last one is no key for it. */
+   of its own to come. What was held of the last one is no key for it, and
+   what the last one showed of itself is not what this one shows: a roam the
+   driver made on its own has no elements to hold the next message 3 to. */
 static COLD fn wifi_roam(wifi_link address_to link, p8 address_to to)
 {
         memory_copy(link->bssid, to, 6);
         crypto_forget(link->ptk, sizeof(link->ptk));
         crypto_forget(link->pending, sizeof(link->pending));
         crypto_forget(link->gtk, sizeof(link->gtk));
+        link->gtk_installed = 0;
+        crypto_forget(link->igtk, sizeof(link->igtk));
+        link->igtk_installed = 0;
+        memory_fill(address_of link->seen, 0, sizeof(link->seen));
         memory_fill(link->replay, 0, sizeof(link->replay));
         link->replay_set = false;
         link->installed = false;
@@ -6670,7 +7237,7 @@ static COLD fn wifi_keep(wifi_link address_to link)
 
         if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
         {
-                radio_keeper_said("no clock to check the link by");
+                radio_station_said(RADIO_SAID_NO_CLOCK);
                 return;
         }
         for (;;)
@@ -6682,7 +7249,7 @@ static COLD fn wifi_keep(wifi_link address_to link)
 
                 if (ready < 0)
                 {
-                        radio_keeper_said("its sockets failed");
+                        radio_station_said(RADIO_SAID_SOCKETS);
                         return;
                 }
                 if (ready & 2)
@@ -6707,7 +7274,7 @@ static COLD fn wifi_keep(wifi_link address_to link)
                         continue;
                 if (!network_deadline_begin(address_of check, WIFI_KEEP_CHECK_SECONDS, 0))
                 {
-                        radio_keeper_said("no clock to check the link by");
+                        radio_station_said(RADIO_SAID_NO_CLOCK);
                         return;
                 }
                 there = nl80211_station(address_of link->session, link->index, now);
@@ -6719,68 +7286,6 @@ static COLD fn wifi_keep(wifi_link address_to link)
         //      Sent away, or the access point stopped answering: the next
         //      join tries another with the same name first.
         radio_avoid_add(link->bssid);
-}
-
-/* The joined link, from the join until its keeper takes it or it is let go. */
-static wifi_link radio_joined = {.session = {.handle = -1}, .eapol = -1};
-
-/* The keeper for the link just joined, started once the joining process has
-   said what it has to and forgotten the passwords it read. */
-static COLD fn radio_keeper_start(void)
-{
-        wifi_link address_to link = address_of radio_joined;
-        p64 began = system_clock_ns(HOST_CLOCK_BOOTTIME);
-
-        if (link->session.handle < 0)
-                return;
-        //      The sockets are kept in its descriptors and stdio is replaced:
-        //      a socket that is itself one of the first three would be lost
-        //      to that.
-        if (link->session.handle < 3 || (link->eapol >= 0 && link->eapol < 3))
-        {
-                radio_keeper_said("not started: its sockets are standard descriptors");
-                wifi_link_close(link);
-                return;
-        }
-        host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644, false);
-
-        if (host_detach(link->eapol >= 0 ? (p32)link->eapol : descriptors_none,
-                        (p32)link->session.handle))
-        {
-                //      Its lock first: what it holds is what the next join
-                //      looks for, and the joining process waits for it.
-                if (host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null) < 0)
-                {
-                        radio_keeper_said("not started: it could not take its lock");
-                        system_call_1(syscall(exit_group), 1);
-                }
-                //      The join's scan news is nothing to the keeper, which
-                //      would wake for every scan anyone asked for.
-                if (link->session.scan)
-                        socket_option_set(link->session.handle, SOL_NETLINK,
-                                          WIFI_NETLINK_DROP_MEMBERSHIP,
-                                          address_of link->session.scan,
-                                          sizeof(link->session.scan));
-                wifi_keep(link);
-                system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
-                wifi_link_close(link);
-                system_call_1(syscall(exit_group), 0);
-        }
-        wifi_link_close(link);
-
-        //      Not returned from until the lock is taken, so that no join can
-        //      begin between the two and find nobody to end: asked a few
-        //      times a millisecond for as long as a second.
-        while (!host_lock_owner(RADIO_KEEPER_PATH))
-        {
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - began >= RADIO_KEEPER_START_NANOSECONDS)
-                {
-                        system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
-                        radio_keeper_said("not started: it took no lock");
-                        return;
-                }
-                host_pause(RADIO_KEEPER_ASK_NANOSECONDS);
-        }
 }
 
 static COLD bool wifi_link_mac(string_address name, p8 address_to mac)
@@ -6959,14 +7464,15 @@ static COLD bipolar nl80211_wait_associated(nl80211 address_to session, p32 sequ
 static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
                                p8 address_to ssid, positive ssid_length,
                                p8 address_to pmk, bool offload, p8 address_to bssid,
-                               p32 frequency)
+                               p32 frequency, const wifi_link address_to link)
 {
         netlink_buffer request = {0};
         p32 sequence = netlink_sequence_take();
         p32 open = NL80211_AUTHTYPE_OPEN;
         p32 version = NL80211_WPA_VERSION_2;
         p32 ccmp = WLAN_CIPHER_CCMP;
-        p32 psk = WLAN_AKM_PSK;
+        p32 psk = WLAN_SUITE_IEEE | link->akm;
+        p32 mfp = NL80211_MFP_REQUIRED;
         bipolar sent;
 
         scope_exit(netlink_forget(address_of request));
@@ -7008,7 +7514,14 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
                    it, and the four-way handshake never began. The same bytes
                    go in message 2, which the access point compares to these. */
                 netlink_attribute_add(address_of request, NL80211_ATTR_IE,
-                                      (address_any)wifi_rsn_ie, sizeof(wifi_rsn_ie));
+                                      (address_any)link->rsn, link->rsn_length);
+                /* Management frame protection, which the kernel takes as
+                   required or not at all: a driver with no connect of its
+                   own (mac80211's kind) refuses the optional form outright.
+                   Asked for, the kernel drops a deauthentication or
+                   disassociation frame that is not protected. */
+                if (link->pmf)
+                        nl80211_attribute_u32(address_of request, NL80211_ATTR_USE_MFP, mfp);
                 if (offload)
                         netlink_attribute_add(address_of request, NL80211_ATTR_PMK, pmk,
                                               32);
@@ -7024,6 +7537,1085 @@ static COLD bipolar nl80211_connect(nl80211 address_to session, p32 index,
         if (sent < 0)
                 return sent;
         return sequence;
+}
+
+/*
+        WPA3-Personal's SAE (802.11-2020 12.4, RFC 7664's dragonfly) over
+        the NIST P-256 group, group 19, on net.c's field and point routines.
+        On the wire a scalar is 32 big-endian bytes and an element is x then
+        y, 32 bytes each.
+
+        The password element is found one of two ways. Hash-to-element
+        (12.4.4.2.3) makes a point PT of the network's name and the password
+        once, by two simplified SWU maps, with no loop and no branch on
+        anything the password decides; it is used whenever the access point
+        says it takes it, in its RSN extension element, which is every 6 GHz
+        network and every one set to it alone. Hunting and pecking
+        (12.4.4.2.2) is the method every WPA3 station has, used for the
+        rest: every pass of the hunt is worked out whole, forty of them at
+        least however early one lands, and the one that counts is kept by
+        mask, which is the Dragonblood advice that the first implementations
+        lacked.
+*/
+#define WIFI_SAE_GROUP 19
+#define WIFI_SAE_PASSES 40
+#define WIFI_SAE_PASSES_MOST 255
+#define WIFI_SAE_SECONDS 10
+#define WIFI_SAE_TOKEN_MOST 64
+#define WIFI_SAE_TOKEN_STATUS 76
+#define WIFI_SAE_H2E_STATUS 126
+#define WIFI_SAE_TOKEN_EXTENSION 93
+
+typedef struct
+{
+        p8 pwe[64];
+        p8 rand[32];
+        p8 scalar[32];
+        p8 element[64];
+        p8 peer_scalar[32];
+        p8 peer_element[64];
+        p8 kck[32];
+        p8 pmk[32];
+        p8 pmkid[16];
+} wifi_sae;
+
+/* 802.11's KDF-Hash-Length with SHA-256, for a length that is a whole
+   number of hashes: HMAC of a counter from 1 (two bytes, little endian),
+   the label, the context and the length in bits. */
+static COLD fn wifi_sae_kdf(p8 address_to key, positive key_length, string_address label,
+                            p8 address_to context, positive context_length,
+                            p8 address_to out, positive bits)
+{
+        p8 block[2 + 24 + 64 + 2];
+        positive label_length = string_length(label);
+        positive length = 2 + label_length + context_length + 2;
+
+        for (positive at = 0; at * 256 < bits; at++)
+        {
+                block[0] = (p8)(at + 1);
+                block[1] = 0;
+                memory_copy(block + 2, label, label_length);
+                memory_copy(block + 2 + label_length, context, context_length);
+                block[length - 2] = (p8)bits;
+                block[length - 1] = (p8)(bits >> 8);
+                crypto_hmac_sha256(key, key_length, block, length, out + at * 32);
+        }
+        crypto_forget(block, sizeof(block));
+}
+
+/* (p + 1) / 4, the exponent that takes a square root of a square of this
+   field: p is 3 mod 4. */
+static COLD fn wifi_sae_root_exponent(p64 address_to exponent)
+{
+        p64 carry = 1;
+
+        for (positive i = 0; i < 4; i++)
+                exponent[i] = (crypto_p256_p[i] >> 2) | (i < 3 ? crypto_p256_p[i + 1] << 62 : 0);
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 sum = exponent[i] + carry;
+
+                carry = sum < carry;
+                exponent[i] = sum;
+        }
+}
+
+/* The two addresses, the higher first. */
+static COLD fn wifi_sae_addresses(const p8 address_to first, const p8 address_to second,
+                                  p8 address_to key)
+{
+        bool higher = memory_compare(first, second, 6) > 0;
+
+        memory_copy(key, higher ? first : second, 6);
+        memory_copy(key + 6, higher ? second : first, 6);
+}
+
+/*
+        The password element by hunting and pecking, for the password and
+        the two addresses: pwd-seed is HMAC-SHA-256 of the password and a
+        counter under the addresses, pwd-value the KDF of it; the first
+        value under p that is the x of a point is kept, with the y whose low
+        bit is the seed's. Every pass is worked out in full, and the first
+        that lands is kept by mask.
+*/
+static COLD bool wifi_sae_pwe(p8 address_to password, positive password_length,
+                              p8 address_to first, p8 address_to second, p8 address_to pwe)
+{
+        p8 key[12];
+        p8 data[64 + 1];
+        p8 seed[32];
+        p8 value[32];
+        p8 p_bytes[32];
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX], y2[CRYPTO_FE_MAX], b[CRYPTO_FE_MAX];
+        p64 root[CRYPTO_FE_MAX], square[CRYPTO_FE_MAX], zero[CRYPTO_FE_MAX];
+        p64 negative_y[CRYPTO_FE_MAX], exponent[CRYPTO_FE_MAX], scratch[CRYPTO_FE_MAX];
+        p64 kept_x[CRYPTO_FE_MAX], kept_y[CRYPTO_FE_MAX];
+        p64 found = 0;
+        bool done = false;
+
+        if (password_length > 64)
+                return false;
+        wifi_sae_addresses(first, second, key);
+        crypto_fe_store_be(p_bytes, crypto_p256_p, 4);
+        crypto_fe_load_be(b, crypto_p256_b_be, 4);
+        crypto_fe_mul(b, b, crypto_p256_field.square, &crypto_p256_field);
+        memory_fill(zero, 0, sizeof(zero));
+        wifi_sae_root_exponent(exponent);
+        memory_fill(kept_x, 0, sizeof(kept_x));
+        memory_fill(kept_y, 0, sizeof(kept_y));
+        memory_copy(data, password, password_length);
+        for (positive pass = 1; pass <= WIFI_SAE_PASSES_MOST && !done; pass++)
+        {
+                p64 below;
+                p64 residue;
+                p64 lands;
+                p64 odd;
+
+                data[password_length] = (p8)pass;
+                crypto_hmac_sha256(key, 12, data, password_length + 1, seed);
+                wifi_sae_kdf(seed, 32, "SAE Hunting and Pecking", p_bytes, 32, value, 256);
+                crypto_fe_load_be(x, value, 4);
+                below = crypto_fe_subtract_raw(scratch, x, crypto_p256_p, 4);
+                //      y^2 = x^3 - 3x + b, in Montgomery form.
+                crypto_fe_mul(x, x, crypto_p256_field.square, &crypto_p256_field);
+                crypto_fe_sqr(square, x, &crypto_p256_field);
+                crypto_fe_mul(y2, square, x, &crypto_p256_field);
+                crypto_fe_sub(y2, y2, x, &crypto_p256_field);
+                crypto_fe_sub(y2, y2, x, &crypto_p256_field);
+                crypto_fe_sub(y2, y2, x, &crypto_p256_field);
+                crypto_fe_add(y2, y2, b, &crypto_p256_field);
+                crypto_fe_power(root, y2, exponent, &crypto_p256_field);
+                crypto_fe_sqr(square, root, &crypto_p256_field);
+                crypto_fe_sub(scratch, square, y2, &crypto_p256_field);
+                residue = crypto_fe_zero_bit(scratch, 4);
+                lands = below & residue & (found ^ 1);
+                //      The y whose low bit, as a plain integer, is the seed's.
+                crypto_fe_mul(y, root, crypto_unit, &crypto_p256_field);
+                odd = y[0] & 1;
+                crypto_fe_sub(negative_y, zero, root, &crypto_p256_field);
+                crypto_fe_select(root, root, negative_y, 4, odd ^ (p64)(seed[31] & 1));
+                crypto_fe_select(kept_x, kept_x, x, 4, lands);
+                crypto_fe_select(kept_y, kept_y, root, 4, lands);
+                found |= lands;
+                done = found && pass >= WIFI_SAE_PASSES;
+        }
+        crypto_fe_mul(kept_x, kept_x, crypto_unit, &crypto_p256_field);
+        crypto_fe_mul(kept_y, kept_y, crypto_unit, &crypto_p256_field);
+        crypto_fe_store_be(pwe, kept_x, 4);
+        crypto_fe_store_be(pwe + 32, kept_y, 4);
+        crypto_forget(data, sizeof(data));
+        crypto_forget(seed, sizeof(seed));
+        crypto_forget(value, sizeof(value));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+        crypto_forget(y2, sizeof(y2));
+        crypto_forget(root, sizeof(root));
+        crypto_forget(square, sizeof(square));
+        crypto_forget(negative_y, sizeof(negative_y));
+        crypto_forget(scratch, sizeof(scratch));
+        crypto_forget(kept_x, sizeof(kept_x));
+        crypto_forget(kept_y, sizeof(kept_y));
+        return found != 0;
+}
+
+/* A scalar from 1 to the group order less one, as 32 bytes. */
+static COLD bool wifi_sae_scalar(p8 address_to out)
+{
+        p64 limbs[CRYPTO_FE_MAX];
+        bool good = false;
+
+        for (positive tries = 0; tries < 64 && !good; tries++)
+        {
+                if (system_random_fill(out, 32, 0) < 0)
+                        break;
+                good = crypto_scalar_from_int_be(limbs, out, 32, crypto_p256_n, 4);
+        }
+        crypto_forget(limbs, sizeof(limbs));
+        return good;
+}
+
+/* out = (a + b) mod the group order, all as 32 bytes. */
+static COLD fn wifi_sae_scalar_add(p8 address_to out, const p8 address_to a,
+                                   const p8 address_to b)
+{
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+
+        crypto_fe_load_be(x, a, 4);
+        crypto_fe_load_be(y, b, 4);
+        crypto_fe_add(x, x, y, &crypto_p256_order);
+        crypto_fe_store_be(out, x, 4);
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+}
+
+/* k times the point (x then y), as bytes; false when it is infinity. */
+static COLD bool wifi_sae_multiply(p8 address_to out, const p8 address_to k,
+                                   const p8 address_to point)
+{
+        crypto_point base, result;
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX], scalar[CRYPTO_FE_MAX];
+        bool finite;
+
+        crypto_fe_load_be(x, point, 4);
+        crypto_fe_load_be(y, point + 32, 4);
+        crypto_fe_load_be(scalar, k, 4);
+        crypto_point_set_xy(&base, x, y, &crypto_p256_field);
+        crypto_point_scalar_private(&result, &base, scalar, null);
+        finite = !crypto_fe_is_zero(result.z, 4);
+        crypto_point_affine(&result);
+        crypto_fe_store_be(out, result.x, 4);
+        crypto_fe_store_be(out + 32, result.y, 4);
+        crypto_forget(scalar, sizeof(scalar));
+        crypto_forget(&base, sizeof(base));
+        crypto_forget(&result, sizeof(result));
+        return finite;
+}
+
+/* The commit: scalar = (rand + mask) mod r, which is neither zero nor one,
+   and element = the inverse of mask * PWE. */
+static COLD bool wifi_sae_commit(wifi_sae address_to sae)
+{
+        p8 mask[32];
+        p8 product[64];
+        p64 y[CRYPTO_FE_MAX], zero[CRYPTO_FE_MAX];
+        bool good = false;
+
+        memory_fill(zero, 0, sizeof(zero));
+        for (positive tries = 0; tries < 16 && !good; tries++)
+        {
+                p8 high = 0;
+
+                if (!wifi_sae_scalar(sae->rand) || !wifi_sae_scalar(mask))
+                        break;
+                wifi_sae_scalar_add(sae->scalar, sae->rand, mask);
+                for (positive at = 0; at < 31; at++)
+                        high |= sae->scalar[at];
+                good = (high || sae->scalar[31] > 1) && wifi_sae_multiply(product, mask, sae->pwe);
+        }
+        if (good)
+        {
+                crypto_fe_load_be(y, product + 32, 4);
+                crypto_fe_sub(y, zero, y, &crypto_p256_field);
+                memory_copy(sae->element, product, 32);
+                crypto_fe_store_be(sae->element + 32, y, 4);
+        }
+        crypto_forget(mask, sizeof(mask));
+        crypto_forget(product, sizeof(product));
+        crypto_forget(y, sizeof(y));
+        return good;
+}
+
+/* Whether the access point's commit is one to take, by what costs nothing:
+   its scalar is above one and under the order, its element is a point of
+   the curve, and the two are not our own sent back (a reflection). */
+static COLD bool wifi_sae_commit_good(const wifi_sae address_to sae, const p8 address_to scalar,
+                                      const p8 address_to element)
+{
+        p64 limbs[CRYPTO_FE_MAX];
+
+        if (!crypto_scalar_from_int_be(limbs, scalar, 32, crypto_p256_n, 4) ||
+            (limbs[0] == 1 && !limbs[1] && !limbs[2] && !limbs[3]))
+                return false;
+        if (!crypto_point_is_on_curve(element, element + 32, &crypto_p256_field,
+                                      crypto_p256_b_be))
+                return false;
+        return memory_compare(scalar, sae->scalar, 32) || memory_compare(element, sae->element, 64);
+}
+
+/*
+        The access point's commit taken in, which is where the cost is: two
+        scalar multiplications. The shared secret K = rand * (peer-scalar *
+        PWE + peer-element), of which only the x goes on: keyseed is its
+        HMAC-SHA-256 under a key of zeros, the KCK and the PMK are the KDF
+        of that over the sum of the two scalars, and the PMKID is the sum's
+        high 128 bits. False when a point on the way is infinity.
+*/
+static COLD bool wifi_sae_take(wifi_sae address_to sae, const p8 address_to scalar,
+                               const p8 address_to element)
+{
+        p8 shared[64], sum_point[64], term[64], keyseed[32], zeros[32], sum[32], keys[64];
+        crypto_point first, second, total;
+        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+        bool good;
+
+        memory_fill(zeros, 0, sizeof(zeros));
+        memory_copy(sae->peer_scalar, scalar, 32);
+        memory_copy(sae->peer_element, element, 64);
+        if (!wifi_sae_multiply(term, scalar, sae->pwe))
+                return false;
+        crypto_fe_load_be(x, term, 4);
+        crypto_fe_load_be(y, term + 32, 4);
+        crypto_point_set_xy(&first, x, y, &crypto_p256_field);
+        crypto_fe_load_be(x, element, 4);
+        crypto_fe_load_be(y, element + 32, 4);
+        crypto_point_set_xy(&second, x, y, &crypto_p256_field);
+        crypto_point_add(&total, &first, &second);
+        if (crypto_fe_is_zero(total.z, 4))
+                return false;
+        crypto_point_affine(&total);
+        crypto_fe_store_be(sum_point, total.x, 4);
+        crypto_fe_store_be(sum_point + 32, total.y, 4);
+        good = wifi_sae_multiply(shared, sae->rand, sum_point);
+        if (good)
+        {
+                crypto_hmac_sha256(zeros, 32, shared, 32, keyseed);
+                wifi_sae_scalar_add(sum, sae->scalar, scalar);
+                wifi_sae_kdf(keyseed, 32, "SAE KCK and PMK", sum, 32, keys, 512);
+                memory_copy(sae->kck, keys, 32);
+                memory_copy(sae->pmk, keys + 32, 32);
+                memory_copy(sae->pmkid, sum, 16);
+        }
+        crypto_forget(shared, sizeof(shared));
+        crypto_forget(sum_point, sizeof(sum_point));
+        crypto_forget(term, sizeof(term));
+        crypto_forget(keyseed, sizeof(keyseed));
+        crypto_forget(keys, sizeof(keys));
+        crypto_forget(&first, sizeof(first));
+        crypto_forget(&second, sizeof(second));
+        crypto_forget(&total, sizeof(total));
+        return good;
+}
+
+/* CN(KCK, counter, scalar, element, peer-scalar, peer-element): the two
+   sides' confirms are the one computation with the roles swapped. */
+static COLD fn wifi_sae_confirm(const p8 address_to kck, const p8 address_to counter,
+                                const p8 address_to scalar, const p8 address_to element,
+                                const p8 address_to other_scalar,
+                                const p8 address_to other_element, p8 address_to out)
+{
+        p8 block[2 + 32 + 64 + 32 + 64];
+
+        memory_copy(block, counter, 2);
+        memory_copy(block + 2, scalar, 32);
+        memory_copy(block + 34, element, 64);
+        memory_copy(block + 98, other_scalar, 32);
+        memory_copy(block + 130, other_element, 64);
+        crypto_hmac_sha256((p8 address_to)kck, 32, block, sizeof(block), out);
+}
+
+/* A small number in Montgomery form. */
+static COLD fn wifi_sae_small(p64 address_to out, p64 value)
+{
+        memory_fill(out, 0, 4 * sizeof(p64));
+        out[0] = value;
+        crypto_fe_mul(out, out, crypto_p256_field.square, &crypto_p256_field);
+}
+
+/* Forty-eight big-endian bytes modulo p, as a plain integer: the high
+   sixteen times 2^256 (which is what the conversion to Montgomery form
+   multiplies by) plus the low thirty-two brought under p once. */
+static COLD fn wifi_sae_reduce(p64 address_to out, const p8 address_to bytes)
+{
+        p64 high[CRYPTO_FE_MAX], low[CRYPTO_FE_MAX], under[CRYPTO_FE_MAX];
+        p64 less;
+
+        memory_fill(high, 0, sizeof(high));
+        high[0] = network_load_64(bytes + 8);
+        high[1] = network_load_64(bytes);
+        crypto_fe_load_be(low, bytes + 16, 4);
+        less = crypto_fe_subtract_raw(under, low, crypto_p256_p, 4);
+        crypto_fe_select(low, under, low, 4, less);
+        crypto_fe_mul(high, high, crypto_p256_field.square, &crypto_p256_field);
+        crypto_fe_add(out, high, low, &crypto_p256_field);
+        crypto_forget(high, sizeof(high));
+        crypto_forget(low, sizeof(low));
+        crypto_forget(under, sizeof(under));
+}
+
+/* RFC 9380's simplified SWU map of u, a plain integer under p, to a point
+   of the curve, as plain x and y: Z = -10, the two candidates and their
+   squares chosen by mask, the square root by the exponent (p + 1) / 4, and
+   the sign of y taken from the low bit of u. */
+static COLD fn wifi_sae_sswu(p64 address_to x_out, p64 address_to y_out, const p64 address_to u)
+{
+        const crypto_field address_to f = &crypto_p256_field;
+        p64 um[4], u2[4], t1[4], t2[4], m[4], t[4], z[4], a[4], b[4], zero[4], one[4];
+        p64 x1a[4], x1b[4], x1[4], x2[4], gx1[4], gx2[4], y1[4], v[4], x[4], y[4], ny[4];
+        p64 exponent[4];
+        p64 is_zero, is_square, odd;
+
+        wifi_sae_root_exponent(exponent);
+        memory_fill(zero, 0, sizeof(zero));
+        memory_copy(one, f->one, sizeof(one));
+        wifi_sae_small(t1, 10);
+        crypto_fe_sub(z, zero, t1, f);
+        wifi_sae_small(t1, 3);
+        crypto_fe_sub(a, zero, t1, f);
+        crypto_fe_load_be(b, crypto_p256_b_be, 4);
+        crypto_fe_mul(b, b, f->square, f);
+
+        crypto_fe_mul(um, u, f->square, f);
+        //      m = z^2 u^4 + z u^2, and t = 1 / m (zero for zero).
+        crypto_fe_sqr(u2, um, f);
+        crypto_fe_mul(t1, z, u2, f);
+        crypto_fe_sqr(t2, t1, f);
+        crypto_fe_add(m, t1, t2, f);
+        crypto_fe_inv(t, m, f);
+        //      x1 = b / (z a) when m is zero, else (-b / a) (1 + t).
+        crypto_fe_mul(t1, z, a, f);
+        crypto_fe_inv(t1, t1, f);
+        crypto_fe_mul(x1a, b, t1, f);
+        crypto_fe_sub(t1, zero, b, f);
+        crypto_fe_inv(t2, a, f);
+        crypto_fe_mul(t1, t1, t2, f);
+        crypto_fe_add(t2, one, t, f);
+        crypto_fe_mul(x1b, t1, t2, f);
+        is_zero = crypto_fe_zero_bit(m, 4);
+        crypto_fe_select(x1, x1b, x1a, 4, is_zero);
+        //      gx1 = x1^3 + a x1 + b; x2 = z u^2 x1; gx2 likewise.
+        crypto_fe_sqr(t1, x1, f);
+        crypto_fe_mul(t1, t1, x1, f);
+        crypto_fe_mul(t2, a, x1, f);
+        crypto_fe_add(t1, t1, t2, f);
+        crypto_fe_add(gx1, t1, b, f);
+        crypto_fe_mul(t1, z, u2, f);
+        crypto_fe_mul(x2, t1, x1, f);
+        crypto_fe_sqr(t1, x2, f);
+        crypto_fe_mul(t1, t1, x2, f);
+        crypto_fe_mul(t2, a, x2, f);
+        crypto_fe_add(t1, t1, t2, f);
+        crypto_fe_add(gx2, t1, b, f);
+        //      Whichever of gx1 and gx2 is a square gives the point.
+        crypto_fe_power(y1, gx1, exponent, f);
+        crypto_fe_sqr(t1, y1, f);
+        crypto_fe_sub(t1, t1, gx1, f);
+        is_square = crypto_fe_zero_bit(t1, 4);
+        crypto_fe_select(v, gx2, gx1, 4, is_square);
+        crypto_fe_select(x, x2, x1, 4, is_square);
+        crypto_fe_power(y, v, exponent, f);
+        //      The y whose low bit is u's.
+        crypto_fe_mul(t1, y, crypto_unit, f);
+        odd = t1[0] & 1;
+        crypto_fe_sub(ny, zero, y, f);
+        crypto_fe_select(y, y, ny, 4, odd ^ (u[0] & 1));
+        crypto_fe_mul(x_out, x, crypto_unit, f);
+        crypto_fe_mul(y_out, y, crypto_unit, f);
+        crypto_forget(um, sizeof(um));
+        crypto_forget(u2, sizeof(u2));
+        crypto_forget(t1, sizeof(t1));
+        crypto_forget(t2, sizeof(t2));
+        crypto_forget(m, sizeof(m));
+        crypto_forget(t, sizeof(t));
+        crypto_forget(x1, sizeof(x1));
+        crypto_forget(x1a, sizeof(x1a));
+        crypto_forget(x1b, sizeof(x1b));
+        crypto_forget(x2, sizeof(x2));
+        crypto_forget(gx1, sizeof(gx1));
+        crypto_forget(gx2, sizeof(gx2));
+        crypto_forget(y1, sizeof(y1));
+        crypto_forget(v, sizeof(v));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+        crypto_forget(ny, sizeof(ny));
+}
+
+/* PT for a network's name and a password: HKDF-Extract of the password
+   salted by the name, two HKDF-Expands to 48 bytes ("SAE Hash to Element
+   u1 P1" and "u2 P2"), each reduced by p and mapped, and the sum of the
+   two points, as x then y. */
+static COLD bool wifi_sae_pt(p8 address_to ssid, positive ssid_length, p8 address_to password,
+                             positive password_length, p8 address_to pt)
+{
+        p8 seed[32];
+        p8 value[48];
+        p64 u[CRYPTO_FE_MAX], x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+        crypto_point point[2], total;
+        bool good = true;
+
+        crypto_hkdf_extract(ssid, ssid_length, password, password_length, seed);
+        for (positive which = 0; which < 2; which++)
+        {
+                string_address label = which ? (string_address) "SAE Hash to Element u2 P2"
+                                             : (string_address) "SAE Hash to Element u1 P1";
+
+                good &= crypto_hkdf_expand(seed, (p8 address_to)label, 25, value, 48);
+                wifi_sae_reduce(u, value);
+                wifi_sae_sswu(x, y, u);
+                crypto_point_set_xy(&point[which], x, y, &crypto_p256_field);
+        }
+        crypto_point_add(&total, &point[0], &point[1]);
+        good &= !crypto_fe_is_zero(total.z, 4);
+        crypto_point_affine(&total);
+        crypto_fe_store_be(pt, total.x, 4);
+        crypto_fe_store_be(pt + 32, total.y, 4);
+        crypto_forget(seed, sizeof(seed));
+        crypto_forget(value, sizeof(value));
+        crypto_forget(u, sizeof(u));
+        crypto_forget(x, sizeof(x));
+        crypto_forget(y, sizeof(y));
+        crypto_forget(point, sizeof(point));
+        crypto_forget(&total, sizeof(total));
+        return good;
+}
+
+/* The element of two stations from PT: PT times HKDF-Extract under 32
+   zeros of the higher address then the lower, brought to 1 .. r - 1 (one
+   subtraction, since a hash is under twice r - 1, then one more). */
+static COLD bool wifi_sae_pwe_from_pt(const p8 address_to pt, const p8 address_to first,
+                                      const p8 address_to second, p8 address_to pwe)
+{
+        p8 key[12];
+        p8 zeros[32];
+        p8 value[32];
+        p64 v[CRYPTO_FE_MAX], below[CRYPTO_FE_MAX], one[CRYPTO_FE_MAX], diff[CRYPTO_FE_MAX];
+        p64 less;
+        p64 carry = 1;
+        bool good;
+
+        wifi_sae_addresses(first, second, key);
+        memory_fill(zeros, 0, sizeof(zeros));
+        crypto_hkdf_extract(zeros, 32, key, 12, value);
+        crypto_fe_load_be(v, value, 4);
+        memory_fill(one, 0, sizeof(one));
+        one[0] = 1;
+        crypto_fe_subtract_raw(below, crypto_p256_n, one, 4);
+        less = crypto_fe_subtract_raw(diff, v, below, 4);
+        crypto_fe_select(v, diff, v, 4, less);
+        for (positive i = 0; i < 4; i++)
+        {
+                p64 sum = v[i] + carry;
+
+                carry = sum < carry;
+                v[i] = sum;
+        }
+        crypto_fe_store_be(value, v, 4);
+        good = wifi_sae_multiply(pwe, value, pt);
+        crypto_forget(value, sizeof(value));
+        crypto_forget(v, sizeof(v));
+        return good;
+}
+
+/*
+        One authentication frame of the exchange, as an access point sent
+        it: its transaction and status, and what the two it reads say.
+
+          commit (1), status 0 or 126   the group; for group 19, the scalar
+                                        and the element, then only whole
+                                        elements (an identifier, rejected
+                                        groups)
+          token asked for (1, 76)        the group, then the token: the rest
+                                        of the frame, or with
+                                        hash-to-element a token container
+                                        (255, n, 93, token)
+          confirm (2), status 0          the send-confirm and the confirm,
+                                        and nothing after them
+          any other status              nothing more
+
+        False for a frame that is no SAE authentication frame from bssid
+        (transmitter and network both), that is cut short or runs on past
+        what it says it is, or whose token is empty or over
+        WIFI_SAE_TOKEN_MOST.
+*/
+typedef struct
+{
+        p16 transaction;
+        p16 status;
+        p16 group;
+        p16 send_confirm;
+        const p8 address_to scalar;
+        const p8 address_to element;
+        const p8 address_to confirm;
+        const p8 address_to token;
+        positive token_length;
+} wifi_sae_frame;
+
+static COLD bool wifi_sae_frame_read(const p8 address_to frame, positive size,
+                                     const p8 address_to bssid, bool h2e,
+                                     wifi_sae_frame address_to out)
+{
+        byte_reader reader = byte_reader_open(frame, size);
+        p16 control = byte_reader_u16le(&reader);
+        const p8 address_to transmitter;
+        const p8 address_to network;
+        p16 algorithm;
+
+        memory_fill(out, 0, sizeof(*out));
+        (void)byte_reader_skip(&reader, 2 + 6);
+        transmitter = byte_reader_take(&reader, 6);
+        network = byte_reader_take(&reader, 6);
+        (void)byte_reader_skip(&reader, 2);
+        algorithm = byte_reader_u16le(&reader);
+        out->transaction = byte_reader_u16le(&reader);
+        out->status = byte_reader_u16le(&reader);
+        //      A management frame of the authentication subtype, not
+        //      protected, from the access point and in its network.
+        if (!byte_reader_ok(&reader) || (control & 0x40ff) != 0x00b0 || algorithm != 3 ||
+            memory_compare(transmitter, bssid, 6) || memory_compare(network, bssid, 6))
+                return false;
+        if (out->transaction == 1 &&
+            (out->status == 0 || out->status == WIFI_SAE_H2E_STATUS))
+        {
+                out->group = byte_reader_u16le(&reader);
+                if (out->group != WIFI_SAE_GROUP)
+                        return byte_reader_ok(&reader);
+                out->scalar = byte_reader_take(&reader, 32);
+                out->element = byte_reader_take(&reader, 64);
+                while (byte_reader_ok(&reader) && byte_reader_left(&reader))
+                {
+                        (void)byte_reader_u8(&reader);
+                        (void)byte_reader_vector8(&reader);
+                }
+                return byte_reader_ok(&reader);
+        }
+        if (out->transaction == 1 && out->status == WIFI_SAE_TOKEN_STATUS)
+        {
+                out->group = byte_reader_u16le(&reader);
+                if (h2e)
+                {
+                        byte_reader container;
+
+                        if (byte_reader_u8(&reader) != 255)
+                                return false;
+                        container = byte_reader_vector8(&reader);
+                        if (byte_reader_u8(&container) != WIFI_SAE_TOKEN_EXTENSION ||
+                            !byte_reader_end(&reader))
+                                return false;
+                        reader = container;
+                }
+                out->token_length = byte_reader_left(&reader);
+                out->token = byte_reader_take(&reader, out->token_length);
+                return byte_reader_ok(&reader) && out->token_length &&
+                       out->token_length <= WIFI_SAE_TOKEN_MOST;
+        }
+        if (out->transaction == 2 && !out->status)
+        {
+                out->send_confirm = byte_reader_u16le(&reader);
+                out->confirm = byte_reader_take(&reader, 32);
+                return byte_reader_ok(&reader) && byte_reader_end(&reader);
+        }
+        return out->transaction == 1 || out->transaction == 2;
+}
+
+/* A commit as the body of an authentication frame: transaction 1, status
+   0 (126 when the exchange uses hash-to-element), the group, the token an
+   access point asked for, the scalar and the element. The token goes
+   before the scalar, or, for hash-to-element, after the element in a
+   container element of its own. */
+static COLD positive wifi_sae_commit_body(const wifi_sae address_to sae, const p8 address_to token,
+                                          positive token_length, p8 address_to out, bool h2e)
+{
+        positive at = 0;
+
+        out[at++] = 1, out[at++] = 0;
+        out[at++] = h2e ? WIFI_SAE_H2E_STATUS : 0, out[at++] = 0;
+        out[at++] = WIFI_SAE_GROUP, out[at++] = 0;
+        if (token_length && !h2e)
+        {
+                memory_copy(out + at, token, token_length);
+                at += token_length;
+        }
+        memory_copy(out + at, sae->scalar, 32);
+        memory_copy(out + at + 32, sae->element, 64);
+        at += 96;
+        if (token_length && h2e)
+        {
+                out[at++] = 255;
+                out[at++] = (p8)(1 + token_length);
+                out[at++] = WIFI_SAE_TOKEN_EXTENSION;
+                memory_copy(out + at, token, token_length);
+                at += token_length;
+        }
+        return at;
+}
+
+/*
+        The exchange's state as the access point's frames move it, one
+        netlink message at a time. What it costs is bounded however many
+        frames come, from the access point or in its name: at most
+        WIFI_SAE_FRAMES_MOST authentication events are read; a commit is
+        checked for what costs nothing (wifi_sae_commit_good) and only one,
+        the first that passes, is taken, at two scalar multiplications;
+        one token round; and the first confirm decides. A commit that does
+        not pass, a confirm before any commit, and a frame from anyone else
+        are passed over. A refusal, the link sent away and the kernel's
+        timeout end it: -111 before our confirm went, -13 after it (the
+        password, as the access point saw it), -110 for the timeout. body
+        is a frame to send when the message is read, or nothing.
+*/
+#define WIFI_SAE_FRAMES_MOST 64
+
+typedef struct
+{
+        wifi_sae address_to sae;
+        const p8 address_to bssid;
+        p32 index;
+        p16 family;
+        p32 port;
+        bool h2e;
+        positive frames;
+        bool token_sent;
+        bool taken;
+        bool done;
+        bipolar result;
+        p8 body[2 + 2 + 2 + WIFI_SAE_TOKEN_MOST + 96 + 3];
+        positive body_length;
+} wifi_sae_turn;
+
+static COLD bool wifi_sae_end(wifi_sae_turn address_to turn, bipolar result)
+{
+        turn->done = true;
+        turn->result = result;
+        return false;
+}
+
+static COLD bool wifi_sae_news(netlink_header address_to header, address_any context)
+{
+        wifi_sae_turn address_to turn = (wifi_sae_turn address_to)context;
+        wifi_sae_frame read;
+        p8 address_to frame;
+        positive size = 0;
+        p8 command;
+
+        if (turn->done)
+                return false;
+        if (header->type == NLMSG_IS_ERROR)
+                return header->port == turn->port && netlink_status(header, true) < 0
+                           ? wifi_sae_end(turn, turn->taken ? -13 : -111)
+                           : true;
+        if (header->type != turn->family ||
+            nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) != turn->index)
+                return true;
+        command = nl80211_command(header);
+        if (command == NL80211_CMD_DEAUTHENTICATE || command == NL80211_CMD_DISASSOCIATE)
+                return wifi_sae_end(turn, turn->taken ? -13 : -111);
+        if (command != NL80211_CMD_AUTHENTICATE)
+                return true;
+        if (++turn->frames > WIFI_SAE_FRAMES_MOST)
+                return wifi_sae_end(turn, -111);
+        if (nl80211_attr(header, NL80211_ATTR_TIMED_OUT))
+                return wifi_sae_end(turn, -110);
+        frame = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_FRAME,
+                                            address_of size);
+        if (!frame || !wifi_sae_frame_read(frame, size, turn->bssid, turn->h2e, address_of read))
+                return true;
+        if (read.transaction == 1 && read.status == WIFI_SAE_TOKEN_STATUS)
+        {
+                //      Anti-clogging: the same commit again with the token
+                //      it asked for, once.
+                if (turn->token_sent || turn->taken)
+                        return wifi_sae_end(turn, -111);
+                turn->token_sent = true;
+                turn->body_length = wifi_sae_commit_body(turn->sae, read.token, read.token_length,
+                                                         turn->body, turn->h2e);
+                return true;
+        }
+        if (read.transaction == 1 && (!read.status || read.status == WIFI_SAE_H2E_STATUS))
+        {
+                //      One commit is taken in; before it, a commit of the
+                //      other method is a refusal of ours.
+                if (turn->taken)
+                        return true;
+                if (read.status != (turn->h2e ? WIFI_SAE_H2E_STATUS : 0))
+                        return wifi_sae_end(turn, -111);
+                if (read.group != WIFI_SAE_GROUP ||
+                    !wifi_sae_commit_good(turn->sae, read.scalar, read.element))
+                        return true;
+                turn->taken = true;
+                if (!wifi_sae_take(turn->sae, read.scalar, read.element))
+                        return wifi_sae_end(turn, -111);
+                turn->body[0] = 2, turn->body[1] = 0, turn->body[2] = 0, turn->body[3] = 0;
+                turn->body[4] = 1, turn->body[5] = 0;
+                wifi_sae_confirm(turn->sae->kck, turn->body + 4, turn->sae->scalar,
+                                 turn->sae->element, turn->sae->peer_scalar,
+                                 turn->sae->peer_element, turn->body + 6);
+                turn->body_length = 6 + 32;
+                return true;
+        }
+        if (read.transaction == 2 && !read.status)
+        {
+                p8 counter[2];
+                p8 want[32];
+                bool same;
+
+                if (!turn->taken)
+                        return true;
+                counter[0] = (p8)read.send_confirm;
+                counter[1] = (p8)(read.send_confirm >> 8);
+                wifi_sae_confirm(turn->sae->kck, counter, turn->sae->peer_scalar,
+                                 turn->sae->peer_element, turn->sae->scalar,
+                                 turn->sae->element, want);
+                same = crypto_same(want, read.confirm, 32);
+                crypto_forget(want, sizeof(want));
+                return wifi_sae_end(turn, same ? 0 : -13);
+        }
+        return read.status ? wifi_sae_end(turn, turn->taken ? -13 : -111) : true;
+}
+
+/*
+        The work SAE asks of the station before the access point has proved
+        anything: the password element (a hunt of forty passes or more, or
+        PT and its multiple), a commit and, once its commit comes, two
+        scalar multiplications more. Anybody in range can make a join start
+        it again and again -- a twin of the name that refuses every commit,
+        a refusal forged in the real one's name -- so the exchanges are
+        counted, in /run/moonwater/wifi.sae, by the boot clock: at most
+        WIFI_SAE_PEER_MOST with one access point and WIFI_SAE_ALL_MOST with
+        all of them in any WIFI_SAE_WINDOW_MS. One over is refused before
+        any of the work, as WIFI_REFUSE_SAE_BUDGET, which the machine's pass
+        waits on as it waits on a wrong password.
+*/
+#define RADIO_SAE_PATH NET_STATE_DIR "/wifi.sae"
+#define WIFI_SAE_WINDOW_MS 60000u
+#define WIFI_SAE_PEER_MOST 6
+#define WIFI_SAE_ALL_MOST 24
+
+typedef struct
+{
+        p8 bssid[6];
+        p8 unused[2];
+        p64 at;
+} wifi_sae_spent;
+
+static COLD bool wifi_sae_budget(const p8 address_to bssid)
+{
+        wifi_sae_spent list[WIFI_SAE_ALL_MOST + 1];
+        bipolar got;
+        positive count;
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
+        positive kept = 1;
+        positive peer = 0;
+
+        if (radio_station >= 0)
+                return radio_station_number(RADIO_ASK_SAE_BUDGET, null, 0, bssid, 0, 0) != 0;
+        got = file_read_once_at(AT_FDCWD, RADIO_SAE_PATH, list + 1,
+                                WIFI_SAE_ALL_MOST * sizeof(list[0]));
+        count = got > 0 ? (positive)got / sizeof(list[0]) : 0;
+
+        for (positive at = 1; at <= count; at++)
+                if (list[at].at <= now && now - list[at].at < WIFI_SAE_WINDOW_MS)
+                {
+                        peer += !memory_compare(list[at].bssid, bssid, 6);
+                        list[kept++] = list[at];
+                }
+        if (peer >= WIFI_SAE_PEER_MOST || kept > WIFI_SAE_ALL_MOST)
+                return false;
+        memory_fill(list, 0, sizeof(list[0]));
+        memory_copy(list[0].bssid, bssid, 6);
+        list[0].at = now;
+        host_state_ready();
+        host_write_file(RADIO_SAE_PATH, (p8 address_to)list, kept * sizeof(list[0]), 0600, false);
+        return true;
+}
+
+static COLD bipolar nl80211_authenticate(nl80211 address_to session, p32 index,
+                                         p8 address_to ssid, positive ssid_length,
+                                         p8 address_to bssid, p32 frequency,
+                                         p8 address_to data, positive data_length)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p32 type = NL80211_AUTHTYPE_SAE;
+        bipolar sent;
+
+        scope_exit(netlink_forget(address_of request));
+        if (!nl80211_begin(address_of request, session->family, NL80211_CMD_AUTHENTICATE,
+                           NLM_REQUEST, sequence))
+                return -1;
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY_FREQ, frequency);
+        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, bssid, 6);
+        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid, ssid_length);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_AUTH_TYPE, type);
+        netlink_attribute_add(address_of request, NL80211_ATTR_AUTH_DATA, data, data_length);
+        if (request.failed)
+                return -1;
+        sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
+        return sent < 0 ? sent : 0;
+}
+
+/* The next datagram of mlme news, through visit, before the deadline: 1
+   when one was read, 0 at the deadline, negative when the socket failed. */
+static COLD bipolar wifi_mlme_next(nl80211 address_to session,
+                                   const network_deadline address_to deadline,
+                                   netlink_visitor visit, address_any context,
+                                   p32 address_to port)
+{
+        for (;;)
+        {
+                netlink_buffer reply = {0};
+                bipolar got = network_wait_readable_until(session->handle, deadline);
+
+                if (got <= 0)
+                        return got;
+                got = netlink_receive(session->handle, address_of reply, port);
+                if (got == NETWORK_INTERRUPTED || got == NETWORK_TRY_AGAIN)
+                {
+                        netlink_forget(address_of reply);
+                        continue;
+                }
+                if (got >= 0)
+                        netlink_each(address_of reply, visit, context);
+                netlink_forget(address_of reply);
+                return got < 0 ? got : 1;
+        }
+}
+
+/*
+        The SAE exchange with the access point bssid, through the kernel's
+        authentication command, as wpa_supplicant runs it for a driver of
+        mac80211's kind, which has no connect of its own for SAE: each
+        commit and confirm body goes in NL80211_CMD_AUTHENTICATE (the
+        transaction and status first, the algorithm left to the kernel), and
+        the access point's frames come back as events of that command on the
+        socket the commands go out on. A command is sent without waiting for
+        its acknowledgement, since a transaction that reads to it throws the
+        frame events it passes away; an error for it still comes, and is a
+        refusal. 0 with the PMK and PMKID in sae, else as wifi_sae_news says.
+*/
+static COLD bipolar wifi_sae_exchange(nl80211 address_to session, p32 index, p8 address_to ssid,
+                                      positive ssid_length, p8 address_to bssid,
+                                      p32 frequency, wifi_sae address_to sae, bool h2e)
+{
+        wifi_sae_turn turn = {.sae = sae, .bssid = bssid, .index = index,
+                              .family = session->family, .h2e = h2e};
+        network_deadline deadline;
+        bipolar failed;
+
+        turn.body_length = wifi_sae_commit_body(sae, null, 0, turn.body, h2e);
+        failed = nl80211_authenticate(session, index, ssid, ssid_length, bssid, frequency,
+                                      turn.body, turn.body_length);
+        turn.body_length = 0;
+        if (failed < 0 || !network_deadline_begin(address_of deadline, WIFI_SAE_SECONDS, 0))
+                return failed < 0 ? failed : -1;
+        while (!turn.done)
+        {
+                failed = wifi_mlme_next(session, address_of deadline, wifi_sae_news,
+                                        address_of turn, address_of turn.port);
+                if (failed <= 0)
+                        return failed < 0 ? failed : -110;
+                //      What the datagram asked for, unless it also ended the
+                //      exchange in a refusal.
+                if (turn.body_length && (!turn.done || !turn.result))
+                {
+                        failed = nl80211_authenticate(session, index, ssid, ssid_length, bssid,
+                                                      frequency, turn.body, turn.body_length);
+                        turn.body_length = 0;
+                        if (failed < 0)
+                                return failed;
+                }
+        }
+        return turn.result;
+}
+
+/* The status of an association response from bssid: false for a frame that
+   is not one, or is cut short. */
+static COLD bool wifi_assoc_status_read(const p8 address_to frame, positive size,
+                                        const p8 address_to bssid, p16 address_to status)
+{
+        byte_reader reader = byte_reader_open(frame, size);
+        p16 control = byte_reader_u16le(&reader);
+        const p8 address_to transmitter;
+
+        (void)byte_reader_skip(&reader, 2 + 6);
+        transmitter = byte_reader_take(&reader, 6);
+        (void)byte_reader_skip(&reader, 6 + 2 + 2);
+        address_to status = byte_reader_u16le(&reader);
+        return byte_reader_ok(&reader) &&
+               ((control & 0x40ff) == 0x0010 || (control & 0x40ff) == 0x0030) &&
+               !memory_compare(transmitter, bssid, 6);
+}
+
+typedef struct
+{
+        const p8 address_to bssid;
+        p32 index;
+        p16 family;
+        p32 port;
+        positive frames;
+        bool done;
+        bipolar result;
+} wifi_assoc_turn;
+
+static COLD bool wifi_assoc_news(netlink_header address_to header, address_any context)
+{
+        wifi_assoc_turn address_to turn = (wifi_assoc_turn address_to)context;
+        p8 address_to frame;
+        positive size = 0;
+        p16 status = 0;
+        p8 command;
+
+        if (turn->done)
+                return false;
+        if (header->type == NLMSG_IS_ERROR)
+        {
+                if (header->port != turn->port || netlink_status(header, true) >= 0)
+                        return true;
+                turn->done = true;
+                turn->result = -111;
+                return false;
+        }
+        if (header->type != turn->family ||
+            nl80211_find_u32(header, NL80211_ATTR_IFINDEX, 0) != turn->index)
+                return true;
+        command = nl80211_command(header);
+        if (command == NL80211_CMD_DEAUTHENTICATE || command == NL80211_CMD_DISASSOCIATE ||
+            (command == NL80211_CMD_ASSOCIATE && ++turn->frames > WIFI_SAE_FRAMES_MOST))
+                turn->result = -111;
+        else if (command != NL80211_CMD_ASSOCIATE)
+                return true;
+        else if (nl80211_attr(header, NL80211_ATTR_TIMED_OUT))
+                turn->result = -110;
+        else
+        {
+                frame = (p8 address_to)netlink_find(header, GENL_HEADER, NL80211_ATTR_FRAME,
+                                                    address_of size);
+                if (!frame || !wifi_assoc_status_read(frame, size, turn->bssid, address_of status))
+                        return true;
+                turn->result = status ? -111 : 0;
+        }
+        turn->done = true;
+        return false;
+}
+
+/* The association that follows a finished exchange: the RSN element (with
+   the PMKID the exchange made, and the RSN extension element after it for
+   hash-to-element), the cipher and key management suites, and protected
+   management frames required. */
+static COLD bipolar nl80211_associate(nl80211 address_to session, p32 index, p8 address_to ssid,
+                                      positive ssid_length, p8 address_to bssid,
+                                      p32 frequency, const wifi_link address_to link)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        p32 version = NL80211_WPA_VERSION_2;
+        p32 ccmp = WLAN_CIPHER_CCMP;
+        p32 akm = WLAN_SUITE_IEEE | link->akm;
+        p32 mfp = NL80211_MFP_REQUIRED;
+        wifi_assoc_turn turn = {.bssid = bssid, .index = index, .family = session->family};
+        network_deadline deadline;
+        bipolar sent;
+
+        scope_exit(netlink_forget(address_of request));
+        if (!nl80211_begin(address_of request, session->family, NL80211_CMD_ASSOCIATE,
+                           NLM_REQUEST, sequence))
+                return -1;
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_IFINDEX, index);
+        netlink_attribute_add(address_of request, NL80211_ATTR_MAC, bssid, 6);
+        netlink_attribute_add(address_of request, NL80211_ATTR_SSID, ssid, ssid_length);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_WIPHY_FREQ, frequency);
+        netlink_attribute_add(address_of request, NL80211_ATTR_IE, (address_any)link->rsn,
+                              link->rsn_length);
+        netlink_attribute_add(address_of request, NL80211_ATTR_PRIVACY, null, 0);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_WPA_VERSIONS, version);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_CIPHER_SUITES_PAIRWISE, ccmp);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_CIPHER_SUITE_GROUP, ccmp);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_AKM_SUITES, akm);
+        nl80211_attribute_u32(address_of request, NL80211_ATTR_USE_MFP, mfp);
+        netlink_attribute_add(address_of request, NL80211_ATTR_CONTROL_PORT, null, 0);
+        if (request.failed)
+                return -1;
+        sent = socket_send(session->handle, request.bytes, request.used, 0, 0, 0);
+        if (sent < 0 || !network_deadline_begin(address_of deadline, NL80211_CONNECT_SECONDS, 0))
+                return sent < 0 ? sent : -1;
+        while (!turn.done)
+        {
+                bipolar got = wifi_mlme_next(session, address_of deadline, wifi_assoc_news,
+                                             address_of turn, address_of turn.port);
+
+                if (got <= 0)
+                        return got < 0 ? got : -110;
+        }
+        return turn.result;
 }
 
 /* Whether the wireless interface has a station: a station the kernel could
@@ -7047,23 +8639,99 @@ static COLD bool nl80211_associated(void)
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency,
-                                     bool force);
+                                     bool force, p8 rules, bool key_only,
+                                     wifi_rsn_caps address_to caps, wifi_seen address_to seen);
+static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length);
+static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what);
+
+/*
+        WPA3 with the access point chosen: the exchange counted against its
+        budget, the password element (hash-to-element when the access point
+        takes it, the hunt otherwise), the commit and the exchange, the
+        association with the PMKID it made, and the four-way handshake on
+        its PMK. The EAPOL socket is opened before the association, since
+        message 1 follows it by a few milliseconds.
+*/
+static COLD bipolar wifi_sae_join(wifi_link address_to link, p8 address_to ssid,
+                                  positive ssid_length, p8 address_to pass, positive pass_length,
+                                  p8 address_to bssid, p32 frequency, bool h2e)
+{
+        wifi_sae sae;
+        bipolar failed;
+        bool made;
+
+        scope_exit(crypto_forget(address_of sae, sizeof(sae)));
+        memory_fill(address_of sae, 0, sizeof(sae));
+        if (!wifi_sae_budget(bssid))
+                return WIFI_REFUSE_SAE_BUDGET;
+        if (link->eapol < 0)
+        {
+                failed = net_packet_open(link->index, ETH_P_PAE);
+                if (failed < 0)
+                        return failed;
+                link->eapol = (b32)failed;
+        }
+        nl80211_disconnect(address_of link->session, link->index);
+        memory_fill(link->bssid, 0, 6);
+        if (h2e)
+        {
+                p8 point[64];
+
+                made = wifi_sae_pt(ssid, ssid_length, pass, pass_length, point) &&
+                       wifi_sae_pwe_from_pt(point, link->sta, bssid, sae.pwe);
+                crypto_forget(point, sizeof(point));
+        }
+        else
+                made = wifi_sae_pwe(pass, pass_length, link->sta, bssid, sae.pwe);
+        if (!made || !wifi_sae_commit(address_of sae))
+                return -1;
+        failed = wifi_sae_exchange(address_of link->session, link->index, ssid, ssid_length,
+                                   bssid, frequency, address_of sae, h2e);
+        if (failed)
+                return failed;
+        memory_copy(link->pmk, sae.pmk, 32);
+        link->rsn_length = (p8)wifi_rsn_build(link->rsn, 8, link->pmf, sae.pmkid);
+        //      The RSN extension element, in the association request and in
+        //      message 2 alike: bit 5, hash-to-element.
+        if (h2e)
+        {
+                link->rsn[link->rsn_length++] = 244;
+                link->rsn[link->rsn_length++] = 1;
+                link->rsn[link->rsn_length++] = 0x20;
+        }
+        failed = nl80211_associate(address_of link->session, link->index, ssid, ssid_length,
+                                   bssid, frequency, link);
+        if (failed)
+                return failed;
+        memory_copy(link->bssid, bssid, 6);
+        return wifi_mac_set(link->sta) ? wifi_handshake(link) : -1;
+}
 
 /*
         A join, into link: on success the link keeps its sockets and keys for
         the keeper, with a four-way handshake of its own where it needs one.
-        -113 when a scan heard no network by this name. The password is the
-        one the key is made of, and it is made only once an access point is
-        chosen, since a network that is not there is not worth the four
-        thousand rounds. force asks for a scan whenever the cache has no
-        access point to join; the machine's own pass leaves that to what a
-        scan for the name found lately (radio_bss_choose).
+        -113 when a scan heard no network by this name. What it asks of the
+        access point it chose is wifi_join_plan's, at this build's tier and
+        with what the saved network has taught it; a refusal of the plan's
+        is made before anything is sent. A PSK is made only once an access
+        point is chosen and asks for one, since a network that is not there,
+        or that is joined with WPA3, is not worth the four thousand rounds.
+        force asks for a scan whenever the cache has no access point to join;
+        the machine's own pass leaves that to what a scan for the name found
+        lately (radio_bss_choose).
 */
-static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
-                                 positive pass_length, bool force, wifi_link address_to link)
+/* Whether the access point the last choice made was one a join had given
+   up on (radio_avoid): the best there was, behind every other. */
+static bool radio_pick_given_up;
+
+/* nl80211_join's answer when a second look found no other access point. */
+#define RADIO_JOIN_NO_OTHER 1
+
+static COLD bipolar nl80211_join_once(p8 address_to ssid, positive ssid_length,
+                                      p8 address_to pass, positive pass_length, bool force,
+                                      bool again, wifi_link address_to link)
 {
         nl80211_iface iface;
-        p8 pmk[32];
         p8 chosen[6];
         p32 frequency = 0;
         bipolar picked = -1;
@@ -7072,14 +8740,21 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         bipolar sequence;
         bool offload = false;
         bool secured = pass_length != 0;
+        bool key_only = pass_length == 64;
+        bool keyed = false;
         bool kept = false;
+        p8 rules = 0;
+        wifi_rsn_caps caps;
+        wifi_plan plan;
 
         wifi_link_close(link);
         scope_exit(if (!kept) wifi_link_close(link));
         memory_fill(chosen, 0, 6);
-        //      Whatever keeps the last link's keys goes first: its EAPOL
-        //      socket would hear this join's message 1 as a rekey.
-        radio_keeper_stop();
+        memory_fill(address_of caps, 0, sizeof(caps));
+        memory_fill(address_of plan, 0, sizeof(plan));
+        //      Whatever kept the last link's keys is gone before the station
+        //      that runs this is forked (radio_join_apart): its EAPOL socket
+        //      would hear this join's message 1 as a rekey.
         failed = nl80211_open(address_of link->session);
         if (!failed)
                 failed = nl80211_interface(address_of link->session, address_of iface);
@@ -7099,23 +8774,85 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
         else
                 wifi_link_mac((string_address)iface.name, link->sta);
 
+        if (secured)
+                rules = radio_rules_get(ssid, ssid_length);
         picked = radio_bss_choose(address_of link->session, iface.index, ssid, ssid_length,
-                                  secured, chosen, address_of frequency, force);
+                                  secured, chosen, address_of frequency, force, rules, key_only,
+                                  address_of caps, address_of link->seen);
+        if (again && (picked <= 0 || radio_pick_given_up))
+                return RADIO_JOIN_NO_OTHER;
         if (!picked)
                 return -113;
 
+        link->akm = 2;
         if (secured)
         {
-                if (!wifi_psk(ssid, ssid_length, pass, pass_length, pmk))
-                        return -22;
-                memory_copy(link->pmk, pmk, 32);
-                offload = nl80211_psk_offload(address_of link->session, iface.wiphy);
+                //      With no scan to read the access point from, what the
+                //      network taught stands in for its elements: WPA2, with
+                //      protection where it offered that once. WPA3 needs an
+                //      access point to send its exchange to, and there is none.
+                if (picked < 0)
+                {
+                        caps.akms = rules & WIFI_RULE_SAE ? 0 : WIFI_AKM_PSK;
+                        caps.pmf = rules & (WIFI_RULE_PMF | WIFI_RULE_SAE) ? WIFI_PMF_CAPABLE : 0;
+                        caps.group = WIFI_CIPHER_CCMP;
+                        caps.pairwise = WIFI_CIPHER_CCMP;
+                }
+                failed = wifi_join_plan(MOONWATER_STRICT_NET, address_of caps, rules, key_only,
+                                        address_of plan);
+                if (failed < 0)
+                {
+                        radio_avoid_add(picked > 0 ? chosen : null);
+                        return failed;
+                }
+                link->akm = plan.akm;
+                link->pmf = plan.pmf;
         }
 
-        //      The driver's own four-way handshake first where it has one;
-        //      if that fails, once more with this one.
+        //      WPA3 first where it is the plan, and WPA2 after it only where
+        //      the plan allows that and the exchange came to nothing for a
+        //      reason that is not the password; then the driver's own
+        //      four-way handshake where it has one, and if that fails, once
+        //      more with this one.
         for (;;)
         {
+                link->version = wifi_key_version(link->akm);
+                if (secured && link->akm == 8)
+                {
+                        failed = wifi_sae_join(link, ssid, ssid_length, pass, pass_length, chosen,
+                                               frequency, caps.h2e != 0);
+                        if (failed && failed != -13 && failed != WIFI_REFUSE_ELEMENTS &&
+                            plan.fallback)
+                        {
+                                //      A new association, and none of the
+                                //      last one's handshake.
+                                link->akm = plan.fallback;
+                                link->pmf = caps.pmf ? WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED : 0;
+                                plan.fallback = 0;
+                                link->answered = 0;
+                                link->replay_set = link->installed = false;
+                                link->pending_set = link->nonce_used = false;
+                                link->gtk_installed = link->igtk_installed = 0;
+                                memory_fill(link->replay, 0, sizeof(link->replay));
+                                if (link->eapol >= 0)
+                                        socket_close(link->eapol);
+                                link->eapol = -1;
+                                continue;
+                        }
+                        break;
+                }
+                link->rsn_length = (p8)wifi_rsn_build(link->rsn, link->akm, link->pmf, null);
+                if (secured && !keyed)
+                {
+                        if (!wifi_psk(ssid, ssid_length, pass, pass_length, link->pmk))
+                        {
+                                failed = -22;
+                                break;
+                        }
+                        keyed = true;
+                        offload = link->akm == 2 &&
+                                  nl80211_psk_offload(address_of link->session, iface.wiphy);
+                }
                 if (secured && !offload && link->eapol < 0)
                 {
                         failed = net_packet_open(iface.index, ETH_P_PAE);
@@ -7126,8 +8863,8 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                 nl80211_disconnect(address_of link->session, iface.index);
                 memory_fill(link->bssid, 0, 6);
                 sequence = nl80211_connect(address_of link->session, iface.index, ssid,
-                                           ssid_length, secured ? pmk : null, offload,
-                                           picked > 0 ? chosen : null, frequency);
+                                           ssid_length, secured ? link->pmk : null, offload,
+                                           picked > 0 ? chosen : null, frequency, link);
                 failed = sequence < 0 ? sequence
                                       : nl80211_wait_associated(address_of link->session,
                                                                 (p32)sequence, iface.index,
@@ -7151,9 +8888,51 @@ static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 ad
                                 : picked > 0          ? chosen
                                                       : null);
         }
+        else if (secured)
+        {
+                //      What this join has taught the network: an access point
+                //      by its name protects its management frames, and WPA3
+                //      is what it is joined with -- or what the access point
+                //      said, under the key, to keep to (Transition Disable).
+                p8 learned = (link->pmf && caps.pmf ? WIFI_RULE_PMF : 0) |
+                             (link->akm == 8 ||
+                                      (link->transition_disable & WIFI_TRANSITION_WPA3_PERSONAL)
+                                  ? WIFI_RULE_SAE
+                                  : 0);
+
+                if (learned & ~rules)
+                        radio_rules_put(ssid, ssid_length, learned, learned);
+        }
         kept = !failed;
-        crypto_forget(pmk, sizeof(pmk));
         return failed;
+}
+
+/*
+        A join. A failure at an access point puts it behind every other by the
+        name (radio_avoid_add), and in the machine's own pass the air is looked
+        at once more at once: another by the name is asked now, not after the
+        wait the failure earns. A louder twin that refuses every join -- WPA3
+        under a password its owner never chose, say -- otherwise held the real
+        one off for as long as that wait grew, a minute at the last. A join a
+        person asked for answers at once and pays for no second look, but for
+        an access point that never answered at all: one heard a moment ago
+        and gone since is still in the kernel's list of what was heard, and
+        the add said "did not associate" with the network itself in range,
+        as wpa_supplicant goes on to the next. A wrong password at the one
+        access point there is finds nothing else and waits as it did.
+*/
+static COLD bipolar nl80211_join(p8 address_to ssid, positive ssid_length, p8 address_to pass,
+                                 positive pass_length, bool force, wifi_link address_to link)
+{
+        bipolar failed = nl80211_join_once(ssid, ssid_length, pass, pass_length, force, false,
+                                           link);
+        bipolar again;
+
+        if (!failed || (force && failed != -110) || failed == -19 || failed == -113 ||
+            failed == WIFI_REFUSE_SAE_BUDGET)
+                return failed;
+        again = nl80211_join_once(ssid, ssid_length, pass, pass_length, force, true, link);
+        return again == RADIO_JOIN_NO_OTHER ? failed : again;
 }
 
 static bipolar nl80211_disconnect(nl80211 address_to session, p32 index)
@@ -7447,6 +9226,122 @@ static bipolar radio_wifi_save(radio_network address_to networks, positive count
         }
 
         return host_write_file(NET_WIFI_LIST, text, used, 0600, true);
+}
+
+/*
+        What each saved network has taught the join, or its owner has said
+        of it, beside the list in /root/wifi.rules: a line "WORD NAME" for
+        each, the word one of radio_rule_words. pmf: an access point of the
+        name offered management frame protection, and one that does not is
+        never joined; sae: it was joined with WPA3, and is never joined with
+        WPA2 again; wpa2: its owner lets the tight tier join it with WPA2
+        (moonwater wifi add SSID - wpa2). The first two are learnt, by a join
+        that worked, and forgotten with the network or when it is added again
+        with another password, which is its owner saying that it changed; the
+        third is what the last add of it said. A name has no line feed, and
+        the first space ends the word.
+*/
+#define RADIO_RULES_PATH "/root/wifi.rules"
+#define RADIO_RULES_ROOM 4096
+
+static const string_address radio_rule_words[] = {
+    (string_address) "pmf", (string_address) "sae", (string_address) "wpa2"};
+
+/* The rule a line says, as its bit, for the name; 0 for none. */
+static p8 radio_rule_of(const p8 address_to line, positive length, const p8 address_to ssid,
+                        positive ssid_length)
+{
+        for (positive bit = 0; bit < 3; bit++)
+        {
+                positive word = string_length(radio_rule_words[bit]);
+
+                if (length == word + 1 + ssid_length &&
+                    !memory_compare(line, radio_rule_words[bit], word) && line[word] == ' ' &&
+                    !memory_compare(line + word + 1, ssid, ssid_length))
+                        return (p8)(1u << bit);
+        }
+        return 0;
+}
+
+static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length)
+{
+        p8 text[RADIO_RULES_ROOM];
+        bipolar got;
+        positive at = 0;
+        positive start;
+        positive length;
+        p8 rules = 0;
+
+        if (radio_station >= 0)
+                return (p8)radio_station_number(RADIO_ASK_RULES_GET, ssid, ssid_length, null, 0, 0);
+        got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+
+        while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
+                                         address_of length))
+                rules |= radio_rule_of(text + start, length, ssid, ssid_length);
+        return rules;
+}
+
+/* The rules of ssid made what in the bits of mask, the others kept as they
+   are; and the lines of a name no longer saved are dropped, which keeps the
+   file to the saved networks' three each. */
+static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what)
+{
+        p8 text[RADIO_RULES_ROOM];
+        p8 kept[RADIO_RULES_ROOM];
+        radio_network networks[RADIO_WIFI_MOST];
+        positive count;
+        bipolar got;
+        p8 rules = 0;
+        positive at = 0;
+        positive used = 0;
+        positive start;
+        positive length;
+
+        if (radio_station >= 0)
+        {
+                (void)radio_station_number(RADIO_ASK_RULES_PUT, ssid, ssid_length, null, mask,
+                                           what);
+                return;
+        }
+        count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
+        got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+
+        while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
+                                         address_of length))
+        {
+                bool saved = false;
+                p8 rule = radio_rule_of(text + start, length, ssid, ssid_length);
+
+                rules |= rule;
+                if (rule)
+                        continue;
+                for (positive one = 0; one < count && !saved; one++)
+                        saved = radio_rule_of(text + start, length, networks[one].ssid,
+                                              networks[one].ssid_length) != 0;
+                if (saved && used + length + 1 <= sizeof(kept))
+                {
+                        memory_copy(kept + used, text + start, length);
+                        used += length;
+                        kept[used++] = '\n';
+                }
+        }
+        crypto_forget(networks, sizeof(networks));
+        rules = (p8)((rules & ~mask) | (what & mask));
+        for (positive bit = 0; bit < 3; bit++)
+        {
+                positive word = string_length(radio_rule_words[bit]);
+
+                if (!(rules & (1u << bit)) || used + word + 1 + ssid_length + 1 > sizeof(kept))
+                        continue;
+                memory_copy(kept + used, radio_rule_words[bit], word);
+                used += word;
+                kept[used++] = ' ';
+                memory_copy(kept + used, ssid, ssid_length);
+                used += ssid_length;
+                kept[used++] = '\n';
+        }
+        host_write_file(RADIO_RULES_PATH, kept, used, 0600, true);
 }
 
 /* ---- wifi: why there is nothing to join with ---- */
@@ -7965,20 +9860,23 @@ enum
         RADIO_EAP,
         RADIO_TKIP,
         RADIO_PMF,
-        RADIO_FT256,
+        RADIO_FT,
 };
 
 static const string_address radio_security_words[] = {
     (string_address) "open", (string_address) "WEP",    (string_address) "WPA",
     (string_address) "WPA2", (string_address) "WPA2/3", (string_address) "WPA3",
     (string_address) "OWE",  (string_address) "802.1X", (string_address) "TKIP",
-    (string_address) "PMF",  (string_address) "FT/256",
+    (string_address) "PMF",  (string_address) "FT/EXT",
 };
 
-/* Whether moonwater can join what a network asks for. */
+/* Whether moonwater can join what a network asks for: open, WPA2 (PSK or
+   PSK-SHA256), WPA3 (SAE) or both, with protected management frames or
+   without. */
 static bool radio_security_joinable(p8 security)
 {
-        return security == RADIO_OPEN || security == RADIO_WPA2 || security == RADIO_WPA23;
+        return security == RADIO_OPEN || security == RADIO_WPA2 || security == RADIO_WPA23 ||
+               security == RADIO_WPA3 || security == RADIO_PMF;
 }
 
 typedef struct
@@ -7999,6 +9897,8 @@ typedef struct
         p32 frequency;
         p32 seen;
         p8 bssid[6];
+        //      What its two frames offer a join, together (wifi_rsn_caps).
+        wifi_rsn_caps caps;
 } radio_heard;
 
 typedef struct
@@ -8009,18 +9909,28 @@ typedef struct
         bool any;
 } radio_air;
 
-#define RADIO_RSN_CCMP 0x000fac04u
-#define RADIO_RSN_MFPR 0x0040u
+/* A cipher suite as wifi_rsn_caps keeps it. */
+static p8 radio_cipher_bit(p32 suite)
+{
+        return suite == 0x000fac04u   ? WIFI_CIPHER_CCMP
+               : suite == 0x000fac02u ? WIFI_CIPHER_TKIP
+                                      : WIFI_CIPHER_OTHER;
+}
 
-/* What an RSN element asks of a station. What the join can answer is one
-   thing: key management 00-0F-AC:2, CCMP as the group cipher and among the
-   pairwise ones, and no demand for protected management frames (its RSN
-   element carries capabilities of zero). A network that asks for WPA2 and
-   something besides is a class of its own, with the thing it asks for as
-   its name, because the kernel would refuse the join after its whole
-   timeout: TKIP or any other cipher but CCMP, PMF where the capabilities
-   require it, and FT or SHA-256 key management with no plain PSK. */
-static p8 radio_rsn_security(p8 address_to element, positive length)
+/*
+        What an RSN element asks of a station, as a class for a scan's row,
+        and into caps what it offers a join. The join answers PSK (00-0F-AC:2),
+        PSK-SHA256 (6) and SAE (8), with CCMP as the group cipher and among
+        the pairwise ones, with protected management frames or without. A
+        network that asks for something else is a class of its own, with the
+        thing it asks for as its name: TKIP or any other cipher but CCMP, and
+        FT or the extended-key SAE suites with nothing the join answers
+        beside them. An element cut short, or one that names no key
+        management the join knows, is WPA2 with what it did say: what is
+        not there is what the join always asked, CCMP and PSK.
+*/
+static p8 radio_rsn_security(p8 address_to element, positive length,
+                             wifi_rsn_caps address_to caps)
 {
         byte_reader reader = byte_reader_open(element, length);
         byte_reader pairwise;
@@ -8028,12 +9938,15 @@ static p8 radio_rsn_security(p8 address_to element, positive length)
         positive which;
         p32 group;
         p16 capabilities = 0;
-        bool ccmp = false, psk = false, other = false, sae = false, eap = false;
-        bool owe = false;
+        bool psk = false, sae = false, ft = false, eap = false, owe = false;
 
+        memory_fill(caps, 0, sizeof(*caps));
+        caps->group = WIFI_CIPHER_CCMP;
+        caps->pairwise = WIFI_CIPHER_CCMP;
+        caps->akms = WIFI_AKM_PSK;
         //      The version and the group cipher, then the pairwise ciphers
         //      and the key management suites, each a count and that many
-        //      four byte suites. What is cut short says WPA2.
+        //      four byte suites, then the capabilities.
         (void)byte_reader_skip(&reader, 2);
         group = byte_reader_u32(&reader);
         count = byte_reader_u16le(&reader);
@@ -8041,48 +9954,72 @@ static p8 radio_rsn_security(p8 address_to element, positive length)
         count = byte_reader_u16le(&reader);
         if (!byte_reader_ok(&reader))
                 return RADIO_WPA2;
+        caps->group = radio_cipher_bit(group);
+        caps->pairwise = 0;
+        caps->akms = 0;
         while (byte_reader_left(&pairwise) >= 4)
-                ccmp |= byte_reader_u32(&pairwise) == RADIO_RSN_CCMP;
+                caps->pairwise |= radio_cipher_bit(byte_reader_u32(&pairwise));
         for (which = 0; which < count && byte_reader_left(&reader) >= 4; which++)
         {
                 p32 oui = byte_reader_u24(&reader);
                 p8 suite = byte_reader_u8(&reader);
 
                 if (oui != 0x000fac)
-                        continue;
-                if (suite == 2)
+                        caps->akms |= WIFI_AKM_OTHER;
+                else if (suite == 2 || suite == 6)
+                {
                         psk = true;
-                else if (suite == 4 || suite == 6)
-                        other = true;
-                else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
+                        caps->akms |= suite == 2 ? WIFI_AKM_PSK : WIFI_AKM_PSK_SHA256;
+                }
+                else if (suite == 8)
+                {
                         sae = true;
-                else if (suite == 18)
-                        owe = true;
+                        caps->akms |= WIFI_AKM_SAE;
+                }
                 else
-                        eap = true;
+                {
+                        ft |= suite == 4 || suite == 9 || suite == 24 || suite == 25;
+                        owe |= suite == 18;
+                        eap |= suite != 4 && suite != 9 && suite != 24 && suite != 25 &&
+                               suite != 18;
+                        caps->akms |= WIFI_AKM_OTHER;
+                }
         }
         if (which == count && byte_reader_left(&reader) >= 2)
                 capabilities = byte_reader_u16le(&reader);
+        caps->pmf = (p8)((capabilities & 0x0080 ? WIFI_PMF_CAPABLE : 0) |
+                         (capabilities & 0x0040 ? WIFI_PMF_REQUIRED : 0));
 
-        if (!psk && !other)
-                return sae ? RADIO_WPA3 : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
-        if (!psk)
-                return sae ? RADIO_WPA3 : RADIO_FT256;
-        if (group != RADIO_RSN_CCMP || !ccmp)
+        if (!psk && !sae && (ft || owe || eap))
+                return ft ? RADIO_FT : owe ? RADIO_OWE : RADIO_EAP;
+        if (!psk && !sae)
+        {
+                caps->akms |= WIFI_AKM_PSK;
+                psk = true;
+        }
+        if (caps->group != WIFI_CIPHER_CCMP || !(caps->pairwise & WIFI_CIPHER_CCMP))
                 return RADIO_TKIP;
-        if (capabilities & RADIO_RSN_MFPR)
+        if (!psk)
+                return RADIO_WPA3;
+        if (caps->pmf & WIFI_PMF_REQUIRED)
                 return RADIO_PMF;
         return sae ? RADIO_WPA23 : RADIO_WPA2;
 }
 
 /* What the elements of one frame ask of a station: the first RSN element's
-   key management, else a WPA vendor element, else what the capability's
-   privacy bit says. */
-static p8 radio_ies_security(p8 address_to elements, positive size, p16 capability)
+   class, else a WPA vendor element, else what the capability's privacy bit
+   says; and into caps what the first RSN element offers, with whether the
+   first RSN extension element takes SAE's hash-to-element (bit 5 of its
+   first byte). */
+static p8 radio_ies_security(p8 address_to elements, positive size, p16 capability,
+                             wifi_rsn_caps address_to caps)
 {
         byte_reader ies = byte_reader_open(elements, elements ? size : 0);
-        bool wpa = false;
+        bool wpa = false, rsn = false, extension = false;
+        p8 security = RADIO_OPEN;
+        p8 h2e = 0;
 
+        memory_fill(caps, 0, sizeof(*caps));
         while (byte_reader_left(&ies))
         {
                 p8 id = byte_reader_u8(&ies);
@@ -8091,16 +10028,58 @@ static p8 radio_ies_security(p8 address_to elements, positive size, p16 capabili
 
                 if (!byte_reader_ok(&ies))
                         break;
-                if (id == 48)
-                        return radio_rsn_security((p8 address_to)byte_reader_here(&data), span);
-                if (id == 221 && span >= 4 && byte_reader_u32(&data) == 0x0050f201)
+                if (id == 48 && !rsn)
+                {
+                        rsn = true;
+                        security = radio_rsn_security((p8 address_to)byte_reader_here(&data),
+                                                      span, caps);
+                }
+                else if (id == 244 && !extension)
+                {
+                        extension = true;
+                        h2e = span && (byte_reader_u8(&data) & 0x20) ? 1 : 0;
+                }
+                else if (id == 221 && span >= 4 && byte_reader_u32(&data) == 0x0050f201)
                         wpa = true;
+        }
+        if (rsn)
+        {
+                caps->h2e = h2e;
+                return security;
         }
         return wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
 }
 
-/* One access point of a scan dump: false for a message that is not one. */
-static bool radio_bss_read(netlink_header address_to header, radio_heard address_to one)
+/* The first element of id in a frame's elements, whole, into out: its
+   length, 0 for none or one cut short. */
+static positive radio_ies_element(p8 address_to elements, positive size, p8 id,
+                                  p8 address_to out)
+{
+        byte_reader ies = byte_reader_open(elements, elements ? size : 0);
+
+        while (byte_reader_left(&ies))
+        {
+                byte_reader whole = ies;
+                p8 kind = byte_reader_u8(&ies);
+                byte_reader data = byte_reader_vector8(&ies);
+                positive span = byte_reader_left(&data);
+
+                if (!byte_reader_ok(&ies))
+                        break;
+                if (kind == id)
+                {
+                        memory_copy(out, byte_reader_take(&whole, 2 + span), 2 + span);
+                        return 2 + span;
+                }
+        }
+        return 0;
+}
+
+/* One access point of a scan dump: false for a message that is not one. seen,
+   when asked for, is the access point's RSN element and RSN extension element
+   as each of its two frames showed them (wifi_seen), from the same message. */
+static bool radio_bss_read(netlink_header address_to header, radio_heard address_to one,
+                           wifi_seen address_to seen)
 {
         positive length = 0;
         positive size = 0;
@@ -8110,7 +10089,7 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
         byte_reader ies;
         p8 address_to beacon;
         positive beacon_size = 0;
-        bool rsn = false, wpa = false, named = false;
+        bool named = false;
         p16 capability = 0;
 
         if (nl80211_command(header) != NL80211_CMD_NEW_SCAN_RESULTS)
@@ -8181,23 +10160,33 @@ static bool radio_bss_read(netlink_header address_to header, radio_heard address
                                 one->ssid_length = (p8)span;
                         }
                 }
-                else if (id == 48 && !rsn)
-                {
-                        rsn = true;
-                        one->security = radio_rsn_security(
-                            (p8 address_to)byte_reader_here(&data), span);
-                }
-                else if (id == 221 && span >= 4 &&
-                         byte_reader_u32(&data) == 0x0050f201)
-                        wpa = true;
         }
-        if (!rsn)
-                one->security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
-        one->beacon_security = beacon && beacon != elements
-                                   ? radio_ies_security(beacon, beacon_size, capability)
-                                   : one->security;
+        one->security = radio_ies_security(elements, elements ? size : 0, capability,
+                                           address_of one->caps);
+        one->beacon_security = one->security;
+        if (beacon && beacon != elements)
+        {
+                wifi_rsn_caps beaconed;
+
+                one->beacon_security = radio_ies_security(beacon, beacon_size, capability,
+                                                          address_of beaconed);
+                wifi_caps_merge(address_of one->caps, address_of beaconed);
+        }
         one->joinable = radio_security_joinable(one->security) ||
                         radio_security_joinable(one->beacon_security);
+        if (seen)
+        {
+                memory_fill(seen, 0, sizeof(*seen));
+                seen->rsn_length[0] = (p16)radio_ies_element(elements, size, 48, seen->rsn[0]);
+                seen->rsnx_length[0] = (p16)radio_ies_element(elements, size, 244, seen->rsnx[0]);
+                if (beacon && beacon != elements)
+                {
+                        seen->rsn_length[1] = (p16)radio_ies_element(beacon, beacon_size, 48,
+                                                                     seen->rsn[1]);
+                        seen->rsnx_length[1] = (p16)radio_ies_element(beacon, beacon_size, 244,
+                                                                      seen->rsnx[1]);
+                }
+        }
         return true;
 }
 
@@ -8256,7 +10245,7 @@ static bool radio_air_seen(netlink_header address_to header, address_any context
         radio_air address_to air = (radio_air address_to)context;
         radio_heard one;
 
-        if (!radio_bss_read(header, address_of one))
+        if (!radio_bss_read(header, address_of one, null))
                 return true;
         /* How old the scan is, from what is not joined: the network the
            machine is on stays in the kernel's list, renewed by every
@@ -8361,6 +10350,9 @@ static p64 radio_scan_age(p8 address_to ssid, positive ssid_length)
         radio_scan_line line;
         string_address cursor = (string_address)text;
 
+        if (radio_station >= 0)
+                return (p64)radio_station_number(RADIO_ASK_SCAN_AGE, ssid, ssid_length, null, 0,
+                                                 0);
         if (host_read_word(RADIO_SCAN_PATH, text, sizeof(text)) <= 0)
                 return best;
         while (radio_scan_line_next(address_of cursor, address_of line))
@@ -8383,6 +10375,12 @@ static fn radio_scan_note(p8 address_to ssid, positive ssid_length)
         string_address cursor = (string_address)old;
         positive lines = 1;
         positive used;
+
+        if (radio_station >= 0)
+        {
+                (void)radio_station_number(RADIO_ASK_SCAN_NOTE, ssid, ssid_length, null, 0, 0);
+                return;
+        }
 
         bipolar_into_string(number, (bipolar)now);
         string_copy_bounded(text, number, sizeof(text));
@@ -8435,11 +10433,12 @@ static fn radio_air_dump(nl80211 address_to session, p32 index, netlink_visitor 
         names at all is a passive one, a tenth of a second or more on every
         channel -- and flushed, so the list after it holds what answered
         and nothing the cache kept from before. For a join, only the 2.4
-        and 5 GHz channels: a network at 6 GHz asks for WPA3, which the
-        join cannot give, and its channels are all listened to rather than
+        and 5 GHz channels: those at 6 GHz are all listened to rather than
         asked, which on a radio with that band made the whole scan outlast
-        the five seconds it is given. A radio refuses a list with a channel
-        it has none of, at once, so the join asks for the widest list first
+        the five seconds it is given, so a network at 6 GHz alone (WPA3 with
+        hash-to-element, which the join has) is not one a join finds. A
+        radio refuses a list with a channel it has none of, at once, so the
+        join asks for the widest list first
         (channel 14, 144 and 169 to 177 as well, where a regulatory domain
         has them), then for the list most radios take, then for the whole
         scan.
@@ -8666,13 +10665,32 @@ typedef struct
         p64 until;
 } radio_avoid;
 
+_Static_assert(RADIO_AVOID_MOST * sizeof(radio_avoid) == RADIO_ASK_AVOID_ROOM,
+               "the broker's answer holds the whole avoid list");
+
 static positive radio_avoid_load(radio_avoid address_to into)
 {
-        bipolar got = file_read_once_at(AT_FDCWD, RADIO_AVOID_PATH, into,
-                                        RADIO_AVOID_MOST * sizeof(radio_avoid));
-        positive count = got > 0 ? (positive)got / sizeof(radio_avoid) : 0;
+        bipolar got;
+        positive count;
         positive kept = 0;
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME) / 1000000;
+
+        if (radio_station >= 0)
+        {
+                radio_ask ask;
+                radio_answer answer;
+
+                memory_fill(address_of ask, 0, sizeof(ask));
+                ask.what = RADIO_ASK_AVOID_LOAD;
+                radio_station_ask(address_of ask, address_of answer);
+                if (answer.count > RADIO_AVOID_MOST)
+                        return 0;
+                memory_copy(into, answer.avoid, (positive)answer.count * sizeof(radio_avoid));
+                return (positive)answer.count;
+        }
+        got = file_read_once_at(AT_FDCWD, RADIO_AVOID_PATH, into,
+                                RADIO_AVOID_MOST * sizeof(radio_avoid));
+        count = got > 0 ? (positive)got / sizeof(radio_avoid) : 0;
 
         for (positive at = 0; at < count; at++)
                 if (into[at].until > now && into[at].until - now <= RADIO_AVOID_MS)
@@ -8688,6 +10706,11 @@ static COLD fn radio_avoid_add(p8 address_to bssid)
 
         if (!bssid || !wifi_mac_set(bssid))
                 return;
+        if (radio_station >= 0)
+        {
+                (void)radio_station_number(RADIO_ASK_AVOID_ADD, null, 0, bssid, 0, 0);
+                return;
+        }
         count = radio_avoid_load(list + 1);
         memory_fill(list, 0, sizeof(list[0]));
         memory_copy(list[0].bssid, bssid, 6);
@@ -8712,13 +10735,20 @@ typedef struct
         bool found;
         bool secured;
         bool fits;
+        //      What the saved network has taught the join, whether its secret
+        //      is a key of 64 hex digits, and the best's elements as seen.
+        p8 rules;
+        bool key_only;
+        wifi_seen seen;
 } radio_pick;
 
 /* Whether what an access point's frame asks of a station is what a saved
-   network wants: WPA2 for one with a password, nothing for one without. */
+   network wants: WPA2 or WPA3 for one with a password, nothing for one
+   without. */
 static bool radio_security_fits(bool secured, p8 security)
 {
-        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23
+        return secured ? security == RADIO_WPA2 || security == RADIO_WPA23 ||
+                             security == RADIO_WPA3 || security == RADIO_PMF
                        : security == RADIO_OPEN;
 }
 
@@ -8728,10 +10758,12 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
 {
         radio_pick address_to pick = (radio_pick address_to)context;
         radio_heard one;
+        wifi_seen seen;
         p64 until = 0;
         bool fits;
 
-        if (!radio_bss_read(header, address_of one) || one.seen > RADIO_AIR_STALE_MS ||
+        if (!radio_bss_read(header, address_of one, address_of seen) ||
+            one.seen > RADIO_AIR_STALE_MS ||
             !wifi_mac_set(one.bssid) || one.ssid_length != pick->ssid_length ||
             memory_compare(one.ssid, pick->ssid, pick->ssid_length))
                 return true;
@@ -8747,9 +10779,19 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         //      probe response as well as a beacon, and any station can send
         //      one in the real access point's name without an RSN element:
         //      what its last beacon asked counts as well, so one forged
-        //      response does not push the real one out behind a twin.
+        //      response does not push the real one out behind a twin. And
+        //      of a secured one, what the join's plan would refuse: a twin
+        //      that offers less than the network taught it (protection,
+        //      WPA3) is exactly what a downgrade needs, and goes last.
         fits = radio_security_fits(pick->secured, one.security) ||
                radio_security_fits(pick->secured, one.beacon_security);
+        if (pick->secured && fits)
+        {
+                wifi_plan plan;
+
+                fits = wifi_join_plan(MOONWATER_STRICT_NET, address_of one.caps, pick->rules,
+                                      pick->key_only, address_of plan) == 0;
+        }
         if (pick->found && (fits < pick->fits ||
                             (fits == pick->fits &&
                              (until > pick->until ||
@@ -8759,6 +10801,7 @@ static bool radio_pick_seen(netlink_header address_to header, address_any contex
         pick->found = true;
         pick->until = until;
         pick->fits = fits;
+        pick->seen = seen;
         return true;
 }
 
@@ -8781,17 +10824,23 @@ static bool radio_scan_declined;
         out of range was scanned for, five seconds of it, again for every
         network and every pass. 1 with one
         chosen, 0 when the scan, or the one a moment ago, heard none by this
-        name, -1 when no scan could be had: the join then goes by name.
+        name, -1 when no scan could be had: the join then goes by name. With
+        one chosen, caps is what it offers and seen what it showed.
 */
 static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      p8 address_to ssid, positive ssid_length, bool secured,
                                      p8 address_to bssid, p32 address_to frequency,
-                                     bool force)
+                                     bool force, p8 rules, bool key_only,
+                                     wifi_rsn_caps address_to caps, wifi_seen address_to seen)
 {
         radio_scan_declined = false;
         radio_avoid avoid[RADIO_AVOID_MOST];
-        radio_pick pick = {
-            .ssid = ssid, .ssid_length = ssid_length, .avoid = avoid, .secured = secured};
+        radio_pick pick = {.ssid = ssid,
+                           .ssid_length = ssid_length,
+                           .avoid = avoid,
+                           .secured = secured,
+                           .rules = rules,
+                           .key_only = key_only};
         bipolar heard = 1;
         bool scanned = false;
 
@@ -8811,10 +10860,13 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
         //      Nothing by the name and no scan asked for: not in range as of
         //      the scan a moment ago, which is no new failure to wait longer for.
         radio_scan_declined = !pick.found && !scanned;
+        radio_pick_given_up = pick.found && pick.until != 0;
         if (!pick.found)
                 return heard > 0 ? 0 : -1;
         memory_copy(bssid, pick.best.bssid, 6);
         address_to frequency = pick.best.frequency;
+        address_to caps = pick.best.caps;
+        address_to seen = pick.seen;
         return 1;
 }
 
@@ -8844,6 +10896,363 @@ static radio_heard address_to radio_air_find(radio_air address_to air, string_ad
                     !memory_compare(air->heard[at].ssid, ssid, length))
                         return air->heard + at;
         return null;
+}
+
+/*
+        The station's filter: its architecture, then the calls that need no
+        more than their number, then the four whose arguments decide, then
+        death. A socket is netlink (route or generic) or the EAPOL packet
+        socket and nothing else; an option is a netlink group joined or left,
+        or extended acks; memory is never executable. Its broker's channel is
+        a socket it already holds, spoken to with sendto and recvfrom.
+*/
+#define RADIO_NETLINK_DROP_MEMBERSHIP 2
+
+static COLD fn radio_filter_build(net_filter address_to filter)
+{
+        static const p32 plain[] = {
+            (p32)syscall(recvfrom), (p32)syscall(sendto), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(getrandom),
+            (p32)syscall(close), (p32)syscall(bind), (p32)syscall(getsockname),
+            (p32)syscall(nanosleep), (p32)syscall(clock_nanosleep),
+            (p32)syscall(munmap), (p32)syscall(mremap), (p32)syscall(madvise),
+            (p32)syscall(exit_group), (p32)syscall(exit),
+            (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall),
+#ifdef NET_APART_RISCV_HWPROBE
+            NET_APART_RISCV_HWPROBE,
+#endif
+        };
+        static const p32 datagram[] = {SOCK_DGRAM};
+        static const p32 netlink_protocols[] = {NETLINK_ROUTE, NETLINK_GENERIC};
+        static const p32 netlink_options[] = {NETLINK_ADD_MEMBERSHIP,
+                                              RADIO_NETLINK_DROP_MEMBERSHIP,
+                                              NETLINK_EXT_ACK};
+        const p32 eapol[] = {(p32)network_order_16(ETH_P_PAE)};
+        positive count = array_count(plain);
+        positive call;
+        positive family;
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - at), 0, plain[at]);
+        net_filter_put(filter, NET_FILTER_ALWAYS, 0, 0, 1);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+
+        //      socket: netlink route or generic, or a packet socket of EAPOL's
+        //      ethertype; datagrams, with SOCK_NONBLOCK or SOCK_CLOEXEC.
+        call = net_filter_when(filter, (p32)syscall(socket));
+        net_filter_load(filter, 0);
+        family = net_filter_when(filter, AF_NETLINK);
+        net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC), datagram,
+                           array_count(datagram));
+        net_filter_require(filter, 2, ~(p32)0, netlink_protocols,
+                           array_count(netlink_protocols));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, family);
+        family = net_filter_when(filter, AF_PACKET);
+        net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC), datagram,
+                           array_count(datagram));
+        net_filter_require(filter, 2, ~(p32)0, eapol, array_count(eapol));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, family);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        //      setsockopt: a netlink group joined or left, extended acks.
+        call = net_filter_when(filter, (p32)syscall(setsockopt));
+        net_filter_load(filter, 1);
+        family = net_filter_when(filter, SOL_NETLINK);
+        net_filter_require(filter, 2, ~(p32)0, netlink_options,
+                           array_count(netlink_options));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, family);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        //      mmap: anything but executable.
+        call = net_filter_when(filter, (p32)syscall(mmap));
+        net_filter_load(filter, 2);
+        net_filter_put(filter, NET_FILTER_ANY_BIT, 1, 0, NET_APART_EXECUTABLE);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+}
+
+#define RADIO_CAP_NET_ADMIN 12
+#define RADIO_CAP_NET_RAW 13
+#define RADIO_CAPABILITY_VERSION 0x20080522u
+#define RADIO_PR_SET_KEEPCAPS 8
+#define RADIO_PR_CAPBSET_DROP 24
+#define RADIO_PR_CAP_AMBIENT 47
+#define RADIO_PR_CAP_AMBIENT_CLEAR_ALL 4
+
+/*
+        The station made what it may be: every capability but CAP_NET_ADMIN
+        (nl80211, the link up) and CAP_NET_RAW (the EAPOL socket) out of its
+        bounding set, nobody when it is root, those two raised again and no
+        other, nothing ambient, not dumpable, no new privileges, then its
+        filter. A user namespace that maps root and not nobody keeps root,
+        which owns nothing outside it (net_apart_nobody). False at the first
+        refusal, and nothing is joined.
+*/
+static COLD bool radio_station_confine(void)
+{
+        struct
+        {
+                p32 version;
+                b32 pid;
+        } head = {RADIO_CAPABILITY_VERSION, 0};
+        struct
+        {
+                p32 effective;
+                p32 permitted;
+                p32 inheritable;
+        } data[2] = {{0}};
+        p32 keep = 1u << RADIO_CAP_NET_ADMIN | 1u << RADIO_CAP_NET_RAW;
+        net_filter filter;
+
+        for (positive cap = 0; cap < 64; cap++)
+        {
+                bipolar dropped;
+
+                if (cap == RADIO_CAP_NET_ADMIN || cap == RADIO_CAP_NET_RAW)
+                        continue;
+                dropped = system_call_5(syscall(prctl), RADIO_PR_CAPBSET_DROP, cap, 0, 0, 0);
+                if (dropped == -EINVAL)
+                        break;
+                if (dropped < 0)
+                        return false;
+        }
+        if (system_call_5(syscall(prctl), RADIO_PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0 ||
+            !net_apart_nobody())
+                return false;
+        data[0].effective = data[0].permitted = keep;
+        radio_filter_build(address_of filter);
+        return system_call_2(syscall(capset), (positive)address_of head,
+                             (positive)data) == 0 &&
+               system_call_5(syscall(prctl), RADIO_PR_CAP_AMBIENT,
+                             RADIO_PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) >= 0 &&
+               system_call_5(syscall(prctl), PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 &&
+               system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+               net_filter_install(address_of filter);
+}
+
+/* The station: confined, then the join, its status to the broker, and for
+   as long as the link stands, its keeper. */
+static DEAD_END COLD fn radio_station_run(b32 channel, bipolar broker, p8 address_to ssid,
+                                          positive ssid_length, p8 address_to pass,
+                                          positive pass_length, bool force)
+{
+        wifi_link link = {.session = {.handle = -1}, .eapol = -1};
+        p32 kept[1] = {(p32)channel};
+        radio_ask ask;
+        radio_answer answer;
+        bipolar failed = WIFI_REFUSE_CONFINE;
+        bool confined;
+
+        radio_station = channel;
+        confined = system_call_5(syscall(prctl), PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) == 0 &&
+                   system_call(syscall(getppid)) == broker &&
+                   descriptors_close_outside(3, kept, 1) && radio_station_confine();
+        if (confined)
+                failed = nl80211_join(ssid, ssid_length, pass, pass_length, force,
+                                      address_of link);
+        crypto_forget(pass, pass_length);
+        radio_secrets_forget();
+        memory_fill(address_of ask, 0, sizeof(ask));
+        ask.what = RADIO_ASK_JOINED;
+        ask.status = failed;
+        radio_station_ask(address_of ask, address_of answer);
+        if (!failed)
+        {
+                //      The join's scan news is nothing to the keeper, which
+                //      would wake for every scan anyone asked for.
+                if (link.session.scan)
+                        socket_option_set(link.session.handle, SOL_NETLINK,
+                                          RADIO_NETLINK_DROP_MEMBERSHIP,
+                                          address_of link.session.scan,
+                                          sizeof(link.session.scan));
+                wifi_keep(address_of link);
+        }
+        wifi_link_close(address_of link);
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+/* A status the join can return: joined, an errno, an access point's reason
+   for ending the handshake, or one of the join's own refusals. */
+static CONST COLD bool radio_join_status(b64 status)
+{
+        return (status <= 0 && status >= -4095) ||
+               (status <= -1000 && status > -1000 - 65536) ||
+               (status >= WIFI_REFUSE_FIRST && status <= WIFI_REFUSE_LAST) ||
+               status == WIFI_REFUSE_CONFINE;
+}
+
+/* What the broker does for one question, with checks on every field: a name
+   no longer than a name, a line to log only as a number it has a line for. */
+static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer address_to answer)
+{
+        p8 address_to ssid = ask->named ? ask->ssid : null;
+        positive ssid_length = ask->named ? ask->ssid_length : 0;
+
+        memory_fill(answer, 0, sizeof(*answer));
+        if (ssid_length > sizeof(ask->ssid))
+                return;
+        switch (ask->what)
+        {
+        case RADIO_ASK_RULES_GET:
+                answer->answer = ssid ? radio_rules_get(ssid, ssid_length) : 0;
+                break;
+        case RADIO_ASK_RULES_PUT:
+                if (ssid)
+                        radio_rules_put(ssid, ssid_length, ask->mask, ask->rules);
+                break;
+        case RADIO_ASK_AVOID_LOAD:
+                answer->count = radio_avoid_load((radio_avoid address_to)answer->avoid);
+                break;
+        case RADIO_ASK_AVOID_ADD:
+                radio_avoid_add(ask->bssid);
+                break;
+        case RADIO_ASK_SCAN_AGE:
+                answer->answer = (bipolar)radio_scan_age(ssid, ssid_length);
+                break;
+        case RADIO_ASK_SCAN_NOTE:
+                if (ssid)
+                        radio_scan_note(ssid, ssid_length);
+                break;
+        case RADIO_ASK_SAE_BUDGET:
+                answer->answer = wifi_sae_budget(ask->bssid);
+                break;
+        case RADIO_ASK_SAID:
+                if (ask->status == RADIO_SAID_NO_CLOCK)
+                        radio_keeper_said("no clock to check the link by");
+                else if (ask->status == RADIO_SAID_SOCKETS)
+                        radio_keeper_said("its sockets failed");
+                break;
+        }
+}
+
+/*
+        The broker: root, detached, holding the keeper's lock. It forks the
+        station, forgets every password it carries, then answers questions
+        until the station ends; the join's status goes to whoever asked for
+        the join, once, through told. A status that is no status the join
+        returns is the station's failure.
+*/
+static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid_length,
+                                     p8 address_to pass, positive pass_length, bool force)
+{
+        b32 ends[2];
+        bipolar broker = system_call(syscall(getpid));
+        bipolar station;
+        positive raw = 0;
+        bool joined = false;
+
+        if (host_lock_file(RADIO_KEEPER_PATH, HOST_FILE_SETLK, null) < 0 ||
+            system_call_4(syscall(socketpair), AF_UNIX,
+                          RADIO_SOCK_SEQPACKET | SOCK_CLOEXEC, 0, (positive)ends) < 0)
+                system_call_1(syscall(exit_group), 1);
+        station = system_fork();
+        if (station < 0)
+                system_call_1(syscall(exit_group), 1);
+        if (!station)
+                radio_station_run(ends[1], broker, ssid, ssid_length, pass, pass_length, force);
+        system_close(ends[1]);
+        crypto_forget(pass, pass_length);
+        radio_secrets_forget();
+
+        for (;;)
+        {
+                radio_ask ask;
+                radio_answer answer;
+                network_deadline deadline;
+                bipolar ready;
+
+                //      The station asks when it has to and may keep the link
+                //      for days: an hour's wait at a time, for ever.
+                if (!network_deadline_begin(address_of deadline, 3600, 0))
+                        break;
+                ready = network_wait_readable_until(ends[0], address_of deadline);
+                if (!ready)
+                        continue;
+                if (ready < 0 ||
+                    socket_receive(ends[0], address_of ask, sizeof(ask), MSG_DONTWAIT, null,
+                                   null) != (bipolar)sizeof(ask))
+                        break;
+                if (ask.what == RADIO_ASK_JOINED && told >= 0)
+                {
+                        b64 status = ask.status;
+
+                        if (!radio_join_status(status))
+                                status = WIFI_REFUSE_APART;
+                        joined = status == 0;
+                        if (joined)
+                        {
+                                host_state_ready();
+                                host_write_file(RADIO_KEPT_PATH, (p8 address_to) "1\n", 2, 0644,
+                                                false);
+                        }
+                        (void)system_write_all((positive)told, address_of status, sizeof(status));
+                        system_close(told);
+                        told = -1;
+                        memory_fill(address_of answer, 0, sizeof(answer));
+                }
+                else if (ask.what == RADIO_ASK_JOINED)
+                        break;
+                else
+                        radio_broker_answer(address_of ask, address_of answer);
+                if (socket_send(ends[0], address_of answer, sizeof(answer), MSG_NOSIGNAL, null,
+                                0) != (bipolar)sizeof(answer))
+                        break;
+        }
+        system_close(ends[0]);
+        system_call_2(syscall(kill), (positive)station, SIGKILL);
+        (void)system_wait4_retry(station, address_of raw, 0, null);
+        //      A station that ended of its own -- the link went -- leaves
+        //      nothing kept. One that died (a signal, its filter) left a link
+        //      whose keys nobody keeps: wifi.kept stays, so the machine's next
+        //      pass joins again, and the log says so.
+        if (joined && (raw & 0x7f) == 0)
+                system_remove_at(AT_FDCWD, RADIO_KEPT_PATH, 0);
+        else if (joined)
+                radio_keeper_said("its station died; the link is joined again");
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+/* A join, apart: whatever kept the last link is ended, a broker is forked
+   that outlives this process, and its word of the join is waited for. */
+static COLD bipolar radio_join_apart(p8 address_to ssid, positive ssid_length,
+                                     p8 address_to pass, positive pass_length, bool force)
+{
+        b32 told[2];
+        b64 status = WIFI_REFUSE_APART;
+        bipolar got;
+
+        radio_keeper_stop();
+        if (system_call_2(syscall(pipe2), (positive)told, O_CLOEXEC) < 0)
+                return WIFI_REFUSE_APART;
+        //      The broker's stdio is replaced; an end that is one of the
+        //      first three would be lost to that.
+        if (told[1] < 3 || told[0] < 3)
+        {
+                system_close(told[0]);
+                system_close(told[1]);
+                return WIFI_REFUSE_APART;
+        }
+        if (host_detach((p32)told[1], descriptors_none))
+                radio_broker(told[1], ssid, ssid_length, pass, pass_length, force);
+        system_close(told[1]);
+        got = system_read_retry((positive)told[0], address_of status, sizeof(status));
+        system_close(told[0]);
+        return got == (bipolar)sizeof(status) ? (bipolar)status : WIFI_REFUSE_APART;
 }
 
 /* A name made safe to print, and how many columns it takes. */
@@ -8923,6 +11332,31 @@ static fn radio_air_row(radio_heard address_to heard, positive width, bool saved
 /* ---- wifi: what the last join said, and the password asked for ---- */
 
 /* The reason a join gave, as the words that follow the network's name. */
+/* What the join's plan says of the access point heard by a saved network's
+   name, the refusal or 0: a twin that offers less than the network taught
+   is said for what it is, whether or not the machine's pass has asked it. */
+static COLD bipolar radio_heard_refused(const radio_heard address_to heard,
+                                        const radio_network address_to networks,
+                                        positive count)
+{
+        for (positive at = 0; at < count; at++)
+        {
+                wifi_plan plan;
+                wifi_rsn_caps caps = heard->caps;
+
+                if (networks[at].ssid_length != heard->ssid_length ||
+                    memory_compare(networks[at].ssid, heard->ssid, heard->ssid_length))
+                        continue;
+                if (!networks[at].pass_length)
+                        return 0;
+                return wifi_join_plan(MOONWATER_STRICT_NET, address_of caps,
+                                      radio_rules_get((p8 address_to)networks[at].ssid,
+                                                      networks[at].ssid_length),
+                                      networks[at].pass_length == 64, address_of plan);
+        }
+        return 0;
+}
+
 static string_address radio_join_words(bipolar failed)
 {
         static p8 words[48];
@@ -8943,7 +11377,44 @@ static string_address radio_join_words(bipolar failed)
                : failed == -62  ? (string_address) "did not begin the handshake"
                : failed == -121 ? (string_address) "stopped answering in the handshake"
                : failed == -113 ? (string_address) "is not in range"
-                                : (string_address) "could not be joined";
+               : failed == WIFI_REFUSE_TKIP
+                   ? (string_address) "uses TKIP (WPA1), which is broken and never joined; "
+                                      "set the access point to WPA2 or WPA3 with AES (CCMP)"
+               : failed == WIFI_REFUSE_CIPHER
+                   ? (string_address) "uses a cipher other than AES (CCMP), which moonwater "
+                                      "does not offer"
+               : failed == WIFI_REFUSE_PMF_GONE
+                   ? (string_address) "no longer offers management frame protection, which it "
+                                      "did (an impostor or a changed access point; wifi remove "
+                                      "and add it again to accept that)"
+               : failed == WIFI_REFUSE_SAE_GONE
+                   ? (string_address) "no longer offers WPA3, which it was joined with (an "
+                                      "impostor or a changed access point; wifi remove and add "
+                                      "it again to accept that)"
+               : failed == WIFI_REFUSE_NO_PMF
+                   ? (string_address) "does not protect its management frames, which this "
+                                      "machine requires"
+               : failed == WIFI_REFUSE_WPA2
+                   ? (string_address) "offers WPA2 alone, which this machine joins only for a "
+                                      "network saved with wpa2 (moonwater wifi add SSID - wpa2)"
+               : failed == WIFI_REFUSE_KEY_ONLY
+                   ? (string_address) "asks for WPA3, which needs the password itself and not a "
+                                      "key of 64 hex digits"
+               : failed == WIFI_REFUSE_SUITE
+                   ? (string_address) "asks for key management moonwater does not offer"
+               : failed == WIFI_REFUSE_SAE_BUDGET
+                   ? (string_address) "was asked for WPA3 more often than a minute allows; it is "
+                                      "tried again later"
+               : failed == WIFI_REFUSE_ELEMENTS
+                   ? (string_address) "showed other security in its handshake than in its "
+                                      "beacon (an impostor, or a downgrade on the way)"
+               : failed == WIFI_REFUSE_CONFINE
+                   ? (string_address) "was not joined: the Wi-Fi station cannot be confined "
+                                      "on this kernel (no seccomp filter)"
+               : failed == WIFI_REFUSE_APART
+                   ? (string_address) "was not joined: the confined Wi-Fi station ended "
+                                      "without a word"
+                   : (string_address) "could not be joined";
 }
 
 /* A join's failure that is the network's doing, which radio_join_words
@@ -8951,7 +11422,9 @@ static string_address radio_join_words(bipolar failed)
 static bool radio_join_said(bipolar failed)
 {
         return failed == -110 || failed == -111 || failed == -13 || failed == -62 ||
-               failed == -121 || failed == -113 || (failed <= -1000 && failed > -1000 - 65536);
+               failed == -121 || failed == -113 ||
+               (failed >= WIFI_REFUSE_FIRST && failed <= WIFI_REFUSE_LAST) ||
+               (failed <= -1000 && failed > -1000 - 65536);
 }
 
 /*
@@ -9043,15 +11516,18 @@ static fn radio_last_set(string_address ssid, bipolar failed)
 }
 
 /* Milliseconds the machine's own pass leaves the network that failed this
-   way alone, from the time it did: only a network that was not there or
-   refused the password is waited on, three seconds the first time and twice
-   as long each, to a minute. */
+   way alone, from the time it did: only a network that was not there,
+   refused the password or was refused by the join's own rules (which no
+   pass will change, and each of which a scan found) is waited on, three
+   seconds the first time and twice as long each, to a minute. */
 static p64 radio_join_wait(const radio_last address_to last)
 {
         positive doubled = last->count > 1 ? last->count - 1 : 0;
         p64 wait;
 
-        if ((last->failed != -113 && last->failed != -13) || !last->at)
+        if ((last->failed != -113 && last->failed != -13 &&
+             (last->failed < WIFI_REFUSE_FIRST || last->failed > WIFI_REFUSE_LAST)) ||
+            !last->at)
                 return 0;
         wait = (p64)3000 << (doubled > 5 ? 5 : doubled);
         return wait > 60000 ? 60000 : wait;
@@ -9198,8 +11674,8 @@ static bipolar radio_wifi_join(string_address ssid, string_address pass, bool fo
         started = system_clock_ns(HOST_CLOCK_BOOTTIME);
         for (;;)
         {
-                failed = nl80211_join((p8 address_to)ssid, ssid_length, (p8 address_to)pass,
-                                      pass_length, force, address_of radio_joined);
+                failed = radio_join_apart((p8 address_to)ssid, ssid_length,
+                                          (p8 address_to)pass, pass_length, force);
                 if (failed != -19)
                         break;
                 //      No wireless interface yet: waited for only where the
@@ -9242,6 +11718,9 @@ static b32 radio_wifi_bring(bool say)
         bipolar failed = 0;
         bool joined = false;
         b32 switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, say);
+
+        radio_secret_hold(networks, sizeof(networks));
+        scope_exit(radio_secret_let_go(networks));
 
         if (!say && nl80211_associated())
         {
@@ -9298,7 +11777,8 @@ static b32 radio_wifi_bring(bool say)
                            : host_refuse("no wireless interface\n");
         }
         if (say)
-                return radio_join_said(failed)
+                return radio_join_said(failed) || failed == WIFI_REFUSE_CONFINE ||
+                               failed == WIFI_REFUSE_APART
                            ? host_refuse("the network %s\n", radio_join_words(failed))
                            : host_fail("wifi", failed ? failed : -1);
         return 1;
@@ -9312,7 +11792,6 @@ static b32 radio_wifi_on(bool say)
         if (lock < 0)
                 return say ? host_fail("wifi", lock) : 1;
         result = radio_wifi_bring(say);
-        radio_keeper_start();
         radio_unlock(lock);
         return result;
 }
@@ -9384,8 +11863,24 @@ static bipolar radio_wifi_store(string_address ssid, string_address pass,
         return failed;
 }
 
+/* What a network that asks for what the join cannot give is told, after
+   "asks for": TKIP (and WPA, whose cipher it is) is broken and the fix is at
+   the access point; the rest are not built. */
+static fn radio_unjoinable(p8 address_to into, positive room, p8 security)
+{
+        bool broken = security == RADIO_WPA || security == RADIO_TKIP;
+
+        radio_line(into, room,
+                   security == RADIO_WPA ? (string_address) "WPA (TKIP)"
+                                         : radio_security_words[security],
+                   broken ? (string_address) ", which is broken and never joined; set the "
+                                             "access point to WPA2 or WPA3 with AES (CCMP)"
+                          : (string_address) ", which moonwater cannot join yet",
+                   null, null, null);
+}
+
 /* Everything of `wifi add` that happens with the radio lock held. */
-static b32 radio_wifi_enter(string_address ssid, string_address pass)
+static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
 {
         radio_air air;
         radio_heard address_to heard = null;
@@ -9402,6 +11897,12 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         if (stored == -EFBIG)
                 return host_refuse("%s is too long to change here\n", NET_WIFI_LIST);
         return_if(stored < 0, host_fail(NET_WIFI_LIST, stored));
+        //      What the network taught the join stands while its password
+        //      does; whether WPA2 is let through the tight tier is what
+        //      this add says.
+        radio_rules_put((p8 address_to)ssid, string_length(ssid),
+                        (p8)((same ? 0 : WIFI_RULE_PMF | WIFI_RULE_SAE) | WIFI_RULE_WPA2),
+                        wpa2 ? WIFI_RULE_WPA2 : 0);
 
         switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
 
@@ -9423,9 +11924,10 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                         return switched;
                 }
                 if (!heard->joinable)
-                        return host_refuse("saved, but it asks for %s, which "
-                                           "moonwater cannot join yet\n",
-                                           radio_security_words[heard->security]);
+                {
+                        radio_unjoinable(why, sizeof(why), heard->security);
+                        return host_refuse("saved, but it asks for %s\n", why);
+                }
                 if (heard->security != RADIO_OPEN && !pass_length)
                         return host_refuse("saved with no password, but it "
                                            "asks for one\n");
@@ -9454,6 +11956,8 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
                 return host_refuse("saved, but the network %s\n",
                                    radio_join_words(failed));
         }
+        if (failed == WIFI_REFUSE_CONFINE || failed == WIFI_REFUSE_APART)
+                return host_refuse("saved, but the network %s\n", radio_join_words(failed));
         return_if(failed < 0, host_fail("wifi", failed));
         if (pass && pass[0])
                 crypto_forget((address_any)pass, string_length(pass));
@@ -9462,7 +11966,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass)
         return switched;
 }
 
-static b32 radio_wifi_add(string_address ssid, string_address pass)
+static b32 radio_wifi_add(string_address ssid, string_address pass, bool wpa2)
 {
         positive ssid_length = string_length(ssid);
         positive pass_length = pass ? string_length(pass) : 0;
@@ -9485,14 +11989,17 @@ static b32 radio_wifi_add(string_address ssid, string_address pass)
                 join to make its own. */
         lock = radio_lock(true);
         return_if(lock < 0, host_fail("wifi", lock));
-        result = radio_wifi_enter(ssid, pass);
-        //      The password is forgotten before the keeper is forked, which
-        //      would carry it in its memory for as long as it lives, and the
-        //      keeper is started before the lock is let go, so that nothing
-        //      joins between the join and the process that keeps it.
+        //      The broker and the station a join forks wipe their copies of
+        //      the password (radio_secrets); this process forgets its own
+        //      before the lock is let go.
         if (pass_length)
+                radio_secret_hold((address_any)pass, pass_length);
+        result = radio_wifi_enter(ssid, pass, wpa2);
+        if (pass_length)
+        {
+                radio_secret_let_go((address_any)pass);
                 crypto_forget((address_any)pass, pass_length);
-        radio_keeper_start();
+        }
         radio_unlock(lock);
         return result;
 }
@@ -9541,6 +12048,10 @@ static b32 radio_wifi_forget(string_address ssid)
         count--;
         crypto_forget(address_of networks[count], sizeof(networks[count]));
 
+        //      Its rules first: a remove cut between the two leaves the
+        //      network saved, and the next remove does both.
+        radio_rules_put((p8 address_to)ssid, string_length(ssid),
+                        WIFI_RULE_PMF | WIFI_RULE_SAE | WIFI_RULE_WPA2, 0);
         failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
         return_if(failed < 0, host_fail(NET_WIFI_LIST, failed));
@@ -9730,20 +12241,42 @@ static b32 radio_wifi_status(void)
 
                 radio_display(name, sizeof(name), last.ssid, string_length(last.ssid));
                 if (heard && !heard->joinable)
-                        string_format(log, host_label "not joined: %s asks for %s, which "
-                                                      "moonwater cannot join yet\n",
-                                      (string_address)name,
-                                      radio_security_words[heard->security]);
+                {
+                        radio_unjoinable(why, sizeof(why), heard->security);
+                        string_format(log, host_label "not joined: %s asks for %s\n",
+                                      (string_address)name, (string_address)why);
+                }
                 else if (heard)
                         string_format(log, host_label "not joined: %s %s\n",
-                                      (string_address)name, radio_join_words(last.failed));
+                                      (string_address)name,
+                                      radio_join_words(radio_heard_refused(heard, networks, count)
+                                                           ?: last.failed));
                 else
                 {
                         bool near = false;
+                        bool said = false;
 
-                        for (at = 0; at < count; at++)
-                                near |= radio_air_find(address_of air,
-                                                       networks[at].ssid) != null;
+                        //      No join has failed of late, or not of one in the
+                        //      air: a saved network heard only from an access
+                        //      point its plan refuses is said for what it is.
+                        for (at = 0; at < count && !said; at++)
+                        {
+                                radio_heard address_to one =
+                                    radio_air_find(address_of air, networks[at].ssid);
+                                bipolar refused =
+                                    one ? radio_heard_refused(one, networks, count) : 0;
+
+                                near |= one != null;
+                                if (refused)
+                                {
+                                        radio_display(name, sizeof(name), networks[at].ssid,
+                                                      networks[at].ssid_length);
+                                        string_format(log, host_label "not joined: %s %s\n",
+                                                      (string_address)name,
+                                                      radio_join_words(refused));
+                                        said = true;
+                                }
+                        }
                         if (!near)
                                 string_format(log, host_label "not joined: no saved "
                                                               "network is in range\n");
@@ -10009,7 +12542,6 @@ static fn radio_wifi_keep(void)
         if (lost)
                 radio_wifi_leave();
         radio_wifi_bring(false);
-        radio_keeper_start();
         radio_unlock(lock);
         system_call_1(syscall(exit), 0);
 }
@@ -10120,16 +12652,21 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                 return power ? radio_wifi_on(true)
                              : radio_done(radio_wifi_off(true), "wifi off");
         }
-        if (string_equals(word, "add") && count >= 4 && count <= 5)
+        if (string_equals(word, "add") && count >= 4 && count <= 6)
         {
                 p8 pass[256];
                 positive length;
+                //      wpa2 after the password, or after - : the network may
+                //      be joined with WPA2 where the tight tier asks for WPA3.
+                bool wpa2 = count == 6;
 
+                return_if(wpa2 && !string_equals(arguments[5], (string_address) "wpa2"),
+                          host_usage());
                 //      A password in the argument is in ps and in the
                 //      history of any shell that does not know this verb;
                 //      the tight tier refuses the form, and anywhere it is
                 //      taken a person at a terminal is told the other.
-                return_if(MOONWATER_STRICT_NET >= STRICT_TIGHT && count == 5 &&
+                return_if(MOONWATER_STRICT_NET >= STRICT_TIGHT && count >= 5 &&
                               !string_equals(arguments[4], (string_address) "-"),
                           host_refuse("a password on the command line is "
                                       "refused: give it on standard input "
@@ -10159,7 +12696,7 @@ static b32 host_wifi(string_address address_to arguments, positive count)
                         memory_copy(pass, arguments[4], length + 1);
                         crypto_forget(arguments[4], length);
                 }
-                return radio_wifi_add(arguments[3], pass);
+                return radio_wifi_add(arguments[3], pass, wpa2);
         }
         if (string_equals(word, "remove") && count == 4)
         {
@@ -11434,11 +13971,16 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
         rather than collecting more samples from it.
 
         No step lands before SNTP_WALL_LEAST, which is not a guess at what
-        clocks read but the date of this source: a clock set earlier than
-        the code that set it is wrong by construction, which is systemd's
-        TIME_EPOCH rule. Moving it forward with each release is what keeps
-        an answer from taking the clock back to when a revoked or expired
-        certificate was still good.
+        clocks read but the date of this source (MOONWATER_CLOCK_FLOOR in
+        net.c, where the certificate check reads the same floor): a clock
+        set earlier than the code that set it is wrong by construction,
+        which is systemd's TIME_EPOCH rule. Moving it forward with each
+        release is what keeps an answer from taking the clock back to when a
+        revoked or expired certificate was still good. And no step lands
+        before clock_trust_floor either, the latest time an authenticated
+        answer or this machine's own uptime ever put in /root/clock.good, so
+        a forged answer cannot take a machine back to a date it was already
+        past.
 
         SNTP_WALL_MOST ends that window at the last second sntp_load_stamp
         can read, 2104-02-26 09:42:23 UTC: a stamp whose high bit is set is
@@ -11522,13 +14064,25 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define SNTP_RATE_LIMITED (SNTP_ANSWER - 5)
 #define SNTP_UNCONFIRMED (SNTP_ANSWER - 6)
 #define SNTP_DENIED (SNTP_ANSWER - 7)
+//      The answer was earlier than this machine has already been: its build,
+//      or the last time it was sure (clock_trust_floor).
+#define SNTP_BELOW_FLOOR (SNTP_ANSWER - 8)
+//      An NTS server said its cookie was no good (NTSN): establish keys again.
+#define SNTP_NTS_NAK (SNTP_ANSWER - 9)
+//      A plain answer put the clock further from the time NTS gave this boot
+//      than the crystal can have drifted since.
+#define SNTP_CONTRADICTS (SNTP_ANSWER - 10)
+//      The query could not be confined (net_apart), so nothing was asked; or
+//      its confined child ended without an answer that could be believed.
+#define SNTP_CONFINE (SNTP_ANSWER - 11)
+#define SNTP_APART (SNTP_ANSWER - 12)
 #define SNTP_KISS_RATE 0x52415445u /* "RATE" */
 #define SNTP_KISS_DENY 0x44454e59u /* "DENY" */
 #define SNTP_KISS_RSTR 0x52535452u /* "RSTR" */
 #define SNTP_DELAY_MOST_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_MOST_NS ((bipolar)24 * 3600 * (bipolar)SNTP_NANOSECONDS)
 #define SNTP_OFFSET_SYNCED_NS ((bipolar)2 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_WALL_LEAST 1788220800ll /* 2026-09-01 */
+#define SNTP_WALL_LEAST MOONWATER_CLOCK_FLOOR
 #define SNTP_WALL_MOST 4233462143ll  /* 2104-02-26 09:42:23, the era 1 stamp ends */
 #define SNTP_WALL_LEAST_NS \
         ((bipolar)SNTP_WALL_LEAST * (bipolar)SNTP_NANOSECONDS)
@@ -11559,15 +14113,6 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define SNTP_CONTROL_DATA                          \
         ((SNTP_CONTROL_HEAD + sizeof(positive) - 1) & \
          ~(sizeof(positive) - 1))
-#define SNTP_TEST_NOW \
-        ((bipolar)1800000000 * (bipolar)SNTP_NANOSECONDS)
-//      2035-12-31, 2036-01-01 (where the window used to end), 2036-02-07
-//      06:28:16 (the wrap), 2040-01-01 and 2100-01-01, in nanoseconds.
-#define SNTP_TEST_DATE_1 ((bipolar)2082672000 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_TEST_DATE_2 ((bipolar)2082758400 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_TEST_DATE_3 ((bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_TEST_DATE_4 ((bipolar)2208988800 * (bipolar)SNTP_NANOSECONDS)
-#define SNTP_TEST_DATE_5 ((bipolar)4102444800 * (bipolar)SNTP_NANOSECONDS)
 
 typedef struct
 {
@@ -11823,8 +14368,9 @@ static PURE COLD bipolar sntp_choose(sntp_sample address_to row, positive count)
         quietly: a wrong offset finds no message, and a receive that found
         no message is indistinguishable from a kernel that sent none. That
         reads as "the timestamp did not help" rather than as a mistake, so
-        it is reached here by its own name and sntp_math_ok hands it
-        buffers laid out by hand -- including ones whose length words lie.
+        it is reached here by its own name, and the machine check
+        (sntp_math_ok in test/checks.c) hands it buffers laid out by
+        hand -- including ones whose length words lie.
 
         Every field is read from a buffer the kernel filled, and the two
         lengths are believed only as far as the buffer goes: a message
@@ -12106,585 +14652,25 @@ static COLD bipolar sntp_reply_sample(p8 address_to reply,
         return SNTP_OK;
 }
 
-//      A control message laid out by hand for sntp_math_ok: the header,
-//      then a timespec where the payload starts.
-static COLD fn sntp_test_message(p8 address_to at, positive size, b32 level,
-                                 b32 type, p64 seconds, p64 nanoseconds)
-{
-        address_to(positive address_to)at = size;
-        address_to(b32 address_to)(at + sizeof(positive)) = level;
-        address_to(b32 address_to)(at + sizeof(positive) + 4) = type;
-        address_to(p64 address_to)(at + SNTP_CONTROL_DATA) = seconds;
-        address_to(p64 address_to)(at + SNTP_CONTROL_DATA + sizeof(p64)) =
-            nanoseconds;
-}
 
-//      A stamp, as the wire has it, for any time the window holds: the cast to
-//      32 bits is the era, as it is on the wire.
-static COLD fn sntp_test_stamp(p8 address_to at, bipolar ns)
-{
-        network_store_32(at, (p32)(ns / (bipolar)SNTP_NANOSECONDS + SNTP_UNIX));
-        network_store_32(at + 4,
-                         (p32)((p64)(ns % (bipolar)SNTP_NANOSECONDS) *
-                               4294967296ull / SNTP_NANOSECONDS));
-}
-
-static COLD bool sntp_math_ok(void)
-{
-        bipolar offset = 0;
-        bipolar delay = 0;
-        bipolar target = 0;
-        bipolar two_days = (bipolar)2 * 86400 * (bipolar)SNTP_NANOSECONDS;
-        positive at;
-        p8 request[SNTP_PACKET];
-        p8 reply[SNTP_PACKET];
-        positive words[12];
-        p8 address_to control = (p8 address_to)words;
-        p64 arrived[2];
-        p32 sequence;
-        static const struct
-        {
-                positive claimed; /* what the message says its length is */
-                b32 level;
-                b32 kind;
-                positive held;    /* what the buffer actually holds */
-                bool want;
-        } control_case[] = {
-            /* the message the kernel really sends */
-            {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS,
-             SNTP_CONTROL_DATA + 16, true},
-            /* some other control message, of which there are many */
-            {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS + 1,
-             SNTP_CONTROL_DATA + 16, false},
-            {SNTP_CONTROL_DATA + 16, 0, SNTP_TIMESTAMPNS,
-             SNTP_CONTROL_DATA + 16, false},
-            /* a length word smaller than the header it heads */
-            {SNTP_CONTROL_DATA - 8, SOL_SOCKET, SNTP_TIMESTAMPNS,
-             SNTP_CONTROL_DATA + 16, false},
-            /* a length word reaching past the end of the buffer */
-            {SNTP_CONTROL_DATA + 64, SOL_SOCKET, SNTP_TIMESTAMPNS,
-             SNTP_CONTROL_DATA + 16, false},
-            /* the right message with too little room for a timespec */
-            {SNTP_CONTROL_DATA + 8, SOL_SOCKET, SNTP_TIMESTAMPNS,
-             SNTP_CONTROL_DATA + 8, false},
-            /* nothing at all, which is what a kernel without the option
-               sends, and the case the caller falls back on */
-            {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS, 0, false},
-        };
-        static const struct
-        {
-                p8 first;
-                p8 stratum;
-                p32 root_delay;
-                p32 root_dispersion;
-                p32 reference_id;
-                bool echoed;
-                bipolar want;
-        } reply_case[] = {
-            /* a stratum 2 server answering the question we asked */
-            {0x24, 2, 0, 0, 0, true, SNTP_OK},
-            /* the same packet with the origin stamp not echoed: a forgery,
-               and the one check standing between us and an off-path lie */
-            {0x24, 2, 0, 0, 0, false, SNTP_NO_REPLY},
-            /* mode 3 is a request, not a reply */
-            {0x23, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
-            /* version 0 and version 7 are no version NTP has had */
-            {0x04, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
-            {0x3c, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
-            /* stratum 0 carries a kiss code in the reference id */
-            {0x24, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
-            {0x24, 0, 0, 0, SNTP_KISS_DENY, true, SNTP_DENIED},
-            {0x24, 0, 0, 0, SNTP_KISS_RSTR, true, SNTP_DENIED},
-            {0x24, 0, 0, 0, 0, true, SNTP_BAD_SERVER},
-            /* and a kiss that is none of the three tells us nothing */
-            {0x24, 0, 0, 0, 0x58595a5au, true, SNTP_BAD_SERVER},
-            /* RATE is still RATE when the alarm bit is set with it */
-            {0xe4, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
-            /* stratum 16 is unsynchronised, and the alarm says so too */
-            {0x24, 16, 0, 0, 0, true, SNTP_BAD_SERVER},
-            {0xe4, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
-            /* a second of root delay is the most we trust, and the sign
-               bit of the fixed-point short is never legitimately set */
-            {0x24, 2, SNTP_SHORT_SECOND, SNTP_SHORT_SECOND, 0, true, SNTP_OK},
-            {0x24, 2, SNTP_SHORT_SECOND + 1, 0, 0, true, SNTP_BAD_SERVER},
-            {0x24, 2, 0, SNTP_SHORT_SECOND + 1, 0, true, SNTP_BAD_SERVER},
-            {0x24, 2, 0x80000000u, 0, 0, true, SNTP_BAD_SERVER},
-            {0x24, 2, 0, 0x80000000u, 0, true, SNTP_BAD_SERVER},
-        };
-        sntp_sample row[5] = {
-            {10000000, 20000000, 0, true}, {8000000, 80000000, 0, true},
-            {2000000, 15000000, 0, true},  {4000000, 40000000, 0, true},
-            {50000000, 200000000, 0, true},
-        };
-        static const bipolar delay_case[][6] = {
-            {0, 1000000000, 1000000000, 2000000000, 0, 2000000000},
-            {0, 1050000000, 1050000000, 2000000000, 50000000, 2000000000},
-            {0, 100000000, 100000000, 1100000000, -450000000, 1100000000},
-        };
-        static const struct
-        {
-                p32 seconds;
-                p32 fraction;
-                bipolar want;
-        } stamp_case[] = {
-            /* era 0, the high bit set: 1968 through February 2036 */
-            {SNTP_UNIX, 0, 0},
-            {SNTP_UNIX + 1, 0, (bipolar)SNTP_NANOSECONDS},
-            {SNTP_UNIX, 0x80000000u, 500000000},
-            /* era 1, the high bit clear: February 2036 onward */
-            {0, 0, (bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS},
-            {1, 0, (bipolar)2085978497 * (bipolar)SNTP_NANOSECONDS},
-            /* 2040-01-01, and the last second there is a stamp for */
-            {123010304u, 0, (bipolar)2208988800 * (bipolar)SNTP_NANOSECONDS},
-            {0x7fffffffu, 0, (bipolar)4233462143ll * (bipolar)SNTP_NANOSECONDS},
-        };
-        static const struct
-        {
-                bipolar t1;
-                bipolar t2;
-                bipolar t3;
-                bipolar t4;
-                bipolar off;
-                bipolar del;
-                bipolar most;
-                bool want;
-        } sane_case[] = {
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
-             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
-             2000000000, SNTP_OFFSET_MOST_NS, true},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
-             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
-             2000000000, SNTP_OFFSET_SYNCED_NS, true},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
-             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 3000000001, 0,
-             3000000001, SNTP_OFFSET_MOST_NS, false},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
-             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 500000000, 0,
-             -500000000, SNTP_OFFSET_MOST_NS, false},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 3000000000,
-             SNTP_TEST_NOW + 3000000000, SNTP_TEST_NOW + 50000000, 2975000000,
-             50000000, SNTP_OFFSET_SYNCED_NS, false},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2000000000,
-             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 50000000, 0, 50000000,
-             SNTP_OFFSET_MOST_NS, false},
-            /* a clock that is 2.5 s out is stepped by an unsynchronised
-               clock and by a hand, and left to a synchronised one */
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
-             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
-             2000000, SNTP_OFFSET_SYNCED_NS, false},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
-             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
-             2000000, SNTP_OFFSET_MOST_NS, true},
-            /* a clock set from the network on either side of 2036-01-01, of
-               the era's wrap on 2036-02-07 and in 2040 and 2100 is stepped
-               like any other: the window ended on the first of those */
-            {SNTP_TEST_DATE_1, SNTP_TEST_DATE_1 + 1000000000,
-             SNTP_TEST_DATE_1 + 1000000000, SNTP_TEST_DATE_1 + 2000000000, 0,
-             2000000000, SNTP_OFFSET_MOST_NS, true},
-            {SNTP_TEST_DATE_2, SNTP_TEST_DATE_2 + 1000000000,
-             SNTP_TEST_DATE_2 + 1000000000, SNTP_TEST_DATE_2 + 2000000000, 0,
-             2000000000, SNTP_OFFSET_MOST_NS, true},
-            {SNTP_TEST_DATE_3, SNTP_TEST_DATE_3 + 1000000000,
-             SNTP_TEST_DATE_3 + 1000000000, SNTP_TEST_DATE_3 + 2000000000, 0,
-             2000000000, SNTP_OFFSET_SYNCED_NS, true},
-            {SNTP_TEST_DATE_4, SNTP_TEST_DATE_4 + 1000000000,
-             SNTP_TEST_DATE_4 + 1000000000, SNTP_TEST_DATE_4 + 2000000000, 0,
-             2000000000, SNTP_OFFSET_MOST_NS, true},
-            {SNTP_TEST_DATE_5, SNTP_TEST_DATE_5 + 1000000000,
-             SNTP_TEST_DATE_5 + 1000000000, SNTP_TEST_DATE_5 + 2000000000, 0,
-             2000000000, SNTP_OFFSET_MOST_NS, true},
-            /* a server that answers with a time past the window's end is
-               refused, and so is one that says it is 1970 */
-            {SNTP_TEST_DATE_5, SNTP_WALL_MOST_NS + 1000000000,
-             SNTP_WALL_MOST_NS + 1000000000, SNTP_TEST_DATE_5 + 2000000000, 0,
-             2000000000, SNTP_OFFSET_MOST_NS, false},
-            /* and one 25 h out only by a hand, which the window bounds */
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
-             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
-             89999999000000, 2000000, SNTP_OFFSET_MOST_NS, false},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
-             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
-             89999999000000, 2000000, SNTP_OFFSET_SYNCED_NS, false},
-            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
-             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
-             89999999000000, 2000000, SNTP_OFFSET_ANY_NS, true},
-        };
-
-        for (at = 0; at < array_count(delay_case); at++)
-        {
-                sntp_offset_delay(delay_case[at][0], delay_case[at][1],
-                                  delay_case[at][2], delay_case[at][3],
-                                  address_of offset, address_of delay);
-                if (offset != delay_case[at][4] || delay != delay_case[at][5])
-                        return false;
-        }
-
-        for (at = 0; at < array_count(sane_case); at++)
-                if (sntp_sample_sane(sane_case[at].t1, sane_case[at].t2,
-                                     sane_case[at].t3, sane_case[at].t4,
-                                     sane_case[at].off, sane_case[at].del,
-                                     sane_case[at].most) != sane_case[at].want)
-                        return false;
-
-        sntp_offset_delay(0, SNTP_TEST_NOW + 1000000000,
-                          SNTP_TEST_NOW + 1000000000, 100000000,
-                          address_of offset, address_of delay);
-        if (!sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
-                              SNTP_TEST_NOW + 1000000000, 100000000, offset,
-                              delay, SNTP_OFFSET_MOST_NS) ||
-            sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
-                             SNTP_TEST_NOW + 1000000000, 100000000, offset,
-                             delay, SNTP_OFFSET_SYNCED_NS) ||
-            !sntp_target_ok(0, offset, address_of target) ||
-            target < SNTP_TEST_NOW || target > SNTP_TEST_NOW + 1000000000)
-                return false;
-
-        sntp_offset_delay(SNTP_TEST_NOW, SNTP_TEST_NOW + two_days,
-                          SNTP_TEST_NOW + two_days,
-                          SNTP_TEST_NOW + 50000000, address_of offset,
-                          address_of delay);
-        if (sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + two_days,
-                             SNTP_TEST_NOW + two_days,
-                             SNTP_TEST_NOW + 50000000, offset, delay,
-                             SNTP_OFFSET_MOST_NS))
-                return false;
-
-        if (!sntp_short_ok(0) || !sntp_short_ok(SNTP_SHORT_SECOND) ||
-            sntp_short_ok(SNTP_SHORT_SECOND + 1) ||
-            sntp_short_ok(0x80000000u))
-                return false;
-
-        /*
-                The seconds bound is the one that has to hold exactly: a
-                whole second short of it, with the largest fraction, is
-                still a number, and one second past it is not.
-        */
-        if (sntp_timespec_ns(SNTP_TIMESPEC_SECONDS_MOST,
-                             SNTP_NANOSECONDS - 1) < 0 ||
-            sntp_timespec_ns(SNTP_TIMESPEC_SECONDS_MOST + 1, 0) >= 0 ||
-            sntp_timespec_ns(0, SNTP_NANOSECONDS) >= 0)
-                return false;
-
-        if (!sntp_local_ok(0) || !sntp_local_ok(SNTP_WALL_MOST_NS) ||
-            sntp_local_ok(SNTP_WALL_MOST_NS + 1) || sntp_local_ok(-1))
-                return false;
-
-        //      The window holds every date from this source's to the end of the
-        //      era 1 stamps, and a step that would land outside it is refused
-        //      on either side.
-        if (!sntp_wall_ok(SNTP_TEST_DATE_1) || !sntp_wall_ok(SNTP_TEST_DATE_2) ||
-            !sntp_wall_ok(SNTP_TEST_DATE_3) || !sntp_wall_ok(SNTP_TEST_DATE_4) ||
-            !sntp_wall_ok(SNTP_TEST_DATE_5) ||
-            !sntp_wall_ok(SNTP_WALL_MOST_NS) ||
-            sntp_wall_ok(SNTP_WALL_MOST_NS + 1) ||
-            sntp_wall_ok(SNTP_WALL_LEAST_NS - 1) ||
-            !sntp_target_ok(SNTP_TEST_DATE_2, 1000000000, address_of target) ||
-            target != SNTP_TEST_DATE_2 + 1000000000 ||
-            !sntp_target_ok(SNTP_TEST_DATE_4, -1000000000, address_of target) ||
-            target != SNTP_TEST_DATE_4 - 1000000000 ||
-            sntp_target_ok(SNTP_WALL_MOST_NS, 1, address_of target))
-                return false;
-
-        for (at = 0; at < array_count(stamp_case); at++)
-        {
-                p8 field[8];
-
-                network_store_32(field, stamp_case[at].seconds);
-                network_store_32(field + 4, stamp_case[at].fraction);
-                if (sntp_load_stamp(field) != stamp_case[at].want)
-                        return false;
-        }
-
-        memory_fill(request, 0, sizeof(request));
-        request[0] = SNTP_LI_VN_MODE;
-        network_store_32(request + 40, 0xc0ffee00u);
-        network_store_32(request + 44, 0x0badf00du);
-        for (at = 0; at < array_count(reply_case); at++)
-        {
-                memory_fill(reply, 0, sizeof(reply));
-                reply[0] = reply_case[at].first;
-                reply[1] = reply_case[at].stratum;
-                network_store_32(reply + 4, reply_case[at].root_delay);
-                network_store_32(reply + 8, reply_case[at].root_dispersion);
-                network_store_32(reply + 12, reply_case[at].reference_id);
-                if (reply_case[at].echoed)
-                        memory_copy(reply + 24, request + 40, 8);
-                if (sntp_reply_ok(reply, request) != reply_case[at].want)
-                        return false;
-        }
-
-        /*
-                The reference stamp: all zeros is a server that does not
-                say, and is the same server for all that; one that says is
-                held to the window and to what the server sent.
-        */
-        {
-                static const struct
-                {
-                        bipolar reference; /* unix seconds; -1 for all zeros */
-                        bipolar want;
-                } reference_case[] = {
-                    {-1, SNTP_OK},
-                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS - 10, SNTP_OK},
-                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 1, SNTP_OK},
-                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 5,
-                     SNTP_BAD_SERVER},
-                    {SNTP_WALL_LEAST - 1, SNTP_BAD_SERVER},
-                    {1, SNTP_BAD_SERVER},
-                };
-                sntp_sample taken;
-
-                for (at = 0; at < array_count(reference_case); at++)
-                {
-                        memory_fill(reply, 0, sizeof(reply));
-                        reply[0] = 0x24;
-                        reply[1] = 2;
-                        memory_copy(reply + 24, request + 40, 8);
-                        sntp_test_stamp(reply + 32, SNTP_TEST_NOW + 1000000);
-                        sntp_test_stamp(reply + 40, SNTP_TEST_NOW + 1000000);
-                        if (reference_case[at].reference >= 0)
-                                sntp_test_stamp(reply + 16,
-                                                reference_case[at].reference *
-                                                    (bipolar)SNTP_NANOSECONDS);
-                        memory_zero(address_of taken, sizeof(taken));
-                        if (sntp_reply_sample(reply, request, SNTP_TEST_NOW,
-                                              SNTP_TEST_NOW + 2000000,
-                                              SNTP_OFFSET_MOST_NS,
-                                              address_of taken) !=
-                            reference_case[at].want)
-                                return false;
-                }
-        }
-
-        /*
-                A control buffer the kernel says it filled short is read
-                for nothing, the error queue's own flag is not that, and
-                the buffer takes the arrival stamp, the departure stamp and
-                the error header with the address behind it at once.
-        */
-        if (sntp_control_held(0, 144) != 144 ||
-            sntp_control_held(SNTP_MSG_CTRUNC, 144) ||
-            sntp_control_held(SNTP_MSG_CTRUNC | SNTP_ERRQUEUE, 128) ||
-            sntp_control_held(SNTP_ERRQUEUE, 96) != 96 ||
-            SNTP_CONTROL_WORDS * sizeof(positive) < 32 + 64 + 48)
-                return false;
-
-        for (at = 0; at < array_count(control_case); at++)
-        {
-                memory_zero(words, sizeof(words));
-                sntp_test_message(control, control_case[at].claimed,
-                                  control_case[at].level, control_case[at].kind,
-                                  1700000000ull, 250000000ull);
-                arrived[0] = 0;
-                arrived[1] = 0;
-                if (sntp_control_stamp(control, control_case[at].held,
-                                       SNTP_TIMESTAMPNS,
-                                       arrived) != control_case[at].want)
-                        return false;
-                if (control_case[at].want &&
-                    (arrived[0] != 1700000000ull || arrived[1] != 250000000ull))
-                        return false;
-        }
-
-        /*
-                The kernel puts its messages in the order it likes, so the
-                one we want is not always first. A message of another kind
-                in front of it must be stepped over, not stopped at.
-        */
-        memory_zero(words, sizeof(words));
-        sntp_test_message(control, SNTP_CONTROL_DATA, SOL_SOCKET,
-                          SNTP_TIMESTAMPNS + 7, 0, 0);
-        sntp_test_message(control + SNTP_CONTROL_DATA, SNTP_CONTROL_DATA + 16,
-                          SOL_SOCKET, SNTP_TIMESTAMPNS, 1700000001ull,
-                          750000000ull);
-        arrived[0] = 0;
-        arrived[1] = 0;
-        if (!sntp_control_stamp(control, 2 * SNTP_CONTROL_DATA + 16,
-                                SNTP_TIMESTAMPNS, arrived) ||
-            arrived[0] != 1700000001ull || arrived[1] != 750000000ull)
-                return false;
-
-        /*
-                The departure stamp comes back under a different type and
-                in a longer payload -- three timespecs, of which the
-                software one is first -- so the walk has to take its two
-                words from the front and let the rest alone, and has to
-                tell the two types apart rather than taking whichever
-                timestamp it meets first.
-        */
-        memory_zero(words, sizeof(words));
-        sntp_test_message(control, SNTP_CONTROL_DATA + 48, SOL_SOCKET,
-                          SNTP_TIMESTAMPING, 1700000002ull, 125000000ull);
-        arrived[0] = 0;
-        arrived[1] = 0;
-        if (!sntp_control_stamp(control, SNTP_CONTROL_DATA + 48,
-                                SNTP_TIMESTAMPING, arrived) ||
-            arrived[0] != 1700000002ull || arrived[1] != 125000000ull)
-                return false;
-        if (sntp_control_stamp(control, SNTP_CONTROL_DATA + 48,
-                               SNTP_TIMESTAMPNS, arrived))
-                return false;
-
-        /*
-                The transmit stamp's number rides in the error header
-                beside it, not in the stamp, and the same header says
-                whether the entry is a timestamp at all. A real ICMP
-                error carries a different origin and must not be read as
-                a sequence number, or a refused port would start
-                claiming to be the answer to a send.
-        */
-        memory_zero(words, sizeof(words));
-        sntp_test_message(control, SNTP_CONTROL_DATA + SNTP_ERROR_BYTES,
-                          SNTP_SOL_IP, SNTP_IP_RECVERR, 0, 0);
-        control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] =
-            SNTP_ERROR_TIMESTAMPING;
-        address_to(p32 address_to)(control + SNTP_CONTROL_DATA +
-                                   SNTP_ERROR_SEQUENCE) = 4u;
-        sequence = 0;
-        if (!sntp_control_sequence(control, SNTP_CONTROL_DATA +
-                                                SNTP_ERROR_BYTES,
-                                   address_of sequence) ||
-            sequence != 4u)
-                return false;
-
-        /* the same entry as an ICMP error rather than a timestamp */
-        control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] = 2; /* ICMP */
-        sequence = 0;
-        if (sntp_control_sequence(control, SNTP_CONTROL_DATA +
-                                               SNTP_ERROR_BYTES,
-                                  address_of sequence))
-                return false;
-
-        /* a header cut short of the field the number sits in */
-        control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] =
-            SNTP_ERROR_TIMESTAMPING;
-        address_to(positive address_to)control = SNTP_CONTROL_DATA + 8;
-        sequence = 0;
-        if (sntp_control_sequence(control, SNTP_CONTROL_DATA + 8,
-                                  address_of sequence))
-                return false;
-
-        /* and no error header at all, which is the fallback case */
-        memory_zero(words, sizeof(words));
-        sntp_test_message(control, SNTP_CONTROL_DATA + 48, SOL_SOCKET,
-                          SNTP_TIMESTAMPING, 0, 0);
-        sequence = 0;
-        if (sntp_control_sequence(control, SNTP_CONTROL_DATA + 48,
-                                  address_of sequence))
-                return false;
-
-        /*
-                One bit of the echoed stamp flipped is still a forgery.
-        */
-        memory_fill(reply, 0, sizeof(reply));
-        reply[0] = 0x24;
-        reply[1] = 2;
-        memory_copy(reply + 24, request + 40, 8);
-        /* Every bit of the full random nonce is reply identity. A parser
-           that compares only the old random low half recreates the weak
-           predictable-clock authenticator this test is meant to prevent. */
-        for (positive byte = 0; byte < 8; byte++)
-                for (p8 bit = 1; bit; bit <<= 1)
-                {
-                        reply[24 + byte] ^= bit;
-                        if (sntp_reply_ok(reply, request) != SNTP_NO_REPLY)
-                                return false;
-                        reply[24 + byte] ^= bit;
-                }
-        {
-                p8 later[SNTP_PACKET];
-
-                memory_copy(later, request, sizeof later);
-                later[40] ^= 1;
-                /* A valid reply to the preceding exchange is a replay, not a
-                   reply to this one, even when every server field is valid. */
-                if (sntp_reply_ok(reply, later) != SNTP_NO_REPLY)
-                        return false;
-        }
-
-        /*
-                The root distance: half of a 20 ms round trip, half of a
-                half-second root delay and a 1/64 s root dispersion.
-        */
-        if (sntp_distance_ns(20000000, 0x8000u, 0x400u) !=
-            10000000 + 250000000 + 15625000)
-                return false;
-
-        /*
-                Choosing among servers. The one with the least distance is a
-                falseticker when neither other interval meets its own, and
-                the next best is believed; two that disagree, or three that
-                all do, cannot name the wrong one, so the least distance
-                stands; and one answer is the answer.
-        */
-        {
-                sntp_sample three[SNTP_SERVERS] = {
-                    {0, 0, 5000000, true},
-                    {1000000, 0, 2000000, true},
-                    {50000000, 0, 1000000, true},
-                };
-                sntp_sample apart[SNTP_SERVERS] = {
-                    {0, 0, 1000000, true},
-                    {10000000, 0, 2000000, true},
-                    {20000000, 0, 500000, true},
-                };
-
-                /* an answer 2 h out claiming half a millisecond, against
-                   an honest 10 ms one: its own word is not enough, alone
-                   or against that one, and two that agree are */
-                sntp_sample far[2] = {
-                    {(bipolar)7200 * 1000000000, 0, 500000, true},
-                    {0, 0, 10000000, true},
-                };
-
-                for (positive server = 0; server < SNTP_SERVERS; server++)
-                {
-                        three[server].address = (p32)(server + 1);
-                        apart[server].address = (p32)(server + 1);
-                }
-                far[0].address = 1;
-                far[1].address = 2;
-                if (sntp_choose(three, 3) != 1 || sntp_choose(three + 1, 2) != 1 ||
-                    sntp_choose(three + 2, 1) != 0 || sntp_choose(apart, 3) != 2)
-                        return false;
-                three[1].ok = false;
-                if (sntp_choose(three, 3) != 2)
-                        return false;
-                if (sntp_choose(far, 2) != 1 || sntp_choose(far, 1) != -1)
-                        return false;
-                far[1].offset_ns = far[0].offset_ns + 1000000;
-                if (sntp_choose(far, 2) != 0)
-                        return false;
-                /* one server under three names is one answer: three that agree
-                   from one address are not a majority, a second server that
-                   agrees with them is, and a step within 2 s needs no word */
-                sntp_sample same[3] = {
-                    {(bipolar)7200 * 1000000000, 0, 500000, true, 9},
-                    {(bipolar)7200 * 1000000000, 0, 600000, true, 9},
-                    {(bipolar)7200 * 1000000000, 0, 700000, true, 9},
-                };
-
-                if (sntp_choose(same, 3) != -1)
-                        return false;
-                same[2].address = 10;
-                if (sntp_choose(same, 3) != 0)
-                        return false;
-                same[0].offset_ns = same[1].offset_ns = same[2].offset_ns = 1000000;
-                same[2].address = 9;
-                if (sntp_choose(same, 3) != 0)
-                        return false;
-        }
-
-        return sntp_pick(row, 5) == 2 && row[2].offset_ns == 2000000;
-}
-
+/*
+        One request and its reply. With nts the request carries NTS's
+        extension fields (nts_request), and a reply is only an answer when
+        nts_reply authenticates it: anything else is noise, charged to the
+        discard allowance like any other, except an NTSN that says the
+        cookie is no good. An NTS reply is longer than 48 bytes by design and
+        is parsed whole, so the tight tier's exact size is for plain replies;
+        one that fills the room is cut and is no answer.
+*/
 static HOT bipolar sntp_exchange(b32 handle,
                                  network_deadline address_to deadline,
                                  bipolar most, p32 address_to sequence,
+                                 nts_exchange address_to nts,
                                  sntp_sample address_to into)
 {
-        p8 request[SNTP_PACKET];
-        p8 reply[SNTP_REPLY_ROOM];
+        p8 request[NTS_PACKET_ROOM];
+        p8 reply[NTS_PACKET_ROOM + 1];
+        positive request_length = SNTP_PACKET;
         p64 sent[2];
         p64 got[2];
         p64 spare[2];
@@ -12697,15 +14683,24 @@ static HOT bipolar sntp_exchange(b32 handle,
         bool stamped;
 
         into->ok = false;
-        memory_fill(request, 0, sizeof(request));
+        memory_fill(request, 0, SNTP_PACKET);
         request[0] = SNTP_LI_VN_MODE;
 
+        //      The packet is whole, extension fields and their tag included,
+        //      before the clock is read for t1: the crypto is not in the
+        //      offset (and t1 and t4 are the kernel's stamps regardless).
+        if_rare (!sntp_put_stamp(request + 40))
+                return SNTP_NO_REPLY;
+        if (nts)
+        {
+                request_length = nts_request(nts, request, sizeof(request));
+                if_rare (!request_length)
+                        return SNTP_NO_REPLY;
+        }
         if_rare (system_call_2(syscall(clock_gettime), CLOCK_REALTIME,
                                (positive)sent) < 0)
                 return SNTP_NO_REPLY;
-        if_rare (!sntp_put_stamp(request + 40))
-                return SNTP_NO_REPLY;
-        if_rare (socket_send(handle, request, SNTP_PACKET, 0, 0, 0) < 0)
+        if_rare (socket_send(handle, request, request_length, 0, 0, 0) < 0)
                 return SNTP_NO_REPLY;
         mine = address_to sequence;
         address_to sequence = mine + 1;
@@ -12720,8 +14715,9 @@ static HOT bipolar sntp_exchange(b32 handle,
                 if_rare (wait <= 0)
                         return SNTP_NO_REPLY;
                 received = sntp_receive_stamped(handle, reply,
-                                                sizeof(reply), got,
-                                                address_of stamped);
+                                                nts ? sizeof(reply)
+                                                    : SNTP_REPLY_ROOM,
+                                                got, address_of stamped);
                 if_rare (!stamped &&
                          system_call_2(syscall(clock_gettime), CLOCK_REALTIME,
                                        (positive)got) < 0)
@@ -12750,11 +14746,27 @@ static HOT bipolar sntp_exchange(b32 handle,
                                 return SNTP_NO_REPLY;
                         continue;
                 }
-                if_rare (received < SNTP_PACKET || (MOONWATER_STRICT_NET >= STRICT_TIGHT && received != SNTP_PACKET))
+                if_rare (received < SNTP_PACKET ||
+                         (nts ? received > NTS_PACKET_ROOM
+                              : MOONWATER_STRICT_NET >= STRICT_TIGHT &&
+                                    received != SNTP_PACKET))
                 {
                         if (discarded++ == NETWORK_DISCARD_MAX)
                                 return SNTP_NO_REPLY;
                         continue;
+                }
+                if (nts)
+                {
+                        bipolar heard = nts_reply(nts, reply, (positive)received);
+
+                        if (heard == NTS_REPLY_NAK)
+                                return SNTP_NTS_NAK;
+                        if (heard != NTS_REPLY_OK)
+                        {
+                                if (discarded++ == NETWORK_DISCARD_MAX)
+                                        return SNTP_NO_REPLY;
+                                continue;
+                        }
                 }
                 verdict = sntp_reply_sample(reply, request, t1,
                                             sntp_timespec_ns(got[0], got[1]),
@@ -12769,12 +14781,13 @@ static HOT bipolar sntp_exchange(b32 handle,
         }
 }
 
-static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
+static COLD bipolar sntp_query_at(p32 server, p16 port, bool filter,
+                                  bipolar most, nts_exchange address_to nts,
                                   sntp_sample address_to answer)
 {
         socket_address_internet where = {
             .family = AF_INET,
-            .port = network_order_16(SNTP_PORT),
+            .port = network_order_16(port),
             .host = network_order_32(server),
         };
         network_deadline deadline;
@@ -12812,11 +14825,13 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
                                             0))
                         break;
                 failed = sntp_exchange((b32)handle, address_of deadline, most,
-                                       address_of sequence, row + at);
+                                       address_of sequence, nts, row + at);
                 //      A server that is not there, or has said no, is not
-                //      asked again for the rest of the samples.
+                //      asked again for the rest of the samples; nor is one
+                //      that refused the cookie, which needs new keys first.
                 if (failed == SNTP_NO_SERVER || failed == SNTP_BAD_SERVER ||
-                    failed == SNTP_RATE_LIMITED || failed == SNTP_DENIED)
+                    failed == SNTP_RATE_LIMITED || failed == SNTP_DENIED ||
+                    failed == SNTP_NTS_NAK)
                         break;
         }
 
@@ -12828,14 +14843,128 @@ static COLD bipolar sntp_query_at(p32 server, bool filter, bipolar most,
         return SNTP_OK;
 }
 
-static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
-                               sntp_sample address_to answer)
+/*
+        A time server asked apart. The machine's NTP child asks as root, and
+        what a server sends is read by sntp_reply_sample and, with NTS, by
+        nts_reply, so the name's lookup, the exchanges and both readers run
+        in a confined child (net_apart, with a time query's filter: recvmsg
+        and the two timestamp options besides a fetch's calls). It answers
+        with its status, the sample it picked and, with NTS, the cookies the
+        replies left. The status is believed as one sntp_query_at returns;
+        the sample as one sntp_reply_sample could have made (taken, a delay
+        within SNTP_DELAY_MOST_NS, a distance not below half of it, an
+        offset inside the NTP window, and inside most when the clock is
+        synchronised, from an address); the cookies as nts_ke_believed holds
+        them. The keys never come back: the caller still has its own.
+*/
+_Static_assert(SNTP_TIMESTAMPNS == NET_APART_SO_TIMESTAMPNS &&
+                   SNTP_TIMESTAMPING == NET_APART_SO_TIMESTAMPING,
+               "the time query's filter allows the options it sets");
+
+typedef struct
 {
+        b64 status;
+        sntp_sample sample;
+        p64 count;
+        p16 length[NTS_COOKIES];
+        p8 cookie[NTS_COOKIES][NTS_COOKIE_MAX];
+} sntp_apart_said;
+
+typedef struct
+{
+        string_address name;
+        p16 port;
+        bool filter;
+        bipolar most;
+        nts_exchange address_to nts;
+} sntp_apart_ask;
+
+static COLD bool sntp_apart_task(address_any context, bipolar answer)
+{
+        sntp_apart_ask address_to ask = context;
+        sntp_apart_said said;
         //      The name or the address as the HTTP client takes it, which is
         //      the one place a host is looked up.
-        p32 host = name && name[0] ? http_lookup(name) : 0;
+        p32 host = ask->name && ask->name[0] ? http_lookup(ask->name) : 0;
+        bool wrote;
 
-        return host ? sntp_query_at(host, filter, most, answer) : SNTP_NO_SERVER;
+        memory_zero(address_of said, sizeof said);
+        said.status = host ? sntp_query_at(host, ask->port, ask->filter, ask->most,
+                                           ask->nts, address_of said.sample)
+                           : SNTP_NO_SERVER;
+        if (ask->nts)
+        {
+                said.count = ask->nts->state->count;
+                memory_copy(said.length, ask->nts->state->length,
+                            sizeof said.length);
+                memory_copy(said.cookie, ask->nts->state->cookie,
+                            sizeof said.cookie);
+        }
+        wrote = system_write_all((positive)answer, address_of said, sizeof said) ==
+                sizeof said;
+        crypto_forget(address_of said, sizeof said);
+        return wrote;
+}
+
+static COLD bool sntp_apart_believed(const sntp_apart_said address_to said,
+                                     bipolar most, bool nts)
+{
+        const sntp_sample address_to sample = address_of said->sample;
+
+        if (said->status != SNTP_OK &&
+            (said->status > SNTP_ANSWER - 1 || said->status < SNTP_CONTRADICTS))
+                return false;
+        if (said->status == SNTP_OK &&
+            (!sample->ok || !sample->address || sample->delay_ns < 0 ||
+             sample->delay_ns > SNTP_DELAY_MOST_NS ||
+             sample->distance_ns < sample->delay_ns / 2 ||
+             !sntp_within(sample->offset_ns, SNTP_WALL_MOST_NS) ||
+             (most <= SNTP_OFFSET_SYNCED_NS &&
+              !sntp_within(sample->offset_ns, most))))
+                return false;
+        if (!nts)
+                return !said->count;
+        if (said->count > NTS_COOKIES)
+                return false;
+        for (positive at = 0; at < said->count; at++)
+                if (!said->length[at] || said->length[at] > NTS_COOKIE_MAX)
+                        return false;
+        return true;
+}
+
+static COLD bipolar sntp_query_apart(string_address name, p16 port, bool filter,
+                                     bipolar most, nts_exchange address_to nts,
+                                     sntp_sample address_to answer)
+{
+        sntp_apart_ask ask = {name, port, filter, most, nts};
+        byte_store got = {0};
+        sntp_apart_said said;
+        bipolar ran = net_apart(sntp_apart_task, address_of ask, -1, address_of got,
+                                sizeof said, true);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+        bipolar status = ran == NET_APART_UNCONFINED ? SNTP_CONFINE : SNTP_APART;
+
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        if (got.bytes)
+                crypto_forget(got.bytes, got.used);
+        byte_store_release(address_of got);
+        if (whole && sntp_apart_believed(address_of said, most, nts != null))
+        {
+                status = (bipolar)said.status;
+                if (status == SNTP_OK)
+                        address_to answer = said.sample;
+                if (nts)
+                {
+                        nts->state->count = (positive)said.count;
+                        memory_copy(nts->state->length, said.length,
+                                    sizeof said.length);
+                        memory_copy(nts->state->cookie, said.cookie,
+                                    sizeof said.cookie);
+                }
+        }
+        crypto_forget(address_of said, sizeof said);
+        return status;
 }
 
 #endif
@@ -12846,6 +14975,12 @@ static COLD bipolar sntp_query(string_address name, bool filter, bipolar most,
 #define LOCALE_NTP_PATH "/root/ntp"
 #define LOCALE_NTP_SERVER_PATH "/root/ntp.server"
 #define LOCALE_NTP_SAMPLING_PATH "/root/ntp.sampling"
+#define LOCALE_NTS_PATH "/root/ntp.nts"
+#define LOCALE_NTS_SERVERS_PATH "/root/ntp.nts.servers"
+#define LOCALE_NTS_STATE_PATH HOST_STATE "/nts"
+#define LOCALE_NTS_FAILED_PATH HOST_STATE "/nts.failed"
+#define LOCALE_NTP_LAST_PATH HOST_STATE "/ntp.last"
+#define LOCALE_NTP_LAST_ROOM 96
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_CANVAS_SCALE_PATH "/root/canvas.scale"
 #define LOCALE_CANVAS_MODES_PATH "/root/canvas.modes"
@@ -13027,6 +15162,8 @@ static bipolar locale_ntp_apply(bool by_hand);
 //      nobody reads these there.
 static bipolar locale_ntp_moved_ns;
 static p8 locale_ntp_answered[LOCALE_NTP_SERVER_ROOM];
+//      Why the last NTS server could not be asked, for the person who asked.
+static p8 locale_nts_why[112];
 
 /*
         What a setting says to a caller who cannot read it. /root is root's,
@@ -13810,6 +15947,81 @@ static bipolar locale_auto_ask(locale_auto_answer address_to answer)
         return status ? status : found ? 0 : HTTP_MALFORMED;
 }
 
+/*
+        The question, apart. The machine asks it as root, so all of it -- the
+        TLS, the HTTP and the reading of the headers and the trace -- runs in
+        a confined child (net_apart), and what comes back is a status and two
+        words. They are believed only as names the table holds: the zone as
+        clock_zone_named spells it, the country through locale_auto_country
+        again. What this process writes and logs is the table's spelling,
+        never the child's bytes.
+*/
+typedef struct
+{
+        b64 status;
+        locale_auto_answer answer;
+} locale_auto_said;
+
+static bool locale_auto_ask_task(address_any context, bipolar answer)
+{
+        locale_auto_said said;
+
+        (void)context;
+        memory_zero(address_of said, sizeof said);
+        said.status = locale_auto_ask(address_of said.answer);
+        return system_write_all((positive)answer, address_of said, sizeof said) ==
+               sizeof said;
+}
+
+//      What the child said, as far as it can be believed: its status when
+//      http_run could have returned it, and a zone only as the table spells
+//      it -- a zone name, or a country code that names one.
+static bipolar locale_auto_believe(locale_auto_said address_to said,
+                                   locale_auto_answer address_to answer)
+{
+        string_address named;
+
+        memory_zero(answer, sizeof(address_to answer));
+        if (said->status)
+                return http_apart_status(said->status) ? (bipolar)said->status
+                                                       : HTTP_APART;
+        said->answer.zone[sizeof(said->answer.zone) - 1] = end;
+        said->answer.mode[sizeof(said->answer.mode) - 1] = end;
+        if (string_equals(said->answer.mode, (string_address) "auto cloudflare"))
+        {
+                named = clock_zone_named(said->answer.zone);
+                if (!named || !string_equals(named, said->answer.zone))
+                        return HTTP_MALFORMED;
+                string_copy_bounded(answer->zone, named, sizeof(answer->zone));
+                string_copy_bounded(answer->mode, "auto cloudflare",
+                                    sizeof(answer->mode));
+                return 0;
+        }
+        if (string_length(said->answer.mode) == 15 &&
+            !memory_compare(said->answer.mode, "auto country ", 13) &&
+            locale_auto_country(said->answer.mode + 13, answer))
+                return 0;
+        memory_zero(answer, sizeof(address_to answer));
+        return HTTP_MALFORMED;
+}
+
+static bipolar locale_auto_ask_apart(locale_auto_answer address_to answer)
+{
+        byte_store got = {0};
+        locale_auto_said said;
+        bipolar ran = net_apart(locale_auto_ask_task, null, -1, address_of got,
+                                sizeof said, false);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+
+        memory_zero(answer, sizeof(address_to answer));
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        byte_store_release(address_of got);
+        if (!whole)
+                return ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
+        return locale_auto_believe(address_of said, answer);
+}
+
 static string_address locale_auto_reason(bipolar status)
 {
         switch (status)
@@ -13823,11 +16035,22 @@ static string_address locale_auto_reason(bipolar status)
         case HTTP_EXPIRED:
         case HTTP_NOT_YET:
         case HTTP_MISMATCH:
+        case HTTP_UNCHECKED:
                 return (string_address) "TLS failed -- is the clock right?";
+        case HTTP_REVOKED:
+                return (string_address) "its certificate is revoked";
+        case HTTP_UNLOGGED:
+                return (string_address) "its certificate was not logged (CT)";
+        case HTTP_CLOCK:
+                return (string_address) "the clock is unset";
         case HTTP_STATUS:
                 return (string_address) "it answered with an error";
         case HTTP_MALFORMED:
                 return (string_address) "the answer named no zone";
+        case HTTP_CONFINE:
+                return (string_address) "the question could not be confined here";
+        case HTTP_APART:
+                return (string_address) "the confined question died";
         }
         return (string_address) "no answer";
 }
@@ -13891,7 +16114,7 @@ static b32 locale_zone_auto(void)
                 return_if(kept < 0, host_fail("timezone", kept));
         }
         locale_network(network, sizeof(network));
-        status = locale_auto_ask(address_of answer);
+        status = locale_auto_ask_apart(address_of answer);
         if (status)
         {
                 locale_auto_asked(null);
@@ -13919,7 +16142,7 @@ static locale_child locale_auto_child = {0, -1};
 static p8 locale_auto_task(address_any network)
 {
         locale_auto_answer answer;
-        bool took = !locale_auto_ask(address_of answer) &&
+        bool took = !locale_auto_ask_apart(address_of answer) &&
                     !locale_auto_take(address_of answer, false);
 
         if (took)
@@ -14003,6 +16226,11 @@ static b32 locale_time_status(void)
         gmtime_r(address_of stamp, address_of broken);
         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", address_of broken);
         string_format(log, "  utc   %s\n", when);
+        if (stamp < 0 || (p64)stamp < clock_trust_floor())
+                host_say(log, "  clock unset: it reads earlier than this "
+                              "system's build or the last time it was sure, "
+                              "so certificates cannot be checked;\n"
+                              "  moonwater time sync sets it\n");
         host_say(log, "  ntp %s, %s\n", locale_switch_say(LOCALE_NTP_PATH),
                  locale_clock_synced() ? "synchronised" : "waiting");
         return 0;
@@ -14015,7 +16243,14 @@ static b32 locale_time_sync(void)
         locale_ntp_moved_ns = 0;
         locale_ntp_answered[0] = end;
         failed = locale_ntp_apply(true);
-        if (failed < 0 && locale_ntp_answered[0])
+        if (failed == SNTP_BELOW_FLOOR)
+                string_format(log, host_label "time: %s answered earlier than "
+                                   "this machine has already been (its build "
+                                   "or the last time it was sure), so the "
+                                   "clock was left alone; remove "
+                                   "/root/clock.good if that is wrong\n",
+                              locale_ntp_answered);
+        else if (failed < 0 && locale_ntp_answered[0])
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
                               locale_ntp_answered,
@@ -14024,17 +16259,32 @@ static b32 locale_time_sync(void)
                                                      "outside the years this "
                                                      "machine accepts"
                                   : file_reason(failed));
+        else if (failed == SNTP_CONTRADICTS)
+                string_format(log, host_label "time: %s answered, but it is "
+                                   "further from the time NTS gave this boot "
+                                   "than the clock can have drifted, so the "
+                                   "clock was left alone\n",
+                              locale_ntp_answered);
         else if (failed == SNTP_UNCONFIRMED)
                 string_format(log, host_label "time: no second server agreed "
                                    "with a step past 2 s, so the clock was "
                                    "left alone\n");
         else if (failed < 0)
+        {
                 string_format(log, host_label "time: no server answered%s\n",
                               failed == SNTP_RATE_LIMITED
                                   ? " -- asked too often, try in a minute"
                               : failed == SNTP_DENIED
                                   ? " -- a server told this machine to stay away"
+                              : failed == SNTP_CONFINE
+                                  ? " -- the query cannot be confined here, so "
+                                    "nothing was asked"
+                              : failed == SNTP_APART
+                                  ? " -- the confined query died"
                                   : "");
+                if (locale_nts_why[0])
+                        string_format(log, "  NTS %s\n", locale_nts_why);
+        }
         else
         {
                 bipolar moved = locale_ntp_moved_ns;
@@ -14146,6 +16396,24 @@ static fn locale_clock_mark_synced(positive error_us)
 */
 static bool locale_ntp_first;
 
+//      Whether a plain answer puts the clock further from the time NTS gave
+//      (known seconds, given elapsed boot seconds ago) than a crystal can
+//      have drifted since: 1000 ppm, which no real one reaches, and five
+//      seconds for the whole-second stamps it was kept in.
+static CONST bool locale_plain_apart(bipolar now, bipolar offset_ns, p64 known,
+                                     p64 elapsed)
+{
+        bipolar apart;
+
+        if (!known || now < 0)
+                return false;
+        apart = now + offset_ns - (bipolar)known * (bipolar)SNTP_NANOSECONDS;
+        if (apart < 0)
+                apart = -apart;
+        return apart > ((bipolar)5 + (bipolar)(elapsed / 1000)) *
+                           (bipolar)SNTP_NANOSECONDS;
+}
+
 static bool locale_ntp_wants_step(bipolar offset_ns)
 {
         bipolar most = locale_ntp_first ? LOCALE_NTP_STEP_FIRST_NS
@@ -14240,129 +16508,6 @@ static fn locale_ntp_discipline_words(bipolar offset_ns, positive error_us,
         words[LOCALE_TIMEX_CONSTANT] = LOCALE_NTP_TIMECONST;
 }
 
-/*
-        Nothing unprivileged can ask the kernel which mode a bit means,
-        and a wrong one returns success, so the decision is checked here
-        instead: what goes in the request for a given offset, rather than
-        what the kernel does with it.
-*/
-static COLD bool locale_discipline_ok(void)
-{
-        positive words[LOGGER_TIMEX_WORDS];
-        positive at;
-        static const struct
-        {
-                bipolar offset_ns;
-                bool step;
-                bipolar sec; /* what a step carries, floored */
-                bipolar nsec;
-        } discipline_case[] = {
-            {0, false, 0, 0},
-            {1000000, false, 0, 0},
-            {-1000000, false, 0, 0},
-            {LOCALE_NTP_STEP_NS - 1, false, 0, 0},
-            {-(LOCALE_NTP_STEP_NS - 1), false, 0, 0},
-            {LOCALE_NTP_STEP_NS, true, 0, LOCALE_NTP_STEP_NS},
-            {-LOCALE_NTP_STEP_NS, true, -1,
-             (bipolar)SNTP_NANOSECONDS - LOCALE_NTP_STEP_NS},
-            {1500000000, true, 1, 500000000},
-            {-1500000000, true, -2, 500000000},
-            {(bipolar)86400 * 1000000000, true, 86400, 0},
-            {-(bipolar)86400 * 1000000000, true, -86400, 0},
-            {(bipolar)3 * 86400 * 1000000000 + 1, true, 259200, 1},
-            {-((bipolar)3 * 86400 * 1000000000 + 1), true, -259201,
-             (bipolar)SNTP_NANOSECONDS - 1},
-        };
-
-        for (at = 0; at < array_count(discipline_case); at++)
-        {
-                bipolar offset = discipline_case[at].offset_ns;
-
-                /* a 20 ms round trip to a server at the root of its
-                   tree is a 10 ms root distance */
-                locale_ntp_discipline_words(offset,
-                                            locale_ntp_error_us(
-                                                sntp_distance_ns(20000000, 0, 0)),
-                                            words);
-
-                if (locale_ntp_wants_step(offset) != discipline_case[at].step)
-                        return false;
-                /* the loop is enabled either way, and the clock counts as
-                   set either way, so STA_UNSYNC never survives a reply */
-                if (words[LOGGER_TIMEX_STATUS] != (STA_PLL | STA_FREQHOLD))
-                        return false;
-                if (words[0] & ADJ_STATUS ? false : true)
-                        return false;
-                /* and it carries an error bound, or the kernel takes the
-                   synchronisation back at the next second */
-                if (!(words[0] & ADJ_MAXERROR) || !(words[0] & ADJ_ESTERROR) ||
-                    words[LOGGER_TIMEX_MAXERROR] != 10001 ||
-                    words[LOCALE_TIMEX_ESTERROR] != 10001)
-                        return false;
-                if (discipline_case[at].step)
-                {
-                        /* a step carries the time, cancels any slew, and
-                           has no business setting a loop time constant */
-                        if (!(words[0] & ADJ_SETOFFSET) ||
-                            words[0] & ADJ_TIMECONST ||
-                            words[LOCALE_TIMEX_OFFSET] != 0 ||
-                            (bipolar)words[LOGGER_TIMEX_TIME_SEC] !=
-                                discipline_case[at].sec ||
-                            (bipolar)words[LOGGER_TIMEX_TIME_NSEC] !=
-                                discipline_case[at].nsec)
-                                return false;
-                }
-                else
-                {
-                        /* a slew hands the offset to the loop and never
-                           steps, so time does not go backwards */
-                        if (words[0] & ADJ_SETOFFSET ||
-                            !(words[0] & ADJ_TIMECONST) ||
-                            (bipolar)words[LOCALE_TIMEX_OFFSET] != offset ||
-                            words[LOCALE_TIMEX_CONSTANT] !=
-                                LOCALE_NTP_TIMECONST ||
-                            words[LOGGER_TIMEX_TIME_SEC] ||
-                            words[LOGGER_TIMEX_TIME_NSEC])
-                                return false;
-                }
-                if (!(words[0] & ADJ_NANO) || !(words[0] & ADJ_OFFSET))
-                        return false;
-        }
-        /* the first answer after boot steps from a millisecond out, and a
-           later one only from 128 ms */
-        locale_ntp_first = true;
-        if (!locale_ntp_wants_step(1000000) || !locale_ntp_wants_step(-1000000) ||
-            locale_ntp_wants_step(999999) || locale_ntp_wants_step(-999999))
-                return false;
-        locale_ntp_first = false;
-        if (locale_ntp_wants_step(1000000) || locale_ntp_wants_step(-86000000))
-                return false;
-        /* a poll learns offset over elapsed, trusted as far as the offset
-           stands above the noise: 144 ms slow after half an hour is -80
-           ppm, nearly all of it learned; 150 us after 256 s is under a
-           quarter of its 0.58 ppm; held within the kernel's 500, and under
-           a minute, or past 1000 ppm, learns nothing */
-        if (locale_ntp_learned(-144000000, (bipolar)1800 * 1000000000, 0) !=
-                -5224738 ||
-            locale_ntp_learned(36000000, (bipolar)1800 * 1000000000,
-                               (bipolar)7 << 16) != 1751516 ||
-            locale_ntp_learned(150000, (bipolar)256 * 1000000000, 0) !=
-                (bipolar)150000 * 65536 / 256000 * 150000 / 650000 ||
-            locale_ntp_learned(-144000000, (bipolar)1800 * 1000000000,
-                               -((bipolar)490 << 16)) != -LOCALE_NTP_FREQ_MOST ||
-            locale_ntp_learned(-144000000, (bipolar)30 * 1000000000, 5) != 5 ||
-            locale_ntp_learned(-5000000000, (bipolar)1800 * 1000000000, 5) != 5 ||
-            locale_ntp_learned((bipolar)199 * 1000000000,
-                               (bipolar)200000 * 1000000000, 0) !=
-                LOCALE_NTP_FREQ_MOST)
-                return false;
-        /* a 10 ms distance is 10 ms, rounded up a microsecond; a negative
-           or absurd one still gives a bound the kernel accepts */
-        return locale_ntp_error_us((bipolar)10 * 1000000) == 10001 &&
-               locale_ntp_error_us(0) == 1 && locale_ntp_error_us(-5) == 1 &&
-               locale_ntp_error_us((bipolar)60 * 1000000000) ==
-                   LOCALE_NTP_ERROR_MOST_US;
-}
 
 static const char locale_ntp_fallback[][24] = {
         LOCALE_NTP_DEFAULT_SERVER,
@@ -14387,6 +16532,8 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
                 return now;
         if (!sntp_target_ok(now, offset_ns, address_of target))
                 return SNTP_MALFORMED;
+        if (target < (bipolar)clock_trust_floor() * (bipolar)SNTP_NANOSECONDS)
+                return SNTP_BELOW_FLOOR;
 
         locale_ntp_first = !locale_ntp_synced;
         locale_ntp_discipline_words(offset_ns, locale_ntp_error_us(distance_ns),
@@ -14439,22 +16586,223 @@ static bipolar locale_ntp_apply_offset(bipolar offset_ns, bipolar distance_ns)
         return 0;
 }
 
+/*
+        The last time this machine knew for certain, kept in /root/clock.good
+        for the next boot's floor (clock_trust_floor, net.c).
+
+        What may be written is what no forged answer can have moved. After an
+        authenticated (NTS) answer, /run/moonwater/clock.auth holds the wall
+        second it set and the boot second it was set at, and the time now is
+        that wall second plus the boot seconds since: the machine's own
+        uptime, which no later step of the wall clock changes. With no such
+        answer this boot, the wall clock is not read at all: what is written
+        is the floor the boot began with (/run/moonwater/clock.base, kept once
+        a boot) plus the seconds the machine has run, which is a lower bound
+        on the time whatever any answer said, so no forgery, plain or not, can
+        put the floor ahead of the truth and lock the real time out; it lags
+        the truth by the time the machine spent switched off. The file only
+        ever goes forward, is written in place and never through a link, and
+        is written after every authenticated answer, every six hours of
+        uptime and when the machine stops.
+*/
+#define LOCALE_CLOCK_AUTH_PATH HOST_STATE "/clock.auth"
+#define LOCALE_CLOCK_BASE_PATH HOST_STATE "/clock.base"
+#define LOCALE_CLOCK_GOOD_EVERY ((p64)6 * 3600 * SNTP_NANOSECONDS)
+
+static p64 locale_clock_next;
+
+//      A decimal number of at most twelve digits at text + *at, moving *at
+//      past it; false when there is none.
+static bool locale_clock_number(string_address text, positive address_to at,
+                                p64 address_to value)
+{
+        p64 number = 0;
+        positive from = address_to at;
+
+        while (text[address_to at] >= '0' && text[address_to at] <= '9' &&
+               address_to at - from < 12)
+        {
+                number = number * 10 + (p64)(text[address_to at] - '0');
+                address_to at += 1;
+        }
+        if (address_to at == from)
+                return false;
+        address_to value = number;
+        return true;
+}
+
+//      What the authenticated answer puts the time at now, or 0; with
+//      elapsed, the boot seconds since it was given.
+static p64 locale_clock_authenticated_now(p64 address_to elapsed)
+{
+        p8 text[48];
+        positive at = 0;
+        p64 wall;
+        p64 booted;
+        p64 now_boot = system_clock_ns(HOST_CLOCK_BOOTTIME) / SNTP_NANOSECONDS;
+
+        host_read_word(LOCALE_CLOCK_AUTH_PATH, text, sizeof(text));
+        if (!locale_clock_number((string_address)text, address_of at, address_of wall) ||
+            text[at++] != ' ' ||
+            !locale_clock_number((string_address)text, address_of at, address_of booted) ||
+            text[at] || booted > now_boot)
+                return 0;
+        if (elapsed)
+                address_to elapsed = now_boot - booted;
+        return wall + (now_boot - booted);
+}
+
+//      An authenticated answer has set the clock: the wall second it set
+//      and the boot second it was set at.
+static fn locale_clock_authenticated(void)
+{
+        p8 text[48];
+        time_t stamp = time(null);
+        positive length;
+
+        if (stamp < 0)
+                return;
+        length = positive_into(text, (positive)stamp);
+        text[length++] = ' ';
+        length += positive_into(text + length,
+                                (positive)(system_clock_ns(HOST_CLOCK_BOOTTIME) /
+                                           SNTP_NANOSECONDS));
+        text[length++] = '\n';
+        host_state_ready();
+        (void)host_write_file(LOCALE_CLOCK_AUTH_PATH, text, length, 0644,
+                              false);
+}
+
+//      The floor this boot started with, which /run/moonwater/clock.base
+//      keeps so that every process can ask, or 0.
+static p64 locale_clock_base(void)
+{
+        p8 text[24];
+        positive at = 0;
+        p64 value;
+
+        host_read_word(LOCALE_CLOCK_BASE_PATH, text, sizeof(text));
+        return locale_clock_number((string_address)text, address_of at, address_of value) &&
+                       !text[at]
+                   ? value : 0;
+}
+
+static fn locale_clock_base_keep(void)
+{
+        p8 text[24];
+        positive length;
+
+        if (locale_clock_base())
+                return;
+        host_state_ready();
+        length = positive_into(text, (positive)clock_trust_floor());
+        text[length++] = '\n';
+        (void)host_write_file(LOCALE_CLOCK_BASE_PATH, text, length, 0644, false);
+}
+
+static bool locale_clock_persist(bool sync)
+{
+        p64 floor = clock_trust_floor();
+        p64 value = locale_clock_authenticated_now(null);
+        p8 text[24];
+        positive length;
+
+        if (!value)
+        {
+                p64 base = locale_clock_base();
+
+                //      Nothing a forged answer can have moved: the floor the
+                //      boot started with and the seconds the machine has run
+                //      since.
+                if (!base)
+                        return false;
+                value = base + system_clock_ns(HOST_CLOCK_BOOTTIME) /
+                                   SNTP_NANOSECONDS;
+        }
+        if (value <= floor || value > CLOCK_GOOD_MOST)
+                return false;
+        length = positive_into(text, (positive)value);
+        text[length++] = '\n';
+        return host_write_file(CLOCK_GOOD_PATH, text, length, 0644, sync) >= 0;
+}
+
+//      Every six hours of uptime, from the machine loop; a minute later
+//      when there was nothing yet to keep.
+static fn locale_clock_keep(void)
+{
+        p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
+
+        if (now < locale_clock_next)
+                return;
+        locale_clock_next = now + (locale_clock_persist(false)
+                                       ? LOCALE_CLOCK_GOOD_EVERY
+                                       : (p64)60 * SNTP_NANOSECONDS);
+}
+
+//      When the machine stops, from the shell that stops it.
+static fn host_clock_stop(void)
+{
+        (void)locale_clock_persist(true);
+}
+
 static bipolar locale_ntp_ask(string_address server, bool filter, bipolar most,
                               sntp_sample address_to answer)
 {
         if (!server || !server[0] ||
             !radio_text_plain(server, string_length(server)))
                 return SNTP_NO_SERVER;
-        return sntp_query(server, filter, most, answer);
+        return sntp_query_apart(server, SNTP_PORT, filter, most, null, answer);
+}
+
+/*
+        An unauthenticated answer does not get to undo an authenticated one.
+        When NTS has set the clock this boot, what it said is known to within
+        the drift of the crystal since (1000 ppm is a bound no real one
+        reaches, plus five seconds), and a plain answer that puts the clock
+        further from that is refused: it is a forgery, or a pool server that
+        is wrong, and either way the authenticated time is the better one.
+*/
+static bool locale_plain_contradicts(bipolar offset_ns)
+{
+        p64 elapsed = 0;
+        p64 known = locale_clock_authenticated_now(address_of elapsed);
+
+        return locale_plain_apart(sntp_now_ns(), offset_ns, known, elapsed);
 }
 
 static bipolar locale_ntp_take(string_address server,
-                               const sntp_sample address_to answer)
+                               const sntp_sample address_to answer,
+                               bool authenticated)
 {
+        bipolar applied;
+        p8 last[LOCALE_NTP_LAST_ROOM];
+        positive length;
+
         locale_ntp_moved_ns = answer->offset_ns;
         string_copy_bounded(locale_ntp_answered, server,
                             sizeof(locale_ntp_answered));
-        return locale_ntp_apply_offset(answer->offset_ns, answer->distance_ns);
+        if (authenticated)
+                string_append_bounded(locale_ntp_answered, " (NTS)",
+                                      sizeof(locale_ntp_answered));
+        else if (locale_plain_contradicts(answer->offset_ns))
+                return SNTP_CONTRADICTS;
+        applied = locale_ntp_apply_offset(answer->offset_ns, answer->distance_ns);
+        if (applied < 0)
+                return applied;
+        //      What set the clock, for the status page, and what it now
+        //      knows for sure.
+        string_copy_bounded(last, authenticated ? "nts " : "plain ", sizeof(last));
+        string_append_bounded(last, server, sizeof(last));
+        length = string_length(last);
+        last[length++] = '\n';
+        host_state_ready();
+        (void)host_write_file(LOCALE_NTP_LAST_PATH, last, length, 0644, false);
+        if (authenticated)
+        {
+                locale_clock_authenticated();
+                (void)locale_clock_persist(false);
+        }
+        return applied;
 }
 
 /*
@@ -14484,7 +16832,400 @@ static bool locale_ntp_heard(const sntp_sample address_to heard, positive count,
         return array_any(at, count, heard[at].address == address);
 }
 
-static bipolar locale_ntp_walk(bool by_hand)
+/*
+        Network Time Security, as the machine uses it.
+
+        NTS is preferred: a machine asks for time from the key-establishment
+        servers it knows (the defaults below, or the lines of
+        /root/ntp.nts.servers, each a name or name:port) before it asks the
+        pool, and an answer that authenticated is what sets an unset clock.
+        The pool is the fallback, and only when no NTS server could be
+        reached; its answers are marked plain (moonwater ntp says which set
+        the clock last), are never written to the floor as known, and are
+        refused when they put the clock further from the NTS time of this
+        boot than a crystal can have drifted. A network that blocks TCP 4460
+        costs one try of a few seconds, and then the pool is used without
+        trying NTS again for two minutes (by hand, always). A server named in
+        /root/ntp.server is the machine's own choice and is asked alone, in
+        plain, as it always was, unless NTS is only: then nothing plain is
+        asked, that server included.
+
+        The keys and cookies live in /run/moonwater/nts (0600, in place, never
+        through a link, read back as a plain file with every field checked: a
+        torn or planted file is no state and the next query establishes
+        afresh), since the scheduled query runs in a child of the machine
+        process that is gone when it answers.
+*/
+#define LOCALE_NTS_MAGIC 0x3153544eu /* "NTS1" */
+#define LOCALE_NTS_BACKOFF_NS ((p64)120 * SNTP_NANOSECONDS)
+#define LOCALE_NTS_SERVERS_MOST 4
+#define LOCALE_NTS_ENTRY_ROOM 80
+#define LOCALE_NTS_SERVERS_ROOM 1024
+
+static const char locale_nts_default[][24] = {
+        "time.cloudflare.com",
+        "nts.netnod.se",
+        "ptbtime1.ptb.de",
+};
+
+static positive locale_nts_mode(void)
+{
+        p8 word[16];
+
+        host_read_word(LOCALE_NTS_PATH, word, sizeof(word));
+        return nts_mode_of((string_address)word);
+}
+
+//      The mode as it is said, or that the caller cannot read it.
+static string_address locale_nts_say(void)
+{
+        p8 word[16];
+        positive mode;
+
+        if (!locale_readable(LOCALE_NTS_PATH, word, sizeof(word)))
+                return (string_address)LOCALE_NEEDS_ROOT;
+        mode = nts_mode_of((string_address)word);
+        return mode == NTS_OFF   ? (string_address) "off"
+               : mode == NTS_ONLY ? (string_address) "only"
+                                  : (string_address) "on";
+}
+
+//      "name" or "name:port", as the key-establishment server it names.
+static bool locale_nts_entry(string_address entry, p8 address_to host,
+                             p16 address_to port)
+{
+        positive length = string_length(entry);
+        positive colon = length;
+        positive number = 0;
+
+        for (positive at = 0; at < length; at++)
+                if (entry[at] == ':')
+                        colon = at;
+        if (colon < length)
+        {
+                if (colon + 1 == length || length - colon > 6)
+                        return false;
+                for (positive at = colon + 1; at < length; at++)
+                {
+                        if (!byte_is_digit((p8)entry[at]))
+                                return false;
+                        number = number * 10 + (positive)(entry[at] - '0');
+                }
+                if (!number || number > 65535)
+                        return false;
+        }
+        if (!nts_name_ok((const p8 address_to)entry, colon))
+                return false;
+        memory_copy(host, entry, colon);
+        host[colon] = end;
+        address_to port = colon < length ? (p16)number : NTS_KE_PORT;
+        return true;
+}
+
+//      The lines of the servers' file that are servers: each a valid entry,
+//      of fewer than stride bytes once its trailing blanks are gone. A line
+//      is never cut to fit, so one too long is no server rather than its
+//      first stride bytes; and when the file was longer than the buffer the
+//      last line, cut where the buffer ends, is not one either. At most
+//      LOCALE_NTS_SERVERS_MOST are taken; returns the count.
+static positive locale_nts_lines(const p8 address_to text, positive length,
+                                 bool complete, p8 address_to into,
+                                 positive stride)
+{
+        positive count = 0;
+        positive at = 0;
+
+        if (!complete)
+        {
+                while (length && text[length - 1] != '\n')
+                        length--;
+        }
+        while (at < length && count < LOCALE_NTS_SERVERS_MOST)
+        {
+                positive stop = at;
+                positive size;
+                p8 line[LOCALE_NTS_ENTRY_ROOM];
+                p8 host[NTS_SERVER_MAX];
+                p16 port;
+
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+                size = stop - at;
+                while (size && (text[at + size - 1] == '\r' || text[at + size - 1] == ' '))
+                        size--;
+                if (size < stride)
+                {
+                        memory_copy(line, text + at, size);
+                        line[size] = end;
+                        if (locale_nts_entry((string_address)line, host, address_of port))
+                                string_copy_bounded(into + count++ * stride,
+                                                    (string_address)line, stride);
+                }
+                at = stop + 1;
+        }
+        return count;
+}
+
+//      The settings' servers, else the defaults: the lines of the file that
+//      are valid entries (locale_nts_lines), to LOCALE_NTS_SERVERS_MOST.
+//      Returns the count.
+static positive locale_nts_servers(p8 address_to into, positive stride)
+{
+        p8 text[LOCALE_NTS_SERVERS_ROOM];
+        bipolar got = host_read_state(LOCALE_NTS_SERVERS_PATH, text, sizeof(text));
+        positive count = 0;
+
+        if (got > 0)
+                count = locale_nts_lines(text, (positive)got,
+                                         got < (bipolar)sizeof(text) - 1,
+                                         into, stride);
+        if (count)
+                return count;
+        for (count = 0; count < array_count(locale_nts_default); count++)
+                string_copy_bounded(into + count * stride,
+                                    (string_address)locale_nts_default[count],
+                                    stride);
+        return count;
+}
+
+static bool locale_nts_state_ok(const nts_state address_to state)
+{
+        return nts_state_ok(state) && state->origin_port &&
+               nts_name_ok(state->origin, string_length((string_address)state->origin));
+}
+
+static bool locale_nts_load(nts_state address_to state)
+{
+        p8 bytes[4 + sizeof(nts_state) + 2];
+        bipolar got = file_slurp_regular_at(AT_FDCWD,
+                                            (string_address)LOCALE_NTS_STATE_PATH,
+                                            bytes, sizeof(bytes), O_NOFOLLOW);
+        bool good = got == (bipolar)(4 + sizeof(nts_state)) &&
+                    network_load_32(bytes) == LOCALE_NTS_MAGIC;
+
+        if (good)
+        {
+                memory_copy(state, bytes + 4, sizeof(nts_state));
+                //      Fields that are read as text end where they should.
+                state->origin[NTS_SERVER_MAX - 1] = end;
+                state->server[NTS_SERVER_MAX - 1] = end;
+                good = locale_nts_state_ok(state);
+        }
+        crypto_forget(bytes, sizeof(bytes));
+        if (!good)
+                memory_zero(state, sizeof(*state));
+        return good;
+}
+
+static fn locale_nts_save(const nts_state address_to state)
+{
+        p8 bytes[4 + sizeof(nts_state)];
+
+        network_store_32(bytes, LOCALE_NTS_MAGIC);
+        memory_copy(bytes + 4, state, sizeof(nts_state));
+        host_state_ready();
+        (void)host_write_file(LOCALE_NTS_STATE_PATH, bytes, sizeof(bytes), 0600,
+                              false);
+        crypto_forget(bytes, sizeof(bytes));
+}
+
+//      A negotiated time server that is not the key-establishment server's
+//      own name has to be a public address, unless the key-establishment
+//      server is not one: a name in an authenticated reply is still a name
+//      someone chose, and this is the same test a redirect gets.
+static bool locale_nts_server_ok(string_address host, string_address server)
+{
+        p32 ip;
+
+        if (!server[0] || string_equals(server, host))
+                return true;
+        ip = http_lookup_apart(server);
+        return ip && (http_address_public(ip) ||
+                      !http_address_public(http_lookup_apart(host)));
+}
+
+static fn locale_nts_why_set(string_address host, string_address why)
+{
+        string_copy_bounded((string_address)locale_nts_why, host,
+                            sizeof(locale_nts_why));
+        string_append_bounded((string_address)locale_nts_why, ": ",
+                              sizeof(locale_nts_why));
+        string_append_bounded((string_address)locale_nts_why, why,
+                              sizeof(locale_nts_why));
+}
+
+//      One key-establishment server asked for the time: the exchange with
+//      its cookies, or the key establishment first when there is no state
+//      or none left, and once more if the server says the cookie is no
+//      good. The answer is authenticated or there is none. reached says a
+//      name resolved, so a network that blocks NTS is told from one that is
+//      not up yet.
+static COLD bipolar locale_nts_ask(string_address entry, bool filter,
+                                   sntp_sample address_to answer,
+                                   bool address_to reached)
+{
+        static nts_state state;
+        nts_exchange exchange;
+        p8 host[NTS_SERVER_MAX];
+        p16 port;
+        bool have;
+        bool said = false;
+        bipolar status = SNTP_NO_SERVER;
+
+        if (!locale_nts_entry(entry, host, address_of port))
+                return SNTP_NO_SERVER;
+        have = locale_nts_load(&state) &&
+               string_equals((string_address)state.origin, (string_address)host) &&
+               state.origin_port == port && state.count;
+        for (positive attempt = 0; attempt < 2; attempt++)
+        {
+                string_address server;
+
+                if (!have)
+                {
+                        //      Until an authenticated answer has been taken this
+                        //      boot, the certificate is judged as of the floor.
+                        bipolar why = nts_ke_apart(
+                            (string_address)host, port,
+                            !locale_clock_authenticated_now(null), &state);
+
+                        if (why)
+                        {
+                                address_to reached |= why != HTTP_NO_HOST;
+                                locale_nts_why_set((string_address)host,
+                                                   locale_auto_reason(why));
+                                said = true;
+                                status = SNTP_NO_SERVER;
+                                break;
+                        }
+                        string_copy_bounded((string_address)state.origin,
+                                            (string_address)host,
+                                            sizeof(state.origin));
+                        state.origin_port = port;
+                        if (!locale_nts_state_ok(&state))
+                                break;
+                        locale_nts_save(&state);
+                }
+                server = state.server[0] ? (string_address)state.server
+                                         : (string_address)host;
+                address_to reached = true;
+                if (!locale_nts_server_ok((string_address)host, server))
+                {
+                        locale_nts_why_set((string_address)host,
+                                           (string_address) "it named a time "
+                                           "server that is not a public "
+                                           "address");
+                        said = true;
+                        status = SNTP_NO_SERVER;
+                        break;
+                }
+                nts_exchange_open(&exchange, &state);
+                //      An authenticated answer is believed wherever the window
+                //      puts it.
+                status = sntp_query_apart(server, state.port, filter,
+                                          SNTP_OFFSET_ANY_NS, &exchange, answer);
+                nts_exchange_close(&exchange);
+                locale_nts_save(&state);
+                if (status != SNTP_NTS_NAK)
+                        break;
+                have = false;
+        }
+        if (status < 0 && !said)
+                locale_nts_why_set((string_address)host,
+                                   status == SNTP_NTS_NAK
+                                       ? (string_address) "its cookies were "
+                                                          "refused twice"
+                                       : (string_address) "no authenticated "
+                                                          "answer");
+        crypto_forget(&state, sizeof(state));
+        return status;
+}
+
+//      NTS servers have been tried and failed within the last two minutes.
+static bool locale_nts_backed_off(bool by_hand)
+{
+        p8 text[24];
+        positive at = 0;
+        p64 then;
+
+        host_read_word(LOCALE_NTS_FAILED_PATH, text, sizeof(text));
+        return !by_hand &&
+               locale_clock_number((string_address)text, address_of at, address_of then) &&
+               !text[at] &&
+               system_clock_ns(HOST_CLOCK_BOOTTIME) <
+                   then * SNTP_NANOSECONDS + LOCALE_NTS_BACKOFF_NS;
+}
+
+static fn locale_nts_failed(void)
+{
+        p8 text[24];
+        positive length = positive_into(
+            text, (positive)(system_clock_ns(HOST_CLOCK_BOOTTIME) / SNTP_NANOSECONDS));
+
+        text[length++] = '\n';
+        host_state_ready();
+        (void)host_write_file(LOCALE_NTS_FAILED_PATH, text, length, 0644, false);
+}
+
+/*
+        The NTS servers in order, until one answer may be believed: the
+        first one does on a clock that is unset (it has nothing to
+        contradict) and for the only server there is, and so does one that
+        moves a set clock two seconds or less; a step past two seconds on a
+        clock that is set is taken on two servers' words, authenticated or
+        not, so one wrong or compromised server cannot make it (sntp_choose,
+        as for the pool). heard says some answer authenticated, which ends
+        the walk whatever became of it: the pool is not asked to overrule
+        authenticated time.
+*/
+static bipolar locale_nts_walk(bool address_to heard_any, bool address_to reached)
+{
+        p8 servers[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
+        positive count = locale_nts_servers(servers, LOCALE_NTS_ENTRY_ROOM);
+        bool filter = locale_ntp_sampling_wanted();
+        sntp_sample row[SNTP_SERVERS];
+        positive from[SNTP_SERVERS];
+        positive heard = 0;
+        bipolar failed = SNTP_NO_SERVER;
+        bool rated = false;
+        bool denied = false;
+        bipolar now = sntp_now_ns();
+        bool alone = count == 1 || now < 0 || !sntp_wall_ok(now) ||
+                     now < (bipolar)clock_trust_floor() * (bipolar)SNTP_NANOSECONDS;
+
+        for (positive at = 0; at < count && heard < SNTP_SERVERS; at++)
+        {
+                failed = locale_nts_ask((string_address)servers + at * LOCALE_NTS_ENTRY_ROOM,
+                                        filter, row + heard, reached);
+                if (failed < 0)
+                {
+                        rated |= failed == SNTP_RATE_LIMITED;
+                        denied |= failed == SNTP_DENIED;
+                        continue;
+                }
+                if (locale_ntp_heard(row, heard, row[heard].address))
+                        continue;
+                from[heard++] = at;
+                if (alone ||
+                    (heard == 1 && sntp_within(row[0].offset_ns, SNTP_OFFSET_SYNCED_NS)) ||
+                    (heard > 1 && sntp_choose(row, heard) >= 0))
+                        break;
+        }
+        address_to heard_any = heard != 0;
+        if (heard)
+        {
+                bipolar chosen = alone ? 0 : sntp_choose(row, heard);
+
+                if (chosen < 0)
+                        return SNTP_UNCONFIRMED;
+                return locale_ntp_take((string_address)servers +
+                                           from[chosen] * LOCALE_NTS_ENTRY_ROOM,
+                                       row + chosen, true);
+        }
+        return denied ? SNTP_DENIED : rated ? SNTP_RATE_LIMITED : failed;
+}
+
+static bipolar locale_ntp_plain(bool by_hand)
 {
         p8 server[LOCALE_NTP_SERVER_ROOM];
         bipolar failed = SNTP_NO_SERVER;
@@ -14518,10 +17259,16 @@ static bipolar locale_ntp_walk(bool by_hand)
                 {
                         heard_from[0] = array_count(locale_ntp_fallback);
                         heard_count = 1;
+                        //      Plain time is unauthenticated: one server's
+                        //      word moves a clock that is set by two
+                        //      seconds at most, by hand or not, and a
+                        //      further step waits for a second server (or
+                        //      for NTS, or for `date -s` from a person who
+                        //      knows the time).
                         if (unset || sntp_within(heard[0].offset_ns,
-                                                SNTP_OFFSET_SYNCED_NS))
+                                                 SNTP_OFFSET_SYNCED_NS))
                                 return locale_ntp_take((string_address)server,
-                                                       heard);
+                                                       heard, false);
                 }
                 rated = failed == SNTP_RATE_LIMITED;
                 denied = failed == SNTP_DENIED;
@@ -14571,9 +17318,49 @@ static bipolar locale_ntp_walk(bool by_hand)
                     heard_from[chosen] == array_count(locale_ntp_fallback)
                         ? (string_address)server
                         : (string_address)locale_ntp_fallback[heard_from[chosen]],
-                    heard + chosen);
+                    heard + chosen, false);
         }
         return denied ? SNTP_DENIED : rated ? SNTP_RATE_LIMITED : failed;
+}
+
+/*
+        NTS first, then the pool. An answer an NTS server authenticated ends
+        the walk whatever became of it (taken, refused below the floor, or
+        unconfirmed): the pool is not asked to overrule authenticated time.
+        With none, a network that answered but would not do NTS is left for
+        two minutes (locale_nts_failed), and the pool is asked unless NTS is
+        only.
+*/
+static bipolar locale_ntp_walk(bool by_hand)
+{
+        p8 named[LOCALE_NTP_SERVER_ROOM];
+        positive mode = locale_nts_mode();
+        bipolar failed = SNTP_NO_SERVER;
+        bool heard = false;
+        bool reached = false;
+
+        locale_nts_why[0] = end;
+        host_read_word(LOCALE_NTP_SERVER_PATH, named, sizeof(named));
+        if (mode != NTS_OFF && (!named[0] || mode == NTS_ONLY))
+        {
+                if (locale_nts_backed_off(by_hand))
+                        string_copy_bounded((string_address)locale_nts_why,
+                                            "not asked: none answered in the "
+                                            "last two minutes",
+                                            sizeof(locale_nts_why));
+                else
+                {
+                        failed = locale_nts_walk(address_of heard,
+                                                 address_of reached);
+                        if (heard)
+                                return failed;
+                        if (reached)
+                                locale_nts_failed();
+                }
+        }
+        if (mode == NTS_ONLY)
+                return failed;
+        return locale_ntp_plain(by_hand);
 }
 
 /*
@@ -14612,6 +17399,34 @@ static string_address locale_ntp_server_say(p8 address_to into, positive room)
         return (string_address)into;
 }
 
+//      moonwater ntp nts: whether it is asked for first, who is asked, and
+//      what set the clock last (nts: authenticated; plain: the pool, which
+//      anyone on the path could have forged).
+static fn locale_nts_status(bool label)
+{
+        p8 servers[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
+        p8 last[LOCALE_NTP_LAST_ROOM];
+        string_address said = locale_nts_say();
+        positive count;
+
+        if (label)
+                string_format(log, host_label "ntp nts %s", said);
+        else
+                string_format(log, "  ntp nts %s", said);
+        if (!string_equals(said, LOCALE_NEEDS_ROOT))
+        {
+                count = locale_nts_servers(servers, LOCALE_NTS_ENTRY_ROOM);
+                string_format(log, ", servers");
+                for (positive at = 0; at < count; at++)
+                        string_format(log, " %s",
+                                      (string_address)servers + at * LOCALE_NTS_ENTRY_ROOM);
+        }
+        host_read_word(LOCALE_NTP_LAST_PATH, last, sizeof(last));
+        host_say(log, "; the clock was last set by %s\n",
+                 last[0] ? (string_address)last
+                         : (string_address) "nothing this boot");
+}
+
 static b32 locale_ntp_status(void)
 {
         p8 server[LOCALE_NTP_SERVER_ROOM];
@@ -14621,6 +17436,73 @@ static b32 locale_ntp_status(void)
                  locale_ntp_server_say(server, sizeof(server)),
                  locale_switch_say(LOCALE_NTP_SAMPLING_PATH),
                  locale_clock_synced() ? "synchronised" : "waiting");
+        locale_nts_status(false);
+        return 0;
+}
+
+//      moonwater ntp nts [on|off|only|servers [default|NAME[:PORT]...]]
+static b32 locale_nts_command(string_address address_to arguments,
+                              positive count)
+{
+        string_address word = count > 3 ? arguments[3] : null;
+
+        if (count == 3)
+        {
+                locale_nts_status(true);
+                return 0;
+        }
+        if (string_equals(word, "servers"))
+        {
+                p8 text[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
+                positive length = 0;
+                bipolar kept;
+
+                if (count == 4)
+                {
+                        locale_nts_status(true);
+                        return 0;
+                }
+                return_if(count - 4 > LOCALE_NTS_SERVERS_MOST, host_usage());
+                host_need_root();
+                if (count == 5 && string_equals(arguments[4], "default"))
+                {
+                        kept = system_remove_at(AT_FDCWD, LOCALE_NTS_SERVERS_PATH, 0);
+                        return_if(kept < 0 && kept != -ENOENT,
+                                  host_fail("ntp nts servers", kept));
+                        locale_nts_status(true);
+                        return 0;
+                }
+                for (positive at = 4; at < count; at++)
+                {
+                        p8 host[NTS_SERVER_MAX];
+                        p16 port;
+                        positive size = string_length(arguments[at]);
+
+                        if (size >= LOCALE_NTS_ENTRY_ROOM ||
+                            !locale_nts_entry(arguments[at], host, address_of port))
+                                return host_refuse("%s is not a server: a name or "
+                                                   "address, or NAME:PORT\n",
+                                                   arguments[at]);
+                        memory_copy(text + length, arguments[at], size);
+                        length += size;
+                        text[length++] = '\n';
+                }
+                kept = host_write_file(LOCALE_NTS_SERVERS_PATH, text, length,
+                                       0644, true);
+                return_if(kept < 0, host_fail("ntp nts servers", kept));
+                locale_nts_status(true);
+                return 0;
+        }
+        return_if(count != 4 || (!string_equals(word, "on") &&
+                                 !string_equals(word, "off") &&
+                                 !string_equals(word, "only")),
+                  host_usage());
+        host_need_root();
+        if (host_save("ntp nts", LOCALE_NTS_PATH, word))
+                return 1;
+        if (!string_equals(word, "off"))
+                locale_ntp_next = 0;
+        locale_nts_status(true);
         return 0;
 }
 
@@ -15096,6 +17978,9 @@ static fn locale_restore(void)
         locale_ntp_retry = LOCALE_NTP_RETRY_LEAST;
         locale_ntp_synced = 0;
         locale_ntp_every = LOCALE_NTP_AGAIN_FIRST;
+        //      The floor this boot began with, once a boot, from the disk's
+        //      /root when one was taken.
+        locale_clock_base_keep();
         locale_auto_next = 0;
         locale_auto_wait = LOCALE_AUTO_LEAST;
         //      Only the machine process asks the time. `moonwater boot` comes
@@ -15178,6 +18063,7 @@ static fn locale_recover(void)
         now = system_clock_ns(HOST_CLOCK_BOOTTIME);
         locale_ntp_keep(online, synced, now);
         locale_auto_keep(locale_ntp_on, synced, now, network);
+        locale_clock_keep();
 }
 
 /*
@@ -15346,9 +18232,8 @@ static bool name_valid(string_address name)
 {
         positive length = string_length(name);
 
-        return length && string_span_of_set(name, NAME_LETTERS) == length &&
-               name[0] != '-' && name[length - 1] != '-' &&
-               !string_equals(name, "random") && link_name_good(name);
+        return link_name_good(name) && string_span_of_set(name, NAME_LETTERS) == length &&
+               name[length - 1] != '-' && !string_equals(name, "random");
 }
 
 static bipolar name_apply(string_address name)
@@ -15361,13 +18246,6 @@ static bipolar name_apply(string_address name)
         return applied;
 }
 
-/* The name /root keeps, when what it keeps is one. */
-static bool name_saved(p8 address_to into, positive room)
-{
-        host_read_word(NAME_PATH, into, room);
-        return name_valid(into);
-}
-
 //      A roll that could not be saved, kept so that the next ask in this
 //      process is the same name and not another roll.
 static p8 name_unsaved[NAME_ROOM];
@@ -15377,7 +18255,8 @@ static p8 name_unsaved[NAME_ROOM];
    saved at the end: false when /root would not take it. */
 static bool name_ensure(p8 address_to into, positive room, bool address_to rolled)
 {
-        address_to rolled = !name_saved(into, room);
+        host_read_word(NAME_PATH, into, room);
+        address_to rolled = !name_valid(into);
 
         if (!address_to rolled)
                 return true;
@@ -15413,6 +18292,7 @@ static b32 host_name(string_address address_to arguments, positive count)
 {
         p8 name[NAME_ROOM];
         bool rolled;
+        bipolar applied;
 
         return_if(count > 3, host_usage());
 
@@ -15464,16 +18344,13 @@ static b32 host_name(string_address address_to arguments, positive count)
         //      has it at the next boot, and says so when it does not.
         if (host_save(NAME_PATH, NAME_PATH, name))
                 return 1;
+        applied = name_apply(name);
+        if (applied < 0)
         {
-                bipolar done = name_apply(name);
-
-                if (done < 0)
-                {
-                        host_say(log_error, host_label "%s is saved, but the "
-                                            "kernel did not take it: %s\n",
-                                 name, file_reason(done));
-                        return 1;
-                }
+                host_say(log_error, host_label "%s is saved, but the "
+                                    "kernel did not take it: %s\n",
+                         name, file_reason(applied));
+                return 1;
         }
 
         host_say(log, "%s\n", name);
@@ -15521,6 +18398,8 @@ static b32 host_ntp(string_address address_to arguments, positive count)
                 host_need_root();
                 return locale_ntp_server_set(arguments[3]);
         }
+        if (string_equals(word, "nts"))
+                return locale_nts_command(arguments, count);
         if (string_equals(word, "sampling"))
         {
                 if (count == 3)
@@ -15857,6 +18736,36 @@ static b32 host_desktop(string_address address_to arguments, positive count)
         server of a network that named none, and where a lookup asks when the
         file names no server at all.
 */
+/*
+        moonwater dns tls [on|off|only]: whether names are asked over TLS
+        (the DNS over TLS comment in net.c says how). Kept in /root/dns.tls
+        and published in /run/moonwater/dns.tls, which the resolver reads,
+        so that a lookup by a user who cannot read /root follows it too; no
+        word kept is no published file, and then the tier's default holds.
+*/
+#define DNS_TLS_KEPT "/root/dns.tls"
+
+static fn dns_tls_publish(void)
+{
+        p8 word[16];
+
+        host_read_word(DNS_TLS_KEPT, word, sizeof(word));
+        if (!word[0])
+        {
+                (void)system_remove_at(AT_FDCWD, DNS_TLS_PATH, 0);
+                return;
+        }
+        host_state_ready();
+        (void)radio_write_word(DNS_TLS_PATH, (string_address)word);
+}
+
+static string_address dns_tls_word(positive mode)
+{
+        return mode == DNS_TLS_ON     ? (string_address) "on"
+               : mode == DNS_TLS_ONLY ? (string_address) "only"
+                                      : (string_address) "off";
+}
+
 static fn dns_say(bool label)
 {
         p32 servers[DNS_SERVERS_MAX];
@@ -15879,7 +18788,28 @@ static fn dns_say(bool label)
                 string_format(log, " " LOCALE_NEEDS_ROOT);
         else
                 string_format(log, "%s", net_dns_kept(kept) ? " (kept)" : " (the network's)");
-        host_say(log, "\n");
+        //      The label's escapes are format text: as an argument %s would
+        //      print them as the characters they are spelt with.
+        host_say(log, label ? "\n" host_label "dns tls %s\n" : "\n  dns tls %s\n",
+                 dns_tls_word(dns_tls_mode()));
+}
+
+static b32 dns_tls_verb(string_address address_to arguments, positive count)
+{
+        string_address word = count > 3 ? arguments[3] : null;
+
+        if (count == 4)
+        {
+                return_if(!string_equals(word, "on") && !string_equals(word, "off") &&
+                          !string_equals(word, "only"), host_usage());
+                host_need_root();
+                return_if(host_save("dns tls", DNS_TLS_KEPT, word), 1);
+                dns_tls_publish();
+        }
+        else
+                return_if(count != 3, host_usage());
+        host_say(log, host_label "dns tls %s\n", dns_tls_word(dns_tls_mode()));
+        return 0;
 }
 
 static b32 dns_set(string_address address_to words, positive count)
@@ -15937,6 +18867,7 @@ static fn dns_restore(void)
         p32 servers[DNS_SERVERS_MAX];
         positive count = net_dns_kept(servers);
 
+        dns_tls_publish();
         if (count)
                 (void)net_write_resolv_servers((string_address) "/etc/resolv.conf",
                                                servers, count);
@@ -15949,6 +18880,8 @@ static b32 host_dns(string_address address_to arguments, positive count)
                 dns_say(true);
                 return 0;
         }
+        if (string_equals(arguments[2], "tls"))
+                return dns_tls_verb(arguments, count);
         host_need_root();
         return count == 3 && string_equals(arguments[2], "auto") ? dns_auto()
                                                                  : dns_set(arguments + 2, count - 2);
@@ -16385,8 +19318,9 @@ static const host_row host_rows[] = {
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
     {null, "wired [on|off]", "the wired links; off keeps them down", 'b'},
     {null, "wifi [on|off]", "the radio, saved networks and those in range", 'b'},
-    {null, "wifi add SSID [PASSWORD|-]", "remember a network and join it; asks for", 'b'},
-    {null, "", "the password, - reads it from stdin", 'b'},
+    {null, "wifi add SSID [PASSWORD|-] [wpa2]", "remember a network and join it; asks for", 'b'},
+    {null, "", "the password, - reads it from stdin; wpa2 lets", 'b'},
+    {null, "", "a tight tier join it without WPA3", 'b'},
     {null, "wifi remove SSID", "forget a saved network, and leave it", 'b'},
     {null, "bluetooth [on|off]", "the radio and the remembered devices", 'b'},
     {null, "bluetooth add NAME", "keep a device's name; the radio goes on for what pairs", 'b'},
@@ -16399,9 +19333,12 @@ static const host_row host_rows[] = {
     {null, "ntp [on|off]", "set the clock from the network [on]", 'b'},
     {null, "ntp server [NAME|auto]", "who is asked first: a name or address [auto]", 'b'},
     {null, "ntp sampling [on|off]", "keep the lowest-delay sample of five [on]", 'b'},
+    {null, "ntp nts [on|off|only]", "authenticated time (RFC 8915) first; only refuses plain [on]", 'b'},
+    {null, "ntp nts servers [NAME[:PORT]...|default]", "who is asked for it, up to four", 'b'},
     {null, "keyboard [LAYOUT|list|xkb]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
     {null, "name [NEW|random]", "what this machine is called, like space-wizard", 'b'},
     {null, "dns [ADDRESS...|auto]", "up to three servers names are asked of, or the network's [auto]", 'b'},
+    {null, "dns tls [on|off|only]", "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]", 'b'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
@@ -16745,6 +19682,7 @@ static b32 host_answer(bool update, string_address disk)
 static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(HOST_MACHINE_SCRIPT),
     HOST_WIPE_KEEP(NET_WIFI_LIST),
+    HOST_WIPE_KEEP(RADIO_RULES_PATH),
     HOST_WIPE_KEEP(NET_WIFI_POWER),
     HOST_WIPE_KEEP(NET_WIRED_POWER),
     HOST_WIPE_KEEP(NET_BLUETOOTH_LIST),
@@ -16756,11 +19694,15 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_NTP_PATH),
     HOST_WIPE_KEEP(LOCALE_NTP_SERVER_PATH),
     HOST_WIPE_KEEP(LOCALE_NTP_SAMPLING_PATH),
+    HOST_WIPE_KEEP(LOCALE_NTS_PATH),
+    HOST_WIPE_KEEP(LOCALE_NTS_SERVERS_PATH),
+    HOST_WIPE_KEEP(CLOCK_GOOD_PATH),
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
+    HOST_WIPE_KEEP(DNS_TLS_KEPT),
     HOST_WIPE_KEEP(NAME_PATH),
     HOST_WIPE_KEEP(LINK_SWITCH_PATH),
     HOST_WIPE_KEEP(LINK_KEY_PATH),
@@ -16768,6 +19710,9 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LINK_PORT_PATH),
     HOST_WIPE_KEEP(LINK_GROUPS_PATH),
     HOST_WIPE_KEEP(LINK_STAMPS_PATH),
+    //  The text size every terminal follows, which is the module's own
+    //  (TERMINAL_SIZE_DIR in src/canvas/terminal.c) and so named here.
+    "terminal",
     null,
 };
 

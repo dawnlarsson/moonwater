@@ -10,8 +10,8 @@
         Each section keeps its own heading and its own include guard, so it
         still says what it is and what it refuses to know about its
         neighbours. wait.c stays beside this because src/sh/tools.c expands
-        it too, and expands it first; anchors.inc stays beside it because it
-        is a table.
+        it too, and expands it first; anchors.inc, ct_logs.inc and
+        suffixes.inc stay beside it because they are tables.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -58,6 +58,9 @@
 #define NETLINK_HEADER 16
 #define NETLINK_DATAGRAM_MAX (16u * 1024u * 1024u)
 #define NETLINK_TRANSACTION_SECONDS 10
+//      A dump the kernel changed underneath, and the tries it gets.
+#define NETLINK_DUMP_CHANGED (-11) /* EAGAIN, spelled out: the fuzz lifts have no errno names */
+#define NETLINK_DUMP_TRIES 3
 
 #define NLM_REQUEST 0x0001
 #define NLM_ACK 0x0004
@@ -273,8 +276,6 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
         netlink_attribute address_to attribute;
         positive length;
         positive padded;
-        p32 message_length;
-        netlink_header address_to header;
 
         if (buffer->failed)
                 return false;
@@ -289,13 +290,13 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
         }
 
         /* The attribute starts at the aligned end of the message, as
-           iproute2's addattr_l places it, whatever the body length was. */
+           iproute2's addattr_l places it, whatever the body length was. The
+           message's length is that end too: the header is aligned and every
+           attribute before this one left the cursor and nlmsg_len equal. */
         length = sizeof(netlink_attribute) + size;
         padded = netlink_align(length);
-        message_length = netlink_align(
-            ((netlink_header address_to)buffer->bytes)->length);
 
-        if (message_length > 0xffffffffu - padded)
+        if (buffer->used > 0xffffffffu - padded)
         {
                 buffer->failed = true;
                 return false;
@@ -306,8 +307,6 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
 
         /* net_room may move the allocation. Never carry an interior pointer
            across it. */
-        header = (netlink_header address_to)buffer->bytes;
-
         attribute = (netlink_attribute address_to)(buffer->bytes + buffer->used);
         attribute->length = (p16)length;
         attribute->type = type;
@@ -324,8 +323,7 @@ static COLD bool netlink_attribute_add(netlink_buffer address_to buffer, p16 typ
                             0, padded - length);
 
         buffer->used += padded;
-
-        header->length = (p32)(message_length + padded);
+        ((netlink_header address_to)buffer->bytes)->length = (p32)buffer->used;
 
         return true;
 }
@@ -401,6 +399,13 @@ static bipolar netlink_open_protocol(p32 protocol, p32 groups)
 
 #define netlink_open_groups(groups) netlink_open_protocol(NETLINK_ROUTE, groups)
 
+static bool netlink_source_is_kernel(
+    const socket_address_netlink address_to source, p32 length)
+{
+        return length >= sizeof(*source) && source->family == AF_NETLINK &&
+               source->port == 0;
+}
+
 /*
         One datagram, however big it turns out to be.
 
@@ -411,13 +416,6 @@ static bipolar netlink_open_protocol(p32 protocol, p32 groups)
         larger than the buffer arrives silently shortened, and a dump that
         loses its tail looks exactly like a dump that ended.
 */
-static bool netlink_source_is_kernel(
-    const socket_address_netlink address_to source, p32 length)
-{
-        return length >= sizeof(*source) && source->family == AF_NETLINK &&
-               source->port == 0;
-}
-
 static COLD bipolar netlink_receive_one(b32 handle,
                                    netlink_buffer address_to buffer,
                                    bool require_kernel)
@@ -454,7 +452,13 @@ static COLD bipolar netlink_receive_one(b32 handle,
         }
 
         if (!size || (positive)size > NETLINK_DATAGRAM_MAX)
+        {
+                /* Left queued it would be the next peek too, and the socket
+                   would refuse every reply behind it. */
+                (void)socket_receive(handle, null, 0, MSG_DONTWAIT, 0, 0);
+                buffer->used = 0;
                 return -1;
+        }
 
         if (!net_room(buffer, (positive)size + 64))
                 return -1;
@@ -566,28 +570,6 @@ static COLD bool netlink_each(netlink_buffer address_to reply,
         return true;
 }
 
-static COLD bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
-                            p32 sequence, netlink_buffer address_to reply,
-                            netlink_visitor visit, address_any context);
-
-/*
-        The tail every acknowledged request shares: sent, answered, and both
-        buffers given back whatever the answer was.
-*/
-static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to request,
-                                p32 sequence, netlink_visitor visit,
-                                address_any context)
-{
-        netlink_buffer reply = {0};
-        bipolar status = netlink_walk(handle, request, sequence, address_of reply,
-                                      visit, context);
-
-        netlink_forget(request);
-        netlink_forget(address_of reply);
-
-        return status;
-}
-
 typedef struct
 {
         netlink_visitor visit;
@@ -621,7 +603,8 @@ static COLD bool netlink_turn_take(netlink_header address_to header,
         {
                 bipolar status = netlink_status(header, true);
 
-                turn->status = turn->interrupted && !status ? -1 : status;
+                turn->status = turn->interrupted && !status
+                                   ? NETLINK_DUMP_CHANGED : status;
                 turn->done = true;
                 return false;
         }
@@ -731,6 +714,80 @@ static bipolar netlink_walk(b32 handle, netlink_buffer address_to request,
                 if (!turn.matched && discarded++ == NETWORK_DISCARD_MAX)
                         return -1;
         }
+}
+
+/*
+        The tail every acknowledged request shares: sent, answered, and both
+        buffers given back whatever the answer was.
+*/
+static COLD bipolar netlink_transact(b32 handle, netlink_buffer address_to request,
+                                p32 sequence, netlink_visitor visit,
+                                address_any context)
+{
+        netlink_buffer reply = {0};
+        bipolar status = netlink_walk(handle, request, sequence, address_of reply,
+                                      visit, context);
+
+        netlink_forget(request);
+        netlink_forget(address_of reply);
+
+        return status;
+}
+
+static p32 netlink_sequence_next = 1;
+
+/* Sequence zero conventionally labels unsolicited notifications. Keep every
+   request/reply correlation in the nonzero namespace even after wraparound. */
+static p32 netlink_sequence_take(void)
+{
+        p32 sequence = netlink_sequence_next;
+
+        netlink_sequence_next++;
+        if (!netlink_sequence_next)
+                netlink_sequence_next = 1;
+
+        return sequence;
+}
+
+/*
+        Everything of one kind, walked.
+
+        Links, addresses and routes all begin their body with a family byte,
+        so one request shape asks for all three. The body size differs and the
+        caller says which, because it is also what tells netlink_find where
+        the attributes start.
+*/
+static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
+                            netlink_visitor visit, address_any context)
+{
+        netlink_buffer request = {0};
+        p32 sequence = netlink_sequence_take();
+        if (!netlink_begin(address_of request, type, NLM_REQUEST | NLM_DUMP,
+                           sequence, body))
+                return -1;
+
+        address_to(p8 address_to) netlink_body(address_of request) = family;
+
+        return netlink_transact(handle, address_of request, sequence,
+                                visit, context);
+}
+
+//      Asked again while the kernel says the table changed under it, with the
+//      visitor's state put back to the copy taken before the first try.
+static COLD bipolar netlink_dump_again(b32 handle, p16 type, positive body,
+                                       p8 family, netlink_visitor visit,
+                                       address_any context, address_any first,
+                                       positive size)
+{
+        bipolar status = NETLINK_DUMP_CHANGED;
+
+        for (positive tries = 0; tries < NETLINK_DUMP_TRIES &&
+                                 status == NETLINK_DUMP_CHANGED; tries++)
+        {
+                memory_copy(context, first, size);
+                status = netlink_dump(handle, type, body, family, visit, context);
+        }
+        return status;
 }
 
 /*
@@ -867,21 +924,6 @@ static COLD address_any netlink_message_body(netlink_header address_to header,
         change a route that is not there yet and answers ENOENT.
 */
 
-static p32 netlink_sequence_next = 1;
-
-/* Sequence zero conventionally labels unsolicited notifications. Keep every
-   request/reply correlation in the nonzero namespace even after wraparound. */
-static p32 netlink_sequence_take(void)
-{
-        p32 sequence = netlink_sequence_next;
-
-        netlink_sequence_next++;
-        if (!netlink_sequence_next)
-                netlink_sequence_next = 1;
-
-        return sequence;
-}
-
 typedef struct
 {
         string_address wanted;
@@ -902,9 +944,6 @@ typedef struct
         p8 name[IFNAME_SIZE];
         p8 hardware[6];
 } netlink_search;
-
-static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
-                            netlink_visitor visit, address_any context);
 
 static inline INLINE string_address netlink_link_name(
     netlink_header address_to header, netlink_link address_to address_to link)
@@ -972,13 +1011,12 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
         if (search->skip_loopback)
         {
                 /*
-                        Only a link a lease can be had on: Ethernet framing
-                        (ARPHRD_ETHER), which a wifi station has too, and not
-                        one of the wifi links the caller named in skip -- an
-                        access point or anything else that is no station.
-                        A radio's monitor (hwsim0, ARPHRD_IEEE80211_RADIOTAP)
-                        was taken, and DHCP waited out its whole schedule
-                        on it before the station was looked at.
+                        Only a link a lease can be had on, and not one of the
+                        wifi links the caller named in skip -- an access point
+                        or anything else that is no station. A radio's monitor
+                        (hwsim0, ARPHRD_IEEE80211_RADIOTAP) was taken, and DHCP
+                        waited out its whole schedule on it before the station
+                        was looked at.
                 */
                 if ((link->flags & IFF_LOOPBACK) || link->kind != NETLINK_LINK_ETHER)
                         return true;
@@ -1008,24 +1046,15 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
                 {
                         bool had = (search->flags & IFF_RUNNING) != 0;
                         bool has = (link->flags & IFF_RUNNING) != 0;
+                        bool better = had != has ? has
+                            : search->prefer == NETLINK_PREFER_WIFI
+                                ? wireless && !search->wireless
+                            : search->prefer == NETLINK_PREFER_WIRED
+                                ? !wireless && search->wireless
+                                : false;
 
-                        if (had && !has)
+                        if (!better)
                                 return true;
-                        if (had == has)
-                        {
-                                if (search->prefer == NETLINK_PREFER_WIFI)
-                                {
-                                        if (!(wireless && !search->wireless))
-                                                return true;
-                                }
-                                else if (search->prefer == NETLINK_PREFER_WIRED)
-                                {
-                                        if (!(!wireless && search->wireless))
-                                                return true;
-                                }
-                                else
-                                        return true;
-                        }
                 }
         }
         else if (search->found || !string_equals(name, search->wanted))
@@ -1073,11 +1102,13 @@ static bool netlink_link_seen(netlink_header address_to header, address_any cont
 */
 static bipolar netlink_link_find(b32 handle, netlink_search address_to search)
 {
-        search->found = search->has_hardware = false;
+        netlink_search first = address_to search;
+        bipolar status;
 
-        bipolar status = netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link),
-                                      AF_UNSPEC, netlink_link_seen, search);
-
+        first.found = first.has_hardware = false;
+        status = netlink_dump_again(handle, RTM_GETLINK, sizeof(netlink_link),
+                                    AF_UNSPEC, netlink_link_seen, search,
+                                    address_of first, sizeof first);
         if (status < 0)
                 return status;
 
@@ -1107,10 +1138,7 @@ static bipolar netlink_link_flag_up(b32 handle, p32 index, bool up)
                                 null, null);
 }
 
-static bipolar netlink_link_up(b32 handle, p32 index)
-{
-        return netlink_link_flag_up(handle, index, true);
-}
+#define netlink_link_up(handle, index) netlink_link_flag_up(handle, index, true)
 
 /*
         The wired links: Ethernet framing, not loopback and not a wireless
@@ -1151,9 +1179,11 @@ static bool netlink_wired_seen(netlink_header address_to header, address_any con
 
 static bipolar netlink_wired_list(b32 handle, netlink_wired address_to wired)
 {
-        wired->count = 0;
-        return netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link), AF_UNSPEC,
-                            netlink_wired_seen, wired);
+        netlink_wired first = {.count = 0};
+
+        return netlink_dump_again(handle, RTM_GETLINK, sizeof(netlink_link),
+                                  AF_UNSPEC, netlink_wired_seen, wired,
+                                  address_of first, sizeof first);
 }
 
 /*
@@ -1206,12 +1236,11 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
                                 null, null);
 }
 
-#define netlink_address_add(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_REPLACE,   \
-        index, host, prefix, 0)
-
 /* A leased address, created exclusively or put in place of the one there,
-   its lifetimes the lease's. */
+   its lifetimes the lease's. Automatic configuration must acquire a kernel
+   object before it can later claim the right to remove it, so it asks for
+   EXCLUSIVE: that tells a newly installed address from an identical one an
+   operator or another network manager already owns, which REPLACE cannot. */
 #define netlink_address_lease(handle, index, host, prefix, seconds, exclusive) \
         netlink_address_change(                                                \
             handle, RTM_NEWADDR,                                                \
@@ -1219,13 +1248,8 @@ static bipolar netlink_address_change(b32 handle, p16 type, p16 flags,
                 ((exclusive) ? NLM_EXCLUSIVE : NLM_REPLACE),                    \
             index, host, prefix, seconds)
 
-/* Automatic configuration must acquire a kernel object before it can later
-   claim the right to remove it.  EXCLUSIVE distinguishes a newly installed
-   address from an identical address which was already owned by an operator or
-   another network manager; REPLACE cannot make that distinction. */
-#define netlink_address_acquire(handle, index, host, prefix) netlink_address_change( \
-        handle, RTM_NEWADDR, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,     \
-        index, host, prefix, 0)
+#define netlink_address_add(handle, index, host, prefix) \
+        netlink_address_lease(handle, index, host, prefix, 0, false)
 
 #define netlink_address_delete(handle, index, host, prefix) netlink_address_change( \
         handle, RTM_DELADDR, NLM_REQUEST | NLM_ACK, index, host, prefix, 0)
@@ -1290,37 +1314,11 @@ static bipolar netlink_route_change(b32 handle, p16 type, p16 flags,
         destination, bits, gateway, index, 0)
 
 /* An existing route is state, not spare capacity.  Initial DHCP acquisition
-   uses EXCLUSIVE so a pre-existing default route is reported as a conflict
-   and remains byte-for-byte kernel state owned by whoever installed it. */
-#define netlink_route_acquire(handle, destination, bits, gateway, index) netlink_route_change( \
-        handle, RTM_NEWROUTE, NLM_REQUEST | NLM_ACK | NLM_CREATE | NLM_EXCLUSIVE,              \
-        destination, bits, gateway, index, 0)
-
+   asks route_change for EXCLUSIVE so a pre-existing default route is reported
+   as a conflict and remains byte-for-byte kernel state owned by whoever
+   installed it. */
 #define netlink_route_delete(handle, destination, bits, gateway, index) netlink_route_change( \
         handle, RTM_DELROUTE, NLM_REQUEST | NLM_ACK, destination, bits, gateway, index, 0)
-
-/*
-        Everything of one kind, walked.
-
-        Links, addresses and routes all begin their body with a family byte,
-        so one request shape asks for all three. The body size differs and the
-        caller says which, because it is also what tells netlink_find where
-        the attributes start.
-*/
-static bipolar netlink_dump(b32 handle, p16 type, positive body, p8 family,
-                            netlink_visitor visit, address_any context)
-{
-        netlink_buffer request = {0};
-        p32 sequence = netlink_sequence_take();
-        if (!netlink_begin(address_of request, type, NLM_REQUEST | NLM_DUMP,
-                           sequence, body))
-                return -1;
-
-        address_to(p8 address_to) netlink_body(address_of request) = family;
-
-        return netlink_transact(handle, address_of request, sequence,
-                                visit, context);
-}
 
 #define NETLINK_LEASES_MAX 8
 
@@ -1376,8 +1374,11 @@ static COLD bool netlink_lease_seen(netlink_header address_to header,
 static COLD bipolar netlink_leases_on(b32 handle,
                                       netlink_lease_search address_to search)
 {
-        return netlink_dump(handle, RTM_GETADDR, sizeof(netlink_address),
-                            AF_INET, netlink_lease_seen, search);
+        netlink_lease_search first = address_to search;
+
+        return netlink_dump_again(handle, RTM_GETADDR, sizeof(netlink_address),
+                                  AF_INET, netlink_lease_seen, search,
+                                  address_of first, sizeof first);
 }
 
 #endif // STANDARD_MODERN_C_NET_NETLINK
@@ -1742,10 +1743,12 @@ static COLD bipolar dns_answer_address(p8 address_to message, positive size,
 
 /* The transaction id and exact echoed question are the reply identity.  UDP
    uses this predicate to discard raced junk within the original deadline;
-   TCP has one framed reply and treats an identity mismatch as malformed. */
+   TCP has one framed reply and treats an identity mismatch as malformed.
+   Folded compares the question under ASCII case, which is how a server that
+   does not keep the case it was sent echoes it. */
 static COLD bool dns_reply_identity(
     p8 address_to reply, positive size, p16 id,
-    p8 address_to request, positive question_length)
+    p8 address_to request, positive question_length, bool folded)
 {
         byte_reader reader = byte_reader_open(reply, size);
         p16 asked = byte_reader_u16(&reader);
@@ -1757,8 +1760,10 @@ static COLD bool dns_reply_identity(
         (void)byte_reader_skip(&reader, 6);
         question = byte_reader_take(&reader, question_length);
         return byte_reader_ok(&reader) && asked == id && questions == 1 &&
-               !memory_compare(question, request + DNS_HEADER,
-                               question_length);
+               !(folded ? memory_compare_ascii_case(question, request + DNS_HEADER,
+                                                    question_length)
+                        : memory_compare(question, request + DNS_HEADER,
+                                         question_length));
 }
 
 /* Walk every declared resource record, including sections this IPv4 resolver
@@ -1809,7 +1814,7 @@ static COLD bipolar dns_reply_result(
         positive available = size > DNS_MAX_MESSAGE ? DNS_MAX_MESSAGE : size;
 
         if (!dns_reply_identity(reply, available, id, request,
-                                question_length))
+                                question_length, false))
                 return DNS_MALFORMED;
 
         {
@@ -2087,24 +2092,51 @@ static COLD fn dns_bind_random_port(b32 handle)
         }
 }
 
-//      The reply matches what was sent except in case: the same id, one
-//      question, the same bytes under ASCII case folding.
-static COLD bool dns_reply_identity_folded(
-    p8 address_to reply, positive size, p16 id,
-    p8 address_to request, positive question_length)
+//      The question for name as a query of id id: the header, the name (its
+//      letters in random case when *mixed, which is set false when randomness
+//      is refused), type A class IN, and the EDNS0 option when edns. The
+//      length of the name as written, or negative when it does not fit.
+static COLD bipolar dns_build_request(p8 address_to request, positive room,
+                                      string_address name, p16 id,
+                                      bool address_to mixed, bool edns,
+                                      positive address_to question_length,
+                                      positive address_to request_length)
 {
-        byte_reader reader = byte_reader_open(reply, size);
-        p16 asked = byte_reader_u16(&reader);
-        p16 questions;
-        const p8 address_to question;
+        bipolar written;
 
-        (void)byte_reader_skip(&reader, 2);
-        questions = byte_reader_u16(&reader);
-        (void)byte_reader_skip(&reader, 6);
-        question = byte_reader_take(&reader, question_length);
-        return byte_reader_ok(&reader) && asked == id && questions == 1 &&
-               !memory_compare_ascii_case(question, request + DNS_HEADER,
-                                          question_length);
+        if (room < DNS_HEADER + 4 + DNS_EDNS_LENGTH)
+                return DNS_MALFORMED;
+        written = dns_write_name(request + DNS_HEADER,
+                                 room - DNS_HEADER - 4 - DNS_EDNS_LENGTH, name);
+        if (written < 0)
+                return written;
+        if (address_to mixed)
+                address_to mixed = dns_mix_case(request + DNS_HEADER,
+                                                (positive)written);
+
+        memory_fill(request, 0, DNS_HEADER);
+        network_store_16(request, id);
+        network_store_16(request + 2, DNS_FLAG_RECURSE);
+        network_store_16(request + 4, 1);
+        network_store_16(request + DNS_HEADER + written, DNS_TYPE_A);
+        network_store_16(request + DNS_HEADER + written + 2, DNS_CLASS_IN);
+
+        address_to question_length = (positive)written + 4;
+        address_to request_length = DNS_HEADER + address_to question_length;
+
+        if (edns)
+        {
+                p8 address_to option = request + address_to request_length;
+
+                network_store_16(request + 10, 1);
+                option[0] = 0;                        // the root as owner
+                network_store_16(option + 1, 41);     // OPT
+                network_store_16(option + 3, DNS_EDNS_SIZE);
+                network_store_32(option + 5, 0);      // version 0, no flags
+                network_store_16(option + 9, 0);
+                address_to request_length += DNS_EDNS_LENGTH;
+        }
+        return written;
 }
 
 /*
@@ -2152,40 +2184,12 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
             system_random_fill(address_of id, sizeof id, 0))
                 return DNS_NO_RANDOM;
 
-        written = dns_write_name(request + DNS_HEADER,
-                                 sizeof(request) - DNS_HEADER - 4 -
-                                     DNS_EDNS_LENGTH,
-                                 name);
-
+        written = dns_build_request(request, sizeof(request), name, id,
+                                    address_of mixed, edns,
+                                    address_of question_length,
+                                    address_of request_length);
         if (written < 0)
                 return DNS_MALFORMED;
-
-        if (mixed)
-                mixed = dns_mix_case(request + DNS_HEADER, (positive)written);
-
-        memory_fill(request, 0, DNS_HEADER);
-        network_store_16(request, id);
-        network_store_16(request + 2, DNS_FLAG_RECURSE);
-        network_store_16(request + 4, 1);
-
-        network_store_16(request + DNS_HEADER + written, DNS_TYPE_A);
-        network_store_16(request + DNS_HEADER + written + 2, DNS_CLASS_IN);
-
-        question_length = (positive)written + 4;
-        request_length = DNS_HEADER + question_length;
-
-        if (edns)
-        {
-                p8 address_to option = request + request_length;
-
-                network_store_16(request + 10, 1);
-                option[0] = 0;                        // the root as owner
-                network_store_16(option + 1, 41);     // OPT
-                network_store_16(option + 3, DNS_EDNS_SIZE);
-                network_store_32(option + 5, 0);      // version 0, no flags
-                network_store_16(option + 9, 0);
-                request_length += DNS_EDNS_LENGTH;
-        }
 
         handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 
@@ -2242,14 +2246,14 @@ static COLD bipolar dns_query_once(p32 server, p16 port, string_address name,
                 available = (positive)got > sizeof reply
                     ? sizeof reply : (positive)got;
                 if (!dns_reply_identity(reply, available, id, request,
-                                        question_length))
+                                        question_length, false))
                 {
                         //      Right id, the question in another case: a
                         //      server that does not keep the case it is
                         //      sent. Say so; the caller asks once more.
-                        if (mixed && dns_reply_identity_folded(
+                        if (mixed && dns_reply_identity(
                                          reply, available, id, request,
-                                         question_length))
+                                         question_length, true))
                         {
                                 failure = DNS_CASE_FOLDED;
                                 goto failed;
@@ -2353,6 +2357,30 @@ static COLD bipolar dns_resolve_at(p32 server, p16 port, string_address name,
 #define DNS_FALLBACK 0x01010101u
 #define DNS_SERVERS_MAX 3
 
+/*
+        The servers, read once and held: what a confined child does
+        (net_apart), since a child that may not open a file cannot read
+        resolv.conf at the moment a redirect or a caIssuers location names a
+        host. It reads the file before its filter goes on, and every lookup
+        it makes after that asks the servers it read, whatever path it names.
+        Only that child ever holds; every other process reads the file each
+        time, as before.
+*/
+typedef struct
+{
+        bool held;
+        positive count;
+        p32 servers[DNS_SERVERS_MAX];
+} dns_held_servers;
+
+static dns_held_servers dns_held;
+
+static COLD fn dns_servers_hold(string_address path)
+{
+        dns_held.count = dns_servers(path, dns_held.servers, DNS_SERVERS_MAX);
+        dns_held.held = true;
+}
+
 static CONST COLD bool dns_answer_is_final(bipolar status)
 {
         return status == DNS_OK || status == DNS_NO_SUCH_NAME ||
@@ -2363,8 +2391,11 @@ static COLD bipolar dns_resolve_any(string_address path, string_address name,
                                p32 address_to found, positive seconds)
 {
         bipolar status = DNS_NO_SERVER;
-        p32 servers[DNS_SERVERS_MAX];
-        positive count = dns_servers(path, servers, array_count(servers));
+        p32 read[DNS_SERVERS_MAX];
+        p32 address_to servers = dns_held.held ? dns_held.servers : read;
+        positive count = dns_held.held
+                             ? dns_held.count
+                             : dns_servers(path, read, array_count(read));
 
         for (positive index = 0; index < count; index++)
         {
@@ -3121,6 +3152,76 @@ static bool crypto_aes_key_unwrap(p8 address_to kek, p8 address_to wrap,
         return unwrapped;
 }
 
+/* AES-128 of one block under the FIPS-197 schedule round. lib.c's AES runs
+   in GCM's counter mode, and the keystream of a counter is that block
+   encrypted, so one block of zeros through it is the cipher. */
+static fn crypto_aes128_encrypt(const p8 address_to round, const p8 address_to in,
+                                p8 address_to out)
+{
+        p8 counter[16];
+        p8 zero[16];
+
+        memory_copy(counter, in, 16);
+        memory_fill(zero, 0, 16);
+        aes128_ctr_blocks(round, counter, zero, out, 1);
+        crypto_forget(counter, sizeof(counter));
+}
+
+/* A CMAC subkey: the block doubled in GF(2^128), the carry folded back by
+   mask rather than by a branch on the key. */
+static fn crypto_cmac_double(p8 address_to block)
+{
+        p8 carry = (p8)(0 - (block[0] >> 7));
+
+        for (positive at = 0; at < 15; at++)
+                block[at] = (p8)((block[at] << 1) | (block[at + 1] >> 7));
+        block[15] = (p8)((block[15] << 1) ^ (carry & 0x87));
+}
+
+/*
+        AES-CMAC (RFC 4493) under a 128-bit key: K1 is AES(0) doubled and K2
+        is K1 doubled; the blocks are chained, and the last is XORed with K1
+        when it is whole and with K2 after 10* padding when it is not or
+        there is none. The MIC of the key frames of WPA's descriptor
+        version 3 and of SAE.
+*/
+static fn crypto_aes_cmac(p8 address_to key, const p8 address_to data, positive length,
+                          p8 address_to out)
+{
+        p8 round[176];
+        p8 subkey[2][16];
+        p8 state[16];
+        p8 last[16];
+        positive blocks = length ? (length + 15) / 16 : 1;
+        positive tail = length - (blocks - 1) * 16;
+        bool whole = length && tail == 16;
+
+        crypto_aes128_expand(key, round);
+        memory_fill(state, 0, 16);
+        crypto_aes128_encrypt(round, state, subkey[0]);
+        crypto_cmac_double(subkey[0]);
+        memory_copy(subkey[1], subkey[0], 16);
+        crypto_cmac_double(subkey[1]);
+        for (positive at = 0; at + 1 < blocks; at++)
+        {
+                for (positive byte = 0; byte < 16; byte++)
+                        state[byte] ^= data[at * 16 + byte];
+                crypto_aes128_encrypt(round, state, state);
+        }
+        memory_fill(last, 0, 16);
+        if (tail)
+                memory_copy(last, data + (blocks - 1) * 16, tail);
+        if (!whole)
+                last[tail] = 0x80;
+        for (positive byte = 0; byte < 16; byte++)
+                state[byte] ^= last[byte] ^ subkey[whole ? 0 : 1][byte];
+        crypto_aes128_encrypt(round, state, out);
+        crypto_forget(round, sizeof(round));
+        crypto_forget(subkey, sizeof(subkey));
+        crypto_forget(state, sizeof(state));
+        crypto_forget(last, sizeof(last));
+}
+
 /*
         GHASH over a span, the last partial block zero padded. The multiply
         is ghash_blocks in lib.c over the table ghash_key made; GCM's
@@ -3248,6 +3349,209 @@ static bool crypto_aesgcm_open(crypto_aesgcm_key address_to key,
         if (!valid)
                 crypto_forget(text, text_length);
         crypto_forget(got, sizeof got);
+        return valid;
+}
+
+/*
+        AES-SIV-CMAC-256, RFC 5297: the AEAD RFC 8915 makes mandatory for
+        NTS (AEAD_AES_SIV_CMAC_256, number 15). The 256-bit key is two
+        AES-128 keys, the left for S2V, which turns the associated data and
+        the plaintext into a synthetic IV with CMAC (RFC 4493), the right
+        for counter mode under that IV. The IV is the tag and leads the
+        ciphertext. Nothing is built that the AES-128 schedule and
+        lib.c's counter body did not already give: one block is the counter
+        body over a zero block, and the two bits RFC 5297 clears in the
+        counter are what make the body's 32-bit wrapping increment exact.
+        Strings are taken as parts (the associated data, then the nonce
+        RFC 5116 asks to be the last of them), and the plaintext is the
+        final string S2V takes.
+*/
+typedef struct
+{
+        p8 round[176];
+        p8 first[16];
+        p8 second[16];
+} crypto_cmac_key;
+
+typedef struct
+{
+        crypto_cmac_key mac;
+        p8 round[176];
+} crypto_siv_key;
+
+static fn crypto_aes128_block(const p8 address_to round, const p8 address_to in,
+                              p8 address_to out)
+{
+        p8 counter[16];
+
+        memory_copy(counter, in, 16);
+        memory_fill(out, 0, 16);
+        aes128_ctr_blocks(round, counter, out, out, 1);
+        crypto_forget(counter, sizeof counter);
+}
+
+//      Multiplication by x in GF(2^128) (RFC 5297 2.3, RFC 4493 2.3).
+static fn crypto_siv_double(p8 address_to block)
+{
+        p8 carry = (p8)(block[0] >> 7);
+
+        for (positive at = 0; at < 15; at++)
+                block[at] = (p8)((block[at] << 1) | (block[at + 1] >> 7));
+        block[15] = (p8)((block[15] << 1) ^ (0x87 & (p8)(0 - carry)));
+}
+
+static fn crypto_cmac_prepare(crypto_cmac_key address_to key,
+                              const p8 address_to raw)
+{
+        p8 zero[16];
+
+        memory_fill(zero, 0, 16);
+        crypto_aes128_expand((p8 address_to)raw, key->round);
+        crypto_aes128_block(key->round, zero, key->first);
+        crypto_siv_double(key->first);
+        memory_copy(key->second, key->first, 16);
+        crypto_siv_double(key->second);
+}
+
+//      CMAC of a span. With xorend, the span's last 16 bytes are taken
+//      with that block xored in, which is S2V's "xorend" without a copy.
+static fn crypto_cmac(const crypto_cmac_key address_to key,
+                      const p8 address_to data, positive length,
+                      const p8 address_to xorend, p8 address_to out)
+{
+        positive blocks = length ? (length + 15) / 16 : 1;
+        p8 state[16];
+        p8 block[16];
+
+        memory_fill(state, 0, 16);
+        for (positive at = 0; at < blocks; at++)
+        {
+                bool last = at + 1 == blocks;
+
+                for (positive in = 0; in < 16; in++)
+                {
+                        positive index = at * 16 + in;
+                        p8 byte = 0;
+
+                        if (index < length)
+                        {
+                                byte = data[index];
+                                if (xorend && length >= 16 && index + 16 >= length)
+                                        byte ^= xorend[index + 16 - length];
+                        }
+                        else if (index == length)
+                                byte = 0x80;
+                        block[in] = byte ^ state[in];
+                }
+                if (last)
+                {
+                        const p8 address_to subkey =
+                            length && length % 16 == 0 ? key->first
+                                                        : key->second;
+
+                        for (positive in = 0; in < 16; in++)
+                                block[in] ^= subkey[in];
+                }
+                crypto_aes128_block(key->round, block, state);
+        }
+        memory_copy(out, state, 16);
+        crypto_forget(state, sizeof state);
+        crypto_forget(block, sizeof block);
+}
+
+static fn crypto_siv_prepare(crypto_siv_key address_to key,
+                             const p8 address_to raw)
+{
+        crypto_cmac_prepare(address_of key->mac, raw);
+        crypto_aes128_expand((p8 address_to)raw + 16, key->round);
+}
+
+//      S2V(K1, part 1 .. part count, text), RFC 5297 2.4.
+static fn crypto_siv_s2v(const crypto_siv_key address_to key,
+                         const p8 address_to address_to parts,
+                         const positive address_to lengths, positive count,
+                         const p8 address_to text, positive text_length,
+                         p8 address_to v)
+{
+        p8 zero[16];
+        p8 d[16];
+        p8 t[16];
+
+        memory_fill(zero, 0, 16);
+        crypto_cmac(address_of key->mac, zero, 16, null, d);
+        for (positive at = 0; at < count; at++)
+        {
+                crypto_siv_double(d);
+                crypto_cmac(address_of key->mac, parts[at], lengths[at], null, t);
+                for (positive in = 0; in < 16; in++)
+                        d[in] ^= t[in];
+        }
+        if (text_length >= 16)
+                crypto_cmac(address_of key->mac, text, text_length, d, v);
+        else
+        {
+                crypto_siv_double(d);
+                memory_fill(t, 0, 16);
+                memory_copy(t, text, text_length);
+                t[text_length] = 0x80;
+                for (positive in = 0; in < 16; in++)
+                        t[in] ^= d[in];
+                crypto_cmac(address_of key->mac, t, 16, null, v);
+        }
+        crypto_forget(d, sizeof d);
+        crypto_forget(t, sizeof t);
+}
+
+//      Counter mode under the IV with its two bits cleared.
+static fn crypto_siv_ctr(const crypto_siv_key address_to key,
+                         const p8 address_to v, p8 address_to text,
+                         positive length)
+{
+        p8 counter[16];
+        p8 padded[16];
+        positive whole = length / 16;
+        positive rest = length % 16;
+
+        memory_copy(counter, v, 16);
+        counter[8] &= 0x7f;
+        counter[12] &= 0x7f;
+        aes128_ctr_blocks(key->round, counter, text, text, whole);
+        if (rest)
+        {
+                memory_fill(padded, 0, 16);
+                memory_copy(padded, text + whole * 16, rest);
+                aes128_ctr_blocks(key->round, counter, padded, padded, 1);
+                memory_copy(text + whole * 16, padded, rest);
+        }
+        crypto_forget(counter, sizeof counter);
+        crypto_forget(padded, sizeof padded);
+}
+
+static fn crypto_siv_seal(const crypto_siv_key address_to key,
+                          const p8 address_to address_to parts,
+                          const positive address_to lengths, positive count,
+                          p8 address_to text, positive length,
+                          p8 address_to tag)
+{
+        crypto_siv_s2v(key, parts, lengths, count, text, length, tag);
+        crypto_siv_ctr(key, tag, text, length);
+}
+
+static bool crypto_siv_open(const crypto_siv_key address_to key,
+                            const p8 address_to address_to parts,
+                            const positive address_to lengths, positive count,
+                            p8 address_to text, positive length,
+                            const p8 address_to tag)
+{
+        p8 v[16];
+        bool valid;
+
+        crypto_siv_ctr(key, tag, text, length);
+        crypto_siv_s2v(key, parts, lengths, count, text, length, v);
+        valid = crypto_same(v, tag, 16);
+        if (!valid)
+                crypto_forget(text, length);
+        crypto_forget(v, sizeof v);
         return valid;
 }
 
@@ -3706,6 +4010,27 @@ static fn crypto_fe_inv_public(p64 address_to d, const p64 address_to a,
                 }
         }
         crypto_fe_mul(d, crypto_limbs_is_one(u, n) ? x1 : x2, f->square, f);
+}
+
+/* d = a^e in Montgomery form for an exponent e that is public and as wide as
+   the field: a square every bit and a multiply where e has a one, so what
+   is spent follows e and never a. SAE's square roots ((p + 1) / 4) and its
+   test for a square take their exponents from the modulus alone. */
+static fn crypto_fe_power(p64 address_to d, const p64 address_to a,
+                          const p64 address_to e, const crypto_field address_to f)
+{
+        p64 result[CRYPTO_FE_MAX];
+        positive n = f->n;
+
+        memory_copy(result, f->one, n * 8);
+        for (positive bit = n * 64; bit; bit--)
+        {
+                crypto_fe_sqr(result, result, f);
+                if ((e[(bit - 1) / 64] >> ((bit - 1) % 64)) & 1)
+                        crypto_fe_mul(result, result, a, f);
+        }
+        memory_copy(d, result, n * 8);
+        crypto_forget(result, sizeof(result));
 }
 
 /* Jacobian points: (X, Y, Z) is the affine (X/Z^2, Y/Z^3), coordinates in
@@ -5424,9 +5749,25 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_NOT_YET (-4)
 /* Or that no name in it was the host's. */
 #define TLS_MISMATCH (-5)
+/* Or that its issuer says it is revoked, in a CRL or a stapled OCSP
+   response; or that whether it is could not be told where the answer is
+   required: a must-staple leaf without a good staple in every tier, and an
+   unreachable, stale or unreadable source at the tight one. */
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
+/* Or that the clock is below its floor: it was never set, so no date in a
+   certificate can be judged against it. */
+#define TLS_CLOCK (-8)
+/* Or, at the tight tier, that the certificate was not logged as Certificate
+   Transparency asks (tls_ct_holds). */
+#define TLS_UNLOGGED (-9)
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
+#define TLS_FAULT_REVOKED 4
+#define TLS_FAULT_UNCHECKED 5
+#define TLS_FAULT_CLOCK 6
+#define TLS_FAULT_UNLOGGED 7
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -5444,6 +5785,7 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_HS_CLIENT_KEY_EXCHANGE 16
 #define TLS_HS_CERT_VERIFY 15
 #define TLS_HS_FINISHED 20
+#define TLS_HS_CERTIFICATE_STATUS 22
 #define TLS_HS_KEY_UPDATE 24
 
 /* One trust anchor from anchors.inc: hashes that find candidates, then the
@@ -5475,6 +5817,8 @@ static const p8 tls_oid_pkcs1[8] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x
 static const p8 tls_oid_rsa[9] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01,
                                   0x01, 0x01};
 static const p8 tls_oid_san[3] = {0x55, 0x1d, 0x11};
+/* 1.3.6.1.4.1.11129.2.4.2, the embedded SCT list (RFC 6962 3.3). */
+static const p8 tls_oid_scts[10] = {0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, 0x02};
 static const p8 tls_oid_basic_constraints[3] = {0x55, 0x1d, 0x13};
 static const p8 tls_oid_name_constraints[3] = {0x55, 0x1d, 0x1e};
 static const p8 tls_oid_key_usage[3] = {0x55, 0x1d, 0x0f};
@@ -5483,6 +5827,27 @@ static const p8 tls_oid_server_auth[8] = {0x2b, 0x06, 0x01, 0x05,
                                           0x05, 0x07, 0x03, 0x01};
 static const p8 tls_oid_authority_info[8] = {0x2b, 0x06, 0x01, 0x05,
                                              0x05, 0x07, 0x01, 0x01};
+/* Revocation: the certificate's cRLDistributionPoints, authorityKeyIdentifier
+   and TLS Feature (RFC 7633) extensions and id-kp-OCSPSigning; a CRL's
+   cRLNumber, deltaCRLIndicator and issuingDistributionPoint and an entry's
+   reasonCode and invalidityDate; id-pkix-ocsp-basic; and the two hashes an
+   OCSP CertID names its issuer by, SHA-1 and SHA-256. */
+static const p8 tls_oid_crl_points[3] = {0x55, 0x1d, 0x1f};
+static const p8 tls_oid_authority_key[3] = {0x55, 0x1d, 0x23};
+static const p8 tls_oid_tls_feature[8] = {0x2b, 0x06, 0x01, 0x05,
+                                          0x05, 0x07, 0x01, 0x18};
+static const p8 tls_oid_ocsp_signing[8] = {0x2b, 0x06, 0x01, 0x05,
+                                           0x05, 0x07, 0x03, 0x09};
+static const p8 tls_oid_crl_number[3] = {0x55, 0x1d, 0x14};
+static const p8 tls_oid_delta_crl[3] = {0x55, 0x1d, 0x1b};
+static const p8 tls_oid_crl_scope[3] = {0x55, 0x1d, 0x1c};
+static const p8 tls_oid_crl_reason[3] = {0x55, 0x1d, 0x15};
+static const p8 tls_oid_invalidity[3] = {0x55, 0x1d, 0x18};
+static const p8 tls_oid_ocsp_basic[9] = {0x2b, 0x06, 0x01, 0x05, 0x05,
+                                         0x07, 0x30, 0x01, 0x01};
+static const p8 tls_oid_sha1[5] = {0x2b, 0x0e, 0x03, 0x02, 0x1a};
+static const p8 tls_oid_sha256[9] = {0x60, 0x86, 0x48, 0x01, 0x65,
+                                     0x03, 0x04, 0x02, 0x01};
 
 typedef struct
 {
@@ -5510,6 +5875,28 @@ typedef struct
            clock (which side of them the clock is on), that reason. */
         bool untrusted;
         p8 fault;
+        /* status_request went in the hello (only when the chain is checked:
+           a staple is read for revocation and nothing else); a TLS 1.2
+           server echoed it, so a CertificateStatus may follow its
+           Certificate, whose check then waits for it (chain_pending). */
+        bool status_requested;
+        bool status_echoed;
+        bool chain_pending;
+        /* The handshake's deadline while it runs: a revocation fetch nests
+           in it. */
+        const network_deadline address_to deadline;
+        /* Network Time Security's key establishment (RFC 8915 4) uses TLS for
+           two things besides a connection: an application protocol to offer
+           in the ClientHello and to see named back, which is also how this
+           client knows it must not settle for TLS 1.2 (no exporter there,
+           and RFC 8915 requires 1.3), and a key derived from the finished
+           handshake under a label (RFC 8446 7.5). clock_bootstrap says the
+           connection is the one that will say what time it is, so the clock
+           cannot yet be asked: see tls_verify_chain. */
+        const p8 address_to alpn;
+        positive alpn_length;
+        bool clock_bootstrap;
+        p8 exporter[32];
         /* TLS 1.2 (RFC 5246, 5288, 7627): the suite, the server's random,
            the master secret -- the premaster until the client's flight --
            and the client's key exchange point, made when the server's
@@ -6162,6 +6549,175 @@ static COLD bipolar tls_asn1_enter_oid(p8 address_to bytes, positive size,
                                  address_to stop - address_to at))
                 return TLS_FAIL;
         return TLS_OK;
+}
+
+/*
+        The same DER read through a cursor, for the revocation parsers: a
+        CRL and an OCSP response arrive over plain HTTP and in a handshake,
+        so nothing in them is trusted until a signature over them verifies,
+        and they hold no index into what they read (security_hygiene).
+
+        tls_der_value is one value of the tag at the reader's front: its
+        contents as a reader of their own, and the reader past it. A wrong
+        tag, a length tls_asn1_length refuses or one longer than what is left
+        fails both. tls_der_peek is the tag at the front, or 0 at the end or
+        on a failed reader (no DER tag here is 0). tls_der_whole is one value,
+        header and all, for a signature over it or a byte comparison.
+*/
+static COLD byte_reader tls_der_value(byte_reader address_to reader, p8 tag)
+{
+        p8 address_to bytes = (p8 address_to)byte_reader_here(reader);
+        positive at = 0;
+        positive stop = 0;
+
+        if (!bytes || tls_asn1_enter(bytes, byte_reader_left(reader), tag,
+                                     address_of at, address_of stop))
+        {
+                (void)byte_reader_take(reader, positive_max);
+                return byte_reader_dead();
+        }
+        (void)byte_reader_skip(reader, at);
+        return byte_reader_window(reader, stop - at);
+}
+
+static COLD p8 tls_der_peek(byte_reader reader)
+{
+        return byte_reader_u8(&reader);
+}
+
+static COLD p8 address_to tls_der_whole(byte_reader address_to reader, p8 tag,
+                                        positive address_to length)
+{
+        p8 address_to start = (p8 address_to)byte_reader_here(reader);
+        positive before = byte_reader_left(reader);
+        byte_reader inside = tls_der_value(reader, tag);
+
+        address_to length = 0;
+        if (!byte_reader_ok(&inside))
+                return null;
+        address_to length = before - byte_reader_left(reader);
+        return start;
+}
+
+/* A DER INTEGER's contents: at least one octet, and no first octet that only
+   repeats the sign of the next (X.690 8.3.2). */
+static COLD bool tls_der_integer(byte_reader contents)
+{
+        positive length = byte_reader_left(&contents);
+        p8 first = byte_reader_u8(&contents);
+        p8 second;
+
+        if (!byte_reader_ok(&contents))
+                return false;
+        if (length == 1)
+                return true;
+        second = byte_reader_u8(&contents);
+        return !(first == 0 && !(second & 0x80)) &&
+               !(first == 0xff && (second & 0x80));
+}
+
+/* The one INTEGER whose contents are a single octet below 0x80 and the one
+   ENUMERATED: value, or -1 for anything else (a longer or negative one). */
+static COLD bipolar tls_der_small(byte_reader address_to reader, p8 tag)
+{
+        byte_reader contents = tls_der_value(reader, tag);
+        p8 value = byte_reader_u8(&contents);
+
+        return byte_reader_end(&contents) && value < 0x80 ? value : -1;
+}
+
+/* A BOOLEAN DEFAULT FALSE under an implicit context tag, which DER spells
+   only when TRUE (see tls_asn1_true): absent is false, present has to be
+   one octet 0xff. False with the reader failed for any other spelling. */
+static COLD bool tls_der_flag(byte_reader address_to reader, p8 tag)
+{
+        byte_reader contents;
+
+        if (tls_der_peek(*reader) != tag)
+                return false;
+        contents = tls_der_value(reader, tag);
+        if (byte_reader_u8(&contents) == 0xff && byte_reader_end(&contents))
+                return true;
+        (void)byte_reader_take(reader, positive_max);
+        return false;
+}
+
+/* A named bit list's BIT STRING contents (ReasonFlags), held to DER's one
+   spelling as tls_parse_key_usage holds keyUsage: the unused count is the
+   final octet's trailing zeros, and that octet is not zero. The empty list is
+   one octet, 0. */
+static COLD bool tls_der_named_bits(byte_reader contents)
+{
+        p8 unused = byte_reader_u8(&contents);
+        p8 final;
+        p8 zeros = 0;
+
+        if (!byte_reader_ok(&contents) || unused > 7)
+                return false;
+        if (!byte_reader_left(&contents))
+                return !unused;
+        (void)byte_reader_skip(&contents, byte_reader_left(&contents) - 1);
+        final = byte_reader_u8(&contents);
+        if (!final)
+                return false;
+        while (!(final & 1))
+        {
+                zeros++;
+                final >>= 1;
+        }
+        return zeros == unused;
+}
+
+/* GeneralNames' contents (RFC 5280 4.2.1.6): one name or more, each a whole
+   value under one of the nine context tags the CHOICE defines. */
+static COLD bool tls_general_names_valid(byte_reader names)
+{
+        if (!byte_reader_left(&names))
+                return false;
+        while (byte_reader_left(&names))
+        {
+                p8 tag = tls_der_peek(names);
+
+                if (tag != 0xa0 && tag != 0x81 && tag != 0x82 && tag != 0xa3 &&
+                    tag != 0xa4 && tag != 0xa5 && tag != 0x86 && tag != 0x87 &&
+                    tag != 0x88)
+                        return false;
+                (void)tls_der_value(&names, tag);
+        }
+        return byte_reader_ok(&names);
+}
+
+/* Whether two GeneralNames share a name, byte for byte (RFC 5280 6.3.3
+   (b)(2)(i), a CRL's issuingDistributionPoint against the distribution
+   point the certificate named). Each list is walked TLS_NAMES_MEET names
+   deep at most, so a signed but hostile list costs at most its square. */
+#define TLS_NAMES_MEET 16
+
+static COLD bool tls_general_names_meet(byte_reader one, byte_reader two)
+{
+        for (positive i = 0; byte_reader_left(&one) && i < TLS_NAMES_MEET; i++)
+        {
+                positive length = 0;
+                const p8 address_to name = tls_der_whole(&one, tls_der_peek(one),
+                                                         address_of length);
+                byte_reader other = two;
+
+                if (!name)
+                        return false;
+                for (positive j = 0; byte_reader_left(&other) && j < TLS_NAMES_MEET;
+                     j++)
+                {
+                        positive size = 0;
+                        const p8 address_to candidate = tls_der_whole(
+                            &other, tls_der_peek(other), address_of size);
+
+                        if (!candidate)
+                                break;
+                        if (size == length && !memory_compare(candidate, name, size))
+                                return true;
+                }
+        }
+        return false;
 }
 
 /* DER INTEGERs used for keys and ECDSA signatures are strictly positive and
@@ -6963,6 +7519,35 @@ typedef struct
         /* The first http: caIssuers location, or null (tls_parse_ca_issuers). */
         p8 address_to ca_issuers;
         positive ca_issuers_length;
+        /* Revocation. The serial's INTEGER contents, sign octet and all, as
+           a CRL entry or an OCSP CertID spells it; the SubjectPublicKey BIT
+           STRING past its unused-bits octet, what an OCSP issuerKeyHash and
+           a byKey responder hash; the first whole-reason http: CRL
+           distribution point and the fullName it is one of (null when there
+           is none, tls_parse_crl_points); authorityKeyIdentifier's
+           keyIdentifier, or null; and the TLS Feature status_request. */
+        p8 address_to serial;
+        positive serial_length;
+        p8 address_to key_bits;
+        positive key_bits_length;
+        p8 address_to crl_url;
+        positive crl_url_length;
+        p8 address_to crl_names;
+        positive crl_names_length;
+        p8 address_to authority_key;
+        positive authority_key_length;
+        bool must_staple;
+        /* Certificate Transparency: the SubjectPublicKeyInfo whole (what an
+           SCT's issuer_key_hash hashes), the extensions' [3] and the SCT list
+           extension whole, which the precertificate an SCT signed lacks
+           (tls_ct_precert), and the TLS-encoded list inside it, or null. */
+        p8 address_to spki;
+        positive spki_length;
+        p8 address_to extensions;
+        p8 address_to sct_extension;
+        positive sct_extension_length;
+        p8 address_to scts;
+        positive scts_length;
         p8 curve;
         p8 qx[48];
         p8 qy[48];
@@ -6978,8 +7563,10 @@ typedef struct
         bool key_usage;
         bool digital_signature;
         bool key_cert_sign;
+        bool crl_sign;
         bool extended_key_usage;
         bool server_auth;
+        bool ocsp_signing;
         bool san_match;
         bool unsupported_critical;
 } tls_cert;
@@ -7053,6 +7640,54 @@ static COLD bool tls_date_value(p8 tag, p8 address_to text, positive length,
         return true;
 }
 
+/* An OCSP time: GeneralizedTime in every year (RFC 6960 4.2.1), held to the
+   one spelling RFC 5280 4.1.2.5.2 allows it, YYYYMMDDHHMMSSZ. From 2050 on
+   that is tls_date_value's own GeneralizedTime; before, its digits past the
+   century are the UTCTime of the same moment, and the century has to be the
+   one that UTCTime implies (so 1950 through 2049). */
+static COLD bool tls_date_general(p8 address_to text, positive length,
+                                  p64 address_to value)
+{
+        p64 answer = 0;
+
+        if (tls_date_value(0x18, text, length, value))
+                return true;
+        if (length != 15 || text[0] < '1' || text[0] > '2' || text[1] < '0' ||
+            text[1] > '9' ||
+            !tls_date_value(0x17, text + 2, 13, address_of answer) ||
+            answer / 1000000000000ull !=
+                (p64)(text[0] - '0') * 10 + (p64)(text[1] - '0'))
+                return false;
+        address_to value = answer;
+        return true;
+}
+
+/* A date as tls_date_value keeps it, YYYYMMDDHHMMSS, as seconds from the
+   start of year 0 of the proleptic Gregorian calendar (the days are
+   Hinnant's days_from_civil): how far apart two dates are, for the clock
+   skew a revocation answer is allowed. 0 for 0. */
+static COLD p64 tls_date_seconds(p64 date)
+{
+        p64 year = date / 10000000000ull;
+        p64 month = date / 100000000 % 100;
+        p64 day = date / 1000000 % 100;
+        p64 shifted;
+        p64 era;
+        p64 of_era;
+        p64 of_year;
+        p64 days;
+
+        if (!year || !month)
+                return 0;
+        shifted = month <= 2 ? year - 1 : year;
+        era = shifted / 400;
+        of_era = shifted - era * 400;
+        of_year = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1;
+        days = era * 146097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+        return ((days * 24 + date / 10000 % 100) * 60 + date / 100 % 100) * 60 +
+               date % 100;
+}
+
 static COLD bipolar tls_parse_validity(p8 address_to der, positive size,
                                   positive address_to at, tls_cert address_to cert)
 {
@@ -7119,44 +7754,36 @@ static COLD bipolar tls_parse_basic_constraints(p8 address_to value, positive le
 static COLD bipolar tls_parse_key_usage(p8 address_to value, positive length,
                                    tls_cert address_to cert)
 {
-        positive at = 0;
-        positive stop = 0;
-        p8 unused;
-        p8 canonical_unused = 0;
-        p8 final;
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader bits = tls_der_value(&reader, 0x03);
+        positive size;
+        p8 first;
+        p8 second = 0;
 
-        if (tls_asn1_enter(value, length, 0x03, address_of at, address_of stop) ||
-            stop != length || at >= stop)
+        /* KeyUsage is a named bit list, held to DER's one spelling by
+           tls_der_named_bits: the unused-bit count is exactly the trailing-zero
+           count in the final nonzero octet, and one or two octets. Merely
+           checking that declared unused bits are zero accepts alternate signed
+           encodings and trailing zero octets which stricter certificate
+           validators reject. */
+        if (!byte_reader_end(&reader) || byte_reader_left(&bits) < 2 ||
+            !tls_der_named_bits(bits))
                 return TLS_FAIL;
-        unused = value[at++];
-        if (unused > 7 || at >= stop)
-                return TLS_FAIL;
-        final = value[stop - 1];
-        if (!final)
-                return TLS_FAIL;
-        while (!(final & 1))
-        {
-                canonical_unused++;
-                final >>= 1;
-        }
-        /* KeyUsage is a named bit list. DER removes every trailing zero bit,
-           so the unused-bit count must be exactly the trailing-zero count in
-           the final nonzero octet. Merely checking that declared unused bits
-           are zero accepts alternate signed encodings and trailing zero
-           octets which stricter certificate validators reject. */
-        if (unused != canonical_unused)
-                return TLS_FAIL;
+        (void)byte_reader_u8(&bits);
+        size = byte_reader_left(&bits);
+        first = byte_reader_u8(&bits);
+        if (size == 2)
+                second = byte_reader_u8(&bits);
         /* RFC 5280 defines exactly nine KeyUsage bits. The ninth is
            decipherOnly and is permitted only with keyAgreement. Rejecting
            further set bits matters even though this client does not act on
            them: silently ignoring undefined authorization bits creates a
            profile differential with validators that enforce the schema. */
-        if (stop - at > 2 ||
-            (stop - at == 2 &&
-             (value[at + 1] != 0x80 || !(value[at] & 0x08))))
+        if (size > 2 || (size == 2 && (second != 0x80 || !(first & 0x08))))
                 return TLS_FAIL;
-        cert->digital_signature = (value[at] & 0x80) != 0;
-        cert->key_cert_sign = (value[at] & 0x04) != 0;
+        cert->digital_signature = (first & 0x80) != 0;
+        cert->key_cert_sign = (first & 0x04) != 0;
+        cert->crl_sign = (first & 0x02) != 0;
         return TLS_OK;
 }
 
@@ -7178,6 +7805,8 @@ static COLD bipolar tls_parse_extended_key_usage(p8 address_to value, positive l
                         return TLS_FAIL;
                 if (tls_oid_is(value + at, oid_stop - at, tls_oid_server_auth, 8))
                         cert->server_auth = true;
+                if (tls_oid_is(value + at, oid_stop - at, tls_oid_ocsp_signing, 8))
+                        cert->ocsp_signing = true;
                 at = oid_stop;
         }
         return TLS_OK;
@@ -7223,6 +7852,143 @@ static COLD fn tls_parse_ca_issuers(p8 address_to value, positive length,
         }
 }
 
+/* cRLDistributionPoints (RFC 5280 4.2.1.13), every point checked: each a
+   distributionPoint [0], reasons [1] and cRLIssuer [2] in that order, not
+   reasons alone, the name a fullName [0] of GeneralNames or a
+   nameRelativeToCRLIssuer [1]. The one kept is the first point that covers
+   every reason and is its own CA's (no reasons, no cRLIssuer) with an http:
+   URI in its fullName: that URI is fetched (tls_crl_answer), and the
+   fullName is what a partitioned CRL's issuingDistributionPoint has to
+   share a name with. A value that does not parse refuses the certificate,
+   as OpenSSL refuses it: a distribution point is how the issuer says where
+   revocation is published, and one that cannot be read cannot be honoured. */
+static COLD bipolar tls_parse_crl_points(p8 address_to value, positive length,
+                                         tls_cert address_to cert)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader points = tls_der_value(&reader, 0x30);
+
+        if (!byte_reader_end(&reader) || !byte_reader_left(&points))
+                return TLS_FAIL;
+        while (byte_reader_left(&points))
+        {
+                byte_reader point = tls_der_value(&points, 0x30);
+                byte_reader full = byte_reader_dead();
+                bool named = false;
+                bool partial = false;
+                bool delegated = false;
+
+                if (tls_der_peek(point) == 0xa0)
+                {
+                        byte_reader name = tls_der_value(&point, 0xa0);
+                        p8 form = tls_der_peek(name);
+                        byte_reader inside = tls_der_value(&name, form);
+
+                        if ((form != 0xa0 && form != 0xa1) || !byte_reader_end(&name) ||
+                            (form == 0xa0 ? !tls_general_names_valid(inside)
+                                          : !byte_reader_left(&inside)))
+                                return TLS_FAIL;
+                        if (form == 0xa0)
+                                full = inside;
+                        named = true;
+                }
+                if (tls_der_peek(point) == 0x81)
+                {
+                        if (!tls_der_named_bits(tls_der_value(&point, 0x81)))
+                                return TLS_FAIL;
+                        partial = true;
+                }
+                if (tls_der_peek(point) == 0xa2)
+                {
+                        if (!tls_general_names_valid(tls_der_value(&point, 0xa2)))
+                                return TLS_FAIL;
+                        delegated = true;
+                }
+                if (!byte_reader_end(&point) || (!named && !delegated))
+                        return TLS_FAIL;
+                if (cert->crl_url || partial || delegated || !byte_reader_ok(&full))
+                        continue;
+                for (byte_reader names = full; byte_reader_left(&names);)
+                {
+                        p8 tag = tls_der_peek(names);
+                        byte_reader uri = tls_der_value(&names, tag);
+                        const p8 address_to text = byte_reader_here(&uri);
+                        positive size = byte_reader_left(&uri);
+
+                        if (tag == 0x86 && size > 7 && tls_printable(text, size) &&
+                            !memory_compare_ascii_case(text, "http://", 7))
+                        {
+                                cert->crl_url = (p8 address_to)text;
+                                cert->crl_url_length = size;
+                                cert->crl_names = (p8 address_to)byte_reader_here(&full);
+                                cert->crl_names_length = byte_reader_left(&full);
+                                break;
+                        }
+                }
+        }
+        return byte_reader_ok(&points) ? TLS_OK : TLS_FAIL;
+}
+
+/* authorityKeyIdentifier (RFC 5280 4.2.1.1): keyIdentifier [0], then
+   authorityCertIssuer [1] and authorityCertSerialNumber [2], the two only
+   together. The identifier is kept; a CRL that names its own has to name
+   the same one (tls_crl_answer). */
+static COLD bipolar tls_parse_authority_key(p8 address_to value, positive length,
+                                            p8 address_to address_to key,
+                                            positive address_to key_length)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader identifier = tls_der_value(&reader, 0x30);
+
+        address_to key = null;
+        address_to key_length = 0;
+        if (!byte_reader_end(&reader))
+                return TLS_FAIL;
+        if (tls_der_peek(identifier) == 0x80)
+        {
+                byte_reader octets = tls_der_value(&identifier, 0x80);
+
+                address_to key = (p8 address_to)byte_reader_here(&octets);
+                address_to key_length = byte_reader_left(&octets);
+        }
+        if (tls_der_peek(identifier) == 0xa1 &&
+            (!tls_general_names_valid(tls_der_value(&identifier, 0xa1)) ||
+             !tls_der_integer(tls_der_value(&identifier, 0x82))))
+                return TLS_FAIL;
+        return byte_reader_end(&identifier) ? TLS_OK : TLS_FAIL;
+}
+
+/* The TLS Feature extension (RFC 7633): a SEQUENCE of INTEGERs, each a TLS
+   extension number. status_request (5) among them is must-staple: the
+   leaf is refused in every tier unless the server staples a good OCSP
+   answer. Numbers are non-negative and at most 65535; an extension that
+   does not parse refuses the certificate, since it may be the one that
+   asked for a staple. */
+static COLD bipolar tls_parse_tls_feature(p8 address_to value, positive length,
+                                          tls_cert address_to cert)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader features = tls_der_value(&reader, 0x30);
+
+        if (!byte_reader_end(&reader))
+                return TLS_FAIL;
+        while (byte_reader_left(&features))
+        {
+                byte_reader number = tls_der_value(&features, 0x02);
+                positive feature = 0;
+
+                if (!tls_der_integer(number) || byte_reader_left(&number) > 3 ||
+                    (tls_der_peek(number) & 0x80))
+                        return TLS_FAIL;
+                while (byte_reader_left(&number))
+                        feature = feature << 8 | byte_reader_u8(&number);
+                if (feature > 0xffff)
+                        return TLS_FAIL;
+                cert->must_staple |= feature == 5;
+        }
+        return byte_reader_ok(&features) ? TLS_OK : TLS_FAIL;
+}
+
 static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                                     positive at, p8 version,
                                     tls_cert address_to cert,
@@ -7257,6 +8023,7 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
            smuggle v3 constraints into a shape whose version says they do not
            exist, leaving different validators to disagree about the same
            signed bytes. */
+        cert->extensions = der + at;
         if (version != 2 ||
             tls_asn1_enter(der, tbs_stop, 0xa3, address_of at,
                            address_of extensions_stop) ||
@@ -7269,6 +8036,7 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
         while (at < sequence_stop)
         {
                 positive extension_stop = 0;
+                positive extension_at = at;
                 positive oid_at;
                 positive oid_stop = 0;
                 positive value_stop = 0;
@@ -7360,6 +8128,46 @@ static COLD bipolar tls_parse_extensions(p8 address_to der, positive tbs_stop,
                          tls_oid_is(der + oid_at, oid_stop - oid_at,
                                     tls_oid_authority_info, 8))
                         tls_parse_ca_issuers(der + at, value_stop - at, cert);
+                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_crl_points, 3))
+                {
+                        if (tls_parse_crl_points(der + at, value_stop - at, cert))
+                                return TLS_FAIL;
+                }
+                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_authority_key, 3))
+                {
+                        if (tls_parse_authority_key(der + at, value_stop - at,
+                                                    address_of cert->authority_key,
+                                                    address_of cert->authority_key_length))
+                                return TLS_FAIL;
+                }
+                else if (tls_oid_is(der + oid_at, oid_stop - oid_at,
+                                    tls_oid_tls_feature, 8))
+                {
+                        if (tls_parse_tls_feature(der + at, value_stop - at, cert))
+                                return TLS_FAIL;
+                }
+                else if (!critical &&
+                         tls_oid_is(der + oid_at, oid_stop - oid_at, tls_oid_scts, 10))
+                {
+                        /* An OCTET STRING of the TLS-encoded list. One that is
+                           not is no list: it counts for nothing where CT is
+                           asked and is ignored where it is not, as any other
+                           client ignores it. */
+                        positive list_at = at;
+                        positive list_stop = 0;
+
+                        if (!tls_asn1_enter(der, value_stop, 0x04, address_of list_at,
+                                            address_of list_stop) &&
+                            list_stop == value_stop)
+                        {
+                                cert->scts = der + list_at;
+                                cert->scts_length = list_stop - list_at;
+                                cert->sct_extension = der + extension_at;
+                                cert->sct_extension_length = extension_stop - extension_at;
+                        }
+                }
                 else if (critical)
                         cert->unsupported_critical = true;
 
@@ -7418,6 +8226,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                                           address_of value_at,
                                           address_of value_length))
                         return TLS_FAIL;
+                cert->serial = der + at;
+                cert->serial_length = serial_stop - at;
                 at = serial_stop;
         }
         {
@@ -7438,8 +8248,10 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                           address_of cert->subject, address_of cert->subject_length))
                 return TLS_FAIL;
 
+        cert->spki = der + at;
         if (tls_asn1_enter(der, tbs_stop, 0x30, address_of at, address_of spki_stop))
                 return TLS_FAIL;
+        cert->spki_length = spki_stop - (positive)(cert->spki - der);
         if (tls_asn1_enter(der, spki_stop, 0x30, address_of at, address_of alg_stop))
                 return TLS_FAIL;
         param_at = at;
@@ -7459,6 +8271,8 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
                 return TLS_FAIL;
         if (at >= bit_stop || der[at++] != 0)
                 return TLS_FAIL;
+        cert->key_bits = der + at;
+        cert->key_bits_length = bit_stop - at;
 
         if (tls_oid_is(der + param_at, oid_stop - param_at, tls_oid_ec, 7))
         {
@@ -7539,6 +8353,774 @@ static COLD bipolar tls_parse_cert(p8 address_to der, positive length,
 
         return tls_parse_extensions(der, tbs_stop, spki_stop, version,
                                     cert, host);
+}
+
+/*
+        Revocation answers, read before anything vouches for them.
+
+        An OCSP response (RFC 6960) comes stapled in the handshake and a CRL
+        (RFC 5280 5) over plain HTTP from the address a certificate names, so
+        both are any peer's bytes until a signature over them verifies, and
+        their parsers run first: strict DER, every field in its place, every
+        extension known or not critical and none twice, every list under a
+        ceiling. What they keep are pointers into the bytes they were given.
+
+          TLS_OCSP_MAX         bytes of a stapled response; one has to fit a
+                               handshake message anyway
+          TLS_OCSP_RESPONSES   SingleResponses in one response
+          TLS_OCSP_CERTS       certificates one carries for a delegated
+                               responder
+          TLS_LIST_EXTENSIONS  extensions in a CRL, an entry, a response or a
+                               single response
+          TLS_CRL_ENTRIES      revoked certificates read in one CRL: 1.7
+                               times the 311,758 of the largest public one
+                               seen (DigiCert Global G2 TLS RSA SHA256 2020
+                               CA1, 11.7 MB, 2026-10-09), and fewer than the
+                               smallest entries (20 bytes) can fill below
+                               the three length octets tls_asn1_length reads,
+                               so the count binds before the length does
+*/
+#define TLS_OCSP_MAX 16384
+#define TLS_OCSP_RESPONSES 16
+#define TLS_OCSP_CERTS 4
+#define TLS_LIST_EXTENSIONS 16
+#define TLS_CRL_ENTRIES ((positive)1 << 19)
+#define TLS_OCSP_GOOD 0
+#define TLS_OCSP_REVOKED 1
+#define TLS_OCSP_UNKNOWN 2
+
+typedef struct
+{
+        const p8 address_to oid[TLS_LIST_EXTENSIONS];
+        positive length[TLS_LIST_EXTENSIONS];
+        positive count;
+} tls_seen;
+
+/* Whether a reader holds exactly these bytes: an OID's contents, say. */
+static COLD bool tls_der_is(byte_reader contents, const p8 address_to want,
+                            positive length)
+{
+        return byte_reader_ok(&contents) && byte_reader_left(&contents) == length &&
+               !memory_compare(byte_reader_here(&contents), want, length);
+}
+
+/* A Time (RFC 5280 4.1.2.5): UTCTime or GeneralizedTime by the certificate
+   rule, or -- generalized -- GeneralizedTime in every year, as OCSP and a
+   CRL entry's invalidityDate write it. Fails the reader on any other tag. */
+static COLD bool tls_der_time(byte_reader address_to reader, bool generalized,
+                              p64 address_to value)
+{
+        p8 tag = tls_der_peek(address_to reader);
+        byte_reader text;
+
+        if (tag != 0x18 && (generalized || tag != 0x17))
+        {
+                (void)byte_reader_take(reader, positive_max);
+                return false;
+        }
+        text = tls_der_value(reader, tag);
+        return byte_reader_ok(&text) &&
+               (generalized
+                    ? tls_date_general((p8 address_to)byte_reader_here(&text),
+                                       byte_reader_left(&text), value)
+                    : tls_date_value(tag, (p8 address_to)byte_reader_here(&text),
+                                     byte_reader_left(&text), value));
+}
+
+/* The next Extension of an Extensions list's contents: its OID, its
+   critical flag and its value's contents, the list read past it. False at
+   the end of the list, or with the list failed on anything malformed, on a
+   second of one OID, and past TLS_LIST_EXTENSIONS of them. */
+static COLD bool tls_der_extension(byte_reader address_to list,
+                                   tls_seen address_to seen,
+                                   byte_reader address_to oid,
+                                   bool address_to critical,
+                                   byte_reader address_to value)
+{
+        byte_reader extension;
+
+        if (!byte_reader_left(list))
+                return false;
+        extension = tls_der_value(list, 0x30);
+        address_to oid = tls_der_value(&extension, 0x06);
+        address_to critical = tls_der_flag(&extension, 0x01);
+        address_to value = tls_der_value(&extension, 0x04);
+        if (!byte_reader_end(&extension) ||
+            !tls_oid_content_der(byte_reader_here(oid), byte_reader_left(oid)) ||
+            seen->count == TLS_LIST_EXTENSIONS)
+                goto refused;
+        for (positive k = 0; k < seen->count; k++)
+                if (tls_der_is(address_to oid, seen->oid[k], seen->length[k]))
+                        goto refused;
+        seen->oid[seen->count] = byte_reader_here(oid);
+        seen->length[seen->count++] = byte_reader_left(oid);
+        return true;
+
+refused:
+        (void)byte_reader_take(list, positive_max);
+        return false;
+}
+
+/* A CRLReason (RFC 5280 5.3.1): 0 to 10 but the unused 7, and in a whole
+   CRL not removeFromCRL (8), which only a delta CRL may say. */
+static COLD bool tls_crl_reason(bipolar code, bool whole)
+{
+        return code >= 0 && code <= 10 && code != 7 && (!whole || code != 8);
+}
+
+typedef struct
+{
+        /* The hash the CertID names its issuer by: 1 SHA-1, 2 SHA-256. */
+        p8 hash;
+        p8 status;
+        positive hash_length;
+        const p8 address_to name_hash;
+        const p8 address_to key_hash;
+        const p8 address_to serial;
+        positive serial_length;
+        p64 this_update;
+        /* 0 when it names none. */
+        p64 next_update;
+} tls_ocsp_single;
+
+typedef struct
+{
+        /* ResponseData whole, the signature over it and its algorithm. */
+        p8 address_to tbs;
+        positive tbs_length;
+        p8 address_to sig_oid;
+        positive sig_oid_length;
+        const p8 address_to sig;
+        positive sig_length;
+        /* byName's Name, header and all, or byKey's SHA-1 key hash. */
+        const p8 address_to responder;
+        positive responder_length;
+        bool by_key;
+        p64 produced;
+        /* The SingleResponses' and the certificates' SEQUENCE contents. */
+        const p8 address_to responses;
+        positive responses_length;
+        const p8 address_to certs;
+        positive certs_length;
+} tls_ocsp;
+
+/* One SingleResponse (RFC 6960 4.2.1), whole: the CertID -- SHA-1 or
+   SHA-256 with NULL or absent parameters, both hashes that hash's length,
+   a DER serial -- then good [0], revoked [1] (a time and an optional
+   reason) or unknown [2], thisUpdate, an optional nextUpdate [0] and
+   singleExtensions [1], none critical. */
+static COLD bipolar tls_parse_ocsp_single(const p8 address_to bytes,
+                                          positive length,
+                                          tls_ocsp_single address_to single)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        byte_reader response = tls_der_value(&reader, 0x30);
+        byte_reader id = tls_der_value(&response, 0x30);
+        byte_reader algorithm = tls_der_value(&id, 0x30);
+        byte_reader oid = tls_der_value(&algorithm, 0x06);
+        byte_reader name_hash;
+        byte_reader key_hash;
+        byte_reader serial;
+        byte_reader status;
+        p8 tag;
+
+        memory_fill(single, 0, sizeof(address_to single));
+        single->hash = tls_der_is(oid, tls_oid_sha1, 5)     ? 1
+                       : tls_der_is(oid, tls_oid_sha256, 9) ? 2
+                                                            : 0;
+        single->hash_length = single->hash == 1 ? 20 : 32;
+        if (byte_reader_left(&algorithm))
+        {
+                byte_reader nothing = tls_der_value(&algorithm, 0x05);
+
+                if (!byte_reader_end(&nothing))
+                        return TLS_FAIL;
+        }
+        name_hash = tls_der_value(&id, 0x04);
+        key_hash = tls_der_value(&id, 0x04);
+        serial = tls_der_value(&id, 0x02);
+        if (!single->hash || !byte_reader_end(&algorithm) || !byte_reader_end(&id) ||
+            byte_reader_left(&name_hash) != single->hash_length ||
+            byte_reader_left(&key_hash) != single->hash_length ||
+            !tls_der_integer(serial))
+                return TLS_FAIL;
+        single->name_hash = byte_reader_here(&name_hash);
+        single->key_hash = byte_reader_here(&key_hash);
+        single->serial = byte_reader_here(&serial);
+        single->serial_length = byte_reader_left(&serial);
+
+        tag = tls_der_peek(response);
+        status = tls_der_value(&response, tag);
+        if (tag == 0x80 || tag == 0x82)
+        {
+                if (!byte_reader_end(&status))
+                        return TLS_FAIL;
+                single->status = tag == 0x80 ? TLS_OCSP_GOOD : TLS_OCSP_UNKNOWN;
+        }
+        else if (tag == 0xa1)
+        {
+                p64 revoked = 0;
+
+                if (!tls_der_time(&status, true, address_of revoked))
+                        return TLS_FAIL;
+                if (tls_der_peek(status) == 0xa0)
+                {
+                        byte_reader reason = tls_der_value(&status, 0xa0);
+
+                        if (!tls_crl_reason(tls_der_small(&reason, 0x0a), false) ||
+                            !byte_reader_end(&reason))
+                                return TLS_FAIL;
+                }
+                if (!byte_reader_end(&status))
+                        return TLS_FAIL;
+                single->status = TLS_OCSP_REVOKED;
+        }
+        else
+                return TLS_FAIL;
+
+        if (!tls_der_time(&response, true, address_of single->this_update))
+                return TLS_FAIL;
+        if (tls_der_peek(response) == 0xa0)
+        {
+                byte_reader next = tls_der_value(&response, 0xa0);
+
+                if (!tls_der_time(&next, true, address_of single->next_update) ||
+                    !byte_reader_end(&next) ||
+                    single->next_update < single->this_update)
+                        return TLS_FAIL;
+        }
+        if (tls_der_peek(response) == 0xa1)
+        {
+                byte_reader wrapper = tls_der_value(&response, 0xa1);
+                byte_reader list = tls_der_value(&wrapper, 0x30);
+                byte_reader value;
+                bool critical = false;
+                tls_seen seen;
+
+                memory_fill(address_of seen, 0, sizeof seen);
+                if (!byte_reader_end(&wrapper) || !byte_reader_left(&list))
+                        return TLS_FAIL;
+                while (tls_der_extension(&list, address_of seen, address_of oid,
+                                         address_of critical, address_of value))
+                        if (critical)
+                                return TLS_FAIL;
+                if (!byte_reader_end(&list))
+                        return TLS_FAIL;
+        }
+        return byte_reader_end(&response) && byte_reader_end(&reader) ? TLS_OK
+                                                                      : TLS_FAIL;
+}
+
+/* An OCSPResponse (RFC 6960 4.2.1) of at most TLS_OCSP_MAX bytes that
+   answers: status successful (0, the only one with responseBytes),
+   id-pkix-ocsp-basic, and a BasicOCSPResponse of ResponseData (v1, which
+   DER leaves out; a responder byName [1] or byKey [2] of 20 bytes;
+   producedAt; one to TLS_OCSP_RESPONSES SingleResponses, each whole;
+   responseExtensions [1], none critical), a signature algorithm
+   tls_signature_algorithm knows, the signature, and up to TLS_OCSP_CERTS
+   certificates [0]. Any other status is TLS_FAIL: tryLater and the rest say
+   nothing about the certificate. */
+static COLD bipolar tls_parse_ocsp(p8 address_to bytes, positive length,
+                                   tls_ocsp address_to ocsp)
+{
+        byte_reader reader = byte_reader_open(bytes,
+                                              length > TLS_OCSP_MAX ? 0 : length);
+        byte_reader response = tls_der_value(&reader, 0x30);
+        bipolar status = tls_der_small(&response, 0x0a);
+        byte_reader wrapper = tls_der_value(&response, 0xa0);
+        byte_reader kind = tls_der_value(&wrapper, 0x30);
+        byte_reader oid = tls_der_value(&kind, 0x06);
+        byte_reader octets = tls_der_value(&kind, 0x04);
+        byte_reader basic = tls_der_value(&octets, 0x30);
+        byte_reader outer;
+        byte_reader data;
+        byte_reader bits;
+        byte_reader list;
+        p8 tag;
+        positive at = 0;
+        positive count = 0;
+
+        memory_fill(ocsp, 0, sizeof(address_to ocsp));
+        if (status || !byte_reader_end(&reader) || !byte_reader_end(&response) ||
+            !byte_reader_end(&wrapper) || !tls_der_is(oid, tls_oid_ocsp_basic, 9) ||
+            !byte_reader_end(&kind) || !byte_reader_end(&octets))
+                return TLS_FAIL;
+        ocsp->tbs = tls_der_whole(&basic, 0x30, address_of ocsp->tbs_length);
+        if (!ocsp->tbs ||
+            !tls_signature_algorithm((p8 address_to)byte_reader_here(&basic),
+                                     byte_reader_left(&basic), address_of at,
+                                     address_of ocsp->sig_oid,
+                                     address_of ocsp->sig_oid_length) ||
+            !byte_reader_skip(&basic, at))
+                return TLS_FAIL;
+        bits = tls_der_value(&basic, 0x03);
+        if (byte_reader_u8(&bits) || !byte_reader_left(&bits))
+                return TLS_FAIL;
+        ocsp->sig = byte_reader_here(&bits);
+        ocsp->sig_length = byte_reader_left(&bits);
+        if (tls_der_peek(basic) == 0xa0)
+        {
+                byte_reader holder = tls_der_value(&basic, 0xa0);
+
+                list = tls_der_value(&holder, 0x30);
+                if (!byte_reader_end(&holder))
+                        return TLS_FAIL;
+                ocsp->certs = byte_reader_here(&list);
+                ocsp->certs_length = byte_reader_left(&list);
+                for (count = 0; byte_reader_left(&list); count++)
+                {
+                        byte_reader certificate = tls_der_value(&list, 0x30);
+
+                        if (count == TLS_OCSP_CERTS || !byte_reader_ok(&certificate))
+                                return TLS_FAIL;
+                }
+                if (!byte_reader_ok(&list))
+                        return TLS_FAIL;
+        }
+        if (!byte_reader_end(&basic))
+                return TLS_FAIL;
+
+        outer = byte_reader_open(ocsp->tbs, ocsp->tbs_length);
+        data = tls_der_value(&outer, 0x30);
+        tag = tls_der_peek(data);
+        if (tag == 0xa1)
+        {
+                byte_reader name = tls_der_value(&data, 0xa1);
+
+                ocsp->responder = tls_der_whole(&name, 0x30,
+                                                address_of ocsp->responder_length);
+                if (!ocsp->responder || !byte_reader_end(&name))
+                        return TLS_FAIL;
+        }
+        else if (tag == 0xa2)
+        {
+                byte_reader name = tls_der_value(&data, 0xa2);
+                byte_reader hash = tls_der_value(&name, 0x04);
+
+                if (byte_reader_left(&hash) != 20 || !byte_reader_end(&name))
+                        return TLS_FAIL;
+                ocsp->responder = byte_reader_here(&hash);
+                ocsp->responder_length = 20;
+                ocsp->by_key = true;
+        }
+        else
+                return TLS_FAIL;
+        if (!tls_der_time(&data, true, address_of ocsp->produced))
+                return TLS_FAIL;
+        list = tls_der_value(&data, 0x30);
+        ocsp->responses = byte_reader_here(&list);
+        ocsp->responses_length = byte_reader_left(&list);
+        if (!byte_reader_left(&list))
+                return TLS_FAIL;
+        for (count = 0; byte_reader_left(&list); count++)
+        {
+                positive size = 0;
+                const p8 address_to whole = tls_der_whole(&list, 0x30, address_of size);
+                tls_ocsp_single single;
+
+                if (count == TLS_OCSP_RESPONSES || !whole ||
+                    tls_parse_ocsp_single(whole, size, address_of single))
+                        return TLS_FAIL;
+        }
+        if (tls_der_peek(data) == 0xa1)
+        {
+                byte_reader holder = tls_der_value(&data, 0xa1);
+                byte_reader extensions = tls_der_value(&holder, 0x30);
+                byte_reader value;
+                bool critical = false;
+                tls_seen seen;
+
+                memory_fill(address_of seen, 0, sizeof seen);
+                if (!byte_reader_end(&holder) || !byte_reader_left(&extensions))
+                        return TLS_FAIL;
+                while (tls_der_extension(&extensions, address_of seen, address_of oid,
+                                         address_of critical, address_of value))
+                        if (critical)
+                                return TLS_FAIL;
+                if (!byte_reader_end(&extensions))
+                        return TLS_FAIL;
+        }
+        return byte_reader_end(&data) ? TLS_OK : TLS_FAIL;
+}
+
+typedef struct
+{
+        /* The issuingDistributionPoint (RFC 5280 5.2.5): whether there is
+           one, its fullName's GeneralNames contents (null when it names no
+           point or a relative one), and what it says the CRL leaves out. */
+        bool present;
+        bool relative;
+        bool user_only;
+        bool ca_only;
+        bool some_reasons;
+        bool indirect;
+        bool attribute_only;
+        const p8 address_to names;
+        positive names_length;
+} tls_crl_scope;
+
+typedef struct
+{
+        p8 address_to tbs;
+        positive tbs_length;
+        p8 address_to sig_oid;
+        positive sig_oid_length;
+        const p8 address_to sig;
+        positive sig_length;
+        p8 address_to issuer;
+        positive issuer_length;
+        p8 address_to authority_key;
+        positive authority_key_length;
+        tls_crl_scope scope;
+        p64 this_update;
+        /* 0 when it names none. */
+        p64 next_update;
+        positive entries;
+        /* The serial asked about is on it. */
+        bool listed;
+} tls_crl;
+
+/* An issuingDistributionPoint's value: not empty, its fields in order, the
+   booleans only ever TRUE (DER leaves FALSE out), reasons a named bit list,
+   and at most one of user, CA and attribute certificates only. */
+static COLD bipolar tls_parse_crl_scope(const p8 address_to value,
+                                        positive length,
+                                        tls_crl_scope address_to scope)
+{
+        byte_reader reader = byte_reader_open(value, length);
+        byte_reader point = tls_der_value(&reader, 0x30);
+
+        memory_fill(scope, 0, sizeof(address_to scope));
+        if (!byte_reader_end(&reader) || !byte_reader_left(&point))
+                return TLS_FAIL;
+        scope->present = true;
+        if (tls_der_peek(point) == 0xa0)
+        {
+                byte_reader name = tls_der_value(&point, 0xa0);
+                p8 form = tls_der_peek(name);
+                byte_reader inside = tls_der_value(&name, form);
+
+                if ((form != 0xa0 && form != 0xa1) || !byte_reader_end(&name) ||
+                    (form == 0xa0 ? !tls_general_names_valid(inside)
+                                  : !byte_reader_left(&inside)))
+                        return TLS_FAIL;
+                scope->relative = form == 0xa1;
+                if (form == 0xa0)
+                {
+                        scope->names = byte_reader_here(&inside);
+                        scope->names_length = byte_reader_left(&inside);
+                }
+        }
+        scope->user_only = tls_der_flag(&point, 0x81);
+        scope->ca_only = tls_der_flag(&point, 0x82);
+        if (tls_der_peek(point) == 0x83)
+        {
+                if (!tls_der_named_bits(tls_der_value(&point, 0x83)))
+                        return TLS_FAIL;
+                scope->some_reasons = true;
+        }
+        scope->indirect = tls_der_flag(&point, 0x84);
+        scope->attribute_only = tls_der_flag(&point, 0x85);
+        return byte_reader_end(&point) &&
+                       scope->user_only + scope->ca_only + scope->attribute_only <= 1
+                   ? TLS_OK
+                   : TLS_FAIL;
+}
+
+/* A CRL entry's extensions: reasonCode (not removeFromCRL), invalidityDate,
+   and nothing else critical -- certificateIssuer, which only an indirect
+   CRL carries, among them. */
+static COLD bool tls_crl_entry_extensions(byte_reader list)
+{
+        byte_reader oid;
+        byte_reader value;
+        bool critical = false;
+        tls_seen seen;
+
+        memory_fill(address_of seen, 0, sizeof seen);
+        if (!byte_reader_left(&list))
+                return false;
+        while (tls_der_extension(&list, address_of seen, address_of oid,
+                                 address_of critical, address_of value))
+        {
+                p64 when = 0;
+
+                if (tls_der_is(oid, tls_oid_crl_reason, 3))
+                {
+                        if (!tls_crl_reason(tls_der_small(&value, 0x0a), true) ||
+                            !byte_reader_end(&value))
+                                return false;
+                }
+                else if (tls_der_is(oid, tls_oid_invalidity, 3))
+                {
+                        if (!tls_der_time(&value, true, address_of when) ||
+                            !byte_reader_end(&value))
+                                return false;
+                }
+                else if (critical)
+                        return false;
+        }
+        return byte_reader_end(&list);
+}
+
+/* A CertificateList (RFC 5280 5.1), and whether serial is on it: v2, or v1
+   with no extension anywhere; the inner signature algorithm the outer one;
+   thisUpdate and an optional nextUpdate by the certificate time rule;
+   revoked certificates each a DER serial, a time and the extensions
+   tls_crl_entry_extensions allows, at most TLS_CRL_ENTRIES of them; and
+   crlExtensions, not empty, of which authorityKeyIdentifier, cRLNumber (a
+   non-negative INTEGER of at most 20 octets past its sign) and
+   issuingDistributionPoint are read, deltaCRLIndicator is refused (a delta
+   is not a whole CRL), and anything else must not be critical. */
+static COLD bipolar tls_parse_crl(p8 address_to bytes, positive length,
+                                  const p8 address_to serial,
+                                  positive serial_length, tls_crl address_to crl)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        byte_reader list = tls_der_value(&reader, 0x30);
+        byte_reader outer;
+        byte_reader tbs;
+        byte_reader bits;
+        p8 address_to tbs_oid = null;
+        positive tbs_oid_length = 0;
+        positive at = 0;
+        bool v2 = false;
+
+        memory_fill(crl, 0, sizeof(address_to crl));
+        if (!byte_reader_end(&reader))
+                return TLS_FAIL;
+        crl->tbs = tls_der_whole(&list, 0x30, address_of crl->tbs_length);
+        if (!crl->tbs ||
+            !tls_signature_algorithm((p8 address_to)byte_reader_here(&list),
+                                     byte_reader_left(&list), address_of at,
+                                     address_of crl->sig_oid,
+                                     address_of crl->sig_oid_length) ||
+            !byte_reader_skip(&list, at))
+                return TLS_FAIL;
+        bits = tls_der_value(&list, 0x03);
+        if (byte_reader_u8(&bits) || !byte_reader_left(&bits) ||
+            !byte_reader_end(&list))
+                return TLS_FAIL;
+        crl->sig = byte_reader_here(&bits);
+        crl->sig_length = byte_reader_left(&bits);
+
+        outer = byte_reader_open(crl->tbs, crl->tbs_length);
+        tbs = tls_der_value(&outer, 0x30);
+        if (tls_der_peek(tbs) == 0x02)
+        {
+                if (tls_der_small(&tbs, 0x02) != 1)
+                        return TLS_FAIL;
+                v2 = true;
+        }
+        at = 0;
+        if (!tls_signature_algorithm((p8 address_to)byte_reader_here(&tbs),
+                                     byte_reader_left(&tbs), address_of at,
+                                     address_of tbs_oid, address_of tbs_oid_length) ||
+            !byte_reader_skip(&tbs, at) || tbs_oid_length != crl->sig_oid_length ||
+            memory_compare(tbs_oid, crl->sig_oid, tbs_oid_length))
+                return TLS_FAIL;
+        crl->issuer = tls_der_whole(&tbs, 0x30, address_of crl->issuer_length);
+        if (!crl->issuer || !tls_der_time(&tbs, false, address_of crl->this_update))
+                return TLS_FAIL;
+        if ((tls_der_peek(tbs) == 0x17 || tls_der_peek(tbs) == 0x18) &&
+            (!tls_der_time(&tbs, false, address_of crl->next_update) ||
+             crl->next_update < crl->this_update))
+                return TLS_FAIL;
+        if (tls_der_peek(tbs) == 0x30)
+        {
+                byte_reader revoked = tls_der_value(&tbs, 0x30);
+
+                while (byte_reader_left(&revoked))
+                {
+                        byte_reader entry = tls_der_value(&revoked, 0x30);
+                        byte_reader number = tls_der_value(&entry, 0x02);
+                        p64 when = 0;
+
+                        if (crl->entries++ == TLS_CRL_ENTRIES ||
+                            !tls_der_integer(number) ||
+                            !tls_der_time(&entry, false, address_of when) ||
+                            (byte_reader_left(&entry) &&
+                             (!v2 || !tls_crl_entry_extensions(
+                                         tls_der_value(&entry, 0x30)))) ||
+                            !byte_reader_end(&entry))
+                                return TLS_FAIL;
+                        crl->listed |= tls_der_is(number, serial, serial_length);
+                }
+                if (!byte_reader_ok(&revoked))
+                        return TLS_FAIL;
+        }
+        if (tls_der_peek(tbs) == 0xa0)
+        {
+                byte_reader holder = tls_der_value(&tbs, 0xa0);
+                byte_reader extensions = tls_der_value(&holder, 0x30);
+                byte_reader oid;
+                byte_reader value;
+                bool critical = false;
+                tls_seen seen;
+
+                memory_fill(address_of seen, 0, sizeof seen);
+                if (!v2 || !byte_reader_end(&holder) || !byte_reader_left(&extensions))
+                        return TLS_FAIL;
+                while (tls_der_extension(&extensions, address_of seen, address_of oid,
+                                         address_of critical, address_of value))
+                {
+                        if (tls_der_is(oid, tls_oid_authority_key, 3))
+                        {
+                                if (tls_parse_authority_key(
+                                        (p8 address_to)byte_reader_here(&value),
+                                        byte_reader_left(&value),
+                                        address_of crl->authority_key,
+                                        address_of crl->authority_key_length))
+                                        return TLS_FAIL;
+                        }
+                        else if (tls_der_is(oid, tls_oid_crl_number, 3))
+                        {
+                                byte_reader number = tls_der_value(&value, 0x02);
+
+                                if (!tls_der_integer(number) ||
+                                    (tls_der_peek(number) & 0x80) ||
+                                    byte_reader_left(&number) > 21 ||
+                                    !byte_reader_end(&value))
+                                        return TLS_FAIL;
+                        }
+                        else if (tls_der_is(oid, tls_oid_crl_scope, 3))
+                        {
+                                if (tls_parse_crl_scope(byte_reader_here(&value),
+                                                        byte_reader_left(&value),
+                                                        address_of crl->scope))
+                                        return TLS_FAIL;
+                        }
+                        else if (critical || tls_der_is(oid, tls_oid_delta_crl, 3))
+                                return TLS_FAIL;
+                }
+                if (!byte_reader_end(&extensions))
+                        return TLS_FAIL;
+        }
+        return byte_reader_end(&tbs) && byte_reader_end(&outer) ? TLS_OK : TLS_FAIL;
+}
+
+/* Whether a CRL of this scope answers for cert, which named the distribution
+   point it was fetched from (RFC 5280 6.3.3 (b)(2)): a CRL without one is
+   whole; one with one covers no reasons partly, is no indirect CRL, holds
+   the kind of certificate cert is (a CA's or an end entity's), and when it
+   names a point shares a name with cert's. A relative name is not read, so
+   it covers nothing. */
+static COLD bool tls_crl_covers(const tls_crl_scope address_to scope,
+                                const tls_cert address_to cert)
+{
+        if (!scope->present)
+                return true;
+        if (scope->relative || scope->some_reasons || scope->indirect ||
+            scope->attribute_only || (scope->user_only && cert->ca) ||
+            (scope->ca_only && !cert->ca))
+                return false;
+        return !scope->names ||
+               (cert->crl_names &&
+                tls_general_names_meet(
+                    byte_reader_open(scope->names, scope->names_length),
+                    byte_reader_open(cert->crl_names, cert->crl_names_length)));
+}
+
+/* Whether a revocation answer issued at this_update and good until
+   next_update holds now, allowing TLS_REVOCATION_SKEW seconds of clock
+   difference either way (OpenSSL's OCSP_check_validity allows the same five
+   minutes): issued no later than now, not yet past its next, and naming a
+   next at all -- one that names none (RFC 6960 4.2.2.1, RFC 5280 5.1.2.5)
+   cannot be told stale, and both CA/Browser Forum profiles require it. */
+#define TLS_REVOCATION_SKEW 300
+
+static COLD bool tls_revocation_fresh(p64 this_update, p64 next_update, p64 now)
+{
+        p64 at = tls_date_seconds(now);
+
+        return next_update && this_update <= next_update &&
+               tls_date_seconds(this_update) <= at + TLS_REVOCATION_SKEW &&
+               at <= tls_date_seconds(next_update) + TLS_REVOCATION_SKEW;
+}
+
+/* A DER header for contents of length bytes at out: its size, which
+   tls_der_header_size says without writing. */
+static COLD positive tls_der_header_size(positive length)
+{
+        return length < 0x80 ? 2 : length < 0x100 ? 3 : length < 0x10000 ? 4 : 5;
+}
+
+static COLD positive tls_der_header(p8 address_to out, p8 tag, positive length)
+{
+        positive size = tls_der_header_size(length);
+
+        out[0] = tag;
+        if (size == 2)
+                out[1] = (p8)length;
+        else
+        {
+                out[1] = (p8)(0x80 | (size - 2));
+                for (positive k = 2; k < size; k++)
+                        out[k] = (p8)(length >> (8 * (size - 1 - k)));
+        }
+        return size;
+}
+
+/* The SubjectPublicKey BIT STRING contents of a key, past the unused-bits
+   octet: what an OCSP issuerKeyHash and a byKey responder hash. A served
+   certificate's own bytes; for an anchor, which carries none, the same
+   bytes rebuilt -- 04 X Y for a curve, the RSAPublicKey SEQUENCE for RSA --
+   which DER makes the one spelling of that key. The length in out, or 0
+   when room is short or the key is none of these. */
+static COLD positive tls_key_bits(const tls_cert address_to cert,
+                                  p8 address_to out, positive room)
+{
+        positive coord = cert->curve == 1 ? 32 : 48;
+        positive skip = 0;
+        positive magnitude;
+        positive modulus;
+        positive power = 0;
+        positive exponent;
+        positive inner;
+        positive at;
+        p8 bytes[8];
+
+        if (cert->key_bits)
+        {
+                if (cert->key_bits_length > room)
+                        return 0;
+                memory_copy(out, cert->key_bits, cert->key_bits_length);
+                return cert->key_bits_length;
+        }
+        if (cert->curve == 1 || cert->curve == 2)
+        {
+                if (room < 1 + 2 * coord)
+                        return 0;
+                out[0] = 4;
+                memory_copy(out + 1, cert->qx + 48 - coord, coord);
+                memory_copy(out + 1 + coord, cert->qy + 48 - coord, coord);
+                return 1 + 2 * coord;
+        }
+        if (cert->curve != 3 || !cert->modulus_length || !cert->exponent ||
+            cert->modulus_length > sizeof cert->modulus)
+                return 0;
+        while (skip + 1 < cert->modulus_length && !cert->modulus[skip])
+                skip++;
+        magnitude = cert->modulus_length - skip;
+        modulus = magnitude + (cert->modulus[skip] >> 7);
+        for (p64 rest = cert->exponent; rest; rest >>= 8)
+                bytes[7 - power++] = (p8)rest;
+        exponent = power + (bytes[8 - power] >> 7);
+        inner = tls_der_header_size(modulus) + modulus +
+                tls_der_header_size(exponent) + exponent;
+        if (tls_der_header_size(inner) + inner > room)
+                return 0;
+        at = tls_der_header(out, 0x30, inner);
+        at += tls_der_header(out + at, 0x02, modulus);
+        if (modulus > magnitude)
+                out[at++] = 0;
+        memory_copy(out + at, cert->modulus + skip, magnitude);
+        at += magnitude;
+        at += tls_der_header(out + at, 0x02, exponent);
+        if (exponent > power)
+                out[at++] = 0;
+        memory_copy(out + at, bytes + 8 - power, power);
+        return at + power;
 }
 
 /* An anchor's key laid out the way tls_parse_cert lays out a served one. */
@@ -7709,40 +9291,43 @@ static COLD bool tls_verify_one(tls_cert address_to child, tls_cert address_to i
 
 /* The last certificate served names its issuer.  Each anchor with that
    subject Name is tried, and one signature that verifies ends the chain; a
-   Name no anchor carries fails without any signature check. */
-static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from)
+   Name no anchor carries fails without any signature check. The anchor that
+   signed goes to signer when there is one to fill: its key is what the
+   child's revocation answers are verified under. */
+static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from,
+                                     tls_cert address_to signer)
 {
         p8 digest[32];
+        tls_cert root;
 
         if (!child->issuer || !child->issuer_length)
                 return false;
 #ifdef TLS_BENCH_ANCHOR
-        {
-                tls_cert root;
-
-                memory_fill(address_of root, 0, sizeof(root));
-                root.curve = 2;
-                memory_copy(root.qx, tls_bench_anchor_x, 48);
-                memory_copy(root.qy, tls_bench_anchor_y, 48);
-                if (!tls_bench_distrusts(leaf_from) &&
-                    tls_verify_one(child, address_of root))
-                        return true;
-        }
+        memory_fill(address_of root, 0, sizeof(root));
+        root.curve = 2;
+        memory_copy(root.qx, tls_bench_anchor_x, 48);
+        memory_copy(root.qy, tls_bench_anchor_y, 48);
+        if (!tls_bench_distrusts(leaf_from) &&
+            tls_verify_one(child, address_of root))
+                goto signed_by;
 #endif
         crypto_sha256_of(child->issuer, child->issuer_length, digest);
         for (positive i = 0; i < array_count(tls_anchors); i++)
         {
-                tls_cert root;
-
                 if (memory_compare(tls_anchors[i].name, digest, 8) ||
                     tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
                 if (tls_verify_one(child, address_of root))
-                        return true;
+                        goto signed_by;
         }
 
         return false;
+
+signed_by:
+        if (signer)
+                address_to signer = root;
+        return true;
 }
 
 static COLD fn tls_keep_leaf(tls_conn address_to tls, tls_cert address_to leaf)
@@ -7766,9 +9351,79 @@ static COLD fn tls_keep_leaf(tls_conn address_to tls, tls_cert address_to leaf)
         }
 }
 
-static COLD bool tls_date_now(p64 address_to value)
+/*
+        Whether the clock can be believed at all, before anything asks what
+        it says.
+
+        A certificate is only as current as the clock that judges it, and a
+        clock that nobody set reads 1970, or whatever a dead RTC battery
+        left, which is earlier than the certificate's own notBefore on the
+        one hand and, rolled back on purpose, earlier than an expired
+        certificate's notAfter on the other. So the clock has a floor, the
+        later of two moments this system already knows it is past:
+
+            MOONWATER_CLOCK_FLOOR, the date of the source this was built
+            from, which the SNTP client also refuses to step below (it is
+            SNTP_WALL_LEAST there), moved forward with each release so that
+            nothing older than the code counts as now; and
+
+            /root/clock.good, the latest time this machine knew for sure:
+            an authenticated (NTS) answer's own time, or the floor the boot
+            began with plus the seconds it has run (locale_clock_persist).
+            A file that is not a decimal number of seconds between the
+            build floor and the end of the NTP window, or that is not a
+            plain file (a link, a FIFO), is ignored, so a damaged or planted
+            one can only fail to help, never push the floor out of reach of
+            a real clock. Deleting it is always safe. A program that cannot
+            read /root (anyone but root) judges by the build's floor alone.
+
+        A clock below the floor is not wrong by some amount, it is unset:
+        tls_date_now refuses it and the connection says so, with how to
+        fix it, instead of judging dates against a number that means
+        nothing. The real time comes from `moonwater time sync` (NTS first,
+        plain NTP if no server offers it), or by hand with `date -s`.
+*/
+#ifndef MOONWATER_CLOCK_FLOOR
+#define MOONWATER_CLOCK_FLOOR 1790812800ll /* 2026-10-01 */
+#endif
+#ifndef CLOCK_GOOD_PATH
+#define CLOCK_GOOD_PATH "/root/clock.good"
+#endif
+//      SNTP_WALL_MOST, the last second an NTP stamp can carry (2104-02-26).
+#define CLOCK_GOOD_MOST 4233462143ll
+
+//      The floor a confined child read before its filter went on (net_apart),
+//      since it may not open the file after; 0 everywhere else.
+static p64 clock_floor_held;
+
+//      The floor, in seconds since the epoch: the build's, or the
+//      persisted last-known-good time when that is later.
+static COLD p64 clock_trust_floor(void)
 {
-        time_t stamp = time(null);
+        p8 text[24];
+        bipolar got;
+        p64 value = 0;
+        positive at = 0;
+
+        if (clock_floor_held)
+                return clock_floor_held;
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)CLOCK_GOOD_PATH,
+                                    text, sizeof(text), O_NOFOLLOW);
+        if (got < 1 || got > 12)
+                return MOONWATER_CLOCK_FLOOR;
+        while (at < (positive)got && text[at] >= '0' && text[at] <= '9')
+                value = value * 10 + (p64)(text[at++] - '0');
+        while (at < (positive)got && text[at] == '\n')
+                at++;
+        if (!at || at != (positive)got || value < MOONWATER_CLOCK_FLOOR ||
+            value > CLOCK_GOOD_MOST)
+                return MOONWATER_CLOCK_FLOOR;
+        return value;
+}
+
+//      A moment as a certificate's dates are kept: YYYYMMDDHHMMSS.
+static COLD bool tls_date_of(time_t stamp, p64 address_to value)
+{
         tm calendar;
         p64 answer;
 
@@ -7782,6 +9437,21 @@ static COLD bool tls_date_now(p64 address_to value)
         answer = answer * 100 + (p64)calendar.tm_sec;
         address_to value = answer;
         return true;
+}
+
+static COLD bool tls_date_now(p64 address_to value)
+{
+        time_t stamp = time(null);
+
+        return stamp >= 0 && (p64)stamp >= clock_trust_floor() &&
+               tls_date_of(stamp, value);
+}
+
+/* The date the floor is, for the connection that has to go ahead on a clock
+   it cannot yet believe (tls->clock_bootstrap). */
+static COLD bool tls_date_floor(p64 address_to value)
+{
+        return tls_date_of((time_t)clock_trust_floor(), value);
 }
 
 static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)
@@ -7917,12 +9587,74 @@ static COLD bool tls_certificate_body_open(p8 address_to body,
         return byte_reader_end(&reader);
 }
 
+/* A CertificateEntry's extensions (RFC 8446 4.4.2): none, or -- when the
+   hello offered status_request -- that one alone, a CertificateStatus (RFC
+   6066 8) of status_type ocsp and an OCSPResponse of at least a byte, filling
+   the extension. The response is handed back unread (only the leaf's is
+   read, by tls_ocsp_answer); an SCT list or any other kind answers nothing
+   this client asked, and OpenSSL refuses the two it knows too. */
+static COLD bool tls_entry_status(const p8 address_to bytes, positive length,
+                                  bool asked,
+                                  const p8 address_to address_to response,
+                                  positive address_to response_length)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        byte_reader status;
+        byte_reader answer;
+
+        address_to response = null;
+        address_to response_length = 0;
+        if (!length)
+                return true;
+        if (!asked || byte_reader_u16(&reader) != 5)
+                return false;
+        status = byte_reader_vector16(&reader);
+        if (!byte_reader_end(&reader) || byte_reader_u8(&status) != 1)
+                return false;
+        answer = byte_reader_vector24(&status);
+        if (!byte_reader_end(&status) || !byte_reader_left(&answer))
+                return false;
+        address_to response = byte_reader_here(&answer);
+        address_to response_length = byte_reader_left(&answer);
+        return true;
+}
+
 /* The issuer certificate a caIssuers URL names, fetched into room over the
    HTTP client (defined there, beside it): its length, or 0. */
 #define TLS_AIA_MAX 16384
 
 static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                                    p8 address_to into, positive room);
+
+/* Whether the certificates on a verified path are revoked, as their issuers
+   answer, which tls_verify_chain asks last: defined with the HTTP client,
+   beside the CRL fetch. */
+static COLD bool tls_revocation_holds(tls_conn address_to tls,
+                                      tls_cert address_to certs,
+                                      const positive address_to path,
+                                      positive depth, tls_cert address_to top,
+                                      const p8 address_to staple,
+                                      positive staple_length, p64 now);
+
+/* Whether a verified path's leaf was logged as Certificate Transparency
+   asks, which the tight tier holds a public root's chain to: defined beside
+   the revocation checks. */
+static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_to path,
+                              positive depth, tls_cert address_to top);
+
+/* A path to an anchor: logged where the tier asks, then not revoked. */
+static COLD bool tls_trust_holds(tls_conn address_to tls, tls_cert address_to certs,
+                                 const positive address_to path, positive depth,
+                                 tls_cert address_to top, const p8 address_to staple,
+                                 positive staple_length, p64 now)
+{
+        if (MOONWATER_STRICT_NET >= STRICT_TIGHT && !tls_ct_holds(certs, path, depth, top))
+        {
+                tls->fault = TLS_FAULT_UNLOGGED;
+                return false;
+        }
+        return tls_revocation_holds(tls, certs, path, depth, top, staple, staple_length, now);
+}
 
 /* The leaf comes first; the rest is a pool, as RFC 8446 section 4.4.2 asks
    clients to treat it. Of 640 public HTTPS hosts openssl verified on
@@ -7946,11 +9678,16 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
    certificate names in its caIssuers location is fetched once
    (tls_aia_fetch) and joins the pool as one more candidate, held to every
    test a served one is. A fetched certificate's own missing issuer is not
-   fetched in turn. */
+   fetched in turn.
+
+   A path that ends at an anchor is then asked about revocation
+   (tls_revocation_holds): the leaf by the OCSP response stapled in its
+   entry or by its CRL, each certificate above it by its CRL. */
 static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                              string_address host, tls_conn address_to tls)
 {
         tls_cert certs[9];
+        tls_cert root;
         positive path[9] = {0};
         p8 fetched[TLS_AIA_MAX];
         positive count = 0;
@@ -7960,21 +9697,36 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         positive depth = 0;
         p64 now = 0;
         bool asked = false;
+        const p8 address_to staple = null;
+        positive staple_length = 0;
+        bool unset = false;
+        p64 leaf_from;
 
         if (!tls_certificate_body_open(body, body_length, address_of list))
                 return false;
 
         //      Each entry is a certificate and its extensions, which can only
         //      answer what a ClientHello asked for (RFC 8446 4.2, 4.4.2): an
-        //      OCSP status or an SCT list, neither of which this client asks
-        //      for, so an entry with any is refused, as OpenSSL refuses both.
+        //      OCSP status when the hello offered status_request, and nothing
+        //      else (tls_entry_status).
         while (byte_reader_left(&list) && count < 8)
         {
                 byte_reader entry = byte_reader_vector24(&list);
                 byte_reader extensions = byte_reader_vector16(&list);
+                const p8 address_to status = null;
+                positive status_length = 0;
 
-                if (!byte_reader_ok(&list) || byte_reader_left(&extensions))
+                if (!byte_reader_ok(&list) ||
+                    !tls_entry_status(byte_reader_here(&extensions),
+                                      byte_reader_left(&extensions),
+                                      tls->status_requested, address_of status,
+                                      address_of status_length))
                         return false;
+                if (!count)
+                {
+                        staple = status;
+                        staple_length = status_length;
+                }
                 if (tls_parse_cert((p8 address_to)byte_reader_here(&entry),
                                    byte_reader_left(&entry), certs + count,
                                    count ? null : host))
@@ -7989,6 +9741,9 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!count || byte_reader_left(&list))
                 return false;
 
+        //      The leaf's own notBefore, for Mozilla's distrust-after dates,
+        //      whatever the clock's judgement does to the copy below.
+        leaf_from = certs[0].not_before;
         tls_keep_leaf(tls, certs);
 
         if (tls->check_cert && !certs[0].san_match)
@@ -7999,14 +9754,39 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls->check_cert)
                 return true;
 
-        if (!tls_date_now(address_of now))
+        if (tls->clock_bootstrap)
+        {
+                /* The connection that will say what time it is cannot be
+                   judged by the time it has not yet said, whether the clock
+                   is unset or only wrong (an RTC two years out reads every
+                   certificate expired). It is judged as of the floor: the
+                   certificate has to be unexpired on the day this system
+                   was built or last sure (an old, stolen one is not), and
+                   notBefore is not asked, since a short-lived certificate
+                   was issued after that day and the clock cannot say when
+                   it is now. chrony's nocerttimecheck does the same, with
+                   no floor at all. The caller asks for this only until an
+                   authenticated answer has been taken this boot. */
+                if (!tls_date_floor(address_of now))
+                {
+                        tls->fault = TLS_FAULT_CLOCK;
+                        return false;
+                }
+                unset = true;
+                for (positive at = 0; at < count; at++)
+                        certs[at].not_before = 0;
+        }
+        else if (!tls_date_now(address_of now))
+        {
+                tls->fault = TLS_FAULT_CLOCK;
                 return false;
+        }
         if (certs[0].not_before > now)
                 tls->fault = TLS_FAULT_EARLY;
         else if (certs[0].not_after < now)
                 tls->fault = TLS_FAULT_LATE;
         if (!tls_leaf_authorized(certs, now) ||
-            tls_spki_is_anchor(certs, certs[0].not_before))
+            tls_spki_is_anchor(certs, leaf_from))
                 return false;
         for (;;)
         {
@@ -8018,7 +9798,7 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                             tls_certificate_names_chain(certs + child,
                                                         certs + next) &&
                             ((anchor = tls_spki_is_anchor(certs + next,
-                                                          certs[0].not_before)) ||
+                                                          leaf_from)) ||
                              tls_issuer_authorized(certs + next, depth, now)) &&
                             tls_verify_one(certs + child, certs + next) &&
                             tls_path_permitted(certs, path, depth + 1,
@@ -8028,9 +9808,11 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                 {
                         positive length;
 
-                        if (tls_anchor_verifies(certs + child,
-                                                certs[0].not_before))
-                                return true;
+                        if (tls_anchor_verifies(certs + child, leaf_from,
+                                                address_of root))
+                                return tls_trust_holds(tls, certs, path, depth,
+                                                       address_of root, staple,
+                                                       staple_length, now);
                         if (asked || !certs[child].ca_issuers)
                                 return false;
                         asked = true;
@@ -8040,27 +9822,18 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                         if (!length || tls_parse_cert(fetched, length,
                                                       certs + count, null))
                                 return false;
+                        if (unset)
+                                certs[count].not_before = 0;
                         count++;
                         continue;
                 }
                 if (anchor)
-                        return true;
+                        return tls_trust_holds(tls, certs, path, depth, certs + next,
+                                               staple, staple_length, now);
                 unusable |= (positive)1 << next;
                 child = next;
                 path[++depth] = next;
         }
-}
-
-static COLD bool tls_hello_append(p8 address_to out, positive room,
-                             positive address_to at,
-                             const p8 address_to bytes, positive length)
-{
-        if (address_to at > room || length > room - address_to at)
-                return false;
-
-        memory_copy(out + address_to at, bytes, length);
-        address_to at += length;
-        return true;
 }
 
 /* A key share on one of the groups supported_groups names, as its group
@@ -8150,12 +9923,21 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
             0, 0x2b, 0, 5, 4, 0x03, 0x04, 0x03, 0x03,
             0, 0x0d, 0, 12, 0, 10, 0x04, 0x03, 0x05, 0x03, 0x08, 0x04,
             0x04, 0x01, 0x05, 0x01};
+        /* status_request (RFC 6066 8): OCSP, no responder named, no request
+           extensions. Only when the chain is checked: a staple is read for
+           revocation alone, so an unchecked connection asks for none and
+           keeps refusing one. */
+        static const p8 status_request[] = {0, 5, 0, 5, 1, 0, 0, 0, 0};
+        /* The same, with TLS 1.3 alone on offer, for a connection that may
+           not be TLS 1.2 (tls->alpn): supported_versions is the first nine
+           bytes of tail. */
+        static const p8 only_thirteen[] = {0, 0x2b, 0, 3, 2, 0x03, 0x04};
         p8 share[10 + 97];
         positive share_length;
         positive host_length = string_length(tls->host);
+        byte_store hello = {out, room, 0};
         bool letter = false;
         bool colon = false;
-        positive at = 0;
         positive ext_len_at;
         bipolar status = TLS_FAIL;
 
@@ -8173,13 +9955,13 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         network_store_16(share + 6, tls->group);
         network_store_16(share + 8, (p16)share_length);
 
-        if (!tls_hello_append(out, room, address_of at, prefix, sizeof prefix) ||
-            !tls_hello_append(out, room, address_of at, tls->client_random, 32) ||
-            !tls_hello_append(out, room, address_of at, parameters,
-                              sizeof parameters))
+        if (!byte_store_append_exact(address_of hello, prefix, sizeof prefix) ||
+            !byte_store_append_exact(address_of hello, tls->client_random, 32) ||
+            !byte_store_append_exact(address_of hello, parameters,
+                                     sizeof parameters))
                 goto done;
 
-        ext_len_at = at - 2;
+        ext_len_at = hello.used - 2;
 
         /* server_name names a DNS host (RFC 6066 3): an absolute name
            without its trailing dot, and never an address -- nothing with a
@@ -8202,11 +9984,10 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                     (p8)((n - 2) >> 8), (p8)(n - 2), 0,
                     (p8)(host_length >> 8), (p8)host_length};
 
-                if (!tls_hello_append(out, room, address_of at, sni,
-                                      sizeof sni) ||
-                    !tls_hello_append(out, room, address_of at,
-                                      (const p8 address_to)tls->host,
-                                      host_length))
+                if (!byte_store_append_exact(address_of hello, sni,
+                                             sizeof sni) ||
+                    !byte_store_append_exact(address_of hello, tls->host,
+                                             host_length))
                         goto done;
         }
 
@@ -8216,31 +9997,58 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
                               (p8)cookie_length};
 
                 if (cookie_length > 0xffff ||
-                    !tls_hello_append(out, room, address_of at, head,
-                                      sizeof head) ||
-                    !tls_hello_append(out, room, address_of at, cookie,
-                                      cookie_length))
+                    !byte_store_append_exact(address_of hello, head,
+                                             sizeof head) ||
+                    !byte_store_append_exact(address_of hello, cookie,
+                                             cookie_length))
                         goto done;
         }
 
-        if (!tls_hello_append(out, room, address_of at, groups, sizeof groups) ||
-            !tls_hello_append(out, room, address_of at, share,
-                              10 + share_length) ||
-            !tls_hello_append(out, room, address_of at, tail, sizeof tail))
+        /* application_layer_protocol_negotiation (RFC 7301 3.1): one
+           protocol name, only when the caller names one. */
+        if (tls->alpn_length)
+        {
+                positive n = 3 + tls->alpn_length;
+                p8 head[] = {0, 0x10, (p8)(n >> 8), (p8)n,
+                             (p8)((n - 2) >> 8), (p8)(n - 2),
+                             (p8)tls->alpn_length};
+
+                if (tls->alpn_length > 32 ||
+                    !byte_store_append_exact(address_of hello, head,
+                                             sizeof head) ||
+                    !byte_store_append_exact(address_of hello, tls->alpn,
+                                             tls->alpn_length))
+                        goto done;
+        }
+
+        if (!byte_store_append_exact(address_of hello, groups, sizeof groups) ||
+            !byte_store_append_exact(address_of hello, share,
+                                     10 + share_length) ||
+            (tls->alpn_length
+                 ? !byte_store_append_exact(address_of hello, only_thirteen,
+                                            sizeof only_thirteen) ||
+                       !byte_store_append_exact(address_of hello, tail + 9,
+                                                sizeof tail - 9)
+                 : !byte_store_append_exact(address_of hello, tail,
+                                            sizeof tail)) ||
+            (tls->check_cert &&
+             !byte_store_append_exact(address_of hello, status_request,
+                                      sizeof status_request)))
                 goto done;
+        tls->status_requested = tls->check_cert;
 
         {
-                positive ext_length = at - ext_len_at - 2;
+                positive ext_length = hello.used - ext_len_at - 2;
                 network_store_16(out + ext_len_at, (p16)ext_length);
         }
         {
-                positive body = at - 4;
+                positive body = hello.used - 4;
                 out[1] = (p8)(body >> 16);
                 out[2] = (p8)(body >> 8);
                 out[3] = (p8)body;
         }
 
-        address_to used = at;
+        address_to used = hello.used;
         status = TLS_OK;
 
 done:
@@ -8269,8 +10077,11 @@ static const p8 tls_retry_random[32] = {
    secret (RFC 7627) and an empty renegotiation_info (RFC 5746) required,
    point formats that include uncompressed, a session id the server may
    choose; and never the random's downgrade sentinel, since TLS 1.3 was on
-   offer (RFC 8446 4.1.3). Each version refuses the other's extensions.
-   Both record the server's random. */
+   offer (RFC 8446 4.1.3). An empty status_request when the hello offered
+   one says a CertificateStatus may follow the Certificate (RFC 6066 8),
+   which tls->status_echoed records; TLS 1.3 carries the staple in the
+   Certificate instead, so its ServerHello may not echo it. Each version
+   refuses the other's extensions. Both record the server's random. */
 static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                                      tls_conn address_to tls,
                                      p8 address_to peer, positive room,
@@ -8321,19 +10132,21 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
         {
                 positive id = byte_reader_u16(&extensions);
                 byte_reader data = byte_reader_vector16(&extensions);
-                positive bit = 7;
+                positive bit = 8;
 
                 if (!byte_reader_ok(&extensions))
                         return TLS_FAIL;
-                /* One bit a kind this client offered, in kinds' order and
-                   renegotiation_info last; any other kind, or one twice,
-                   fails. */
+                /* One bit a kind this client offered, in kinds' order,
+                   renegotiation_info and then status_request last; any
+                   other kind, or one twice, fails. */
                 for (positive kind = 0; kind < sizeof kinds; kind++)
                         if (id == kinds[kind])
                                 bit = kind;
                 if (id == 0xff01)
                         bit = 6;
-                if (bit == 7 || seen >> bit & 1)
+                if (id == 0x0005 && tls->status_requested)
+                        bit = 7;
+                if (bit == 8 || seen >> bit & 1)
                         return TLS_FAIL;
                 seen |= (positive)1 << bit;
 
@@ -8392,7 +10205,8 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 }
                 else if ((id == 0x0000 &&
                           (byte_reader_left(&data) || !tls->named)) ||
-                         (id == 0x0017 && byte_reader_left(&data)) ||
+                         ((id == 0x0017 || id == 0x0005) &&
+                          byte_reader_left(&data)) ||
                          (id == 0xff01 &&
                           (byte_reader_u8(&data) || !byte_reader_end(&data))))
                         return TLS_FAIL;
@@ -8415,6 +10229,7 @@ static COLD bipolar tls_server_hello_keys(p8 address_to hello, positive length,
                 return TLS_FAIL;
         tls->tls12 = true;
         tls->suite = (p16)suite;
+        tls->status_echoed = (seen >> 7 & 1) != 0;
         return TLS_OK;
 }
 
@@ -8501,6 +10316,9 @@ static COLD fn tls_derive_app_keys(tls_conn address_to tls)
                           tls->c_ap_traffic);
         tls_derive_secret(master, "s ap traffic", address_of tls->transcript,
                           tls->s_ap_traffic);
+        if (tls->alpn_length)
+                tls_derive_secret(master, "exp master",
+                                  address_of tls->transcript, tls->exporter);
 
         crypto_forget(derived, sizeof derived);
         crypto_forget(master, sizeof master);
@@ -8716,13 +10534,16 @@ static COLD bipolar tls_check_cert_verify(tls_conn address_to tls, p8 address_to
 #define TLS_SERVER_FLIGHT_FINISHED 4
 #define TLS_SERVER_FLIGHT_COMPLETE 5
 #define TLS12_FLIGHT_CERTIFICATE 6
-#define TLS12_FLIGHT_FINISHED 10
-#define TLS12_FLIGHT_COMPLETE 11
+#define TLS12_FLIGHT_FINISHED 11
+#define TLS12_FLIGHT_COMPLETE 12
 
 /* This client offers no PSK and resumes nothing, so each version's server
    flight has one legal shape, in which only a CertificateRequest is
-   optional: TLS 1.3's from EncryptedExtensions, TLS 1.2's from Certificate
-   to ServerHelloDone and, after the client's flight, Finished. A zero ends
+   optional, and in TLS 1.2 a CertificateStatus after the Certificate (which
+   tls_flight_message takes only when the ServerHello echoed
+   status_request): TLS 1.3's from EncryptedExtensions, TLS 1.2's from
+   Certificate to ServerHelloDone and, after the client's flight, Finished. A
+   zero ends
    each, so neither version's walk reaches the other's messages. Keeping
    the shapes in one transition function prevents a duplicate message from
    overwriting parsed certificate state or an early Finished from
@@ -8739,6 +10560,7 @@ static COLD bool tls_server_flight_step(p8 address_to state, p8 type)
             TLS_HS_FINISHED,
             0,
             TLS_HS_CERTIFICATE,
+            TLS_HS_CERTIFICATE_STATUS | 0x80,
             TLS_HS_SERVER_KEY_EXCHANGE,
             TLS_HS_CERT_REQUEST | 0x80,
             TLS_HS_SERVER_HELLO_DONE,
@@ -8802,6 +10624,36 @@ static COLD bool tls_encrypted_extensions_valid(p8 address_to body,
         return true;
 }
 
+/* What EncryptedExtensions says about the application protocol (RFC 7301
+   3.1): when one was offered, exactly that one, named once. */
+static COLD bool tls_alpn_named(const tls_conn address_to tls,
+                                p8 address_to body, positive length)
+{
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader list = byte_reader_vector16(&reader);
+
+        while (byte_reader_left(&list))
+        {
+                p16 kind = byte_reader_u16(&list);
+                byte_reader value = byte_reader_vector16(&list);
+
+                if (!byte_reader_ok(&list))
+                        return false;
+                if (kind == 0x0010)
+                {
+                        byte_reader names = byte_reader_vector16(&value);
+                        byte_reader name = byte_reader_vector8(&names);
+
+                        return byte_reader_end(&value) && byte_reader_end(&names) &&
+                               byte_reader_ok(&name) &&
+                               byte_reader_left(&name) == tls->alpn_length &&
+                               !memory_compare(byte_reader_here(&name),
+                                               tls->alpn, tls->alpn_length);
+                }
+        }
+        return false;
+}
+
 static COLD bool tls_new_session_ticket_valid(p8 address_to body,
                                          positive length)
 {
@@ -8850,11 +10702,6 @@ static COLD bipolar tls_key_update_until(
                            address_of tls->seq_write);
         tls->update_asked |= ask;
         return TLS_OK;
-}
-
-static COLD bipolar tls_key_update(tls_conn address_to tls, bool ask)
-{
-        return tls_key_update_until(tls, ask, null);
 }
 
 /* This client does not resume sessions, but servers commonly send tickets:
@@ -8923,18 +10770,22 @@ static COLD bipolar tls_post_handshake_append_until(
         return TLS_OK;
 }
 
-static COLD bipolar tls_post_handshake_append(tls_conn address_to tls,
-                                             p8 address_to fragment,
-                                             positive length)
+/* The relaid list in into through the one chain check, and then the leaf's
+   key has to be the kind the suite signs with. */
+static COLD bool tls12_chain(tls_conn address_to tls, p8 address_to into)
 {
-        return tls_post_handshake_append_until(tls, fragment, length, null);
+        tls->chain_pending = false;
+        return tls_verify_chain(into, 4 + tls_load_24(into + 1), tls->host, tls) &&
+               (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
 }
 
 /* A TLS 1.2 Certificate is the list alone, each entry without
    extensions. Laid out again as TLS 1.3's -- an empty context, two empty
    extension bytes after each certificate -- in into, which has room for
-   5 + TLS_PLAINTEXT_MAX bytes, it goes through the one chain check; then
-   the leaf's key has to be the kind the suite signs with. */
+   5 + TLS_PLAINTEXT_MAX bytes, it goes through the one chain check
+   (tls12_chain). When the server echoed status_request the check waits for
+   the message after: a CertificateStatus (tls12_certificate_status), or
+   ServerKeyExchange with no staple. */
 static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
                                    positive length, p8 address_to into)
 {
@@ -8964,8 +10815,54 @@ static COLD bool tls12_certificate(tls_conn address_to tls, p8 address_to body,
         }
         into[1] = (p8)((out.used - 4) >> 16);
         network_store_16(into + 2, (p16)(out.used - 4));
-        return tls_verify_chain(into, out.used, tls->host, tls) &&
-               (tls->leaf_curve == 3) == (tls->suite == 0xc02f);
+        if (tls->status_echoed)
+        {
+                tls->chain_pending = true;
+                return true;
+        }
+        return tls12_chain(tls, into);
+}
+
+/* A TLS 1.2 CertificateStatus (RFC 6066 8), after the Certificate of a
+   server that echoed status_request: status_type ocsp and a response of at
+   least a byte, the whole body. The response goes into the relaid list as
+   the leaf's CertificateEntry status_request extension, the way TLS 1.3
+   sends it, and the chain is checked with it there. */
+static COLD bool tls12_certificate_status(tls_conn address_to tls,
+                                          p8 address_to body, positive length,
+                                          p8 address_to into)
+{
+        byte_reader reader = byte_reader_open(body, length);
+        byte_reader answer;
+        positive used;
+        positive leaf;
+        positive size;
+        positive extension;
+
+        if (!tls->chain_pending || byte_reader_u8(&reader) != 1)
+                return false;
+        answer = byte_reader_vector24(&reader);
+        size = byte_reader_left(&answer);
+        used = 4 + tls_load_24(into + 1);
+        //      The leaf's two extension length bytes, after its certificate;
+        //      a list with no leaf has none to fill.
+        leaf = used >= 9 ? 7 + tls_load_24(into + 4) : used;
+        extension = 4 + 1 + 3 + size;
+        if (!byte_reader_end(&reader) || !size || extension > 0xffff ||
+            leaf + 2 > used || extension > 5 + TLS_PLAINTEXT_MAX - used)
+                return false;
+        memory_copy(into + leaf + 2 + extension, into + leaf + 2, used - leaf - 2);
+        network_store_16(into + leaf, (p16)extension);
+        network_store_16(into + leaf + 2, 5);
+        network_store_16(into + leaf + 4, (p16)(extension - 4));
+        into[leaf + 6] = 1;
+        into[leaf + 7] = (p8)(size >> 16);
+        network_store_16(into + leaf + 8, (p16)size);
+        memory_copy(into + leaf + 10, byte_reader_here(&answer), size);
+        used += extension;
+        into[1] = (p8)((used - 4) >> 16);
+        network_store_16(into + 2, (p16)(used - 4));
+        return tls12_chain(tls, into);
 }
 
 /* ServerKeyExchange (RFC 8422 5.4): a named curve this client offered and a
@@ -9046,7 +10943,11 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
 
         if (msg[0] == TLS_HS_ENCRYPTED_EXTS)
                 valid = tls_encrypted_extensions_valid(
-                    body, body_length, (positive)1 << 0x000a | tls->named);
+                            body, body_length,
+                            (positive)1 << 0x000a | tls->named |
+                                (tls->alpn_length ? (positive)1 << 0x0010 : 0)) &&
+                        (!tls->alpn_length ||
+                         tls_alpn_named(tls, body, body_length));
         else if (msg[0] == TLS_HS_CERT_REQUEST)
                 //      TLS 1.3's has an empty context, then extensions.
                 valid = tls->cert_requested =
@@ -9066,8 +10967,27 @@ static COLD bipolar tls_flight_message(tls_conn address_to tls,
                                                       tls->host, tls);
                 tls->untrusted = tls->check_cert && !valid;
         }
+        //      A TLS 1.2 check that waited for a staple runs at the
+        //      CertificateStatus, or with none at ServerKeyExchange; a
+        //      CertificateStatus nothing waited for is refused.
+        else if (msg[0] == TLS_HS_CERTIFICATE_STATUS)
+        {
+                bool waited = tls->chain_pending;
+
+                valid = tls12_certificate_status(tls, body, body_length, scratch);
+                tls->untrusted = tls->check_cert && !valid && waited &&
+                                 !tls->chain_pending;
+        }
         else if (msg[0] == TLS_HS_SERVER_KEY_EXCHANGE)
-                valid = tls12_key_exchange(tls, body, body_length);
+        {
+                valid = true;
+                if (tls->chain_pending)
+                {
+                        valid = tls12_chain(tls, scratch);
+                        tls->untrusted = tls->check_cert && !valid;
+                }
+                valid = valid && tls12_key_exchange(tls, body, body_length);
+        }
         else if (msg[0] == TLS_HS_SERVER_HELLO_DONE)
                 valid = !body_length;
         else if (msg[0] == TLS_HS_CERT_VERIFY)
@@ -9210,6 +11130,7 @@ static COLD bipolar tls_handshake(
         const p8 address_to cookie = null;
         positive cookie_length = 0;
 
+        tls->deadline = deadline;
         crypto_sha256_open(address_of tls->transcript);
 
         for (;;)
@@ -9257,6 +11178,7 @@ static COLD bipolar tls_handshake(
         /* TLS 1.2 is never the answer to a retry. In TLS 1.3 the keys
            change after ServerHello, so nothing may share its records. */
         if (hello_kind || (retried && tls->tls12) ||
+            (tls->tls12 && tls->alpn_length) ||
             (!tls->tls12 && used != length))
                 goto done;
         tls_transcript_add(tls, hs, length);
@@ -9297,32 +11219,76 @@ done:
         crypto_forget(shared, sizeof shared);
         crypto_forget(hs, sizeof hs);
         crypto_forget(tls->scalar, sizeof tls->scalar);
+        tls->deadline = null;
+        return status;
+}
+
+/* What each TLS_FAULT_* answers, in its number's order: none, EARLY, ... */
+static const bipolar tls_fault_answer[8] = {
+    TLS_UNTRUSTED, TLS_NOT_YET, TLS_EXPIRED, TLS_MISMATCH,
+    TLS_REVOKED, TLS_UNCHECKED, TLS_CLOCK, TLS_UNLOGGED};
+
+/* A connection over the caller's deadline (null when it could not be had),
+   and for Network Time Security's key establishment an application
+   protocol named in the hello and back (TLS 1.3 only), the exporter secret
+   kept, and the certificate judged as of the floor while the clock cannot
+   be believed (bootstrap). */
+static COLD bipolar tls_connect_until(tls_conn address_to tls, bipolar handle,
+                                      string_address host, bool check_cert,
+                                      const p8 address_to alpn,
+                                      positive alpn_length, bool bootstrap,
+                                      const network_deadline address_to deadline)
+{
+        bipolar status;
+
+        memory_fill(tls, 0, TLS_CONN_HEAD);
+        tls->handle = handle;
+        tls->host = host;
+        tls->check_cert = check_cert;
+        tls->alpn = alpn;
+        tls->alpn_length = alpn_length;
+        tls->clock_bootstrap = bootstrap;
+        status = deadline ? tls_handshake(tls, deadline) : TLS_FAIL;
+        if (status)
+        {
+                status = !tls->untrusted ? TLS_FAIL
+                         : tls->fault < 8 ? tls_fault_answer[tls->fault]
+                                          : TLS_UNTRUSTED;
+                tls_forget(tls);
+        }
         return status;
 }
 
 static COLD bipolar tls_connect(tls_conn address_to tls, bipolar handle,
                            string_address host, bool check_cert)
 {
-        bipolar status;
         network_deadline deadline;
 
-        memory_fill(tls, 0, TLS_CONN_HEAD);
-        tls->handle = handle;
-        tls->host = host;
-        tls->check_cert = check_cert;
-        status = network_deadline_begin(address_of deadline,
-                                        TLS_HANDSHAKE_SECONDS, 0)
-                     ? tls_handshake(tls, address_of deadline) : TLS_FAIL;
-        if (status)
-        {
-                status = !tls->untrusted ? TLS_FAIL
-                         : tls->fault == TLS_FAULT_EARLY ? TLS_NOT_YET
-                         : tls->fault == TLS_FAULT_LATE ? TLS_EXPIRED
-                         : tls->fault == TLS_FAULT_NAME ? TLS_MISMATCH
-                                                        : TLS_UNTRUSTED;
-                tls_forget(tls);
-        }
-        return status;
+        return tls_connect_until(tls, handle, host, check_cert, null, 0, false,
+                                 network_deadline_begin(address_of deadline,
+                                                        TLS_HANDSHAKE_SECONDS, 0)
+                                     ? address_of deadline : null);
+}
+
+/* RFC 8446 7.5: TLS-Exporter(label, context, length) from the exporter
+   master secret kept at the handshake's end, for a connection that named a
+   protocol. The caller's length is at most 32, one HKDF block. */
+static COLD bool tls_export(tls_conn address_to tls, string_address label,
+                            const p8 address_to context,
+                            positive context_length, p8 address_to out,
+                            positive length)
+{
+        p8 derived[32];
+        p8 hash[32];
+
+        if (!tls->alpn_length || !tls->application || tls->tls12 ||
+            length > 32)
+                return false;
+        crypto_sha256_of((p8 address_to)context, context_length, hash);
+        tls_expand_label(tls->exporter, label, tls_empty_sha256, 32, derived, 32);
+        tls_expand_label(derived, "exporter", hash, 32, out, length);
+        crypto_forget(derived, sizeof derived);
+        return true;
 }
 
 static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
@@ -9333,7 +11299,7 @@ static bipolar tls_write(tls_conn address_to tls, p8 address_to data,
                 positive take = min(length, (positive)TLS_PLAINTEXT_MAX);
 
                 if ((tls->seq_write >= TLS_KEY_UPDATE_AT && !tls->tls12 &&
-                     tls_key_update(tls, false)) ||
+                     tls_key_update_until(tls, false, null)) ||
                     tls_send_enc(tls, TLS_CT_APP, data, take))
                         return TLS_FAIL;
                 data += take;
@@ -9467,15 +11433,6 @@ refused:
         return TLS_FAIL;
 }
 
-static bipolar tls_borrow(tls_conn address_to tls, positive room,
-                          p8 address_to address_to span,
-                          positive address_to got, positive seconds,
-                          positive nanoseconds)
-{
-        return tls_take(tls, room, span, got, null, seconds, nanoseconds,
-                        false);
-}
-
 static bipolar tls_borrow_within(
     tls_conn address_to tls, positive room, p8 address_to address_to span,
     positive address_to got, positive seconds, positive nanoseconds,
@@ -9492,12 +11449,6 @@ static bipolar tls_lend_until(
     positive address_to got, const network_deadline address_to deadline)
 {
         return tls_take(tls, room, span, got, deadline, 0, 0, true);
-}
-
-static bipolar tls_lend(tls_conn address_to tls, positive room,
-                        p8 address_to address_to span, positive address_to got)
-{
-        return tls_lend_until(tls, room, span, got, null);
 }
 
 static bipolar tls_read_until(
@@ -9537,6 +11488,16 @@ static bipolar tls_read_until(
 #define HTTP_IDLE_SECONDS 30
 #define HTTP_HEAD_SECONDS 30
 #define HTTP_BODY_SECONDS 300
+//      STRICT_TIGHT's most for a body that declared no length -- one ended by
+//      the close, or chunked -- written as it arrives: 1 GiB. GNU wget takes
+//      such a body until the peer stops, which the default does too.
+#define HTTP_UNDECLARED_MOST ((positive)1 << 30)
+//      STRICT_TIGHT's budget for a whole fetch -- every hop of a redirect
+//      chain and the body -- where the default, as GNU wget, times each hop
+//      alone: one head wait and one body wait. Zero for none.
+#define HTTP_CHAIN_SECONDS                                                   \
+        (MOONWATER_STRICT_NET >= STRICT_TIGHT                                \
+             ? (positive)(HTTP_HEAD_SECONDS + HTTP_BODY_SECONDS) : 0)
 
 #define HTTP_OK 0
 #define HTTP_BAD_URL (-1)
@@ -9560,6 +11521,28 @@ static bipolar tls_read_until(
 //      STRICT_TIGHT only: a redirect that leaves public address space for
 //      an address that is not public.
 #define HTTP_PRIVATE (-17)
+//      The certificate is revoked, or whether it is could not be told where
+//      the answer is required (TLS_REVOKED, TLS_UNCHECKED).
+#define HTTP_REVOKED (-18)
+#define HTTP_UNCHECKED (-19)
+//      The clock is below its floor: it was never set.
+#define HTTP_CLOCK (-20)
+//      STRICT_TIGHT only: a name (not an address, not localhost) the
+//      resolver answered with this machine, "this network" or the link-local
+//      block the clouds' metadata service lives in.
+#define HTTP_REBOUND (-21)
+//      STRICT_TIGHT only: a body that declared no length ran past
+//      HTTP_UNDECLARED_MOST.
+#define HTTP_UNDECLARED (-22)
+//      STRICT_TIGHT only: a public certificate not logged as Certificate
+//      Transparency asks (TLS_UNLOGGED).
+#define HTTP_UNLOGGED (-23)
+//      The fetch's network half (http_run_apart) could not be confined, so
+//      nothing was asked; or it ended without a whole answer -- killed by
+//      its filter or a signal, or with an answer the caller could not
+//      believe.
+#define HTTP_CONFINE (-24)
+#define HTTP_APART (-25)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -9597,6 +11580,136 @@ static bool http_web_scheme(string_address url, positive scheme)
                !memory_compare_ascii_case(url, "https", scheme - 1);
 }
 
+/* A URL made fit for a request line the way GNU wget and curl make one: after
+   the authority, a space, a backslash and every byte past 0x7f become %XX in
+   upper case, and every other byte -- '%' included, so an escape already
+   there is never doubled and one that is not an escape (%zz) goes on as curl
+   sends it -- goes through as it came.  A server's Location with a space or
+   UTF-8 in it, or a URL typed with one, is a real answer that both fetch;
+   http_split_into's and the request builder's refusal of those bytes stays
+   the backstop for a caller that skips this.  The authority is left exactly
+   as written for the parser to judge: url is a whole URL, whose authority
+   follows "scheme://" or, when bare_host, starts it; otherwise it is a
+   reference, whose only authority follows a leading "//".  url is length
+   bytes and a terminator; into holds the answer whole with its own, or this
+   is HTTP_BAD_URL. */
+static bipolar http_url_escape(string_address url, positive length, bool bare_host,
+                               p8 address_to into, positive room)
+{
+        static const p8 hex[] = "0123456789ABCDEF";
+        byte_reader reader = byte_reader_open((const p8 address_to)url, length);
+        byte_reader slashes = reader;
+        byte_store out = {into, room ? room - 1 : 0, 0};
+        positive scheme = http_scheme_length(url);
+        positive verbatim = 0;
+
+        if (scheme > length)
+                scheme = 0;
+        byte_reader_skip(address_of slashes, scheme);
+        if ((scheme || !bare_host) && byte_reader_u8(address_of slashes) == '/' &&
+            byte_reader_u8(address_of slashes) == '/' && byte_reader_ok(address_of slashes))
+                verbatim = scheme + 2;
+        if (verbatim || bare_host)
+        {
+                byte_reader rest = reader;
+
+                byte_reader_skip(address_of rest, verbatim);
+                for (;;)
+                {
+                        byte_reader look = rest;
+                        p8 byte = byte_reader_u8(address_of look);
+
+                        if (!byte_reader_ok(address_of look) || byte == '/' ||
+                            byte == '?' || byte == '#')
+                                break;
+                        rest = look;
+                        verbatim++;
+                }
+        }
+        if (!room || !byte_store_append_exact(address_of out,
+                                               byte_reader_take(address_of reader,
+                                                                verbatim),
+                                               verbatim))
+                return HTTP_BAD_URL;
+        while (byte_reader_left(address_of reader))
+        {
+                p8 byte = byte_reader_u8(address_of reader);
+                p8 escape[3] = {'%', hex[byte >> 4], hex[byte & 15]};
+                bool plain = byte != ' ' && byte != '\\' && byte <= 0x7f;
+
+                if (!byte_store_append_exact(address_of out, plain ? address_of byte
+                                                                   : escape,
+                                             plain ? 1 : 3))
+                        return HTTP_BAD_URL;
+        }
+        into[out.used] = end;
+        return HTTP_OK;
+}
+
+/* inet_aton's spellings of an IPv4 address, which GNU wget (through the C
+   library) and curl (its own URL parser) both connect to: one to four parts
+   joined by '.', each decimal, 0x hex or 0 octal, every part but the last one
+   byte and the last filling the bytes left ("127.1", "0x7f.1", "0177.0.0.1",
+   "2130706433").  A trailing '.', an empty part, an 8 or 9 in an octal part,
+   a bare "0x" (which glibc reads as 0) or a part past its share is no such
+   spelling, and the host stays a name for the resolver.  The address is in
+   host order, as http_address_public reads one. */
+static bool http_ipv4_spelling(const p8 address_to host, positive length,
+                               p32 address_to ip)
+{
+        byte_reader reader = byte_reader_open(host, length);
+        p64 address = 0;
+        positive parts = 0;
+
+        for (;;)
+        {
+                byte_reader look = reader;
+                p8 first = byte_reader_u8(address_of look);
+                p8 second = byte_reader_u8(address_of look);
+                positive base = 10;
+                positive digits = 0;
+                p64 value = 0;
+
+                if (first == '0' && (second | 0x20) == 'x')
+                {
+                        base = 16;
+                        byte_reader_skip(address_of reader, 2);
+                }
+                else if (first == '0' && byte_is_digit(second))
+                {
+                        base = 8;
+                        byte_reader_skip(address_of reader, 1);
+                }
+                for (;; digits++)
+                {
+                        look = reader;
+                        positive digit = digit_known(byte_reader_u8(address_of look),
+                                                     base);
+
+                        if (!byte_reader_ok(address_of look) || digit >= base)
+                                break;
+                        value = value * base + digit;
+                        if (value > 0xffffffffu)
+                                return false;
+                        reader = look;
+                }
+                if (!digits)
+                        return false;
+                parts++;
+                if (!byte_reader_left(address_of reader))
+                {
+                        if (value >> (8 * (5 - parts)))
+                                return false;
+                        address_to ip = (p32)(address << (8 * (5 - parts)) | value);
+                        return true;
+                }
+                if (parts == 4 || value > 255 ||
+                    byte_reader_u8(address_of reader) != '.')
+                        return false;
+                address = address << 8 | value;
+        }
+}
+
 /*
         http://host[:port][/path] taken apart.
 
@@ -9606,6 +11719,14 @@ static bool http_web_scheme(string_address url, positive scheme)
         port the kernel picked. A URL the client could not carry through
         http_run -- HTTP_URL_MAX bytes or more -- is refused here too, so no
         caller derives an output name or a message from one.
+
+        A host that inet_aton reads as an address is that address, written
+        once here as the dotted quad, so the Host field, TLS's choice of an IP
+        identity over a DNS one, the lookup and the address policy all see the
+        same four octets: curl does the same (GNU wget connects to the address
+        and sends the spelling as written in Host). STRICT_TIGHT refuses every
+        such spelling but the dotted quad itself, as the ambiguity it is: a
+        filter that reads "0x7f.1" as a name is not the parser that connects.
 */
 static bipolar http_split_into(string_address url, p8 address_to host, positive room,
                                p16 address_to port, string_address address_to path,
@@ -9669,6 +11790,24 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
                 return HTTP_BAD_URL;
 
         string_address host_at = at;
+        positive host_length = length;
+        p8 quad[16];
+        p32 numeric;
+
+        if (http_ipv4_spelling(host_at, length, address_of numeric))
+        {
+                positive quad_length = host_into(quad, numeric);
+
+                if (quad_length != length ||
+                    memory_compare(quad, host_at, length))
+                {
+                        if (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                            quad_length + 1 >= room)
+                                return HTTP_BAD_URL;
+                        host_at = quad;
+                        host_length = quad_length;
+                }
+        }
         at += length;
 
         if (string_is(at, ':'))
@@ -9695,8 +11834,8 @@ static bipolar http_split_into(string_address url, p8 address_to host, positive 
            transaction, not a half-written host paired with a default port;
            callers which log or retry after an error cannot accidentally use
            pieces of a rejected authority. */
-        memory_copy(host, host_at, length);
-        host[length] = end;
+        memory_copy(host, host_at, host_length);
+        host[host_length] = end;
         address_to port = selected_port;
         address_to tls = selected_tls;
         address_to path = string_get(at) && !string_is(at, '#')
@@ -9734,12 +11873,14 @@ static bipolar http_origin_form(string_address path, p8 address_to into,
 //      Where the header ends: the blank line, in either spelling.
 static PURE bipolar http_header_end(p8 address_to bytes, positive size)
 {
-        //      Both spellings are looked for at once and the one that
-        //      starts first wins. A header block ending \r\n\r\n contains no
-        //      bare \n\n -- there is a \r between them -- so the two can never
-        //      both match at the same place.
+        //      The blank line is an LF, then a bare LF or a CRLF.  The field
+        //      walk drops the CR of a blank line as it does of any line, so
+        //      "Name: v\n\r\n" ends the head there too, and the finder must
+        //      agree or the head waits for bytes that never come.  Both
+        //      spellings are looked for at once and the one that starts
+        //      first wins; they start at different LFs, so they never tie.
         //
-        //      Once the full spelling is found at some offset, only a bare
+        //      Once the CRLF spelling is found at some offset, only a bare
         //      one starting before it can win, so the second search stops
         //      there rather than walking the rest of the buffer. A block
         //      ending \r\n\r\n holds no \n\n at all, so searching the whole
@@ -9747,12 +11888,12 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
         //      read, and once more per informational response ahead of the
         //      final one, which is what a peer sending 1xx after 1xx one
         //      byte at a time was buying.
-        p8 address_to full = (p8 address_to)memory_search(bytes, size, "\r\n\r\n", 4);
-        positive span = full ? (positive)(full - bytes) + 1 : size;
+        p8 address_to crlf = (p8 address_to)memory_search(bytes, size, "\n\r\n", 3);
+        positive span = crlf ? (positive)(crlf - bytes) + 1 : size;
         p8 address_to bare = (p8 address_to)memory_search(bytes, span, "\n\n", 2);
 
-        if (full && (!bare || full < bare))
-                return (bipolar)(full - bytes) + 4;
+        if (crlf && (!bare || crlf < bare))
+                return (bipolar)(crlf - bytes) + 3;
 
         if (bare)
                 return (bipolar)(bare - bytes) + 2;
@@ -9769,17 +11910,27 @@ static PURE bipolar http_header_end(p8 address_to bytes, positive size)
    anywhere else would itself be the differential.  Response splitting is still relevant to a client: a poisoned
    keep-alive cache or an intercepting proxy can otherwise make the bytes
    authenticated by TLS describe a different response from the one consumed
-   here. */
+   here.
+
+   The default reads a head as GNU wget 1.25.0 and curl 8.22.0 both do, and
+   refuses what either of them refuses where a second reading would frame or
+   redirect differently: it takes a Content-Length that repeats one number
+   ("3" twice, "3, 3"), a folded line after an ordinary field, and any byte
+   but NUL and a bare CR in the reason phrase (only the code is read); it
+   refuses Content-Length values that disagree, an empty element of a list, a
+   fold after Content-Length, Transfer-Encoding or a redirect's Location, and
+   a control in any field.  STRICT_TIGHT refuses every repeat, list, fold and
+   status-line control. */
 static bool http_token_byte(p8 byte)
 {
         return byte_is_alnum(byte) ||
                memory_first_of("!#$%&'*+-.^_`|~", byte, 15);
 }
 
-/* One line of a head or of a trailer, its line end gone.  A status line is
-   text with no control but tab; a field is a token, a colon, and a value
-   held to the same.  The token also refuses obs-fold, whitespace before the
-   colon, and an empty field name. */
+/* One line of a head or of a trailer, its line end gone.  A field is a
+   token, a colon, and a value that is text with no control but tab.  The
+   token also refuses obs-fold, whitespace before the colon, and an empty
+   field name. */
 static bipolar http_field_name(p8 address_to line, positive stop)
 {
         positive name = string_span_max((string_address)line, stop,
@@ -9792,37 +11943,29 @@ static bipolar http_field_name(p8 address_to line, positive stop)
         return (bipolar)name;
 }
 
+/* A status line is never read past its code (http_status_code), so the
+   default takes what wget and curl take in its reason phrase -- DEL, ESC and
+   bytes past 0x7f included -- and refuses only a NUL and a CR, the two curl
+   refuses; nothing of it is printed or stored.  STRICT_TIGHT holds it to
+   text with no control but tab.  (Plain C, not #if: a hosted lift that
+   forgets to define the tier fails to build instead of running as the tight
+   one.) */
 static bool http_line_valid(p8 address_to line, positive stop, bool field)
 {
-        return field ? http_field_name(line, stop) >= 0
-                     : memory_text_span(line, stop) == stop;
-}
-
-static bool http_header_block_valid(p8 address_to bytes, positive size)
-{
         positive at = 0;
-        bool status = true;
 
-        while (at < size)
+        if (field)
+                return http_field_name(line, stop) >= 0;
+        for (;;)
         {
-                positive line = at;
-                positive stop = at + memory_span_without_byte(
-                    bytes + at, '\n', size - at);
-
-                if (stop == size)
+                at += memory_text_span(line + at, stop - at);
+                if (at == stop)
+                        return true;
+                if (MOONWATER_STRICT_NET >= STRICT_TIGHT || !line[at] ||
+                    line[at] == '\r')
                         return false;
-                at = stop + 1;
-                if (stop > line && bytes[stop - 1] == '\r')
-                        stop--;
-
-                if (stop == line)
-                        return !status && at == size;
-                if (!http_line_valid(bytes + line, stop - line, !status))
-                        return false;
-                status = false;
+                at++;
         }
-
-        return false;
 }
 
 //      One header's value, by name, without regard to its case.
@@ -9975,8 +12118,6 @@ static bipolar http_trailer_line(p8 address_to line, positive line_length)
         return http_line_valid(line, stop, true) ? 0 : HTTP_MALFORMED;
 }
 
-static bipolar http_unchunk(p8 address_to bytes, positive size);
-
 /*
         The whole exchange.
 
@@ -10007,6 +12148,8 @@ typedef struct
         string_address length;
         positive transfer_size;
         positive length_size;
+        //      The number every Content-Length named, at the default tier.
+        positive length_value;
 } http_framing_fields;
 
 static bool http_response_is_redirect(b32 code)
@@ -10020,9 +12163,72 @@ static bool http_response_is_success(b32 code)
         return code >= 200 && code < 300;
 }
 
+/* One Content-Length value at the default tier, as wget and curl read it: a
+   comma list of decimal numbers with blanks around each, every number the
+   same as each other and as every Content-Length before it.  An empty
+   element, a sign, any other byte, or a number that disagrees is refused
+   (curl refuses each; GNU wget reads the first number and ignores the rest).
+   The first number's digits are the span the framing reads, so a list of one
+   number frames exactly as the number alone. */
+static bool http_length_values(const p8 address_to value, positive size,
+                               http_framing_fields address_to fields)
+{
+        byte_reader reader = byte_reader_open(value, size);
+
+        for (;;)
+        {
+                byte_reader look;
+                const p8 address_to digits;
+                positive count = 0;
+                positive number = 0;
+
+                for (look = reader; byte_is_blank(byte_reader_u8(address_of look));
+                     look = reader)
+                        byte_reader_skip(address_of reader, 1);
+                digits = byte_reader_here(address_of reader);
+                for (look = reader;; look = reader, count++)
+                {
+                        p8 byte = byte_reader_u8(address_of look);
+
+                        if (!byte_reader_ok(address_of look) || !byte_is_digit(byte))
+                                break;
+                        if (!positive_append_digit(address_of number,
+                                                   (positive)(byte - '0'),
+                                                   positive_max))
+                                return false;
+                        byte_reader_skip(address_of reader, 1);
+                }
+                if (!count)
+                        return false;
+                if (!fields->length)
+                {
+                        fields->length = (string_address)digits;
+                        fields->length_size = count;
+                        fields->length_value = number;
+                }
+                else if (number != fields->length_value)
+                        return false;
+                for (look = reader; byte_is_blank(byte_reader_u8(address_of look));
+                     look = reader)
+                        byte_reader_skip(address_of reader, 1);
+                if (!byte_reader_left(address_of reader))
+                        return byte_reader_ok(address_of reader);
+                if (byte_reader_u8(address_of reader) != ',')
+                        return false;
+        }
+}
+
 /* Validate each line and collect the framing fields in the same walk.
    Unknown fields still undergo the full grammar and control-byte checks;
-   their names need no repeated comparison with fields of other lengths. */
+   their names need no repeated comparison with fields of other lengths.
+   A folded line (one that begins with a blank) continues the field before
+   it, whose value here is its first line either way: the default reads one
+   after an ordinary field, or straight after the status line, as wget and
+   curl do, and refuses one after Content-Length or Transfer-Encoding (curl
+   refuses both; GNU wget reads the length and prints a chunked body raw)
+   and after the Location of a redirect, which the two follow to different
+   places (wget to "/a%20%20%20/b", curl to "/a%20/b" for "/a" folded onto
+   "/b"). */
 static bool http_response_fields(p8 address_to bytes, positive size,
                                  http_response address_to response,
                                  http_framing_fields address_to fields)
@@ -10030,6 +12236,7 @@ static bool http_response_fields(p8 address_to bytes, positive size,
         positive at = 0;
         bool status = true;
         bool redirect = http_response_is_redirect(response->code);
+        bool framing_before = false;
 
         memory_zero(fields, sizeof *fields);
         while (at < size)
@@ -10052,6 +12259,14 @@ static bool http_response_fields(p8 address_to bytes, positive size,
                         status = false;
                         continue;
                 }
+                if (byte_is_blank(bytes[line]))
+                {
+                        if (MOONWATER_STRICT_NET >= STRICT_TIGHT || framing_before ||
+                            memory_text_span(bytes + line, stop - line) !=
+                                stop - line)
+                                return false;
+                        continue;
+                }
 
                 bipolar name = http_field_name(bytes + line, stop - line);
                 string_address address_to value = null;
@@ -10059,21 +12274,32 @@ static bool http_response_fields(p8 address_to bytes, positive size,
 
                 if (name < 0)
                         return false;
+                framing_before = false;
                 if (name == 17 && !memory_compare_ascii_case(
                         bytes + line, "transfer-encoding", 17))
                 {
+                        framing_before = true;
                         value = address_of fields->transfer;
                         length = address_of fields->transfer_size;
                 }
                 else if (name == 14 && !memory_compare_ascii_case(
                         bytes + line, "content-length", 14))
                 {
+                        framing_before = true;
+                        if (MOONWATER_STRICT_NET < STRICT_TIGHT)
+                        {
+                                if (!http_length_values(bytes + line + 15,
+                                                        stop - line - 15, fields))
+                                        return false;
+                                continue;
+                        }
                         value = address_of fields->length;
                         length = address_of fields->length_size;
                 }
                 else if (redirect && name == 8 && !memory_compare_ascii_case(
                         bytes + line, "location", 8))
                 {
+                        framing_before = true;
                         value = address_of response->location;
                         length = address_of response->location_length;
                 }
@@ -10291,6 +12517,20 @@ static fn http_link_close(http_link address_to link)
         link->tls = false;
 }
 
+//      tls_connect's refusal as the HTTP client says it.
+static bipolar http_tls_status(bipolar verdict)
+{
+        return verdict == TLS_UNTRUSTED ? HTTP_UNTRUSTED
+               : verdict == TLS_EXPIRED ? HTTP_EXPIRED
+               : verdict == TLS_NOT_YET ? HTTP_NOT_YET
+               : verdict == TLS_MISMATCH ? HTTP_MISMATCH
+               : verdict == TLS_REVOKED ? HTTP_REVOKED
+               : verdict == TLS_UNCHECKED ? HTTP_UNCHECKED
+               : verdict == TLS_CLOCK ? HTTP_CLOCK
+               : verdict == TLS_UNLOGGED ? HTTP_UNLOGGED
+                                        : HTTP_TLS;
+}
+
 static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
                               string_address host, bool tls, bool check_cert)
 {
@@ -10307,11 +12547,7 @@ static bipolar http_link_open(http_link address_to link, p32 ip, p16 port,
                 if (verdict)
                 {
                         http_link_close(link);
-                        return verdict == TLS_UNTRUSTED ? HTTP_UNTRUSTED
-                               : verdict == TLS_EXPIRED ? HTTP_EXPIRED
-                               : verdict == TLS_NOT_YET ? HTTP_NOT_YET
-                               : verdict == TLS_MISMATCH ? HTTP_MISMATCH
-                                                        : HTTP_TLS;
+                        return http_tls_status(verdict);
                 }
                 link->tls = true;
         }
@@ -10351,7 +12587,7 @@ static bipolar http_response_head(
     http_link address_to link, p8 address_to head, positive room,
     positive address_to used, positive address_to header,
     http_response address_to response, positive seconds, positive nanoseconds,
-    bool incomplete_is_malformed)
+    bool incomplete_is_malformed, const network_deadline address_to outer)
 {
         network_deadline deadline;
         /* Carried across the reads: the head is walked once in total rather
@@ -10361,7 +12597,9 @@ static bipolar http_response_head(
         positive searched = 0;
 
         address_to used = 0;
-        if (!network_deadline_begin(address_of deadline, seconds, nanoseconds))
+        //      A redirect chain's own deadline, when it has one, holds this.
+        if (!network_deadline_begin_within(address_of deadline, seconds,
+                                           nanoseconds, outer))
                 return HTTP_NO_REPLY;
 
         for (;;)
@@ -10410,27 +12648,15 @@ typedef struct
         positive read_nanoseconds;
         // Whole-body budget; zero began is reserved for bounded unit readers.
         network_deadline deadline;
+        // The most payload a body that declared no length may deliver, and
+        // what a chunked one has delivered so far; zero for no ceiling.
+        positive undeclared_most;
+        positive undeclared_seen;
 } http_body;
 
-static bipolar http_body_read(http_body address_to body, p8 address_to into,
-                              positive room, positive address_to got);
-static bipolar http_copy(http_body address_to body, bipolar dest, positive want,
-                         bool exact);
-static bipolar http_copy_chunked(http_body address_to body, bipolar dest);
-
-/* A final response's body, by the framing its head declared.  A memory store
-   refuses a close-delimited body beyond its limit as it arrives, so an EOF
-   that lands exactly on the limit is still a complete body. */
-static bipolar http_copy_body(http_body address_to body, bipolar dest,
-                              const http_response address_to response)
-{
-        bool exact = response->body_kind == HTTP_BODY_LENGTH;
-
-        if (response->body_kind == HTTP_BODY_CHUNKED)
-                return http_copy_chunked(body, dest);
-        return http_copy(body, dest,
-                         exact ? response->body_length : positive_max, exact);
-}
+static bipolar http_body_borrow(http_body address_to body, positive room,
+                                p8 address_to address_to data,
+                                positive address_to got);
 
 //      One progress wait, shortened by a whole-body budget when one is active;
 //      inline, because a read of an unbudgeted body asks only for the idle limit.
@@ -10463,10 +12689,6 @@ static inline INLINE bool http_body_wait(
         }
         return address_to seconds || address_to nanoseconds;
 }
-
-static bipolar http_body_borrow(http_body address_to body, positive room,
-                                p8 address_to address_to data,
-                                positive address_to got);
 
 /* Payload copied into the caller's bytes: the stash's and TLS's through
    http_body_borrow, a plaintext socket's by a read that asks the clock and
@@ -10789,6 +13011,14 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
                         return HTTP_MALFORMED;
                 if (!size)
                         return http_copy_trailers(body);
+                /* A chunk past the ceiling on an undeclared body is refused
+                   before a byte of it is written. */
+                if (body->undeclared_most)
+                {
+                        if (size > body->undeclared_most - body->undeclared_seen)
+                                return HTTP_UNDECLARED;
+                        body->undeclared_seen += size;
+                }
                 {
                         bipolar copied = http_copy(body, dest, size, true);
 
@@ -10804,6 +13034,34 @@ static bipolar http_copy_chunked(http_body address_to body, bipolar dest)
         }
 }
 
+/* A final response's body, by the framing its head declared.  A memory store
+   refuses a close-delimited body beyond its limit as it arrives, so an EOF
+   that lands exactly on the limit is still a complete body.  So does a body's
+   ceiling on what declared no length (undeclared_most): exactly that many
+   bytes and then the close is a body, and one byte more is
+   HTTP_UNDECLARED, asked for only once the ceiling is reached and never
+   written. */
+static bipolar http_copy_body(http_body address_to body, bipolar dest,
+                              const http_response address_to response)
+{
+        bipolar copied;
+        p8 address_to more = null;
+        positive got = 0;
+
+        if (response->body_kind == HTTP_BODY_CHUNKED)
+                return http_copy_chunked(body, dest);
+        if (response->body_kind == HTTP_BODY_LENGTH)
+                return http_copy(body, dest, response->body_length, true);
+        copied = http_copy(body, dest,
+                           body->undeclared_most ? body->undeclared_most
+                                                 : positive_max,
+                           false);
+        if (copied || !body->undeclared_most)
+                return copied;
+        if (http_body_borrow(body, 1, address_of more, address_of got))
+                return HTTP_NO_REPLY;
+        return got ? HTTP_UNDECLARED : HTTP_OK;
+}
 
 /* The memory frontend retains strict whole-body consumption and transfers no
    allocation: the same chunk decoder compacts within the response store. */
@@ -10909,11 +13167,13 @@ static positive http_port_suffix(p8 address_to into, bool tls, p16 port)
                    ? 0 : 1 + positive_into(into + 1, port);
 }
 
-static bipolar http_get_request(p8 address_to request, positive room,
-                                string_address host, p16 port,
-                                string_address path, bool tls,
-                                p8 version_minor, string_address agent,
-                                positive address_to used)
+/* The request, GET or -- for a caller that asks only whether the resource is
+   there, as wget --spider does -- HEAD, whose answer has no content whatever
+   its head declares (RFC 9110 9.3.2). */
+static bipolar http_request(p8 address_to request, positive room, bool head,
+                            string_address host, p16 port, string_address path,
+                            bool tls, p8 version_minor, string_address agent,
+                            positive address_to used)
 {
         p8 target[HTTP_URL_MAX];
         p8 port_text[7];
@@ -10927,7 +13187,8 @@ static bipolar http_get_request(p8 address_to request, positive room,
             version_minor < '0' || version_minor > '9')
                 return HTTP_BAD_URL;
 
-        ok = byte_store_append_exact(address_of out, "GET ", 4);
+        ok = head ? byte_store_append_exact(address_of out, "HEAD ", 5)
+                  : byte_store_append_exact(address_of out, "GET ", 4);
         ok &= byte_store_append_exact(address_of out, target, string_length(target));
         ok &= byte_store_append_exact(address_of out, " HTTP/1.", 8);
         ok &= byte_store_append_exact(address_of out, address_of version_minor, 1);
@@ -10943,6 +13204,16 @@ static bipolar http_get_request(p8 address_to request, positive room,
                 return HTTP_BAD_URL;
         address_to used = out.used;
         return HTTP_OK;
+}
+
+static bipolar http_get_request(p8 address_to request, positive room,
+                                string_address host, p16 port,
+                                string_address path, bool tls,
+                                p8 version_minor, string_address agent,
+                                positive address_to used)
+{
+        return http_request(request, room, false, host, port, path, tls,
+                            version_minor, agent, used);
 }
 
 static bipolar http_put_url(p8 address_to into, positive room, bool tls,
@@ -10967,6 +13238,9 @@ static bipolar http_put_url(p8 address_to into, positive room, bool tls,
         return HTTP_OK;
 }
 
+/* A Location resolved against the URL that answered with it, into room
+   bytes at into, which may be location itself: the reference is copied
+   before a byte is written. */
 static bipolar http_absolutize(bool tls, string_address host, p16 port,
                                string_address path, string_address location,
                                p8 address_to into, positive room)
@@ -11182,25 +13456,790 @@ static bool http_address_public(p32 ip)
                (a != 192 || b || (p8)(ip >> 8)) && (a != 198 || (b & 0xfe) != 18);
 }
 
+/* Whether host is a name that the resolver answered with an address no
+   name of a real service has: this network (0/8), loopback (127/8) or
+   link-local (169.254/16, where the clouds keep the metadata service that
+   hands out the machine's credentials). That answer is what DNS rebinding
+   looks like -- a name its owner, or an on-path forger of plain DNS, points
+   at the machine itself so a fetch of an untrusted URL reads what only the
+   machine may -- and STRICT_TIGHT refuses it on every hop, the first one
+   too. An address written in the URL is the writer's own choice and is
+   taken, as is localhost, which never asks a resolver. A name inside the
+   network (10/8, 172.16/12, 192.168/16, 100.64/10) is ordinary on an
+   intranet, and only the redirect rule keeps a chain that has reached public
+   space from going back to one. */
+static bool http_name_rebound(string_address host, p32 ip)
+{
+        p8 a = (p8)(ip >> 24);
+
+        return string_to_host(host) < 0 && !http_host_loopback(host) &&
+               (!a || a == 127 || (a == 169 && (p8)(ip >> 16) == 254));
+}
+
 #define TLS_AIA_SECONDS 5
+/* What a CRL's store grows by while its length is not yet known. */
+#define TLS_CRL_STEP ((positive)1 << 16)
 
 /*
-        tls_verify_chain's missing issuer: the certificate a caIssuers
-        location names (RFC 5280 4.2.2.1), which browsers fetch when a server
-        leaves an intermediate out. The URL comes from a certificate nothing
-        has verified yet, so the peer chooses the destination, and the fetch
-        is held to what a certificate needs: http: only (https would be a
-        handshake inside a handshake), port 80 unless a harness serves it,
-        no userinfo, a public address, one HTTP/1.0 GET with no redirect
-        followed, five seconds for the connection and the reply together,
-        a 200, and a body of at most room bytes less the head, which the
-        caller parses and verifies like any served certificate -- DER only,
-        so a PKCS#7 bundle or PEM text is refused there. Returns the body's
-        length at the front of into, or 0.
+        Revocation: stapling and CRLs, in tiers.
+
+        Each certificate on a verified path below its anchor is asked about
+        by the issuer that signed it. The leaf first by the OCSP response its
+        server stapled (RFC 6066 8, RFC 8446 4.4.2.1), when it stapled one;
+        then -- the leaf without a good staple, and every certificate above
+        it -- by the CRL its first whole-reason http: distribution point
+        names (RFC 5280 6.3), fetched under caIssuers' rules and held in
+        memory for the rest of the process (tls_crl_get).
+
+        An answer is good, revoked, none (a source there is that said
+        nothing usable: unreachable, too large, unparseable, signed by
+        nobody it may be, about another certificate, unknown, or stale) or
+        absent (no source: no staple and no distribution point). Revoked
+        refuses in every tier. A leaf that asks for a staple (TLS Feature
+        status_request, RFC 7633) and has no good one is refused in every
+        tier too. None is passed over at the default tier, as browsers that
+        still fetch revocation pass over it, and refuses at the tight one.
+        Absent is passed in both: a certificate that names no CRL and whose
+        server staples nothing has no source to fail, and OCSP is never
+        fetched (only stapled), so a responder URL alone is not a source.
+
+        Ceilings: TLS_REVOCATION_SECONDS for every fetch of one handshake
+        together (inside the handshake's own deadline; each name lookup has
+        its own three seconds), TLS_CRL_MAX bytes a CRL, TLS_CRL_HELD CRLs and
+        TLS_CRL_HELD_BYTES held, a failed fetch not tried again for
+        TLS_CRL_RETRY seconds.
 */
-static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
-                                   p8 address_to into, positive room)
+#define TLS_ANSWER_GOOD 0
+#define TLS_ANSWER_REVOKED 1
+#define TLS_ANSWER_NONE 2
+#define TLS_ANSWER_ABSENT 3
+#define TLS_REVOCATION_SECONDS 10
+#define TLS_CRL_MAX ((positive)16 << 20)
+#define TLS_CRL_HELD 8
+#define TLS_CRL_HELD_BYTES ((positive)32 << 20)
+#define TLS_CRL_RETRY 300
+
+/* The plain HTTP fetch, defined beside tls_aia_fetch below. */
+static COLD positive tls_plain_get(const p8 address_to url, positive length,
+                                   byte_store address_to into, positive seconds,
+                                   const network_deadline address_to outer);
+
+/* SHA-1 (kind 1, 20 bytes) or SHA-256 (kind 2, 32), the two an OCSP CertID
+   names its issuer by. */
+static COLD fn tls_revocation_hash(p8 kind, const p8 address_to bytes,
+                                   positive length, p8 address_to out)
 {
+        digest_state digest;
+
+        digest_open(address_of digest, kind == 1 ? DIGEST_SHA1 : DIGEST_SHA256,
+                    kind == 1 ? 20 : 32);
+        digest_write(address_of digest, (address_any)bytes, length);
+        digest_close(address_of digest, out);
+}
+
+/* Whether signer's key signed tbs: tls_verify_one, given the signed part of
+   an OCSP response or a CRL laid out as a certificate's. */
+static COLD bool tls_signed_by(p8 address_to tbs, positive tbs_length,
+                               p8 address_to sig_oid, positive sig_oid_length,
+                               const p8 address_to sig, positive sig_length,
+                               tls_cert address_to signer)
+{
+        tls_cert part;
+
+        memory_fill(address_of part, 0, sizeof part);
+        part.tbs = tbs;
+        part.tbs_length = tbs_length;
+        part.sig_oid = sig_oid;
+        part.sig_oid_length = sig_oid_length;
+        part.sig = (p8 address_to)sig;
+        part.sig_length = sig_length;
+        return tls_verify_one(address_of part, signer);
+}
+
+/*
+        Certificate Transparency (RFC 6962), at the tight tier.
+
+        A certificate a public CA issues is logged before it is issued: the CA
+        sends a precertificate to logs, each answers with a signed certificate
+        timestamp (SCT), and the CA embeds the SCTs in the certificate (the
+        extension 1.3.6.1.4.1.11129.2.4.2). A certificate nobody logged -- one a
+        CA was made to issue quietly, or a forgery under a stolen key -- has
+        none that verify, and is the certificate CT exists to expose.
+        tls_ct_holds asks what Chrome asks (its CT policy, embedded SCTs):
+        every SCT is checked against the log it names in tls_ct_logs, over the
+        precertificate it signed -- the leaf's TBSCertificate without the SCT
+        list, and the SHA-256 of its issuer's SubjectPublicKeyInfo -- and
+        counted only from a log that is usable, qualified or read-only, or
+        retired after the SCT was made, and whose temporal interval holds the
+        leaf's notAfter, made no later than now. Counted SCTs have to come from
+        two operators at least, at least one from a log that has not retired,
+        and number two for a leaf of 180 days or less and three for a longer
+        one.
+
+        SCTs a server sends in TLS or in a stapled OCSP response are not read:
+        a public certificate carries its own. The default and reference tiers
+        do not ask, as GNU wget and curl do not; a chain that ends at the
+        harness's own root (TLS_BENCH_ANCHOR) is asked only when the harness
+        names logs of its own (TLS_BENCH_CT).
+*/
+typedef struct
+{
+        p8 id[32];
+        p8 x[32];
+        p8 y[32];
+        p8 operator;
+        p64 retired; // milliseconds since the epoch; 0 while it is not
+        p64 from;    // the notAfter interval it takes, milliseconds; 0, 0 for any
+        p64 until;
+} tls_ct_log;
+
+#include "ct_logs.inc"
+#ifdef TLS_BENCH_CT
+#include TLS_BENCH_CT
+#endif
+
+#define TLS_CT_SCTS_MOST 16
+#define TLS_CT_SHORT_DAYS 180
+
+//      The log an SCT names, or null.
+static COLD const tls_ct_log address_to tls_ct_log_find(const p8 address_to id)
+{
+        for (positive at = 0; at < array_count(tls_ct_logs); at++)
+                if (!memory_compare(tls_ct_logs[at].id, id, 32))
+                        return tls_ct_logs + at;
+#ifdef TLS_BENCH_CT
+        for (positive at = 0; at < array_count(tls_bench_ct_logs); at++)
+                if (!memory_compare(tls_bench_ct_logs[at].id, id, 32))
+                        return tls_bench_ct_logs + at;
+#endif
+        return null;
+}
+
+/*
+        The precertificate's TBSCertificate an embedded SCT signed: the leaf's,
+        with the SCT list extension taken out and the lengths of the
+        extensions, their [3] and the TBS written again. Its length, or 0 when
+        the leaf carries no list or nothing would be left of its extensions.
+        out has room for the leaf's own TBS, which this never exceeds.
+*/
+static COLD positive tls_ct_precert(const tls_cert address_to leaf, p8 address_to out,
+                                    positive room)
+{
+        p8 address_to tbs = leaf->tbs;
+        positive tbs_length = leaf->tbs_length;
+        positive at = 0;
+        positive tbs_stop = 0;
+        positive wrap_stop = 0;
+        positive list_at;
+        positive list_stop = 0;
+        positive cut;
+        positive cut_length = leaf->sct_extension_length;
+        positive prefix;
+        positive kept;
+        positive list_header;
+        positive wrap_header;
+        positive used;
+
+        if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||
+            leaf->sct_extension < leaf->extensions ||
+            tls_asn1_enter(tbs, tbs_length, 0x30, address_of at, address_of tbs_stop) ||
+            tbs_stop != tbs_length)
+                return 0;
+        prefix = (positive)(leaf->extensions - tbs) - at;
+        at = (positive)(leaf->extensions - tbs);
+        if (tls_asn1_enter(tbs, tbs_stop, 0xa3, address_of at, address_of wrap_stop) ||
+            wrap_stop != tbs_stop)
+                return 0;
+        list_at = at;
+        if (tls_asn1_enter(tbs, wrap_stop, 0x30, address_of list_at, address_of list_stop) ||
+            list_stop != wrap_stop)
+                return 0;
+        cut = (positive)(leaf->sct_extension - tbs);
+        if (cut < list_at || cut_length > list_stop - cut)
+                return 0;
+        kept = list_stop - list_at - cut_length;
+        if (!kept)
+                return 0;
+        list_header = tls_der_header_size(kept);
+        wrap_header = tls_der_header_size(list_header + kept);
+        used = prefix + wrap_header + list_header + kept;
+        at = tls_der_header_size(used);
+        if (at + used > room)
+                return 0;
+        tls_der_header(out, 0x30, used);
+        //      Everything before the extensions, as it was.
+        memory_copy(out + at, tbs + (positive)(leaf->extensions - tbs) - prefix, prefix);
+        at += prefix;
+        at += tls_der_header(out + at, 0xa3, list_header + kept);
+        at += tls_der_header(out + at, 0x30, kept);
+        memory_copy(out + at, tbs + list_at, cut - list_at);
+        at += cut - list_at;
+        memory_copy(out + at, tbs + cut + cut_length, list_stop - cut - cut_length);
+        at += list_stop - cut - cut_length;
+        return at;
+}
+
+/*
+        One SCT read (RFC 6962 3.2): v1, the log's id, its timestamp in
+        milliseconds, its extensions, and an ECDSA signature with SHA-256 as
+        a DER Ecdsa-Sig-Value. False for any other shape.
+*/
+typedef struct
+{
+        const p8 address_to id;
+        p64 timestamp;
+        const p8 address_to extensions;
+        positive extensions_length;
+        const p8 address_to signature;
+        positive signature_length;
+} tls_ct_sct;
+
+static COLD bool tls_ct_sct_read(byte_reader address_to reader, tls_ct_sct address_to sct)
+{
+        byte_reader extensions;
+        byte_reader signature;
+        p32 high;
+
+        if (byte_reader_u8(reader) != 0)
+                return false;
+        sct->id = byte_reader_take(reader, 32);
+        high = byte_reader_u32(reader);
+        sct->timestamp = (p64)high << 32 | byte_reader_u32(reader);
+        extensions = byte_reader_vector16(reader);
+        sct->extensions = byte_reader_here(address_of extensions);
+        sct->extensions_length = byte_reader_left(address_of extensions);
+        //      SHA-256 (4) and ECDSA (3), the one pair every log uses.
+        if (byte_reader_u8(reader) != 4 || byte_reader_u8(reader) != 3)
+                return false;
+        signature = byte_reader_vector16(reader);
+        sct->signature = byte_reader_here(address_of signature);
+        sct->signature_length = byte_reader_left(address_of signature);
+        return byte_reader_ok(reader) && byte_reader_end(reader) && sct->id &&
+               byte_reader_ok(address_of extensions) && byte_reader_ok(address_of signature) &&
+               sct->signature_length;
+}
+
+/*
+        Whether one SCT verifies under its log's key over the precertificate:
+        sct_version 0, signature_type certificate_timestamp (0), the
+        timestamp, entry_type precert_entry (1), the issuer key hash, the TBS
+        with a 24-bit length, the SCT's extensions with a 16-bit one.
+*/
+static COLD bool tls_ct_sct_verifies(const tls_ct_sct address_to sct,
+                                     const tls_ct_log address_to log,
+                                     const p8 address_to issuer_key_hash,
+                                     const p8 address_to precert, positive precert_length,
+                                     byte_store address_to signed_bytes)
+{
+        static const p8 ecdsa_sha256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02};
+        p8 head[12];
+        p8 lengths[3];
+        tls_cert signer;
+
+        signed_bytes->used = 0;
+        head[0] = 0;
+        head[1] = 0;
+        network_store_64(head + 2, sct->timestamp);
+        head[10] = 0;
+        head[11] = 1;
+        lengths[0] = (p8)(precert_length >> 16);
+        lengths[1] = (p8)(precert_length >> 8);
+        lengths[2] = (p8)precert_length;
+        if (precert_length >= 1u << 24 ||
+            !byte_store_reserve(signed_bytes,
+                                sizeof head + 32 + 3 + precert_length + 2 +
+                                    sct->extensions_length,
+                                4096) ||
+            !byte_store_append_exact(signed_bytes, head, sizeof head) ||
+            !byte_store_append_exact(signed_bytes, issuer_key_hash, 32) ||
+            !byte_store_append_exact(signed_bytes, lengths, 3) ||
+            !byte_store_append_exact(signed_bytes, precert, precert_length))
+                return false;
+        lengths[0] = (p8)(sct->extensions_length >> 8);
+        lengths[1] = (p8)sct->extensions_length;
+        if (!byte_store_append_exact(signed_bytes, lengths, 2) ||
+            !byte_store_append_exact(signed_bytes, sct->extensions, sct->extensions_length))
+                return false;
+        memory_fill(address_of signer, 0, sizeof signer);
+        signer.curve = 1;
+        memory_copy(signer.qx + 16, log->x, 32);
+        memory_copy(signer.qy + 16, log->y, 32);
+        return tls_signed_by(signed_bytes->bytes, signed_bytes->used, (p8 address_to)ecdsa_sha256,
+                             sizeof ecdsa_sha256, sct->signature, sct->signature_length,
+                             address_of signer);
+}
+
+/* Whether a counted SCT's log may count it now: not retired, or retired
+   after it was made; taking the leaf's notAfter; made by now. */
+static PURE COLD bool tls_ct_log_counts(const tls_ct_log address_to log, p64 timestamp,
+                                         p64 not_after_ms, p64 now_ms)
+{
+        return timestamp <= now_ms && (!log->retired || timestamp < log->retired) &&
+               (!log->until || (not_after_ms >= log->from && not_after_ms < log->until));
+}
+
+static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_to path,
+                              positive depth, tls_cert address_to top)
+{
+        tls_cert address_to leaf = certs;
+        tls_cert address_to issuer = depth ? certs + path[1] : top;
+        byte_store precert = {0};
+        byte_store signed_bytes = {0};
+        byte_reader list;
+        byte_reader entries;
+        p8 issuer_key_hash[32];
+        p8 operators[TLS_CT_SCTS_MOST];
+        positive counted = 0;
+        positive distinct = 0;
+        bool current = false;
+        p64 now_ms;
+        p64 not_before_ms;
+        p64 not_after_ms;
+        positive length;
+        positive seen = 0;
+        bool held;
+
+#ifdef TLS_BENCH_ANCHOR
+#ifndef TLS_BENCH_CT
+        //      The harness's own root, with no logs of its own to ask.
+        if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&
+            !memory_compare(top->qy, tls_bench_anchor_y, 48))
+                return true;
+#endif
+#endif
+        if (!leaf->scts || !issuer->spki || !issuer->spki_length)
+                return false;
+        //      tls_date_seconds counts from day zero of its calendar, not
+        //      from the epoch an SCT's timestamp counts from.
+        now_ms = (p64)time(null) * 1000;
+        not_before_ms = (tls_date_seconds(leaf->not_before) -
+                         tls_date_seconds(19700101000000ull)) * 1000;
+        not_after_ms = (tls_date_seconds(leaf->not_after) -
+                        tls_date_seconds(19700101000000ull)) * 1000;
+        crypto_sha256_of(issuer->spki, issuer->spki_length, issuer_key_hash);
+        if (!byte_store_reserve(address_of precert, leaf->tbs_length, 4096))
+                return false;
+        length = tls_ct_precert(leaf, precert.bytes, leaf->tbs_length);
+        list = byte_reader_open(leaf->scts, leaf->scts_length);
+        entries = byte_reader_vector16(address_of list);
+        if (!length || !byte_reader_ok(address_of list) || !byte_reader_end(address_of list))
+        {
+                byte_store_release(address_of precert);
+                return false;
+        }
+        while (byte_reader_left(address_of entries) && seen++ < TLS_CT_SCTS_MOST)
+        {
+                byte_reader one = byte_reader_vector16(address_of entries);
+                tls_ct_sct sct;
+                const tls_ct_log address_to log;
+                bool known = false;
+
+                if (!byte_reader_ok(address_of entries) ||
+                    !tls_ct_sct_read(address_of one, address_of sct))
+                        break;
+                log = tls_ct_log_find(sct.id);
+                if (!log || !tls_ct_log_counts(log, sct.timestamp, not_after_ms, now_ms) ||
+                    !tls_ct_sct_verifies(address_of sct, log, issuer_key_hash, precert.bytes,
+                                         length, address_of signed_bytes))
+                        continue;
+                counted++;
+                current |= !log->retired;
+                for (positive at = 0; at < distinct; at++)
+                        known |= operators[at] == log->operator;
+                if (!known)
+                        operators[distinct++] = log->operator;
+        }
+        held = byte_reader_ok(address_of entries) && distinct >= 2 && current &&
+               counted >= (not_after_ms - not_before_ms <=
+                                   (p64)TLS_CT_SHORT_DAYS * 86400 * 1000
+                               ? 2u
+                               : 3u);
+        byte_store_release(address_of precert);
+        byte_store_release(address_of signed_bytes);
+        return held;
+}
+
+/* What a stapled OCSP response says of leaf, which issuer signed (RFC 6960
+   3.2, 4.2.2.2). It has to parse (tls_parse_ocsp); exactly one of its
+   SingleResponses has to name leaf -- the hash of leaf's issuer Name and of
+   issuer's key under the CertID's hash, and leaf's serial; and it has to be
+   signed by issuer, or by a delegated responder among its certificates:
+   issued by issuer (the Name leaf names, issuer's signature), with
+   id-kp-OCSPSigning, current, a digitalSignature key if it limits its key
+   at all, and the responder the response names (byName its subject, byKey
+   the SHA-1 of its key). Revoked so signed is revoked whenever it was said;
+   good has to be fresh (tls_revocation_fresh); unknown, stale or anything
+   short of the above is none. */
+static COLD p8 tls_ocsp_answer(tls_cert address_to leaf, tls_cert address_to issuer,
+                               const p8 address_to response, positive length,
+                               p64 now)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 names[2][32];
+        p8 keys[2][32];
+        positive key_length = tls_key_bits(issuer, key, sizeof key);
+        positive matched = 0;
+        tls_ocsp ocsp;
+        tls_ocsp_single single;
+        tls_ocsp_single found;
+        tls_cert responder;
+        tls_cert address_to signer = null;
+        byte_reader list;
+
+        if (!key_length || !leaf->issuer || !leaf->serial ||
+            tls_parse_ocsp((p8 address_to)response, length, address_of ocsp))
+                return TLS_ANSWER_NONE;
+        for (p8 kind = 1; kind <= 2; kind++)
+        {
+                tls_revocation_hash(kind, leaf->issuer, leaf->issuer_length,
+                                    names[kind - 1]);
+                tls_revocation_hash(kind, key, key_length, keys[kind - 1]);
+        }
+        memory_fill(address_of found, 0, sizeof found);
+        list = byte_reader_open(ocsp.responses, ocsp.responses_length);
+        while (byte_reader_left(&list))
+        {
+                positive size = 0;
+                const p8 address_to whole = tls_der_whole(&list, 0x30, address_of size);
+
+                if (!whole || tls_parse_ocsp_single(whole, size, address_of single))
+                        return TLS_ANSWER_NONE;
+                if (!memory_compare(single.name_hash, names[single.hash - 1],
+                                    single.hash_length) &&
+                    !memory_compare(single.key_hash, keys[single.hash - 1],
+                                    single.hash_length) &&
+                    single.serial_length == leaf->serial_length &&
+                    !memory_compare(single.serial, leaf->serial, leaf->serial_length))
+                {
+                        found = single;
+                        matched++;
+                }
+        }
+        //      None names leaf, or two do, which could disagree.
+        if (matched != 1)
+                return TLS_ANSWER_NONE;
+
+        if (ocsp.by_key ? !memory_compare(ocsp.responder, keys[0], 20)
+                        : ocsp.responder_length == leaf->issuer_length &&
+                              !memory_compare(ocsp.responder, leaf->issuer,
+                                              leaf->issuer_length))
+                signer = issuer;
+        list = byte_reader_open(ocsp.certs, ocsp.certs_length);
+        while (!signer && byte_reader_left(&list))
+        {
+                positive size = 0;
+                p8 address_to whole =
+                    (p8 address_to)tls_der_whole(&list, 0x30, address_of size);
+                p8 named[20];
+
+                if (!whole)
+                        break;
+                if (tls_parse_cert(whole, size, address_of responder, null) ||
+                    responder.issuer_length != leaf->issuer_length ||
+                    memory_compare(responder.issuer, leaf->issuer,
+                                   leaf->issuer_length) ||
+                    !responder.ocsp_signing ||
+                    !tls_cert_current(address_of responder, now) ||
+                    (responder.key_usage && !responder.digital_signature))
+                        continue;
+                if (ocsp.by_key)
+                {
+                        p8 bits[32 + CRYPTO_RSA_BYTES];
+                        positive bits_length = tls_key_bits(address_of responder, bits,
+                                                            sizeof bits);
+
+                        tls_revocation_hash(1, bits, bits_length, named);
+                        if (!bits_length || memory_compare(named, ocsp.responder, 20))
+                                continue;
+                }
+                else if (responder.subject_length != ocsp.responder_length ||
+                         memory_compare(responder.subject, ocsp.responder,
+                                        ocsp.responder_length))
+                        continue;
+                if (tls_verify_one(address_of responder, issuer))
+                        signer = address_of responder;
+        }
+        if (!signer || !tls_signed_by(ocsp.tbs, ocsp.tbs_length, ocsp.sig_oid,
+                                      ocsp.sig_oid_length, ocsp.sig,
+                                      ocsp.sig_length, signer))
+                return TLS_ANSWER_NONE;
+        if (found.status == TLS_OCSP_REVOKED)
+                return TLS_ANSWER_REVOKED;
+        return found.status == TLS_OCSP_GOOD &&
+                       tls_revocation_fresh(found.this_update, found.next_update,
+                                            now)
+                   ? TLS_ANSWER_GOOD
+                   : TLS_ANSWER_NONE;
+}
+
+/*
+        The CRLs this process fetched, by the SHA-256 of their URL: the bytes
+        (or a failed fetch, not tried again for TLS_CRL_RETRY seconds), and
+        once one verifies, the SHA-256 of the key it verified under and its
+        nextUpdate. Memory only: the fetch may run where no file can be
+        opened, and a CRL is a few seconds' download at worst. A CRL past its
+        nextUpdate is fetched again; the least recently used goes when a new
+        one would hold more than TLS_CRL_HELD of them or TLS_CRL_HELD_BYTES.
+*/
+typedef struct
+{
+        byte_store crl;
+        p8 name[32];
+        p8 signer[32];
+        p64 next_update;
+        p64 fetched;
+        positive age;
+        bool used;
+        bool failed;
+} tls_crl_held;
+
+static tls_crl_held tls_crl_cache[TLS_CRL_HELD];
+static positive tls_crl_clock;
+
+static COLD fn tls_crl_drop(tls_crl_held address_to held)
+{
+        byte_store_release(address_of held->crl);
+        memory_fill(held, 0, sizeof(address_to held));
+}
+
+static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
+                                               positive length, p64 now,
+                                               const network_deadline address_to deadline)
+{
+        p8 name[32];
+        p64 at = tls_date_seconds(now);
+        byte_store fetched = {null, 0, 0};
+        tls_crl_held address_to slot = null;
+        positive seconds;
+        positive nanoseconds;
+        bool got;
+
+        crypto_sha256_of((p8 address_to)url, length, name);
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+        {
+                tls_crl_held address_to held = tls_crl_cache + k;
+
+                if (!held->used || memory_compare(held->name, name, 32))
+                        continue;
+                if (held->failed ? held->fetched + TLS_CRL_RETRY > at
+                                 : !held->next_update ||
+                                       tls_date_seconds(held->next_update) +
+                                               TLS_REVOCATION_SKEW >= at)
+                {
+                        held->age = ++tls_crl_clock;
+                        return held;
+                }
+                tls_crl_drop(held);
+        }
+        //      A budget spent by an earlier URL is no attempt: nothing is
+        //      looked up, and nothing is held as failed for TLS_CRL_RETRY.
+        if (!deadline || !network_deadline_left(deadline, address_of seconds,
+                                                address_of nanoseconds))
+                return null;
+        got = tls_plain_get(url, length, address_of fetched, TLS_REVOCATION_SECONDS,
+                            deadline) != 0;
+        if (!got)
+                byte_store_release(address_of fetched);
+        for (;;)
+        {
+                positive count = 0;
+                positive bytes = fetched.used;
+                tls_crl_held address_to oldest = null;
+
+                slot = null;
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                {
+                        tls_crl_held address_to held = tls_crl_cache + k;
+
+                        if (!held->used)
+                        {
+                                slot = slot ? slot : held;
+                                continue;
+                        }
+                        count++;
+                        bytes += held->crl.used;
+                        if (!oldest || held->age < oldest->age)
+                                oldest = held;
+                }
+                if (slot && bytes <= TLS_CRL_HELD_BYTES)
+                        break;
+                if (!oldest)
+                {
+                        byte_store_release(address_of fetched);
+                        return null;
+                }
+                tls_crl_drop(oldest);
+        }
+        slot->crl = fetched;
+        memory_copy(slot->name, name, 32);
+        slot->fetched = at;
+        slot->age = ++tls_crl_clock;
+        slot->used = true;
+        slot->failed = !got;
+        return slot;
+}
+
+/* What the CRL at one URL says of cert, which issuer signed (RFC 5280
+   6.3.3): fetched or held; parsed with cert's serial looked up
+   (tls_parse_crl); issued under the Name cert names and, when both carry one,
+   the same authority key identifier; signed by issuer, whose key's SHA-256
+   is signer; of a scope that covers cert (tls_crl_covers). Listed so signed
+   is revoked; otherwise good when fresh; none for any failure. */
+static COLD p8 tls_crl_answer_at(tls_cert address_to cert,
+                                 tls_cert address_to issuer,
+                                 const p8 address_to url, positive length,
+                                 const p8 address_to signer, p64 now,
+                                 const network_deadline address_to deadline)
+{
+        tls_crl_held address_to held = tls_crl_get(url, length, now, deadline);
+        tls_crl crl;
+
+        if (!held || held->failed ||
+            tls_parse_crl(held->crl.bytes, held->crl.used, cert->serial,
+                          cert->serial_length, address_of crl) ||
+            crl.issuer_length != cert->issuer_length ||
+            memory_compare(crl.issuer, cert->issuer, cert->issuer_length) ||
+            (crl.authority_key && cert->authority_key &&
+             (crl.authority_key_length != cert->authority_key_length ||
+              memory_compare(crl.authority_key, cert->authority_key,
+                             crl.authority_key_length))) ||
+            !tls_crl_covers(address_of crl.scope, cert))
+                return TLS_ANSWER_NONE;
+        if (memory_compare(held->signer, signer, 32))
+        {
+                if (!tls_signed_by(crl.tbs, crl.tbs_length, crl.sig_oid,
+                                   crl.sig_oid_length, crl.sig, crl.sig_length,
+                                   issuer))
+                        return TLS_ANSWER_NONE;
+                memory_copy(held->signer, signer, 32);
+                held->next_update = crl.next_update;
+        }
+        if (crl.listed)
+                return TLS_ANSWER_REVOKED;
+        return tls_revocation_fresh(crl.this_update, crl.next_update, now)
+                   ? TLS_ANSWER_GOOD
+                   : TLS_ANSWER_NONE;
+}
+
+/* What cert's CRL says of it: each http: URI of the distribution point it
+   names, in order, until one answers (tls_crl_answer_at), at most
+   TLS_CRL_POINTS of them. A CA lists mirrors there, and one may refuse a
+   plain GET that another serves: Microsoft's www.microsoft.com answers 403
+   where crl2.microsoft.com serves the same CRL. The issuer has to be one
+   whose key may sign CRLs (cRLSign, when it limits its key at all). Absent
+   when cert names no CRL, none when no URI answers. */
+#define TLS_CRL_POINTS 4
+
+static COLD p8 tls_crl_answer(tls_cert address_to cert, tls_cert address_to issuer,
+                              p64 now, const network_deadline address_to deadline)
+{
+        p8 key[32 + CRYPTO_RSA_BYTES];
+        p8 signer[32];
+        positive key_length;
+        positive tried = 0;
+        byte_reader names;
+
+        if (!cert->crl_url)
+                return TLS_ANSWER_ABSENT;
+        key_length = tls_key_bits(issuer, key, sizeof key);
+        if (!key_length || !cert->issuer || !cert->serial ||
+            (issuer->key_usage && !issuer->crl_sign))
+                return TLS_ANSWER_NONE;
+        crypto_sha256_of(key, key_length, signer);
+        names = byte_reader_open(cert->crl_names, cert->crl_names_length);
+        while (byte_reader_left(&names) && tried < TLS_CRL_POINTS)
+        {
+                p8 tag = tls_der_peek(names);
+                byte_reader uri = tls_der_value(&names, tag);
+                const p8 address_to text = byte_reader_here(&uri);
+                positive size = byte_reader_left(&uri);
+                p8 answer;
+
+                if (tag != 0x86 || size <= 7 || !tls_printable(text, size) ||
+                    memory_compare_ascii_case(text, "http://", 7))
+                        continue;
+                tried++;
+                answer = tls_crl_answer_at(cert, issuer, text, size, signer, now,
+                                           deadline);
+                if (answer != TLS_ANSWER_NONE)
+                        return answer;
+        }
+        return TLS_ANSWER_NONE;
+}
+
+/* The tiers over a verified path: path[0] the leaf, path[depth] the last
+   certificate below the anchor, top the certificate or anchor that signed
+   that one. False with tls->fault saying why when the path may not be
+   used: revoked, or unchecked where the answer was required. */
+static COLD bool tls_revocation_holds(tls_conn address_to tls,
+                                      tls_cert address_to certs,
+                                      const positive address_to path,
+                                      positive depth, tls_cert address_to top,
+                                      const p8 address_to staple,
+                                      positive staple_length, p64 now)
+{
+        network_deadline deadline;
+        bool timed = network_deadline_begin_within(address_of deadline,
+                                                   TLS_REVOCATION_SECONDS, 0,
+                                                   tls->deadline);
+        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+
+        for (positive k = 0; k <= depth; k++)
+        {
+                tls_cert address_to cert = certs + path[k];
+                tls_cert address_to issuer = k < depth ? certs + path[k + 1] : top;
+                p8 answer = TLS_ANSWER_ABSENT;
+
+                if (!k && staple)
+                        answer = tls_ocsp_answer(cert, issuer, staple, staple_length,
+                                                 now);
+                if (answer == TLS_ANSWER_GOOD)
+                        continue;
+                if (answer == TLS_ANSWER_REVOKED)
+                        goto revoked;
+                if ((!k && cert->must_staple) || (answer == TLS_ANSWER_NONE && tight))
+                        goto unchecked;
+                answer = tls_crl_answer(cert, issuer, now,
+                                        timed ? address_of deadline : null);
+                if (answer == TLS_ANSWER_REVOKED)
+                        goto revoked;
+                if (answer == TLS_ANSWER_NONE && tight)
+                        goto unchecked;
+        }
+        return true;
+
+revoked:
+        tls->fault = TLS_FAULT_REVOKED;
+        return false;
+unchecked:
+        tls->fault = TLS_FAULT_UNCHECKED;
+        return false;
+}
+
+/*
+        tls_verify_chain's two fetches over plain HTTP: the certificate a
+        caIssuers location names (RFC 5280 4.2.2.1), which browsers fetch
+        when a server leaves an intermediate out, and the CRL a distribution
+        point names (RFC 5280 4.2.1.13). The URL comes from a certificate,
+        and for caIssuers one nothing has verified yet, so the peer may
+        choose the destination, and the fetch is held to what a certificate
+        or a CRL needs: http: only (https would be a handshake inside a
+        handshake), port 80 unless a harness serves it, no userinfo, a public
+        address, one HTTP/1.0 GET with no redirect followed, seconds for the
+        connection and the reply together -- inside outer, when there is one
+        -- a 200, and a body of at most most bytes, which the caller parses
+        and verifies -- DER only, so a PKCS#7 bundle or PEM text is refused
+        there. A store given room holds what it was given (caIssuers' room on
+        the stack), at most that many bytes; one given none grows on the heap
+        to hold the head and TLS_CRL_MAX bytes of body (a CRL's). Returns the
+        body's length at the front of the store, or 0.
+*/
+static COLD positive tls_plain_get(const p8 address_to url, positive length,
+                                   byte_store address_to into, positive seconds,
+                                   const network_deadline address_to outer)
+{
+        positive most = into->room ? into->room : TLS_CRL_MAX;
+        bool grow = !into->room;
         p8 text[HTTP_URL_MAX];
         p8 host[256];
         p8 request[HTTP_URL_MAX + 256];
@@ -11209,13 +14248,15 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
         bool tls;
         p32 ip;
         positive sent = 0;
-        positive used = 0;
         positive header = 0;
+        positive left = 0;
+        positive part = 0;
         http_response response;
         network_deadline deadline;
         bipolar handle;
         bool closed = false;
 
+        into->used = 0;
         if (length >= sizeof text)
                 return 0;
         memory_copy(text, url, length);
@@ -11230,9 +14271,12 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                              path, false, '0', (string_address)"Wget",
                              address_of sent) ||
             !(ip = http_lookup((string_address)host)) || !http_address_public(ip) ||
-            !network_deadline_begin(address_of deadline, TLS_AIA_SECONDS, 0))
+            !network_deadline_begin_within(address_of deadline, seconds, 0, outer) ||
+            !network_deadline_left(address_of deadline, address_of left,
+                                   address_of part) ||
+            (grow && !byte_store_reserve(into, TLS_CRL_STEP, TLS_CRL_STEP)))
                 return 0;
-        handle = http_stream_open(ip, port, TLS_AIA_SECONDS);
+        handle = http_stream_open(ip, port, left + (part != 0));
         if (handle < 0)
                 return 0;
         if (network_stream_send_all_until(handle, request, sent,
@@ -11240,33 +14284,846 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
                 for (;;)
                 {
                         bipolar got;
+                        bool framed = !http_response_framing(into->bytes, into->used,
+                                                             address_of header,
+                                                             address_of response);
+                        positive wanted;
 
-                        if (!http_response_framing(into, used, address_of header,
-                                                   address_of response) &&
-                            response.body_kind == HTTP_BODY_LENGTH &&
-                            used - header >= response.body_length)
+                        if (framed && response.body_kind == HTTP_BODY_LENGTH &&
+                            (response.body_length > most ||
+                             into->used - header >= response.body_length))
                                 break;
-                        if (used == room)
+                        if (framed && into->used - header > most)
                                 break;
+                        if (into->used == into->room)
+                        {
+                                wanted = framed && response.body_kind == HTTP_BODY_LENGTH
+                                             ? header + response.body_length
+                                             : into->room + TLS_CRL_STEP;
+                                if (!grow || wanted > most + HTTP_HEAD_MAX ||
+                                    !byte_store_reserve(into, wanted, TLS_CRL_STEP))
+                                        break;
+                        }
                         got = network_stream_read_some_until(
-                            handle, into + used, room - used, address_of deadline);
+                            handle, into->bytes + into->used, into->room - into->used,
+                            address_of deadline);
                         if (got <= 0)
                         {
                                 closed = !got;
                                 break;
                         }
-                        used += (positive)got;
+                        into->used += (positive)got;
                 }
         socket_close((b32)handle);
-        if (http_response_framing(into, used, address_of header,
+        if (http_response_framing(into->bytes, into->used, address_of header,
                                   address_of response) ||
-            response.code != 200 ||
+            response.code != 200 || into->used - header > most ||
             (response.body_kind == HTTP_BODY_LENGTH
-                 ? used - header != response.body_length
+                 ? into->used - header != response.body_length
                  : response.body_kind != HTTP_BODY_CLOSE || !closed))
+        {
+                into->used = 0;
                 return 0;
-        memory_copy(into, into + header, used - header);
-        return used - header;
+        }
+        memory_copy(into->bytes, into->bytes + header, into->used - header);
+        into->used -= header;
+        return into->used;
+}
+
+static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
+                                   p8 address_to into, positive room)
+{
+        byte_store store = {into, room, 0};
+
+        return tls_plain_get(url, length, address_of store, TLS_AIA_SECONDS, null);
+}
+
+/*
+        Network Time Security, key establishment: RFC 8915 4.
+
+        The NTS-KE connection is TLS 1.3 to the server's port (4460), the
+        ALPN protocol "ntske/1", one request of three records (NTPv4 is the
+        protocol asked for, AEAD_AES_SIV_CMAC_256 the algorithm) and one
+        reply: the two it chose, cookies to spend one at a time, and
+        optionally another server and port for the time itself. The keys
+        are not in the reply. Both ends derive them from the finished
+        handshake with the TLS exporter (RFC 8446 7.5) under the label
+        "EXPORTER-network-time-security", context the protocol number, the
+        algorithm number and one byte for the direction.
+
+        nts_ke_reply is the reply's parser alone, fed bytes from anywhere
+        (nts_fuzz): critical records it does not know fail, an error or a
+        warning record fails, a number is taken only as the one it asked
+        for, a name only as a host name, a port not at zero, and nothing
+        follows the end record. A cookie too long for this client's room is
+        passed over, since a server can issue any length; with none that
+        fit, the exchange fails.
+
+        Whether NTS is asked at all is a word in /root/ntp.nts: on, off, or
+        only (NTS and nothing the path could have forged). A word that is
+        none of them is the tier's default: on, and at the tight tier only
+        (nts_mode_of), so a hardened or locked image never takes plain time
+        unless someone said so.
+*/
+#define NTS_KE_PORT 4460
+#define NTS_COOKIES 8
+#define NTS_COOKIE_MAX 256
+#define NTS_SERVER_MAX 64
+#define NTS_AEAD_SIV_CMAC_256 15
+#define NTS_NTP_PORT 123
+#define NTS_KE_ROOM 4096
+#define NTS_KE_SECONDS 6
+#define NTS_OFF 0
+#define NTS_ON 1
+#define NTS_ONLY 2
+#if MOONWATER_STRICT_NET >= STRICT_TIGHT
+#define NTS_MODE_DEFAULT NTS_ONLY
+#else
+#define NTS_MODE_DEFAULT NTS_ON
+#endif
+
+typedef struct
+{
+        p8 c2s[32];
+        p8 s2c[32];
+        /* The key-establishment server this came from, and the time server
+           (and port) the exchange named, empty and 123 when it named none. */
+        p8 origin[NTS_SERVER_MAX];
+        p16 origin_port;
+        p8 server[NTS_SERVER_MAX];
+        p16 port;
+        positive count;
+        p16 length[NTS_COOKIES];
+        p8 cookie[NTS_COOKIES][NTS_COOKIE_MAX];
+} nts_state;
+
+//      The word in /root/ntp.nts as a mode: the tier's default for anything
+//      that is not on, off or only, a missing file included.
+static COLD positive nts_mode_of(string_address word)
+{
+        return string_equals(word, "off")    ? NTS_OFF
+               : string_equals(word, "on")   ? NTS_ON
+               : string_equals(word, "only") ? NTS_ONLY
+                                             : NTS_MODE_DEFAULT;
+}
+
+/* A host name, or a dotted address: labels of letters, digits and hyphens
+   between dots, none empty and none beginning or ending with a hyphen. */
+static COLD bool nts_name_ok(const p8 address_to name, positive length)
+{
+        positive label = 0;
+
+        if (!length || length >= NTS_SERVER_MAX)
+                return false;
+        for (positive at = 0; at < length; at++)
+        {
+                if (name[at] == '.')
+                {
+                        if (!label || name[at - 1] == '-')
+                                return false;
+                        label = 0;
+                }
+                else if (byte_is_alnum(name[at]) || (name[at] == '-' && label))
+                        label++;
+                else
+                        return false;
+        }
+        return label && name[length - 1] != '-';
+}
+
+//      Whether the reply so far holds its end record, in whole records.
+static COLD bool nts_ke_complete(const p8 address_to data, positive length)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)data, length);
+
+        while (byte_reader_left(&reader) >= 4)
+        {
+                p16 type = byte_reader_u16(&reader);
+
+                (void)byte_reader_vector16(&reader);
+                if (!byte_reader_ok(&reader))
+                        return false;
+                if ((type & 0x7fff) == 0)
+                        return true;
+        }
+        return false;
+}
+
+#define NTS_KE_OK 0
+#define NTS_KE_MALFORMED (-1)
+#define NTS_KE_ERROR (-2)
+
+static COLD bipolar nts_ke_reply(const p8 address_to data, positive length,
+                                 nts_state address_to state)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)data, length);
+        bool protocol = false;
+        bool algorithm = false;
+        bool named = false;
+        bool ported = false;
+        bool done = false;
+
+        state->count = 0;
+        state->server[0] = end;
+        state->port = NTS_NTP_PORT;
+        while (!done && byte_reader_left(&reader))
+        {
+                p16 type = byte_reader_u16(&reader);
+                byte_reader body = byte_reader_vector16(&reader);
+                positive size = byte_reader_left(&body);
+                bool critical = (type & 0x8000) != 0;
+
+                if (!byte_reader_ok(&reader))
+                        return NTS_KE_MALFORMED;
+                switch (type & 0x7fff)
+                {
+                case 0:
+                        if (size || !critical)
+                                return NTS_KE_MALFORMED;
+                        done = true;
+                        break;
+                case 1:
+                        if (protocol || size != 2 || byte_reader_u16(&body))
+                                return NTS_KE_MALFORMED;
+                        protocol = true;
+                        break;
+                case 2:
+                case 3:
+                        //      An error or a warning: RFC 8915 4.1.3 and 4.1.4
+                        //      have the client end the exchange on either.
+                        return NTS_KE_ERROR;
+                case 4:
+                        if (algorithm || size != 2 ||
+                            byte_reader_u16(&body) != NTS_AEAD_SIV_CMAC_256)
+                                return NTS_KE_MALFORMED;
+                        algorithm = true;
+                        break;
+                case 5:
+                        if (size && size <= NTS_COOKIE_MAX &&
+                            state->count < NTS_COOKIES)
+                        {
+                                memory_copy(state->cookie[state->count],
+                                            byte_reader_here(&body), size);
+                                state->length[state->count++] = (p16)size;
+                        }
+                        break;
+                case 6:
+                        if (named || !nts_name_ok(byte_reader_here(&body), size))
+                                return NTS_KE_MALFORMED;
+                        memory_copy(state->server, byte_reader_here(&body),
+                                    size);
+                        state->server[size] = end;
+                        named = true;
+                        break;
+                case 7:
+                        if (ported || size != 2)
+                                return NTS_KE_MALFORMED;
+                        state->port = byte_reader_u16(&body);
+                        if (!state->port)
+                                return NTS_KE_MALFORMED;
+                        ported = true;
+                        break;
+                default:
+                        if (critical)
+                                return NTS_KE_MALFORMED;
+                }
+        }
+        return done && !byte_reader_left(&reader) && protocol && algorithm &&
+                       state->count
+                   ? NTS_KE_OK : NTS_KE_MALFORMED;
+}
+
+/*
+        NTS in the packet, RFC 8915 5: extension fields after the 48 bytes.
+
+        A request carries a unique identifier (32 random bytes the reply
+        must echo), one cookie (spent: it is taken out of the state as the
+        packet is built, and the reply brings a fresh one), a placeholder
+        for each cookie the state is then short of eight, and the
+        authenticator: a nonce and the AEAD tag over everything before it,
+        under the client-to-server key. A reply is believed only when it
+        echoes the identifier and its authenticator, the last field,
+        opens under the server-to-client key over the packet before it; the
+        cookies it carries inside are then kept. A reply that fails either
+        is noise, not an answer: the exchange goes on waiting for the real
+        one, so a forger who has seen the identifier in the clear spends
+        nothing but its own packet (and one of the exchange's discards). The
+        one thing an unauthenticated reply may do is say the cookie is no
+        good (a kiss code NTSN with the identifier), which sends the caller
+        back to key establishment once.
+
+        The plaintext is empty in a request, so the ciphertext is the
+        16-byte tag alone. Nonces are 16 random bytes, never reused under
+        a key because they are drawn, and the origin timestamp stays the
+        random authenticator it always was.
+*/
+#define NTS_HEADER 48
+#define NTS_PACKET_ROOM 1280
+#define NTS_EF_UID 0x0104
+#define NTS_EF_COOKIE 0x0204
+#define NTS_EF_PLACEHOLDER 0x0304
+#define NTS_EF_AUTH 0x0404
+#define NTS_UID_BYTES 32
+#define NTS_NONCE_BYTES 16
+#define NTS_TAG_BYTES 16
+#define NTS_REPLY_OK 0
+#define NTS_REPLY_IGNORE (-1)
+#define NTS_REPLY_NAK (-2)
+#define NTS_KISS_NTSN 0x4e54534eu /* "NTSN" */
+
+typedef struct
+{
+        crypto_siv_key c2s;
+        crypto_siv_key s2c;
+        p8 uid[NTS_UID_BYTES];
+        nts_state address_to state;
+} nts_exchange;
+
+//      The keys of a state, ready for an exchange.
+static COLD fn nts_exchange_open(nts_exchange address_to exchange,
+                                 nts_state address_to state)
+{
+        exchange->state = state;
+        crypto_siv_prepare(address_of exchange->c2s, state->c2s);
+        crypto_siv_prepare(address_of exchange->s2c, state->s2c);
+}
+
+static COLD fn nts_exchange_close(nts_exchange address_to exchange)
+{
+        crypto_forget(exchange, sizeof(*exchange));
+}
+
+//      The fields after the header already in packet, or 0 when there is
+//      no cookie left or no room. The cookie is spent, and a placeholder of
+//      its size is sent for each the state is short of eight after it (RFC
+//      8915 5.5: the server returns one new cookie for each cookie or
+//      placeholder), so that a reply that never comes costs a cookie only
+//      until the next one that does.
+static COLD positive nts_request(nts_exchange address_to exchange,
+                                 p8 address_to packet, positive room)
+{
+        nts_state address_to state = exchange->state;
+        const p8 address_to parts[2];
+        positive lengths[2];
+        p8 nonce[NTS_NONCE_BYTES];
+        positive at = NTS_HEADER;
+        positive length;
+        positive padded;
+        positive auth;
+        positive more;
+
+        if (!state->count || state->count > NTS_COOKIES)
+                return 0;
+        length = state->length[state->count - 1];
+        padded = (length + 3) & ~(positive)3;
+        if (!length || length > NTS_COOKIE_MAX ||
+            room < at + 4 + NTS_UID_BYTES + 4 + padded + 4 + 4 +
+                       NTS_NONCE_BYTES + NTS_TAG_BYTES ||
+            system_random_fill(exchange->uid, NTS_UID_BYTES, 0) ||
+            system_random_fill(nonce, NTS_NONCE_BYTES, 0))
+                return 0;
+        network_store_16(packet + at, NTS_EF_UID);
+        network_store_16(packet + at + 2, 4 + NTS_UID_BYTES);
+        memory_copy(packet + at + 4, exchange->uid, NTS_UID_BYTES);
+        at += 4 + NTS_UID_BYTES;
+        network_store_16(packet + at, NTS_EF_COOKIE);
+        network_store_16(packet + at + 2, (p16)(4 + padded));
+        memory_copy(packet + at + 4, state->cookie[state->count - 1], length);
+        memory_fill(packet + at + 4 + length, 0, padded - length);
+        at += 4 + padded;
+        crypto_forget(state->cookie[--state->count], NTS_COOKIE_MAX);
+        state->length[state->count] = 0;
+
+        //      One of the eight is the cookie just sent; the rest, while the
+        //      packet has room for them and the authenticator after.
+        for (more = NTS_COOKIES - state->count - 1; more; more--)
+        {
+                if (room < at + 4 + padded + 4 + 4 + NTS_NONCE_BYTES +
+                               NTS_TAG_BYTES)
+                        break;
+                network_store_16(packet + at, NTS_EF_PLACEHOLDER);
+                network_store_16(packet + at + 2, (p16)(4 + padded));
+                memory_fill(packet + at + 4, 0, padded);
+                at += 4 + padded;
+        }
+
+        auth = at;
+        network_store_16(packet + at, NTS_EF_AUTH);
+        network_store_16(packet + at + 2,
+                         4 + 4 + NTS_NONCE_BYTES + NTS_TAG_BYTES);
+        network_store_16(packet + at + 4, NTS_NONCE_BYTES);
+        network_store_16(packet + at + 6, NTS_TAG_BYTES);
+        memory_copy(packet + at + 8, nonce, NTS_NONCE_BYTES);
+        parts[0] = packet;
+        lengths[0] = auth;
+        parts[1] = nonce;
+        lengths[1] = NTS_NONCE_BYTES;
+        crypto_siv_seal(address_of exchange->c2s, parts, lengths, 2,
+                        packet + at + 8 + NTS_NONCE_BYTES, 0,
+                        packet + at + 8 + NTS_NONCE_BYTES);
+        crypto_forget(nonce, sizeof nonce);
+        return auth + 4 + 4 + NTS_NONCE_BYTES + NTS_TAG_BYTES;
+}
+
+//      The cookies in a reply's decrypted fields, added to the state.
+static COLD fn nts_cookies_take(nts_state address_to state,
+                                const p8 address_to plain, positive length)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)plain, length);
+
+        while (byte_reader_left(&reader) >= 4)
+        {
+                p16 type = byte_reader_u16(&reader);
+                positive size = byte_reader_u16(&reader);
+
+                if (size < 4 || size % 4 || size - 4 > byte_reader_left(&reader))
+                        return;
+                size -= 4;
+                if (type == NTS_EF_COOKIE && size && size <= NTS_COOKIE_MAX &&
+                    state->count < NTS_COOKIES)
+                {
+                        memory_copy(state->cookie[state->count],
+                                    byte_reader_here(&reader), size);
+                        state->length[state->count++] = (p16)size;
+                }
+                (void)byte_reader_skip(&reader, size);
+        }
+}
+
+/*
+        A reply, read through one cursor: the header's mode and stratum and
+        the four bytes a kiss code is in, then the extension fields, each a
+        type and a length that covers it whole (at least 16 bytes, a whole
+        number of words, RFC 7822). The identifier is echoed once; the
+        authenticator is the last field, and opens over everything before it.
+*/
+static COLD bipolar nts_reply(nts_exchange address_to exchange,
+                              const p8 address_to reply, positive length)
+{
+        byte_reader reader = byte_reader_open((p8 address_to)reply, length);
+        byte_reader fields;
+        byte_reader auth = byte_reader_open(null, 0);
+        const p8 address_to parts[2];
+        positive lengths[2];
+        p8 plain[NTS_PACKET_ROOM];
+        positive before = 0;
+        bool sealed = false;
+        bool echoed = false;
+        p8 stratum;
+        p32 kiss;
+
+        (void)byte_reader_u8(&reader);
+        stratum = byte_reader_u8(&reader);
+        (void)byte_reader_skip(&reader, 10);
+        kiss = byte_reader_u32(&reader);
+        (void)byte_reader_skip(&reader, NTS_HEADER - 16);
+        if (!byte_reader_ok(&reader))
+                return NTS_REPLY_IGNORE;
+        fields = reader;
+        while (byte_reader_left(&fields))
+        {
+                positive at = length - byte_reader_left(&fields);
+                p16 type = byte_reader_u16(&fields);
+                positive size = byte_reader_u16(&fields);
+                byte_reader body;
+
+                if (!byte_reader_ok(&fields) || size < 16 || size % 4 ||
+                    size - 4 > byte_reader_left(&fields))
+                        return NTS_REPLY_IGNORE;
+                body = byte_reader_window(&fields, size - 4);
+                if (type == NTS_EF_UID)
+                {
+                        if (echoed || size != 4 + NTS_UID_BYTES ||
+                            memory_compare(byte_reader_here(&body),
+                                           exchange->uid, NTS_UID_BYTES))
+                                return NTS_REPLY_IGNORE;
+                        echoed = true;
+                }
+                else if (type == NTS_EF_AUTH)
+                {
+                        if (sealed || byte_reader_left(&fields))
+                                return NTS_REPLY_IGNORE;
+                        sealed = true;
+                        before = at;
+                        auth = body;
+                }
+        }
+        if (!echoed)
+                return NTS_REPLY_IGNORE;
+        if (!sealed)
+                return !stratum && kiss == NTS_KISS_NTSN ? NTS_REPLY_NAK
+                                                          : NTS_REPLY_IGNORE;
+        {
+                positive nonce_length = byte_reader_u16(&auth);
+                positive cipher_length = byte_reader_u16(&auth);
+                positive nonce_padded = (nonce_length + 3) & ~(positive)3;
+                positive cipher_padded = (cipher_length + 3) & ~(positive)3;
+                const p8 address_to nonce = byte_reader_take(&auth, nonce_padded);
+                const p8 address_to cipher = byte_reader_take(&auth, cipher_padded);
+                bool opened;
+
+                if (!byte_reader_ok(&auth) || cipher_length < NTS_TAG_BYTES ||
+                    cipher_length - NTS_TAG_BYTES > sizeof(plain))
+                        return NTS_REPLY_IGNORE;
+                memory_copy(plain, cipher + NTS_TAG_BYTES,
+                            cipher_length - NTS_TAG_BYTES);
+                parts[0] = reply;
+                lengths[0] = before;
+                parts[1] = nonce;
+                lengths[1] = nonce_length;
+                opened = crypto_siv_open(address_of exchange->s2c, parts,
+                                         lengths, 2, plain,
+                                         cipher_length - NTS_TAG_BYTES, cipher);
+                if (opened)
+                        nts_cookies_take(exchange->state, plain,
+                                         cipher_length - NTS_TAG_BYTES);
+                crypto_forget(plain, sizeof plain);
+                return opened ? NTS_REPLY_OK : NTS_REPLY_IGNORE;
+        }
+}
+
+/* The keys a finished handshake yields: RFC 8915 4.2. */
+static COLD bool nts_ke_keys(tls_conn address_to tls, nts_state address_to state)
+{
+        p8 context[5] = {0, 0, 0, NTS_AEAD_SIV_CMAC_256, 0};
+
+        if (!tls_export(tls, "EXPORTER-network-time-security", context, 5,
+                        state->c2s, 32))
+                return false;
+        context[4] = 1;
+        return tls_export(tls, "EXPORTER-network-time-security", context, 5,
+                          state->s2c, 32);
+}
+
+/* One key establishment with host on port: the state it leaves, or the
+   reason it did not (an HTTP_ status: no name, no route, the certificate
+   refused, or the exchange malformed). bootstrap says the certificate may
+   be judged as of the clock's floor, because this is the exchange that will
+   set the clock. The name is asked of the network's resolver in plain: the
+   certificate check against it is what authenticates the server, so a
+   forged answer costs the exchange and never the time, and a clock cannot
+   wait for names that need it to be set. One deadline holds the handshake
+   and the reply. */
+static COLD bipolar nts_ke(string_address host, p16 port, bool bootstrap,
+                           nts_state address_to state)
+{
+        static const p8 request[] = {0x80, 0x01, 0, 2, 0, 0, 0, 4, 0, 2, 0,
+                                     NTS_AEAD_SIV_CMAC_256, 0x80, 0, 0, 0};
+        http_link link;
+        network_deadline deadline;
+        p8 reply[NTS_KE_ROOM];
+        positive used = 0;
+        bipolar status;
+        p32 ip = http_lookup(host);
+
+        memory_fill(state, 0, sizeof(*state));
+        if (!ip)
+                return HTTP_NO_HOST;
+        memory_fill(address_of link, 0, __builtin_offsetof(http_link, session));
+        link.handle = http_stream_open(ip, port, NTS_KE_SECONDS);
+        if (link.handle < 0)
+                return link.handle;
+        if (!network_deadline_begin(address_of deadline, NTS_KE_SECONDS, 0))
+        {
+                http_link_close(address_of link);
+                return HTTP_NO_REPLY;
+        }
+        status = tls_connect_until(address_of link.session, link.handle, host,
+                                   true, (const p8 address_to) "ntske/1", 7,
+                                   bootstrap, address_of deadline);
+        if (status)
+        {
+                http_link_close(address_of link);
+                return http_tls_status(status);
+        }
+        link.tls = true;
+        status = http_link_write(address_of link, (p8 address_to)request,
+                                 sizeof request);
+        while (!status && !nts_ke_complete(reply, used))
+        {
+                positive got = 0;
+
+                if (used == sizeof reply ||
+                    http_link_read_until(address_of link, reply + used,
+                                         sizeof reply - used, address_of got,
+                                         address_of deadline) ||
+                    !got)
+                        status = HTTP_NO_REPLY;
+                else
+                        used += got;
+        }
+        if (!status &&
+            (nts_ke_reply(reply, used, state) != NTS_KE_OK ||
+             !nts_ke_keys(address_of link.session, state)))
+                status = HTTP_MALFORMED;
+        http_link_close(address_of link);
+        crypto_forget(reply, sizeof reply);
+        if (status)
+                memory_fill(state, 0, sizeof(*state));
+        return status;
+}
+
+/*
+        DNS over TLS (RFC 7858), for the public resolvers known to offer it.
+
+        The setting is a word root keeps in /root/dns.tls (`moonwater dns tls
+        on|off|only`) and publishes in /run/moonwater/dns.tls, which every
+        program can read and only root can write, so a lookup by someone who
+        cannot read /root is held to the same rule: off asks every resolver
+        over UDP as this resolver always has; on asks over TLS on port 853
+        first and, when that cannot be done (no connection, a certificate
+        refused, an unset clock), over UDP as before, within two seconds of
+        the first try; only asks over TLS alone and sends no name in the
+        clear at all. A word that is none of them is the tier's default: off,
+        and only at the tight tier.
+
+        Which resolvers are asked over TLS: the ones /etc/resolv.conf names
+        that are known to offer it (1.1.1.1, 1.0.0.1, 9.9.9.9 and
+        149.112.112.112: Cloudflare and Quad9), or, when it names none of
+        them, those four in turn. That is a third party told the names, over
+        an authenticated channel, instead of the network's own resolver in
+        the clear; a name only the network's resolver knows does not resolve
+        with only. The certificate is checked as for https: the chain to a
+        Mozilla root, the dates against the clock and its floor, and the
+        resolver's own address against an iPAddress name (each of the four
+        publishes its address as one). A resolver that presents no acceptable
+        certificate is not believed, so an on-path attacker who can block or
+        answer TCP 853 gets, with on, the plain query exactly as without the
+        setting, which is why only exists.
+
+        Why it is off by default: a captive portal answers or drops port 853
+        and a first lease arrives with the clock unset, where every
+        certificate is refused, which is the ordinary first minute of a
+        machine; on survives both at a cost of two seconds a lookup, which a
+        default should not charge. At the tight tier only is the default,
+        where the cost is that names do not resolve until NTS has set the
+        clock.
+
+        Only the HTTP client (wget, fetch, the zone's question) and `host`
+        follow it. The time servers' names, NTS key establishment, a
+        certificate's caIssuers location, hostid, logger's server and
+        waterlink's peers are asked in plain: a clock cannot wait for names
+        that need it to be set, NTS and TLS authenticate the server they reach
+        whatever the name resolved to, and a lookup inside a handshake is not
+        to open a handshake of its own.
+*/
+#define DNS_TLS_PORT 853
+#define DNS_TLS_SECONDS 2
+#define DNS_TLS_FAILED (-12)
+//      dns_resolve_apart's own: the child could not be confined, so nothing
+//      was asked; or it ended without an answer that could be believed.
+#define DNS_CONFINE (-13)
+#define DNS_APART (-14)
+#define DNS_TLS_OFF 0
+#define DNS_TLS_ON 1
+#define DNS_TLS_ONLY 2
+#ifndef DNS_TLS_PATH
+#define DNS_TLS_PATH "/run/moonwater/dns.tls"
+#endif
+#if MOONWATER_STRICT_NET >= STRICT_TIGHT
+#define DNS_TLS_DEFAULT DNS_TLS_ONLY
+#else
+#define DNS_TLS_DEFAULT DNS_TLS_OFF
+#endif
+
+static const p32 dns_tls_public[] = {0x01010101u, 0x09090909u, 0x01000001u,
+                                     0x95707070u};
+
+static CONST COLD bool dns_offers_tls(p32 server)
+{
+        for (positive at = 0; at < array_count(dns_tls_public); at++)
+                if (server == dns_tls_public[at])
+                        return true;
+        return false;
+}
+
+//      The word as a mode: the tier's default for anything that is not on,
+//      off or only, a missing file included.
+static COLD positive dns_tls_mode_of(string_address word)
+{
+        return string_equals(word, "off")    ? DNS_TLS_OFF
+               : string_equals(word, "on")   ? DNS_TLS_ON
+               : string_equals(word, "only") ? DNS_TLS_ONLY
+                                             : DNS_TLS_DEFAULT;
+}
+
+//      The setting a confined child read before its filter went on, plus
+//      one, as dns_held holds its servers; 0 everywhere else.
+static positive dns_tls_held;
+
+//      The published setting, read as a plain file only.
+static COLD positive dns_tls_mode(void)
+{
+        p8 text[16];
+        bipolar got;
+
+        if (dns_tls_held)
+                return dns_tls_held - 1;
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)DNS_TLS_PATH,
+                                    text, sizeof(text), O_NOFOLLOW);
+        if (got < 0)
+                got = 0;
+        while (got && (text[got - 1] == '\n' || text[got - 1] == ' '))
+                got--;
+        text[got] = end;
+        return dns_tls_mode_of((string_address)text);
+}
+
+/*
+        One query over TLS to server, within the deadline: DNS_TLS_FAILED
+        when no answer to it came (no connection, a handshake or certificate
+        refused, a stream that ended or went quiet), otherwise what the
+        answer says. RFC 7858 3.3: a two-byte length and the query, a
+        two-byte length and the reply. The question is asked as written,
+        since the channel authenticates the answer, with EDNS0.
+*/
+static COLD bipolar dns_query_tls(p32 server, string_address name,
+                                  p32 address_to found,
+                                  const network_deadline address_to deadline)
+{
+        http_link link;
+        p8 request[2 + DNS_MAX_MESSAGE];
+        p8 reply[DNS_MAX_MESSAGE];
+        p8 host[16];
+        socket_address_internet where = {
+            .family = AF_INET, .port = network_order_16(DNS_TLS_PORT),
+            .host = network_order_32(server)};
+        b32 one = 1;
+        bool mixed = false;
+        positive question_length;
+        positive request_length;
+        positive got;
+        positive length;
+        p16 id;
+        bipolar status = DNS_TLS_FAILED;
+
+        if (!network_transaction_secure(address_of id, sizeof id) &&
+            system_random_fill(address_of id, sizeof id, 0))
+                return DNS_NO_RANDOM;
+        if (dns_build_request(request + 2, sizeof request - 2, name, id,
+                              address_of mixed, true, address_of question_length,
+                              address_of request_length) < 0)
+                return DNS_MALFORMED;
+        network_store_16(request, (p16)request_length);
+        host[host_into(host, server)] = end;
+
+        memory_fill(address_of link, 0, __builtin_offsetof(http_link, session));
+        link.handle = dns_stream_connect_until(address_of where, deadline);
+        if (link.handle < 0)
+                return DNS_TLS_FAILED;
+        (void)socket_option_set((b32)link.handle, IPPROTO_TCP, TCP_NODELAY,
+                                address_of one, sizeof one);
+        if (tls_connect_until(address_of link.session, link.handle,
+                              (string_address)host, true, null, 0, false,
+                              deadline))
+        {
+                http_link_close(address_of link);
+                return DNS_TLS_FAILED;
+        }
+        link.tls = true;
+        if (http_link_write(address_of link, request, 2 + request_length))
+                goto done;
+        //      The length, then exactly that many bytes, each read held to the
+        //      deadline.
+        for (got = 0; got < 2;)
+        {
+                positive more = 0;
+
+                if (http_link_read_until(address_of link, reply + got, 2 - got,
+                                         address_of more, deadline) || !more)
+                        goto done;
+                got += more;
+        }
+        length = network_load_16(reply);
+        if (length > sizeof reply)
+        {
+                status = DNS_MALFORMED;
+                goto done;
+        }
+        for (got = 0; got < length;)
+        {
+                positive more = 0;
+
+                if (http_link_read_until(address_of link, reply + got,
+                                         length - got, address_of more,
+                                         deadline) || !more)
+                        goto done;
+                got += more;
+        }
+        status = dns_reply_result(reply, length, id, request + 2,
+                                  question_length, found);
+        if (status == DNS_TRY_TCP)
+                status = DNS_MALFORMED;
+
+done:
+        http_link_close(address_of link);
+        return status;
+}
+
+/*
+        A name under the setting: over TLS to the resolvers that offer it
+        while the TLS budget lasts (every one with only, two seconds of them
+        with on), and the answer the first that answers gives is believed as
+        the plain walk believes one; then, with on and no answer over TLS,
+        the plain walk over resolv.conf. With only, no resolver is asked in
+        the clear, the network's own included.
+*/
+static COLD bipolar dns_resolve_wanted(string_address path, string_address name,
+                                       p32 address_to found, positive seconds)
+{
+        positive mode = dns_tls_mode();
+        p32 named[DNS_SERVERS_MAX];
+        p32 asked[array_count(dns_tls_public)];
+        positive count = 0;
+        positive have;
+        network_deadline deadline;
+        bipolar status = DNS_NO_REPLY;
+
+        if (mode == DNS_TLS_OFF)
+                return dns_resolve_any(path, name, found, seconds);
+        if (dns_held.held)
+        {
+                have = dns_held.count;
+                memory_copy(named, dns_held.servers, have * sizeof *named);
+        }
+        else
+                have = dns_servers(path, named, array_count(named));
+        for (positive at = 0; at < have; at++)
+                if (dns_offers_tls(named[at]))
+                        asked[count++] = named[at];
+        if (!count)
+                for (; count < array_count(dns_tls_public); count++)
+                        asked[count] = dns_tls_public[count];
+        if (network_deadline_begin(address_of deadline,
+                                   mode == DNS_TLS_ONLY || seconds < DNS_TLS_SECONDS
+                                       ? seconds : DNS_TLS_SECONDS,
+                                   0))
+                for (positive at = 0; at < count; at++)
+                {
+                        bipolar answer = dns_query_tls(asked[at], name, found,
+                                                       address_of deadline);
+
+                        if (answer != DNS_TLS_FAILED)
+                                status = answer;
+                        if (dns_answer_is_final(answer))
+                                return answer;
+                }
+        if (mode == DNS_TLS_ONLY)
+                return status;
+        return dns_resolve_any(path, name, found, seconds);
+}
+
+/* The HTTP client's lookup: what http_lookup answers, with a name asked
+   under the DNS over TLS setting. */
+static p32 http_lookup_wanted(string_address host)
+{
+        p32 ip = 0;
+
+        if (string_to_host(host) >= 0 || http_host_loopback(host))
+                return http_lookup(host);
+        return dns_resolve_wanted((string_address) "/etc/resolv.conf", host,
+                                  address_of ip, 3) == DNS_OK
+                   ? ip : 0;
 }
 
 static fn http_url_leaf(string_address path, p8 address_to into, positive room)
@@ -11320,16 +15177,37 @@ typedef struct
         positive head_seconds;
         positive body_seconds;
         positive body_most;
+        //      The most a streamed body that declared no length may write,
+        //      or zero for no ceiling: GNU wget's default has none, and
+        //      neither has this client's; the tight tier's is
+        //      HTTP_UNDECLARED_MOST. A body held in memory is held to
+        //      body_most in every tier already.
+        positive undeclared_most;
+        //      HEAD, not GET: whether the resource is there, and no body.
+        bool head;
+        //      The whole fetch, every hop's head and the body, in one budget,
+        //      or zero for none: the tight tier's is one head wait and one
+        //      body wait (HTTP_CHAIN_SECONDS), where the default, as GNU wget,
+        //      times each hop alone.
+        positive chain_seconds;
 } http_manners;
 
 static const http_manners http_manners_fetch = {
     (string_address)"dawning", '0', false, false, true,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, false, HTTP_CHAIN_SECONDS};
 static const http_manners http_manners_wget = {
     (string_address)"Wget", '1', true, true, false,
-    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX};
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX,
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? HTTP_UNDECLARED_MOST : 0, false,
+    HTTP_CHAIN_SECONDS};
+//      wget --spider: wget's manners, asking HEAD at every hop as GNU wget
+//      does, and reading no body however the head frames one.
+static const http_manners http_manners_spider = {
+    (string_address)"Wget", '1', true, true, false,
+    HTTP_HEAD_SECONDS, HTTP_BODY_SECONDS, HTTP_FETCH_MAX, 0, true, HTTP_CHAIN_SECONDS};
 static const http_manners http_manners_zone = {
-    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096};
+    (string_address)"Moonwater", '1', false, true, false, 10, 10, 4096, 0, false,
+    MOONWATER_STRICT_NET >= STRICT_TIGHT ? 20 : 0};
 
 /* The head of the response a fetch ended on, for the caller that reads a
    header of it. */
@@ -11359,6 +15237,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         http_buffer whole = {0};
         positive hop;
         bool secure = false;
+        //      The tight tier's budget for the whole fetch; began zero for none.
+        network_deadline chain = {0};
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
         bool reached_public = false;
 #endif
@@ -11367,6 +15247,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         if (string_length(start) >= sizeof url)
                 return HTTP_BAD_URL;
         string_copy(url, start);
+        if (how->chain_seconds &&
+            !network_deadline_begin(address_of chain, how->chain_seconds, 0))
+                return HTTP_NO_REPLY;
 
         for (hop = 0; hop < HTTP_HOPS; hop++)
         {
@@ -11382,6 +15265,15 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 positive header = 0;
                 positive used = 0;
 
+                positive left[2];
+
+                if (chain.began &&
+                    !network_deadline_left(address_of chain, left, left + 1))
+                {
+                        status = HTTP_NO_REPLY;
+                        goto done;
+                }
+
                 /* The request is built before any name is looked up or any
                    connection opened: a Location this client cannot put on
                    the wire costs its target no connection and no handshake.
@@ -11395,11 +15287,17 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 if (!status && !http_transport_allowed(address_of secure, tls))
                         status = HTTP_DOWNGRADE;
                 if (!status)
-                        status = http_get_request(
-                            head, sizeof head, host, port, path, tls,
+                        status = http_request(
+                            head, sizeof head, how->head, host, port, path, tls,
                             how->version_minor, how->agent, address_of used);
-                if (!status && !(ip = http_lookup(host)))
+                if (!status && !(ip = http_lookup_wanted(host)))
                         status = HTTP_NO_HOST;
+                /* GNU wget and curl connect wherever a name resolves, so the
+                   default does; the tight tier refuses a name rebound onto
+                   this machine or its link, on the first hop as on any. */
+                if (!status && MOONWATER_STRICT_NET >= STRICT_TIGHT &&
+                    http_name_rebound(host, ip))
+                        status = HTTP_REBOUND;
 #if MOONWATER_STRICT_NET >= STRICT_TIGHT
                 /* Once a chain has reached public space no later hop may
                    go back inside: a name that resolves, or a Location that
@@ -11432,7 +15330,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = http_response_head(
                             address_of link, head, sizeof head, address_of used,
                             address_of header, address_of response,
-                            how->head_seconds, 0, how->head_cut_is_malformed);
+                            how->head_seconds, 0, how->head_cut_is_malformed,
+                            chain.began ? address_of chain : null);
                 if (!status && code)
                         address_to code = response.code;
                 if (!status && head_out)
@@ -11443,16 +15342,37 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                 {
                         p8 placed[HTTP_URL_MAX];
 
-                        status = !response.location_length ? HTTP_MALFORMED
+                        /* A redirect with nothing to follow, no Location or
+                           an empty one, is the server's answer, a status like
+                           any other: GNU wget says "Redirection (302) without
+                           location" and exits 8, and curl -L hands the body
+                           over. */
+                        status = !response.location_length ? HTTP_STATUS
                                  : response.location_length >= sizeof placed
                                      ? HTTP_BAD_URL : HTTP_OK;
+                        if (status == HTTP_BAD_URL)
+                        {
+                                /* The URL a failure names is the Location
+                                   that was too long, as far as it goes, and
+                                   not the page that sent it. */
+                                memory_copy(url, response.location, sizeof url - 1);
+                                url[sizeof url - 1] = end;
+                        }
                         if (!status)
                         {
                                 memory_copy(placed, response.location,
                                             response.location_length);
                                 placed[response.location_length] = end;
-                                status = http_absolutize(tls, host, port, path, placed,
-                                                         next, sizeof next);
+                                /* Escaped into next, and resolved from there
+                                   in place: http_absolutize copies the
+                                   reference before it writes a byte. */
+                                status = http_url_escape(placed,
+                                                         response.location_length,
+                                                         false, next, sizeof next);
+                                if (!status)
+                                        status = http_absolutize(tls, host, port, path,
+                                                                 next, next,
+                                                                 sizeof next);
                                 //      The next hop, or the Location a failure
                                 //      names; both terminate inside a buffer
                                 //      exactly as large as url.
@@ -11466,7 +15386,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
 
                 if (!status && !http_response_is_success(response.code))
                         status = HTTP_STATUS;
-                else if (!status && !http_response_has_no_body(response.code))
+                else if (!status && !how->head &&
+                         !http_response_has_no_body(response.code))
                 {
                         /* The default reads a 205's content as any other
                            response's, as wget and curl do.  The tight tier
@@ -11482,6 +15403,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                             .scratch = head,
                             .store = reset || into ? address_of whole : null,
                             .store_limit = reset ? 0 : how->body_most,
+                            .undeclared_most = into ? 0 : how->undeclared_most,
                         };
 
                         /* The idle timer catches a stopped peer; this absolute
@@ -11493,8 +15415,9 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                            on one, and a large file over a slow link is not an
                            attack. */
                         if ((into || MOONWATER_STRICT_NET >= STRICT_TIGHT) &&
-                            !network_deadline_begin(address_of body.deadline,
-                                                    how->body_seconds, 0))
+                            !network_deadline_begin_within(
+                                address_of body.deadline, how->body_seconds, 0,
+                                chain.began ? address_of chain : null))
                                 status = HTTP_NO_REPLY;
                         else
                                 status =
@@ -11530,12 +15453,26 @@ done:
         return status;
 }
 
+/* The two clients' engines, run in the calling process. The clients
+   themselves never call these: they call http_get_apart and
+   http_fetch_to_apart below, which run the same engine in a confined child.
+   These are what the checks and the HTTP fuzz target drive directly, the
+   way the checks call dhcp_ask. */
+
 //      fetch: no TLS, no redirect followed, and the body only once it is whole.
 static bipolar http_get(string_address url, http_buffer address_to body,
                         b32 address_to code)
 {
         return http_run(url, address_of http_manners_fetch, false, -1, body,
                         code, null, null);
+}
+
+//      wget --spider: wget's request with HEAD, and nothing but the answer.
+static bipolar http_spider(string_address start, bool check_cert,
+                           b32 address_to code, p8 address_to where)
+{
+        return http_run(start, address_of http_manners_spider, check_cert, -1,
+                        null, code, where, null);
 }
 
 //      wget: TLS, redirects, and the body written as it arrives; where, if
@@ -11548,6 +15485,846 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 }
 
 #endif // STANDARD_MODERN_C_NET_HTTP
+/* ---- apart: the network half of a client, in a child of its own ---- */
+
+#ifndef STANDARD_MODERN_C_NET_APART
+#define STANDARD_MODERN_C_NET_APART
+
+/*
+        The network half of a client, apart from the client.
+
+        Everything a TLS server, an HTTP server or a resolver sends is read by
+        a parser here: the record layer, X.509 and its DER, the HTTP head and
+        its framing, a DNS answer. A memory-safety bug in any of them, run in
+        the process of the person who typed wget, is code running with
+        everything that person may do, and the zone's question at boot
+        (locale_auto_ask in src/sh/host.c) runs as root. So a client puts that
+        half in a child (net_apart) and keeps the rest itself:
+
+          the client opens or creates whatever is written, makes every
+          decision that touches a file, and reads back one answer, of a size
+          it bounds, which it believes only as far as it can check;
+
+          the child holds the answer's pipe, the one descriptor it was handed
+          to write into (wget's output, or none) and standard error, and
+          nothing else; reads resolv.conf, the DNS over TLS setting and the
+          clock's floor while it still may (the trust anchors are compiled
+          in, the clock is a vDSO read, and a revocation list is fetched
+          into memory, never a file); becomes
+          nobody when it is root; can no longer be dumped, gain a privilege
+          through exec or outlive the client; and then installs a filter that
+          kills it at any system call fetching does not need.
+
+        What fetching needs is short: a socket, IPv4 TCP or UDP and nothing
+        else -- no unix, netlink, packet, raw or IPv6 socket -- with connect,
+        bind (a DNS query's random port), sendto and recvfrom; two socket
+        timeouts and TCP_NODELAY to set and SO_ERROR to read back; ppoll; the
+        clock and getrandom; write and writev; close; memory that is never
+        made executable; riscv_hwprobe on RISC-V, which the hash routines ask
+        the first time they run; and the ways out. A redirect, a caIssuers
+        fetch or a revocation list is another socket and connect inside the
+        same child, which is why those stay. openat, execve, ptrace, kill,
+        ioctl, mprotect and everything else is a SIGSYS.
+
+        It fails closed. A kernel that will not take the filter -- one built
+        without seccomp, a container whose own filter refuses the call, or
+        qemu-user, which cannot filter itself and answers ENOSYS -- fetches
+        nothing: NET_APART_UNCONFINED, and the client says so. Moonwater's own
+        kernels always have CONFIG_SECCOMP_FILTER (build_essentials in
+        src/build/build.c). The DHCP exchange has its own filter
+        (dhcp_confine), which also fails closed.
+
+        Every client is a task: a function that runs in the child with the
+        caller's memory as it was at the fork, does the exchange, and writes
+        its answer to the descriptor it is given; and a caller that hands it
+        to net_apart and then reads that answer as it would a packet, held to
+        sizes and values it can check. http_run_apart, nts_ke_apart and
+        dns_resolve_apart below are the three.
+*/
+#define NET_APART_OK 0
+#define NET_APART_NO_CHILD (-1)
+#define NET_APART_UNCONFINED (-2)
+#define NET_APART_DIED (-3)
+
+//      The child's exit when it could not confine itself and so did nothing.
+#define NET_APART_EXIT_UNCONFINED 3
+
+#define NET_APART_NOBODY 65534
+
+#define PR_SET_PDEATHSIG 1
+#define PR_SET_DUMPABLE 4
+#define PR_SET_NO_NEW_PRIVS 38
+#define SECCOMP_SET_MODE_FILTER 1
+#define SECCOMP_RET_KILL_PROCESS 0x80000000u
+#define SECCOMP_RET_ALLOW 0x7fff0000u
+#define AUDIT_ARCH_X86_64 0xc000003eu
+#define AUDIT_ARCH_AARCH64 0xc00000b7u
+#define AUDIT_ARCH_RISCV64 0xc00000f3u
+
+#if defined(__x86_64__)
+#define NET_APART_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define NET_APART_ARCH AUDIT_ARCH_AARCH64
+#else
+#define NET_APART_ARCH AUDIT_ARCH_RISCV64
+#define NET_APART_RISCV_HWPROBE 258
+#endif
+
+/*
+        Classic BPF, as seccomp runs it over struct seccomp_data: the call's
+        number at 0, its architecture at 4, then six 64-bit arguments from 16.
+        An argument is read by its low word, which on these little-endian
+        machines is the word at its offset and is all of an int to the kernel.
+*/
+#define NET_FILTER_LOAD 0x20    /* BPF_LD | BPF_W | BPF_ABS */
+#define NET_FILTER_AND 0x54     /* BPF_ALU | BPF_AND | BPF_K */
+#define NET_FILTER_ALWAYS 0x05  /* BPF_JMP | BPF_JA */
+#define NET_FILTER_EQUAL 0x15   /* BPF_JMP | BPF_JEQ | BPF_K */
+#define NET_FILTER_ANY_BIT 0x45 /* BPF_JMP | BPF_JSET | BPF_K */
+#define NET_FILTER_RETURN 0x06  /* BPF_RET | BPF_K */
+#define NET_FILTER_NUMBER 0
+#define NET_FILTER_ARCH 4
+#define NET_FILTER_ARGUMENT(n) (16 + 8 * (n))
+#define NET_FILTER_STEPS 96
+//      PROT_EXEC, the one protection a mapping in the child may not have.
+#define NET_APART_EXECUTABLE 4
+//      SO_TIMESTAMPNS and SO_TIMESTAMPING, the two options a time query
+//      sets (SNTP_TIMESTAMPNS and SNTP_TIMESTAMPING in src/sh/host.c).
+#define NET_APART_SO_TIMESTAMPNS 35
+#define NET_APART_SO_TIMESTAMPING 37
+
+//      struct sock_filter.
+typedef struct
+{
+        p16 code;
+        p8 jump_true;
+        p8 jump_false;
+        p32 value;
+} net_filter_step;
+
+typedef struct
+{
+        net_filter_step steps[NET_FILTER_STEPS];
+        positive used;
+} net_filter;
+
+//      One step. A program that would not fit counts past the end, and
+//      net_filter_install refuses it.
+static COLD fn net_filter_put(net_filter address_to filter, p16 code,
+                              p8 jump_true, p8 jump_false, p32 value)
+{
+        if (filter->used < NET_FILTER_STEPS)
+                filter->steps[filter->used] =
+                    (net_filter_step){code, jump_true, jump_false, value};
+        filter->used++;
+}
+
+//      The answer for every call that reached this step.
+static COLD fn net_filter_answer(net_filter address_to filter, p32 answer)
+{
+        net_filter_put(filter, NET_FILTER_RETURN, 0, 0, answer);
+}
+
+//      Argument n's low word, masked, is one of the values, or the call is
+//      killed; when it is, the program goes on to the step after.
+static COLD fn net_filter_require(net_filter address_to filter, positive argument,
+                                  p32 mask, const p32 address_to values,
+                                  positive count)
+{
+        positive after = filter->used + 1 + (mask != ~(p32)0) + count + 1;
+
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0,
+                       (p32)NET_FILTER_ARGUMENT(argument));
+        if (mask != ~(p32)0)
+                net_filter_put(filter, NET_FILTER_AND, 0, 0, mask);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL,
+                               (p8)(after - filter->used - 1), 0, values[at]);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+}
+
+/* A test on the accumulator whose false branch goes past what follows, to
+   wherever net_filter_past is called: a call's own block of argument checks,
+   which ends in an answer on every path, or one value's half of one. The
+   accumulator still holds what was compared, so the next test reads it. */
+static COLD positive net_filter_when(net_filter address_to filter, p32 value)
+{
+        positive at = filter->used;
+
+        net_filter_put(filter, NET_FILTER_EQUAL, 0, 0, value);
+        return at;
+}
+
+static COLD fn net_filter_past(net_filter address_to filter, positive when)
+{
+        if (when < NET_FILTER_STEPS)
+                filter->steps[when].jump_false = (p8)(filter->used - when - 1);
+}
+
+//      Argument n's low word into the accumulator.
+static COLD fn net_filter_load(net_filter address_to filter, positive argument)
+{
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0,
+                       (p32)NET_FILTER_ARGUMENT(argument));
+}
+
+/* The program: the architecture, then the calls that need no more than
+   their number, then the four whose arguments decide, then death. The
+   numbers come first in the order a download makes them most. x32's
+   bit-30 numbers on x86_64 match nothing listed and are killed. A time
+   query (clock) also reads its replies and their stamps with recvmsg and
+   sets the two timestamp options; nothing else is told them. */
+static COLD fn net_filter_build(net_filter address_to filter, bool clock)
+{
+        static const p32 plain[] = {
+            (p32)syscall(recvfrom), (p32)syscall(writev),
+            (p32)syscall(sendto), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(write),
+            (p32)syscall(getrandom), (p32)syscall(close),
+            (p32)syscall(connect), (p32)syscall(bind),
+            (p32)syscall(munmap), (p32)syscall(mremap),
+            (p32)syscall(madvise), (p32)syscall(exit_group),
+            (p32)syscall(exit), (p32)syscall(rt_sigreturn),
+            (p32)syscall(restart_syscall),
+#ifdef NET_APART_RISCV_HWPROBE
+            NET_APART_RISCV_HWPROBE,
+#endif
+        };
+        static const p32 families[] = {AF_INET};
+        static const p32 kinds[] = {SOCK_STREAM, SOCK_DGRAM};
+        static const p32 protocols[] = {0};
+        static const p32 socket_level[] = {SO_RCVTIMEO, SO_SNDTIMEO};
+        static const p32 clock_level[] = {SO_RCVTIMEO, SO_SNDTIMEO,
+                                          NET_APART_SO_TIMESTAMPNS,
+                                          NET_APART_SO_TIMESTAMPING};
+        static const p32 tcp_level[] = {TCP_NODELAY};
+        static const p32 sol_socket[] = {SOL_SOCKET};
+        static const p32 so_error[] = {SO_ERROR};
+        positive count = array_count(plain);
+        positive call;
+        positive level;
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        for (positive at = 0; at < count; at++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - at), 0,
+                               plain[at]);
+        net_filter_put(filter, NET_FILTER_ALWAYS, 0, 0, 1);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+
+        //      socket: AF_INET, stream or datagram (with SOCK_NONBLOCK or
+        //      SOCK_CLOEXEC or both), protocol 0.
+        call = net_filter_when(filter, (p32)syscall(socket));
+        net_filter_require(filter, 0, ~(p32)0, families, array_count(families));
+        net_filter_require(filter, 1, ~(p32)(SOCK_NONBLOCK | SOCK_CLOEXEC),
+                           kinds, array_count(kinds));
+        net_filter_require(filter, 2, ~(p32)0, protocols, array_count(protocols));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, call);
+
+        //      setsockopt: SO_RCVTIMEO and SO_SNDTIMEO, or TCP_NODELAY.
+        call = net_filter_when(filter, (p32)syscall(setsockopt));
+        net_filter_load(filter, 1);
+        level = net_filter_when(filter, SOL_SOCKET);
+        if (clock)
+                net_filter_require(filter, 2, ~(p32)0, clock_level,
+                                   array_count(clock_level));
+        else
+                net_filter_require(filter, 2, ~(p32)0, socket_level,
+                                   array_count(socket_level));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, level);
+        level = net_filter_when(filter, IPPROTO_TCP);
+        net_filter_require(filter, 2, ~(p32)0, tcp_level, array_count(tcp_level));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, level);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        //      getsockopt: SO_ERROR, after a connect that did not finish.
+        call = net_filter_when(filter, (p32)syscall(getsockopt));
+        net_filter_require(filter, 1, ~(p32)0, sol_socket, array_count(sol_socket));
+        net_filter_require(filter, 2, ~(p32)0, so_error, array_count(so_error));
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_past(filter, call);
+
+        //      recvmsg, for a time query only.
+        if (clock)
+        {
+                call = net_filter_when(filter, (p32)syscall(recvmsg));
+                net_filter_answer(filter, SECCOMP_RET_ALLOW);
+                net_filter_past(filter, call);
+        }
+
+        //      mmap: anything but executable.
+        call = net_filter_when(filter, (p32)syscall(mmap));
+        net_filter_load(filter, 2);
+        net_filter_put(filter, NET_FILTER_ANY_BIT, 1, 0, NET_APART_EXECUTABLE);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_past(filter, call);
+
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+}
+
+//      True only when the kernel took it. ENOSYS is a refusal like any other.
+static COLD bool net_filter_install(net_filter address_to filter)
+{
+        struct
+        {
+                p16 count;
+                net_filter_step address_to steps;
+        } program = {(p16)filter->used, filter->steps};
+
+        return filter->used <= NET_FILTER_STEPS &&
+               system_call_3(syscall(seccomp), SECCOMP_SET_MODE_FILTER, 0,
+                             (positive)address_of program) == 0;
+}
+
+/*
+        Root becomes nobody, as the DHCP exchange does. A user namespace that
+        maps root and not nobody (unshare -r, which the address-policy rows of
+        wget_hostile run under) answers EINVAL for an id it has no mapping
+        for, and EPERM for setgroups, which unshare turns off there: that
+        root owns nothing outside the namespace, and the filter is the
+        boundary. Any other refusal is a refusal.
+*/
+static COLD bool net_apart_nobody(void)
+{
+        bipolar status;
+
+        if (system_call_1(syscall(getuid), 0) && system_call_1(syscall(geteuid), 0))
+                return true;
+        status = system_call_2(syscall(setgroups), 0, 0);
+        if (status < 0 && status != -EPERM)
+                return false;
+        status = system_call_3(syscall(setresgid), NET_APART_NOBODY,
+                               NET_APART_NOBODY, NET_APART_NOBODY);
+        if (status < 0 && status != -EINVAL)
+                return false;
+        status = system_call_3(syscall(setresuid), NET_APART_NOBODY,
+                               NET_APART_NOBODY, NET_APART_NOBODY);
+        return status >= 0 || status == -EINVAL;
+}
+
+/* After the ids change, which clears both: no core and no ptrace by its
+   owner, killed with the client that forked it (and gone already if the
+   client went first), and no exec that grants anything. */
+static COLD bool net_apart_tie(bipolar parent)
+{
+        return system_call_5(syscall(prctl), PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 &&
+               system_call_5(syscall(prctl), PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) == 0 &&
+               system_call(syscall(getppid)) == parent &&
+               system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
+}
+
+/* What a confined child does: its work, with its answer written to answer,
+   a pipe whose other end the caller reads to its end. True when the whole
+   answer went in. */
+typedef bool (*net_apart_task)(address_any context, bipolar answer);
+
+static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context,
+                                        bipolar keep, b32 answer, bipolar parent,
+                                        bool clock)
+{
+        p32 kept[3] = {(p32)answer, 2, keep >= 0 ? (p32)keep : descriptors_none};
+        net_filter filter;
+
+        dns_servers_hold((string_address) "/etc/resolv.conf");
+        dns_tls_held = dns_tls_mode() + 1;
+        clock_floor_held = clock_trust_floor();
+        net_filter_build(address_of filter, clock);
+        if (!descriptors_close_outside(0, kept, array_count(kept)) ||
+            !net_apart_nobody() || !net_apart_tie(parent) ||
+            !net_filter_install(address_of filter))
+                system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
+        system_call_1(syscall(exit_group), task(context, answer) ? 0 : 1);
+        __builtin_unreachable();
+}
+
+//      The signal the last confined child died of, for the line that says
+//      so; 0 when it ended some other way.
+static b32 net_apart_signal;
+
+/*
+        task in a confined child, with keep (or -1 for none) the one
+        descriptor it may write besides its answer, and the answer read into
+        answer, which the caller releases: NET_APART_OK when the child wrote
+        at most `most` bytes and exited, NET_APART_UNCONFINED when it could not
+        confine itself and did nothing, NET_APART_DIED when it died, said too
+        much or ended otherwise, NET_APART_NO_CHILD when there was no child.
+        clock is a time query's filter (net_filter_build).
+
+        The parent reads to the end of the pipe before it waits, so a large
+        answer cannot stall the child. A child that dies of SIGPIPE or SIGXFSZ
+        died writing into keep, which would have killed the caller; the caller
+        dies of it too, so wget -O - | head ends as it did. With SIGCHLD
+        ignored the kernel would reap the child unasked, so the default holds
+        while the child runs and is put back after.
+*/
+static COLD bipolar net_apart(net_apart_task task, address_any context,
+                              bipolar keep, byte_store address_to answer,
+                              positive most, bool clock)
+{
+        b32 ends[2];
+        bipolar parent = system_call(syscall(getpid));
+        bipolar child;
+        positive raw = 0;
+        positive was[4] = {0};
+        bool whole = true;
+        bool restore;
+        bipolar waited;
+        positive signal;
+
+        net_apart_signal = 0;
+        restore = system_signal_action(SIGCHLD, null, was, 8) >= 0 &&
+                  (was[0] == (positive)SIG_IGN ||
+                   (was[1] & SA_NOCLDWAIT)) &&
+                  system_signal_install(SIGCHLD, (positive)SIG_DFL, 0, 0, null);
+        log_flush();
+        child = system_child_fork(ends, O_CLOEXEC);
+        if (child < 0)
+        {
+                if (restore)
+                        system_signal_action(SIGCHLD, was, null, 8);
+                return NET_APART_NO_CHILD;
+        }
+        if (!child)
+                net_apart_child(task, context, keep, ends[1], parent, clock);
+
+        for (;;)
+        {
+                positive want = answer->used + 65536;
+                bipolar got;
+
+                if (want > most + 1)
+                        want = most + 1;
+                if (!byte_store_reserve(answer, want, 4096))
+                {
+                        whole = false;
+                        break;
+                }
+                got = system_read_retry((positive)ends[0],
+                                        answer->bytes + answer->used,
+                                        want - answer->used);
+                if (got <= 0)
+                {
+                        whole = !got;
+                        break;
+                }
+                answer->used += (positive)got;
+                if (answer->used > most)
+                {
+                        whole = false;
+                        break;
+                }
+        }
+        if (!whole)
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+        system_close(ends[0]);
+        waited = system_wait4_retry(child, address_of raw, 0, null);
+        if (restore)
+                system_signal_action(SIGCHLD, was, null, 8);
+        if (waited != child)
+                return NET_APART_DIED;
+
+        signal = raw & 0x7f;
+        if (signal)
+        {
+                net_apart_signal = (b32)signal;
+                if (whole && (signal == SIGPIPE || signal == SIGXFSZ))
+                        system_call_2(syscall(kill), (positive)parent, signal);
+                return NET_APART_DIED;
+        }
+        if (((raw >> 8) & 0xff) == NET_APART_EXIT_UNCONFINED && !answer->used)
+                return NET_APART_UNCONFINED;
+        return whole && !((raw >> 8) & 0xff) ? NET_APART_OK : NET_APART_DIED;
+}
+
+/*
+        http_run, apart.
+
+        The child runs http_run as the caller would have, with the caller's
+        arguments as the fork left them -- the output descriptor is the one
+        it keeps -- and answers with what http_run left behind: its status,
+        the response code, why the last write failed, where it ended, the
+        head when one was kept, and the body when it was stored. The caller
+        believes that only as far as it can check it: a status http_run can
+        return, an errno that is an errno, a URL shorter than a URL may be,
+        a head no longer than a head may be, a body within what the manners
+        allow, and lengths that add up to exactly what came. Anything else
+        is HTTP_APART, as a child that died is.
+*/
+typedef struct
+{
+        b64 status;
+        b64 code;
+        b64 write_failure;
+        p64 where_length;
+        p64 head_length;
+        p64 body_length;
+} http_apart_said;
+
+//      head_length when no head was kept.
+#define HTTP_APART_NO_HEAD (~(p64)0)
+
+typedef struct
+{
+        string_address start;
+        const http_manners address_to how;
+        bool check_cert;
+        bipolar dest;
+        bool body;
+        bool head;
+        b32 address_to code;
+        p8 address_to where;
+} http_apart_ask;
+
+static COLD bool http_apart_write(bipolar answer, const address_any bytes,
+                                  positive length)
+{
+        return !length || system_write_all((positive)answer, bytes, length) == length;
+}
+
+static COLD bool http_apart_task(address_any context, bipolar answer)
+{
+        http_apart_ask address_to ask = context;
+        http_buffer body = {0};
+        http_buffer head = {0};
+        http_apart_said said = {0};
+
+        said.status = http_run(ask->start, ask->how, ask->check_cert, ask->dest,
+                               ask->body ? address_of body : null, ask->code,
+                               ask->where, ask->head ? address_of head : null);
+        said.code = ask->code ? address_to ask->code : 0;
+        said.write_failure = http_write_failure;
+        said.where_length = ask->where ? string_length(ask->where) : 0;
+        said.head_length = head.bytes ? head.used : HTTP_APART_NO_HEAD;
+        said.body_length = body.used;
+        return http_apart_write(answer, address_of said, sizeof said) &&
+               http_apart_write(answer, ask->where, said.where_length) &&
+               (!head.bytes || http_apart_write(answer, head.bytes, head.used)) &&
+               http_apart_write(answer, body.bytes, body.used);
+}
+
+static CONST COLD bool http_apart_status(b64 status)
+{
+        return status <= HTTP_OK && status >= HTTP_UNLOGGED && status != -6;
+}
+
+static COLD bool http_apart_believed(const http_apart_said address_to said,
+                                     const http_apart_ask address_to ask,
+                                     positive whole)
+{
+        bool head = said->head_length != HTTP_APART_NO_HEAD;
+
+        return http_apart_status(said->status) &&
+               said->code == (b32)said->code &&
+               said->write_failure <= 0 && said->write_failure >= -4095 &&
+               said->where_length < HTTP_URL_MAX &&
+               (ask->where || !said->where_length) &&
+               (!head || (ask->head && said->head_length <= HTTP_HEAD_MAX)) &&
+               said->body_length <= ask->how->body_most &&
+               (!said->body_length || (ask->body && said->status == HTTP_OK)) &&
+               whole == sizeof *said + said->where_length +
+                            (head ? said->head_length : 0) + said->body_length;
+}
+
+static COLD bipolar http_run_apart(string_address start,
+                                   const http_manners address_to how,
+                                   bool check_cert, bipolar dest,
+                                   http_buffer address_to into,
+                                   b32 address_to code, p8 address_to where,
+                                   http_buffer address_to head_out)
+{
+        http_apart_ask ask = {start, how, check_cert, dest, into != null,
+                              head_out != null, code, where};
+        byte_store answer = {0};
+        http_apart_said said;
+        positive at = sizeof said;
+        bipolar status;
+        bipolar ran = net_apart(http_apart_task, address_of ask, dest,
+                                address_of answer,
+                                sizeof said + HTTP_URL_MAX + HTTP_HEAD_MAX +
+                                    how->body_most, false);
+
+        if (ran != NET_APART_OK || answer.used < sizeof said)
+        {
+                byte_store_release(address_of answer);
+                return ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
+        }
+        memory_copy(address_of said, answer.bytes, sizeof said);
+        if (!http_apart_believed(address_of said, address_of ask, answer.used))
+        {
+                byte_store_release(address_of answer);
+                return HTTP_APART;
+        }
+
+        status = (bipolar)said.status;
+        if (code)
+                address_to code = (b32)said.code;
+        if (where)
+        {
+                memory_copy(where, answer.bytes + at, said.where_length);
+                where[said.where_length] = end;
+        }
+        at += said.where_length;
+        if (head_out && said.head_length != HTTP_APART_NO_HEAD)
+        {
+                bipolar kept = http_head_keep(head_out, answer.bytes + at,
+                                              said.head_length);
+
+                if (!status)
+                        status = kept;
+                at += said.head_length;
+        }
+        http_write_failure = (bipolar)said.write_failure;
+        //      A body only on success, and then it replaces what the caller
+        //      held, terminated as http_copy's store terminates it.
+        if (into && !status)
+        {
+                byte_store_release(into);
+                if (said.body_length)
+                {
+                        memory_copy(answer.bytes, answer.bytes + at,
+                                    said.body_length);
+                        answer.used = said.body_length;
+                        answer.bytes[answer.used] = end;
+                        address_to into = answer;
+                        memory_fill(address_of answer, 0, sizeof answer);
+                }
+        }
+        byte_store_release(address_of answer);
+        return status;
+}
+
+//      fetch, wget and wget --spider, as the clients call them: http_get,
+//      http_fetch_to and http_spider in a confined child.
+static bipolar http_get_apart(string_address url, http_buffer address_to body,
+                              b32 address_to code)
+{
+        return http_run_apart(url, address_of http_manners_fetch, false, -1,
+                              body, code, null, null);
+}
+
+static bipolar http_spider_apart(string_address start, bool check_cert,
+                                 b32 address_to code, p8 address_to where)
+{
+        return http_run_apart(start, address_of http_manners_spider, check_cert,
+                              -1, null, code, where, null);
+}
+
+static bipolar http_fetch_to_apart(string_address start, bipolar dest,
+                                   bool check_cert, b32 address_to code,
+                                   p8 address_to where)
+{
+        return http_run_apart(start, address_of http_manners_wget, check_cert,
+                              dest, null, code, where, null);
+}
+
+/*
+        nts_ke, apart. The machine's NTP child asks it as root, and the key
+        establishment is a TLS 1.3 handshake with an X.509 chain and a record
+        of the server's own making, so all of it runs in a confined child,
+        which answers with its status and the state it made. The state is
+        believed only as nts_ke_reply could have written it: at least one
+        cookie and no more than there is room for, each of a length a cookie
+        may have, a time server that is a name or empty, a port not zero.
+        The keys cross the pipe, and every copy but the caller's is wiped.
+*/
+typedef struct
+{
+        b64 status;
+        nts_state state;
+} nts_ke_said;
+
+typedef struct
+{
+        string_address host;
+        p16 port;
+        bool bootstrap;
+} nts_ke_ask;
+
+static COLD bool nts_ke_task(address_any context, bipolar answer)
+{
+        nts_ke_ask address_to ask = context;
+        nts_ke_said said;
+        bool wrote;
+
+        memory_fill(address_of said, 0, sizeof said);
+        said.status = nts_ke(ask->host, ask->port, ask->bootstrap,
+                             address_of said.state);
+        wrote = system_write_all((positive)answer, address_of said, sizeof said) ==
+                sizeof said;
+        crypto_forget(address_of said, sizeof said);
+        return wrote;
+}
+
+//      A state as nts_ke_reply and the cookies it took leave it: one to eight
+//      cookies, each of a length a cookie may have, a port that is not zero
+//      and a time server that is a name or empty. The origin is the caller's.
+static COLD bool nts_state_ok(const nts_state address_to state)
+{
+        if (!state->count || state->count > NTS_COOKIES || !state->port ||
+            (state->server[0] &&
+             !nts_name_ok(state->server, string_length((string_address)state->server))))
+                return false;
+        for (positive at = 0; at < state->count; at++)
+                if (!state->length[at] || state->length[at] > NTS_COOKIE_MAX)
+                        return false;
+        return true;
+}
+
+static COLD bool nts_ke_believed(nts_ke_said address_to said)
+{
+        nts_state address_to state = address_of said->state;
+
+        if (said->status)
+                return http_apart_status(said->status);
+        state->server[sizeof state->server - 1] = end;
+        return nts_state_ok(state);
+}
+
+static COLD bipolar nts_ke_apart(string_address host, p16 port, bool bootstrap,
+                                 nts_state address_to state)
+{
+        nts_ke_ask ask = {host, port, bootstrap};
+        byte_store got = {0};
+        nts_ke_said said;
+        bipolar ran = net_apart(nts_ke_task, address_of ask, -1, address_of got,
+                                sizeof said, false);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+        bipolar status = ran == NET_APART_UNCONFINED ? HTTP_CONFINE : HTTP_APART;
+
+        memory_fill(state, 0, sizeof(*state));
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        if (got.bytes)
+                crypto_forget(got.bytes, got.used);
+        byte_store_release(address_of got);
+        if (!whole)
+                return status;
+        if (!nts_ke_believed(address_of said))
+                status = HTTP_APART;
+        else if (!(status = (bipolar)said.status))
+                memory_copy(state, address_of said.state, sizeof(*state));
+        crypto_forget(address_of said, sizeof said);
+        return status;
+}
+
+/*
+        A name asked apart: the DNS answer, and the TLS and X.509 of a
+        resolver over TLS, are read in a confined child, which answers with a
+        status and an address. The status is believed only as one the
+        resolver returns. `host` asks under the DNS over TLS setting or of
+        the server it names (dns_resolve_apart); hostid, logger, a Waterlink
+        service and NTS's check of the time server it was named ask in plain,
+        as net_resolve_v4 does (net_resolve_v4_apart, http_lookup_apart).
+*/
+typedef struct
+{
+        b64 status;
+        p32 found;
+} dns_apart_said;
+
+typedef struct
+{
+        bipolar server;
+        string_address name;
+        positive seconds;
+        bool plain;
+} dns_apart_ask;
+
+static COLD bool dns_apart_task(address_any context, bipolar answer)
+{
+        dns_apart_ask address_to ask = context;
+        dns_apart_said said = {0};
+        p32 found = 0;
+
+        said.status =
+            ask->plain ? net_resolve_v4(ask->name, address_of found, ask->seconds)
+            : ask->server >= 0
+                ? dns_resolve_at((p32)ask->server, DNS_PORT, ask->name,
+                                 address_of found, ask->seconds)
+                : dns_resolve_wanted((string_address) "/etc/resolv.conf",
+                                     ask->name, address_of found, ask->seconds);
+        said.found = said.status == DNS_OK ? found : 0;
+        return system_write_all((positive)answer, address_of said, sizeof said) ==
+               sizeof said;
+}
+
+//      A status the confined resolver may say: one of the resolver's own,
+//      from DNS_OK down to DNS_TLS_FAILED. Anything else is a child that was
+//      not the resolver any more.
+static CONST COLD bool dns_apart_status(b64 status)
+{
+        return status <= DNS_OK && status >= DNS_TLS_FAILED;
+}
+
+static COLD bipolar dns_apart_ask_apart(dns_apart_ask address_to ask,
+                                        p32 address_to found)
+{
+        byte_store got = {0};
+        dns_apart_said said;
+        bipolar ran = net_apart(dns_apart_task, ask, -1, address_of got,
+                                sizeof said, false);
+        bool whole = ran == NET_APART_OK && got.used == sizeof said;
+
+        address_to found = 0;
+        if (whole)
+                memory_copy(address_of said, got.bytes, sizeof said);
+        byte_store_release(address_of got);
+        if (!whole)
+                return ran == NET_APART_UNCONFINED ? DNS_CONFINE : DNS_APART;
+        if (!dns_apart_status(said.status))
+                return DNS_APART;
+        if (said.status == DNS_OK)
+                address_to found = said.found;
+        return (bipolar)said.status;
+}
+
+//      server, or -1 for the setting's resolvers; a status the resolver
+//      returns, DNS_CONFINE or DNS_APART.
+static COLD bipolar dns_resolve_apart(bipolar server, string_address name,
+                                      p32 address_to found)
+{
+        dns_apart_ask ask = {server, name, server >= 0 ? 5 : 3, false};
+
+        return dns_apart_ask_apart(address_of ask, found);
+}
+
+/* net_resolve_v4, apart; an address is itself without a child, and so is
+   localhost and every name under it (RFC 6761 6.3), which is never asked of
+   a resolver: what GNU's tools are told by /etc/hosts, and what the HTTP
+   client already does (http_lookup). */
+static COLD bipolar net_resolve_v4_apart(string_address name,
+                                         p32 address_to found, positive seconds)
+{
+        dns_apart_ask ask = {-1, name, seconds, true};
+        bipolar numeric = string_to_host(name);
+
+        if (numeric < 0 && http_host_loopback(name))
+                numeric = HOST_LOOPBACK;
+        if (numeric >= 0)
+        {
+                address_to found = (p32)numeric;
+                return DNS_OK;
+        }
+        return dns_apart_ask_apart(address_of ask, found);
+}
+
+//      http_lookup, apart.
+static COLD p32 http_lookup_apart(string_address host)
+{
+        p32 ip = 0;
+
+        return net_resolve_v4_apart(host, address_of ip, 3) == DNS_OK ? ip : 0;
+}
+
+#endif // STANDARD_MODERN_C_NET_APART
 /* ---- dhcp: dhcp: an address obtained rather than typed ---- */
 
 #ifndef STANDARD_MODERN_C_NET_DHCP
@@ -11574,15 +16351,17 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
         answer the routing table cannot.
 
         The broadcast flag. A server may unicast its reply to an address the
-        client does not have yet, which some clients receive anyway and some
-        do not. Setting the flag asks for a broadcast reply, which always
-        arrives. qemu's user-mode network broadcasts regardless and echoes the
-        flag back as zero, so this is the one part of the exchange that the
-        boot lane structurally cannot check -- it is set because a real
-        network needs it, not because a test proved it here.
+        client does not have yet, which a UDP socket never receives and the
+        packet socket an acquisition reads (dhcp_frames_open) does. Setting
+        the flag asks for a broadcast reply, which arrives either way. qemu's
+        user-mode network broadcasts regardless and echoes the flag back as
+        zero, so this is the one part of the exchange that the boot lane
+        structurally cannot check -- it is set because a real network needs
+        it, not because a test proved it here.
 
         The network watcher ARP-probes a newly acknowledged address before it
-        installs the lease and schedules dhcp_reacquire at half its lifetime.
+        installs the lease, announces it once it is in, and schedules
+        dhcp_reacquire at half its lifetime.
 */
 
 #define DHCP_CLIENT_PORT 68
@@ -11597,6 +16376,7 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_DECLINE 4
 #define DHCP_ACK 5
 #define DHCP_NAK 6
+#define DHCP_RELEASE 7
 
 #define DHCP_OPTION_PAD 0
 #define DHCP_OPTION_MASK 1
@@ -11618,6 +16398,12 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 #define DHCP_NO_OFFER (-2)
 #define DHCP_REFUSED (-3)
 #define DHCP_NO_RANDOM (-4)
+//      Not outcomes: what the confined child says down its answer pipe
+//      while it still works (dhcp_say), so that whoever waits for the
+//      exchange knows when a server holds an address for this client --
+//      from the REQUEST until its ACK window is over -- and which one.
+#define DHCP_REQUESTED (-20)
+#define DHCP_UNANSWERED (-21)
 
 typedef struct
 {
@@ -11630,6 +16416,15 @@ typedef struct
         p32 renewal;
         p32 rebinding;
 } dhcp_lease;
+
+/* One record down the answer pipe of an exchange run apart: the outcome and
+   the lease once at the end, and before that DHCP_REQUESTED or
+   DHCP_UNANSWERED with the offer a REQUEST names. */
+typedef struct
+{
+        bipolar status;
+        dhcp_lease lease;
+} dhcp_answer;
 
 /* A transaction id is visible beside the client's public hardware address and
    is the only unpredictable field an off-path reply must guess. Prefer the
@@ -11769,13 +16564,14 @@ static COLD positive dhcp_build(p8 address_to into, positive room, p8 kind,
         //      What we would like to be told, which a server may ignore, and
         //      the end. Short packets are dropped by some servers and by some
         //      switches, so the 261 bytes at most written here are padded to
-        //      the length everything accepts. A DECLINE asks for nothing: RFC
-        //      2131's table 5 says it MUST NOT carry a parameter list.
+        //      the length everything accepts. A DECLINE or a RELEASE asks for
+        //      nothing: RFC 2131's table 5 says MUST NOT to a parameter list
+        //      in either.
         static const p8 ask[] = {DHCP_OPTION_ASK, 3, DHCP_OPTION_MASK,
                                  DHCP_OPTION_ROUTER, DHCP_OPTION_DNS,
                                  DHCP_OPTION_END};
 
-        if (kind == DHCP_DECLINE)
+        if (kind == DHCP_DECLINE || kind == DHCP_RELEASE)
                 into[at] = DHCP_OPTION_END;
         else
                 memory_copy(into + at, ask, sizeof ask);
@@ -11976,19 +16772,13 @@ static COLD fn dhcp_lease_merge(dhcp_lease address_to lease,
         }
 }
 
-/* What a server may hand out. The address and the router come from the unicast
-   space: not 0/8 (this network), 127/8 (the machine itself), nor 224/3
-   (multicast, the reserved block and the limited broadcast). A router is the
-   address of another host, so it is not the leased address itself. The prefix
-   the mask implies (an omitted mask is the /24 policy above) must not reach
-   0/8, 127/8 or 224/3 either: a /1 mask on a 10/8 address would route the
-   machine's own loopback and every multicast group onto the wire. On a subnet
-   wider than a /31 the first and last addresses name the subnet and are not
-   hosts. A /32 lease and its off-link router stay legal (the clouds hand
-   them out); every wider prefix requires its router on that link, since the
-   kernel cannot reach an off-link next hop without a route through that same
-   next hop. Every server that speaks
-   to this machine can send any of these; none of them is a network. */
+/* What a server may hand out. The address, the router and the prefix the mask
+   implies (an omitted mask is the /24 policy) must be unicast: not 0/8, 127/8
+   or 224/3, so a /1 mask on a 10/8 address cannot route the loopback and every
+   multicast group onto the wire. A router is another host, not the leased
+   address. On a subnet wider than a /31 the first and last addresses name the
+   subnet, not a host. A /32 may have an off-link router (the clouds hand them
+   out); a wider prefix needs its router on that link. */
 static CONST COLD bool dhcp_address_unicast(p32 address)
 {
         return (address >> 24) && (address >> 24) != 127 && address < 0xe0000000u;
@@ -12085,90 +16875,245 @@ static COLD bool dhcp_reacquisition_answer_matches(
 }
 
 /*
+        A reply as the wire carries it, judged as IP and UDP would have: IPv4
+        with a header of five words or more; a total length covering the
+        headers and no more than was read (link padding follows); no fragment,
+        not even the first of several; UDP; the header checksum; a UDP length
+        within the IP payload, the rest cut off as the kernel cuts it; the UDP
+        checksum when the sender wrote one, unless the kernel vouches for it
+        (dhcp_frame_vouched); and port 67 to port 68. What is left is the DHCP
+        message, and the addresses and source port a UDP socket would name.
+*/
+typedef struct
+{
+        p32 source;
+        p32 destination;
+        p16 source_port;
+        const p8 address_to message;
+        positive length;
+} dhcp_frame;
+
+/* The ones' complement sum of a block added to sum, folded to sixteen bits:
+   0xffff over a block whose own checksum is in it and right. */
+static COLD p32 dhcp_sum(byte_reader block, p32 sum)
+{
+        while (byte_reader_left(&block) >= 2)
+                sum += byte_reader_u16(&block);
+        if (byte_reader_left(&block))
+                sum += (p32)byte_reader_u8(&block) << 8;
+        while (sum >> 16)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return sum;
+}
+
+static COLD bool dhcp_unframe(const p8 address_to frame, positive size,
+                              bool vouched, dhcp_frame address_to into)
+{
+        byte_reader fields = byte_reader_open(frame, size);
+        byte_reader rest = fields;
+        p8 lead = byte_reader_u8(&fields);
+        positive header = (positive)(lead & 15) * 4;
+        positive total;
+        p16 fragment;
+        p8 protocol;
+        p32 source;
+        p32 destination;
+        byte_reader datagram;
+        byte_reader udp;
+        p16 from;
+        p16 to;
+        p16 length;
+        p16 checksum;
+
+        (void)byte_reader_u8(&fields);           // type of service
+        total = byte_reader_u16(&fields);
+        (void)byte_reader_u16(&fields);          // identification
+        fragment = byte_reader_u16(&fields);
+        (void)byte_reader_u8(&fields);           // time to live
+        protocol = byte_reader_u8(&fields);
+        (void)byte_reader_u16(&fields);          // header checksum
+        source = byte_reader_u32(&fields);
+        destination = byte_reader_u32(&fields);
+        //      The reserved flag is not asked about, as the kernel does not.
+        if (!byte_reader_ok(&fields) || lead >> 4 != 4 || header < 20 ||
+            total < header + 8 || total > size || (fragment & 0x3fff) ||
+            protocol != 17)
+                return false;
+
+        datagram = byte_reader_window(&rest, total);
+        if (dhcp_sum(byte_reader_window(&datagram, header), 0) != 0xffff)
+                return false;
+        udp = datagram;
+        from = byte_reader_u16(&datagram);
+        to = byte_reader_u16(&datagram);
+        length = byte_reader_u16(&datagram);
+        checksum = byte_reader_u16(&datagram);
+        if (from != DHCP_SERVER_PORT || to != DHCP_CLIENT_PORT || length < 8 ||
+            length > total - header)
+                return false;
+        udp = byte_reader_window(&udp, length);
+        //      The pseudo-header (both addresses, the protocol, the UDP
+        //      length) and the datagram, its checksum in it.
+        if (checksum && !vouched &&
+            dhcp_sum(udp, (source >> 16) + (source & 0xffff) +
+                              (destination >> 16) + (destination & 0xffff) +
+                              17 + length) != 0xffff)
+                return false;
+        (void)byte_reader_skip(&udp, 8);
+        if (!byte_reader_ok(&udp))
+                return false;
+        into->source = source;
+        into->destination = destination;
+        into->source_port = from;
+        into->message = byte_reader_here(&udp);
+        into->length = byte_reader_left(&udp);
+        return true;
+}
+
+/*
+        Whether the kernel vouches for a frame's UDP checksum. PACKET_AUXDATA's
+        tp_status says CSUMNOTREADY (a frame sent from this machine across a
+        virtual wire, its checksum left for a card that never runs) or
+        CSUM_VALID (a card checked it on the way in); the UDP layer would not
+        have asked either, so neither does dhcp_unframe. The messages are the
+        kernel's, not the wire's, and none is believed from a cut-short buffer.
+*/
+#define DHCP_SOL_PACKET 263
+#define DHCP_PACKET_AUXDATA 8
+#define DHCP_CHECKSUM_NOT_READY 8
+#define DHCP_CHECKSUM_VALID 0x80
+
+static COLD bool dhcp_frame_vouched(const p8 address_to control,
+                                    positive size)
+{
+        byte_reader messages = byte_reader_open(control, size);
+
+        while (byte_reader_left(&messages) >= 16)
+        {
+                positive low = byte_reader_u32le(&messages);
+                positive length = low | (positive)byte_reader_u32le(&messages) << 32;
+                p32 level = byte_reader_u32le(&messages);
+                p32 type = byte_reader_u32le(&messages);
+                byte_reader data;
+
+                if (length < 16)
+                        return false;
+                data = byte_reader_window(&messages, length - 16);
+                if (level == DHCP_SOL_PACKET && type == DHCP_PACKET_AUXDATA)
+                {
+                        p32 status = byte_reader_u32le(&data);
+
+                        return byte_reader_ok(&data) &&
+                               (status & (DHCP_CHECKSUM_NOT_READY |
+                                          DHCP_CHECKSUM_VALID));
+                }
+                (void)byte_reader_skip(&messages, (8 - length % 8) % 8);
+        }
+        return false;
+}
+
+/*
         The exchange, confined.
 
         A reply is parsed as root, and any host on the wire can write one. So
         the watcher runs each exchange in a child (net_dhcp_apart), which
-        opens and binds the client socket while it may and then comes here:
-        every descriptor but that socket and the answer's pipe is closed,
-        every id becomes nobody's, no exec may grant anything back, and a
-        filter kills any call beyond the exchange's own -- sendto, recvfrom,
-        ppoll, clock_gettime, close -- the answer's write, and exit. What a
-        crafted packet could make of the child is then DHCP from port 68 on
-        that link, which any host on it can send already, and one lease,
-        which the parent judges as it would a packet.
+        opens and binds its sockets while it may and then comes here: every
+        descriptor but the client socket, the packet socket an acquisition
+        reads (dhcp_frames) and the answer's pipe is closed, every id becomes
+        nobody's, no exec may grant anything back, and a filter kills any
+        call beyond the exchange's own -- recvfrom, recvmsg, ppoll,
+        clock_gettime, close, exit -- and sendto and write, which may name
+        only the client socket and the pipe: a packet socket that can be
+        written to sends any frame at all. What a crafted packet could make
+        of the child is then DHCP from port 68 on that link, which any host
+        on it can send already, and one lease, which the parent judges as it
+        would a packet.
 
-        Only that child is confined; the checks call dhcp_ask directly. A
-        kernel without seccomp (or qemu-user, which cannot filter itself)
-        leaves the child unprivileged but unfiltered rather than offline.
+        No filter is no exchange. A kernel that will not install one -- built
+        without SECCOMP_FILTER, which every Moonwater kernel has
+        (build_essentials), or qemu-user, which cannot filter itself -- gets
+        no DHCP from the child, which refuses before it reads a byte, rather
+        than parse hostile packets unfiltered. Only that child is confined;
+        the checks that call dhcp_ask directly leave dhcp_apart unset.
 */
 static b32 dhcp_apart = -1;
 
-#define DHCP_NOBODY 65534
+/* The packet socket an acquisition reads its answers from (dhcp_frames_open),
+   or -1 when it has none and reads its UDP socket as a renewal does. Open
+   only while dhcp_ask runs. */
+static bipolar dhcp_frames = -1;
 
-#if defined(__x86_64__)
-#define DHCP_AUDIT_ARCH 0xc000003eu
-#elif defined(__aarch64__)
-#define DHCP_AUDIT_ARCH 0xc00000b7u
-#else
-#define DHCP_AUDIT_ARCH 0xc00000f3u
-#endif
-
-typedef struct
+/*
+        The exchange's filter, net_apart's kind (net_filter): the architecture,
+        then the call. The client socket's send and the answer's write are
+        pinned to their descriptors; x32's bit-30 numbers match nothing listed
+        and are killed with the rest.
+*/
+static COLD fn dhcp_filter_build(net_filter address_to filter, b32 handle)
 {
-        p16 code;
-        p8 jump_true;
-        p8 jump_false;
-        p32 value;
-} dhcp_filter_step;
+        static const p32 allowed[] = {
+            (p32)syscall(recvfrom), (p32)syscall(recvmsg), (p32)syscall(ppoll),
+            (p32)syscall(clock_gettime), (p32)syscall(close),
+            (p32)syscall(exit_group), (p32)syscall(exit),
+            (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall)};
+        const p32 pinned[2][2] = {{(p32)syscall(sendto), (p32)handle},
+                                  {(p32)syscall(write), (p32)dhcp_apart}};
+        positive count = array_count(allowed);
+
+        filter->used = 0;
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_ARCH);
+        net_filter_put(filter, NET_FILTER_EQUAL, 1, 0, NET_APART_ARCH);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_put(filter, NET_FILTER_LOAD, 0, 0, NET_FILTER_NUMBER);
+        //      A pinned call, then its descriptor: the low half of its first
+        //      argument, which is all of the int the kernel reads. Another
+        //      call goes on to the next block.
+        for (positive i = 0; i < array_count(pinned); i++)
+        {
+                positive call = net_filter_when(filter, pinned[i][0]);
+
+                net_filter_require(filter, 0, ~(p32)0, pinned[i] + 1, 1);
+                net_filter_answer(filter, SECCOMP_RET_ALLOW);
+                net_filter_past(filter, call);
+        }
+        for (positive i = 0; i < count; i++)
+                net_filter_put(filter, NET_FILTER_EQUAL, (p8)(count - i), 0, allowed[i]);
+        net_filter_answer(filter, SECCOMP_RET_KILL_PROCESS);
+        net_filter_answer(filter, SECCOMP_RET_ALLOW);
+}
 
 static COLD bool dhcp_confine(b32 handle)
 {
-        static const p32 allowed[] = {
-            (p32)syscall(sendto), (p32)syscall(recvfrom), (p32)syscall(ppoll),
-            (p32)syscall(clock_gettime), (p32)syscall(close),
-            (p32)syscall(write), (p32)syscall(exit_group), (p32)syscall(exit),
-            (p32)syscall(rt_sigreturn), (p32)syscall(restart_syscall)};
-        dhcp_filter_step steps[6 + array_count(allowed)];
-        struct
-        {
-                p16 count;
-                dhcp_filter_step address_to steps;
-        } filter = {0, steps};
-        positive at = 0;
-        bipolar status;
+        p32 keep[3] = {(p32)handle, (p32)dhcp_apart,
+                       dhcp_frames >= 0 ? (p32)dhcp_frames : descriptors_none};
+        net_filter filter;
 
         if (dhcp_apart < 0)
                 return true;
-        if (!descriptors_close_except(0, (p32)handle, (p32)dhcp_apart))
+        if (!descriptors_close_outside(0, keep, 3))
                 return false;
 
         if ((!system_call_1(syscall(getuid), 0) &&
              (system_call_2(syscall(setgroups), 0, 0) < 0 ||
-              system_call_3(syscall(setresgid), DHCP_NOBODY, DHCP_NOBODY,
-                            DHCP_NOBODY) < 0 ||
-              system_call_3(syscall(setresuid), DHCP_NOBODY, DHCP_NOBODY,
-                            DHCP_NOBODY) < 0)) ||
-            system_call_5(syscall(prctl), 38 /* PR_SET_NO_NEW_PRIVS */, 1, 0,
-                          0, 0) < 0)
+              system_call_3(syscall(setresgid), NET_APART_NOBODY,
+                            NET_APART_NOBODY, NET_APART_NOBODY) < 0 ||
+              system_call_3(syscall(setresuid), NET_APART_NOBODY,
+                            NET_APART_NOBODY, NET_APART_NOBODY) < 0)) ||
+            system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
                 return false;
+        dhcp_filter_build(address_of filter, handle);
+        return net_filter_install(address_of filter);
+}
 
-        //      The architecture, then the call. x32's bit-30 numbers match
-        //      nothing listed and are killed with the rest.
-        steps[at++] = (dhcp_filter_step){0x20, 0, 0, 4};
-        steps[at++] = (dhcp_filter_step){0x15, 1, 0, DHCP_AUDIT_ARCH};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x80000000u};
-        steps[at++] = (dhcp_filter_step){0x20, 0, 0, 0};
-        for (positive i = 0; i < array_count(allowed); i++)
-                steps[at++] = (dhcp_filter_step){
-                    0x15, (p8)(array_count(allowed) - i), 0, allowed[i]};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x80000000u};
-        steps[at++] = (dhcp_filter_step){0x06, 0, 0, 0x7fff0000u};
-        filter.count = (p16)at;
+/* Says how far the exchange has got to whoever waits for it apart
+   (DHCP_REQUESTED, DHCP_UNANSWERED), when somebody does. */
+static COLD fn dhcp_say(bipolar status, const dhcp_lease address_to lease)
+{
+        dhcp_answer said = {status, *lease};
 
-        status = system_call_3(syscall(seccomp), 1 /* SET_MODE_FILTER */, 0,
-                               (positive)address_of filter);
-        return status >= 0 || status == -ENOSYS;
+        if (dhcp_apart >= 0)
+                system_write_all((positive)dhcp_apart, address_of said,
+                                 sizeof said);
 }
 
 static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
@@ -12197,6 +17142,181 @@ static COLD bipolar dhcp_open(string_address device, p32 host, bool broadcast)
         }
 
         return handle;
+}
+
+/*
+        The replies, read where reverse-path filtering cannot drop them.
+
+        Before the client has an address, rp_filter 1 or 2 drops an OFFER
+        whose source has no route back (measured on a KVM tap: OFFERs went
+        out and no REQUEST came back). So an acquisition reads its answers
+        from a packet socket on the interface, as dhclient and dhcpcd do,
+        and still sends on its UDP socket. dhcp_frame_filter keeps UDP to
+        port 68 that is not a later fragment; dhcp_unframe judges every
+        frame it keeps. The filter is attached and locked before the socket
+        is bound, so no frame gets in unseen and the confined child cannot
+        remove it. -1 when packet sockets are refused: the acquisition then
+        reads its UDP socket. Renewals hold an address and a route and stay
+        on UDP.
+*/
+#define DHCP_SO_ATTACH_FILTER 26
+#define DHCP_SO_LOCK_FILTER 44
+#define DHCP_SIOCGIFINDEX 0x8933
+#define DHCP_PACKET_HOST 0
+#define DHCP_PACKET_BROADCAST 1
+#define DHCP_MSG_CTRUNC 8
+#define DHCP_FRAME_ROOM 1536
+
+static const net_filter_step dhcp_frame_filter[] = {
+    {0x30, 0, 0, 9},                    // ldb [9]: the protocol
+    {0x15, 0, 6, 17},                   //   UDP, or drop
+    {0x28, 0, 0, 6},                    // ldh [6]: flags and fragment offset
+    {0x45, 4, 0, 0x1fff},               //   a later fragment: drop
+    {0xb1, 0, 0, 0},                    // ldxb 4 * ([0] & 15): header length
+    {0x48, 0, 0, 2},                    // ldh [x + 2]: destination port
+    {0x15, 0, 1, DHCP_CLIENT_PORT},     //   68, or drop
+    {0x06, 0, 0, 0xffff},               // keep it
+    {0x06, 0, 0, 0}};                   // drop it
+
+static COLD bipolar dhcp_frames_open(string_address device)
+{
+        struct
+        {
+                p16 count;
+                const net_filter_step address_to steps;
+        } filter = {(p16)array_count(dhcp_frame_filter), dhcp_frame_filter};
+        struct
+        {
+                p8 name[16];
+                b32 index;
+                p8 rest[20];
+        } request = {{0}, 0, {0}};
+        socket_address_packet link = {
+            .family = AF_PACKET, .protocol = network_order_16(ETH_P_IP)};
+        positive length = string_length(device);
+        bipolar handle;
+        b32 one = 1;
+
+        if (!length || length >= sizeof request.name)
+                return -1;
+        handle = socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (handle < 0)
+                return -1;
+        memory_copy(request.name, device, length);
+        if (system_call_3(syscall(ioctl), (positive)handle, DHCP_SIOCGIFINDEX,
+                          (positive)address_of request) < 0 ||
+            socket_option_set((b32)handle, DHCP_SOL_PACKET, DHCP_PACKET_AUXDATA,
+                              address_of one, sizeof one) < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, DHCP_SO_ATTACH_FILTER,
+                              address_of filter, sizeof filter) < 0 ||
+            socket_option_set((b32)handle, SOL_SOCKET, DHCP_SO_LOCK_FILTER,
+                              address_of one, sizeof one) < 0)
+                goto refused;
+        link.index = (p32)request.index;
+        if (socket_bind((b32)handle, address_of link, sizeof link) < 0)
+                goto refused;
+        return handle;
+
+refused:
+        socket_close((b32)handle);
+        return -1;
+}
+
+static COLD fn dhcp_frames_close(void)
+{
+        if (dhcp_frames >= 0)
+                socket_close((b32)dhcp_frames);
+        dhcp_frames = -1;
+}
+
+typedef struct
+{
+        address_any base;
+        positive length;
+} dhcp_vector;
+
+typedef struct
+{
+        address_any name;
+        p32 name_size;
+        dhcp_vector address_to vectors;
+        positive vector_count;
+        address_any control;
+        positive control_size;
+        b32 flags;
+} dhcp_message_header;
+
+/* The next DHCP message off the packet socket, network_receive_next's way:
+   its length, with the message copied to `into`; 0 for a frame that is not
+   a DHCP reply this machine may read (sent by it, to another station's
+   hardware address, or refused by dhcp_unframe), which the caller counts
+   against its allowance as it counts any refused datagram; NETWORK_SILENT
+   when the deadline went by first; or the error that ended the wait or the
+   read. The read never blocks. The peer is the IP source and the UDP source
+   port, as a UDP socket would have named them, and `destination` the IP
+   destination, which a socket would have kept to itself. */
+static COLD bipolar dhcp_frame_next(bipolar frames, p8 address_to into,
+                                    positive room,
+                                    socket_address_internet address_to peer,
+                                    p32 address_to peer_size,
+                                    p32 address_to destination,
+                                    const network_deadline address_to deadline)
+{
+        for (;;)
+        {
+                p8 frame[DHCP_FRAME_ROOM];
+                p8 control[64];
+                socket_address_packet from;
+                dhcp_vector vector = {frame, sizeof frame};
+                dhcp_message_header message = {
+                    address_of from, sizeof from, address_of vector, 1,
+                    control, sizeof control, 0};
+                dhcp_frame found;
+                positive seconds;
+                positive nanoseconds;
+                bipolar got;
+
+                if (!network_deadline_left(deadline, address_of seconds,
+                                           address_of nanoseconds))
+                        return NETWORK_SILENT;
+                memory_zero(address_of from, sizeof from);
+                got = system_call_3(syscall(recvmsg), (positive)frames,
+                                    (positive)address_of message,
+                                    MSG_TRUNC | MSG_DONTWAIT);
+                if (got == NETWORK_INTERRUPTED)
+                        continue;
+                if (got == NETWORK_TRY_AGAIN)
+                {
+                        bipolar ready = network_wait_readable_until(frames,
+                                                                     deadline);
+
+                        if (ready <= 0)
+                                return ready ? ready : NETWORK_SILENT;
+                        continue;
+                }
+                if (got < 0)
+                        return got;
+                memory_zero(peer, sizeof *peer);
+                address_to peer_size = sizeof *peer;
+                if ((positive)got > sizeof frame ||
+                    message.name_size <= __builtin_offsetof(socket_address_packet,
+                                                            pkttype) ||
+                    (from.pkttype != DHCP_PACKET_HOST &&
+                     from.pkttype != DHCP_PACKET_BROADCAST) ||
+                    !dhcp_unframe(frame, (positive)got,
+                                  !(message.flags & DHCP_MSG_CTRUNC) &&
+                                      dhcp_frame_vouched(
+                                          control, message.control_size),
+                                  address_of found) ||
+                    !found.length || found.length > room)
+                        return 0;
+                memory_copy(into, found.message, found.length);
+                peer->family = AF_INET;
+                peer->port = network_order_16(found.source_port);
+                peer->host = network_order_32(found.source);
+                address_to destination = found.destination;
+                return (bipolar)found.length;
+        }
 }
 
 /* Packet fields identify the DHCP transaction; the datagram endpoint says
@@ -12235,18 +17355,31 @@ static COLD bool dhcp_receive(bipolar handle, p8 address_to packet, positive roo
         {
                 socket_address_internet peer;
                 p32 peer_size;
-                bipolar got = network_receive_next(handle, packet, room, address_of peer,
-                                                   address_of peer_size, deadline);
+                p32 destination = HOST_BROADCAST;
+                bool framed = dhcp_frames >= 0;
+                bipolar got = framed
+                    ? dhcp_frame_next(dhcp_frames, packet, room, address_of peer,
+                                      address_of peer_size,
+                                      address_of destination, deadline)
+                    : network_receive_next(handle, packet, room, address_of peer,
+                                           address_of peer_size, deadline);
+                dhcp_lease parsed;
 
                 if (got < 0)
                         return false;
 
+                //      A frame has no socket to have kept out what was sent
+                //      to another station's address: it is for this client
+                //      when it is broadcast or names the address it offers.
                 if (got && (positive)got <= room &&
                     dhcp_peer_matches(address_of peer, peer_size,
                                       expected_peer, any_peer_host) &&
                     dhcp_read(packet, (positive)got, transaction, hardware,
-                              lease, kind) >= 0)
+                              address_of parsed, kind) >= 0 &&
+                    (destination == HOST_BROADCAST ||
+                     (parsed.address && destination == parsed.address)))
                 {
+                        *lease = parsed;
                         if (accepted_peer)
                                 *accepted_peer = peer;
                         return true;
@@ -12288,37 +17421,16 @@ static COLD bipolar dhcp_complete(bipolar handle, p8 address_to packet,
 /*
         The exchange, with a schedule rather than a single try.
 
-        A server that is slow, or a link that has only just come up and whose
-        switch port is still learning, is the ordinary case at boot rather
-        than the exception. A link brought up a moment ago has not finished
-        negotiating, the first DISCOVERs go into that gap and are simply lost,
-        and what decides when a machine is on the network is how soon after
-        carrier the next one goes out. So it asks four times a second for the
-        first three seconds and backs off after that.
+        A link brought up a moment ago has not finished negotiating, and the
+        first DISCOVERs sent into that gap are lost, so what decides when a
+        machine is on the network is how soon after carrier the next one goes
+        out: four a second for the first three seconds, then backing off.
 
-        A note on where the time went, because it was not where it looked.
-
-        A boot reached carrier at three seconds and had no address until
-        fifteen. Counting showed the whole exchange was one send, one poll,
-        one offer and one poll for the acknowledgement -- perhaps two seconds
-        of work -- inside fourteen seconds of wall clock, and a direct test
-        showed ppoll honouring its timeout to the millisecond.
-
-        It was getrandom. With no flags it waits for the kernel's entropy pool
-        to be initialised, and early in boot it is not. Twelve seconds of a
-        boot were spent there, before a single packet moved, asking for a
-        number to put in a header. That wait used to be avoided with
-        GRND_NONBLOCK and the kernel's explicit early-boot insecure stream.
-        DHCP now prefers the initialized CSPRNG without waiting, then blocks
-        on that same CSPRNG rather than drawing a guessable xid; if neither
-        path can fill the transaction id, acquisition fails before I/O.
-
-        The wait is short now: the first blocking getrandom sets the kernel
-        generating entropy itself, and crng is ready about 0.85 s later. On
-        KVM with no RDRAND/RDSEED and no virtio-rng (kernel 7.2) the lease
-        came 0.6-0.95 s later than with GRND_INSECURE, and never failed;
-        with RDRAND or virtio-rng the pool is ready before DHCP asks and
-        nothing waits.
+        The transaction id comes from the initialized CSPRNG without waiting,
+        else from a blocking read of that same CSPRNG, never GRND_INSECURE: a
+        guessable xid lets an off-path reply through. The blocking read costs
+        about 0.85 s once, on a machine with neither RDRAND nor virtio-rng;
+        with either, nothing waits.
 */
 static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         dhcp_lease address_to lease)
@@ -12340,10 +17452,16 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
         //      transaction, so it is ready; a refusal leaves no spread.
         if (system_random_fill(spread, sizeof spread, 1))
                 memory_fill(spread, 128, sizeof spread);
+        //      The packet socket first: dhcp_open confines the child, after
+        //      which nothing could open one.
+        dhcp_frames = dhcp_frames_open(device);
         handle = dhcp_open(device, HOST_ANY, true);
 
         if (handle < 0)
+        {
+                dhcp_frames_close();
                 return DHCP_NO_SOCKET;
+        }
 
         socket_address_internet where = {
             .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
@@ -12359,33 +17477,21 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                 positive remaining = NETWORK_DISCARD_MAX;
 
                 /*
-                        A quarter second apart while it matters.
-
-                        The link comes up about three seconds into a boot and
-                        the DISCOVERs before that are lost, so what decides
-                        when a machine is on the network is how soon after
-                        carrier the next one goes out. At one second that was
-                        the whole of the remaining delay; at a quarter it is
-                        within noise of the card itself.
-
-                        Twelve quick tries covers three seconds of that, and
-                        the backoff after it is for a network with no server
-                        on it, which should not be broadcast at forever.
-
-                        The first waits only 50 ms. A link brought up a moment
-                        ago drops what is sent before its queue starts while
-                        the send reports success: on KVM half of all boots put
-                        the first DISCOVER nowhere (a capture of the wire had
-                        only the second) and took the lease 250 ms late.
+                        A quarter second apart for the first three seconds,
+                        then the backoff, for a network with no server on it.
+                        The first waits only 50 ms: a link brought up a moment
+                        ago drops the first send while reporting success (on
+                        KVM half of all boots put it nowhere, and took the
+                        lease 250 ms late).
                 */
-                wait = !attempt ? 50 : attempt < 12 ? 250 : (attempt - 11) * 2000;
                 //      The backoff, once a server has had three seconds
                 //      to answer, moves by up to a second either way (RFC
                 //      2131 4.1), so that machines that lost their server
                 //      together -- a power cut, a switch restarting -- do
                 //      not keep asking it in step.
-                if (attempt >= 12)
-                        wait = wait - 1000 + spread[attempt - 12] * 2000 / 255;
+                wait = !attempt ? 50 : attempt < 12 ? 250
+                       : (attempt - 11) * 2000 - 1000 +
+                             spread[attempt - 12] * 2000 / 255;
                 length = dhcp_build(packet, sizeof packet, DHCP_DISCOVER,
                                     transaction, hardware, 0, 0, 0, true);
 
@@ -12422,20 +17528,33 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                                             transaction, hardware, lease->address,
                                             lease->server, 0, true);
 
+                        //      A server will hold the offered address for
+                        //      this client until the ACK window is over:
+                        //      whoever waits for the exchange is told, so
+                        //      that link news lets the ACK come first. Told
+                        //      before the send, so that no news the REQUEST
+                        //      sets off can be read first.
+                        dhcp_say(DHCP_REQUESTED, lease);
                         if (socket_send(
                                 (b32)handle, packet, length, 0,
                                 address_of where, sizeof where) < 0)
+                        {
                                 /* The REQUEST never left.  Start the next
                                    discovery attempt immediately instead of
                                    spending its whole reply budget waiting for
                                    an answer that cannot exist. */
+                                dhcp_say(DHCP_UNANSWERED, lease);
                                 break;
+                        }
 
                         //      An ACK is given at least the usual quarter.
                         if (!network_deadline_begin(
                                 address_of deadline, wait / 1000,
                                 (wait < 250 ? 250 : wait % 1000) * 1000000))
+                        {
+                                dhcp_say(DHCP_UNANSWERED, lease);
                                 break;
+                        }
 
                         status = dhcp_complete(
                             handle, packet, sizeof packet, transaction,
@@ -12444,39 +17563,31 @@ static bipolar dhcp_ask(string_address device, p8 address_to hardware,
                         if (status != DHCP_NO_OFFER)
                         {
                                 socket_close((b32)handle);
+                                dhcp_frames_close();
                                 return status;
                         }
+                        dhcp_say(DHCP_UNANSWERED, lease);
                         break;
                 }
         }
 
         socket_close((b32)handle);
+        dhcp_frames_close();
         return DHCP_NO_OFFER;
 }
 
 /*
         Keeping the address we already have.
 
-        A lease is a loan with a time on it. Half way through, a client is
-        supposed to ask to keep what it has -- unicast to the server that gave
-        it, with ciaddr set to the address and no server identifier, which is
-        what distinguishes "may I keep this" from "may I have one". The server
-        answers with an ACK and a fresh lease time.
+        Half way through a lease the client asks, unicast to the server that
+        gave it, to keep what it has: ciaddr set and no server identifier,
+        which is what says "may I keep this" rather than "may I have one". A
+        fresh DISCOVER may come back with a different address, and every
+        connection open on this one dies with it.
 
-        This matters more than it looks on a machine that stays up. qemu hands
-        out a lease measured in days and nothing here would ever notice, but a
-        home router giving an hour means a machine that has been up since
-        yesterday is holding an address the server considers free, and the
-        first thing that goes wrong is somebody else being given it.
-
-        Renewing rather than starting over is the whole point: a fresh
-        DISCOVER may come back with a different address, and every connection
-        open at the time dies with it.
-
-        A timeout here is not fatal and does not discard the address. The
-        caller retries within the current state, switches from unicast renewal
-        to broadcast rebinding at T2, and starts discovery only after a NAK or
-        the lease's actual expiry.
+        A timeout is not fatal and does not discard the address: the caller
+        retries, switches to broadcast rebinding at T2, and starts discovery
+        only after a NAK or the lease's expiry.
 */
 static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
                               dhcp_lease address_to lease, bool rebinding,
@@ -12512,21 +17623,16 @@ static bipolar dhcp_reacquire(string_address device, p8 address_to hardware,
 
         if (socket_send((b32)handle, packet, length, 0, address_of where,
                         sizeof where) < 0)
-        {
                 status = DHCP_NO_SOCKET;
-                goto done;
-        }
-
         //      An ACK keeps what the renewal said, including the new lease
         //      time, but does not lose what it left out: it need not repeat
         //      every option.
-        if (network_deadline_begin(address_of deadline, wait, 0))
+        else if (network_deadline_begin(address_of deadline, wait, 0))
                 status = dhcp_complete(handle, packet, sizeof packet,
                                        transaction, hardware, lease,
                                        address_of expected, rebinding,
                                        address_of deadline);
 
-done:
         socket_close((b32)handle);
         return status;
 }
@@ -12534,29 +17640,30 @@ done:
 /*
         Giving back an address somebody else answers for.
 
-        The watcher ARP-probes an acknowledged address before it installs it,
-        and a station that answers means the server handed out an address in
-        use: a stale lease, a machine configured by hand, or a host that says
-        so to keep this one off the network. RFC 2131 4.4.1 has the client
-        broadcast a DHCPDECLINE naming the address (option 50) and the server
-        that gave it (option 54), under a transaction id of its own, and wait
-        ten seconds before it asks again; the server marks the address in use
-        and offers another. Without it the server offered the same address on
-        every DISCOVER until its lease ran out, and the link had none.
-
-        Nothing answers a DECLINE, so this is one send, from the same confined
-        child as the other exchanges: its filter already allows sendto.
+        A station that answers the watcher's ARP probe of a fresh address
+        means the server handed out an address in use. RFC 2131 4.4.1: the
+        client broadcasts a DHCPDECLINE naming it (option 50) and the server
+        (option 54), so the server marks it taken and offers another. Without
+        that the same address came back on every DISCOVER until its lease ran
+        out. And an exchange the watcher cut while its REQUEST was unanswered
+        leaves the offered address held for this client: RFC 2131 4.4.6's
+        DHCPRELEASE (ciaddr set, option 54, nothing asked) hands it back.
+        Neither is answered, so each is one send from the confined child,
+        whose filter already allows sendto. `kind` is DHCP_DECLINE or
+        DHCP_RELEASE.
 */
-static bipolar dhcp_decline(string_address device, p8 address_to hardware,
-                            const dhcp_lease address_to lease)
+static bipolar dhcp_give_back(string_address device, p8 address_to hardware,
+                              const dhcp_lease address_to lease, p8 kind)
 {
         p8 packet[300];
         p32 transaction;
         bipolar handle;
         bipolar sent;
         positive length;
+        bool declined = kind == DHCP_DECLINE;
 
-        if (!lease->address || !lease->server)
+        if (!lease->address || !lease->server ||
+            (!declined && kind != DHCP_RELEASE))
                 return DHCP_NO_OFFER;
         if (!dhcp_transaction_early(address_of transaction))
                 return DHCP_NO_RANDOM;
@@ -12568,8 +17675,9 @@ static bipolar dhcp_decline(string_address device, p8 address_to hardware,
             .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
             .host = network_order_32(HOST_BROADCAST)};
 
-        length = dhcp_build(packet, sizeof packet, DHCP_DECLINE, transaction,
-                            hardware, lease->address, lease->server, 0, false);
+        length = dhcp_build(packet, sizeof packet, kind, transaction, hardware,
+                            declined ? lease->address : 0, lease->server,
+                            declined ? 0 : lease->address, false);
         sent = socket_send((b32)handle, packet, length, 0, address_of where,
                            sizeof where);
         socket_close((b32)handle);

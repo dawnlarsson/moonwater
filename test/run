@@ -2,10 +2,16 @@
 #
 #       Every test in the tree, in one order, and every benchmark beside it.
 #
-#           sh test/run                 every lane this machine can run
+#           sh test/run --changed       the seams this tree has changed from main
+#           sh test/run --seam net      one seam's lanes (--seams lists them)
 #           sh test/run shell text      only the lanes named
-#           sh test/run -j 16           the same, up to 16 lanes at once
+#           sh test/run -j 16 --changed the same, up to 16 lanes at once
 #           sh test/run --list          what the lanes are
+#           sh test/run --plan --changed   the lanes that would run, and none run
+#           sh test/run --all           every lane this machine can run (asked
+#                                       for on purpose; a terminal asks again)
+#
+#       An empty command line is refused: it is every lane, which is hours.
 #
 #           sh test/run bench           every benchmark
 #           sh test/run bench floor     only the benchmarks named
@@ -84,12 +90,42 @@ TEST_TALLY="$work/tally"
 export TEST_TALLY
 [ -n "${TEST_SHARED_WORK:-}" ] || : > "$TEST_TALLY"
 
+#       Where the time went: a line of seconds and a name for every build and
+#       every harness, from this file and from differential.py, shown at the
+#       end of a run with the slowest first.
+TEST_TIMES="$work/times"
+export TEST_TIMES
+[ -n "${TEST_SHARED_WORK:-}" ] || : > "$TEST_TIMES"
+
+#       The build cache, shared with differential.py's build_run: a compile
+#       is answered from it when the compiler, the command line, the files on
+#       it and the preprocessed text are the ones that made an entry.
+#       MOONWATER_TEST_CACHE=off turns it off; =verify builds every time and
+#       fails when a build is not the bytes its key stood for; any other
+#       value is the directory.
+cache_setting=${MOONWATER_TEST_CACHE:-}
+case $cache_setting in
+off) build_cache= ;;
+'' | verify)
+        build_cache=${XDG_CACHE_HOME:-${HOME:+$HOME/.cache}}
+        build_cache=${build_cache:+$build_cache/moonwater-test}
+        ;;
+*) build_cache=$cache_setting ;;
+esac
+if command -v sha256sum > /dev/null 2>&1; then
+        cache_sum() { sha256sum | cut -d ' ' -f 1; }
+elif command -v shasum > /dev/null 2>&1; then
+        cache_sum() { shasum -a 256 | cut -d ' ' -f 1; }
+else
+        build_cache=
+fi
+
 #       Lanes run only when named, because they need something a plain run
 #       does not have: wifi wants an image built with kernel/profile/hwsim,
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan ring0 tier scale desktop chrome"
+asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
 
@@ -140,6 +176,14 @@ describe()
         stream)   echo "<stdio.h>'s FILE against glibc's, on three machines" ;;
         socket)   echo "byte order against a reference, and real sockets on three machines" ;;
         net)      echo "the netlink wire, ip against the kernel, and TLS ClientHello groups" ;;
+        net_fast) echo "net's quick harnesses: the state machines, the proofs and the guards" ;;
+        net_x86_64) echo "net's CHECK_net and its tight build on x86-64" ;;
+        net_arm64) echo "net's CHECK_net and its tight build on arm64" ;;
+        net_riscv64) echo "net's CHECK_net and its tight build on riscv64" ;;
+        net_crypto) echo "the crypto against OpenSSL: vectors made once, checked on three machines, with the instruction and address counts" ;;
+        net_tls)  echo "net's TLS: certificates, names, chains, the record layer against OpenSSL" ;;
+        net_fuzz) echo "net's bounded fuzz runs, and the Wi-Fi key states" ;;
+        net_http) echo "net's HTTP and wget against hostile servers, DNS over TLS, SNTP eras" ;;
         slurp)    echo "bounded file reads and forced EINTR at open and read, on three machines" ;;
         wait)     echo "wait4 arguments, statuses and forced EINTR retry, on three machines" ;;
         writer)   echo "buffer boundaries, direct policy and write ordering, on three machines" ;;
@@ -176,10 +220,119 @@ describe()
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
+        proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
+        mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
         ring0)    echo "a hostile program's windows, ioctls, images and log lines against a booted kernel, and what its sanitizers say" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for (MOONWATER_TIER names the tier)" ;;
         scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
         esac
+}
+
+#
+#       Seams. A change belongs to one, and its loop is that seam's lanes: a
+#       bare `sh test/run` is every lane of every seam, which is hours of a
+#       whole machine, so the whole run is a thing asked for (--all) and not
+#       what an empty command line means. Every lane is in exactly one seam
+#       and every file in the tree is in one, or is named below as in none;
+#       differential_oracle holds both to this list.
+#
+#       A seam's run list is what --seam and --changed run. Its apart list
+#       is the rest of its lanes: a lane that is the sum of others in the run
+#       list (net is net_fast .. net_http, one thread of them), and one that
+#       needs an image, an hour or a tool most machines lack, which only its
+#       own name runs.
+#
+seams="lib compress net link shell tools machine desktop image engine"
+
+seam_lanes()
+{
+        case $1 in
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack" ;;
+        compress) echo "tar zstd gzip xz compression_floor compression" ;;
+        net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
+        link) echo "waterlink link" ;;
+        shell) echo "shell builtins audit" ;;
+        tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
+        machine) echo "machine cli script bowl storage_io storage_format" ;;
+        desktop) echo "term edit font canvas sleep" ;;
+        image) echo "kit switches boot install" ;;
+        engine) echo "differential_oracle" ;;
+        *) return 1 ;;
+        esac
+}
+
+seam_apart()
+{
+        case $1 in
+        net) echo "net wifi fuzz msan proof mutation" ;;
+        tools) echo "scale" ;;
+        desktop) echo "desktop chrome" ;;
+        image) echo "ring0 tier" ;;
+        *) ;;
+        esac
+}
+
+#       The seams a path of the tree is in (more than one when more than one
+#       lane reads it), `-` for a path no lane covers, `suite` for the suite's own
+#       three files, which are the checks of every seam and select none (a
+#       change to them is run by naming the seams it is meant for), and `?`
+#       for a path that is nobody's yet, which --changed refuses to guess.
+seam_of_path()
+{
+        case $1 in
+        src/lib.c | src/lib.util.c | src/platform/*) echo lib ;;
+        src/net/* | src/sh/net.c) echo net ;;
+        src/waterlink/*) echo link ;;
+        src/sh/gzip.c | src/sh/xz.c | src/sh/zstd.c | src/sh/tar.c) echo compress ;;
+        src/sh/shell.c | src/sh/lex.c | src/sh/lex_line_floor.inc | src/sh/parse.c | \
+        src/sh/exec.c | src/sh/expand.c | src/sh/builtin.c | src/sh/pty.c | \
+        programs/shell.c) echo shell ;;
+        src/sh/awk.c | src/sh/text.c | src/sh/checksum.c | src/sh/file.c | \
+        src/sh/tools.c | src/sh/tools.inc | src/sh/process_tools.c | \
+        src/sh/regex_graph.c | src/sh/snapshot.c | src/sh/monitor.c | \
+        programs/utilities.c | programs/monitor.sh) echo tools ;;
+        src/sh/host.c | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
+        main.moonwater.sh) echo machine ;;
+        src/sh/edit.c | src/canvas/* | fonts/*) echo desktop ;;
+        src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
+        test/checks.c | test/run | test/differential.py) echo suite ;;
+        test/codec_floor/*) echo compress ;;
+        test/assembly/* | test/insns) echo lib ;;
+        test/insn.c) echo lib net ;;
+        test/function_audit.seal) echo - ;;
+        test/*) echo engine ;;
+        README.md | THIRD-PARTY | .gitignore | .vscode/* | .github/*) echo - ;;
+        *) echo '?' ;;
+        esac
+}
+
+seam_known()
+{
+        case " $seams " in
+        *" $1 "*) return 0 ;;
+        esac
+        return 1
+}
+
+seams_print()
+{
+        for seam in $seams; do
+                printf '%-9s run   %s\n' "$seam" "$(seam_lanes "$seam")"
+                [ -z "$(seam_apart "$seam")" ] ||
+                        printf '%-9s apart %s\n' "$seam" "$(seam_apart "$seam")"
+        done
+}
+
+#       The files this tree has changed from where it left main (or from HEAD
+#       when there is no main here), committed or not.
+seams_changed_files()
+{
+        changed_base=${1:-}
+        [ -n "$changed_base" ] ||
+                changed_base=$(git merge-base HEAD origin/main 2>/dev/null ||
+                        git merge-base HEAD main 2>/dev/null || echo HEAD)
+        { git diff --name-only "$changed_base" -- 2>/dev/null
+          git ls-files --others --exclude-standard 2>/dev/null; } | sort -u
 }
 
 tally()
@@ -594,6 +747,142 @@ coverage_guest_collect()
         coverage_stem=""
 }
 
+#       The digest a build is kept under: the compiler's and the linker's
+#       version lines, the command line without its output, each file named
+#       on it by its bytes and not its path, and what the preprocessor reads.
+#       No digest (status 1) when the preprocessor cannot be asked, which is
+#       a build that is not kept.
+build_key()
+{
+        key_count=$#
+        while [ "$key_count" -gt 0 ]; do
+                key_word=$1
+                shift
+                key_count=$((key_count - 1))
+                if [ "$key_word" = -o ] && [ "$key_count" -gt 0 ]; then
+                        shift
+                        key_count=$((key_count - 1))
+                        continue
+                fi
+                set -- "$@" "$key_word"
+        done
+
+        key_text=$(mktemp "$work/key.XXXXXX") || return 1
+        "$@" -E -P > "$key_text" 2> /dev/null || { rm -f "$key_text"; return 1; }
+        {
+                printf 'moonwater build cache sh 1\n'
+                "$1" --version 2> /dev/null | sed -n 1p
+                key_linker=$("$1" -print-prog-name=ld 2> /dev/null) || key_linker=ld
+                "$key_linker" --version 2> /dev/null | sed -n 1p
+                for key_word in "$@"; do
+                        if [ "$key_word" != "$1" ] && [ -f "$key_word" ]; then
+                                printf 'file %s\n' "$(cache_sum < "$key_word")"
+                        else
+                                printf 'arg %s\n' "$key_word"
+                        fi
+                done
+                cat "$key_text"
+        } | cache_sum
+        rm -f "$key_text"
+}
+
+#       Whether this process is the one to make an entry (0), or it was made
+#       while waiting for whoever held the claim (1): a build that two lanes
+#       want is made by one of them. A claim is a directory beside the entry
+#       holding its owner's host and pid, and one whose owner is gone, or that
+#       has stood for twenty minutes, is not waited for.
+build_claim()
+{
+        claim_lock=$1.lock
+        mkdir -p "${1%/*}" 2> /dev/null || return 0
+        claim_node=$(uname -n)
+        claim_until=$(($(date +%s) + 1200))
+        while :; do
+                [ ! -f "$1" ] || return 1
+                if mkdir "$claim_lock" 2> /dev/null; then
+                        #       Made while this was between looking and claiming.
+                        if [ -f "$1" ]; then
+                                rmdir "$claim_lock" 2> /dev/null
+                                return 1
+                        fi
+                        echo "$claim_node $$" > "$claim_lock/owner"
+                        return 0
+                fi
+                claim_owner=$(cat "$claim_lock/owner" 2> /dev/null)
+                if [ -n "$claim_owner" ] && [ "${claim_owner% *}" = "$claim_node" ] &&
+                   ! kill -0 "${claim_owner#* }" 2> /dev/null; then
+                        rm -f "$claim_lock/owner"
+                        rmdir "$claim_lock" 2> /dev/null
+                        continue
+                fi
+                if [ "$(date +%s)" -gt "$claim_until" ]; then
+                        rm -f "$claim_lock/owner"
+                        rmdir "$claim_lock" 2> /dev/null
+                        continue
+                fi
+                sleep 0.5
+        done
+}
+
+#       One build, from the cache or made: the output is $1, the command is
+#       the rest (with -o "$1" in it), and what the compiler said goes to
+#       "$1.err". Only a build that succeeded is kept, under a temporary name
+#       and renamed so that two lanes making one entry never meet halfway.
+build_cached()
+{
+        cached_output=$1
+        shift
+        cached_began=$(date +%s)
+        cached_key=
+        if [ -n "$build_cache" ] && [ -z "${coverage_args:-}" ]; then
+                cached_key=$(build_key "$@") || cached_key=
+        fi
+        cached_entry=
+        [ -z "$cached_key" ] ||
+                cached_entry=$build_cache/$(printf %s "$cached_key" | cut -c 1-2)/$cached_key
+
+        cached_claimed=
+        if [ -n "$cached_entry" ] && [ "$cache_setting" != verify ]; then
+                [ -f "$cached_entry" ] || build_claim "$cached_entry" || :
+                if [ ! -f "$cached_entry" ]; then
+                        cached_claimed=1
+                fi
+        fi
+
+        if [ -n "$cached_entry" ] && [ -f "$cached_entry" ] &&
+           [ "$cache_setting" != verify ]; then
+                cp -p "$cached_entry" "$cached_output" || return 1
+                : > "$cached_output.err"
+                touch "$cached_entry"
+                printf '%s build %s (cached)\n' "$(($(date +%s) - cached_began))" \
+                        "${cached_output##*/}" >> "$TEST_TIMES"
+                return 0
+        fi
+
+        "$@" 2> "$cached_output.err"
+        cached_status=$?
+        printf '%s build %s\n' "$(($(date +%s) - cached_began))" \
+                "${cached_output##*/}" >> "$TEST_TIMES"
+
+        if [ "$cached_status" = 0 ] && [ -n "$cached_entry" ]; then
+                if [ -f "$cached_entry" ] && ! cmp -s "$cached_entry" "$cached_output"; then
+                        printf 'build cache: %s is not the build its key stood for (%s)\n' \
+                                "${cached_output##*/}" "$cached_key" >> "$cached_output.err"
+                        cached_status=1
+                elif mkdir -p "${cached_entry%/*}" 2> /dev/null &&
+                     cached_stage=$(mktemp "${cached_entry%/*}/.stage.XXXXXX" 2> /dev/null); then
+                        cp -p "$cached_output" "$cached_stage" &&
+                                mv "$cached_stage" "$cached_entry" ||
+                                rm -f "$cached_stage"
+                fi
+        fi
+        if [ -n "$cached_claimed" ]; then
+                rm -f "$cached_entry.lock/owner"
+                rmdir "$cached_entry.lock" 2> /dev/null
+        fi
+        return "$cached_status"
+}
+
 freestanding()
 {
         source_file=$1
@@ -683,10 +972,10 @@ freestanding()
         coverage_build "$architecture" "$output" || return 1
 
         # shellcheck disable=SC2086
-        if $compiler -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
-                -fno-builtin "$@" -w -T src/build/spark.ld -Wl,-e,_start \
-                -Wl,--build-id=none -Wl,--no-warn-rwx-segments $coverage_args \
-                -o "$output" "$source_file" 2> "$output.err"
+        if build_cached "$output" $compiler -O2 -static -nostdlib -nostartfiles \
+                -fno-stack-protector -fno-builtin "$@" -w -T src/build/spark.ld \
+                -Wl,-e,_start -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
+                $coverage_args -o "$output" "$source_file"
         then
                 coverage_keep "$output"
                 return 0
@@ -745,9 +1034,12 @@ farm=""
 #       second build of the same file beside it.
 need_shared_wait()
 {
-        [ -n "${TEST_SHARED_WORK:-}" ] && [ -e "$work/shared.building" ] ||
-                return 0
-        while [ ! -e "$work/shared.done" ]; do
+        [ -n "${TEST_SHARED_WORK:-}" ] && [ -e "$work/shared.building" ] &&
+                [ -z "${shared_parent:-}" ] || return 0
+
+        #       The policy farm is built only when a lane asked for needs it.
+        [ "$1" != hardened ] || [ -e "$work/shared.hardened" ] || return 0
+        while [ ! -e "$work/shared.$1.done" ]; do
                 sleep 0.2
         done
         [ ! -e "$work/shared.failed" ]
@@ -756,7 +1048,7 @@ need_shared_wait()
 need_shell()
 {
         [ -z "$shell_binary" ] || return 0
-        need_shared_wait || return 1
+        need_shared_wait shell || return 1
 
         #       A lane is a subshell and cannot hand the shell it built back
         #       to the lanes after it, so the build is skipped when the
@@ -2941,17 +3233,18 @@ lane_link()
 #
 lane_netem()
 {
-        need_shell || return 1
-        netem_status=0
-        python3 test/differential.py --harness net_netem --shell "$shell_binary" ||
-                netem_status=$?
+        net_outcome=0
         #       The lease epoch walk against sh/net.c with one step taken out:
         #       the first mutant here, every one with MOONWATER_EPOCH_MUTANTS=all.
-        python3 test/differential.py --harness net_epoch_mutants || {
-                [ $? = 2 ] || netem_status=1
-        }
-        return "$netem_status"
+        #       It builds a shell of its own, beside the one the DHCP and SNTP
+        #       clients are put against in a veth pair of their own.
+        job soft python3 test/differential.py --harness net_epoch_mutants
+        need_shell || { jobs_wait; return 1; }
+        job maybe python3 test/differential.py --harness net_netem --shell "$shell_binary"
+        jobs_wait
+        return "$net_outcome"
 }
+
 #       qemu's default riscv64 cpu is its richest one, with V at a vector
 #       length of 128 bits, so the lane above runs the vector bodies at that
 #       length only. It asks again with the cpu that has no V, which is the
@@ -3985,8 +4278,14 @@ freestanding_checks_one()
         #       Soft RLIMIT_AS is ignored under qemu-user; native host arch
         #       proves it. Pass --emulated so CHECK_reserve / CHECK_lock /
         #       CHECK_net log honest NOT RUN for AS rather than a false pass.
+        #       qemu-user cannot install a seccomp filter either, so wget's
+        #       confined network half refuses there: CHECK_net and
+        #       CHECK_storage_io check the refusal and say NOT RUN for the
+        #       fetch, and CHECK_bowl does for the Wi-Fi station.
         if { [ "$suite" = reserve ] || [ "$suite" = lock ] ||
-             [ "$suite" = net ] || [ "$suite" = socket ]; } && [ -n "$runner" ]; then
+             [ "$suite" = net ] || [ "$suite" = storage_io ] ||
+             [ "$suite" = bowl ] || [ "$suite" = socket ]; } &&
+                [ -n "$runner" ]; then
                 $runner "$work/$suite.$name" --emulated > "$work/$suite.$name.out" 2>&1
                 status=$?
         elif [ -n "${check_input-}" ]; then
@@ -4023,6 +4322,22 @@ freestanding_checks_lane()
         suite=$1
         source=$2
         target_lane freestanding_checks_one "$suite" "$source"
+}
+
+#       One iteration of target_lane: this target, this check. The status is
+#       target_tools' when the tools are missing (2) and the check's when it ran.
+one_target_lane()
+{
+        target=$1
+        shift
+        target_tools "$target" && "$@"
+}
+
+#       Whether this target can run at all (target_tools, which also sets
+#       target_compiler and target_runner); 2 when it cannot.
+one_target_lane_tools()
+{
+        target_tools "$1"
 }
 
 target_lane()
@@ -4114,186 +4429,259 @@ tight_check_one()
 net_tight_one() { tight_check_one net; }
 bowl_tight_one() { tight_check_one bowl; }
 
-lane_net()
+#       Checks that share nothing run side by side. `job CLASS COMMAND...`
+#       starts one in the background with its output kept, and jobs_wait waits
+#       for them all and prints each one's output in the order they were
+#       started, so the log reads as a serial run does. The class says what
+#       the command's status means to net_outcome:
+#
+#           maybe   0 passed, 2 did not run (the lane is then 2), else failed
+#           soft    0 passed, 2 did not run and is only noted, else failed
+#           hard    0 passed, anything else failed
+#
+#       At most TEST_HARNESS_JOBS run at once, a quarter of the processors
+#       (one to four) unless it is set: a machine of two or four runs them
+#       one after another, as a lane always did. The harness a job runs is
+#       spelled out where it is started, as "--harness" and its name, for
+#       the registry in differential.py to find.
+job_limit=${TEST_HARNESS_JOBS:-$(($(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4) / 4))}
+[ "$job_limit" -ge 1 ] 2> /dev/null || job_limit=1
+[ "$job_limit" -le 4 ] || [ -n "${TEST_HARNESS_JOBS:-}" ] || job_limit=4
+job_count=0
+
+job()
 {
-        python3 test/differential.py --harness net_clock_fault || return 1
-        python3 test/differential.py --harness net_wait_states || return 1
-        python3 test/differential.py --harness net_parser_work_states || return 1
-        python3 test/differential.py --harness net_math_proof || return 1
-        python3 test/differential.py --harness wire_constants || return 1
-        python3 test/differential.py --harness net_dependency_closure || return 1
-        python3 test/differential.py --harness security_hygiene || return 1
-        freestanding_checks_lane net net
-        net_outcome=$?
-        target_lane net_tight_one
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        #       The crypto against OpenSSL on all three machines: the vectors
-        #       come from Python's cryptography, the answers from
-        #       CHECK_crypto_vectors reading them on its standard input.
+        job_class=$1
+        shift
+        job_name=$1
+        job_previous=
+        for job_word in "$@"; do
+                [ "$job_previous" != --harness ] || job_name=$job_word
+                job_previous=$job_word
+        done
+        [ -d "$work/jobs" ] || mkdir -p "$work/jobs" || return 1
+
+        #       Wait for a place: the ones started, not yet over and still there.
+        while :; do
+                job_alive=0
+                job_at=1
+                while [ "$job_at" -le "$job_count" ]; do
+                        eval "job_pid=\$job_pid_$job_at"
+                        if [ ! -e "$work/jobs/$$.$job_at.status" ] &&
+                           kill -0 "$job_pid" 2> /dev/null; then
+                                job_alive=$((job_alive + 1))
+                        fi
+                        job_at=$((job_at + 1))
+                done
+                [ "$job_alive" -ge "$job_limit" ] || break
+                sleep 0.2
+        done
+
+        job_count=$((job_count + 1))
+        job_base=$work/jobs/$$.$job_count
+        printf '%s %s\n' "$job_class" "$job_name" > "$job_base.class"
+        (
+                "$@" < /dev/null > "$job_base.out" 2>&1
+                echo $? > "$job_base.status"
+        ) &
+        eval "job_pid_$job_count=$!"
+}
+
+#       Each job's output as soon as it and the ones started before it are
+#       over, so a long group still scrolls.
+jobs_wait()
+{
+        job_at=1
+        while [ "$job_at" -le "$job_count" ]; do
+                job_base=$work/jobs/$$.$job_at
+                eval "job_pid=\$job_pid_$job_at"
+                while [ ! -e "$job_base.status" ] && kill -0 "$job_pid" 2> /dev/null; do
+                        sleep 0.2
+                done
+                read -r job_class job_name < "$job_base.class"
+                cat "$job_base.out"
+                job_status=$(cat "$job_base.status" 2> /dev/null || echo 1)
+                case $job_status in
+                0) ;;
+                2)
+                        case $job_class in
+                        maybe) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
+                        soft) note "$job_name: skipped (soft) -- does not downgrade net" ;;
+                        *) net_outcome=1 ;;
+                        esac
+                        ;;
+                *) net_outcome=1 ;;
+                esac
+                rm -f "$job_base.class" "$job_base.out" "$job_base.status"
+                job_at=$((job_at + 1))
+        done
+        wait
+        job_count=0
+}
+
+#       lane_net is the sum of the groups below, run in this order, and each
+#       group is a lane of its own for `sh test/run -j N --seam net`: the net
+#       lane is forty independent harnesses and was one thread of
+#       twenty-four minutes on a box of thirty-two cores. The groups share
+#       one outcome, net_outcome: 0, 2 when something did not run, 1 when
+#       something failed.
+net_fast()
+{
+        job hard python3 test/differential.py --harness net_clock_fault
+        job hard python3 test/differential.py --harness net_wait_states
+        job hard python3 test/differential.py --harness net_parser_work_states
+        job hard python3 test/differential.py --harness net_dhcp_exchange
+        job hard python3 test/differential.py --harness net_lease_transitions
+        job hard python3 test/differential.py --harness net_math_proof
+        job hard python3 test/differential.py --harness wire_constants
+        job hard python3 test/differential.py --harness net_dependency_closure
+        job hard python3 test/differential.py --harness security_hygiene
+        jobs_wait
+        return 0
+}
+
+#       One architecture's share: CHECK_net and its tight-tier build.
+net_arch()
+{
+        job maybe one_target_lane "$1" freestanding_checks_one net net
+        job maybe one_target_lane "$1" net_tight_one
+        jobs_wait
+        return 0
+}
+
+#       The crypto against OpenSSL on all three machines: the vectors come
+#       from Python's cryptography, made once (the RSA keys are fresh each
+#       run, so three makings would be three different sets) and with them
+#       the instruction and address counts of every machine, and the answers
+#       from CHECK_crypto_vectors reading them on its standard input.
+net_crypto()
+{
         python3 test/differential.py --harness crypto_vectors \
                 > "$work/crypto_vectors.in"
         case $? in
         0)
                 check_input=$work/crypto_vectors.in
-                freestanding_checks_lane crypto_vectors crypto_vectors
-                case $? in
-                0) ;;
-                2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-                *) net_outcome=1 ;;
-                esac
+                job maybe one_target_lane x86_64 freestanding_checks_one crypto_vectors crypto_vectors
+                job maybe one_target_lane arm64 freestanding_checks_one crypto_vectors crypto_vectors
+                job maybe one_target_lane riscv64 freestanding_checks_one crypto_vectors crypto_vectors
+                jobs_wait
                 check_input=
                 ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
-        python3 test/differential.py --harness tls_chains
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness tls_hostnames
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness tls_dates || net_outcome=1
-        python3 test/differential.py --harness public_suffixes || net_outcome=1
-        python3 test/differential.py --harness anchors || net_outcome=1
-        python3 test/differential.py --harness g_tables || net_outcome=1
-        need_shell || return 1
-        python3 test/differential.py --harness tls_peer --shell "$shell_binary"
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
+        return 0
+}
+
+net_tls()
+{
+        #       The long ones first, and the shell built while they run: only
+        #       tls_peer reads it, and a lane that builds it before it starts
+        #       anything has spent the half minute doing one thing.
+        job maybe python3 test/differential.py --harness tls_chains
+        #       Certificate Transparency at the tight tier: the policy against
+        #       a model over SCTs the harness's own logs sign, and end to end
+        #       through wget; and the log table against its header's list.
+        job maybe python3 test/differential.py --harness tls_ct
+        job maybe python3 test/differential.py --harness https_downgrade
+        #       A DNS reply's reading against an independent one, over replies
+        #       from a grammar, a third damaged.
+        job hard python3 test/differential.py --harness dns_oracle
+        need_shell || { jobs_wait; return 1; }
+        job maybe python3 test/differential.py --harness tls_peer --shell "$shell_binary"
+        job maybe python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
                 --mutate 100
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
         #       Delivery schedules and FIN/RST cuts under the record layer;
         #       MOONWATER_TLS_SCHEDULES lengthens it.
-        python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
+        job maybe python3 test/differential.py --harness tls_peer --shell "$shell_binary" \
                 --schedule "${MOONWATER_TLS_SCHEDULES:-40}"
+        job hard python3 test/differential.py --harness ct_logs
+        #       NTS against chrony's server and against servers that are
+        #       wrong, in a namespace; NOT RUN without a chronyd built with NTS
+        #       (MOONWATER_CHRONYD), which does not downgrade net.
+        job soft python3 test/differential.py --harness nts
+        job maybe python3 test/differential.py --harness tls_hostnames
+        job hard python3 test/differential.py --harness tls_dates
+        job hard python3 test/differential.py --harness public_suffixes
+        job hard python3 test/differential.py --harness anchors
+        job hard python3 test/differential.py --harness g_tables
+        job maybe python3 test/differential.py --harness http_response_framing
+        jobs_wait
+        return 0
+}
+
+net_fuzz()
+{
+        job soft python3 test/differential.py --harness tls_der_fuzz
+        job soft python3 test/differential.py --harness tls_ocsp_fuzz
+        job soft python3 test/differential.py --harness tls_crl_fuzz
+        job soft python3 test/differential.py --harness tls_hs_fuzz
+        job soft python3 test/differential.py --harness dhcp_fuzz
+        job soft python3 test/differential.py --harness dhcp_frame_fuzz
+        job soft python3 test/differential.py --harness sntp_fuzz
+        job maybe python3 test/differential.py --harness wifi_key_state
+        job soft python3 test/differential.py --harness wifi_eapol_fuzz
+        job soft python3 test/differential.py --harness wifi_scan_fuzz
+        job soft python3 test/differential.py --harness wifi_sae_fuzz
+        job soft python3 test/differential.py --harness nts_fuzz
+        job soft python3 test/differential.py --harness bowl_sig_fuzz
+        job soft python3 test/differential.py --harness dns_fuzz
+        job soft python3 test/differential.py --harness netlink_fuzz
+        job soft python3 test/differential.py --harness crypto_fuzz
+        jobs_wait
+        return 0
+}
+
+net_http()
+{
+        need_shell || return 1
+        job maybe python3 test/differential.py --harness http_urls
+        job maybe python3 test/differential.py --harness wget_mutation --shell "$shell_binary"
+        job maybe python3 test/differential.py --harness wget_hostile --shell "$shell_binary"
+        job maybe python3 test/differential.py --harness hostile_strings --shell "$shell_binary"
+        #       DNS over TLS: a shell trusting a generated root, a resolver on
+        #       1.1.1.1 and the network's own on 10.0.0.1, in a namespace.
+        job maybe python3 test/differential.py --harness dns_tls
+        job soft python3 test/differential.py --harness http_fuzz
+        job maybe python3 test/differential.py --harness sntp_era
+        jobs_wait
+        return 0
+}
+
+#       A target whose tools are missing did not run (2); one that is required
+#       and missing failed (1), as target_lane has it.
+net_target()
+{
+        one_target_lane_tools "$1"
         case $? in
-        0) ;;
+        0) net_arch "$1" ;;
         2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
         *) net_outcome=1 ;;
         esac
-        python3 test/differential.py --harness https_downgrade
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness http_response_framing
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness tls_der_fuzz
-        case $? in
-        0) ;;
-        2) note "tls_der_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness tls_hs_fuzz
-        case $? in
-        0) ;;
-        2) note "tls_hs_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness dhcp_fuzz; case $? in 0) ;; 2) note "dhcp_fuzz: skipped (soft) -- does not downgrade net" ;; *) net_outcome=1 ;; esac
-        python3 test/differential.py --harness sntp_fuzz
-        case $? in
-        0) ;;
-        2) note "sntp_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness wifi_eapol_fuzz
-        case $? in
-        0) ;;
-        2) note "wifi_eapol_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness wifi_scan_fuzz
-        case $? in
-        0) ;;
-        2) note "wifi_scan_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness bowl_sig_fuzz
-        case $? in
-        0) ;;
-        2) note "bowl_sig_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness dns_fuzz
-        case $? in
-        0) ;;
-        2) note "dns_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness netlink_fuzz
-        case $? in
-        0) ;;
-        2) note "netlink_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness crypto_fuzz
-        case $? in
-        0) ;;
-        2) note "crypto_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness http_urls
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness wget_mutation --shell "$shell_binary"
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness wget_hostile --shell "$shell_binary"
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness hostile_strings --shell "$shell_binary"
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness http_fuzz
-        case $? in
-        0) ;;
-        2) note "http_fuzz: skipped (soft) -- does not downgrade net" ;;
-        *) net_outcome=1 ;;
-        esac
-        python3 test/differential.py --harness sntp_era
-        case $? in
-        0) ;;
-        2) [ "$net_outcome" != 0 ] || net_outcome=2 ;;
-        *) net_outcome=1 ;;
-        esac
+}
+
+lane_net()
+{
+        net_outcome=0
+        net_fast || return 1
+        for net_arch_name in x86_64 arm64 riscv64; do
+                net_target "$net_arch_name"
+        done
+        net_crypto
+        net_tls || return 1
+        net_fuzz
+        net_http || return 1
         return "$net_outcome"
 }
+
+lane_net_fast() { net_outcome=0; net_fast || return 1; return "$net_outcome"; }
+lane_net_x86_64() { net_outcome=0; net_target x86_64; return "$net_outcome"; }
+lane_net_arm64() { net_outcome=0; net_target arm64; return "$net_outcome"; }
+lane_net_riscv64() { net_outcome=0; net_target riscv64; return "$net_outcome"; }
+lane_net_crypto() { net_outcome=0; net_crypto; return "$net_outcome"; }
+lane_net_tls() { net_outcome=0; net_tls || return 1; return "$net_outcome"; }
+lane_net_fuzz() { net_outcome=0; net_fuzz; return "$net_outcome"; }
+lane_net_http() { net_outcome=0; net_http || return 1; return "$net_outcome"; }
 #       Every network fuzz target for longer than lane_net's smoke, an hour
 #       each with no run cap unless MOONWATER_FUZZ_SECONDS /
 #       MOONWATER_FUZZ_RUNS say otherwise.
@@ -4311,6 +4699,38 @@ lane_fuzz()
 #       netlink_fuzz runs. Needs Linux clang's -fsanitize=memory; NOT RUN
 #       without it.
 lane_msan() { MOONWATER_MSAN=1 python3 test/differential.py --harness msan_net; }
+#       Proofs of the network parsers, run only when named. net_exhaustive_proof
+#       compares small security predicates with their specifications on every
+#       input there is (every IPv4 address, every prefix of every address, every
+#       DER length head, ...); net_bounded_proof has CBMC prove memory safety,
+#       termination and a stated property of each parser for every input up to
+#       its bound. cbmc comes from PATH or MOONWATER_CBMC; without it the
+#       bounded half is NOT RUN, which does not fail the lane.
+#       Every decision in src/net/net.c and src/net/wait.c flipped once against
+#       CHECK_net and the harnesses of its family; a survivor that is not listed
+#       in NET_MUTATION_EQUIVALENT with its reason fails. Hours, not minutes:
+#       MOONWATER_MUTATION_JOBS sets the parallelism (default a quarter of the
+#       CPUs), MOONWATER_MUTATION_FUNCTIONS a regular expression of functions,
+#       MOONWATER_MUTATION_JOURNAL a file each verdict is kept in, so a run that
+#       dies is taken up where it stopped.
+lane_mutation()
+{
+        python3 test/differential.py --harness net_mutation --oracle full \
+                --jobs "${MOONWATER_MUTATION_JOBS:-$(( $(nproc) / 4 + 1 ))}" \
+                ${MOONWATER_MUTATION_FUNCTIONS:+--functions "$MOONWATER_MUTATION_FUNCTIONS"} \
+                ${MOONWATER_MUTATION_JOURNAL:+--journal "$MOONWATER_MUTATION_JOURNAL"}
+}
+
+lane_proof()
+{
+        python3 test/differential.py --harness net_exhaustive_proof || return 1
+        python3 test/differential.py --harness net_bounded_proof
+        case $? in
+        0) ;;
+        2) note "net_bounded_proof: skipped (soft) -- no cbmc" ;;
+        *) return 1 ;;
+        esac
+}
 #       The bowl checks again at the tight tier (MOONWATER_STRICT 2), host
 #       architecture only: the argument forms of a password and a group
 #       secret are refused there and nowhere else.
@@ -5248,6 +5668,8 @@ differential_domain()
 #       whole-shell build, so run -j makes it beside the others.
 need_hardened_shell()
 {
+        [ -x "$work/hardened-shell" ] && return 0
+        need_shared_wait hardened || return 1
         [ -x "$work/hardened-shell" ] && return 0
         build_tool config-header kernel/profile/sec_hardened \
                 "$work/hardened.h" > "$work/hardened.h.log" 2>&1 ||
@@ -11726,6 +12148,28 @@ else
         lost 'record moves with a region' "[$record_one] [$record_two]"
 fi
 
+#       The NET level each tier's profile resolves to, which is the level the
+#       HTTP client's address policy and its ceiling on an undeclared body
+#       read (wget_hostile and CHECK_net hold the client at each level): the
+#       reference 0, the default and the workstation 1, the hardened tier 2
+#       and the locked 3, and a NET profile named after another tier its own.
+group net-tiers
+for net_case in 'sec_reference:0' 'sec_default:1' 'sec_workstation:1' \
+        'sec_hardened:2' 'sec_locked:3' 'sec_default sec_net_hardened:2' \
+        'sec_default sec_net_locked:3' 'sec_hardened sec_net_locked:3'; do
+        net_profiles=${net_case%:*}
+        { echo CONFIG_MOONWATER_CORE=y
+          for net_profile in $net_profiles; do cat "kernel/profile/$net_profile"; done
+        } > "$work/switch-net.config"
+        if build_tool config-header "$work/switch-net.config" "$work/switch-net.h" \
+                > "$work/switch-net.log" 2>&1; then
+                same "$net_profiles: NET" "${net_case##*:}" \
+                        "$(sed -n 's/^#define MOONWATER_STRICT_NET //p' "$work/switch-net.h")"
+        else
+                lost "$net_profiles header" "$(head -3 "$work/switch-net.log")"
+        fi
+done
+
 #       One region at a level the rest of the build is not at. The FILES
 #       region tight in a build whose whole level is the default refuses
 #       to make an entry in a world-writable directory without the sticky bit
@@ -13391,6 +13835,13 @@ printf 'loopback-%s-%s-%s\n' "$(cat /sys/class/net/lo/flags)" "$(ip addr show lo
 for i in $(seq 1 60); do [ "$(cat /proc/sys/net/ipv4/tcp_syncookies)" = 1 ] && break; sleep 0.2; done
 printf 'nk-%s-%s-%s-%s-%s-%s-%s-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/default/accept_redirects)" "$(cat /proc/sys/net/ipv6/conf/eth0/accept_ra)" "$(cat /proc/sys/net/ipv6/conf/default/autoconf)" "$(cat /proc/sys/net/ipv4/tcp_rfc1337)" "$(cat /proc/sys/net/ipv4/tcp_syncookies)" "$(cat /proc/sys/fs/protected_symlinks)" "$(cat /proc/sys/fs/protected_hardlinks)" "$(cat /proc/sys/fs/protected_fifos)" "$(cat /proc/sys/fs/protected_regular)" "$(cat /proc/sys/kernel/kptr_restrict)" "$(cat /proc/sys/kernel/dmesg_restrict)" "$(cat /proc/sys/kernel/io_uring_disabled)" | rev
 #
+#       Written with them: reverse-path filtering loose (the DHCP client reads
+#       its OFFER from a packet socket, which rp_filter does not reach) and
+#       ARP answered only for the interface's own addresses, asked with the
+#       best source, and announced on link up.
+#
+printf 'nr-%s-%s-%s-%s-%s\n' "$(cat /proc/sys/net/ipv4/conf/all/rp_filter)" "$(cat /proc/sys/net/ipv4/conf/all/arp_ignore)" "$(cat /proc/sys/net/ipv4/conf/all/arp_filter)" "$(cat /proc/sys/net/ipv4/conf/all/arp_announce)" "$(cat /proc/sys/net/ipv4/conf/all/arp_notify)" | rev
+#
 #       The address space of a program the Spark loader started is randomized,
 #       as an ELF's is: the loader never set PF_RANDOMIZE, which begin_new_exec
 #       clears, so every program's stack sat at the top of the address space
@@ -13767,6 +14218,7 @@ says transcript 'and the clock reads the zone it was set to' '0010+'
 says transcript 'and the zone reached the kernel and this system' '1applied'
 says transcript 'as a TZif that bowl programs read' '2fiZTtzif'
 says transcript 'the watcher set the default kernel network and file settings' '1-1-1-1-1-1-1-1-1-0-0-0-kn'
+says transcript 'and rp_filter loose, with the ARP settings' '1-2-1-1-2-rn'
 says transcript 'floodlight device'   'fl-device-thgildoolf #'
 says transcript 'floodlight refuses nothing' 'fl-denials-0'
 says transcript 'floodlight has awk'  'fl-awk-1'
@@ -13957,6 +14409,13 @@ never transcript 'no missing command' 'failed with error: No such file or direct
 #       runs here. A program's illegal instruction is init's restart line.
 #       arm64's emulated boot above is already -cpu max.
 #
+#       The seccomp deaths qemu-user cannot show: CHECK_net's confinement
+#       groups and CHECK_bowl run as root inside this machine's own guest.
+if [ "$boot_emulator" != qemu-system-x86_64 ]; then
+        python3 test/differential.py --harness guest_confinement --image "$image" ||
+                lost 'guest confinement' 'a confinement check failed in the guest'
+fi
+
 if [ "$boot_emulator" = qemu-system-riscv64 ]; then
         { sleep 15; cat "$work/commands"; } |
                 timeout 360 qemu-system-riscv64 -m 2G -smp 2 -machine virt -cpu max \
@@ -22742,21 +23201,153 @@ esac
 
 alone_lanes="text files misc util_linux shell builtins awk term edit differential_oracle boot install canvas wifi ring0 scale desktop"
 
-if [ "$#" -gt 0 ]; then
-        requested=$*
+#       What to run: lanes by name, a seam's lanes (--seam), the seams the
+#       tree has changed (--changed), or every lane (--all). An empty command
+#       line is none of these and is refused.
+everything=0
+requested=""
+changed=0
+changed_base=""
+plan=0
 
-        for lane in $requested; do
-                case " $lanes $asked_lanes " in
-                *" $lane "*) ;;
-                *) echo "run: no lane called $lane" >&2; exit 2 ;;
+while [ "$#" -gt 0 ]; do
+        case $1 in
+        --all) everything=1 ;;
+        --seams) seams_print; exit 0 ;;
+        --seam-of)
+                shift
+                for path in "$@"; do
+                        printf '%s %s\n' "$path" "$(seam_of_path "$path")"
+                done
+                exit 0 ;;
+        --seam)
+                [ "$#" -ge 2 ] || { echo "run: --seam wants a seam's name" >&2; exit 2; }
+                seam_known "$2" ||
+                        { echo "run: no seam called $2 (sh test/run --seams)" >&2; exit 2; }
+                requested="$requested $(seam_lanes "$2")"
+                shift ;;
+        --plan) plan=1 ;;
+        --changed) changed=1 ;;
+        --changed=*) changed=1; changed_base=${1#--changed=} ;;
+        -*) echo "run: no option called $1" >&2; exit 2 ;;
+        *) requested="$requested $1" ;;
+        esac
+        shift
+done
+
+if [ "$changed" = 1 ]; then
+        seams_unmapped=""
+        seams_wide=""
+        seams_touched=""
+        for path in $(seams_changed_files "$changed_base"); do
+                for seam in $(seam_of_path "$path"); do
+                        case $seam in
+                        -) ;;
+                        '?') seams_unmapped="$seams_unmapped $path" ;;
+                        suite) seams_wide="$seams_wide $path" ;;
+                        *) case " $seams_touched " in
+                           *" $seam "*) ;;
+                           *) seams_touched="$seams_touched $seam" ;;
+                           esac ;;
+                        esac
+                done
+        done
+
+        if [ -n "$seams_unmapped" ]; then
+                echo "run: files in no seam, so no lane is theirs to run:" >&2
+                for path in $seams_unmapped; do echo "  $path" >&2; done
+                echo "run: give each a seam in seam_of_path, or name seams with --seam" >&2
+                exit 2
+        fi
+
+        #       The suite's own files change what any lane asks, so they select
+        #       nothing: the seams they are meant for are named beside --changed.
+        if [ -n "$seams_wide" ] && [ -z "$requested" ]; then
+                echo "run: these are the checks of every seam, and say which to run:" >&2
+                for path in $seams_wide; do echo "  $path" >&2; done
+                echo "run: name the seams (--changed --seam net) or lanes beside --changed, or --all" >&2
+                exit 2
+        fi
+
+        #       In the seams' own order, which is the order they build up in.
+        for seam in $seams; do
+                case " $seams_touched " in
+                *" $seam "*) requested="$requested $(seam_lanes "$seam")" ;;
                 esac
         done
-else
+        echo "run: seams changed:${seams_touched:- none}" >&2
+fi
+
+if [ "$everything" = 1 ]; then
+        [ -z "$requested" ] && [ "$changed" = 0 ] ||
+                { echo "run: --all is every lane and takes no other; name lanes or seams without it" >&2; exit 2; }
         requested=$lanes
+
+        #       Asked for on purpose, and on a terminal asked again: this is
+        #       the run that takes a machine for hours, and the one a typo or
+        #       a shell history should never start.
+        if [ -t 0 ] && [ -t 1 ]; then
+                lane_count=$(printf '%s\n' $requested | wc -l | tr -d ' ')
+                printf 'run: --all is %s lanes, hours of this machine. Type everything to go on: ' \
+                        "$lane_count"
+                read -r confirmation < /dev/tty || confirmation=
+                [ "$confirmation" = everything ] || { echo "run: not run"; exit 2; }
+        fi
+elif [ -z "$requested" ]; then
+        if [ "$changed" = 1 ]; then
+                echo "run: no lane covers what changed"
+                exit 0
+        fi
+        cat >&2 <<'TEXT'
+run: an empty command line is every lane of every seam, which is hours. Say what changed:
+
+    sh test/run -j 8 --changed        the seams this tree has changed from main
+    sh test/run -j 8 --seam net       one seam's lanes (sh test/run --seams lists them)
+    sh test/run net machine           lanes by name (sh test/run --list)
+    sh test/run --all                 every lane, asked for on purpose
+TEXT
+        exit 2
+fi
+
+#       Each lane once, in the order it was asked for.
+deduped=""
+for lane in $requested; do
+        case " $lanes $asked_lanes " in
+        *" $lane "*) ;;
+        *) echo "run: no lane called $lane" >&2; exit 2 ;;
+        esac
+        case " $deduped " in
+        *" $lane "*) ;;
+        *) deduped="$deduped $lane" ;;
+        esac
+done
+requested=${deduped# }
+
+#       What would run, and nothing run: what a seam or a change comes to.
+if [ "$plan" = 1 ]; then
+        echo "$requested"
+        exit 0
 fi
 
 broken=""
 notrun=""
+
+#       Entries nobody has used for two weeks go, and then the older ones
+#       until the cache is under MOONWATER_TEST_CACHE_MB (8192), from the
+#       default directory only: a directory someone named is theirs to clear.
+case $build_cache in
+*/moonwater-test)
+        if [ -d "$build_cache" ]; then
+                for prune_days in 14 7 3 1 0; do
+                        find "$build_cache" -type f -mtime +"$prune_days" \
+                                -exec rm -f {} + 2> /dev/null
+                        prune_kb=$(du -sk "$build_cache" 2> /dev/null | cut -f 1)
+                        [ "${prune_kb:-0}" -gt $((${MOONWATER_TEST_CACHE_MB:-8192} * 1024)) ] ||
+                                break
+                done
+        fi
+        ;;
+esac
 
 #
 #       A lane that did not run is not a lane that passed.
@@ -22774,16 +23365,32 @@ if [ "$jobs" -gt 1 ]; then
         #       The shell and the policy utilities are each a whole-shell
         #       compile of half a minute, so they build side by side, and in
         #       the background: the lanes that need neither start at once,
-        #       and need_shell holds the ones that do until shared.done.
+        #       and need_shell holds the ones that do until its own is built
+        #       and not until the other is, which is built only when one of
+        #       the lanes that read it (misc, util_linux, shell, awk) is here.
         : > "$work/shared.building"
+        shared_hardened=
+        for lane in $requested; do
+                case $lane in
+                misc | util_linux | shell | awk) shared_hardened=1 ;;
+                esac
+        done
+        [ -z "$shared_hardened" ] || : > "$work/shared.hardened"
         (
-                need_shell > "$work/shared.shell.log" 2>&1 &
-                shell_build=$!
-                need_hardened_shell > "$work/shared.hardened.log" 2>&1 &
-                hardened_build=$!
-                wait "$shell_build" && wait "$hardened_build" ||
-                        : > "$work/shared.failed"
-                : > "$work/shared.done"
+                shared_parent=1
+                {
+                        need_shell > "$work/shared.shell.log" 2>&1 ||
+                                : > "$work/shared.failed"
+                        : > "$work/shared.shell.done"
+                } &
+                if [ -n "$shared_hardened" ]; then
+                        {
+                                need_hardened_shell > "$work/shared.hardened.log" 2>&1 ||
+                                        : > "$work/shared.failed"
+                                : > "$work/shared.hardened.done"
+                        } &
+                fi
+                wait
         ) &
         shared_build=$!
 
@@ -22859,6 +23466,17 @@ while read -r name passed count; do
 done < "$TEST_TALLY"
 
 printf '  %-14s %s of %s\n' "" "$total_pass" "$total_all"
+
+#       Where the time went, slowest first, and how much of the building the
+#       cache answered.
+if [ -s "$TEST_TIMES" ]; then
+        echo
+        echo "  slowest steps (seconds):"
+        sort -rn "$TEST_TIMES" | head -n 12 | sed 's/^/    /'
+        awk '$2 == "build" { built++; if ($NF == "(cached)") hit++ }
+             END { if (built) printf "  builds: %d, %d from the cache\n", built, hit }' \
+                "$TEST_TIMES"
+fi
 
 # A lane returning zero cannot overrule failed assertions in its tally.
 if [ "$total_pass" -ne "$total_all" ]; then

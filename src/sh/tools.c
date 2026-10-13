@@ -16,10 +16,8 @@
 /* net.c's DNS section, below this file, is where that resolver is.  hostid deliberately reuses
    that small resolver instead of bringing libc/NSS or a second DNS client
    into the shell. */
-static bipolar dns_resolve_any(string_address path, string_address name,
-                               p32 address_to found, positive seconds);
-static bipolar net_resolve_v4(string_address name, p32 address_to found,
-                              positive seconds);
+static bipolar net_resolve_v4_apart(string_address name, p32 address_to found,
+                                    positive seconds);
 
 #if defined(LINUX) && !defined(KERNEL_MODE)
 #include "../net/wait.c"
@@ -78,11 +76,11 @@ static p32 tools_hostid_value()
 
         p32 host;
 
-        if (dns_resolve_any((string_address) "/etc/resolv.conf", facts.node,
-                            address_of host, 1))
+        //      The answer is read in a confined child (net_apart).
+        if (net_resolve_v4_apart(facts.node, address_of host, 1))
                 return 0;
 
-        /* dns_resolve_any returns the numeric host; gethostid operates on
+        /* net_resolve_v4_apart returns the numeric host; gethostid operates on
            the native in_addr word before rotating its two halves. */
         p32 wire = network_order_32(host);
         return (wire << 16) | (wire >> 16);
@@ -574,7 +572,7 @@ static bipolar logger_connect_kind(logger_control address_to control,
         if (control->server)
         {
                 p32 found;
-                if (net_resolve_v4(control->server, address_of found, 3))
+                if (net_resolve_v4_apart(control->server, address_of found, 3))
                         return -ERROR_NO_ENTRY;
                 bipolar host = (bipolar)found;
 
@@ -17108,6 +17106,11 @@ static b32 tools_dmesg_follow(tools_dmesg_state address_to state,
                 bipolar got = system_read_retry((positive)handle,
                                                 record_bytes,
                                                 sizeof(record_bytes));
+                //      Records overwritten before they were read: the next
+                //      read starts at the oldest one left, as util-linux
+                //      reads on.
+                if (got == -32)
+                        continue;
                 if (got < 0)
                 {
                         system_close(handle);

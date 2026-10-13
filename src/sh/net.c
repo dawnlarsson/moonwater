@@ -79,10 +79,30 @@
 
         A record is one write, so the bytes are gathered until a newline
         rather than passed through as string_format produces them.
+
+        And each record is its own open. The kernel lets one open of
+        /dev/kmsg write ten records in five seconds and drops the rest
+        without a word -- their count is said only when it is closed, which
+        the watcher never does -- and a radio coming up says more than ten:
+        the lease it took was in place and its line was not in the log. The
+        handle held is for a child of the watcher (a confined one may not
+        open anything) and for a node that went away since.
 */
 static b32 net_kmsg_handle = -1;
+static bipolar net_kmsg_owner;
 static p8 net_kmsg_line[512];
 static positive net_kmsg_used;
+
+static COLD fn net_kmsg_record(void)
+{
+        bipolar fresh = -1;
+
+        if (system_call(syscall(getpid)) == net_kmsg_owner)
+                fresh = system_open_at(AT_FDCWD, "/dev/kmsg", 1 | O_CLOEXEC);
+        kmsg_write(fresh >= 0 ? fresh : net_kmsg_handle, net_kmsg_line, net_kmsg_used);
+        if (fresh >= 0)
+                system_close((b32)fresh);
+}
 
 static COLD fn net_kmsg(address_any data, positive length)
 {
@@ -97,8 +117,7 @@ static COLD fn net_kmsg(address_any data, positive length)
                 if (bytes[at] == '\n' || net_kmsg_used + 1 >= sizeof net_kmsg_line)
                 {
                         if (net_kmsg_used)
-                                kmsg_write(net_kmsg_handle, net_kmsg_line,
-                                           net_kmsg_used);
+                                net_kmsg_record();
 
                         net_kmsg_used = 0;
 
@@ -517,15 +536,11 @@ static COLD b32 net_host(void)
                         net_flush();
                         return 1;
                 }
-
-                status = dns_resolve_at((p32)server, DNS_PORT, net_word(1),
-                                        address_of found, 5);
         }
         else
-        {
-                status = dns_resolve_any((string_address) "/etc/resolv.conf",
-                                         net_word(1), address_of found, 3);
-        }
+                server = -1;
+        //      The answer is read in a confined child (net_apart), as wget's is.
+        status = dns_resolve_apart(server, net_word(1), address_of found);
 
         switch (status)
         {
@@ -557,6 +572,14 @@ static COLD b32 net_host(void)
                 break;
         case DNS_NO_RANDOM:
                 string_format(net_out, "host: secure randomness is not ready\n");
+                break;
+        case DNS_CONFINE:
+                string_format(net_out, "host: cannot confine the lookup of %w "
+                                       "here; nothing was asked\n",
+                              writer_terminal_quoted_name, net_word(1));
+                break;
+        case DNS_APART:
+                string_format(net_out, "host: the confined lookup died\n");
                 break;
         default:
                 string_format(net_out, "host: the reply made no sense\n");
@@ -615,10 +638,20 @@ static b32 net_fetch(void)
         //      The url is handed over whole rather than the pieces above: the
         //      client resolves it, and a literal address needs no resolver,
         //      which is what makes the test able to fetch from a socket on
-        //      loopback with no nameserver anywhere in sight.
-        status = http_get(net_word(1), address_of body, address_of code);
+        //      loopback with no nameserver anywhere in sight. The exchange
+        //      runs in a confined child (net_apart), and the body comes back
+        //      to be written here.
+        status = http_get_apart(net_word(1), address_of body, address_of code);
 
-        if (status == HTTP_NO_HOST)
+        if (status == HTTP_CONFINE)
+                string_format(net_out, "fetch: cannot confine the download "
+                                   "from %w here; nothing was fetched\n",
+                              writer_terminal_quoted_name, name);
+        else if (status == HTTP_APART)
+                string_format(net_out, "fetch: the confined download from %w "
+                                   "died\n",
+                              writer_terminal_quoted_name, name);
+        else if (status == HTTP_NO_HOST)
                 string_format(net_out, "fetch: cannot resolve %w\n",
                               writer_terminal_quoted_name, name);
         else if (status == HTTP_NO_ROUTE)
@@ -626,6 +659,10 @@ static b32 net_fetch(void)
                               writer_terminal_quoted_name, name);
         else if (status == HTTP_NO_REPLY)
                 string_format(net_out, "fetch: no reply from %w\n",
+                              writer_terminal_quoted_name, name);
+        else if (status == HTTP_REBOUND)
+                string_format(net_out, "fetch: refused %w: the name resolved to this "
+                                   "machine or its link-local network\n",
                               writer_terminal_quoted_name, name);
         else if (status == HTTP_STATUS && http_response_is_redirect(code))
                 string_format(net_out, "fetch: %p, which is a redirect this does not "
@@ -658,8 +695,12 @@ static const argument_option wget_options[] = {
     {"help", 'h'},
     {"version", 'V'},
     {"no-check-certificate", 'K'},
+    {"spider", 's', ARGUMENT_LONG_ONLY},
     {null},
 };
+
+/* The way out that ends every certificate refusal, in GNU wget's words. */
+#define NET_WGET_INSECURE "To connect to %w insecurely, use `--no-check-certificate'.\n"
 
 /* wget's exit statuses are GNU wget's: 1 anything else, 2 a command line
    it cannot parse, 3 a file it cannot write, 4 the network, 6 a server
@@ -756,33 +797,81 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
         case HTTP_UNTRUSTED:
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: The certificate of '%w' is not trusted.\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_MISMATCH:
                 return string_report(log_error, WGET_SSL,
                                      "The certificate's owner does not match "
-                                     "hostname '%w'\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     "hostname '%w'\n" NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_EXPIRED:
         case HTTP_NOT_YET:
                 return string_report(log_error, WGET_SSL,
                                      "ERROR: The certificate of '%w' %s.\n"
-                                     "To connect to %w insecurely, use "
-                                     "`--no-check-certificate'.\n",
+                                     NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      status == HTTP_EXPIRED
                                          ? "has expired" : "is not yet activated",
+                                     writer_terminal_quoted_name, host);
+        //      GNU wget's line for a revoked certificate (its GnuTLS build's,
+        //      which says the others above too); then one GNU wget has no
+        //      equivalent for, for a status that could not be checked where
+        //      it is required: must-staple without a good staple, or the
+        //      tight tier's unreachable, stale or unreadable source.
+        case HTTP_REVOKED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' has been revoked.\n"
+                                     NET_WGET_INSECURE,
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
+        case HTTP_UNCHECKED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: Whether the certificate of '%w' is "
+                                     "revoked could not be checked.\n"
+                                     NET_WGET_INSECURE,
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
+        //      Not a wrong clock but an unset one: it reads earlier than the
+        //      system's own build, or than the last time the machine was sure,
+        //      so no certificate date can be judged.
+        case HTTP_CLOCK:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The system clock has not been set "
+                                     "(it reads before this system was built), "
+                                     "so the certificate of '%w' cannot be "
+                                     "checked.\nRun `moonwater time sync`, or "
+                                     "set it with `date -s`. To connect to %w "
+                                     "insecurely, use `--no-check-certificate'.\n",
+                                     writer_terminal_quoted_name, host,
+                                     writer_terminal_quoted_name, host);
+        //      The tight tier's: a public certificate that carries no proof
+        //      it was logged, which is what a certificate issued in secret
+        //      looks like.
+        case HTTP_UNLOGGED:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' was not "
+                                     "logged as Certificate Transparency asks "
+                                     "(SCTs from two log operators).\n" NET_WGET_INSECURE,
+                                     writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused a redirect to %w, an address "
                                      "that is not public\n",
                                      writer_terminal_quoted_name, where);
+        case HTTP_REBOUND:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: refused %w: the name resolved to this "
+                                     "machine or its link-local network\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_UNDECLARED:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: %w sent more than %p bytes with no "
+                                     "length declared; refused\n",
+                                     writer_terminal_quoted_name, host,
+                                     (positive)HTTP_UNDECLARED_MOST);
         case HTTP_DOWNGRADE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused an HTTPS to HTTP redirect "
@@ -792,6 +881,25 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                 return string_report(log_error, WGET_SERVER,
                                      "%p redirections exceeded.\n",
                                      (positive)(HTTP_HOPS - 1));
+        //      The network half runs in a confined child (net_apart): a
+        //      kernel that cannot filter it fetches nothing, and a child
+        //      killed by its filter or anything else is said apart.
+        case HTTP_CONFINE:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: cannot confine the download from "
+                                     "%w here; nothing was fetched\n",
+                                     writer_terminal_quoted_name, host);
+        case HTTP_APART:
+                if (!net_apart_signal)
+                        return string_report(log_error, WGET_NETWORK,
+                                             "wget: the confined download "
+                                             "from %w gave no answer\n",
+                                             writer_terminal_quoted_name, host);
+                return string_report(log_error, WGET_NETWORK,
+                                     "wget: the confined download from %w "
+                                     "died (signal %p)\n",
+                                     writer_terminal_quoted_name, host,
+                                     (positive)net_apart_signal);
         //      GNU wget's own line, and its file I/O status.
         case HTTP_WRITE:
                 return string_report(log_error, WGET_FILE,
@@ -800,6 +908,16 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      file_reason(http_write_failure));
         case HTTP_STATUS:
                 refuse_if(code == 401, WGET_AUTH, "Username/Password Authentication Failed.\n");
+                //      --spider names output null, and says GNU wget's line.
+                if (!output && !http_response_is_redirect(code))
+                        return string_report(log_error, WGET_SERVER,
+                                             "Remote file does not exist -- "
+                                             "broken link!!!\n");
+                //      wget follows every redirect it is given a place for.
+                if (http_response_is_redirect(code))
+                        return string_report(log_error, WGET_SERVER,
+                                             "ERROR: Redirection (%p) without "
+                                             "location.\n", (positive)code);
                 return string_report(log_error, WGET_SERVER,
                                      "wget: %w returned %p\n",
                                      writer_terminal_quoted_name, host,
@@ -829,6 +947,7 @@ static b32 net_wget(void)
         p8 leaf[256];
         p8 numbered[256 + 24];
         p8 where[HTTP_URL_MAX];
+        p8 escaped[HTTP_URL_MAX];
         string_address path;
         p16 port;
         bool tls;
@@ -845,7 +964,8 @@ static b32 net_wget(void)
                 return WGET_USAGE;
 
         if (file_meta(address_of taking,
-                      (string_address) "[-q] [-O FILE] [--no-check-certificate] URL",
+                      (string_address) "[-q] [-O FILE] [--no-check-certificate] "
+                                       "[--spider] URL",
                       log))
         {
                 log_flush();
@@ -857,7 +977,7 @@ static b32 net_wget(void)
                 string_format(log_error, "wget: missing URL\n");
                 return string_report(log_error, WGET_GENERIC,
                                      "Usage: wget [-q] [-O FILE] "
-                                     "[--no-check-certificate] URL\n");
+                                     "[--no-check-certificate] [--spider] URL\n");
         }
 
         if (taking.first + 1 < (positive)program_argument_count())
@@ -869,6 +989,12 @@ static b32 net_wget(void)
         }
 
         url = program_argument((b32)taking.first);
+        /* A space, a backslash or a byte past ASCII in the URL is fetched
+           escaped, as GNU wget and curl fetch it; one too long to escape is
+           named as it was typed. */
+        if (!http_url_escape(url, string_length(url), true, escaped,
+                             sizeof escaped))
+                url = (string_address)escaped;
         quiet = (taking.flags & FILE_FLAG('q')) != 0;
         check_cert = (taking.flags & FILE_FLAG('K')) == 0;
         output = file_option_value(address_of taking, 'O');
@@ -876,6 +1002,26 @@ static b32 net_wget(void)
         status = http_split_into(url, name, sizeof name, address_of port,
                                  address_of path, address_of tls);
         return_if(status, net_wget_failed(status, 0, url, null));
+
+        /* --spider asks HEAD at every hop, as GNU wget does, and keeps
+           nothing; GNU wget still makes an -O file, empty, and so does this
+           (on success: a failed fetch publishes no file here). */
+        if ((taking.flags & FILE_FLAG('s')) && !output)
+        {
+                if (!quiet)
+                        string_format(log_error, "Spider mode enabled. Check if "
+                                                 "remote file exists.\n%w\n",
+                                      writer_terminal_quoted_name, url);
+                string_copy(where, url);
+                status = http_spider_apart(url, check_cert, address_of code,
+                                           where);
+                if (status)
+                        return net_wget_failed(status, code, where, null);
+                if (!quiet)
+                        string_format(log_error, "Remote file exists.\n");
+                log_flush();
+                return 0;
+        }
 
         if (output && string_equals(output, (string_address) "-"))
                 dest = 1;
@@ -937,7 +1083,10 @@ static b32 net_wget(void)
         }
 
         string_copy(where, url);
-        status = http_fetch_to(url, dest, check_cert, address_of code, where);
+        status = taking.flags & FILE_FLAG('s')
+                     ? http_spider_apart(url, check_cert, address_of code, where)
+                     : http_fetch_to_apart(url, dest, check_cert,
+                                           address_of code, where);
         if (own_stream)
                 system_close((positive)dest);
 
@@ -1430,7 +1579,7 @@ static COLD bipolar net_holding_release(b32 handle, net_holding address_to held)
 static COLD bipolar net_lease_rollback(
     b32 handle, const net_holding address_to previous,
     p32 index, const dhcp_lease address_to lease,
-    bool address_changed, bool route_changed)
+    bool address_changed, bool route_installed, bool route_removed)
 {
         bipolar failed = 0;
 
@@ -1444,7 +1593,7 @@ static COLD bipolar net_lease_rollback(
                         failed = status;
         }
 
-        if (route_changed)
+        if (route_installed || route_removed)
         {
                 bool same = false;
 
@@ -1461,7 +1610,7 @@ static COLD bipolar net_lease_rollback(
 
                 //      The new route goes unless restoring the old one
                 //      already put back that very route.
-                if (lease->router && !same)
+                if (route_installed && lease->router && !same)
                         net_rollback_record(
                             netlink_route_delete(handle, 0, 0,
                                                  lease->router, index),
@@ -1494,6 +1643,7 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
         p32 servers[DNS_SERVERS_MAX];
         positive named;
         bool route_applied = false;
+        bool route_removed = false;
         string_address doing = null;
         bipolar status = 0;
         p8 written[32];
@@ -1569,7 +1719,9 @@ static COLD b32 net_apply_lease(b32 handle, p32 index, string_address name,
                         doing = (string_address) "old route delete";
                         goto failed;
                 }
-                route_applied = true;
+                /* Removing our old route changes rollback work, but grants
+                   no ownership of a new route whose create said EEXIST. */
+                route_removed = true;
         }
 
         /* A prefix is part of an address object's identity.  Since
@@ -1644,7 +1796,7 @@ failed:
         {
                 bipolar rollback = net_lease_rollback(
                     handle, previous, index, lease,
-                    address_applied, route_applied);
+                    address_applied, route_applied, route_removed);
 
                 if (rollback < 0)
                 {
@@ -1687,13 +1839,12 @@ static COLD p8 net_internet_prefer(void)
         a reply is: a usable lease with its timers in RFC 2131's order, and on
         renewal the address already held -- the child can say only what a
         server could have. A child that says nothing within the exchange's
-        own schedule is killed rather than waited for.
+        own schedule is killed rather than waited for. Before its answer an
+        acquiring child also says when a REQUEST of its goes out and when
+        that REQUEST's ACK window ends unanswered (dhcp_say), in the same
+        shape.
 */
-typedef struct
-{
-        bipolar status;
-        dhcp_lease lease;
-} net_dhcp_answer;
+typedef dhcp_answer net_dhcp_answer;
 
 /*
         The watcher's exchange is not allowed to be deaf.
@@ -1716,6 +1867,25 @@ static bool net_exchange_cut;
 #define NET_DHCP_WATCH_SECONDS 12
 #define NET_DHCP_TIMED_OUT (-10)
 #define NET_DHCP_INTERRUPTED (-11)
+
+/*
+        But not between a REQUEST and its ACK.
+
+        Once the REQUEST is out a server holds the offered address for this
+        client, and the ACK is a round trip away. A cut there threw the
+        exchange away all the same, and the next pass began a new transaction
+        whose DISCOVER the server had to answer again (measured in KVM with
+        a server that acknowledges a second after the REQUEST and a carrier
+        toggle on another NIC at 4.7 s: the exchange was killed, a second
+        DISCOVER went out at 5.2 s and the lease came at 6.47 s). So news,
+        the wake pipe, or the budget running out, while a REQUEST of the
+        child's is in its ACK window, wait NET_DHCP_ACK_GRACE_SECONDS more for
+        the child's answer, the news left unread to be acted on as soon as the
+        exchange ends; a window that ends unanswered ends the wait. When the
+        grace runs out the child is cut as before, and the address it asked
+        for is given back with a DHCPRELEASE, which nothing here will use.
+*/
+#define NET_DHCP_ACK_GRACE_SECONDS 2
 
 /*
         Link news may cut an exchange, but not again at once.
@@ -1806,11 +1976,12 @@ static COLD bipolar net_exchange_wait(bipolar answer,
 }
 
 /* What the child is asked to do: discover, renew with the server that gave
-   the lease, rebind with any, or decline the lease it names. */
+   the lease, rebind with any, or decline or release the lease it names. */
 #define NET_DHCP_DISCOVER 0
 #define NET_DHCP_RENEW 1
 #define NET_DHCP_REBIND 2
 #define NET_DHCP_DECLINE 3
+#define NET_DHCP_RELEASE 4
 
 static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware,
                                    dhcp_lease address_to lease, p8 exchange,
@@ -1818,9 +1989,16 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 {
         b32 ends[2];
         net_dhcp_answer answer = {DHCP_NO_SOCKET, *lease};
+        net_dhcp_answer requested = {DHCP_NO_SOCKET, {0}};
         network_deadline deadline;
+        network_deadline grace;
         bool renew = exchange == NET_DHCP_RENEW || exchange == NET_DHCP_REBIND;
-        bool heard;
+        bool giving = exchange == NET_DHCP_DECLINE || exchange == NET_DHCP_RELEASE;
+        bool heard = false;
+        bool pending = false;
+        //      What ended the wait: 1 nothing yet, 0 the budget, -2 the
+        //      wake pipe or link news.
+        bipolar ended = 1;
 
         bipolar child = system_child_fork(ends, O_CLOEXEC);
 
@@ -1833,9 +2011,12 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
                     renew ? dhcp_reacquire(device, hardware,
                                            address_of answer.lease,
                                            exchange == NET_DHCP_REBIND, wait)
-                    : exchange == NET_DHCP_DECLINE
-                        ? dhcp_decline(device, hardware, address_of answer.lease)
-                        : dhcp_ask(device, hardware, address_of answer.lease);
+                    : giving ? dhcp_give_back(device, hardware,
+                                              address_of answer.lease,
+                                              exchange == NET_DHCP_DECLINE
+                                                  ? DHCP_DECLINE
+                                                  : DHCP_RELEASE)
+                             : dhcp_ask(device, hardware, address_of answer.lease);
                 system_write_all((positive)dhcp_apart, address_of answer,
                                  sizeof answer);
                 system_call_1(syscall(exit_group), 0);
@@ -1843,31 +2024,86 @@ static COLD bipolar net_dhcp_apart(string_address device, p8 address_to hardware
 
         //      dhcp_ask's twenty attempts can each wait out a DISCOVER
         //      and a REQUEST, 150 s in all, after a CSPRNG that may take
-        //      a second; a renewal is its own wait, and a DECLINE is one
-        //      send after the same CSPRNG.
+        //      a second; a renewal is its own wait, and a DECLINE or a
+        //      RELEASE is one send after the same CSPRNG.
         bool watching = exchange == NET_DHCP_DISCOVER && net_wake_watch >= 0;
-        bipolar waited = -1;
 
-        heard = network_deadline_begin(address_of deadline,
-                                       renew ? wait + 5
-                                       : exchange == NET_DHCP_DECLINE ? 5
-                                       : watching ? NET_DHCP_WATCH_SECONDS
-                                                  : 180, 0) &&
-                (watching
-                     ? (waited = net_exchange_wait(ends[0], address_of deadline))
-                     : network_wait_readable_until(ends[0], address_of deadline)) > 0 &&
-                system_read_retry((positive)ends[0], address_of answer,
-                                  sizeof answer) == (bipolar)sizeof answer;
+        if (network_deadline_begin(address_of deadline,
+                                   renew ? wait + 5
+                                   : giving ? 5
+                                   : watching ? NET_DHCP_WATCH_SECONDS
+                                              : 180, 0))
+                for (;;)
+                {
+                        bipolar ready =
+                            ended <= 0 ? network_wait_readable_until(
+                                             ends[0], address_of grace)
+                            : watching ? net_exchange_wait(ends[0],
+                                                           address_of deadline)
+                                       : network_wait_readable_until(
+                                             ends[0], address_of deadline);
+
+                        if (ended > 0 && (ready == 0 || ready == -2))
+                        {
+                                ended = ready;
+                                if (pending &&
+                                    network_deadline_begin(
+                                        address_of grace,
+                                        NET_DHCP_ACK_GRACE_SECONDS, 0))
+                                        continue;
+                                break;
+                        }
+                        if (ready <= 0 ||
+                            system_read_retry((positive)ends[0], address_of answer,
+                                              sizeof answer) !=
+                                (bipolar)sizeof answer)
+                                break;
+                        //      Only an acquisition says how far it got.
+                        if (exchange == NET_DHCP_DISCOVER &&
+                            (answer.status == DHCP_REQUESTED ||
+                             answer.status == DHCP_UNANSWERED))
+                        {
+                                pending = answer.status == DHCP_REQUESTED;
+                                requested = answer;
+                                if (!pending && ended <= 0)
+                                        break;
+                                continue;
+                        }
+                        heard = true;
+                        break;
+                }
         system_child_reap(child, ends[0], true);
 
+        if (!heard && pending)
+                (void)net_dhcp_apart(device, hardware,
+                                     address_of requested.lease,
+                                     NET_DHCP_RELEASE, 0);
+        //      News that waited for the ACK waits for the conflict probe too
+        //      (net_arp_conflict), or it would cut that at once and throw the
+        //      lease away after all: the loop reads it as soon as the lease
+        //      is in place. Whether this wait saw it or not -- a watcher slow
+        //      to be scheduled finds the answer and the news ready together,
+        //      and reads the answer first.
+        if (heard && pending && answer.status == DHCP_OK && watching &&
+            net_events_watch >= 0)
+        {
+                system_poll_descriptor news = {(b32)net_events_watch,
+                                               SYSTEM_POLL_READ, 0};
+                timespec now = {0, 0};
+
+                if (ended == -2 ||
+                    system_poll_wait(address_of news, 1, address_of now, null) > 0)
+                        net_news_holdoff_until =
+                            net_seconds() + NET_NEWS_HOLDOFF_SECONDS;
+        }
         if (!heard)
         {
-                if (watching && waited == -2)
+                if (watching && ended == -2)
                         return net_exchange_was_cut();
-                return watching && waited == 0 ? NET_DHCP_TIMED_OUT
-                                               : DHCP_NO_SOCKET;
+                return watching && ended == 0 ? NET_DHCP_TIMED_OUT
+                                              : DHCP_NO_SOCKET;
         }
-        if (exchange == NET_DHCP_DECLINE)
+        if (giving)
                 return answer.status == DHCP_OK ? DHCP_OK : DHCP_NO_SOCKET;
         if (answer.status != DHCP_OK)
                 return answer.status == DHCP_NO_OFFER ||
@@ -2000,6 +2236,23 @@ static bool net_arp_claims(const p8 address_to packet, positive size,
                memory_compare(sender, hardware, 6);
 }
 
+/* An ARP request for target from sender (cooked, 28 bytes): a probe asks
+   from 0.0.0.0, an announcement from the address itself (RFC 5227 2.1.1,
+   2.3). */
+static COLD fn net_arp_request(p8 address_to into, const p8 address_to hardware,
+                               p32 sender, p32 target)
+{
+        memory_zero(into, NET_ARP_PACKET);
+        network_store_16(into, 1);
+        network_store_16(into + 2, ETH_P_IP);
+        into[4] = 6;
+        into[5] = 4;
+        network_store_16(into + 6, 1);
+        memory_copy(into + 8, hardware, 6);
+        network_store_32(into + 14, sender);
+        network_store_32(into + 24, target);
+}
+
 /* A packet socket of one ethertype on one interface: the cooked link header
    is the kernel's, the payload is ours. */
 static COLD bipolar net_packet_open(p32 index, p16 protocol)
@@ -2040,13 +2293,7 @@ static COLD bipolar net_arp_conflict(p32 index, p8 address_to hardware,
         if (handle < 0)
                 return -1;
         memory_fill(all.addr, 0xff, 6);
-        network_store_16(probe, 1);
-        network_store_16(probe + 2, ETH_P_IP);
-        probe[4] = 6;
-        probe[5] = 4;
-        network_store_16(probe + 6, 1);
-        memory_copy(probe + 8, hardware, 6);
-        network_store_32(probe + 24, address);
+        net_arp_request(probe, hardware, 0, address);
 
         for (positive attempt = 0; attempt < NET_ARP_PROBES; attempt++)
         {
@@ -2096,6 +2343,44 @@ failed:
         return -1;
 }
 
+/*
+        Telling the neighbours (RFC 5227 2.3).
+
+        Once a new address is in place, two ARP announcements -- a request
+        for it, from it -- refresh every cache on the link that still maps it
+        to a station that held it before. The kernel's own (arp_notify) go
+        out when a link comes up or changes its hardware address, not when an
+        address is added. RFC 5227 spaces the two by two seconds, which the
+        watcher does not wait: the second follows a tenth of a second after
+        the first. A link that takes neither loses nothing it had.
+*/
+static COLD fn net_arp_announce(p32 index, const p8 address_to hardware,
+                                p32 address)
+{
+        p8 announcement[NET_ARP_PACKET];
+        socket_address_packet all = {
+            .family = AF_PACKET,
+            .protocol = network_order_16(ETH_P_ARP),
+            .index = index,
+            .halen = 6};
+        timespec apart = {0, 100000000};
+        bipolar handle = net_packet_open(index, ETH_P_ARP);
+
+        if (handle < 0)
+                return;
+        memory_fill(all.addr, 0xff, 6);
+        net_arp_request(announcement, hardware, address, address);
+        for (positive at = 0; at < 2; at++)
+        {
+                if (at)
+                        system_call_2(syscall(nanosleep), (positive)address_of apart,
+                                      0);
+                (void)socket_send((b32)handle, announcement, sizeof announcement,
+                                  0, address_of all, sizeof all);
+        }
+        socket_close((b32)handle);
+}
+
 static COLD b32 net_auto(b32 handle, net_holding address_to held)
 {
         netlink_search search;
@@ -2123,13 +2408,7 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         for (tried = 0;; tried++)
         {
                 if (netlink_link_find(handle, address_of search) < 0)
-                {
-                        if (tried)
-                                return 1;
-                        string_format(net_out, "ip: no interface to configure\n");
-                        net_flush();
-                        return 1;
-                }
+                        return tried ? 1 : net_ip_refused("no interface to configure");
 
                 if (held && held->index == search.index && !held->lost)
                         return 0;
@@ -2183,20 +2462,11 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
         }
 
         if (status != DHCP_OK)
-        {
-                if (status == DHCP_REFUSED)
-                        string_format(net_out, "ip: the server refused the request\n");
-                else if (status == DHCP_NO_OFFER)
-                        string_format(net_out, "ip: nobody offered a lease\n");
-                else if (status == DHCP_NO_RANDOM)
-                        string_format(net_out,
-                                      "ip: kernel randomness is unavailable\n");
-                else
-                        string_format(net_out, "ip: could not ask for a lease\n");
-
-                net_flush();
-                return 1;
-        }
+                return net_ip_refused(
+                    status == DHCP_REFUSED ? "the server refused the request"
+                    : status == DHCP_NO_OFFER ? "nobody offered a lease"
+                    : status == DHCP_NO_RANDOM ? "kernel randomness is unavailable"
+                                               : "could not ask for a lease");
 
         status = net_arp_conflict(search.index, search.hardware, lease.address);
         if (status == -2)
@@ -2212,23 +2482,17 @@ static COLD b32 net_auto(b32 handle, net_holding address_to held)
 
                 if (held)
                         net_decline_hold(search.index);
-                string_format(net_out,
-                              declined == DHCP_OK
-                                  ? "ip: the offered address is already in use; declined\n"
-                                  : "ip: the offered address is already in use\n");
-                net_flush();
-                return 1;
+                return net_ip_refused(declined == DHCP_OK
+                                          ? "the offered address is already in use; declined"
+                                          : "the offered address is already in use");
         }
         if (status)
-        {
-                string_format(net_out, "ip: could not check the offered address\n");
-                net_flush();
-                return 1;
-        }
+                return net_ip_refused("could not check the offered address");
 
         if (net_apply_lease(handle, search.index, search.name,
                             search.hardware, address_of lease, held, true))
                 return 1;
+        net_arp_announce(search.index, search.hardware, lease.address);
         /* Counted once the lease is taken, not before the exchange:
            bringing a link up can itself cost a carrier loss -- a PHY that
            starts by dropping the carrier it was registered with -- which
@@ -2288,9 +2552,9 @@ static COLD b32 net_reconfigure(b32 handle, net_holding address_to held)
         it changes the radio or the preference file. If the fifo is missing
         at start, the watcher opens it again on the next idle pass.
 
-        With no lease, idle is a few seconds and grows to half a minute, so a
-        DHCP server that comes back, or a wireless interface that appears
-        after firmware, is configured without waiting for a cable event.
+        With no lease, idle is a few seconds and grows to ten, so a DHCP
+        server that comes back, or a wireless interface that appears after
+        firmware, is configured without waiting for a cable event.
 
         Re-running is safe to do at any time. Adding an address uses REPLACE
         and adding a route is idempotent, so a spurious run costs a DHCP
@@ -2554,11 +2818,19 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         network's.
 
         The reference tier (STRICT_REFERENCE) keeps the kernel's own values,
-        the rest write the table below. rp_filter is left alone on purpose: the
-        DHCP client is a UDP socket, its OFFER comes from an address with no
-        route yet, and with rp_filter 1 or 2 the OFFER is dropped and no lease
-        is ever taken (measured: OFFERs sent, no REQUEST, in a KVM guest booted
-        with either).
+        the rest write the table below. Reverse-path filtering is loose
+        (rp_filter 2: a packet whose source this machine has no route to at
+        all is dropped) and strict at the tight tier (1: no route back out of
+        the interface it came in on). It was left at the kernel's 0 while the
+        DHCP client read its OFFER from a UDP socket, which either setting
+        starves: the OFFER comes from an address with no route yet (measured:
+        OFFERs sent, no REQUEST, in a KVM guest booted with either). The
+        client reads it from a packet socket now (dhcp_frames_open). ARP is
+        answered only for an address of the interface asked on (arp_ignore
+        1), only when the asker is routed out of it (arp_filter 1), asked
+        with the best local source (arp_announce 2), and announced when a
+        link comes up (arp_notify 1; a new address is announced by
+        net_arp_announce).
 */
 #if MOONWATER_STRICT_NET >= STRICT_SAFE
 static COLD fn net_sysctl(string_address path, string_address value)
@@ -2652,9 +2924,19 @@ static COLD fn net_kernel_defaults(void)
         static const string_address quiet_v6[] = {
             "accept_ra", "autoconf", "accept_redirects", null};
 
+        static const string_address arp[][2] = {
+            {"arp_ignore", "1\n"}, {"arp_filter", "1\n"},
+            {"arp_announce", "2\n"}, {"arp_notify", "1\n"}};
+
         for (positive at = 0; quiet[at]; at++)
                 net_sysctl_family("/proc/sys/net/ipv4/conf", quiet[at], "0\n",
                                   false);
+        net_sysctl_family("/proc/sys/net/ipv4/conf", "rp_filter",
+                          MOONWATER_STRICT_NET >= STRICT_TIGHT ? "1\n" : "2\n",
+                          false);
+        for (positive at = 0; at < array_count(arp); at++)
+                net_sysctl_family("/proc/sys/net/ipv4/conf", arp[at][0],
+                                  arp[at][1], false);
         for (positive at = 0; quiet_v6[at]; at++)
                 net_sysctl_family("/proc/sys/net/ipv6/conf", quiet_v6[at],
                                   "0\n", true);
@@ -2705,6 +2987,7 @@ static COLD b32 net_watch(void)
 
         if (net_kmsg_handle >= 0)
         {
+                net_kmsg_owner = system_call(syscall(getpid));
                 net_kmsg_used = 0;
                 net_out = net_kmsg;
         }
@@ -2713,8 +2996,7 @@ static COLD b32 net_watch(void)
 
         if (events < 0)
         {
-                string_format(net_out, "ip: %s\n", (string_address) "cannot listen for link changes");
-                net_flush();
+                (void)net_ip_refused("cannot listen for link changes");
                 net_kmsg_close();
                 return 1;
         }
@@ -3037,14 +3319,14 @@ static COLD b32 net_ip(void)
 
         if (!object || net_word_is(object, "help", 4))
         {
-                string_format(log, "usage: ip auto | link | addr | route\n");
-                string_format(log, "       ip auto   find a link, bring it up, "
-                                   "take a lease\n");
-                string_format(log, "       ip watch  the same, now and whenever "
-                                   "a cable changes\n");
-                string_format(log, "       ip link set NAME up\n");
-                string_format(log, "       ip addr add A.B.C.D/N dev NAME\n");
-                string_format(log, "       ip route add default via A.B.C.D [dev NAME]\n");
+                string_format(log, "usage: ip auto | link | addr | route\n"
+                                   "       ip auto   find a link, bring it up, "
+                                   "take a lease\n"
+                                   "       ip watch  the same, now and whenever "
+                                   "a cable changes\n"
+                                   "       ip link set NAME up\n"
+                                   "       ip addr add A.B.C.D/N dev NAME\n"
+                                   "       ip route add default via A.B.C.D [dev NAME]\n");
                 log_flush();
                 return object ? 0 : 1;
         }

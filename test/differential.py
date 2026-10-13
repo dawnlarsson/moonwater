@@ -2562,6 +2562,51 @@ def self_test():
             self.assertEqual(sorted(BY_HAND & asked), [],
                              "named as hand-run and asked for by a lane anyway")
 
+        def test_every_lane_and_every_file_is_in_one_seam(self):
+            """A change is run by its seam's lanes, so a lane in no seam is a
+            lane --changed never runs, and in two a lane it runs twice, and
+            a file in no seam is a change that selects nothing. The seams
+            are test/run's own list; this holds the lanes it names and the
+            files git tracks to it, so adding either is a decision about
+            which seam owns it, made where it is added."""
+            import subprocess
+            runner = Path(__file__).resolve().parent / "run"
+            if not runner.is_file():
+                self.skipTest("test/run is not beside this file")
+
+            def ask(*arguments):
+                done = subprocess.run(["sh", str(runner), *arguments], capture_output=True,
+                                      text=True, timeout=120)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return done.stdout.splitlines()
+
+            lanes = [line.split()[0] for line in ask("--list")]
+            assigned = collections.Counter()
+            for line in ask("--seams"):
+                seam, kind, *named = line.split()
+                self.assertIn(kind, ("run", "apart"), line)
+                assigned.update(named)
+            self.assertEqual(sorted(set(assigned) - set(lanes)), [],
+                             "a seam names a lane test/run does not have")
+            self.assertEqual(sorted(set(lanes) - set(assigned)), [],
+                             "a lane is in no seam: add it to seam_lanes or seam_apart in test/run")
+            self.assertEqual(sorted(lane for lane, count in assigned.items() if count > 1), [],
+                             "a lane is in two seams")
+
+            tracked = subprocess.run(["git", "-C", str(runner.parent.parent), "ls-files"],
+                                     capture_output=True, text=True)
+            if tracked.returncode:
+                return
+            paths = [path for path in tracked.stdout.splitlines() if path]
+            known = set(line.split()[0] for line in ask("--seams")) | {"-", "suite"}
+            unowned = []
+            for row in ask("--seam-of", *paths):
+                path, *owners = row.split(" ")
+                if not owners or not set(owners) <= known:
+                    unowned.append(path)
+            self.assertEqual(unowned, [],
+                             "files in no seam: give each one in seam_of_path in test/run")
+
         def test_no_definition_in_this_file_shadows_another(self):
             """The same hazard from the other side. Assembling modules into
             one file lets a name arrive twice, and the later one wins in
@@ -25913,7 +25958,7 @@ def ul_check_lscpu_summary(farm):
         flags = ["-g", "-O1", "-fno-omit-frame-pointer", "-Wno-pointer-sign", "-w"]
         if compiler != "cc":
             flags += ["-fsanitize=address,undefined"]
-        build = subprocess.run([compiler, *flags, str(c_path), "-o", str(binary)], capture_output=True, text=True)
+        build = build_run([compiler, *flags, str(c_path), "-o", str(binary)], capture_output=True, text=True)
         if build.returncode:
             kept = Path(farm).parent / "ul-lscpu-summary.c"
             log = Path(farm).parent / "ul-lscpu-summary.log"
@@ -26105,12 +26150,16 @@ static positive memory_text_span(const void *block, positive size)
                 i++;
         return i;
 }
+#ifndef memory_zero
 static void memory_zero(void *into, positive size)
 {
         if (size)
                 memset(into, 0, size);
 }
+#endif
+#ifndef max
 #define max(a, b) ((a) > (b) ? (a) : (b))
+#endif
 static positive digit_known(p8 character, positive base)
 {
         positive v;
@@ -30341,7 +30390,7 @@ line_add_padded() { line_add "$@"; }
         if os.uname().sysname == "Linux":
             inputs = canvas_sources(Path(work), os.uname().machine)
             executable = str(Path(work) / "canvas-cells")
-            subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-fno-builtin",
+            build_run([os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-fno-builtin",
                             "-I", work, *inputs, "-o", executable], check=True)
             subprocess.run([executable], check=True)
     return 0
@@ -30408,7 +30457,7 @@ int main(void) {
         kernel = work / "kernel.c"
         kernel.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        subprocess.run([compiler, "-O2", str(kernel), "-o", str(work / "kernel")], check=True)
+        build_run([compiler, "-O2", str(kernel), "-o", str(work / "kernel")], check=True)
         features = subprocess.run([str(work / "kernel")], text=True, stdout=subprocess.PIPE)
         print(features.stdout, end="", flush=True)
         if features.returncode:
@@ -30469,7 +30518,7 @@ int main(void) {
 }
 '''
             (work / "randomize.c").write_text(random_program)
-            built = subprocess.run([compiler, "-O2", "-w", str(work / "randomize.c"), "-o", str(work / "randomize")],
+            built = build_run([compiler, "-O2", "-w", str(work / "randomize.c"), "-o", str(work / "randomize")],
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  FAIL the randomization did not build:\n" + built.stderr[-600:])
@@ -30523,7 +30572,7 @@ int main(int argc, char **argv) {
             (work / "personality.c").write_text(harness)
             for label, (flags, letter) in configs.items():
                 gate += 1
-                built = subprocess.run([compiler, "-O2", "-w", *flags.split(),
+                built = build_run([compiler, "-O2", "-w", *flags.split(),
                                         str(work / "personality.c"), "-o", str(work / "personality")],
                                        capture_output=True, text=True)
                 if built.returncode:
@@ -30543,7 +30592,7 @@ int main(int argc, char **argv) {
             return 1
         if platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64"):
             binary = work / "entry"
-            subprocess.run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",
+            build_run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",
                             "-fno-stack-protector", "-fno-builtin", "-w",
                             "-T", str(root / "src/build/spark.ld"), "-Wl,-e,spark_entry_probe",
                             "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
@@ -31001,7 +31050,7 @@ def build_tool(root):
     source = pathlib.Path(root) / "src/build/build.c"
 
     if not tool.exists() or source.stat().st_mtime > tool.stat().st_mtime:
-        subprocess.run([os.environ.get("CC_BOOTSTRAP", "cc"), "-O2", "-static",
+        build_run([os.environ.get("CC_BOOTSTRAP", "cc"), "-O2", "-static",
                         "-nostdlib", "-nostartfiles", "-fno-stack-protector",
                         "-fno-builtin", "-w", "-o", str(tool), str(source)],
                        check=True)
@@ -31101,7 +31150,7 @@ b32 main(void)
         program.write_text(source, encoding="utf-8")
         for arch in arches:
             binary = root / ("probe-" + arch)
-            built = subprocess.run([
+            built = build_run([
                 os.environ.get("CC", "cc"), "-arch", arch, "-O2",
                 "-nostdlib", "-fno-stack-protector", "-fno-builtin", "-w",
                 "-Wl,-e,_start", str(program), "-I", str(HARNESS_ROOT / "src"),
@@ -35576,7 +35625,7 @@ int main(void)
             unit = Path(work) / 'confine.c'
             unit.write_text(confine)
             binary = Path(work) / 'confine'
-            built = subprocess.run(shlex.split(os.environ.get('CC', 'cc')) +
+            built = build_run(shlex.split(os.environ.get('CC', 'cc')) +
                                    ['-std=gnu11', '-O1', '-w', str(unit), '-o', str(binary)],
                                    capture_output=True, text=True)
             if built.returncode:
@@ -38026,7 +38075,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="canvas-scale-") as temporary:
         unit = Path(temporary) / "scale.c"
         unit.write_text(source)
-        built = subprocess.run([cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
+        built = build_run([cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", "-Wall", "-Wno-unused-function",
                                 "-Wno-unused-variable", "-o", str(unit.with_suffix("")), str(unit)],
                                capture_output=True, text=True)
@@ -41280,7 +41329,7 @@ int main(void) {
         source_path = work / "session.c"
         source_path.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        built = subprocess.run(
+        built = build_run(
             [compiler, "-O2", "-std=gnu11", "-w", str(source_path), "-o", str(work / "session")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if built.returncode:
@@ -41410,7 +41459,7 @@ int main(void) {
         source_path = work / "roots.c"
         source_path.write_text(source)
         compiler = os.environ.get("CC", "gcc")
-        built = subprocess.run(
+        built = build_run(
             [compiler, "-O2", "-std=gnu11", "-w", str(source_path), "-o", str(work / "roots")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if built.returncode:
@@ -42009,7 +42058,7 @@ int main(void) {
         with tempfile.TemporaryDirectory(prefix="host-writes-") as temporary:
             top = Path(temporary).resolve()
             (top / "fixture.c").write_text(shim + body + driver)
-            built = subprocess.run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+            built = build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
                                    capture_output=True, text=True)
             if built.returncode:
                 return None, built.stderr[-2000:]
@@ -42334,7 +42383,7 @@ int main(void) {
         with tempfile.TemporaryDirectory(prefix="net-sysctl-") as temporary:
             top = Path(temporary).resolve()
             (top / "fixture.c").write_text(shim + listing + body + driver)
-            built = subprocess.run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+            built = build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
                                    capture_output=True, text=True)
             if built.returncode:
                 return None, built.stderr[-2000:]
@@ -42528,7 +42577,7 @@ int main(int argc, char **argv) {
     with tempfile.TemporaryDirectory(prefix="console-queue-") as temporary:
         top = Path(temporary)
         (top / "queue.c").write_text(shim + cut + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "queue"), str(top / "queue.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "queue"), str(top / "queue.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the queue did not build:\n" + built.stderr[-3000:])
@@ -42731,7 +42780,7 @@ int main(int argc, char **argv) {
     with tempfile.TemporaryDirectory(prefix="pane-restride-") as temporary:
         top = Path(temporary)
         (top / "restride.c").write_text(shim + body + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "restride"), str(top / "restride.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "restride"), str(top / "restride.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the restride did not build:\n" + built.stderr[-3000:])
@@ -42955,7 +43004,7 @@ int main(void) {
     with tempfile.TemporaryDirectory(prefix="pane-pages-") as temporary:
         top = Path(temporary)
         (top / "pages.c").write_text(shim + body + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "pages"), str(top / "pages.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "pages"), str(top / "pages.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the pane pages did not build:\n" + built.stderr[-3000:])
@@ -43182,7 +43231,7 @@ int main(int argc, char **argv)
     with tempfile.TemporaryDirectory(prefix="sort-spill-") as work:
         top = Path(work)
         (top / "spill.c").write_text(shim + cut + driver)
-        built = subprocess.run(["cc", "-O2", "-w", "-o", str(top / "spill"), str(top / "spill.c")],
+        built = build_run(["cc", "-O2", "-w", "-o", str(top / "spill"), str(top / "spill.c")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL the spill namer did not build:\n" + built.stderr[-2000:])
@@ -43446,10 +43495,11 @@ def dhcp_lift():
     """src/net/net.c's DHCP reply side for a hosted build: (shim, head, walk).
 
     head runs from the DHCP defines through dhcp_lease_timers; walk from
-    dhcp_walk through dhcp_reacquisition_answer_matches. dhcp_packets and
-    dhcp_fuzz share it, so a moved anchor breaks both."""
+    dhcp_walk through the frame judge (dhcp_unframe, dhcp_frame_vouched).
+    dhcp_packets, dhcp_fuzz and dhcp_frame_fuzz share it, so a moved anchor
+    breaks all three."""
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
-    head = net[net.index("#define DHCP_HEAD 236"):net.index("static COLD positive dhcp_build(")]
+    head = net[net.index("#define DHCP_CLIENT_PORT 68"):net.index("static COLD positive dhcp_build(")]
     walk = net[net.index("/*\n        A reply read for what it says."):
                net.index("/*\n        The exchange, confined.")]
     shim = r'''
@@ -43727,7 +43777,7 @@ int main(int argc, char **argv) {
         top = Path(temporary)
         (top / "dhcp.c").write_text(shim + head + walk + driver)
         compiler = "clang" if shutil.which("clang") else "cc"
-        built = subprocess.run([compiler, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+        built = build_run([compiler, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", "-o", str(top / "dhcp"),
                                 str(top / "dhcp.c")], capture_output=True, text=True)
         if built.returncode:
@@ -44073,6 +44123,336 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     return tls_fuzz_run("dhcp", "dhcp", source, 1500)
 
 
+def dhcp_frame_build(message=b"", source=(10, 0, 2, 2), destination=(255, 255, 255, 255),
+                     source_port=67, destination_port=68, options=b"", fragment=0x4000,
+                     protocol=17, version=4, header_checksum="right", udp_checksum="right",
+                     udp_short=0, total_short=0, pad=b""):
+    """An IPv4 frame round a UDP datagram, as a packet socket hands it over,
+    with every field the frame judge reads open to being wrong."""
+    import struct
+    header = 20 + len(options)
+    udp_length = 8 + len(message) - udp_short
+    total = header + 8 + len(message) - total_short
+    ip = bytearray(struct.pack("!BBHHHBBH4s4s", version << 4 | header // 4, 0, total, 0x1234,
+                               fragment, 64, protocol, 0, bytes(source), bytes(destination)))
+    ip += options
+
+    def folded(data):
+        if len(data) % 2:
+            data += b"\0"
+        total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+        while total >> 16:
+            total = (total & 0xffff) + (total >> 16)
+        return total
+
+    if header_checksum == "right":
+        ip[10:12] = struct.pack("!H", ~folded(bytes(ip)) & 0xffff)
+    elif header_checksum == "wrong":
+        ip[10:12] = struct.pack("!H", (~folded(bytes(ip)) & 0xffff) ^ 0x0100)
+    udp = bytearray(struct.pack("!HHHH", source_port, destination_port, udp_length, 0)) + message
+    if udp_checksum in ("right", "wrong"):
+        pseudo = bytes(source) + bytes(destination) + struct.pack("!BBH", 0, 17, udp_length)
+        value = ~folded(pseudo + bytes(udp[:udp_length])) & 0xffff or 0xffff
+        udp[6:8] = struct.pack("!H", value ^ (0x0001 if udp_checksum == "wrong" else 0))
+    return bytes(ip) + bytes(udp) + pad
+
+
+def dhcp_frame_fuzz_seeds():
+    """Name to bytes for dhcp_frame_fuzz: frames in every shape the judge
+    tells apart. Byte 0 asks the target to shape what follows (0 here: the
+    frames are exact), byte 1 is the shaping's cuts, byte 2 the control
+    messages (0 none, 1 PACKET_AUXDATA vouching for the checksum, 2 saying
+    nothing, 3 the bytes after byte 3, whose count byte 3 is), then the
+    frame."""
+    import struct
+
+    def option(code, value):
+        return bytes([code, len(value)]) + value
+
+    reply = bytearray(236)
+    reply[0:3] = b"\x02\x01\x06"
+    reply[4:8] = (0xdeadbeef).to_bytes(4, "big")
+    reply[16:20] = bytes([10, 0, 2, 15])
+    reply[28:34] = bytes([2, 0, 0, 0, 0, 1])
+    offer = bytes(reply) + b"\x63\x82\x53\x63" + option(53, b"\x02") + \
+        option(54, bytes([10, 0, 2, 2])) + option(51, (3600).to_bytes(4, "big")) + b"\xff"
+
+    def seed(frame, control=0, raw=b""):
+        return bytes([0, 0, control, len(raw)]) + raw + frame
+
+    def auxdata(status, length=36, level=263, kind=8):
+        return (struct.pack("<QII", length, level, kind) + struct.pack("<IIIHHHH", status, 0, 0, 0, 0, 0, 0)
+                )[:max(16, length)].ljust((length + 7) & ~7, b"\0")
+
+    seeds = {
+        "offer": seed(dhcp_frame_build(offer)),
+        "offer_unicast": seed(dhcp_frame_build(offer, destination=(10, 0, 2, 15))),
+        "offer_no_udp_checksum": seed(dhcp_frame_build(offer, udp_checksum="none")),
+        "offer_unfinished": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 1),
+        "offer_checked": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3, auxdata(0x80)),
+        "offer_other_status": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3, auxdata(0x77)),
+        "offer_wrong_udp_checksum": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 2),
+        "offer_wrong_header_checksum": seed(dhcp_frame_build(offer, header_checksum="wrong")),
+        "offer_options": seed(dhcp_frame_build(offer, options=b"\x94\x04\0\0")),
+        "offer_long_options": seed(dhcp_frame_build(offer, options=b"\x01" * 40)),
+        "offer_padded": seed(dhcp_frame_build(offer, pad=b"\0" * 18)),
+        "offer_udp_short": seed(dhcp_frame_build(offer, udp_short=3)),
+        "offer_udp_long": seed(dhcp_frame_build(offer, udp_short=-1)),
+        "offer_total_short": seed(dhcp_frame_build(offer, total_short=40)),
+        "offer_total_long": seed(dhcp_frame_build(offer, total_short=-2)),
+        "offer_more_fragments": seed(dhcp_frame_build(offer, fragment=0x2000)),
+        "offer_later_fragment": seed(dhcp_frame_build(offer, fragment=0x0010)),
+        "offer_reserved_flag": seed(dhcp_frame_build(offer, fragment=0x8000)),
+        "offer_tcp": seed(dhcp_frame_build(offer, protocol=6)),
+        "offer_version_six": seed(dhcp_frame_build(offer, version=6)),
+        "offer_from_68": seed(dhcp_frame_build(offer, source_port=68)),
+        "offer_to_67": seed(dhcp_frame_build(offer, destination_port=67)),
+        "empty_datagram": seed(dhcp_frame_build(b"")),
+        "odd_datagram": seed(dhcp_frame_build(b"\x02\x01\x06")),
+        "header_only": seed(dhcp_frame_build(offer)[:20]),
+        "cut_in_udp": seed(dhcp_frame_build(offer)[:25]),
+        "auxdata_short": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3, auxdata(8, 18)),
+        "auxdata_after_other": seed(dhcp_frame_build(offer, udp_checksum="wrong"), 3,
+                                    auxdata(0, 20, 0, 29) + auxdata(8)),
+        "auxdata_length_huge": seed(dhcp_frame_build(offer), 3,
+                                    struct.pack("<QII", 1 << 62, 263, 8) + b"\x08\0\0\0"),
+        "auxdata_length_zero": seed(dhcp_frame_build(offer), 3, struct.pack("<QII", 0, 263, 8)),
+        "shaped_noise": bytes([0x07, 0x09, 1, 0]) + bytes(range(64)) * 6,
+    }
+    return {name + ".bin": data for name, data in seeds.items()}
+
+
+def harness_dhcp_frame_fuzz(argv):
+    """Coverage-guided libFuzzer over the frame judge an acquisition reads its
+    replies through (dhcp_unframe, dhcp_frame_vouched and dhcp_sum, lifted
+    from src/net/net.c with the rest of dhcp_lift), against an independent
+    reading here from RFC 791 and RFC 768 by direct indexing: the verdict, the
+    two addresses, the source port, and where the DHCP message starts and
+    how long it is. The control-message walk is read twice the same way. The
+    prefilter the kernel runs for the socket (dhcp_frame_filter, lifted as
+    the bytes the kernel is given) is run by a classic BPF interpreter written
+    here and has to keep every frame the judge accepts: a filter that dropped
+    one would starve the client of a reply it would have taken. An accepted
+    message goes on through dhcp_read in a heap block exactly its length.
+    Seeds from dhcp_frame_fuzz_seeds; byte 0 can ask the target to shape the
+    frame (version, header length, ports, lengths, both checksums) so that the
+    mutations reach the judge's last questions. ASan/UBSan, or MSan with
+    MOONWATER_MSAN=1; NOT RUN (2) without clang/libFuzzer.
+
+        python3 test/differential.py --harness dhcp_frame_fuzz
+    """
+    del argv
+    shim, head, walk = dhcp_lift()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    program = re.search(r"^static const net_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
+                        net, re.M | re.S)
+    if not program:
+        print("  FAIL dhcp frame fuzz: dhcp_frame_filter is not in src/net/net.c")
+        write_tally("dhcp-frame-fuzz", 0, 1)
+        return 1
+    source = shim + head + walk + ul_c_typedefs(net, "net_filter_step") + "\n" + \
+        program.group(0) + r"""
+#define FUZZ_REQUIRE(condition, what)                                         \
+        do { if (!(condition)) { fprintf(stderr, "dhcp frame fuzz: %s\n", what); \
+                                 __builtin_trap(); } } while (0)
+
+/* RFC 1071's sum, a byte at a time into one wide accumulator: even bytes
+   high, odd bytes low, folded once at the end. */
+static unsigned long reference_sum(const p8 *bytes, long count, unsigned long sum)
+{
+        for (long i = 0; i < count; i++)
+                sum += i & 1 ? bytes[i] : (unsigned long)bytes[i] << 8;
+        return sum;
+}
+static int reference_folds_whole(unsigned long sum)
+{
+        while (sum > 0xffff)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return sum == 0xffff;
+}
+
+typedef struct { p32 source, destination; unsigned port; long offset, length; } reference_frame;
+
+/* RFC 791 and RFC 768, by index into the frame. */
+static int reference_unframe(const p8 *f, long n, int vouched, reference_frame *out)
+{
+        if (n < 20)
+                return 0;
+        long header = (f[0] & 15) * 4;
+        long total = f[2] << 8 | f[3];
+        if (f[0] >> 4 != 4 || header < 20 || total < header + 8 || total > n)
+                return 0;
+        if ((f[6] & 0x3f) || f[7] || f[9] != 17)        /* MF, an offset, not UDP */
+                return 0;
+        if (!reference_folds_whole(reference_sum(f, header, 0)))
+                return 0;
+        const p8 *u = f + header;
+        long length = u[4] << 8 | u[5];
+        if ((u[0] << 8 | u[1]) != 67 || (u[2] << 8 | u[3]) != 68 || length < 8 ||
+            length > total - header)
+                return 0;
+        if ((u[6] || u[7]) && !vouched) {
+                p8 pseudo[12] = {f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19],
+                                 0, 17, (p8)(length >> 8), (p8)length};
+                if (!reference_folds_whole(reference_sum(u, length, reference_sum(pseudo, 12, 0))))
+                        return 0;
+        }
+        out->source = (p32)f[12] << 24 | (p32)f[13] << 16 | (p32)f[14] << 8 | f[15];
+        out->destination = (p32)f[16] << 24 | (p32)f[17] << 16 | (p32)f[18] << 8 | f[19];
+        out->port = u[0] << 8 | u[1];
+        out->offset = header + 8;
+        out->length = length - 8;
+        return 1;
+}
+
+/* cmsg(3): a size_t length counting its 16-byte header, level, type, data,
+   then CMSG_ALIGN to eight. TP_STATUS_CSUMNOTREADY is bit 3 of tp_status,
+   TP_STATUS_CSUM_VALID bit 7. */
+static int reference_vouched(const p8 *c, long n)
+{
+        for (long at = 0; n - at >= 16;) {
+                unsigned long length = 0;
+                for (int i = 7; i >= 0; i--)
+                        length = length << 8 | c[at + i];
+                unsigned level = c[at + 8] | c[at + 9] << 8 | c[at + 10] << 16 | (unsigned)c[at + 11] << 24;
+                unsigned type = c[at + 12] | c[at + 13] << 8 | c[at + 14] << 16 | (unsigned)c[at + 15] << 24;
+                if (length < 16 || length > (unsigned long)(n - at))
+                        return 0;
+                if (level == 263 && type == 8)
+                        return length >= 20 && (c[at + 16] & 0x88);
+                at += (long)((length + 7) & ~7ul);
+        }
+        return 0;
+}
+
+/* Classic BPF as the kernel runs a socket filter: a load past the packet
+   ends the program with 0, which drops it. Only what the filter uses. */
+static unsigned reference_bpf(const p8 *packet, unsigned long size)
+{
+        unsigned a = 0, x = 0;
+        unsigned count = sizeof dhcp_frame_filter / sizeof *dhcp_frame_filter;
+        for (unsigned pc = 0; pc < count; pc++) {
+                const net_filter_step *step = dhcp_frame_filter + pc;
+                unsigned long at = step->value;
+                switch (step->code) {
+                case 0x30: if (at >= size) return 0; a = packet[at]; break;
+                case 0x28: if (at + 2 > size) return 0; a = packet[at] << 8 | packet[at + 1]; break;
+                case 0xb1: if (at >= size) return 0; x = (packet[at] & 15) * 4u; break;
+                case 0x48: at += x; if (at + 2 > size) return 0; a = packet[at] << 8 | packet[at + 1]; break;
+                case 0x15: pc += a == step->value ? step->jump_true : step->jump_false; break;
+                case 0x45: pc += a & step->value ? step->jump_true : step->jump_false; break;
+                case 0x06: return step->value;
+                default: FUZZ_REQUIRE(0, "the filter uses an instruction the interpreter does not know");
+                }
+        }
+        FUZZ_REQUIRE(0, "the filter runs off its end");
+        return 0;
+}
+
+static void put16(p8 *at, unsigned value) { at[0] = (p8)(value >> 8); at[1] = (p8)value; }
+
+/* Byte 0 bit 0: shape the frame -- version 4, a header of 5 + (bits 4..5)
+   words, UDP from 67 to 68, the total length the frame less (byte 1 & 7)
+   bytes of padding, the UDP length short by (byte 1 >> 3 & 3), no fragment;
+   bit 1: the header checksum made right; bit 2: the UDP checksum made right;
+   bit 3: no UDP checksum. */
+static void shape(p8 *f, long n, p8 how, p8 cuts)
+{
+        long header = 20 + 4 * ((how >> 4) & 3);
+        if (!(how & 1) || n < header + 8)
+                return;
+        long total = n - (cuts & 7) < header + 8 ? header + 8 : n - (cuts & 7);
+        long length = total - header - ((cuts >> 3) & 3);
+        if (length < 8)
+                length = 8;
+        f[0] = (p8)(0x40 | header / 4);
+        put16(f + 2, (unsigned)total);
+        put16(f + 6, 0x4000);
+        f[9] = 17;
+        put16(f + header, 67);
+        put16(f + header + 2, 68);
+        put16(f + header + 4, (unsigned)length);
+        if (how & 8)
+                put16(f + header + 6, 0);
+        if (how & 4) {
+                put16(f + header + 6, 0);
+                p8 pseudo[12] = {f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19],
+                                 0, 17, (p8)(length >> 8), (p8)length};
+                unsigned long sum = reference_sum(f + header, length, reference_sum(pseudo, 12, 0));
+                while (sum > 0xffff)
+                        sum = (sum & 0xffff) + (sum >> 16);
+                put16(f + header + 6, (unsigned)(~sum & 0xffff) ? (unsigned)(~sum & 0xffff) : 0xffff);
+        }
+        if (how & 2) {
+                put16(f + 10, 0);
+                unsigned long sum = reference_sum(f, header, 0);
+                while (sum > 0xffff)
+                        sum = (sum & 0xffff) + (sum >> 16);
+                put16(f + 10, (unsigned)(~sum & 0xffff));
+        }
+}
+
+static const p8 fuzz_hardware[6] = {2, 0, 0, 0, 0, 1};
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        if (size < 4)
+                return 0;
+        p8 how = data[0], cuts = data[1], mode = data[2] & 3;
+        long raw = mode == 3 ? data[3] : 0;
+        if ((long)size - 4 < raw)
+                return 0;
+        p8 made[40];
+        const p8 *control_bytes = data + 4;
+        long control_size = raw;
+        if (mode == 1 || mode == 2) {
+                memset(made, 0, sizeof made);
+                made[0] = 36; made[8] = 263 & 0xff; made[9] = 263 >> 8; made[12] = 8;
+                made[16] = mode == 1 ? 8 : 0;
+                control_bytes = made;
+                control_size = 40;
+        }
+        long n = (long)size - 4 - raw;
+        p8 *control = malloc(control_size ? control_size : 1);
+        p8 *frame = malloc(n ? n : 1);
+        memcpy(control, control_bytes, control_size);
+        memcpy(frame, data + 4 + raw, n);
+        shape(frame, n, how, cuts);
+
+        bool vouched = dhcp_frame_vouched(control, (positive)control_size);
+        FUZZ_REQUIRE(vouched == (reference_vouched(control, control_size) == 1),
+                     "dhcp_frame_vouched and the reference disagree");
+        dhcp_frame got;
+        memset(&got, 0xa5, sizeof got);
+        dhcp_frame untouched = got;
+        reference_frame want;
+        bool accepted = dhcp_unframe(frame, (positive)n, vouched, &got);
+        FUZZ_REQUIRE(accepted == (reference_unframe(frame, n, vouched, &want) == 1),
+                     "dhcp_unframe and the reference disagree on the verdict");
+        if (!accepted) {
+                FUZZ_REQUIRE(!memcmp(&got, &untouched, sizeof got), "a refused frame wrote its answer");
+        } else {
+                FUZZ_REQUIRE(got.message == frame + want.offset && got.length == (positive)want.length &&
+                             got.source == want.source && got.destination == want.destination &&
+                             got.source_port == want.port,
+                             "dhcp_unframe and the reference read different fields");
+                FUZZ_REQUIRE(reference_bpf(frame, (unsigned long)n) != 0,
+                             "the kernel's prefilter drops a frame the judge accepts");
+                p8 *message = malloc(got.length ? got.length : 1);
+                memcpy(message, got.message, got.length);
+                dhcp_lease lease;
+                p8 kind = 0;
+                (void)dhcp_read(message, got.length, 0xdeadbeef, (p8 *)fuzz_hardware, &lease, &kind);
+                free(message);
+        }
+        free(frame);
+        free(control);
+        return 0;
+}
+"""
+    return tls_fuzz_run("dhcp frame", dhcp_frame_fuzz_seeds(), source, 1600)
+
+
 def harness_term_fuzz(argv):
     """Coverage-guided libFuzzer over the terminal emulator, src/canvas/term.c.
 
@@ -44204,7 +44584,7 @@ def fuzz_lib_run(label, tally, source, seeds, max_len, lib=True):
                  "-fno-sanitize-recover=all", "-I", str(HARNESS_ROOT)]
         if lib:
             flags.append("-Dmain=fuzz_unused_main")
-        built = subprocess.run(flags + [sanitize.replace("fuzzer,", "fuzzer-no-link,"),
+        built = build_run(flags + [sanitize.replace("fuzzer,", "fuzzer-no-link,"),
                                         "-c", str(unit), "-o", str(work / "a.o")],
                                capture_output=True, text=True, cwd=HARNESS_ROOT)
         if built.returncode:
@@ -44214,7 +44594,7 @@ def fuzz_lib_run(label, tally, source, seeds, max_len, lib=True):
         local = subprocess.run([objcopy] + (["--keep-global-symbol=LLVMFuzzerTestOneInput"] if lib else [])
                                + [str(work / "a.o"), str(work / "b.o")],
                                capture_output=True, text=True)
-        linked = subprocess.run([clang, sanitize, str(work / "b.o"), "-o", str(work / tally)],
+        linked = build_run([clang, sanitize, str(work / "b.o"), "-o", str(work / tally)],
                                 capture_output=True, text=True)
         if local.returncode or linked.returncode:
             print("  FAIL " + label + " fuzz does not link:\n" + (local.stderr + linked.stderr)[-2000:])
@@ -44688,7 +45068,7 @@ int main(int count, char **argument) {
                 where.mkdir()
                 source = work / (which + scene + ".c")
                 source.write_text(shim + blob + installer + driver)
-                built = subprocess.run(
+                built = build_run(
                     [compiler, "-O1", "-std=gnu11", "-w",
                      '-DROOT="%s"' % (where / "tree"), str(source),
                      "-o", str(work / (which + scene + ".run"))],
@@ -44871,6 +45251,14 @@ def harness_moonwater_cli(argv):
                 'timezone ""', "timezone a b", "time", "time sync", "time bogus",
                 "time sync extra", "ntp", "ntp on", "ntp off", "ntp sampling", "ntp sampling on",
                 "ntp sampling off", "ntp sampling maybe", "ntp sampling on extra", "ntp a b",
+                #       NTS left on, and its list the default, for the rows below.
+                "ntp nts", "ntp nts only", "ntp nts off", "ntp nts on", "ntp nts maybe",
+                "ntp nts on extra", "ntp nts servers", "ntp nts servers a.example b.example:444",
+                "ntp nts servers bad_name", "ntp nts servers a.example:0",
+                "ntp nts servers a.example:99999", "ntp nts servers a b c d e",
+                'ntp nts servers ""', "ntp nts servers default",
+                "dns tls", "dns tls on", "dns tls only", "dns tls off", "dns tls maybe",
+                "dns tls on extra",
                 "keyboard", "keyboard xx", "keyboard a b", "name", "name random", "name x",
                 "name a b", "name random x", 'name ""', "name -x", "name x-", "name UPPER",
                 "name " + "x" * 64, "name ../x", "canvas", "canvas on", "canvas off",
@@ -44920,6 +45308,17 @@ def harness_moonwater_cli(argv):
             'ntp sampling',
             'ntp sampling on',
             'ntp sampling off',
+            'ntp nts',
+            'ntp nts only',
+            'ntp nts off',
+            'ntp nts on',
+            'ntp nts servers',
+            'ntp nts servers a.example b.example:444',
+            'ntp nts servers default',
+            'dns tls',
+            'dns tls on',
+            'dns tls only',
+            'dns tls off',
             'keyboard',
             'canvas scale',
             'canvas scale 2',
@@ -44961,6 +45360,10 @@ def harness_moonwater_cli(argv):
             'timezone +99',
             'timezone ""',
             'time sync',
+            'ntp nts servers bad_name',
+            'ntp nts servers a.example:0',
+            'ntp nts servers a.example:99999',
+            'ntp nts servers ""',
             'keyboard xx',
             'name ""',
             'name -x',
@@ -45017,6 +45420,11 @@ def harness_moonwater_cli(argv):
             'ntp sampling maybe',
             'ntp sampling on extra',
             'ntp a b',
+            'ntp nts maybe',
+            'ntp nts on extra',
+            'ntp nts servers a b c d e',
+            'dns tls maybe',
+            'dns tls on extra',
             'keyboard a b',
             'name a b',
             'name random x',
@@ -45223,6 +45631,43 @@ def harness_moonwater_cli(argv):
               "bare wired reports off", repr(seen["wired"]))
         check(seen["wired on"]["status"] == 0 and block("on-word") == ["on"],
               "wired on writes its word", repr(seen["wired on"]))
+
+        # What a saved network carries beside its password, in
+        # /root/wifi.rules: the wpa2 word an add says, until an add without
+        # it; what a join learnt (pmf, sae), while the password stays; and
+        # nothing of a network that is not saved, or no longer is.
+        lines, finished = session(
+            "rm -f /root/wifi /root/wifi.rules\n" +
+            say("wifi add scen-r passpass1 wpa2") +
+            "echo '@@ rules-1'; cat /root/wifi.rules; echo '@@end'\n" +
+            "printf 'pmf scen-r\\nsae scen-r\\nwpa2 scen-r\\npmf gone-net\\nbogus line\\n' > /root/wifi.rules\n" +
+            say("wifi add scen-r passpass1 wpa2") +
+            "echo '@@ rules-2'; cat /root/wifi.rules; echo '@@end'\n" +
+            say("wifi add scen-r passpass1") +
+            "echo '@@ rules-3'; cat /root/wifi.rules; echo '@@end'\n" +
+            say("wifi add scen-r passpass2") +
+            "echo '@@ rules-4'; wc -c < /root/wifi.rules; echo '@@end'\n" +
+            say("wifi add scen-r - wpa3") +
+            "printf 'pmf scen-r\\nwpa2 scen-r\\n' > /root/wifi.rules\n" +
+            say("wifi remove scen-r") +
+            "echo '@@ rules-5'; wc -c < /root/wifi.rules; echo '@@end'\n" +
+            "ls -l /root/wifi.rules | cut -c1-10\n")
+        seen = answers(lines)
+        check(finished, "the wifi rules session finished", "")
+        check(block("rules-1") == ["wpa2 scen-r"],
+              "wifi add with wpa2 says so beside the list", repr(block("rules-1")))
+        check(block("rules-2") == ["pmf scen-r", "sae scen-r", "wpa2 scen-r"],
+              "the same password keeps what the join learnt, and a network not saved has no rules",
+              repr(block("rules-2")))
+        check(block("rules-3") == ["pmf scen-r", "sae scen-r"],
+              "an add without wpa2 takes its word back", repr(block("rules-3")))
+        check(block("rules-4") == ["0"],
+              "another password forgets what the join learnt", repr(block("rules-4")))
+        check(seen["wifi add scen-r - wpa3"]["status"] == 2,
+              "a word after the password that is not wpa2 is a usage", repr(seen.get("wifi add scen-r - wpa3")))
+        check(block("rules-5") == ["0"] and "-rw-------" in lines,
+              "wifi remove forgets every rule of the network, and the file is root's alone",
+              repr((block("rules-5"), lines[-3:])))
 
         # The switches the kernel keeps in sysfs, against a /sys of plain
         # files the sandbox owns: what a verb writes is read back from them.
@@ -45857,9 +46302,10 @@ def harness_moonwater_cli(argv):
         # is taken (and then refused by a kernel that will not let a namespace
         # set the clock), RATE is reported as asked too often, DENY and RSTR
         # as the server saying no, and everything else is no answer at all.
-        # A person who asks for the time takes a server's word for a year,
-        # where the machine itself never steps a clock that is set by more
-        # than a day.
+        # A person who asks for the time may be told a year (the window
+        # bounds the answer, not a day), but plain time is unauthenticated:
+        # one server's word moves a set clock by two seconds at most and a
+        # further step waits for a second server's agreement.
         server = r"""
 import json, socket, struct, time
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -45932,8 +46378,8 @@ while True:
                 said[current] = line
         check("no server answered" in said.get("closed", "") and closed_ms < 1800,
               "time sync against a port nobody listens on is over at once", f"{closed_ms} ms: {said.get('closed')}")
-        least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll",
-                              (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
+        least = int(re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll",
+                              (HARNESS_ROOT / "src/net/net.c").read_text()).group(1))
         most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll",
                              (HARNESS_ROOT / "src/sh/host.c").read_text()).group(1))
         for number, spec in enumerate(specs):
@@ -45949,9 +46395,113 @@ while True:
             got = ("taken" if "answered, but" in answer else
                    "rated" if "asked too often" in answer else
                    "denied" if "stay away" in answer else
+                   "unconfirmed" if "no second server agreed" in answer else
                    "none" if "no server answered" in answer else answer)
-            want = "taken" if taken else "rated" if rated else "denied" if denied else "none"
+            #   Plain time is unauthenticated: the one server named moves a
+            #   clock that is set by two seconds at most, by hand too, and a
+            #   further step waits for a second server, which none of these
+            #   namespaces can reach (0470d803's rule).
+            far = abs(spec["offset"]) > 2
+            want = ("unconfirmed" if taken and far else "taken" if taken else
+                    "rated" if rated else "denied" if denied else "none")
             check(got == want, f"time sync against {spec} is {want}", got)
+
+        # The clock's floor: the latest time this machine already knows it is
+        # past is /root/clock.good, and an answer earlier than it moves nothing.
+        # A file that is not a plain number of seconds from the build to the end
+        # of the NTP window is no floor at all. The same server answers the real
+        # time each round.
+        script = ("ip link set lo up\npython3 /tmp/ntpd.py &\nntp_server=$!\nsleep 1\n"
+                  "echo 127.0.0.1 > /root/ntp.server\necho off > /root/ntp.sampling\n"
+                  f"printf '%s' {shlex.quote(json.dumps(base))} > /tmp/ntp.spec\n")
+        floors = [("a day ahead", "$(( $(date +%s) + 86400 ))", "earlier than"),
+                  ("a minute ahead", "$(( $(date +%s) + 60 ))", "earlier than"),
+                  ("right now", "$(( $(date +%s) - 5 ))", "answered, but"),
+                  ("before the build", "1000000000", "answered, but"),
+                  ("past the NTP window", "4233462144", "answered, but"),
+                  ("text", "abc", "answered, but"),
+                  ("a number and text", "'1799999999 x'", "answered, but"),
+                  ("a sign", "-5", "answered, but"),
+                  ("blank", "''", "answered, but"),
+                  ("a huge number", "99999999999999999999", "answered, but")]
+        for number, (label, value, _) in enumerate(floors):
+            script += (f"echo '@@ floor{number}'; echo {value} > /root/clock.good\n"
+                       "timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n")
+        #   A day ahead behind a link is no floor either.
+        script += ("echo '@@ floor-link'; rm -f /root/clock.good; "
+                   "echo $(( $(date +%s) + 86400 )) > /tmp/clock.aside; "
+                   "ln -s /tmp/clock.aside /root/clock.good\n"
+                   "timeout 20 /tmp/moonwater time sync 2>&1 | head -1\n")
+        script += ("rm -f /root/clock.good /tmp/clock.aside\nkill $ntp_server\n"
+                   "wait $ntp_server 2>/dev/null || true\n")
+        lines, finished = session(script)
+        check(finished, "the clock floor walk finished", "")
+        said = {}
+        current = None
+        for line in lines:
+            if line.startswith("@@ floor"):
+                current = line[8:]
+            elif current is not None and current not in said:
+                said[current] = line
+        for number, (label, _, want) in enumerate(floors):
+            check(want in said.get(str(number), ""),
+                  f"time sync with clock.good {label} says '{want}'", said.get(str(number), ""))
+        check("answered, but" in said.get("-link", ""),
+              "time sync with clock.good a day ahead behind a link says 'answered, but'",
+              said.get("-link", ""))
+
+        # Stopping the machine keeps the time: from an authenticated answer's
+        # record plus the uptime since (so a later forged step cannot move it),
+        # or from the floor the boot began with plus the uptime, never backwards,
+        # never through a link.
+        #   The shell's own poweroff, which syncs and then asks the kernel to stop
+        #   the machine: it is refused here, for want of the capability in the
+        #   host's namespace, and the time has been kept before it is asked.
+        script = ("mkdir -p /run/moonwater\nln -sf /tmp/moonwater /tmp/msh\n"
+                  "up=$(cut -d. -f1 /proc/uptime)\n"
+                  "echo \"$(( $(date +%s) - 30 )) $(( up > 30 ? up - 30 : 0 ))\" > /run/moonwater/clock.auth\n"
+                  "rm -f /root/clock.good\n"
+                  "echo '@@ stop'; timeout 20 /tmp/msh -c poweroff 2>&1 | tail -1\n"
+                  "echo \"@@good $(cat /root/clock.good) $(date +%s)\"\n"
+                  "echo $(( $(date +%s) + 5000 )) > /root/clock.good\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@kept $(cat /root/clock.good) $(date +%s)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.auth\n"
+                  "echo $(( $(date +%s) - $(cut -d. -f1 /proc/uptime) - 100 )) > /run/moonwater/clock.base\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@floor $(cat /root/clock.good) $(date +%s)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.base\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@nobase $(cat /root/clock.good 2>/dev/null | head -c 12)\"\n"
+                  "rm -f /root/clock.good\n"
+                  "ln -s /tmp/victim /root/clock.good; echo untouched > /tmp/victim\n"
+                  "echo \"$(( $(date +%s) - 30 )) 0\" > /run/moonwater/clock.auth\n"
+                  "timeout 20 /tmp/msh -c poweroff >/dev/null 2>&1\n"
+                  "echo \"@@victim $(cat /tmp/victim)\"\n"
+                  "rm -f /root/clock.good /run/moonwater/clock.auth /tmp/victim\n")
+        lines, finished = session(script)
+        for line in lines:
+            parts = line.split()
+            if line.startswith("@@good "):
+                then, now = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (None, None)
+                check(then is not None and now - 10 <= then <= now + 5,
+                      "poweroff writes the authenticated time plus the uptime to clock.good", line)
+            elif line.startswith("@@kept "):
+                check(len(parts) == 3 and int(parts[1]) >= int(parts[2]) + 4000,
+                      "poweroff never lowers clock.good", line)
+            elif line.startswith("@@floor "):
+                then, now = (int(parts[1]), int(parts[2])) if len(parts) == 3 else (None, None)
+                check(then is not None and now - 110 <= then <= now - 90,
+                      "without an authenticated answer the floor is the boot's floor plus the "
+                      "uptime, not the wall clock's", line)
+            elif line.startswith("@@nobase "):
+                check(len(parts) == 1, "with no answer and no boot floor nothing is written", line)
+            elif line.startswith("@@victim "):
+                check(parts[1:] == ["untouched"],
+                      "poweroff does not write through a link planted as clock.good", line)
+        check(finished and all(any(line.startswith(mark) for line in lines)
+                               for mark in ("@@good ", "@@kept ", "@@floor ", "@@nobase", "@@victim ")),
+              "the poweroff rows ran", lines[-6:])
 
         # Zones set at once leave a zone and its mode that go together, and
         # every writer says it took.
@@ -46050,14 +46600,39 @@ while True:
         script += say("name keeper") + "echo \"@@ntp $(cat /root/name)\"\n"
         script += say("ntp off") + "echo \"@@ntp $(cat /root/ntp)\"\n"
         script += say("ntp on") + "echo \"@@ntp $(cat /root/ntp)\"\n"
+        #       NTS: its switch, and the servers it asks, refused when one is no
+        #       name (and then the list is as it was), put back by "default".
+        script += say("ntp nts off") + "echo \"@@nts $(cat /root/ntp.nts)\"\n"
+        script += say("ntp nts only") + "echo \"@@nts $(cat /root/ntp.nts)\"\n"
+        script += say("ntp nts on") + "echo \"@@nts $(cat /root/ntp.nts)\"\n"
+        script += (say("ntp nts servers a.example b.example:444") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers ok.example bad_name") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers a.example:0") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers a b c d e") +
+                   "echo \"@@servers $(tr '\\n' , < /root/ntp.nts.servers)\"\n" +
+                   say("ntp nts servers default") +
+                   "echo \"@@servers $([ -e /root/ntp.nts.servers ] && echo present || echo absent)\"\n" +
+                   say("ntp nts servers time.example") + say("ntp nts off"))
+        #       dns tls: the three words written and published, an unknown one
+        #       refused and both files left as they were. A bare dns says its
+        #       state, with the label's bold in it as escapes and not as text.
+        script += say("dns")
+        script += "".join(say(f"dns tls {word}") +
+                          "echo \"@@dnstls $(cat /root/dns.tls) $(cat /run/moonwater/dns.tls)\"\n"
+                          for word in ("on", "only", "off", "banana"))
         script += say("link key") + say("link off") + "printf g > /root/link.groups\n"
         script += "echo off > /root/wired.power; printf 'power powersave\\n' > /root/tune\n"
-        script += ("mkdir -p /home/u/deep && echo x > /home/u/deep/f && echo y > /root/junk && "
+        script += ("printf x > /root/clock.good && "
+                   "mkdir -p /home/u/deep && echo x > /home/u/deep/f && echo y > /root/junk && "
                    "mkdir -p /root/dir && echo z > /bowls/one/kept\n" + say("wipe yes") +
                    "echo \"@@after $(ls -A /home | wc -l) $(ls /root | tr '\\n' ,) "
                    "$(cat /bowls/one/kept)\"\n")
         lines, finished = session(script)
         current = None
+        dns_lines = 0
         for line in lines:
             if line.startswith("@@ "):
                 current = line[3:]
@@ -46070,16 +46645,35 @@ while True:
                 check(line != "@@status 0", "an unknown layout is refused", line)
             elif line.startswith("@@ntp "):
                 check(line.split()[1] == current.split()[1], f"{current} is written", line)
+            elif line.startswith("@@nts "):
+                check(line.split()[1] == current.split()[2], f"{current} is written", line)
+            elif current == "dns" and not line.startswith("@@"):
+                dns_lines += 1
+                check("\\x1b" not in line,
+                      "a bare dns prints its label's escapes, not their spelling", line)
+            elif line.startswith("@@dnstls "):
+                want = "off" if current == "dns tls banana" else current.split()[2]
+                check(line.split()[1:] == [want, want],
+                      f"{current} keeps and publishes the word, or refuses it", line)
+            elif line.startswith("@@servers "):
+                if current == "ntp nts servers default":
+                    check(line.endswith(" absent"), "ntp nts servers default removes the list", line)
+                else:
+                    check(line.split(" ", 1)[1:] == ["a.example,b.example:444,"],
+                          f"{current} leaves the list as it should", line)
             elif line.startswith("@@after "):
                 parts = line.split()
                 kept = set(filter(None, parts[2].split(",")))
                 check(parts[1] == "0" and "junk" not in kept and "dir" not in kept and
-                             {"keyboard", "name", "ntp", "timezone", "link", "link.key",
+                             {"keyboard", "name", "ntp", "ntp.nts", "ntp.nts.servers", "clock.good",
+                              "dns.tls",
+                              "timezone", "link", "link.key",
                               "link.groups", "wired.power", "tune"} <= kept and
                              parts[3] == "z",
                              "wipe empties /home and /root and keeps the settings (wired and the "
                              "power and charge ones too), the link's key and switch, and the bowls",
                              line)
+        check(dns_lines > 0, "a bare dns says its state, one or more lines", dns_lines)
 
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line
@@ -46121,12 +46715,14 @@ while True:
         # AcceptEnv carry one in); a caller who cannot read /root is told so
         # rather than shown the answer of a machine nobody has set up; a
         # keyboard layout Canvas could not take is not reported as taken; and
-        # the server asked first is a verb, whole or refused.
+        # the server asked first is a verb, whole or refused. The caller's zone
+        # is named QQQ, which no zone the sessions before this one leave behind
+        # (their race ends on Paris or on Tokyo, which is JST) can spell.
         locale_say = say
         script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
                   "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes\n"
-                  "echo '@@ tz'; TZ=JST-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
-                  "echo '@@ tz time'; TZ=JST-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
+                  "echo '@@ tz'; TZ=QQQ-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
+                  "echo '@@ tz time'; TZ=QQQ-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
                   "printf 'off\\r\\n' > /root/wired.power\n" + locale_say("wired") +
                   "rm -f /root/wired.power /root/timezone /root/timezone.mode\n")
         #       What a machine nobody has told anything says, then what it says to a
@@ -46200,9 +46796,9 @@ while True:
         seen = answers(lines)
         text = lambda name: "\n".join(seen.get(name, {}).get("out", []))
         check(finished, "the clock verbs' session finished", "")
-        check("+01" in text("tz").split("after", 1)[-1] and "JST" not in text("tz"),
+        check("+01" in text("tz").split("after", 1)[-1] and "QQQ" not in text("tz"),
               "a TZ in the caller's environment is not the zone a change is shown in", text("tz"))
-        check("JST" not in text("tz time"), "nor the zone the clock is read in", text("tz time"))
+        check("QQQ" not in text("tz time"), "nor the zone the clock is read in", text("tz time"))
         check("wired off" in text("wired"), "a state word edited with a CRLF is the word it says",
               text("wired"))
         wants = {"ntp": ("ntp off", "sampling off"), "ntp sampling": ("sampling off",),
@@ -47478,7 +48074,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="machine-reap-") as work:
         unit = Path(work) / "reap.c"
         unit.write_text(source)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
                                 str(Path(work) / "reap"), str(unit)],
                                capture_output=True, text=True)
         if built.returncode:
@@ -47541,6 +48137,226 @@ def openssl_workbench(work):
     return openssl, issue
 
 
+#       The build cache. A compile that links is a function of the compiler,
+#       the linker, the command line, the files named on it and the text the
+#       preprocessor reads, and a harness that builds the shell the harness
+#       before it built, or the unit the last run built, learns nothing from
+#       building it again: half a minute for the same bytes. build_run is
+#       subprocess.run for a compiler line that answers from the cache. The
+#       key is the digest of those inputs (a file named on the line counts by
+#       its bytes and not its path, which is a temporary directory's), the
+#       entry is the output and what the compiler said, written under a
+#       temporary name and renamed so that two builds of one key never meet
+#       halfway. A line with a path of the run's own in it makes a key of its
+#       own and so never hits, which is a miss and not a wrong answer.
+#
+#       MOONWATER_TEST_CACHE names the directory (default
+#       ~/.cache/moonwater-test, shared with test/run's freestanding),
+#       `off` turns it off, and `verify` builds every time and fails when a
+#       build is not the bytes its key stood for: the proof that the key is
+#       the whole function.
+BUILD_CACHE_TOOLS = {}
+BUILD_CACHE_LINES = {"-E", "-M", "-MM", "-MD", "-MMD", "-"}
+
+
+def build_cache_setting():
+    """(directory or None, verify) for MOONWATER_TEST_CACHE."""
+    setting = os.environ.get("MOONWATER_TEST_CACHE", "")
+    if setting == "off" or os.environ.get("MOONWATER_INTEGRATION_COVERAGE"):
+        return None, False
+    home = os.environ.get("XDG_CACHE_HOME") or (
+        os.path.join(os.environ["HOME"], ".cache") if os.environ.get("HOME") else "")
+    root = setting if setting not in ("", "verify") else (
+        os.path.join(home, "moonwater-test") if home else "")
+    return (Path(root) if root else None), setting == "verify"
+
+
+def build_cache_tool(program, linked=True):
+    """The program's version line and, for a compiler, its linker's, one to a
+    line, as a build is made by both."""
+    if (program, linked) not in BUILD_CACHE_TOOLS:
+        lines = []
+        for command in ([program, "--version"], None):
+            if command is None:
+                if not linked:
+                    break
+                found = subprocess.run([program, "-print-prog-name=ld"], capture_output=True,
+                                       text=True)
+                command = [found.stdout.strip() or "ld", "--version"]
+            try:
+                said = subprocess.run(command, capture_output=True, text=True).stdout
+            except OSError:
+                said = ""
+            if said:
+                lines.append(said.split("\n")[0] + "\n")
+        BUILD_CACHE_TOOLS[(program, linked)] = "".join(lines)
+    return BUILD_CACHE_TOOLS[(program, linked)]
+
+
+def build_cache_key(command, cwd):
+    """(key, output) for a compiler line that links or compiles one output, or None.
+
+    The key is the digest of the text test/run's build_key writes for the
+    same line, so a build made by either is found by the other: a line for
+    the version of the compiler and one for its linker's, then a line for
+    each word of the command but the output and its name, `file` and the
+    digest of its bytes for a word that names a file and `arg` and the word
+    for the rest, then what the preprocessor reads."""
+    words, kept, output, at = [str(word) for word in command], [], None, 0
+    base = Path(cwd) if cwd else Path.cwd()
+    if len(words) < 4 or BUILD_CACHE_LINES & set(words):
+        return None
+    while at < len(words):
+        if words[at] == "-o" and at + 1 < len(words) and output is None:
+            output, at = words[at + 1], at + 2
+            continue
+        kept.append(words[at])
+        at += 1
+    if output is None:
+        return None
+    text = subprocess.run(kept + ["-E", "-P"], capture_output=True, cwd=cwd)
+    if text.returncode:
+        return None
+    digest = hashlib.sha256(b"moonwater build cache sh 1\n")
+    digest.update(build_cache_tool(words[0]).encode())
+    for word in kept:
+        path = base / word
+        #   The anchor and the logs a shell is built with are included by
+        #   name, and what is in the file is in the preprocessed text, so the
+        #   name is a temporary directory's and not part of the program.
+        included = re.fullmatch(r'-D(TLS_BENCH_ANCHOR|TLS_BENCH_CT)="(.*)"', word)
+        if included and (base / included.group(2)).is_file():
+            digest.update(b"arg -D" + included.group(1).encode() + b"=<included>\n")
+        elif word != words[0] and path.is_file():
+            digest.update(b"file " + hashlib.sha256(path.read_bytes()).hexdigest().encode() + b"\n")
+        else:
+            digest.update(b"arg " + word.encode() + b"\n")
+    digest.update(text.stdout)
+    return digest.hexdigest(), output
+
+
+def build_claim(entry):
+    """True when this process is the one to make entry, and False when it was
+    made while waiting for whoever held the claim: a build that two lanes want
+    is made by one of them. A claim is a directory beside the entry holding the
+    pid of its owner, and one whose owner is gone, or that has stood for
+    twenty minutes, is not waited for."""
+    lock = Path(str(entry) + ".lock")
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 1200
+    while True:
+        if entry.is_file():
+            return False
+        try:
+            lock.mkdir()
+            if entry.is_file():
+                #   Made while this was between looking and claiming.
+                lock.rmdir()
+                return False
+            (lock / "owner").write_text("%s %d\n" % (os.uname().nodename, os.getpid()))
+            return True
+        except FileExistsError:
+            pass
+        try:
+            host, _, number = (lock / "owner").read_text().partition(" ")
+            if host == os.uname().nodename:
+                os.kill(int(number), 0)
+        except ProcessLookupError:
+            shutil.rmtree(lock, ignore_errors=True)
+            continue
+        except (OSError, ValueError):
+            pass
+        if time.monotonic() > deadline:
+            shutil.rmtree(lock, ignore_errors=True)
+            continue
+        time.sleep(0.5)
+
+
+def build_run(command, **options):
+    """subprocess.run for a compiler line, from the build cache when it can be.
+
+    What it returns is what run would: the cached compiler's words stand for
+    a build that said them, and a build that failed is never kept."""
+    root, verify = build_cache_setting()
+    began = time.monotonic()
+    keyed = None
+    if root and "input" not in options and not options.get("shell"):
+        try:
+            keyed = build_cache_key(command, options.get("cwd"))
+        except OSError:
+            keyed = None
+    name = "build " + Path(str(command[-1])).name
+    if keyed is None:
+        done = subprocess.run(command, **options)
+        record_time(name, time.monotonic() - began)
+        return done
+    key, output = keyed
+    entry = root / key[:2] / key
+    target = Path(options["cwd"] if options.get("cwd") else ".") / output
+
+    def served():
+        shutil.copyfile(entry, target)
+        os.chmod(target, entry.stat().st_mode & 0o777)
+        os.utime(entry)
+        said = entry.with_suffix(".err").read_bytes() if entry.with_suffix(".err").exists() else b""
+        record_time(name + " (cached)", time.monotonic() - began)
+        text = options.get("text") or options.get("universal_newlines") or options.get("encoding")
+        shaped = said.decode(errors="replace") if text else said
+        captured = options.get("capture_output") or options.get("stderr") == subprocess.PIPE
+        merged = options.get("stderr") == subprocess.STDOUT
+        return subprocess.CompletedProcess(
+            command, 0, shaped if merged else (("" if text else b"") if (
+                captured or options.get("stdout") == subprocess.PIPE) else None),
+            shaped if captured and not merged else None)
+
+    if entry.is_file() and not verify:
+        return served()
+    claimed = verify or build_claim(entry)
+    if not claimed:
+        return served()
+    try:
+        done = subprocess.run(command, **options)
+        record_time(name, time.monotonic() - began)
+        if done.returncode == 0 and target.is_file():
+            said = done.stderr if isinstance(done.stderr, bytes) else (done.stderr or "").encode()
+            #   A program built with debug information or a sanitizer carries
+            #   the path of its source, which is a temporary directory's, so
+            #   only the others are the same bytes each time.
+            debugged = any(str(word).startswith(("-g", "-fsanitize")) for word in command)
+            if verify and not debugged and entry.is_file() and (
+                    entry.read_bytes() != target.read_bytes()):
+                raise RuntimeError("build cache: %s differs from the build its key stood for (%s)"
+                                   % (output, key))
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            staged = entry.with_name(".%s.%d" % (key, os.getpid()))
+            shutil.copyfile(target, staged)
+            os.chmod(staged, target.stat().st_mode & 0o777)
+            staged.with_suffix(".err").write_bytes(said)
+            os.replace(staged.with_suffix(".err"), entry.with_suffix(".err"))
+            os.replace(staged, entry)
+        return done
+    finally:
+        if claimed and not verify:
+            shutil.rmtree(str(entry) + ".lock", ignore_errors=True)
+
+
+def build_together(commands, **options):
+    """build_run for each command at once, in the order the commands were given."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(commands))) as pool:
+        return list(pool.map(lambda command: build_run(command, **options), commands))
+
+
+def record_time(name, seconds):
+    """One line in the file test/run keeps for what a run spent its time on."""
+    path = os.environ.get("TEST_TIMES")
+    if path:
+        try:
+            with open(path, "a") as stream:
+                stream.write("%.1f %s\n" % (seconds, name))
+        except OSError:
+            pass
+
+
 def spark_shell_command(cc, output, anchor=None, defines=()):
     """The cc line that builds programs/shell.c as a spark image does, run from HARNESS_ROOT.
 
@@ -47590,6 +48406,44 @@ def spark_shell_command(cc, output, anchor=None, defines=()):
             *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
             *("-D" + define for define in defines),
             "-o", str(output), "programs/shell.c"]
+
+
+def bench_root_key(work):
+    """work/root.key, and the key: the P-384 key a harness that builds a shell
+    anchored to a root of its own signs with.
+
+    It is made once and kept beside the build cache, because the anchor a
+    shell is built with is this key's public point: a key made fresh each run
+    was a shell built fresh each run, a minute of the compiler for each shell
+    in each harness, and the same program but for that. The leaves, the serial
+    numbers and the times are fresh each run as they were, and with no cache
+    so is the key."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    root, _ = build_cache_setting()
+    kept = root / "bench-root.pem" if root else None
+    pem = None
+    if kept:
+        try:
+            pem = kept.read_bytes()
+        except OSError:
+            pem = None
+    if pem is None:
+        pem = ec.generate_private_key(ec.SECP384R1()).private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption())
+        if kept:
+            try:
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                staged = kept.with_name(".bench-root.%d" % os.getpid())
+                staged.write_bytes(pem)
+                os.chmod(staged, 0o600)
+                os.replace(staged, kept)
+                pem = kept.read_bytes()
+            except OSError:
+                pass
+    (work / "root.key").write_bytes(pem)
+    return serialization.load_pem_private_key(pem, password=None)
 
 
 def bench_anchor(work):
@@ -47976,7 +48830,125 @@ def harness_tls_chains(argv):
          {"distrust": True, "serve_root": True}),
         ("distrust-after: root served first, leaf issued after", 2, good_leaf,
          {"distrust": True, "root_first": True}),
+        #   Revocation. "dp" gives a certificate a CRL distribution point on
+        #   the files server, "crls" makes the CRLs with `openssl ca -gencrl`
+        #   (issuer, serials revoked, an issuingDistributionPoint, dates in
+        #   days, another signer, PEM on the wire), and openssl verify is
+        #   asked with -crl_check (the leaf's) or -crl_check_all and the CRLs
+        #   it could have fetched. "tight" serves the row again to a shell
+        #   built at the tight net tier, which refuses where the default
+        #   passes over a source that gave no usable answer (SOFT_FAIL).
+        ("revocation: the leaf on its issuer's CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["leaf"]}]}),
+        ("revocation: the leaf's CRL lists another certificate", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "keys": ("P-256", "P-384", "RSA-2048"), "spare": True,
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["spare"]}]}),
+        ("revocation: the leaf's CRL lists nothing", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second"}]}),
+        ("revocation: a partitioned CRL that names the leaf's point", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second", "revoke": ["spare"],
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-7.crl\nonlyuser=TRUE\n"}],
+          "spare": True}),
+        ("revocation: the leaf on its partitioned CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second", "revoke": ["leaf"],
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-7.crl\nonlyuser=TRUE\n"}]}),
+        ("revocation: the leaf's point serves another partition", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second", "revoke": ["leaf"],
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-8.crl\n"}]}),
+        ("revocation: a partitioned CRL for CA certificates only", 2, good_leaf,
+         {"dp": {"leaf": "leaf-7.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf-7.crl", "issuer": "second",
+                    "idp": "fullname=URI:http://127.0.0.1:%d/leaf-7.crl\nonlyCA=TRUE\n"}]}),
+        ("revocation: the leaf's CRL is past its nextUpdate", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "dates": (-10, -1)}]}),
+        ("revocation: the leaf on a CRL past its nextUpdate", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["leaf"],
+                    "dates": (-10, -1)}]}),
+        ("revocation: the leaf's CRL is signed by another key of its issuer's name", 2,
+         good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crlsigner": True,
+          "crls": [{"name": "leaf.crl", "issuer": "second", "signer": "crlsigner",
+                    "revoke": ["leaf"]}]}),
+        ("revocation: the leaf's CRL is not there", 2, good_leaf,
+         {"dp": {"leaf": "absent.crl"}, "crl_check": "leaf"}),
+        ("revocation: the leaf's CRL is served as PEM", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "pem": True}]}),
+        ("revocation: the leaf's CRL carries an unknown critical extension", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second",
+                    "extra": "1.2.3.4=critical,DER:05:00\n"}]}),
+        ("revocation: the leaf's CRL is a delta CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "crls": [{"name": "leaf.crl", "issuer": "second",
+                    "extra": "2.5.29.27=critical,DER:02:02:03:e8\n"}]}),
+        ("revocation: the leaf on a CRL its RSA issuer signed", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl"}, "crl_check": "leaf",
+          "second_key": "RSA-2048",
+          "crls": [{"name": "leaf.crl", "issuer": "second", "revoke": ["leaf"]}]}),
+        ("revocation: every certificate's CRL lists nothing", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl", "second": "second.crl", "first": "first.crl"},
+          "crl_check": "all",
+          "crls": [{"name": "leaf.crl", "issuer": "second"},
+                   {"name": "second.crl", "issuer": "first"},
+                   {"name": "first.crl", "issuer": "root"}]}),
+        ("revocation: the intermediate on its issuer's CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl", "second": "second.crl", "first": "first.crl"},
+          "crl_check": "all",
+          "crls": [{"name": "leaf.crl", "issuer": "second"},
+                   {"name": "second.crl", "issuer": "first", "revoke": ["second"]},
+                   {"name": "first.crl", "issuer": "root"}]}),
+        ("revocation: the first intermediate on the root's CRL", 2, good_leaf,
+         {"dp": {"leaf": "leaf.crl", "second": "second.crl", "first": "first.crl"},
+          "crl_check": "all",
+          "crls": [{"name": "leaf.crl", "issuer": "second"},
+                   {"name": "second.crl", "issuer": "first"},
+                   {"name": "first.crl", "issuer": "root", "revoke": ["first"]}]}),
+        ("revocation: the leaf names its CRL over https", 2, good_leaf,
+         {"dp_url": "https://127.0.0.1:%d/leaf.crl"}),
+        ("revocation: a must-staple leaf whose server staples nothing", 2,
+         good_leaf + "tlsfeature=status_request\n", {}),
+        ("revocation: a leaf whose TLS Feature asks for other extensions", 2,
+         good_leaf + "tlsfeature=status_request_v2\n", {}),
+        # The clock's floor (net.c clock_trust_floor): a clock that reads earlier
+        # than the build, or than /root/clock.good says the machine has been, is
+        # unset, and no certificate date is judged against it. A file that is no
+        # floor (text, past the NTP window, before the build, trailing text, a
+        # link, absent) changes nothing.
+        ("clock below the build floor", 2, good_leaf, {"shell": "floor"}),
+        ("clock below the last known good time", 2, good_leaf,
+         {"shell": "good", "clock_good": "future"}),
+        ("clock above the last known good time", 2, good_leaf,
+         {"shell": "good", "clock_good": "past"}),
+        ("a last known good time that is text", 2, good_leaf,
+         {"shell": "good", "clock_good": "text"}),
+        ("a last known good time past the NTP window", 2, good_leaf,
+         {"shell": "good", "clock_good": "far"}),
+        ("a last known good time before the build", 2, good_leaf,
+         {"shell": "good", "clock_good": "old"}),
+        ("a last known good time with trailing text", 2, good_leaf,
+         {"shell": "good", "clock_good": "trailing"}),
+        ("a last known good time behind a link", 2, good_leaf,
+         {"shell": "good", "clock_good": "link"}),
+        ("no last known good time", 2, good_leaf, {"shell": "good", "clock_good": None}),
     )
+    #   A revocation row is about the issuer's answer, not the leaf's key, so
+    #   it runs on a P-256 leaf unless it names its own, and again at the
+    #   tight tier; so does the plainest good chain, which names no source.
+    mutations = tuple(
+        (name, depth, leaf_ext, dict({"keys": ("P-256",), "tight": True}, **change))
+        if name.startswith("revocation:") else
+        (name, depth, leaf_ext, dict(change, tight=True) if name == "good" else change)
+        for name, depth, leaf_ext, change in mutations)
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
             ("RSA-2048", ["-newkey", "rsa:2048"]),
@@ -47986,6 +48958,8 @@ def harness_tls_chains(argv):
     every_key = ("P-256", "P-384", "RSA-2048")
     #       This tree's policy where it is stricter than openssl, on purpose.
     DELIBERATE = {
+        "clock below the build floor": "a clock before the build is unset, not merely wrong",
+        "clock below the last known good time": "a clock before the last time it was sure is unset",
         "distrust-after: leaf issued a second after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: leaf issued long after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: leaf under the root, issued after": "Mozilla's distrust-after date; openssl has none",
@@ -48006,6 +48980,43 @@ def harness_tls_chains(argv):
         "intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
         "first intermediate duplicate unknown extension": "RFC 5280 one-instance rule; OpenSSL accepts unknown duplicates",
         "first intermediate sixty-five extensions": "explicit per-certificate extension work ceiling",
+        "revocation: a must-staple leaf whose server staples nothing":
+            "RFC 7633: a leaf that asks for a staple is refused without a good one; "
+            "openssl verify has no handshake to ask",
+    }
+    #       Revocation sources that gave no usable answer -- unreachable, out
+    #       of scope, stale, unsigned, unreadable -- which the default tier
+    #       passes over and openssl -crl_check refuses; the tight tier has to
+    #       refuse them too, and say it could not check.
+    SOFT_FAIL = {
+        "revocation: the leaf's point serves another partition":
+            "its issuingDistributionPoint names another point",
+        "revocation: a partitioned CRL for CA certificates only": "out of its scope",
+        "revocation: the leaf's CRL is past its nextUpdate": "stale",
+        "revocation: the leaf's CRL is signed by another key of its issuer's name":
+            "its signature is not its issuer's",
+        "revocation: the leaf's CRL is not there": "unreachable (404)",
+        "revocation: the leaf's CRL carries an unknown critical extension": "unreadable",
+        "revocation: the leaf's CRL is a delta CRL": "not a whole CRL",
+    }
+    #       Where only the tight tier refuses what openssl accepts.
+    TIGHT_REFUSES = {
+        "revocation: the leaf's CRL is served as PEM":
+            "a CRL is DER on the wire; openssl verify is handed the file, the "
+            "client cannot read it, and the tight tier refuses an unread source",
+    }
+    #       What wget says for a refusal other than not trusted.
+    REVOKED_LINE = "ERROR: The certificate of '127.0.0.1' has been revoked."
+    UNCHECKED_LINE = ("ERROR: Whether the certificate of '127.0.0.1' is revoked "
+                      "could not be checked.")
+    SAYS = {
+        "revocation: the leaf on its issuer's CRL": REVOKED_LINE,
+        "revocation: the leaf on its partitioned CRL": REVOKED_LINE,
+        "revocation: the leaf on a CRL past its nextUpdate": REVOKED_LINE,
+        "revocation: the leaf on a CRL its RSA issuer signed": REVOKED_LINE,
+        "revocation: the intermediate on its issuer's CRL": REVOKED_LINE,
+        "revocation: the first intermediate on the root's CRL": REVOKED_LINE,
+        "revocation: a must-staple leaf whose server staples nothing": UNCHECKED_LINE,
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
@@ -48031,7 +49042,18 @@ def harness_tls_chains(argv):
         "DNS constraints leave an IP name alone",
         "a DNS constraint is compared without case",
         "two CAs' DNS constraints, the leaf inside both",
-    }
+        "revocation: the leaf's CRL lists another certificate",
+        "revocation: the leaf's CRL lists nothing",
+        "revocation: a partitioned CRL that names the leaf's point",
+        "revocation: the leaf's CRL is served as PEM",
+        "revocation: every certificate's CRL lists nothing",
+        "revocation: the leaf names its CRL over https",
+        "revocation: a leaf whose TLS Feature asks for other extensions",
+            "clock above the last known good time", "a last known good time that is text",
+        "a last known good time past the NTP window", "a last known good time before the build",
+        "a last known good time with trailing text", "a last known good time behind a link",
+        "no last known good time",
+    } | set(SOFT_FAIL)
     #       Where wget accepts what OpenSSL refuses, each with its reason and
     #       with Go's crypto/x509 on wget's side of it.
     LOOSER_THAN_OPENSSL = {
@@ -48117,8 +49139,10 @@ def harness_tls_chains(argv):
                 rewrite_cert_oids(name, issuer_name, rewrites)
 
         p384 = keys[1][1]
+        bench_root_key(work)
         for root in ("root", "stranger"):
-            openssl("req", "-x509", *p384, "-nodes", "-keyout", root + ".key", "-out",
+            made = ["-key", "root.key"] if root == "root" else [*p384, "-keyout", root + ".key"]
+            openssl("req", "-x509", *made, "-nodes", "-out",
                     root + ".pem", "-days", "3650", "-sha384", "-subj", "/CN=tls chains root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
@@ -48132,22 +49156,35 @@ def harness_tls_chains(argv):
             print("tls chains: a SHA-1 legacy root served too: NOT RUN -- "
                   "openssl will not sign with SHA-1 here")
             mutations = tuple(m for m in mutations if m[3].get("extra") != "legacy")
-        built = subprocess.run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
-                               cwd=HARNESS_ROOT, capture_output=True, text=True)
-        if built.returncode:
-            print(built.stderr[-3000:])
+        #   The shell, the same shell with a distrust-after date on the bench
+        #   root, and the same at the tight net tier, built side by side.
+        anchor = bench_anchor(work)
+        wanted = [("shell", ()),
+                  ("shell_distrust", ("TLS_BENCH_DISTRUST=20240615235959",)),
+                  ("shell_tight", ("MOONWATER_STRICT_NET=2",))]
+        #   The same shell with a floor in 2100 (every clock is below it), and
+        #   with the last-known-good file where the harness can write it,
+        #   when a mutation asks for either.
+        for variant, defines in (("floor", ("MOONWATER_CLOCK_FLOOR=4102444800ll",)),
+                                 ("good", ('CLOCK_GOOD_PATH="%s/clock.good"' % work,))):
+            if any(m[3].get("shell") == variant and (not args.only or args.only in m[0])
+                   for m in mutations):
+                wanted.append(("shell_" + variant, defines))
+        builds = build_together(
+            [spark_shell_command(args.cc, work / name, anchor, defines) for name, defines in wanted],
+            cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        failed = [build.stderr for build in builds]
+        if any(build.returncode for build in builds):
+            print("".join(failed)[-3000:])
             return 1
         (work / "wget").symlink_to(work / "shell")
-        #   The same shell with a distrust-after date on the bench root.
-        built = subprocess.run(spark_shell_command(
-            args.cc, work / "shell_distrust", bench_anchor(work),
-            ("TLS_BENCH_DISTRUST=20240615235959",)), cwd=HARNESS_ROOT,
-            capture_output=True, text=True)
-        if built.returncode:
-            print(built.stderr[-3000:])
-            return 1
-        (work / "distrust").mkdir()
-        (work / "distrust" / "wget").symlink_to(work / "shell_distrust")
+        for place in ("distrust", "tight"):
+            (work / place).mkdir()
+            (work / place / "wget").symlink_to(work / ("shell_" + place))
+        for name, _ in wanted[3:]:
+            variant = name[len("shell_"):]
+            (work / variant).mkdir()
+            (work / variant / "wget").symlink_to(work / name)
 
         #   caIssuers locations are served from the work directory.
         import functools
@@ -48182,9 +49219,54 @@ def harness_tls_chains(argv):
         threading.Thread(target=files.serve_forever, daemon=True).start()
         files_port = files.server_address[1]
 
+        def stamp(days):
+            moment = datetime.datetime.now(datetime.timezone.utc) + \
+                datetime.timedelta(days=days)
+            return moment.strftime("%Y%m%d%H%M%SZ")
+
+        def make_crl(spec):
+            """One CRL by `openssl ca -gencrl`, DER at its name on the files
+            server (PEM when it says so); its PEM, for openssl verify."""
+            name = spec["name"]
+            signer = spec.get("signer", spec["issuer"])
+            idp = spec.get("idp", "").replace("%d", str(files_port))
+            (work / (name + ".index")).write_text("")
+            (work / (name + ".number")).write_text("1000\n")
+            (work / (name + ".conf")).write_text(
+                "[ca]\ndefault_ca=crl\n[crl]\ndatabase=%s.index\ncrlnumber=%s.number\n"
+                "default_md=sha384\ncrl_extensions=crl_ext\n[crl_ext]\n"
+                "authorityKeyIdentifier=keyid:always\n%s%s%s" % (
+                    name, name, "issuingDistributionPoint=critical,@idp\n" if idp else "",
+                    spec.get("extra", ""), "[idp]\n" + idp if idp else ""))
+            def ca(*arguments):
+                done = subprocess.run(["openssl", *arguments], cwd=work,
+                                      capture_output=True, text=True)
+                if done.returncode:
+                    raise RuntimeError("openssl %s: %s" % (" ".join(arguments),
+                                                           done.stderr[-600:]))
+
+            for revoked in spec.get("revoke", ()):
+                ca("ca", "-config", name + ".conf", "-revoke", revoked + ".pem",
+                   "-keyfile", signer + ".key", "-cert", signer + ".pem")
+            last, following = spec.get("dates", (-1, 7))
+            ca("ca", "-config", name + ".conf", "-gencrl", "-keyfile", signer + ".key",
+               "-cert", signer + ".pem", "-out", name + ".pem",
+               "-crl_lastupdate", stamp(last), "-crl_nextupdate", stamp(following))
+            ca("crl", "-in", name + ".pem", "-outform",
+               "PEM" if spec.get("pem") else "DER", "-out", name)
+            return (work / (name + ".pem")).read_text()
+
         for mutation, depth, leaf_ext, change in mutations:
             if args.only and args.only not in mutation:
                 continue
+
+            def crl_point(name):
+                if change.get("dp_url") and name == "leaf":
+                    return "crlDistributionPoints=URI:%s\n" % (change["dp_url"] % files_port)
+                where = change.get("dp", {}).get(name)
+                return ("crlDistributionPoints=URI:http://127.0.0.1:%d/%s\n" % (
+                    files_port, where)) if where else ""
+
             for key_name, key in keys:
                 if key_name not in change.get("keys", every_key):
                     continue
@@ -48198,7 +49280,7 @@ def harness_tls_chains(argv):
                         (change.get("first_ca", "CA:TRUE,pathlen:%d" %
                                     change.get("first_pathlen", 1)),
                          change.get("first_key_usage", "keyCertSign,cRLSign")))
-                    first_extensions += change.get("first_extra", "")
+                    first_extensions += change.get("first_extra", "") + crl_point("first")
                     issue("first", p384, "/CN=tls chains first", top,
                           first_extensions,
                           change.get("first_dates", (-1, 90)),
@@ -48215,7 +49297,7 @@ def harness_tls_chains(argv):
                         (change.get("second_ca", "CA:TRUE,pathlen:0"),
                          change.get("second_key_usage", "keyCertSign,cRLSign")))
                     second_extensions += change.get("second_extra", "").replace(
-                        "%d", str(files_port))
+                        "%d", str(files_port)) + crl_point("second")
                     issue("second", dict(keys).get(change.get("second_key"), p384),
                           "/CN=tls chains second", "first",
                           second_extensions,
@@ -48228,15 +49310,29 @@ def harness_tls_chains(argv):
                     if change.get("impostor"):
                         issue("impostor", p384, "/CN=tls chains second", "first",
                               second_extensions)
+                    #   Another key under the second intermediate's own Name,
+                    #   to sign a CRL its issuer did not.
+                    if change.get("crlsigner"):
+                        issue("crlsigner", p384, "/CN=tls chains second", "first",
+                              second_extensions)
+                leaf_extensions = leaf_ext + crl_point("leaf")
                 if change.get("aia"):
-                    leaf_ext += "authorityInfoAccess=caIssuers;URI:%s\n" % (
+                    leaf_extensions += "authorityInfoAccess=caIssuers;URI:%s\n" % (
                         change["aia"] % files_port)
                     for name in chain:
                         openssl("x509", "-in", name + ".pem", "-outform", "DER",
                                 "-out", name + ".der")
-                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer, leaf_ext,
-                      change.get("leaf_dates", (-1, 90)),
+                issue("leaf", key, change.get("leaf_subject", "/CN=127.0.0.1"), issuer,
+                      leaf_extensions, change.get("leaf_dates", (-1, 90)),
                       change.get("leaf_digest", "sha384"))
+                #   A certificate the leaf's issuer revokes beside it.
+                if change.get("spare"):
+                    issue("spare", key, "/CN=tls chains spare", issuer, good_leaf)
+                for name in ("leaf.crl", "leaf-7.crl", "second.crl", "first.crl",
+                             "absent.crl"):
+                    if (work / name).exists():
+                        (work / name).unlink()
+                crl_pem = "".join(make_crl(spec) for spec in change.get("crls", ()))
                 if change.get("der_rewrite_oids") or change.get("der_dup_unknown"):
                     mutate_cert_der("leaf", issuer, change,
                                     "der_rewrite_oids", "der_dup_unknown")
@@ -48261,6 +49357,12 @@ def harness_tls_chains(argv):
                           "-verify_ip", "127.0.0.1"]
                 if served or change.get("openssl_untrusted"):
                     verify += ["-untrusted", "untrusted.pem"]
+                if change.get("crl_check"):
+                    verify += ["-crl_check" if change["crl_check"] == "leaf"
+                               else "-crl_check_all"]
+                    (work / "crls.pem").write_text(crl_pem)
+                    if crl_pem:
+                        verify += ["-CRLfile", "crls.pem"]
                 openssl_ok = subprocess.run(verify + ["leaf.pem"], cwd=work,
                                             capture_output=True).returncode == 0
                 if go_verifier:
@@ -48305,7 +49407,7 @@ def harness_tls_chains(argv):
                     continue
                 context.set_ecdh_curve("prime256v1")
 
-                def fetch(context):
+                def fetch(context, binary=None):
                     listener = socket.socket()
                     listener.bind(("127.0.0.1", 0))
                     listener.listen(1)
@@ -48330,7 +49432,9 @@ def harness_tls_chains(argv):
                     server = threading.Thread(target=serve, daemon=True)
                     server.start()
                     fetched = subprocess.run(
-                        [str(work / ("distrust/wget" if change.get("distrust") else "wget")),
+                        [str(binary or work / ((change.get("shell") or
+                                                ("distrust" if change.get("distrust") else "."))
+                                               + "/wget")),
                          "-q", "-O", "-", "https://127.0.0.1:%d/" %
                          listener.getsockname()[1]], capture_output=True, timeout=30,
                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
@@ -48338,7 +49442,43 @@ def harness_tls_chains(argv):
                     listener.close()
                     return fetched
 
+                if "clock_good" in change:
+                    kept = work / "clock.good"
+                    now_s = int(time.time())
+                    kept.unlink(missing_ok=True)
+                    (work / "clock.aside").unlink(missing_ok=True)
+                    if change["clock_good"] == "link":
+                        #   A day ahead, but behind a link: no floor.
+                        (work / "clock.aside").write_text("%d\n" % (now_s + 86400))
+                        kept.symlink_to(work / "clock.aside")
+                    elif change["clock_good"] is not None:
+                        kept.write_text({"future": "%d\n" % (now_s + 86400),
+                                         "past": "%d\n" % (now_s - 86400),
+                                         "text": "soon\n",
+                                         #   SNTP_WALL_MOST + 1, the NTP window's end.
+                                         "far": "4233462144\n",
+                                         "old": "1000000000\n",
+                                         "trailing": "%d x\n" % (now_s + 86400)
+                                         }[change["clock_good"]])
                 fetched = fetch(context)
+                #   The tight tier's verdict: the default's, but a refusal with
+                #   its own words where a source gave no usable answer.
+                if change.get("tight"):
+                    tight = fetch(context, work / "tight" / "wget")
+                    tight_ok = tight.returncode == 0 and tight.stdout.startswith(b"truste")
+                    default_ok = fetched.returncode == 0 and fetched.stdout.startswith(b"truste")
+                    refuses = mutation in SOFT_FAIL or mutation in TIGHT_REFUSES
+                    checks(tight_ok == (default_ok and not refuses),
+                           "%s with a %s leaf: the tight tier %s it (%s)" % (
+                               mutation, key_name, "accepts" if tight_ok else "refuses",
+                               tight.stderr.decode(errors="replace").strip()[:200]))
+                    if refuses and not tight_ok:
+                        checks(tight.returncode == 5 and tight.stderr.decode(
+                                   errors="replace") == UNCHECKED_LINE +
+                               "\nTo connect to 127.0.0.1 insecurely, use "
+                               "`--no-check-certificate'.\n",
+                               "%s with a %s leaf: the tight tier says %r with status %d" % (
+                                   mutation, key_name, tight.stderr[:200], tight.returncode))
                 # The same chain over TLS 1.2, whose Certificate is relaid
                 # for the one chain check: the verdict may not move.
                 context12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -48369,13 +49509,23 @@ def harness_tls_chains(argv):
                                 "no subject alternative name",
                                 #   OpenSSL's extfile keeps one of the two, a DNS name.
                                 "duplicate subjectAltName leaf extension") else
-                            "ERROR: The certificate of '127.0.0.1' is not trusted.")
+                            SAYS.get(mutation, "ERROR: The certificate of '127.0.0.1' is not trusted."))
                     checks(fetched.returncode == 5,
                            "%s: wget refuses the certificate with status %d, not GNU wget's 5 (%s)" % (
                                name, fetched.returncode, said.strip()[:200]))
-                    checks(said == line + "\nTo connect to 127.0.0.1 insecurely, use "
-                                   "`--no-check-certificate'.\n",
-                           "%s: wget says %r, not %r" % (name, said[:200], line))
+                    if mutation.startswith("clock below"):
+                        #   Not a certificate's fault but the clock's: no
+                        #   date was judged, and the way out is to set it.
+                        line = ("ERROR: The system clock has not been set (it reads before "
+                                "this system was built), so the certificate of '127.0.0.1' "
+                                "cannot be checked.\nRun `moonwater time sync`, or set it "
+                                "with `date -s`. To connect to 127.0.0.1 insecurely, use "
+                                "`--no-check-certificate'.\n")
+                        checks(said == line, "%s: wget says %r, not %r" % (name, said[:300], line))
+                    else:
+                        checks(said == line + "\nTo connect to 127.0.0.1 insecurely, use "
+                                       "`--no-check-certificate'.\n",
+                               "%s: wget says %r, not %r" % (name, said[:200], line))
                     #   (A server whose own key usage forbids the ECDHE signature
                     #   never sends the certificate over 1.2: that is 4.)
                     checks((fetched12.returncode, fetched12.stderr) in (
@@ -48385,7 +49535,7 @@ def harness_tls_chains(argv):
                                name, fetched12.stderr.decode(errors="replace")[:200], fetched12.returncode))
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE or
-                       mutation in LOOSER_THAN_OPENSSL,
+                       mutation in LOOSER_THAN_OPENSSL or mutation in SOFT_FAIL,
                        "%s: the OpenSSL oracle %s a chain the standards matrix says to %s" % (
                            name, "accepts" if openssl_ok else "refuses",
                            "accept" if expected else "refuse"))
@@ -48400,6 +49550,12 @@ def harness_tls_chains(argv):
                 if mutation in LOOSER_THAN_OPENSSL and ours_ok and not openssl_ok:
                     checks(not go_verifier or go_rows[-1][2],
                            "%s: listed as looser than OpenSSL but Go refuses it too" % name)
+                    continue
+                if mutation in SOFT_FAIL:
+                    checks(ours_ok and not openssl_ok,
+                           "%s: listed as a source the default passes over, but openssl %s "
+                           "it and wget %s it" % (name, "accepts" if openssl_ok else "refuses",
+                                                  "accepts" if ours_ok else "refuses"))
                     continue
                 checks(ours_ok == openssl_ok,
                        "%s: openssl %s it and wget %s it (%s)" % (
@@ -48461,6 +49617,498 @@ def harness_tls_chains(argv):
             else:
                 checks(True, "%s: no chain Go refuses that wget accepts" % name)
     return checks.verdict("tls chains", "tls-chains")
+
+
+def harness_nts(argv):
+    """Network Time Security end to end: this client's NTS-KE and NTP against
+    chrony's server, and against servers that are wrong.
+
+    The shell is built trusting a root the harness makes (TLS_BENCH_ANCHOR), and
+    everything runs in a user, mount and network namespace with only loopback,
+    /root and /run their own. chronyd (built with NTS; MOONWATER_CHRONYD or
+    --chronyd names it, and the lane is NOT RUN without one) serves NTS-KE and
+    NTP on loopback, announcing a time server of 127.0.0.3 that a relay in this
+    harness stands at and forwards to chrony, so that every reply can be
+    changed on the way back. `moonwater time sync` is the client. A kernel
+    will not let a namespace set the clock, so an answer that was believed
+    ends "answered, but the clock could not be set" under the name it came
+    from with "(NTS)" after it; an answer that was not ends "no server
+    answered" (the pool, asked after NTS fails, is not reachable here).
+
+    - the exchange works against chrony, sampling on and off; a second and a
+      tenth sync make no second key establishment (cookies are spent and
+      replaced by the replies), and a state file that is torn, planted or a
+      link to another file is no state (the exchange is made again, and the
+      file the link names is left as it was)
+    - a reply with any one of its bytes changed, cut short, replayed after a
+      fresh one, with its authenticator stripped, answered for another
+      identifier, or dropped is no answer; one that says NTSN (the cookie is
+      no good) makes exactly one new key establishment and then works
+    - a key-establishment server that selects no ALPN, speaks TLS 1.2 only,
+      has a certificate for another address, an expired one, never answers,
+      answers with noise, or answers past the room is no server
+    - a server named in the reply that is not a public address is not asked;
+      with `ntp nts off` no key establishment is made at all
+
+        python3 test/differential.py --harness nts [--chronyd PATH]
+    """
+    import socket
+    import ssl
+    import struct
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness nts")
+    parser.add_argument("--chronyd", default=os.environ.get("MOONWATER_CHRONYD") or shutil.which("chronyd"))
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    parser.add_argument("--inner")
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux" or not shutil.which("openssl") or not shutil.which("ip"):
+        print("nts: NOT RUN -- needs Linux, openssl and ip")
+        return 2
+    if not args.chronyd or not Path(args.chronyd).exists():
+        print("nts: NOT RUN -- needs chronyd built with NTS (MOONWATER_CHRONYD or --chronyd)")
+        return 2
+    if subprocess.run(["unshare", "-Urmn", "--fork", "true"], capture_output=True).returncode:
+        print("nts: NOT RUN -- no unprivileged user namespaces here")
+        return 2
+    if not args.inner:
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="nts-") as temporary:
+            work = Path(temporary)
+            openssl, issue = openssl_workbench(work)
+            p384 = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]
+            p256 = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]
+            bench_root_key(work)
+            openssl("req", "-x509", "-key", "root.key", "-out", "root.pem",
+                    "-days", "30", "-sha384", "-subj", "/CN=nts root",
+                    "-addext", "basicConstraints=critical,CA:TRUE",
+                    "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+            leaf = ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+                    "extendedKeyUsage=serverAuth\nsubjectAltName=IP:%s\n")
+            issue("good", p256, "/CN=nts", "root", leaf % "127.0.0.1")
+            issue("wrongname", p256, "/CN=nts", "root", leaf % "127.0.0.9")
+            issue("expired", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-400, -1))
+            #   Validity as a clock with a floor sees it: issued in two days, expired
+            #   yesterday, expired twenty days ago, expiring in twelve hours.
+            issue("future", p256, "/CN=nts", "root", leaf % "127.0.0.1", (2, 90))
+            issue("yesterday", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-30, -1))
+            issue("old", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-60, -20))
+            issue("expiring", p256, "/CN=nts", "root", leaf % "127.0.0.1", (-1, 0.5))
+            now_s = int(time.time())
+            #   The shell as shipped, and with a floor ten days back (the clock is above
+            #   it) and one a day ahead (the clock is below it).
+            #   And at the tight tier (MOONWATER_STRICT 2, what the hardened and
+            #   locked net profiles build), where an NTS reply must still be taken
+            #   whole and NTS is only unless /root/ntp.nts says otherwise.
+            for variant, defines in (("bin", ()), ("above", ("MOONWATER_CLOCK_FLOOR=%dll" % (now_s - 10 * 86400),)),
+                                     ("below", ("MOONWATER_CLOCK_FLOOR=%dll" % (now_s + 86400),)),
+                                     ("tight", ("MOONWATER_STRICT=2",))):
+                (work / variant).mkdir()
+                built = build_run(spark_shell_command(args.cc, work / variant / "moonwater",
+                                                           bench_anchor(work), defines),
+                                       cwd=HARNESS_ROOT, capture_output=True, text=True)
+                if built.returncode:
+                    print(built.stderr[-3000:])
+                    return 1
+                os.symlink("moonwater", work / variant / "wget")
+            ran = subprocess.run(["unshare", "-Urmn", "--fork", sys.executable,
+                                  os.path.abspath(__file__), "--harness", "nts", "--inner", str(work),
+                                  "--chronyd", args.chronyd], cwd=HARNESS_ROOT, stdin=subprocess.DEVNULL,
+                                 timeout=1500)
+            return ran.returncode
+
+    work = Path(args.inner)
+    checks = Checks()
+    subprocess.run(["mount", "-t", "tmpfs", "t", "/root"], check=True)
+    subprocess.run(["mount", "-t", "tmpfs", "t", "/run"], check=True)
+    Path("/run/moonwater").mkdir()
+    subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
+    mw = str(work / "bin/moonwater")
+
+    def chrony(tag, extra, ntsport, ntpport):
+        conf = work / ("chrony-%s.conf" % tag)
+        conf.write_text("port %d\nntsport %d\nbindaddress 127.0.0.1\nntsservercert %s\n"
+                        "ntsserverkey %s\nlocal stratum 3\nallow\ndriftfile %s\npidfile %s\ncmdport 0\n%s" %
+                        (ntpport, ntsport, work / "good.pem", work / "good.key",
+                         work / ("drift-" + tag), work / ("pid-" + tag), extra))
+        return subprocess.Popen([args.chronyd, "-x", "-d", "-f", str(conf)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # The servers: one announcing 127.0.0.3 (the relay's), one announcing a
+    # private address, one announcing only a port.
+    daemons = [chrony("relay", "ntsntpserver 127.0.0.3\n", 14460, 123),
+               chrony("private", "ntsntpserver 10.1.2.3\n", 14461, 124),
+               chrony("port", "", 14462, 12346)]
+    time.sleep(2.5)
+
+    #   A TCP proxy in front of chrony's key establishment that counts.
+    ke_count = [0]
+    stop = threading.Event()
+
+    def proxy(listen_port, target_port):
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", listen_port))
+        listener.listen(8)
+        listener.settimeout(0.5)
+
+        def pipe(a, b):
+            try:
+                while True:
+                    data = a.recv(4096)
+                    if not data:
+                        break
+                    b.sendall(data)
+            except OSError:
+                pass
+            for end in (a, b):
+                try:
+                    end.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        while not stop.is_set():
+            try:
+                client, _ = listener.accept()
+            except OSError:
+                continue
+            ke_count[0] += 1
+            upstream = socket.create_connection(("127.0.0.1", target_port))
+            threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
+            threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()
+
+    threading.Thread(target=proxy, args=(14470, 14460), daemon=True).start()
+
+    #   The NTP relay at 127.0.0.3:123: to chrony and back, changing the reply.
+    mode = {"name": "pass", "arg": 0, "last": None, "served": 0}
+
+    def relay():
+        front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        front.bind(("127.0.0.3", 123))
+        front.settimeout(0.5)
+        back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        back.settimeout(1.5)
+        while not stop.is_set():
+            try:
+                request, peer = front.recvfrom(2048)
+            except OSError:
+                continue
+            kind = mode["name"]
+            if kind == "drop":
+                continue
+            back.sendto(request, ("127.0.0.1", 123))
+            try:
+                reply = back.recv(2048)
+            except OSError:
+                continue
+            fresh = reply
+            if kind == "flip":
+                reply = bytearray(reply)
+                reply[mode["arg"] % len(reply)] ^= 0x01
+                reply = bytes(reply)
+            elif kind == "cut":
+                reply = reply[:mode["arg"]]
+            elif kind == "replay" and mode["last"]:
+                reply = mode["last"]
+            elif kind == "strip":
+                at = 48
+                while at + 4 <= len(reply) and reply[at:at + 2] != b"\x04\x04":
+                    at += struct.unpack(">H", reply[at + 2:at + 4])[0]
+                reply = reply[:at]
+            elif kind == "nak" or (kind == "nak-once" and mode["served"] == 0):
+                uid = request[48 + 4:48 + 36]
+                reply = (bytes([0x24, 0, 0, 0]) + bytes(8) + b"NTSN" + bytes(8) + request[40:48] +
+                         bytes(16) + b"\x01\x04\x00\x24" + uid)
+            elif kind == "uid":
+                reply = bytearray(reply)
+                reply[48 + 4] ^= 0x80
+                reply = bytes(reply)
+            elif kind == "extra":
+                reply = reply + b"\0\0\0\0"
+            mode["last"] = fresh
+            mode["served"] += 1
+            front.sendto(reply, peer)
+
+    threading.Thread(target=relay, daemon=True).start()
+
+    def sync(entries, sampling=False, timeout=60, shell=None):
+        Path("/root/ntp.nts.servers").write_text("\n".join(entries) + "\n")
+        Path("/root/ntp.sampling").write_text("on\n" if sampling else "off\n")
+        ran = subprocess.run([shell or mw, "time", "sync"], capture_output=True, text=True, timeout=timeout,
+                             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        text = re.sub(r"\x1b\[[0-9;]*m", "", ran.stdout + ran.stderr)
+        return text.splitlines()[0] if text else ""
+
+    def believed(line, name):
+        return ("%s (NTS) answered" % name) in line
+
+    state_path = Path("/run/moonwater/nts")
+    ke = "127.0.0.1:14470"
+
+    # The exchange works, and its state makes the next ones cheap.
+    for sampling in (False, True):
+        state_path.unlink(missing_ok=True)
+        ke_count[0] = 0
+        line = sync([ke], sampling)
+        checks(believed(line, ke), "an NTS exchange with chrony (sampling %s) says what it should: %s"
+               % (sampling, line))
+        checks(state_path.exists() and (state_path.stat().st_mode & 0o777) == 0o600,
+               "the NTS state is a file of mode 0600")
+        for _ in range(9):
+            line = sync([ke], sampling)
+            checks(believed(line, ke), "a later NTS exchange (sampling %s): %s" % (sampling, line))
+        checks(ke_count[0] == 1, "ten syncs with sampling %s made %d key establishments, not one"
+               % (sampling, ke_count[0]))
+
+    # State that is not state.
+    for label, damage in (("torn", lambda p: p.write_bytes(p.read_bytes()[:700])),
+                          ("zeroed", lambda p: p.write_bytes(bytes(len(p.read_bytes())))),
+                          ("a flipped magic", lambda p: p.write_bytes(b"\xff" + p.read_bytes()[1:])),
+                          ("empty", lambda p: p.write_bytes(b""))):
+        sync([ke])
+        damage(state_path)
+        before = ke_count[0]
+        line = sync([ke])
+        checks(believed(line, ke) and ke_count[0] == before + 1,
+               "NTS state %s is established again (%d new key establishments): %s"
+               % (label, ke_count[0] - before, line))
+    state_path.unlink()
+    victim = work / "victim"
+    victim.write_text("untouched\n")
+    state_path.symlink_to(victim)
+    line = sync([ke])
+    checks(believed(line, ke) and victim.read_text() == "untouched\n",
+           "a link planted as the state file is not written through: %s" % line)
+    state_path.unlink()
+
+    # Lost replies cost cookies only until the next one that comes: placeholders
+    # ask for the eight back.
+    def cookies_held():
+        raw = state_path.read_bytes()
+        return int.from_bytes(raw[4 + 200:4 + 208], "little")
+
+    state_path.unlink(missing_ok=True)
+    before = ke_count[0]
+    sync([ke])
+    checks(cookies_held() == 8, "a fresh state holds eight cookies, not %d" % cookies_held())
+    mode.update(name="drop")
+    for _ in range(3):
+        sync([ke])
+    checks(cookies_held() == 5, "three lost replies leave five cookies, not %d" % cookies_held())
+    mode.update(name="pass")
+    line = sync([ke])
+    checks(believed(line, ke) and cookies_held() == 8 and ke_count[0] == before + 1,
+           "one reply that comes brings the eight back with no new key establishment (%d cookies, %d establishments): %s"
+           % (cookies_held(), ke_count[0] - before, line))
+
+    # A reply that is not the server's.
+    sync([ke])
+    cookies_before = state_path.read_bytes()
+    for kind, arg in [("flip", at) for at in (0, 1, 2, 12, 24, 40, 47, 48, 49, 51, 52, 60, 84, 88, 90,
+                                                   120, 160, 170, 180)] + \
+                     [("cut", at) for at in (0, 47, 48, 60, 84, 100, 150, 200)] + \
+                     [("uid", 0), ("strip", 0), ("extra", 0), ("drop", 0), ("replay", 0)]:
+        mode.update(name=kind, arg=arg, last=mode["last"])
+        line = sync([ke])
+        checks("(NTS)" not in line and "no server answered" in line,
+               "a reply under %s %d is no answer: %s" % (kind, arg, line))
+    mode.update(name="pass")
+    line = sync([ke])
+    checks(believed(line, ke), "and the next honest one is an answer: %s" % line)
+
+    # The server says the cookie is no good: one new key establishment.
+    mode.update(name="nak-once", served=0)
+    before = ke_count[0]
+    line = sync([ke])
+    checks(believed(line, ke) and ke_count[0] == before + 1,
+           "NTSN makes one new key establishment, then the exchange works (%d): %s"
+           % (ke_count[0] - before, line))
+    mode.update(name="nak")
+    before = ke_count[0]
+    line = sync([ke])
+    checks("(NTS)" not in line and ke_count[0] == before + 1,
+           "NTSN every time is one more key establishment and no answer (%d): %s"
+           % (ke_count[0] - before, line))
+    mode.update(name="pass")
+
+    # A key-establishment server that is wrong.
+    def bad_server(port, cert, behaviour, wait=None):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(work / (cert + ".pem"), work / (cert + ".key"))
+        if behaviour == "tls12":
+            context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        else:
+            context.minimum_version = ssl.TLSVersion.TLSv1_3
+        if behaviour != "noalpn":
+            context.set_alpn_protocols(["ntske/1"])
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(2)
+        listener.settimeout(40)
+        accepted = []
+
+        def serve():
+            try:
+                raw, _ = listener.accept()
+                accepted.append(1)
+                raw.settimeout(15)
+                with context.wrap_socket(raw, server_side=True) as tls:
+                    tls.recv(4096)
+                    record = lambda kind, body: struct.pack(">HH", kind, len(body)) + body
+                    good = (record(0x8001, b"\0\0") + record(0x8004, b"\0\x0f") +
+                            record(5, b"A" * 100) + record(0x8000, b""))
+                    if behaviour == "noise":
+                        tls.sendall(bytes(range(256)) * 4)
+                    elif behaviour == "huge":
+                        tls.sendall(record(5, b"B" * 60000))
+                    elif behaviour == "silent":
+                        time.sleep(wait or 9)
+                    elif behaviour in ("noalpn", "ke"):
+                        tls.sendall(good)
+            except (OSError, ssl.SSLError):
+                pass
+            listener.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return thread, accepted
+
+    for number, (behaviour, cert) in enumerate((("noalpn", "good"), ("tls12", "good"), ("noise", "good"),
+                                                ("huge", "good"), ("good", "wrongname"),
+                                                ("good", "expired"), ("silent", "good"))):
+        port = 14500 + number
+        thread, accepted = bad_server(port, cert, behaviour)
+        Path("/run/moonwater/nts").unlink(missing_ok=True)
+        line = sync(["127.0.0.1:%d" % port])
+        thread.join(2)
+        checks("(NTS)" not in line and "no server answered" in line,
+               "a key-establishment server that is %s%s is no server: %s" %
+               (behaviour, "" if cert == "good" else " with the %s certificate" % cert, line))
+
+    # A server named in the reply that is not a public address is not asked: the
+    # address is on the loopback here and a listener on it says whether it was.
+    subprocess.run(["ip", "addr", "add", "10.1.2.3/32", "dev", "lo"], check=True)
+    private_seen = []
+
+    def private_listener():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("10.1.2.3", 124))
+        sock.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                private_seen.append(sock.recvfrom(2048)[0])
+            except OSError:
+                pass
+
+    threading.Thread(target=private_listener, daemon=True).start()
+    time.sleep(0.3)
+    line = sync(["127.0.0.1:14461"])
+    checks("(NTS)" not in line and not private_seen,
+           "a time server that is a private address is not asked (%d packets there): %s"
+           % (len(private_seen), line))
+    line = sync(["127.0.0.1:14462"])
+    checks(believed(line, "127.0.0.1:14462"), "a port named alone is taken: %s" % line)
+
+    # The connection that says what time it is is judged as of the floor: a
+    # certificate that is not yet valid, or expired since the floor and not
+    # before it, passes; one that had expired before the floor does not. wget
+    # from the same shells holds to the clock and to its floor.
+    def https_get(shell, cert, port):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(work / (cert + ".pem"), work / (cert + ".key"))
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(1)
+        listener.settimeout(15)
+
+        def serve():
+            try:
+                raw, _ = listener.accept()
+                raw.settimeout(10)
+                with context.wrap_socket(raw, server_side=True) as tls:
+                    tls.recv(4096)
+                    tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            except (OSError, ssl.SSLError):
+                pass
+            listener.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        ran = subprocess.run([str(Path(shell).parent / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" % port],
+                             capture_output=True, text=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        return ran.returncode, ran.stderr
+
+    port = 14520
+    for label, shell, cert, accepted in (
+            ("a certificate as issued", "bin", "good", True),
+            ("a certificate not yet valid, floor behind the clock", "above", "future", True),
+            ("a certificate expired since the floor", "above", "yesterday", True),
+            ("a certificate expired before the floor", "above", "old", False),
+            ("a certificate not yet valid, floor ahead of the clock", "below", "future", True),
+            ("a certificate that expires before the floor", "below", "expiring", False),
+            ("a certificate as issued, floor ahead of the clock", "below", "good", True)):
+        port += 1
+        thread, taken = bad_server(port, cert, "ke")
+        state_path.unlink(missing_ok=True)
+        sync(["127.0.0.1:%d" % port], shell=str(work / shell / "moonwater"))
+        thread.join(3)
+        checks(state_path.exists() == accepted,
+               "key establishment with %s (floor %s): %s" % (label, shell,
+                                                               "taken" if state_path.exists() else "refused"))
+    state_path.unlink(missing_ok=True)
+    port += 1
+    code, said = https_get(work / "above" / "moonwater", "yesterday", port)
+    checks(code == 5 and "has expired" in said,
+           "wget refuses the certificate that key establishment took (%d): %s" % (code, said.strip()[:120]))
+    port += 1
+    code, said = https_get(work / "below" / "moonwater", "good", port)
+    checks(code == 5 and "has not been set" in said,
+           "wget from a clock below its floor says so (%d): %s" % (code, said.strip()[:120]))
+
+    # The tight tier. Its NTS replies are longer than 48 bytes and are taken
+    # whole, as at the default tier; and with no word in /root/ntp.nts NTS is
+    # only there, so a plain server named in /root/ntp.server (chrony answers
+    # plain NTP on 127.0.0.1 too) is not asked, where the shell as shipped
+    # asks that server alone, in plain, as it always has.
+    tight = str(work / "tight" / "moonwater")
+    state_path.unlink(missing_ok=True)
+    line = sync([ke], shell=tight)
+    checks(believed(line, ke), "the tight tier takes an NTS answer: %s" % line)
+    Path("/root/ntp.server").write_text("127.0.0.1\n")
+    line = sync([ke])
+    checks("127.0.0.1 answered" in line and "(NTS)" not in line,
+           "a server of the machine's own is asked in plain at the default tier: %s" % line)
+    line = sync([ke], shell=tight)
+    checks(believed(line, ke), "the tight tier asks NTS and not the named plain server: %s" % line)
+    Path("/root/ntp.nts").write_text("on\n")
+    line = sync([ke], shell=tight)
+    checks("127.0.0.1 answered" in line and "(NTS)" not in line,
+           "ntp nts on at the tight tier is the default tier's rule: %s" % line)
+    Path("/root/ntp.nts").unlink()
+    Path("/root/ntp.server").unlink()
+
+    # NTS only: the same exchange, and nothing else would be asked.
+    Path("/root/ntp.nts").write_text("only\n")
+    line = sync([ke])
+    checks(believed(line, ke), "ntp nts only still takes an NTS answer: %s" % line)
+    line = sync(["127.0.0.1:14501"])
+    checks("(NTS)" not in line and "no server answered" in line,
+           "ntp nts only with no server to ask is no answer: %s" % line)
+
+    # NTS off: no key establishment at all.
+    Path("/root/ntp.nts").write_text("off\n")
+    before = ke_count[0]
+    line = sync([ke])
+    checks(ke_count[0] == before and "(NTS)" not in line,
+           "ntp nts off makes no key establishment: %s" % line)
+    Path("/root/ntp.nts").unlink()
+
+    stop.set()
+    for daemon in daemons:
+        daemon.terminate()
+    return checks.verdict("nts", "nts")
+
 
 
 def harness_tls_peer(argv):
@@ -48929,18 +50577,24 @@ def harness_tls_peer(argv):
         server_random = os.urandom(24) + flight.get("sentinel", os.urandom(8))
         extensions = (b"" if flight.get("no_ems") or flight.get("ems_unsent")
                       else b"\0\x17\0\0") + \
-            b"\xff\1\0\1\0" + flight.get("hello_extra", b"")
+            b"\xff\1\0\1\0" + flight.get("hello_extra", b"") + \
+            (b"\0\5\0\0" if flight.get("echo") else b"")
         mine = X25519PrivateKey.generate()
         params = b"\3\0\x1d\x20" + mine.public_key().public_bytes(
             serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        signature = leaf_key.sign(client_random + server_random + params,
-                                  ec.ECDSA(hashes.SHA256()))
+        signature = flight.get("key", leaf_key).sign(client_random + server_random + params,
+                                                     ec.ECDSA(hashes.SHA256()))
+        listed = b"".join(len(der).to_bytes(3, "big") + der
+                          for der in flight.get("chain", [leaf]))
         messages = [message(2, b"\3\3" + server_random + b"\x20" + os.urandom(32) +
                             b"\xc0\x2b\0" + len(extensions).to_bytes(2, "big") + extensions),
-                    message(11, (len(leaf) + 3).to_bytes(3, "big") +
-                            len(leaf).to_bytes(3, "big") + leaf),
+                    message(11, len(listed).to_bytes(3, "big") + listed),
                     message(12, params + b"\4\3" + len(signature).to_bytes(2, "big") +
                             signature)]
+        #   A CertificateStatus (RFC 6066 8) after the Certificate.
+        if flight.get("status") is not None:
+            messages[2:2] = [message(22, b"\1" + len(flight["status"]).to_bytes(3, "big") +
+                                     flight["status"])]
         if flight.get("request"):
             messages.append(message(13, b"\1\x40\0\2\4\3\0\0"))
         messages[1:1] = flight.get("extra", [])
@@ -49195,8 +50849,9 @@ def harness_tls_peer(argv):
             messages.append(request)
         for part in messages:
             transcript += part
-        signature = leaf_key.sign(b" " * 64 + b"TLS 1.3, server CertificateVerify\0" +
-                                  sha256(transcript), ec.ECDSA(hashes.SHA256()))
+        signature = flight.get("key", leaf_key).sign(
+            b" " * 64 + b"TLS 1.3, server CertificateVerify\0" + sha256(transcript),
+            ec.ECDSA(hashes.SHA256()))
         messages.append(message(15, b"\4\3" + len(signature).to_bytes(2, "big") + signature))
         transcript += messages[-1]
         finished_key = expand_label(server_hs.secret, b"finished", b"", 32)
@@ -49320,7 +50975,7 @@ def harness_tls_peer(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+            built = build_run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
                                    capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -49545,7 +51200,364 @@ def harness_tls_peer(argv):
                     b"TLSv1.2" in fetched.stdout)
             checks(ours == expect, "OpenSSL TLS 1.2 server, %s: wget %s it" % (
                 label, "accepts" if ours else "refuses"))
+        tls_peer_stapled(args, work, checks, serve, entry_with, app, close,
+                         length_head, body)
     return checks.verdict("tls peer", "tls-peer")
+
+
+def tls_peer_stapled(args, work, checks, serve, entry_with, app, close, length_head, body):
+    """tls_peer's stapled OCSP rows: a chain under a P-384 root that shells
+    built here trust (TLS_BENCH_ANCHOR), its leaf the scripted server's key,
+    and OCSP responses made by `openssl ocsp` (good, revoked, unknown,
+    another certificate's, a delegated responder with and without
+    id-kp-OCSPSigning, no nextUpdate, a broken signature) and by Python's
+    cryptography where openssl cannot say it (past its nextUpdate). Each is
+    stapled in the leaf's CertificateEntry over TLS 1.3 and, for some, in a
+    CertificateStatus over TLS 1.2, then served by `openssl s_server
+    -status_file` too, and wget's verdict -- at the default tier and the
+    tight one -- is held to `openssl ocsp -respin`'s on the same response:
+    good is taken, revoked is refused with GNU wget's line, and a response
+    openssl will not vouch for is passed over at the default tier and
+    refused at the tight one. Must-staple leaves (RFC 7633) are refused at
+    both without a good staple."""
+    import datetime
+    import shutil
+    import socket
+    import subprocess
+    import threading
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509 import ocsp
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    if not shutil.which("openssl"):
+        print("tls peer: stapled OCSP NOT RUN -- no openssl")
+        return
+    pki = work / "stapled"
+    pki.mkdir()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    day = datetime.timedelta(days=1)
+
+    def named(text):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, text)])
+
+    def make(name, subject, key, issuer, issuer_key, extensions, serial):
+        builder = (x509.CertificateBuilder().subject_name(named(subject))
+                   .issuer_name(issuer.subject if issuer else named(subject))
+                   .public_key(key.public_key()).serial_number(serial)
+                   .not_valid_before(now - day).not_valid_after(now + 30 * day)
+                   .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                       key.public_key()), critical=False))
+        if issuer:
+            builder = builder.add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                    issuer_key.public_key()), critical=False)
+        for extension, critical in extensions:
+            builder = builder.add_extension(extension, critical=critical)
+        cert = builder.sign(issuer_key or key, hashes.SHA384())
+        (pki / (name + ".pem")).write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        (pki / (name + ".key")).write_bytes(key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+        return cert
+
+    def usage(**bits):
+        fields = dict(digital_signature=False, content_commitment=False,
+                      key_encipherment=False, data_encipherment=False,
+                      key_agreement=False, key_cert_sign=False, crl_sign=False,
+                      encipher_only=False, decipher_only=False)
+        fields.update(bits)
+        return x509.KeyUsage(**fields)
+
+    root_key = ec.generate_private_key(ec.SECP384R1())
+    root = make("root", "tls peer root", root_key, None, None,
+                [(x509.BasicConstraints(ca=True, path_length=None), True),
+                 (usage(key_cert_sign=True, crl_sign=True), True)], 1)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca = make("ca", "tls peer ca", ca_key, root, root_key,
+              [(x509.BasicConstraints(ca=True, path_length=0), True),
+               (usage(key_cert_sign=True, crl_sign=True), True)], 2)
+    leaf_keys = {}
+    leaves = {}
+    for name, serial, extra in (
+            ("leaf", 3, []),
+            ("staple", 4, [(x509.TLSFeature([x509.TLSFeatureType.status_request]), False)]),
+            ("other", 5, []),
+            ("unknown", 8, [])):
+        leaf_keys[name] = ec.generate_private_key(ec.SECP256R1())
+        leaves[name] = make(name, "127.0.0.1", leaf_keys[name], ca, ca_key, [
+            (x509.BasicConstraints(ca=False, path_length=None), True),
+            (usage(digital_signature=True), True),
+            (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), False),
+            (x509.SubjectAlternativeName([x509.IPAddress(
+                __import__("ipaddress").ip_address("127.0.0.1"))]), False)] + extra, serial)
+    responders = {}
+    for name, serial, purposes in (("responder", 6, [ExtendedKeyUsageOID.OCSP_SIGNING]),
+                                   ("pretender", 7, [ExtendedKeyUsageOID.SERVER_AUTH])):
+        key = ec.generate_private_key(ec.SECP256R1())
+        responders[name] = make(name, "tls peer " + name, key, ca, ca_key, [
+            (usage(digital_signature=True), True),
+            (x509.ExtendedKeyUsage(purposes), False)], serial)
+
+    def run(*arguments):
+        done = subprocess.run(["openssl", *arguments], cwd=pki, capture_output=True,
+                              text=True)
+        if done.returncode:
+            raise RuntimeError("openssl %s: %s" % (" ".join(arguments), done.stderr[-600:]))
+        return done
+
+    #   The responder's database: two leaves good, the other leaf revoked,
+    #   and the unknown one not in it.
+    (pki / "index").write_text("")
+    (pki / "ca.conf").write_text("[ca]\ndefault_ca=c\n[c]\ndatabase=index\n"
+                                 "default_md=sha256\nunique_subject=no\n")
+    for name in ("leaf", "staple"):
+        run("ca", "-config", "ca.conf", "-valid", name + ".pem", "-keyfile", "ca.key",
+            "-cert", "ca.pem")
+    run("ca", "-config", "ca.conf", "-revoke", "other.pem", "-keyfile", "ca.key",
+        "-cert", "ca.pem", "-crl_reason", "keyCompromise")
+
+    def answer(cert, signer="ca", days=("-ndays", "1"), certs=False):
+        """openssl ocsp's response about cert, signed by signer."""
+        run("ocsp", "-issuer", "ca.pem", "-cert", cert + ".pem", "-no_nonce",
+            "-reqout", "request.der")
+        run("ocsp", "-index", "index", "-CA", "ca.pem", "-rsigner", signer + ".pem",
+            "-rkey", signer + ".key", "-reqin", "request.der", "-respout",
+            "response.der", *days, *([] if certs else ["-resp_no_certs"]))
+        return (pki / "response.der").read_bytes()
+
+    def stale(cert):
+        built = (ocsp.OCSPResponseBuilder()
+                 .add_response(cert=leaves[cert], issuer=ca, algorithm=hashes.SHA1(),
+                               cert_status=ocsp.OCSPCertStatus.GOOD,
+                               this_update=now - 10 * day, next_update=now - day,
+                               revocation_time=None, revocation_reason=None)
+                 .responder_id(ocsp.OCSPResponderEncoding.HASH, ca)
+                 .sign(ca_key, hashes.SHA256()))
+        return built.public_bytes(serialization.Encoding.DER)
+
+    good = answer("leaf")
+    broken = bytearray(good)
+    broken[-1] ^= 1
+    #   A delegated answer carries its responder's certificate, as RFC 6960
+    #   4.2.2.2 has it.
+    responses = {
+        "good": good,
+        "revoked": answer("other"),
+        "unknown": answer("unknown"),
+        "stale": stale("leaf"),
+        "no nextUpdate": answer("leaf", days=()),
+        "broken signature": bytes(broken),
+        "delegated": answer("leaf", "responder", certs=True),
+        "delegated without id-kp-OCSPSigning": answer("leaf", "pretender", certs=True),
+        "delegated, revoked": answer("other", "responder", certs=True),
+        "tryLater": bytes.fromhex("3003 0a01 03"),
+        "staple good": answer("staple"),
+    }
+
+    def openssl_says(response, cert):
+        """openssl ocsp -respin's word on response for cert: good, revoked or
+        none (no answer it vouches for)."""
+        (pki / "said.der").write_bytes(response)
+        done = subprocess.run(["openssl", "ocsp", "-respin", "said.der", "-issuer", "ca.pem",
+                               "-cert", cert + ".pem", "-CAfile", "root.pem", "-verify_other",
+                               "ca.pem", "-no_nonce"], cwd=pki, capture_output=True,
+                              text=True)
+        said = done.stdout + done.stderr
+        status = re.search(r"%s\.pem: (good|revoked|unknown)" % cert, said)
+        if "Response verify OK" not in said or not status:
+            return "none"
+        if status.group(1) == "revoked":
+            return "revoked"
+        return "good" if status.group(1) == "good" and "times invalid" not in said else "none"
+
+    #   Where this client and openssl part on the same response, on purpose.
+    DELIBERATE = {
+        "no nextUpdate": "a response with no nextUpdate cannot be told stale, and the "
+                         "CA/Browser Forum requires one; openssl takes it",
+    }
+    #   (row, the leaf served, the staple or None, TLS 1.2). openssl ocsp is
+    #   asked about the staple for the leaf served.
+    ROWS = [
+        ("good", "leaf", "good", False),
+        ("revoked", "other", "revoked", False),
+        ("unknown", "unknown", "unknown", False),
+        ("stale", "leaf", "stale", False),
+        ("no nextUpdate", "leaf", "no nextUpdate", False),
+        ("another certificate's", "leaf", "revoked", False),
+        ("broken signature", "leaf", "broken signature", False),
+        ("delegated", "leaf", "delegated", False),
+        ("delegated without id-kp-OCSPSigning", "leaf",
+         "delegated without id-kp-OCSPSigning", False),
+        ("delegated, revoked", "other", "delegated, revoked", False),
+        ("tryLater", "leaf", "tryLater", False),
+        ("must-staple with a good staple", "staple", "staple good", False),
+        ("must-staple with none", "staple", None, False),
+        ("must-staple with another certificate's", "staple", "good", False),
+        ("TLS 1.2 good", "leaf", "good", True),
+        ("TLS 1.2 revoked", "other", "revoked", True),
+        ("TLS 1.2 stale", "leaf", "stale", True),
+        ("TLS 1.2 echoed, nothing stapled", "leaf", None, True),
+        ("TLS 1.2 must-staple with none", "staple", None, True),
+    ]
+    shells = {}
+    commands = []
+    anchor = bench_anchor(pki)
+    for level, defines in (("default", ()), ("tight", ("MOONWATER_STRICT_NET=2",))):
+        shells[level] = pki / ("shell_" + level)
+        commands.append(spark_shell_command(args.cc, shells[level], anchor, defines))
+    builds = build_together(commands, cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+    errors = [build.stderr for build in builds]
+    if any(build.returncode for build in builds):
+        print("".join(errors)[-3000:])
+        checks(False, "stapled OCSP: the anchored shells build")
+        return
+    for level in shells:
+        (pki / level).mkdir()
+        (pki / level / "wget").symlink_to(shells[level])
+
+    def der(cert):
+        return leaves[cert].public_bytes(serialization.Encoding.DER)
+
+    def fetch(level, flight):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(20)
+        outcome = []
+        server = threading.Thread(target=serve, args=(listener, flight,
+                                                      [app(length_head + body), close],
+                                                      outcome), daemon=True)
+        server.start()
+        fetched = subprocess.run(
+            [str(pki / level / "wget"), "-q", "-O", "-",
+             "https://127.0.0.1:%d/" % listener.getsockname()[1]],
+            capture_output=True, timeout=40, env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+        server.join(25)
+        listener.close()
+        return fetched
+
+    ca_der = ca.public_bytes(serialization.Encoding.DER)
+    keys = leaf_keys
+    hint = "\nTo connect to 127.0.0.1 insecurely, use `--no-check-certificate'.\n"
+    lines = {"revoked": "ERROR: The certificate of '127.0.0.1' has been revoked." + hint,
+             "none": "ERROR: Whether the certificate of '127.0.0.1' is revoked could "
+                     "not be checked." + hint}
+    for row, cert, staple, tls12 in ROWS:
+        response = responses[staple] if staple else None
+        signing = keys[cert]
+        word = "absent" if response is None else openssl_says(response, cert)
+        must = cert == "staple"
+        if row in DELIBERATE:
+            checks(word == "good", "stapled OCSP, %s: openssl ocsp says %s, not good" % (row, word))
+            word = "none"
+        if tls12:
+            flight = {"tls12": True, "key": signing, "chain": [der(cert), ca_der],
+                      "echo": True, "status": response}
+        else:
+            flight = {"key": signing, "certificate": tls_peer_chain_body(
+                [der(cert), ca_der], {0: response} if response is not None else {})}
+        for level in ("default", "tight"):
+            fetched = fetch(level, flight)
+            ours = fetched.returncode == 0 and fetched.stdout == body
+            refuse = (word == "revoked" or (must and word != "good") or
+                      (level == "tight" and word == "none"))
+            checks(ours == (not refuse),
+                   "stapled OCSP, %s, %s tier: openssl ocsp says %s and wget %s it (%s)" % (
+                       row, level, word, "accepts" if ours else "refuses",
+                       fetched.stderr.decode(errors="replace").strip()[:200]))
+            if refuse and not ours:
+                checks(fetched.returncode == 5 and fetched.stderr.decode(errors="replace") ==
+                       lines["revoked" if word == "revoked" else "none"],
+                       "stapled OCSP, %s, %s tier: wget says %r with status %d" % (
+                           row, level, fetched.stderr[:200], fetched.returncode))
+
+    #   Shapes only the wire can have: a staple on the intermediate's entry
+    #   (read by nobody, as OpenSSL reads only the leaf's), a CertificateStatus
+    #   from a TLS 1.2 server that did not echo status_request, one that is
+    #   not ocsp, and an empty one.
+    ca_entry = {1: good}
+    for row, flight, take in (
+            ("a staple on the intermediate's entry", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], ca_entry)}, True),
+            ("TLS 1.2 CertificateStatus not echoed", {
+                "tls12": True, "key": keys["leaf"], "chain": [der("leaf"), ca_der],
+                "status": good}, False),
+            ("TLS 1.3 CertificateStatus of another type", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], {}, b"\0\5\0\4\2\0\0\0")}, False),
+            ("TLS 1.3 an empty CertificateStatus", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], {}, b"\0\5\0\0")}, False),
+            ("TLS 1.3 an SCT list beside the staple", {
+                "key": keys["leaf"], "certificate": tls_peer_chain_body(
+                    [der("leaf"), ca_der], {}, b"\0\x12\0\0" + tls_peer_status(good))},
+             False)):
+        fetched = fetch("default", flight)
+        ours = fetched.returncode == 0 and fetched.stdout == body
+        checks(ours == take, "stapled OCSP, %s: wget %s it (%s)" % (
+            row, "accepts" if ours else "refuses",
+            fetched.stderr.decode(errors="replace").strip()[:200]))
+
+    #   OpenSSL itself stapling, over both versions.
+    (pki / "chain.pem").write_bytes((pki / "leaf.pem").read_bytes() +
+                                    (pki / "ca.pem").read_bytes())
+    (pki / "other-chain.pem").write_bytes((pki / "other.pem").read_bytes() +
+                                          (pki / "ca.pem").read_bytes())
+    for label, cert, staple, version in (
+            ("good, TLS 1.3", "leaf", "good", "-tls1_3"),
+            ("good, TLS 1.2", "leaf", "good", "-tls1_2"),
+            ("revoked, TLS 1.3", "other", "revoked", "-tls1_3"),
+            ("revoked, TLS 1.2", "other", "revoked", "-tls1_2")):
+        (pki / "status.der").write_bytes(responses[staple])
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        server = subprocess.Popen(
+            ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+             str(pki / (cert + ".pem")), "-key", str(pki / (cert + ".key")), "-cert_chain",
+             str(pki / "ca.pem"), "-status_file", str(pki / "status.der"), version, "-www",
+             "-naccept", "1"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        ready = b""
+        for _ in range(8):
+            ready = server.stdout.readline()
+            if not ready or b"ACCEPT" in ready:
+                break
+        fetched = subprocess.run(
+            [str(pki / "default" / "wget"), "-q", "-O", "-", "https://127.0.0.1:%d/" % port],
+            capture_output=True, timeout=40, env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+        server.kill()
+        server.wait()
+        ours = b"ACCEPT" in ready and fetched.returncode == 0
+        checks(ours == (staple == "good") and
+               (ours or fetched.stderr.decode(errors="replace") == lines["revoked"]),
+               "openssl s_server stapling %s: wget %s it (%s)" % (
+                   label, "accepts" if ours else "refuses",
+                   fetched.stderr.decode(errors="replace").strip()[:200]))
+
+
+def tls_peer_status(response):
+    """A status_request extension carrying response as a CertificateStatus."""
+    status = b"\1" + len(response).to_bytes(3, "big") + response
+    return b"\0\5" + len(status).to_bytes(2, "big") + status
+
+
+def tls_peer_chain_body(ders, staples, leaf_extensions=None):
+    """A TLS 1.3 Certificate body: an empty context and an entry for each
+    certificate, staples[k] stapled in entry k's extensions, or the leaf's
+    extensions exactly as given."""
+    entries = b""
+    for k, der in enumerate(ders):
+        extensions = (leaf_extensions if k == 0 and leaf_extensions is not None else
+                      tls_peer_status(staples[k]) if staples.get(k) is not None else b"")
+        entries += len(der).to_bytes(3, "big") + der + len(extensions).to_bytes(2, "big") + \
+            extensions
+    return b"\0" + len(entries).to_bytes(3, "big") + entries
 
 
 def harness_https_downgrade(argv):
@@ -49579,9 +51591,8 @@ def harness_https_downgrade(argv):
 
         openssl, issue = openssl_workbench(work)
 
-        openssl("req", "-x509", "-newkey", "ec",
-                "-pkeyopt", "ec_paramgen_curve:secp384r1", "-nodes",
-                "-keyout", "root.key", "-out", "root.pem", "-days", "3650",
+        bench_root_key(work)
+        openssl("req", "-x509", "-key", "root.key", "-out", "root.pem", "-days", "3650",
                 "-sha384", "-subj", "/CN=https downgrade root",
                 "-addext", "basicConstraints=critical,CA:TRUE",
                 "-addext", "keyUsage=critical,keyCertSign,cRLSign")
@@ -49591,7 +51602,7 @@ def harness_https_downgrade(argv):
         (work / "chain.pem").write_text(
             (work / "leaf.pem").read_text() + (work / "root.pem").read_text())
 
-        built = subprocess.run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
+        built = build_run(spark_shell_command(args.cc, work / "shell", bench_anchor(work)),
                                cwd=HARNESS_ROOT, capture_output=True, text=True)
         if built.returncode:
             print(built.stderr[-3000:])
@@ -49842,8 +51853,8 @@ def harness_http_response_framing(argv):
 
     net = (HARNESS_ROOT / "src/net/net.c").read_text()
     defines = net[net.index("#define HTTP_PORT 80"):
-                  net.index("#define HTTP_WRITE (-11)") +
-                  len("#define HTTP_WRITE (-11)\n")]
+                  net.index("#define HTTP_UNDECLARED (-22)") +
+                  len("#define HTTP_UNDECLARED (-22)\n")]
     headers = net[net.index("//      Where the header ends"):
                   net.index(
                       "return http_response_framing_from(bytes, size, "
@@ -49959,6 +51970,10 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
+#define TLS_CLOCK (-8)
+#define TLS_UNLOGGED (-9)
 #define ENOSPC 28
 #define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
@@ -50026,7 +52041,7 @@ static bipolar system_call_3(positive a, positive b, positive c, positive d)
         abort();
         return -1;
 }
-"""
+""" + byte_reader_source() + positive_append_digit_source()
 
     driver = r"""
 static void emit_hex(const p8 *bytes, positive length)
@@ -50303,6 +52318,51 @@ int main(void)
          b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello", None),
         ("cl-list-different", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!", None),
+        ("cl-list-triple-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5, 5\r\n\r\nhello", b"hello"),
+        ("cl-list-spread-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5 ,5\r\n\r\nhello", b"hello"),
+        ("cl-field-and-list-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5, 5\r\n\r\nhello",
+         b"hello"),
+        ("cl-list-leading-zero-same", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 05, 5\r\n\r\nhello", b"hello"),
+        ("cl-list-trailing-comma", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5,\r\n\r\nhello", None),
+        ("cl-list-leading-comma", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: ,5\r\n\r\nhello", None),
+        ("cl-list-empty-middle", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5,,5\r\n\r\nhello", None),
+        ("cl-list-then-different-field", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\nContent-Length: 6\r\n\r\nhello!",
+         None),
+        ("cl-three-fields-last-differs", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n"
+         b"Content-Length: 4\r\n\r\nhello", None),
+        ("reason-phrase-del", "frame",
+         b"HTTP/1.1 200 O\x7fK\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-esc", "frame",
+         b"HTTP/1.1 200 O\x1b[2JK\r\nContent-Length: 0\r\n\r\n", None),
+        ("reason-phrase-nul", "frame",
+         b"HTTP/1.1 200 O\x00K\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-first-field", "frame",
+         b"HTTP/1.1 200 OK\r\n X: y\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-chain", "frame",
+         b"HTTP/1.1 200 OK\r\nX: a\r\n b\r\n\tc\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-after-cl-chain", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n a\r\n b\r\n\r\n", None),
+        ("obs-fold-te", "frame",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n , gzip\r\n\r\n0\r\n\r\n",
+         None),
+        ("obs-fold-control", "frame",
+         b"HTTP/1.1 200 OK\r\nX: a\r\n b\x01c\r\nContent-Length: 0\r\n\r\n", None),
+        ("obs-fold-location-on-200", "frame",
+         b"HTTP/1.1 200 OK\r\nLocation: /a\r\n /b\r\nContent-Length: 0\r\n\r\n", None),
+        ("cl-list-overflow", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, 18446744073709551621\r\n\r\nhello",
+         None),
+        ("cl-list-sign", "frame",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5, +5\r\n\r\nhello", None),
         ("cl-hex", "frame",
          b"HTTP/1.1 200 OK\r\nContent-Length: 0x5\r\n\r\nhello", None),
         ("cl-padded", "full",
@@ -50361,6 +52421,13 @@ int main(void)
         "chunk-size-leading-zeros", "chunk-lf-only-delim",
         "cl-padded", "status-no-reason", "field-obs-text-value",
         "chunk-size-trailing-blank", "chunk-uppercase-hex",
+        #   What GNU wget 1.25.0 and curl 8.22.0 both take in a head, so the
+        #   default does (TIGHT_REFUSES has every one of them).
+        "reason-phrase-control", "reason-phrase-del", "reason-phrase-esc",
+        "content-length-equal-twice", "cl-list-same", "cl-list-triple-same",
+        "cl-list-spread-same", "cl-field-and-list-same", "cl-list-leading-zero-same",
+        "obs-fold-date", "obs-fold-first-field", "obs-fold-chain",
+        "obs-fold-location-on-200",
     }
     #       Moonwater policy where http.client disagrees on the same bytes.
     DELIBERATE = {
@@ -50368,16 +52435,35 @@ int main(void)
             "RFC 9112 forbids TE with Content-Length; Moonwater refuses both",
         "duplicate-content-length":
             "duplicate framing fields are refused before a length is chosen",
-        "reason-phrase-control":
-            "a control byte in the status line is refused: it would reach logs and terminals",
-        "content-length-equal-twice":
-            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-trailing-comma":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-leading-comma":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-empty-middle":
+            "an empty element in a Content-Length list is malformed (curl refuses it too)",
+        "cl-list-then-different-field":
+            "Content-Length values that disagree are refused, as curl does (wget reads the first)",
+        "cl-three-fields-last-differs":
+            "Content-Length values that disagree are refused, as curl does (wget reads the first)",
+        "cl-list-overflow":
+            "a number past 2^64 is not the 5 before it; GNU wget and curl both read the first",
+        "cl-list-sign":
+            "a Content-Length element is plain DIGIT (curl refuses +5 too)",
+        "reason-phrase-nul":
+            "a NUL in the status line is refused (curl refuses it too)",
+        "obs-fold-after-cl-chain":
+            "a fold after Content-Length is refused: curl refuses it, wget reads the length",
+        "obs-fold-te":
+            "a fold after Transfer-Encoding is refused: curl refuses it, wget prints the chunks raw",
+        "obs-fold-control":
+            "response field values reject embedded controls (NUL/CR/LF), a folded line too",
         "content-length-conflict-twice":
             "duplicate framing fields are refused before a length is chosen",
         "bare-cr-in-location":
             "response field values reject embedded controls (NUL/CR/LF)",
         "obs-fold-location":
-            "obsolete line folding is refused so a proxy cannot split views",
+            "a redirect's folded Location is refused: GNU wget follows it to "
+            "/a%20%20%20/b and curl to /a%20/b",
         "space-before-colon":
             "field names are exact tokens; whitespace before ':' is not a name",
         "te-not-chunked":
@@ -50400,8 +52486,6 @@ int main(void)
             "response field values reject embedded controls (NUL/CR/LF)",
         "bare-cr-status-line":
             "a bare CR mid-status-line is not a field separator",
-        "obs-fold-date":
-            "obsolete line folding is refused so a proxy cannot split views",
         "obs-fold-cl":
             "obsolete line folding is refused so a proxy cannot split views",
         "tab-before-colon":
@@ -50440,8 +52524,6 @@ int main(void)
             "chunk framing allows LF-only delimiters like response headers",
         "cl-negative":
             "Content-Length is plain DIGIT; a sign is malformed",
-        "cl-list-same":
-            "a list in Content-Length is a duplicate framing field by another spelling",
         "cl-list-different":
             "a list in Content-Length is a duplicate framing field by another spelling",
         "cl-hex":
@@ -50465,8 +52547,37 @@ int main(void)
     #       all of them: a real server sends 204 with Content-Length: 0, both
     #       tools ignore a 204's declared body and print a 205's, and this
     #       client closes the connection after one response, so a declared
-    #       body left unread can never be taken for the next response.
+    #       body left unread can never be taken for the next response; both
+    #       read a Content-Length that repeats one number, a fold after an
+    #       ordinary field and any reason-phrase byte but NUL and CR (measured
+    #       on the box against GNU wget 1.25.0 and curl 8.22.0, 2026-10-09).
     TIGHT_REFUSES = {
+        "reason-phrase-control":
+            "a control byte in the status line would reach logs and terminals",
+        "reason-phrase-del":
+            "a control byte in the status line would reach logs and terminals",
+        "reason-phrase-esc":
+            "a control byte in the status line would reach logs and terminals",
+        "content-length-equal-twice":
+            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-triple-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-list-spread-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "cl-field-and-list-same":
+            "duplicate framing fields are refused before a length is chosen",
+        "cl-list-leading-zero-same":
+            "a list in Content-Length is a duplicate framing field by another spelling",
+        "obs-fold-date":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-first-field":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-chain":
+            "obsolete line folding is refused so a proxy cannot split views",
+        "obs-fold-location-on-200":
+            "obsolete line folding is refused so a proxy cannot split views",
         "204-with-content-length":
             "RFC 9110 15.3.5 forbids Content-Length on 204",
         "204-with-transfer-encoding":
@@ -50560,11 +52671,11 @@ int main(void)
             "%s %s %s\n" % (name, mode, wire.hex() or "00")
             for name, mode, wire, _ in CASES)
 
-        def probe(strict):
+        def probe(strict, text=stdin):
             """The matrix through the lifted framing at a MOONWATER_STRICT
             tier: (verdict lines, None), or (None, why it failed)."""
             binary = work / ("http_response_framing_%d" % strict)
-            built = subprocess.run(
+            built = build_run(
                 [compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
                  "-DMOONWATER_STRICT=%d" % strict,
                  str(work / "http_response_framing.c"), "-o", str(binary)],
@@ -50572,7 +52683,7 @@ int main(void)
             if built.returncode:
                 return None, ("the response framing probe did not build:\n" +
                               built.stderr[-3000:])
-            ran = subprocess.run([str(binary)], input=stdin,
+            ran = subprocess.run([str(binary)], input=text,
                                  capture_output=True, text=True, timeout=60)
             if ran.returncode or ran.stderr.strip():
                 return None, ("the probe aborted:\n" +
@@ -50648,6 +52759,145 @@ int main(void)
                 checks(py_body == want_body,
                        "%s: http.client body %r != %r" % (
                            name, py_body, want_body))
+
+        #       Generated heads against a model written from the structure
+        #       that made them, at both tiers. The model knows nothing of
+        #       net.c: it says what wget and curl both take (the default
+        #       reads an identical duplicate Content-Length, a list of one
+        #       number, a fold after an ordinary field or a non-redirect's
+        #       Location, and any reason-phrase byte but NUL and a bare CR),
+        #       what curl refuses or the two read apart (a pair that
+        #       disagrees, an empty list element, a fold after a framing field
+        #       or a redirect's Location) and what only the tight tier refuses
+        #       (every one of those, and a 204 or 205 whose declaration cannot
+        #       describe no content).
+        def head_spec(rng):
+            spec = {"code": rng.choice([200, 200, 204, 205, 302, 304, 404]),
+                    "reason": rng.choice(["plain"] * 12 + ["none", "ctl", "del",
+                                                           "esc", "nul", "cr"]),
+                    "fields": [], "folds": {}}
+            for _ in range(rng.choice([0, 1, 1, 1, 2, 3])):
+                base = rng.choice([0, 3, 3, 7])
+                elements = []
+                for _ in range(rng.choice([1, 1, 1, 2, 3])):
+                    roll = rng.random()
+                    if roll < 0.10:
+                        elements.append(str(base + 1))
+                    elif roll < 0.15:
+                        elements.append("")
+                    elif roll < 0.18:
+                        elements.append("x")
+                    elif roll < 0.30:
+                        elements.append("0" + str(base))
+                    else:
+                        elements.append(str(base))
+                spec["fields"].append(("content-length", elements))
+            for _ in range(rng.choice([0, 0, 0, 0, 0, 1, 1, 2])):
+                spec["fields"].append(("transfer-encoding", [rng.choice(
+                    ["chunked", "chunked", "gzip"])]))
+            if spec["code"] in (300, 301, 302, 303, 307, 308) or rng.random() < 0.15:
+                for _ in range(rng.choice([1, 1, 1, 2])):
+                    spec["fields"].append(("location", ["/next"]))
+            for _ in range(rng.choice([0, 1, 2])):
+                spec["fields"].append(("x-pad", ["v"]))
+            rng.shuffle(spec["fields"])
+            spec["folds"] = {at: rng.choice([1, 1, 2]) for at in
+                             range(-1, len(spec["fields"]))
+                             if rng.random() < 0.12}
+            return spec
+
+        def head_wire(spec):
+            reason = {"plain": b" OK", "none": b"", "ctl": b" O\x01K",
+                      "del": b" O\x7fK", "esc": b" O\x1b[2JK",
+                      "nul": b" O\x00K", "cr": b" O\rK"}[spec["reason"]]
+            out = b"HTTP/1.1 %d%s\r\n" % (spec["code"], reason)
+
+            def folds(at):
+                return b"".join([b" folded\r\n", b"\tmore\r\n"][:spec["folds"].get(at, 0)])
+
+            out += folds(-1)
+            for at, (name, elements) in enumerate(spec["fields"]):
+                value = ", ".join(elements) if name != "transfer-encoding" else elements[0]
+                if name == "content-length" and at % 2:
+                    value = " ,".join(elements)
+                out += b"%s: %s\r\n" % (name.title().encode(), value.encode()) + folds(at)
+            return out + b"\r\n"
+
+        def head_model(spec, tier):
+            """None for a refusal, else the body length declared (or -1)."""
+            redirect = spec["code"] in (300, 301, 302, 303, 307, 308)
+            framing = ("content-length", "transfer-encoding") + (
+                ("location",) if redirect else ())
+            if spec["reason"] in ("nul", "cr"):
+                return None
+            if spec["reason"] in ("ctl", "del", "esc") and tier == 2:
+                return None
+            names = [name for name, _ in spec["fields"]]
+            for at in spec["folds"]:
+                if tier == 2:
+                    return None
+                if at >= 0 and names[at] in framing:
+                    return None
+            if names.count("transfer-encoding") > 1:
+                return None
+            if "transfer-encoding" in names:
+                if "content-length" in names or \
+                        [e for n, e in spec["fields"]
+                         if n == "transfer-encoding"][0][0] != "chunked":
+                    return None
+            if redirect and names.count("location") > 1:
+                return None
+            length = -1
+            lists = [e for n, e in spec["fields"] if n == "content-length"]
+            if lists:
+                flat = [x for e in lists for x in e]
+                if any(not x.isdigit() for x in flat):
+                    return None
+                if tier == 2 and (len(lists) > 1 or len(lists[0]) > 1):
+                    return None
+                if len({int(x) for x in flat}) > 1:
+                    return None
+                length = int(flat[0])
+            if tier == 2 and ((spec["code"] == 204 and
+                               ("transfer-encoding" in names or lists)) or
+                              (spec["code"] == 205 and length > 0)):
+                return None
+            return length
+
+        generator = random.Random(0x7157)
+        specs = [head_spec(generator) for _ in range(4000)]
+        wires = []
+        for spec in specs:
+            model = head_model(spec, 1)
+            wires.append(head_wire(spec) +
+                         b"x" * (max(model, 0) if model is not None else 3))
+        text = "".join("g%d frame %s\n" % (n, wire.hex())
+                       for n, wire in enumerate(wires))
+        for tier in (1, 2):
+            said, failure = probe(tier, text)
+            if failure:
+                checks(False, "generated heads, tier %d: %s" % (tier, failure))
+                continue
+            said = {line.split("\t")[0]: line.split("\t") for line in said.splitlines()}
+            wrong = 0
+            accepted = 0
+            for n, spec in enumerate(specs):
+                expect = head_model(spec, tier)
+                row = said["g%d" % n]
+                ours = row[1] == "ACCEPT"
+                accepted += ours
+                body = binascii.unhexlify(row[2]) if row[2] != "-" else None
+                good = ours == (expect is not None) and (
+                    not ours or expect < 0 or body == b"x" * expect)
+                if not good:
+                    wrong += 1
+                    if wrong <= 5:
+                        checks(False, "generated head %d at tier %d: model %s, tier says "
+                               "%s %r for %r" % (
+                                   n, tier, "refuse" if expect is None else
+                                   "accept %d" % expect, row[1], body, wires[n][:200]))
+            checks(wrong == 0, "generated heads at tier %d: %d of %d differ from the model "
+                   "(%d accepted)" % (tier, wrong, len(specs), accepted))
 
     if not curl_seen:
         print("http response framing: curl NOT RUN -- curl is not installed")
@@ -50732,6 +52982,7 @@ typedef const p8 *const_string;
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define memory_copy memmove
 #define memory_copy_apart memcpy
+#define memory_compare memcmp
 #define memory_fill(at, v, n) memset((at), (int)(v), (n))
 #define string_get(s) (*(const unsigned char *)(s))
 #define string_is(source, value) (*(source) == (value))
@@ -50838,6 +53089,11 @@ static positive positive_into(p8 *into, positive value)
 {
         return (positive)sprintf((char *)into, "%lu", value);
 }
+static positive host_into(p8 *into, p32 host)
+{
+        return (positive)sprintf((char *)into, "%u.%u.%u.%u", host >> 24,
+                                 host >> 16 & 255, host >> 8 & 255, host & 255);
+}
 static positive string_digits_max(string_address source, positive bound,
                                   positive *used)
 {
@@ -50862,7 +53118,7 @@ static bool memory_from_hex_exact(address_any into, const p8 *text, positive byt
         return true;
 }
 typedef struct { p8 *bytes; positive room; positive used; } byte_store;
-""" + digits + appends + r"""
+""" + digits + appends + positive_append_digit_source() + r"""
 static bool fuzz_reserve(byte_store *store, positive wanted, positive step)
 {
         (void)step;
@@ -50894,6 +53150,8 @@ static positive fuzz_segment_size;
 static positive fuzz_segment_at;
 static positive fuzz_opened;
 static p32 fuzz_connected[32];
+static bool fuzz_connected_name[32];
+static bool fuzz_identity_name;
 static positive fuzz_connected_count;
 static positive fuzz_requests;
 static char fuzz_identity_host[256];
@@ -50986,9 +53244,11 @@ static int socket_connect(b32 h, const void *where, positive size)
         fuzz_identity_port = to->port;
         fuzz_identity_tls = false;
         fuzz_identity_pending = true;
-        if (fuzz_connected_count < 32)
+        if (fuzz_connected_count < 32) {
+                fuzz_connected_name[fuzz_connected_count] = fuzz_identity_name;
                 fuzz_connected[fuzz_connected_count++] =
                     to->host;
+        }
         return 0;
 }
 static int socket_close(b32 h) { (void)h; return 0; }
@@ -51005,15 +53265,26 @@ static bool network_deadline_left(const network_deadline *d, positive *s,
         *n = d->budget % 1000000000UL;
         return d->began && d->budget;
 }
+static bool network_deadline_begin_within(network_deadline *d, positive s,
+                                          positive n, const network_deadline *outer)
+{
+        if (!network_deadline_begin(d, s, n))
+                return false;
+        if (outer && outer->budget < d->budget)
+                d->budget = outer->budget;
+        return !outer || outer->began;
+}
 
 /* Every request this client writes: one request line and four fields, each
    ended by CRLF, a blank line, and no other CR, LF or control. */
+static bool fuzz_request_head;
 static void fuzz_request(const p8 *data, positive length)
 {
         positive lines = 0;
+        positive method = fuzz_request_head ? 5 : 4;
         fuzz_requests++;
-        if (length < 4 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
-            memcmp(data, "GET /", 5))
+        if (length < 5 || memcmp(data + length - 4, "\r\n\r\n", 4) ||
+            memcmp(data, fuzz_request_head ? "HEAD /" : "GET /", method + 1))
                 fuzz_die("request framing");
         for (positive at = 0; at < length; at++) {
                 p8 byte = data[at];
@@ -51030,7 +53301,7 @@ static void fuzz_request(const p8 *data, positive length)
                 fuzz_die("request line count");
         /* "GET " target " HTTP/1.x" CR: the target holds no space. */
         positive line = (positive)((const p8 *)memchr(data, '\r', length) - data);
-        if (line < 14 || memchr(data + 4, ' ', line - 13))
+        if (line < method + 10 || memchr(data + method, ' ', line - method - 9))
                 fuzz_die("space inside the request target");
         if (fuzz_identity_pending) {
                 const p8 *field = memmem(data, length, "\r\nHost: ", 8);
@@ -51107,6 +53378,10 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_EXPIRED (-3)
 #define TLS_NOT_YET (-4)
 #define TLS_MISMATCH (-5)
+#define TLS_REVOKED (-6)
+#define TLS_UNCHECKED (-7)
+#define TLS_CLOCK (-8)
+#define TLS_UNLOGGED (-9)
 typedef struct
 {
         p8 *receive;
@@ -51256,30 +53531,75 @@ static bipolar system_call_3(positive number, positive fd, positive spans,
         return (bipolar)wrote;
 }
 
+/* lib.c's string_to_host: four octets of one to three digits, no leading
+   zero, single dots, nothing after; the address in host order, or -1. */
+static bipolar string_to_host(string_address input)
+{
+        p32 address = 0;
+        for (int part = 0; part < 4; part++) {
+                p32 octet = 0;
+                int digits = 0;
+                if (part && *input++ != '.')
+                        return -1;
+                while (*input >= '0' && *input <= '9') {
+                        if (digits == 3 || (digits && !octet))
+                                return -1;
+                        octet = octet * 10 + (p32)(*input++ - '0');
+                        digits++;
+                }
+                if (!digits || octet > 255)
+                        return -1;
+                address = address << 8 | octet;
+        }
+        return *input ? -1 : (bipolar)address;
+}
+static bool http_host_loopback(string_address host);
+
 /* A name that does not resolve, one in public space (8.8.8.8), one inside
-   (10.0.0.1), and every other name and literal on this machine. */
+   (10.0.0.1), one the resolver rebinds onto this machine (127.0.0.1) and one
+   onto the clouds' metadata address (169.254.169.254); an address is itself,
+   localhost is loopback, and every other name is on the intranet
+   (10.0.0.2). Each connection records whether a name chose it. */
 static p32 http_lookup(string_address host)
 {
         p32 answer;
+        bipolar literal = string_to_host(host);
 
         if (!strcmp(host, "unknown.invalid"))
                 return 0;
-        if (!strcmp(host, "public.example"))
+        if (literal >= 0)
+                answer = (p32)literal;
+        else if (http_host_loopback(host) || !strcmp(host, "rebind.example"))
+                answer = 0x7f000001;
+        else if (!strcmp(host, "public.example"))
                 answer = 0x08080808;
         else if (!strcmp(host, "inside.example"))
                 answer = 0x0a000001;
+        else if (!strcmp(host, "metadata.example"))
+                answer = 0xa9fea9fe;
         else
-                answer = 0x7f000001;
+                answer = 0x0a000002;
         if (strlen(host) >= sizeof fuzz_identity_host)
                 fuzz_die("resolved host exceeds the identity transcript");
         strcpy(fuzz_identity_host, host);
         fuzz_identity_ip = answer;
+        fuzz_identity_name = literal < 0 && !http_host_loopback(host);
         return answer;
+}
+static p32 http_lookup_wanted(string_address host)
+{
+        return http_lookup(host);
 }
 """
     if tight:
         shim = shim.replace("#define MOONWATER_STRICT STRICT_SAFE",
                             "#define MOONWATER_STRICT STRICT_TIGHT")
+        #   The tight tier's ceiling on a body that declared no length, cut
+        #   from 1 GiB to 64 bytes so an input can reach it and pass it.
+        ceiling = "#define HTTP_UNDECLARED_MOST ((positive)1 << 30)"
+        if ceiling not in http:
+            raise ValueError("http_fuzz_source: the ceiling on undeclared bodies moved")
+        http = http.replace(ceiling, "#define HTTP_UNDECLARED_MOST ((positive)64)")
     return shim + http + driver
 
 
@@ -51349,8 +53669,13 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
         if (http_response_has_no_body(response.code))
                 return 1;
         /* The tight tier reads a 205 as the RFC does: its framing is taken
-           and any content is a refusal. */
+           and any content is a refusal. Its wget, which writes a body as it
+           arrives, refuses one that declared no length past
+           HTTP_UNDECLARED_MOST (cut to 64 bytes in this lift); a chunk that
+           would pass it is refused whole, so a chunked body is refused when
+           its decoded total passes it. */
         bool reset = MOONWATER_STRICT >= STRICT_TIGHT && response.code == 205;
+        bool capped = MOONWATER_STRICT >= STRICT_TIGHT && follow;
         switch (response.body_kind) {
         case HTTP_BODY_LENGTH:
                 if (size - header < response.body_length)
@@ -51364,19 +53689,25 @@ static int fuzz_whole(const p8 *segment, positive size, bool tls, bool follow,
                 if (verdict < 0)
                         return -1;
                 *body_size = (positive)verdict;
+                if (capped && *body_size > HTTP_UNDECLARED_MOST)
+                        return 0;
                 return reset && *body_size ? 0 : 1;
         default:
                 /* Close-delimited: plaintext EOF, or close_notify. */
                 memmove(copy, copy + header, size - header);
                 *body_size = size - header;
+                if (capped && *body_size > HTTP_UNDECLARED_MOST)
+                        return 0;
                 return reset && *body_size ? 0 : 1;
         }
 }
 
+static bool fuzz_head;
 static void fuzz_run(const p8 *data, positive size, int lane)
 {
         bool tls = lane == 1;
         bool fetch = lane == 2;
+        bool head = fuzz_head && !fetch;
         const char *start = tls ? "https://127.0.0.1:8443/dir/file.bin?q=1"
                                 : "http://127.0.0.1:8080/dir/file.bin?q=1";
         http_buffer store = {0};
@@ -51391,23 +53722,49 @@ static void fuzz_run(const p8 *data, positive size, int lane)
         fuzz_identity_host[0] = 0;
         fuzz_identity_pending = false;
         fuzz_sink_used = 0;
+        fuzz_request_head = head;
         status = fetch ? http_get((string_address)start, &store, &code)
-                       : http_fetch_to((string_address)start, 7, true, &code, null);
+                 : head ? http_spider((string_address)start, true, &code, null)
+                        : http_fetch_to((string_address)start, 7, true, &code, null);
+        if (head && fuzz_sink_used)
+                fuzz_die("a HEAD wrote a body");
         if (fuzz_requests != fuzz_opened)
                 fuzz_die("a connection was opened with no request written on it");
         if (fuzz_identity_pending)
                 fuzz_die("a connected authority was not consumed by one request");
         /* At the tight tier a chain that has reached public space never
-           connects inside again. */
+           connects inside again, and no name reaches this machine, "this
+           network" or the link-local block, on any hop. */
         if (MOONWATER_STRICT >= STRICT_TIGHT)
-                for (positive i = 0; i < fuzz_connected_count; i++)
+                for (positive i = 0; i < fuzz_connected_count; i++) {
+                        p8 a = (p8)(fuzz_connected[i] >> 24);
+                        if (fuzz_connected_name[i] &&
+                            (!a || a == 127 ||
+                             (fuzz_connected[i] >> 16) == 0xa9fe))
+                                fuzz_die("a name rebound onto this machine was connected to");
                         for (positive j = i + 1; j < fuzz_connected_count; j++)
                                 if (http_address_public(fuzz_connected[i]) &&
                                     !http_address_public(fuzz_connected[j]))
                                         fuzz_die("a connection went inside after one to "
                                                  "public space");
+                }
 
-        if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
+        /* A HEAD's final answer is its head: a whole 2xx head is success
+           whatever follows it, a refused head is a refusal. */
+        if (head && fuzz_opened && fuzz_segment_open(fuzz_opened - 1)) {
+                http_response response;
+                positive header = 0;
+                p8 *copy = malloc(fuzz_segment_size + 1);
+                memcpy(copy, fuzz_segment, fuzz_segment_size);
+                bipolar framed = http_response_framing(copy, fuzz_segment_size, &header,
+                                                       &response);
+                free(copy);
+                if (!framed && http_response_is_success(response.code) && status)
+                        fuzz_die("HEAD refused a whole 2xx head");
+                if (framed && framed != HTTP_NO_REPLY &&
+                    fuzz_segment_size < HTTP_HEAD_MAX && !status)
+                        fuzz_die("HEAD took a head the framing refuses");
+        } else if (fuzz_opened && !fuzz_write_faults && fuzz_segment_open(fuzz_opened - 1)) {
                 p8 *want = NULL;
                 positive want_size = 0;
                 int whole = fuzz_whole(fuzz_segment, fuzz_segment_size, tls, !fetch,
@@ -51457,6 +53814,20 @@ static void fuzz_url(const p8 *data, positive size)
         p8 leaf[256];
         p8 next[HTTP_URL_MAX];
 
+        fuzz_request_head = false;
+        /* Escaping is idempotent and leaves nothing it escapes behind the
+           authority: a second pass over its answer changes nothing. */
+        for (int bare = 0; bare < 2; bare++) {
+                char *text = bare ? url : location;
+                p8 once[HTTP_URL_MAX], twice[HTTP_URL_MAX];
+                if (!http_url_escape((string_address)text, strlen(text), bare, once,
+                                     sizeof once) &&
+                    (http_url_escape(once, strlen((char *)once), bare, twice,
+                                     sizeof twice) ||
+                     strcmp((char *)once, (char *)twice)))
+                        fuzz_die("escaping an escaped URL changed it");
+        }
+
         memset(host, 0xa5, sizeof host);
         if (http_split_into(url, host, sizeof host, &port, &path, &tls)) {
                 if (host[0] != 0xa5)
@@ -51469,6 +53840,17 @@ static void fuzz_url(const p8 *data, positive size)
         for (p8 *at = host; *at; at++)
                 if (!known_is_alnum(*at) && *at != '-' && *at != '.' && *at != '_')
                         fuzz_die("split let a byte into the host");
+        {
+                /* An address split answers is written one way: the dotted
+                   quad, which only the default reaches from a spelling. */
+                p32 numeric;
+                p8 quad[16];
+                if (http_ipv4_spelling(host, strlen((char *)host), &numeric)) {
+                        quad[host_into(quad, numeric)] = 0;
+                        if (strcmp((char *)quad, (char *)host))
+                                fuzz_die("split answered an address in a spelling of its own");
+                }
+        }
         if (!http_get_request(request, sizeof request, (string_address)host, port,
                               path, tls, '1', (string_address)"Wget", &used))
                 fuzz_request(request, used);
@@ -51550,7 +53932,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         data += 2;
         size -= 2;
         if (lane < 3)
+        {
+                fuzz_head = lane < 2 && (data[-1] & 0x80);
                 fuzz_run(data, size, lane);
+        }
         else if (lane == 3)
                 fuzz_url(data, size);
         else
@@ -51587,7 +53972,8 @@ def http_fuzz_seeds():
                            ("downgrade", b"http://127.0.0.1/p"),
                            ("unknown_host", b"http://unknown.invalid/"),
                            ("trailing_blank", b"/p \t"), ("dot_segments", b"../../x"),
-                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d")):
+                           ("unbuildable", b"/caf\xe9"), ("percent_cr", b"/%0d"),
+                           ("spaced", b"dir/a b?q=x y"), ("backslash", b"/a\\b%zz")):
         redirect = (b"HTTP/1.1 302 Found\r\nLocation: " + location +
                     b"\r\nContent-Length: 0\r\n\r\n")
         for lane in (0, 1):
@@ -51598,7 +53984,11 @@ def http_fuzz_seeds():
             ("inside_then_public", (b"inside.example/p", b"public.example/q")),
             ("public_twice", (b"public.example/p", b"public.example/q")),
             ("public_inside_public", (b"public.example/p", b"inside.example/q",
-                                      b"public.example/r"))):
+                                      b"public.example/r")),
+            ("public_then_spelled", (b"public.example/p", b"0x7f.1/q")),
+            ("to_rebound", (b"rebind.example/p",)),
+            ("to_metadata_name", (b"metadata.example/p", b"other.example/q")),
+            ("to_intranet_name", (b"other.example/p", b"169.254.169.254/q"))):
         for lane in (0, 1):
             scheme = b"https://" if lane else b"http://"
             wire = hop.join(b"HTTP/1.1 302 Found\r\nLocation: " + scheme + where +
@@ -51613,6 +54003,15 @@ def http_fuzz_seeds():
     seeds["run0_faults_length.bin"] = b"\x80\x03" + (
         b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n" + b"z" * 4096)
     seeds["run1_close_notify.bin"] = b"\x01\x02HTTP/1.1 200 OK\r\n\r\n" + b"q" * 3000
+    #   HEAD (wget --spider): a lane's second byte with its top bit set.
+    for name, wire in (("cl_unsent", b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n"),
+                       ("chunked", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
+                       ("close_with_bytes", b"HTTP/1.1 200 OK\r\n\r\nnot a body"),
+                       ("missing", b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno\n"),
+                       ("redirected", b"HTTP/1.1 302 Found\r\nLocation: /y\r\n\r\n" + hop +
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n")):
+        for lane in (0, 1):
+            seeds["head%d_%s.bin" % (lane, name)] = bytes([lane, 0x87]) + wire
     seeds["run0_1xx_trickle.bin"] = b"\x00\x01" + (
         b"HTTP/1.1 100 Continue\r\n\r\n" * 20 + ok)
     for name, url, location in (
@@ -51629,9 +54028,270 @@ def http_fuzz_seeds():
             ("scheme_only", b"gopher://h/", b"mailto:x"),
             ("bare_web_scheme", b"https:443", b"http:80"),
             ("bare_other_scheme", b"ftp:21", b"smtp:25"),
-            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100)):
+            ("long", b"http://h/" + b"a" * 2100, b"b" * 2100),
+            ("escapes", b"h:8/a b\\c\xc3\xa9?d e", b"//h b/c d\xff"),
+            ("spelled", b"http://0x7f.1:8/a", b"//2130706433:9/b"),
+            ("spelled_edge", b"0377.0xffffff", b"http://1.2.65536/")):
         seeds["url_%s.bin" % name] = b"\x03\x00" + url + b"\x00" + location
     return seeds
+
+
+DNS_TLS_SERVER = r"""
+import socket, ssl, struct, sys, threading
+cert, key, plain_port, tls_port, log = sys.argv[1:6]
+ADDRESS = {"udp": bytes([192, 0, 2, 17]), "tls": bytes([192, 0, 2, 53]),
+           "own": bytes([192, 0, 2, 99])}
+out = open(log, "a", buffering=1)
+
+def answer(query, kind):
+    i = 12
+    while query[i]:
+        i += 1 + query[i]
+    question = query[12:i + 5]
+    reply = (query[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + question +
+             b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 0, 4) + ADDRESS[kind])
+    if kind == "tls" and query[12:16] == b"\x03big":
+        # A NULL record of padding makes the reply exactly 4096 bytes, the
+        # most a reply over TLS is read into.
+        pad = 4096 - len(reply) - 11
+        reply = (reply[:10] + struct.pack(">H", 1) + reply[12:] + b"\x00" +
+                 struct.pack(">HHIH", 10, 1, 0, pad) + b"\x00" * pad)
+    return reply
+
+def udp(where, kind, said):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((where, int(plain_port)))
+    while True:
+        data, peer = s.recvfrom(4096)
+        out.write(said + "\n")
+        s.sendto(answer(data, kind), peer)
+
+def tls():
+    if tls_port == "0":
+        return
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("1.1.1.1", int(tls_port)))
+    s.listen(8)
+    while True:
+        raw, _ = s.accept()
+        try:
+            conn = context.wrap_socket(raw, server_side=True)
+        except Exception as error:
+            out.write("tls handshake refused by the client\n")
+            raw.close()
+            continue
+        try:
+            head = conn.recv(2)
+            (length,) = struct.unpack(">H", head)
+            query = b""
+            while len(query) < length:
+                query += conn.recv(length - len(query))
+            out.write("tls query\n")
+            reply = answer(query, "tls")
+            conn.sendall(struct.pack(">H", len(reply)) + reply)
+        except Exception as error:
+            out.write("tls error %s\n" % error)
+        conn.close()
+
+threading.Thread(target=udp, args=("1.1.1.1", "udp", "udp query"), daemon=True).start()
+threading.Thread(target=udp, args=("10.0.0.1", "own", "udp query to the network's own"),
+                 daemon=True).start()
+tls()
+threading.Event().wait()
+"""
+
+
+def harness_dns_tls(argv):
+    """The resolver's DNS over TLS setting (moonwater dns tls), against a server
+    of its own.
+
+    Builds a shell that trusts a root the harness made (TLS_BENCH_ANCHOR, as
+    https_bench does), the same at the tight tier (MOONWATER_STRICT 2) and
+    with a clock floor in 2100 (every clock is unset), and, in user,
+    mount and network namespaces of its own, gives loopback 1.1.1.1 and
+    10.0.0.1 (a network's own resolver, which offers no TLS), where a script
+    answers DNS on UDP 53 with 192.0.2.17 at 1.1.1.1 and 192.0.2.99 at
+    10.0.0.1, and over TLS on 853 at 1.1.1.1 with a leaf it is told to use
+    (good, for another address, expired, absent) with 192.0.2.53, so which
+    path answered is the address that comes back, and the server's log says
+    who was asked. The setting is the word in /run/moonwater/dns.tls, which
+    `moonwater dns tls` publishes.
+
+    - off (and a word that is none of on, off and only) is plain UDP
+    - on asks TLS first and gets the TLS answer with no UDP query; a leaf for
+      another address, an expired leaf, nothing on 853 and an unset clock are
+      each refused and answered by UDP
+    - only is answered over TLS, and with a bad, expired or unset judgement
+      gets no answer and sends nothing over UDP
+    - with the network's own resolver alone in resolv.conf (not one of the
+      four), on and only ask the public four over TLS (1.1.1.1 is here) and
+      only never asks the network's own resolver in the clear
+    - at the tight tier no word is only, and off is off
+
+        python3 test/differential.py --harness dns_tls
+    """
+    import datetime
+    import tempfile
+    del argv
+    if platform.system() != "Linux":
+        print("dns tls: NOT RUN -- needs Linux")
+        return 2
+    for tool in ("unshare", "ip", "openssl"):
+        if not shutil.which(tool):
+            print("dns tls: NOT RUN -- no " + tool)
+            return 2
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        import ipaddress
+    except ImportError:
+        print("dns tls: NOT RUN -- no cryptography package")
+        return 2
+    probe = subprocess.run(["unshare", "-Urmn", "true"], capture_output=True)
+    if probe.returncode:
+        print("dns tls: NOT RUN -- user, mount and network namespaces are refused")
+        return 2
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="dns-tls-") as temporary:
+        work = Path(temporary)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        root_key = bench_root_key(work)
+        (work / "root.key").write_bytes(root_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+        root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dns tls root")])
+        root = (x509.CertificateBuilder().subject_name(root_name).issuer_name(root_name)
+                .public_key(root_key.public_key()).serial_number(1)
+                .not_valid_before(now - datetime.timedelta(days=1))
+                .not_valid_after(now + datetime.timedelta(days=30))
+                .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+                .add_extension(x509.KeyUsage(True, False, False, False, False, True, False, False, False), True)
+                .sign(root_key, hashes.SHA384()))
+        leaf_key = ec.generate_private_key(ec.SECP256R1())
+        (work / "leaf.key").write_bytes(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+
+        def leaf(address, name, expired=False):
+            begin = now - datetime.timedelta(days=(10 if expired else 1))
+            end = now - datetime.timedelta(days=(5 if expired else -10))
+            certificate = (x509.CertificateBuilder()
+                           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "resolver")]))
+                           .issuer_name(root_name).public_key(leaf_key.public_key())
+                           .serial_number(2).not_valid_before(begin).not_valid_after(end)
+                           .add_extension(x509.SubjectAlternativeName(
+                               [x509.IPAddress(ipaddress.ip_address(address))]), False)
+                           .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
+                           .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), False)
+                           .sign(root_key, hashes.SHA384()))
+            (work / name).write_bytes(certificate.public_bytes(serialization.Encoding.PEM) +
+                                      root.public_bytes(serialization.Encoding.PEM))
+
+        leaf("1.1.1.1", "good.pem")
+        leaf("1.1.1.2", "other.pem")
+        leaf("1.1.1.1", "expired.pem", expired=True)
+        anchor = bench_anchor(work)
+        (work / "server.py").write_text(DNS_TLS_SERVER)
+        variants = (("bin", ()), ("tight", ("MOONWATER_STRICT=2",)),
+                    #   A floor above every clock there will be (2100), which is the
+                    #   one tls_chains builds too, and not a day ahead of this run:
+                    #   a program that is the same from run to run is built once.
+                    ("unset", ("MOONWATER_CLOCK_FLOOR=4102444800ll",)))
+        for variant, _ in variants:
+            (work / variant).mkdir()
+        for (variant, _), built in zip(variants, build_together(
+                [spark_shell_command(os.environ.get("CC", "gcc"), work / variant / "shell", anchor,
+                                     defines) for variant, defines in variants],
+                cwd=HARNESS_ROOT, capture_output=True, text=True)):
+            if built.returncode:
+                print("  FAIL the shell did not build:\n" + built.stderr[-3000:])
+                return 1
+            (work / variant / "host").symlink_to(work / variant / "shell")
+
+        def case(setting, certificate, resolver="1.1.1.1", tls_port="853", shell="bin",
+                 name="example.test"):
+            """(answer text, server log lines) for one `host` run."""
+            log = work / "server.log"
+            log.write_text("")
+            (work / "resolv.conf").write_text("nameserver %s\n" % resolver)
+            word = ("printf '%%s\\n' '%s' > /run/moonwater/dns.tls && " % setting
+                    if setting is not None else "")
+            script = (
+                "ip link set lo up && ip addr add 1.1.1.1/32 dev lo && "
+                "ip addr add 10.0.0.1/32 dev lo && "
+                "mount -t tmpfs none /run && mkdir -p /run/moonwater && %s"
+                "mount --bind %s /etc/resolv.conf && "
+                "python3 %s %s %s 53 %s %s > /dev/null 2>&1 & S=$!; "
+                "sleep 1; %s %s; echo rc=$?; kill $S" % (
+                    word, work / "resolv.conf", work / "server.py",
+                    work / certificate, work / "leaf.key", tls_port, log,
+                    work / shell / "host", name))
+            ran = subprocess.run(["unshare", "-Urmn", "sh", "-c", script],
+                                 capture_output=True, text=True, timeout=60)
+            return ran.stdout + ran.stderr, log.read_text().splitlines()
+
+        def address(text):
+            for found in ("192.0.2.53", "192.0.2.17", "192.0.2.99"):
+                if found in text:
+                    return found
+            return None
+
+        rows = (
+            # (what, setting, leaf, resolver, port 853, shell, answer, log must, log must not)
+            ("off is answered over UDP", "off", "good.pem", "1.1.1.1", "853", "bin",
+             "192.0.2.17", ("udp query",), ("tls query",)),
+            ("no word is off", None, "good.pem", "1.1.1.1", "853", "bin",
+             "192.0.2.17", ("udp query",), ("tls query",)),
+            ("a word that is none of them is off", "banana", "good.pem", "1.1.1.1", "853", "bin",
+             "192.0.2.17", ("udp query",), ("tls query",)),
+            ("on is answered over TLS with no UDP query", "on", "good.pem", "1.1.1.1", "853", "bin",
+             "192.0.2.53", ("tls query",), ("udp query",)),
+            ("on with a leaf for another address refuses it and falls back to UDP", "on", "other.pem",
+             "1.1.1.1", "853", "bin", "192.0.2.17", ("udp query",), ("tls query",)),
+            ("on with an expired leaf falls back to UDP", "on", "expired.pem", "1.1.1.1", "853", "bin",
+             "192.0.2.17", ("udp query",), ("tls query",)),
+            ("on with nothing on 853 falls back to UDP", "on", "good.pem", "1.1.1.1", "0", "bin",
+             "192.0.2.17", ("udp query",), ()),
+            ("on with the clock unset falls back to UDP", "on", "good.pem", "1.1.1.1", "853", "unset",
+             "192.0.2.17", ("udp query",), ("tls query",)),
+            ("only is answered over TLS", "only", "good.pem", "1.1.1.1", "853", "bin",
+             "192.0.2.53", ("tls query",), ("udp query",)),
+            ("only with a leaf for another address gets no answer and sends no UDP", "only",
+             "other.pem", "1.1.1.1", "853", "bin", None, (), ("udp query", "tls query")),
+            ("only with an expired leaf gets no answer and sends no UDP", "only", "expired.pem",
+             "1.1.1.1", "853", "bin", None, (), ("udp query", "tls query")),
+            ("only with the clock unset gets no answer and sends no UDP", "only", "good.pem",
+             "1.1.1.1", "853", "unset", None, (), ("udp query", "tls query")),
+            ("off with the network's own resolver asks it", "off", "good.pem", "10.0.0.1", "853",
+             "bin", "192.0.2.99", ("udp query to the network's own",), ("tls query",)),
+            ("on with the network's own resolver asks a public one over TLS first", "on",
+             "good.pem", "10.0.0.1", "853", "bin", "192.0.2.53", ("tls query",),
+             ("udp query to the network's own",)),
+            ("only with the network's own resolver never asks it in the clear", "only",
+             "good.pem", "10.0.0.1", "853", "bin", "192.0.2.53", ("tls query",),
+             ("udp query to the network's own", "udp query")),
+            ("only with the network's own resolver and no TLS anywhere asks nobody in the clear",
+             "only", "good.pem", "10.0.0.1", "0", "bin", None, (),
+             ("udp query to the network's own", "udp query")),
+            ("at the tight tier no word is only", None, "good.pem", "10.0.0.1", "853", "tight",
+             "192.0.2.53", ("tls query",), ("udp query to the network's own", "udp query")),
+            ("at the tight tier off is off", "off", "good.pem", "10.0.0.1", "853", "tight",
+             "192.0.2.99", ("udp query to the network's own",), ("tls query",)),
+        )
+        for what, setting, certificate, resolver, port, shell, want, must, never in rows:
+            text, log = case(setting, certificate, resolver, port, shell)
+            checks(address(text) == want and all(line in log for line in must) and
+                   not any(line in log for line in never),
+                   "%s: %r %r" % (what, text[-200:], log))
+        text, log = case("on", "good.pem", name="big.test")
+        checks(address(text) == "192.0.2.53" and "tls query" in log and "udp query" not in log,
+               "a reply over TLS of exactly 4096 bytes is read: %r %r" % (text[-200:], log))
+    return checks.verdict("dns tls:", "dns-tls")
 
 
 def harness_wget_mutation(argv):
@@ -51848,7 +54508,7 @@ def harness_wget_mutation(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+            built = build_run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
                                    capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -51970,15 +54630,28 @@ def harness_wget_mutation(argv):
             #   wget/curl or by this client, never read two ways.
             ("a duplicated equal Content-Length", [length.replace(
                 b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 15\r\n")],
+             False, (0, payload)),
+            ("a Content-Length list of one number", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15, 15\r\n")],
+             False, (0, payload)),
+            ("a Content-Length list that disagrees", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15, 3\r\n")],
              False, None),
             ("conflicting Content-Length values", [length.replace(
                 b"Content-Length: 15\r\n", b"Content-Length: 15\r\nContent-Length: 3\r\n")],
              False, None),
             ("an obs-fold continuation line in the head", [length.replace(
                 b"Connection: close\r\n", b"X-Fold: a\r\n b\r\nConnection: close\r\n")],
+             False, (0, payload)),
+            ("an obs-fold line after Content-Length", [length.replace(
+                b"Content-Length: 15\r\n", b"Content-Length: 15\r\n 4\r\n")],
              False, None),
             ("a control byte in the reason phrase",
-             [length.replace(b"200 OK", b"200 O\x01K")], False, None),
+             [length.replace(b"200 OK", b"200 O\x01K")], False, (0, payload)),
+            ("DEL and ESC in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x7f\x1b[2JK")], False, (0, payload)),
+            ("a NUL in the reason phrase",
+             [length.replace(b"200 OK", b"200 O\x00K")], False, None),
             ("a bare CR in the reason phrase",
              [length.replace(b"200 OK", b"200 O\rK")], False, None),
             ("a bare LF ends the status line, a second Content-Length follows",
@@ -52002,26 +54675,28 @@ def harness_wget_mutation(argv):
             procedures.append(("FIN cuts a response at byte %d" % at,
                                [length[:at]], False, None))
 
-        #       Where the built shell's wget refuses what GNU wget accepts.
-        #       These refusals predate the harness and stay listed, not
-        #       settled: wget and curl both accept an identical duplicate
-        #       Content-Length and a control byte in the reason phrase, so
-        #       whether the default should is the user's decision. Anything
-        #       else must answer as GNU wget does, and never accept what curl
-        #       refuses.
+        #       Where the built shell's wget refuses what GNU wget accepts:
+        #       only what curl refuses as well (a Content-Length pair or list
+        #       that disagrees, a NUL or bare CR in the status line, a fold
+        #       after a framing field). What both tools accept -- an
+        #       identical duplicate Content-Length, a list of one number, a
+        #       fold after an ordinary field, a control byte in the reason
+        #       phrase -- the default accepts and only MOONWATER_STRICT 2
+        #       refuses. Anything else must answer as GNU wget does, and never
+        #       accept what curl refuses.
         #       A FIN inside the status line or a header is not a response:
         #       GNU wget 1.25.0 exits 0 with nothing written for some of
         #       those cut points, which lets whoever can cut a connection turn
         #       a download into an empty success. This client fails them all.
         STRICTER_THAN_WGET = {
+            "a Content-Length list that disagrees":
+                "values that disagree are refused, as curl does (wget reads the first)",
+            "an obs-fold line after Content-Length":
+                "a fold after a framing field is refused; curl refuses it too",
+            "a NUL in the reason phrase":
+                "a NUL in the status line is refused; curl refuses it too",
             "conflicting Content-Length values":
                 "duplicate framing fields are refused before a length is chosen",
-            "a duplicated equal Content-Length":
-                "duplicate framing fields are refused before a length is chosen",
-            "an obs-fold continuation line in the head":
-                "obsolete line folding is refused so a proxy cannot split views",
-            "a control byte in the reason phrase":
-                "a control byte in the status line would reach logs and terminals",
             "a bare CR in the reason phrase":
                 "a bare CR mid-status-line is not a field separator",
             "a bare LF ends the status line, a second Content-Length follows":
@@ -52064,11 +54739,20 @@ def harness_wget_mutation(argv):
             len(procedures), time.monotonic() - started))
         exits = collections.Counter()
         deaths = []
+        #   What each run is given is drawn first, in order, from the one
+        #   seed, and the runs are made side by side: each has a port of its
+        #   own and reads nothing the others write, and a run is judged by how
+        #   it ended and not by when.
+        asked = []
         for number in range(args.runs):
             name, parts = rng.choice(bases)
             tool = rng.choice(("wget", "wget", "fetch"))
-            mutated = [mutate(part) if rng.random() < 0.8 else part for part in parts]
-            code = run_one(work, mutated, tool)
+            asked.append((name, tool, [mutate(part) if rng.random() < 0.8 else part
+                                       for part in parts]))
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(2, min(8, os.cpu_count() or 2))) as pool:
+            codes = list(pool.map(lambda one: run_one(work, one[2], one[1]), asked))
+        for (name, tool, mutated), code in zip(asked, codes):
             exits[code if isinstance(code, str) or code < 0 or code > 8 else "exit %d" % code] += 1
             if code == "timeout" or code < 0 or code >= 128:
                 deaths.append((name, tool, code, mutated))
@@ -52104,13 +54788,15 @@ def harness_wget_hostile(argv):
     import socket
     import tempfile
     import threading
+    import time
     parser = argparse.ArgumentParser(prog="differential.py --harness wget_hostile")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--shell", help="a built shell to use instead of building one")
     parser.add_argument("--tight-shell", help="a shell built with MOONWATER_STRICT=2")
     parser.add_argument("--netns", help=argparse.SUPPRESS)
-    parser.add_argument("--tight", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--level", type=int, default=1, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    args.tight = args.level >= 2
     if platform.system() != "Linux":
         print("wget hostile: NOT RUN -- needs Linux")
         return 2
@@ -52125,7 +54811,7 @@ def harness_wget_hostile(argv):
     def hop(location):
         """/x redirects to location; anything else is the answer."""
         return lambda line, port: (redirect(location.replace(b"PORT", b"%d" % port))
-                                   if line.startswith(b"GET /x ") else ok())
+                                   if line.split(b" ")[1:2] == [b"/x"] else ok())
 
     def answer(response):
         return lambda line, port: response.replace(b"PORT", b"%d" % port)
@@ -52167,8 +54853,14 @@ def harness_wget_hostile(argv):
                     if field.lower().startswith(b"host:"):
                         self.hosts.append(field[5:].strip())
                 reply = self.script(line, self.port)
+                hold = reply.endswith(b"<HOLD>")
+                reply = reply[:-6] if hold else reply
                 for at in range(0, len(reply), 4096):
                     peer.sendall(reply[at:at + 4096])
+                if hold:
+                    #   Keeps the connection open, as a server that means to
+                    #   send the body a head declares would.
+                    time.sleep(8)
             except OSError:
                 pass
             finally:
@@ -52189,12 +54881,69 @@ def harness_wget_hostile(argv):
     #   name, script, url (PORT and HOST filled in), expected request lines,
     #   expected exit for mw, references that must show the same lines, note
     def case(name, script, url, lines, code=0, refs=("wget", "curl"), host=None,
-             saved=b"hi", message=None):
+             saved=b"hi", message=None, spider=False, quick=False):
         return dict(name=name, script=script, url=url, lines=lines, code=code,
-                    refs=refs, host=host, saved=saved, message=message)
+                    refs=refs, host=host, saved=saved, message=message,
+                    spider=spider, quick=quick)
 
     GET = lambda target: b"GET " + target
+    HEAD = lambda target: b"HEAD " + target
     CASES = [
+        #   A space, a backslash and bytes past ASCII after the authority are
+        #   sent escaped, %XX in upper case, as GNU wget and curl send them
+        #   (curl sends a backslash on as it is, so that row is GNU wget's).
+        case("a Location with UTF-8 is fetched, escaped", hop(b"/caf\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/caf%C3%A9")]),
+        case("a Location with a space is fetched, escaped", hop(b"/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("a Location with a backslash in the path is escaped", hop(b"/a\\b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%5Cb")], refs=("wget",)),
+        case("a relative Location is escaped whole", hop(b"dir/a b?q=x y"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/dir/a%20b?q=x%20y")],
+             refs=("wget",)),
+        case("an absolute Location with UTF-8", hop(b"http://127.0.0.1:PORT/\xc3\xa9"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/%C3%A9")]),
+        case("a network-path Location with a space", hop(b"//127.0.0.1:PORT/a b"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b")]),
+        case("an escape already there is not doubled", hop(b"/a%20b%zz"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/a%20b%zz")],
+             refs=("curl",)),
+        case("a URL typed with UTF-8", answer(ok()), "http://127.0.0.1:PORT/é",
+             [GET(b"/%C3%A9")]),
+        case("a URL typed with a space", answer(ok()), "http://127.0.0.1:PORT/a b?c d",
+             [GET(b"/a%20b?c%20d")], refs=("wget",)),
+        case("a schemeless URL typed with a space", answer(ok()), "127.0.0.1:PORT/a b",
+             [GET(b"/a%20b")], refs=("wget",)),
+        #   A redirect with nothing to follow is the server's answer: GNU wget
+        #   exits 8 ("Redirection (302) without location"; with an empty
+        #   Location it asks again for the same URL until its twenty run out,
+        #   which no row asks anyone to match), curl -L hands the body over.
+        case("a redirect with no Location is the server's answer",
+             answer(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=8, refs=("wget", "curl"),
+             saved=None, message=b"Redirection (302) without location"),
+        case("a redirect with an empty Location is the server's answer",
+             answer(b"HTTP/1.1 302 Found\r\nLocation: \r\nContent-Length: 0\r\n\r\n"),
+             "http://127.0.0.1:PORT/x", [GET(b"/x")], code=8, refs=(), saved=None),
+        case("a Location too long to follow is named as it was, not as its sender",
+             hop(b"/" + b"a" * 3000), "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1,
+             refs=(), saved=None, message=b"/aaaaaaaa"),
+        #   wget --spider asks HEAD at every hop and reads no body, however
+        #   the head frames one (curl -I beside it); with -O GNU wget leaves
+        #   an empty file, which this does on success.
+        case("--spider asks HEAD", answer(ok()), "http://127.0.0.1:PORT/x",
+             [HEAD(b"/x")], saved=b"", spider=True),
+        case("--spider follows a redirect with HEAD", hop(b"/z"), "http://127.0.0.1:PORT/x",
+             [HEAD(b"/x"), HEAD(b"/z")], saved=b"", spider=True),
+        case("--spider on a missing file is the server's answer",
+             answer(b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\n\r\nno\n"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], code=8, saved=None, spider=True),
+        case("--spider does not wait for a body the head declares",
+             answer(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n<HOLD>"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], saved=b"", spider=True, quick=True),
+        case("--spider does not wait for chunks the head declares",
+             answer(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n<HOLD>"),
+             "http://127.0.0.1:PORT/x", [HEAD(b"/x")], saved=b"", spider=True, quick=True),
         case("a redirect loop stops", answer(redirect(b"/x")),
              "http://127.0.0.1:PORT/x", [GET(b"/x")] * 21, code=8, refs=(), saved=None,
              message=b"redirections exceeded"),
@@ -52207,23 +54956,47 @@ def harness_wget_hostile(argv):
         case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
              "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
     ]
+    #   inet_aton's spellings of 127.0.0.1 reach it with the dotted quad in
+    #   Host, as curl sends it (GNU wget sends the spelling; both connect).
+    for spelling in ("127.1", "0x7f.1", "0177.0.0.1", "2130706433", "0x7f000001",
+                     "127.0.1", "0177.1", "0X7F.0X0.0.01"):
+        CASES.append(case("the address %s is 127.0.0.1" % spelling, answer(ok()),
+                          "http://%s:PORT/" % spelling, [GET(b"/")], host=b"127.0.0.1"))
+    CASES.append(case("a Location naming 127.1", hop(b"http://127.1:PORT/z"),
+                      "http://127.0.0.1:PORT/x", [GET(b"/x"), GET(b"/z")], host=b"127.0.0.1"))
 
-    #   The address policy of the tight tier, in a network namespace of its
-    #   own where 8.8.8.8 and 8.8.4.4 are loopback addresses: a chain that has
-    #   reached public space may not be sent back inside, and a chain that
-    #   never left the inside may go anywhere.  The default follows all of it,
-    #   as GNU wget and curl do.
+    #   The address policy of each tier, in a network namespace of its own
+    #   where 8.8.8.8, 8.8.4.4, 10.9.9.9 and 169.254.169.254 are loopback
+    #   addresses, run by a shell built at each MOONWATER_STRICT level: the
+    #   tight and locked tiers (2 and 3, what sec_hardened and sec_locked
+    #   resolve STRICT_NET to) keep a chain that has reached public space out
+    #   of loopback, private, shared and link-local space and refuse a name
+    #   the resolver rebinds onto this machine or its link on any hop, the
+    #   first one too; a chain that never left the inside may go anywhere, an
+    #   address typed in the URL is taken, and an intranet name is ordinary.
+    #   The default and reference tiers (1 and 0) follow all of it, as GNU
+    #   wget and curl do.
     if args.netns:
         import struct
         farm = Path(tempfile.mkdtemp(prefix="wget-netns-"))
         (farm / "wget").symlink_to(args.netns)
         #   The network's resolver, played by a stub on this namespace's own
         #   127.0.0.1:53 (resolv.conf is bound over in a mount namespace of
-        #   its own): every A question is answered 8.8.4.4, a public address
-        #   that is a loopback one here, and every name asked is kept.
+        #   its own): an A question is answered 8.8.4.4, a public address that
+        #   is a loopback one here, but for three names a hostile or
+        #   misconfigured resolver might give -- intranet.example 10.9.9.9,
+        #   rebind.example 127.0.0.1, metadata.example 169.254.169.254 -- and
+        #   every name asked is kept.
         (farm / "resolv.conf").write_text("nameserver 127.0.0.1\n")
         subprocess.run(["mount", "--bind", str(farm / "resolv.conf"), "/etc/resolv.conf"],
                        check=True)
+        #   The tight and locked tiers ask names over TLS alone unless the
+        #   published DNS over TLS word says otherwise, and this stub is the
+        #   network's own resolver: the word is off, in a /run of this mount
+        #   namespace's own, so every tier asks the stub.
+        subprocess.run(["mount", "-t", "tmpfs", "tmpfs", "/run"], check=True)
+        os.makedirs("/run/moonwater")
+        Path("/run/moonwater/dns.tls").write_text("off\n")
         asked = []
         resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         resolver.bind(("127.0.0.1", 53))
@@ -52237,9 +55010,14 @@ def harness_wget_hostile(argv):
                         labels.append(data[at + 1:at + 1 + data[at]])
                         at += 1 + data[at]
                     kind = struct.unpack("!H", data[at + 1:at + 3])[0]
-                    asked.append(b".".join(labels).decode("latin1").lower())
+                    name = b".".join(labels).decode("latin1").lower()
+                    asked.append(name)
+                    address = {"intranet.example": [10, 9, 9, 9],
+                               "rebind.example": [127, 0, 0, 1],
+                               "metadata.example": [169, 254, 169, 254]}.get(
+                                   name, [8, 8, 4, 4])
                     answer = (b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) +
-                              bytes([8, 8, 4, 4])) if kind == 1 else b""
+                              bytes(address)) if kind == 1 else b""
                     resolver.sendto(struct.pack("!HHHHHH", struct.unpack("!H", data[:2])[0],
                                                 0x8180, 1, int(kind == 1), 0, 0) +
                                     data[12:at + 5] + answer, peer)
@@ -52255,23 +55033,149 @@ def harness_wget_hostile(argv):
             #   tight tier refuses it after public space as it refuses
             #   127.0.0.1; a resolver that said 8.8.4.4 once made it public.
             ("public to localhost", "8.8.8.8", b"http://LocalHost.:PORT/z", False),
+            #   inet_aton's spelling of loopback is loopback: the default
+            #   follows it as GNU wget and curl do, and the tight tier, which
+            #   refuses every such spelling but the dotted quad, never asks.
+            ("public to a legacy spelling of loopback", "8.8.8.8",
+             b"http://2130706433:PORT/z", False),
+            ("public to a private address", "8.8.8.8", b"http://10.9.9.9:PORT/z", False),
+            ("public to the cloud metadata address", "8.8.8.8",
+             b"http://169.254.169.254:PORT/z", False),
+            ("public to a name the resolver puts on the intranet", "8.8.8.8",
+             b"http://intranet.example:PORT/z", False),
+            ("public to a name the resolver rebinds onto loopback", "8.8.8.8",
+             b"http://rebind.example:PORT/z", False),
+            ("private to the cloud metadata address", "10.9.9.9",
+             b"http://169.254.169.254:PORT/z", True),
+            ("private to an intranet name", "10.9.9.9", b"http://intranet.example:PORT/z",
+             True),
+            #   The rebinding rule holds on every hop, inside space too.
+            ("private to a name rebound onto the metadata address", "10.9.9.9",
+             b"http://metadata.example:PORT/z", "rebound"),
         ]
+        level = ("reference", "default", "tight", "locked")[args.level]
+        said = {b"2130706433": b"not a url this understands",
+                b"rebind.example": b"the name resolved to this machine",
+                b"metadata.example": b"the name resolved to this machine"}
         failures = 0
         for name, first, location, follows in rows:
+            refused = args.tight and follows is not True
             server = Server(hop(location), "0.0.0.0")
             done = subprocess.run([str(farm / "wget"), "-O", "saved",
                                    "http://%s:%d/x" % (first, server.port)],
                                   capture_output=True, timeout=60, cwd=str(farm))
             server.close()
-            want = [GET(b"/x"), GET(b"/z")] if follows or not args.tight else [GET(b"/x")]
-            code = 0 if follows or not args.tight else 1
-            good = server.lines == want and done.returncode == code and (
-                follows or not args.tight or b"not public" in done.stderr)
+            want = [GET(b"/x")] if refused else [GET(b"/x"), GET(b"/z")]
+            message = [words for spelled, words in said.items() if spelled in location]
+            message = message[0] if message else b"not public"
+            good = server.lines == want and done.returncode == (1 if refused else 0) and (
+                not refused or message in done.stderr)
             if not good:
                 failures += 1
                 print("FAIL %s %s: lines %r exit %d (%s)" % (
-                    "tight" if args.tight else "default", name, server.lines,
-                    done.returncode, done.stderr[-120:]))
+                    level, name, server.lines, done.returncode, done.stderr[-120:]))
+        #   The first URL is the caller's: an address typed in it is taken at
+        #   every tier, and so is a name the resolver puts on the intranet;
+        #   a name it rebinds onto loopback or the metadata address is
+        #   refused at the tight tiers before anything is sent.
+        first_hops = [
+            ("a typed loopback address", "127.0.0.1", True),
+            ("a typed metadata address", "169.254.169.254", True),
+            ("a typed private address", "10.9.9.9", True),
+            ("an intranet name", "intranet.example", True),
+            ("a name rebound onto loopback", "rebind.example", False),
+            ("a name rebound onto the metadata address", "metadata.example", False),
+        ]
+        for name, host, taken in first_hops:
+            refused = args.tight and not taken
+            server = Server(answer(ok()), "0.0.0.0")
+            done = subprocess.run([str(farm / "wget"), "-O", "saved",
+                                   "http://%s:%d/y" % (host, server.port)],
+                                  capture_output=True, timeout=60, cwd=str(farm))
+            server.close()
+            good = (server.lines == ([] if refused else [GET(b"/y")]) and
+                    done.returncode == (1 if refused else 0) and
+                    (not refused or b"the name resolved to this machine" in done.stderr))
+            if not good:
+                failures += 1
+                print("FAIL %s first hop, %s: lines %r exit %d (%s)" % (
+                    level, name, server.lines, done.returncode, done.stderr[-120:]))
+        rows = rows + first_hops
+        #   The tight tiers' ceiling on a body that declared no length
+        #   (HTTP_UNDECLARED_MOST, 1 GiB) through the real program, to its
+        #   standard output: exactly that much and then the close is a download,
+        #   one byte more is refused in so many words, and a chunk that would
+        #   pass it is refused at its size line. The default takes all of it,
+        #   as GNU wget does; CHECK_net holds that with a small ceiling, so
+        #   no row here asks it to read a gigabyte.
+        if args.tight:
+            ceiling = 1 << 30
+            block = b"z" * (1 << 20)
+
+            sent_total = [0]
+
+            def bulk(head, count):
+                sent_total[0] = 0
+                listener = socket.socket()
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                listener.settimeout(60)
+
+                def serve():
+                    try:
+                        peer, _ = listener.accept()
+                    except OSError:
+                        return
+                    try:
+                        peer.settimeout(60)
+                        request = b""
+                        while b"\r\n\r\n" not in request:
+                            more = peer.recv(4096)
+                            if not more:
+                                return
+                            request += more
+                        peer.sendall(head)
+                        left = count
+                        while left:
+                            sent = block if left >= len(block) else block[:left]
+                            peer.sendall(sent)
+                            left -= len(sent)
+                            sent_total[0] += len(sent)
+                    except OSError:
+                        pass
+                    finally:
+                        peer.close()
+                threading.Thread(target=serve, daemon=True).start()
+                return listener
+            plain = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+            ceilings = [
+                ("a close-delimited body of exactly the ceiling", plain, ceiling, 0),
+                ("a close-delimited body one byte past the ceiling", plain, ceiling + 1, 1),
+                ("a chunk past the ceiling", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: "
+                 b"chunked\r\n\r\n%x\r\n" % (ceiling + 1), 4096, 1),
+            ]
+            for name, head, count, code in ceilings:
+                listener = bulk(head, count)
+                began = time.monotonic()
+                #   Standard output thrown away: /dev/null belongs to nobody
+                #   in this user namespace, which -O refuses to write through.
+                done = subprocess.run([str(farm / "wget"), "-q", "-O", "-",
+                                       "http://127.0.0.1:%d/big" % listener.getsockname()[1]],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                      timeout=280, cwd=str(farm))
+                took = time.monotonic() - began
+                listener.close()
+                #   The exact row is a download only if every byte went out.
+                good = done.returncode == code and (
+                    not code or b"with no length declared" in done.stderr) and (
+                    code or sent_total[0] == count)
+                print("NOTE %s %s: exit %d, %d bytes sent, in %.1f s" % (
+                    level, name, done.returncode, sent_total[0], took))
+                if not good:
+                    failures += 1
+                    print("FAIL %s %s: exit %d (%s)" % (level, name, done.returncode,
+                                                        done.stderr[-160:]))
+            rows = rows + ceilings
         #   RFC 6761 6.3: localhost and every name under it, in any case and
         #   with or without the root's dot, reaches 127.0.0.1 and is never
         #   asked of the resolver; a name that only looks like one is asked
@@ -52288,7 +55192,7 @@ def harness_wget_hostile(argv):
         elsewhere = [cased(name) for name in (
             "localhostx", "xlocalhost", "localhost.example", "localhost-a.example",
             "a-localhost", "localhos", "localhost.localhost.example", "ocalhost")]
-        curl = shutil.which("curl") if not args.tight else None
+        curl = shutil.which("curl") if args.level == 1 else None
         for host, inside in [(h, True) for h in loopback] + [(h, False) for h in elsewhere]:
             row_failed = False
             for who in ("mw", "curl") if curl else ("mw",):
@@ -52306,61 +55210,67 @@ def harness_wget_hostile(argv):
                 if not good:
                     row_failed = True
                     print("FAIL %s %s %r: exit %d, reached %r, resolver asked %r" % (
-                        "tight" if args.tight else "default", who, host, done.returncode,
+                        level, who, host, done.returncode,
                         server.locals, asked))
             failures += row_failed
-        #   Host spellings against the references, at the default tier: how
-        #   each client reads 127.0.0.1 spelled the ways inet_aton reads it
-        #   (fewer parts, hex, octal, one number, the root's dot), and the
-        #   authority forms this client refuses. A row says what this client
-        #   does -- "literal" (127.0.0.1 reached, nobody asked), "name" (the
-        #   resolver asked, 8.8.4.4 reached) or "refused" (nothing asked or
-        #   reached) -- and why, where GNU wget or curl is known to differ.
-        #   This client is held to its column; the references' answers are
-        #   printed, and one that has come to agree is said.
+        #   Host spellings against the references: how each client reads
+        #   127.0.0.1 spelled the ways inet_aton reads it (fewer parts, hex,
+        #   octal, one number, the root's dot), and the authority forms this
+        #   client refuses. A row says what this client does -- "literal"
+        #   (127.0.0.1 reached, nobody asked), "name" (the resolver asked,
+        #   8.8.4.4 reached) or "refused" (nothing asked or reached) -- and
+        #   why, where GNU wget or curl is known to differ. This client is
+        #   held to its column at each tier; the references' answers are
+        #   printed beside the default's, and one that has come to agree is
+        #   said.
         spelled = []
-        if not args.tight:
-            quad = [127, 0, 0, 1]
+        quad = [127, 0, 0, 1]
 
-            def octet(value, form):
-                return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
-                        "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
-            numeric = set()
-            while len(numeric) < 10:
-                parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
-                forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
-                         for _ in parts]
-                text = ".".join(octet(v, f) for v, f in zip(parts, forms))
-                try:
-                    same = socket.inet_aton(text) == bytes(quad)
-                except OSError:
-                    same = False
-                if text != "127.0.0.1" and same:
-                    numeric.add(text + spell.choice(["", "", "."]))
-            shorthand = ("a host that is not four plain decimal octets is a name to this "
-                         "client, as the resolver is asked; inet_aton, under GNU wget and "
-                         "curl, reads it as 127.0.0.1 (needs a decision: parity would "
-                         "canonicalize it once in http_split_into)")
-            spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
-                ("http://%s:PORT/" % text, "name", shorthand) for text in sorted(numeric)] + [
-                ("http://u@127.0.0.1:PORT/", "refused",
-                 "userinfo is refused; both send it as Authorization or drop it"),
-                ("http://127.0.0.1:PORT\\@x/", "refused",
-                 "a backslash is refused; both read x as the host"),
-                ("http://ex%61mple.com:PORT/", "refused",
-                 "a percent-encoded host is refused; both decode it"),
-                ("http://b\u00fccher.example:PORT/", "refused",
-                 "a host outside the DNS alphabet is refused; both apply IDNA"),
-                ("http:PORT", "refused",
-                 "http: without // is refused (SECURITY.md); both reach a host named http"),
-                ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
-                ("http://127.0.0.1.:PORT/", "name",
-                 "the root's dot makes a name, as GNU wget reads it; curl reads the address"),
-                ("HTTP://127.0.0.1:PORT/", "literal", None),
-                ("http://Example.COM.:PORT/", "name", None),
-            ]
+        def octet(value, form):
+            return {"dec": "%d" % value, "zero": "0%d" % value, "hex": "0x%x" % value,
+                    "HEX": "0X%X" % value, "oct": "0%o" % value}[form]
+        numeric = set()
+        while len(numeric) < 10:
+            parts = spell.choice([quad, [127, 0, 1], [127, 1], [0x7f000001]])
+            forms = [spell.choice(["dec", "dec", "zero", "hex", "HEX", "oct"])
+                     for _ in parts]
+            text = ".".join(octet(v, f) for v, f in zip(parts, forms))
+            try:
+                same = socket.inet_aton(text) == bytes(quad)
+            except OSError:
+                same = False
+            if text != "127.0.0.1" and same:
+                numeric.add(text + spell.choice(["", "", "."]))
+        #   Without the root's dot the spelling is the address, written as
+        #   the dotted quad once (curl's Host; GNU wget sends the spelling);
+        #   the tight tier refuses it. With the dot it is a name, as GNU wget
+        #   reads it (curl still takes the address).
+        shorthand = ("inet_aton's spelling of an address is that address, as GNU wget "
+                     "and curl read it")
+        rooted = "the root's dot makes a name, as GNU wget reads it; curl reads the address"
+        spelled = [("http://127.0.0.1:PORT/", "literal", None)] + [
+            ("http://%s:PORT/" % text, "name" if text.endswith(".") else
+             "refused" if args.tight else "literal",
+             rooted if text.endswith(".") else shorthand)
+            for text in sorted(numeric)] + [
+            ("http://u@127.0.0.1:PORT/", "refused",
+             "userinfo is refused; both send it as Authorization or drop it"),
+            ("http://127.0.0.1:PORT\\@x/", "refused",
+             "a backslash is refused; both read x as the host"),
+            ("http://ex%61mple.com:PORT/", "refused",
+             "a percent-encoded host is refused; both decode it"),
+            ("http://b\u00fccher.example:PORT/", "refused",
+             "a host outside the DNS alphabet is refused; both apply IDNA"),
+            ("http:PORT", "refused",
+             "http: without // is refused (SECURITY.md); both reach a host named http"),
+            ("http:/127.0.0.1:PORT/", "refused", "curl reads one slash as two"),
+            ("http://127.0.0.1.:PORT/", "name", rooted),
+            ("HTTP://127.0.0.1:PORT/", "literal", None),
+            ("http://Example.COM.:PORT/", "name", None),
+        ]
         references = [(who, path) for who, path in (("wget", shutil.which("wget")),
-                                                    ("curl", shutil.which("curl"))) if path]
+                                                    ("curl", shutil.which("curl"))) if path
+                      and args.level == 1]
         for url, want, why in spelled:
             answers = {}
             for who, path in [("mw", str(farm / "wget"))] + references:
@@ -52384,9 +55294,11 @@ def harness_wget_hostile(argv):
                                                                          asked))
             if answers["mw"] != want:
                 failures += 1
-                print("FAIL default spelling %r: this client %s, wanted %s" % (
-                    url, answers["mw"], want))
+                print("FAIL %s spelling %r: this client %s, wanted %s" % (
+                    level, url, answers["mw"], want))
             others = {who: seen for who, seen in answers.items() if who != "mw"}
+            if not others:
+                continue
             if any(seen != want for seen in others.values()):
                 print("NOTE spelling %r: this client %s; %s%s" % (
                     url, want, ", ".join("%s %s" % kv for kv in sorted(others.items())),
@@ -52402,7 +55314,7 @@ def harness_wget_hostile(argv):
         work = Path(temporary)
         shell = Path(args.shell) if args.shell else work / "shell"
         if not args.shell:
-            built = subprocess.run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
+            built = build_run(spark_shell_command(args.cc, shell), cwd=HARNESS_ROOT,
                                    capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -52416,12 +55328,16 @@ def harness_wget_hostile(argv):
                 server = Server(one["script"])
                 folder = Path(tempfile.mkdtemp(dir=work))
                 url = one["url"].replace("PORT", str(server.port))
+                extra = ([] if not one["spider"] else
+                         ["-I"] if who == "curl" else ["--spider"])
+                began = time.monotonic()
                 try:
-                    done = subprocess.run(command + [url], capture_output=True,
+                    done = subprocess.run(command + extra + [url], capture_output=True,
                                           timeout=60, cwd=str(folder),
                                           env={"PATH": "/usr/bin:/bin"})
                 except subprocess.TimeoutExpired:
                     done = None
+                took = time.monotonic() - began
                 server.close()
                 label = "%s: %s" % (who, one["name"])
                 if done is None:
@@ -52433,6 +55349,9 @@ def harness_wget_hostile(argv):
                 if who == "mw":
                     checks(done.returncode == one["code"], "%s: exit %d, wanted %d (%s)" % (
                         label, done.returncode, one["code"], done.stderr[-160:]))
+                    if one["quick"]:
+                        checks(took < 5, "%s: took %.1f s, the server held the "
+                               "connection open" % (label, took))
                     if one["host"]:
                         want = one["host"] + b":%d" % server.port
                         checks(server.hosts == [want] * len(server.hosts) and server.hosts,
@@ -52444,7 +55363,9 @@ def harness_wget_hostile(argv):
                     have = saved.read_bytes() if saved.exists() else None
                     checks(have == one["saved"], "%s: saved %r, wanted %r" % (
                         label, have, one["saved"]))
-        #   The address policy, by the default shell and by a tight-tier build.
+        #   The address policy at every level: the default shell, and builds
+        #   at MOONWATER_STRICT 0 (sec_reference), 2 (sec_hardened's
+        #   STRICT_NET) and 3 (sec_locked's).
         probe = subprocess.run(["unshare", "-Urnm", "sh", "-c",
                                 "ip link set lo up && ip addr add 8.8.8.8/32 dev lo"],
                                capture_output=True) if shutil.which("unshare") and shutil.which("ip") \
@@ -52452,23 +55373,32 @@ def harness_wget_hostile(argv):
         if probe is None or probe.returncode:
             print("wget hostile: address policy rows skipped (no unshare -Urnm with ip)")
         else:
-            tight = Path(args.tight_shell) if args.tight_shell else work / "tight"
-            if not args.tight_shell:
-                built = subprocess.run(spark_shell_command(
-                    args.cc, tight, defines=("MOONWATER_STRICT=2",)), cwd=HARNESS_ROOT,
-                    capture_output=True, text=True)
-                checks(built.returncode == 0, "the tight-tier shell did not build: "
-                       + built.stderr[-300:])
-            for level, path in (("default", shell), ("tight", tight)):
+            levels = {1: shell}
+            asked = []
+            for number in (0, 2, 3):
+                if number == 2 and args.tight_shell:
+                    levels[number] = Path(args.tight_shell)
+                    continue
+                levels[number] = work / ("level%d" % number)
+                asked.append(number)
+            for number, built in zip(asked, build_together(
+                    [spark_shell_command(args.cc, levels[number],
+                                         defines=("MOONWATER_STRICT=%d" % number,))
+                     for number in asked],
+                    cwd=HARNESS_ROOT, capture_output=True, text=True)):
+                checks(built.returncode == 0, "the MOONWATER_STRICT=%d shell did not build: "
+                       % number + built.stderr[-300:])
+            for number, path in sorted(levels.items()):
+                level = ("reference", "default", "tight", "locked")[number]
                 if not path.exists():
                     continue
                 inside = subprocess.run(
                     ["unshare", "-Urnm", "sh", "-c",
                      'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && '
-                     'ip addr add 8.8.4.4/32 dev lo && exec "$0" "$@"',
+                     'ip addr add 8.8.4.4/32 dev lo && ip addr add 10.9.9.9/32 dev lo && '
+                     'ip addr add 169.254.169.254/32 dev lo && exec "$0" "$@"',
                      sys.executable, str(Path(__file__).resolve()), "--harness",
-                     "wget_hostile", "--netns", str(path)] + (
-                         ["--tight"] if level == "tight" else []),
+                     "wget_hostile", "--netns", str(path), "--level", str(number)],
                     capture_output=True, text=True, timeout=300)
                 for line in inside.stdout.splitlines():
                     if line.startswith("FAIL"):
@@ -52573,6 +55503,17 @@ int main(void)
                 p8 *url = unhex(strcmp(first, "-") ? first : "");
                 if (mode[0] == 'S') {
                         answer(url);
+                } else if (mode[0] == 'E' || mode[0] == 'F') {
+                        p8 into[8192];
+                        unsigned room;
+                        if (scanf("%u", &room) == 1 && room <= sizeof into &&
+                            !http_url_escape((string_address)url, strlen((char *)url),
+                                             mode[0] == 'E', into, room)) {
+                                printf("OK\t");
+                                emit(into);
+                                printf("\n");
+                        } else
+                                printf("BAD\n");
                 } else if (scanf("%8191s", second) == 1) {
                         p8 *ref = unhex(strcmp(second, "-") ? second : "");
                         p8 host[256];
@@ -52604,7 +55545,12 @@ int main(void)
     #       refusal still turns up hundreds of times.
     users = [""] * 12 + ["user@", "u:p@", "@"]
     hosts = ["example.com", "Example.COM", "a-b.c_d", "127.0.0.1", "h", "x" * 254] * 3 + [
-        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test"]
+        "", "bad!host", "h%41", "[::1]", "x" * 255, "\u00e9.test",
+        #   inet_aton's spellings and their neighbours (http_ipv4_spelling).
+        "127.1", "0x7f.1", "0X7F.0.0.1", "0177.0.0.1", "2130706433", "0x7f000001",
+        "010.0.0.1", "127.000.000.001", "1.2.3", "4294967295", "4294967296", "0",
+        "1.2.3.4.5", "0x", "0x.1", "08.1", "127.0.0.1.", "127.1.", "256.1", "1.256",
+        "1.65535", "1.65536", "1.2.65536", "0xffffffff", "0x100000000", "1..2", ".1"]
     ports = ["", "", "", ":80", ":443", ":8080", ":65535", ":08", ":1"] * 2 + [
         ":0", ":65536", ":", ":+1", ":1x", ":99999999999999999999"]
     paths = ["", "/", "/a/b", "/a%20b", "/a;b,c", "/\u00e9", "/a:b@c", "/%0d%0a"] * 2 + [
@@ -52642,11 +55588,39 @@ int main(void)
         shape = random_urls.randrange(7)
         tail = pick(segments) + pick(queries) + pick(fragments)
         references.add([tail, "/" + tail, "//other.example" + pick(ports) + "/" + tail,
-                        pick(["HTTP://", "https://", "Https://"]) + "h2" + pick(ports) + "/" + tail,
+                        pick(["HTTP://", "https://", "Https://"]) +
+                        pick(["h2"] * 4 + ["127.1", "0x7f.0.0.1", "2130706433"]) +
+                        pick(ports) + "/" + tail,
                         pick(["ftp://h/", "mailto:x", "a:b", "javascript:x"]) + tail,
                         pick(["http:", "https:"]) + tail,
                         pick(["?", "#"]) + tail][shape])
     references = sorted(references)
+
+    def inet_aton_quad(host):
+        """The dotted quad inet_aton (glibc's, through Python) reads host as,
+        or None. A bare "0x" part, which glibc reads as zero and nothing
+        writes, stays a name to this client."""
+        import socket
+        if not host or re.search(r"(^|\.)0[xX](\.|$)", host) or \
+                any(c not in string.ascii_letters + string.digits + "." for c in host):
+            return None
+        try:
+            return socket.inet_ntoa(socket.inet_aton(host))
+        except OSError:
+            return None
+
+    def url_host(url):
+        """The host http_split_into reads: after a web scheme's //, or from
+        the start of a URL typed without one, up to / : ? or #."""
+        found = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url)
+        return re.split(r"[/:?#]", url[found.end():] if found else url, maxsplit=1)[0]
+
+    def respelled(url):
+        """Whether url's host is inet_aton's spelling of an address other
+        than that address's own dotted quad: canonicalized by default,
+        refused at the tight tier."""
+        quad = inet_aton_quad(url_host(url))
+        return quad is not None and quad != url_host(url)
 
     def encode(text):
         return text.encode("utf-8").hex() or "-"
@@ -52692,7 +55666,8 @@ int main(void)
             return "refuse"
         tls = scheme.group(1).lower() == "https"
         target = (parts.path or "/") + ("?" + parts.query if "?" in url.split("#", 1)[0] else "")
-        return (tls, host, int(port) if colon else 443 if tls else 80, dot_free(target))
+        return (tls, inet_aton_quad(host) or host, int(port) if colon else 443 if tls else 80,
+                dot_free(target))
 
     def same(got, want):
         return got is not None and got == want
@@ -52720,10 +55695,10 @@ int main(void)
         if platform.system() == "Linux":
             flags.append("-fsanitize=address,undefined")
         (work / "http_urls_tight.c").write_text(tight_source)
-        built = subprocess.run(flags + [str(unit), "-o", str(work / "http_urls")],
+        built = build_run(flags + [str(unit), "-o", str(work / "http_urls")],
                                capture_output=True, text=True)
         if not built.returncode:
-            built = subprocess.run(flags + [str(work / "http_urls_tight.c"), "-o",
+            built = build_run(flags + [str(work / "http_urls_tight.c"), "-o",
                                             str(work / "http_urls_tight")],
                                    capture_output=True, text=True)
         if built.returncode:
@@ -52785,7 +55760,8 @@ int main(void)
         for key, why in DELIBERATE.items():
             checks(seen[key] > 0, "DELIBERATE %s never generated (%s)" % (key, why))
         #   The tight tier: the default's answer, but no scheme token
-        #   without "//" in front of the authority.
+        #   without "//" in front of the authority, and no host that is
+        #   inet_aton's spelling of an address other than its dotted quad.
         tiers = collections.Counter()
         for url, default, tight in zip(urls, answers, tight_answers):
             scheme = scheme_shape.match(url)
@@ -52797,14 +55773,79 @@ int main(void)
                        "%r: http(s): without // was taken: %s" % (url, default))
                 tiers["default took, tight refused" if default != "BAD" else
                       "both refused"] += 1
+            elif respelled(url) and default != "BAD":
+                checks(tight == "BAD", "%r: the tight tier took a respelled address: %s"
+                       % (url, tight))
+                checks(default.split("\t")[1] ==
+                       inet_aton_quad(url_host(url)).encode().hex(),
+                       "%r: the default did not write the dotted quad: %s" % (url, default))
+                tiers["address respelled by default, refused tight"] += 1
             else:
                 checks(tight == default, "%r: the tiers differ: default %s, tight %s" % (
                     url, default, tight))
         for (base, reference), default, tight in zip(pairs, answers[len(urls):],
                                                      tight_answers[len(urls):]):
-            checks(tight == default, "%r + %r: the tiers resolve differently" % (base, reference))
+            if respelled(reference_join(base, reference)) and default != "BAD":
+                checks(tight == "BAD", "%r + %r: the tight tier followed a respelled "
+                       "address: %s" % (base, reference, tight))
+                tiers["a Location's address respelled, refused tight"] += 1
+            else:
+                checks(tight == default, "%r + %r: the tiers resolve differently"
+                       % (base, reference))
         checks(tiers["default took, tight refused"] > 0 and tiers["both refused"] > 0,
                "both halves of the scheme-token rule seen: %r" % dict(tiers))
+        checks(tiers["address respelled by default, refused tight"] > 0 and
+               tiers["a Location's address respelled, refused tight"] > 0,
+               "both halves of the address-spelling rule seen: %r" % dict(tiers))
+
+        #   http_url_escape: after the authority a space, a backslash and every
+        #   byte past 0x7f is %XX in upper case, and nothing else moves. The
+        #   oracle is a regular expression, not the C's loop; that GNU wget and
+        #   curl send these bytes so is wget_hostile's, against the real ones.
+        def escaped(text, bare):
+            """A whole URL's authority follows scheme:// or, typed bare,
+            starts it; a reference's follows a leading //."""
+            raw = text.encode("utf-8")
+            found = (re.match(rb"^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*", raw) or
+                     (re.match(rb"^//[^/?#]*", raw) if not bare else
+                      re.match(rb"^[^/?#]*", raw)))
+            stop = found.end() if found else 0
+            tail = re.sub(rb"[ \\\x80-\xff]", lambda hit: b"%%%02X" % hit.group()[0],
+                          raw[stop:])
+            return raw[:stop] + tail
+
+        texts = sorted(set(urls[:1500]) | set(references) | {
+            "", "/", " ", "\\", "\u00e9", "//", "//h", "//h/a b", "h/a b", "a b:c",
+            "http://h/a b#f g", "http://h b/", "http:", "http://", "x:// y",
+            "\u00e9://h/a b", "a b://h/c d", "HTTP://h/\u00e9?\u00e9#\u00e9",
+            "//h b/c d", "//h\\@e/x y", "//\u00e9:1?q r", "http://\u00e9 \\/a b"})
+        wire = [(mode, text) for text in texts for mode in ("E", "F")]
+        questions = []
+        for mode, text in wire:
+            want = escaped(text, mode == "E")
+            questions.append("%s %s %d" % (mode, encode(text), 8192))
+            #   Exactly enough room, and one byte less.
+            questions.append("%s %s %d" % (mode, encode(text), len(want) + 1))
+            questions.append("%s %s %d" % (mode, encode(text), len(want)))
+        ran = subprocess.run([str(work / "http_urls")], input="\n".join(questions) + "\n",
+                             capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        answers = ran.stdout.splitlines()
+        if ran.returncode or len(answers) != len(questions):
+            print("  FAIL the escape lift stopped:\n" + ran.stderr[-3000:])
+            write_tally("http-urls", 0, 1)
+            return 1
+        for at, (mode, text) in enumerate(wire):
+            want = escaped(text, mode == "E")
+            for offset, room_ok in ((0, True), (1, True), (2, False)):
+                got = answers[3 * at + offset]
+                if room_ok:
+                    checks(got.startswith("OK\t") and
+                           binascii.unhexlify(got.split("\t")[1]) == want,
+                           "%s %r: escaped %r, wanted %r" % (mode, text, got, want))
+                else:
+                    checks(got == "BAD", "%s %r: one byte too little room answered %r"
+                           % (mode, text, got))
 
     return checks.verdict("http urls", "http-urls")
 
@@ -52839,7 +55880,7 @@ def clang_supports_msan(clang):
         unit = work / "probe.c"
         binary = work / "probe"
         unit.write_text("int main(void){return 0;}\n")
-        built = subprocess.run(
+        built = build_run(
             [clang, "-O1", "-fsanitize=memory", str(unit), "-o", str(binary)],
             capture_output=True, text=True)
         return built.returncode == 0
@@ -53226,6 +56267,8 @@ def tls_fuzz_seeds(corpus):
         return crypto_fuzz_seeds()
     if corpus == "http":
         return http_fuzz_seeds()
+    if corpus in ("tls_ocsp", "tls_crl"):
+        return tls_revocation_seeds(corpus)
     seeds = {name + ".bin": bytes.fromhex(hx)
              for name, hx in TLS_FUZZ_SEED_HEX[corpus].items()}
     if corpus == "tls_hs":
@@ -53408,6 +56451,16 @@ def byte_reader_source():
         "/* Stable storage owns its mapping outside these mechanisms.")
 
 
+def positive_append_digit_source():
+    """lib.util.c's positive_append_digit, the checked one-more-digit step the
+    decimal readers run, for a hosted lift of a parser that reads a number
+    through byte_reader. Needs the shim's p8/positive types and bool."""
+    text = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    return src_slice(
+        text, "/* One more decimal digit on a number",
+        "/* The decimal digits at the front of bytes[0, length)")
+
+
 def byte_store_source():
     """lib.util.c's byte_store and its two appends, for a hosted lift of a
     parser that lays what it read out into a store of a fixed size: the
@@ -53487,14 +56540,14 @@ def tls_fuzz_run(label, corpus, source, max_len, extra=()):
         probe = work / "probe.c"
         probe.write_text("int LLVMFuzzerTestOneInput(const unsigned char *d, "
                          "unsigned long n) { (void)d; (void)n; return 0; }\n")
-        if subprocess.run(flags + [str(probe), "-o", str(work / "probe")],
+        if build_run(flags + [str(probe), "-o", str(work / "probe")],
                           capture_output=True, text=True).returncode:
             need = "fuzzer,memory" if moonwater_msan_requested() else "fuzzer"
             print("%s fuzz: NOT RUN -- clang lacks libFuzzer "
                   "(need -fsanitize=%s)" % (label, need))
             return 2
         unit.write_text(source)
-        built = subprocess.run(flags + [str(unit), "-o", str(binary)] + list(extra),
+        built = build_run(flags + [str(unit), "-o", str(binary)] + list(extra),
                                capture_output=True, text=True)
         if retained:
             (retained / "build.log").write_text(built.stdout + built.stderr)
@@ -53587,11 +56640,12 @@ def tls_der_fuzz_lift_parts(net):
         "static COLD bool tls_cert_current(tls_cert address_to cert, p64 now)",
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24")
+    #   Up to the revocation declaration, whose tls_conn this lift has not.
     framing = src_slice(
         net,
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
-        "static COLD bool tls_verify_chain")
+        "/* Whether the certificates on a verified path are revoked")
     shim = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -54476,11 +57530,462 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         4096)
 
 
+def tls_revocation_seeds(corpus):
+    """Name to bytes for the tls_ocsp and tls_crl corpora, built here by hand
+    so every byte is fixed: a well-formed OCSPResponse or CertificateList and
+    a mutation of each field the parsers hold -- tags, versions, times,
+    hashes, statuses, reasons, scopes, extensions known and unknown, critical
+    and twice, every ceiling and one past it. The signatures are shapes, not
+    signatures: the parsers read them, tls_signed_by checks them. Magic first
+    bytes pick a lane: D1 a SingleResponse, D2 CertificateEntry extensions;
+    E1 a serial's length and bytes before a CRL, E2 an
+    issuingDistributionPoint, E3 cRLDistributionPoints, E4
+    authorityKeyIdentifier, E5 TLS Feature, E6 a length then two
+    GeneralNames to meet."""
+    T = tls_seed_tlv
+    ecdsa = T(0x30, T(0x06, bytes.fromhex("2a8648ce3d040302")))
+    rsa = T(0x30, T(0x06, bytes.fromhex("2a864886f70d01010b")), b"\x05\x00")
+    signature = T(0x03, b"\x00" + T(0x30, T(0x02, b"\x01"), T(0x02, b"\x01")))
+    name = T(0x30, T(0x31, T(0x30, T(0x06, b"\x55\x04\x03"), T(0x0c, b"tls ca"))))
+    uri = T(0x86, b"http://crl.example/7.crl")
+
+    def gt(text="20261009120000Z"):
+        return T(0x18, text.encode())
+
+    def ext(oid, value, critical=False):
+        return tls_seed_ext(oid, value, critical)
+
+    if corpus == "tls_ocsp":
+        sha1 = T(0x30, T(0x06, bytes.fromhex("2b0e03021a")), b"\x05\x00")
+        sha256 = T(0x30, T(0x06, bytes.fromhex("608648016503040201")))
+
+        def cert_id(alg=sha1, size=20, serial=b"\x01\x02"):
+            return T(0x30, alg, T(0x04, b"\x11" * size), T(0x04, b"\x22" * size),
+                     T(0x02, serial))
+
+        def single(status=b"\x80\x00", this=None, nxt=None, extra=b"", ident=None):
+            return T(0x30, ident or cert_id(), status, this or gt(),
+                     T(0xa0, gt("20261016120000Z")) if nxt is None else nxt, extra)
+
+        def data(responses=None, responder=None, extra=b"", version=b""):
+            return T(0x30, version, responder or T(0xa2, T(0x04, b"\x33" * 20)), gt(),
+                     T(0x30, *(responses or [single()])), extra)
+
+        def response(body=None, alg=ecdsa, certs=b"", status=b"\x00"):
+            basic = T(0x30, body or data(), alg, signature, certs)
+            return T(0x30, T(0x0a, status), T(0xa0, T(0x30, T(0x06, bytes.fromhex(
+                "2b0601050507300101")), T(0x04, basic))))
+
+        nonce = bytes.fromhex("2b0601050507300102")
+        revoked = T(0xa1, gt("20261001000000Z"), T(0xa0, T(0x0a, b"\x01")))
+        minimal = bytes.fromhex(TLS_FUZZ_SEED_HEX["tls_der"]["minimal_cert"])
+        seeds = {
+            "good.bin": response(),
+            "revoked.bin": response(data([single(revoked)])),
+            "revoked_no_reason.bin": response(data([single(T(0xa1, gt()))])),
+            "revoked_reason_unused_7.bin": response(data([single(T(0xa1, gt(),
+                                                                   T(0xa0, T(0x0a, b"\x07"))))])),
+            "unknown.bin": response(data([single(b"\x82\x00")])),
+            "good_with_content.bin": response(data([single(b"\x80\x01\x00")])),
+            "by_name.bin": response(data(responder=T(0xa1, name))),
+            "by_key_short.bin": response(data(responder=T(0xa2, T(0x04, b"\x33" * 19)))),
+            "sha256_id.bin": response(data([single(ident=cert_id(sha256, 32))])),
+            "sha256_id_short_hash.bin": response(data([single(ident=cert_id(sha256, 20))])),
+            "unknown_hash.bin": response(data([single(ident=cert_id(T(0x30, T(
+                0x06, bytes.fromhex("2a864886f70d0205")))))])),
+            "serial_padded.bin": response(data([single(ident=cert_id(serial=b"\x00\x01"))])),
+            "two_responses.bin": response(data([single(), single(b"\x82\x00")])),
+            "sixteen_responses.bin": response(data([single()] * 16)),
+            "seventeen_responses.bin": response(data([single()] * 17)),
+            "no_next_update.bin": response(data([single(nxt=b"")])),
+            "next_before_this.bin": response(data([single(nxt=T(0xa0, gt("20260101000000Z")))])),
+            "utctime.bin": response(data([single(this=T(0x17, b"261009120000Z"))])),
+            "fractional_seconds.bin": response(data([single(this=T(0x18, b"20261009120000.5Z"))])),
+            "year_1949.bin": response(data([single(this=gt("19491231235959Z"))])),
+            "year_2050.bin": response(data([single(nxt=T(0xa0, gt("20500101000000Z")))])),
+            "version_present.bin": response(data(version=T(0xa0, T(0x02, b"\x00")))),
+            "nonce.bin": response(data(extra=T(0xa1, T(0x30, ext(nonce, T(0x04, b"n" * 16)))))),
+            "unknown_critical_ext.bin": response(data(extra=T(0xa1, T(0x30, ext(
+                b"\x2a\x03", b"\x05\x00", True))))),
+            "duplicate_ext.bin": response(data(extra=T(0xa1, T(0x30, ext(nonce, b"\x04\x00"),
+                                                              ext(nonce, b"\x04\x00"))))),
+            "empty_ext_list.bin": response(data(extra=T(0xa1, T(0x30)))),
+            "single_critical_ext.bin": response(data([single(extra=T(0xa1, T(0x30, ext(
+                b"\x2a\x03", b"\x05\x00", True))))])),
+            "rsa.bin": response(alg=rsa),
+            "unknown_signature_alg.bin": response(alg=T(0x30, T(0x06, b"\x2b\x65\x70"))),
+            "one_cert.bin": response(certs=T(0xa0, T(0x30, minimal))),
+            "four_certs.bin": response(certs=T(0xa0, T(0x30, *[minimal] * 4))),
+            "five_certs.bin": response(certs=T(0xa0, T(0x30, *[minimal] * 5))),
+            "try_later.bin": bytes.fromhex("3003 0a01 03"),
+            "successful_no_bytes.bin": bytes.fromhex("3003 0a01 00"),
+            "status_two_octets.bin": response(status=b"\x00\x00"),
+            "magic_single_good.bin": b"\xd1" + single(),
+            "magic_single_revoked.bin": b"\xd1" + single(revoked),
+            "magic_entry_status.bin": bytes.fromhex("d2 0005 0009 01 000005 30030a0103"),
+            "magic_entry_status_short.bin": bytes.fromhex("d2 0005 0009 01 000009 30030a0103"),
+            "magic_entry_two_extensions.bin": b"\xd2\x00\x05\x00\x00\x00\x12\x00\x00",
+            "empty.bin": b"",
+        }
+        return seeds
+
+    serial = b"\x01\x02"
+    utc = T(0x17, b"261009120000Z")
+    later = T(0x17, b"261016120000Z")
+
+    def entry(number=serial, extra=b"", when=utc):
+        return T(0x30, T(0x02, number), when, extra)
+
+    def crl(entries=None, extensions=None, version=T(0x02, b"\x01"), alg=ecdsa,
+            outer=None, nxt=later, issuer=name):
+        tbs = T(0x30, version, alg, issuer, utc, nxt,
+                T(0x30, *entries) if entries is not None else b"",
+                T(0xa0, T(0x30, *extensions)) if extensions is not None else b"")
+        return T(0x30, tbs, outer or alg, signature)
+
+    aki = ext(b"\x55\x1d\x23", T(0x30, T(0x80, b"\x44" * 20)))
+    number = ext(b"\x55\x1d\x14", T(0x02, b"\x10\x00"))
+
+    def idp(*fields, critical=True):
+        return ext(b"\x55\x1d\x1c", T(0x30, *fields), critical)
+
+    point = T(0xa0, T(0xa0, uri))
+    reason = lambda code: T(0x30, ext(b"\x55\x1d\x15", T(0x0a, bytes([code]))))
+    seeds = {
+        "empty_list.bin": crl(extensions=[aki, number]),
+        "no_entries_v1.bin": crl(version=b""),
+        "listed.bin": crl([entry(b"\x05"), entry(), entry(b"\x00\x80")], [aki, number]),
+        "not_listed.bin": crl([entry(b"\x05"), entry(b"\x01\x03")], [aki, number]),
+        "empty_revoked_sequence.bin": crl([], [aki, number]),
+        "reason_key_compromise.bin": crl([entry(extra=reason(1))], [number]),
+        "reason_unused_7.bin": crl([entry(extra=reason(7))], [number]),
+        "reason_remove_8.bin": crl([entry(extra=reason(8))], [number]),
+        "reason_11.bin": crl([entry(extra=reason(11))], [number]),
+        "invalidity_date.bin": crl([entry(extra=T(0x30, ext(b"\x55\x1d\x18",
+                                                            gt("20261001000000Z"))))], [number]),
+        "certificate_issuer.bin": crl([entry(extra=T(0x30, ext(b"\x55\x1d\x1d", T(0x30, T(
+            0xa4, name)), True)))], [number]),
+        "entry_unknown_critical.bin": crl([entry(extra=T(0x30, ext(b"\x2a\x03", b"\x05\x00",
+                                                                     True)))], [number]),
+        "entry_duplicate_reason.bin": crl([entry(extra=T(0x30, ext(b"\x55\x1d\x15", b"\x0a\x01\x01"),
+                                                         ext(b"\x55\x1d\x15", b"\x0a\x01\x01")))],
+                                          [number]),
+        "entry_empty_extensions.bin": crl([entry(extra=T(0x30))], [number]),
+        "entry_extension_in_v1.bin": crl([entry(extra=reason(1))], version=b""),
+        "entry_serial_padded.bin": crl([entry(b"\x00\x01\x02")], [number]),
+        "entry_serial_negative.bin": crl([entry(b"\xff\x01")], [number]),
+        "entry_generalized_2020.bin": crl([entry(when=gt("20200101000000Z"))], [number]),
+        "number_twenty_one_octets.bin": crl(extensions=[ext(b"\x55\x1d\x14", T(0x02, b"\x7f" * 21))]),
+        "number_twenty_two_octets.bin": crl(extensions=[ext(b"\x55\x1d\x14", T(0x02, b"\x7f" * 22))]),
+        "number_negative.bin": crl(extensions=[ext(b"\x55\x1d\x14", T(0x02, b"\x80"))]),
+        "idp_user_only.bin": crl([entry()], [number, idp(point, b"\x81\x01\xff")]),
+        "idp_ca_only.bin": crl([entry()], [number, idp(point, b"\x82\x01\xff")]),
+        "idp_user_and_ca.bin": crl(extensions=[idp(point, b"\x81\x01\xff", b"\x82\x01\xff")]),
+        "idp_false_spelled.bin": crl(extensions=[idp(point, b"\x81\x01\x00")]),
+        "idp_reasons.bin": crl(extensions=[idp(point, b"\x83\x02\x07\x80")]),
+        "idp_indirect.bin": crl(extensions=[idp(point, b"\x84\x01\xff")]),
+        "idp_attributes.bin": crl(extensions=[idp(point, b"\x85\x01\xff")]),
+        "idp_relative.bin": crl(extensions=[idp(T(0xa0, T(0xa1, T(0x30, T(0x06, b"\x55\x04\x03"),
+                                                                     T(0x0c, b"x")))))]),
+        "idp_empty.bin": crl(extensions=[idp()]),
+        "idp_no_point.bin": crl(extensions=[idp(b"\x81\x01\xff")]),
+        "delta_indicator.bin": crl(extensions=[number, ext(b"\x55\x1d\x1b", T(0x02, b"\x01"), True)]),
+        "freshest_noncritical.bin": crl(extensions=[number, ext(b"\x55\x1d\x2e", T(0x30, T(
+            0x30, point)))]),
+        "unknown_critical.bin": crl(extensions=[ext(b"\x2a\x03", b"\x05\x00", True)]),
+        "duplicate_number.bin": crl(extensions=[number, number]),
+        "sixteen_extensions.bin": crl(extensions=[ext(bytes([0x2a, k]), b"\x05\x00")
+                                                  for k in range(16)]),
+        "seventeen_extensions.bin": crl(extensions=[ext(bytes([0x2a, k]), b"\x05\x00")
+                                                    for k in range(17)]),
+        "empty_extensions.bin": crl(extensions=[]),
+        "v1_with_extensions.bin": crl(extensions=[number], version=b""),
+        "version_v1_spelled.bin": crl(version=T(0x02, b"\x00")),
+        "algorithms_differ.bin": crl(outer=rsa),
+        "no_next_update.bin": crl(nxt=b""),
+        "next_before_this.bin": crl(nxt=T(0x17, b"260101000000Z")),
+        "rsa.bin": crl([entry()], [number], alg=rsa),
+        "many_entries.bin": crl([entry(bytes([1, k >> 8, k & 0xff])) for k in range(400)],
+                                [number]),
+        "magic_serial_listed.bin": b"\xe1\x02\x01\x02" + crl([entry()], [number]),
+        "magic_scope.bin": b"\xe2" + T(0x30, point, b"\x81\x01\xff"),
+        "magic_points.bin": b"\xe3" + T(0x30, T(0x30, point), T(0x30, T(0xa0, T(
+            0xa0, T(0x86, b"ldap://x"))), T(0x81, b"\x07\x80"))),
+        "magic_points_issuer.bin": b"\xe3" + T(0x30, T(0x30, T(0xa2, T(0xa4, name)))),
+        "magic_points_reasons_only.bin": b"\xe3" + T(0x30, T(0x30, T(0x81, b"\x07\x80"))),
+        "magic_authority_key.bin": b"\xe4" + T(0x30, T(0x80, b"\x44" * 20), T(0xa1, T(
+            0xa4, name)), T(0x82, b"\x05")),
+        "magic_authority_serial_alone.bin": b"\xe4" + T(0x30, T(0x82, b"\x05")),
+        "magic_feature.bin": b"\xe5" + T(0x30, T(0x02, b"\x05"), T(0x02, b"\x11")),
+        "magic_feature_big.bin": b"\xe5" + T(0x30, T(0x02, b"\x01\x00\x00")),
+        "magic_feature_negative.bin": b"\xe5" + T(0x30, T(0x02, b"\xff")),
+        "magic_names_meet.bin": b"\xe6" + bytes([len(uri)]) + uri + T(0x82, b"x") + uri,
+        "empty.bin": b"",
+    }
+    return seeds
+
+
+TLS_REVOCATION_FUZZ_DRIVER = r"""
+/* A fixed now for freshness, as tls_der_fuzz fixes it for dates. */
+enum { FUZZ_REVOCATION_NOW = 20261010000000ull };
+
+static const p8 *fuzz_start;
+static positive fuzz_size;
+
+/* Every pointer a parser keeps lies inside the bytes it was given. */
+static fn fuzz_inside(const p8 *at, positive length)
+{
+        if (at && (at < fuzz_start || length > fuzz_size ||
+                   at > fuzz_start + fuzz_size - length))
+                abort();
+}
+"""
+
+
+def harness_tls_ocsp_fuzz(argv):
+    """Coverage-guided libFuzzer over the stapled OCSP response parsers.
+
+    Lifts tls_parse_ocsp, tls_parse_ocsp_single, the DER cursor under them
+    and tls_entry_status from src/net/net.c with tls_der_fuzz's pieces, and
+    asserts that every span a parse keeps (ResponseData, signature,
+    responder, responses, certificates, hashes, serial) lies inside the
+    input, that a SingleResponse names a hash it knows at that hash's length,
+    and that freshness never holds without a nextUpdate. Seeds come from
+    tls_fuzz_seeds("tls_ocsp"); the magic first bytes are tls_revocation_seeds'.
+    Bounded fixed-seed run; 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness tls_ocsp_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = TLS_REVOCATION_FUZZ_DRIVER + r"""
+static fn fuzz_single(const p8 *bytes, positive length)
+{
+        tls_ocsp_single single;
+
+        if (tls_parse_ocsp_single(bytes, length, address_of single))
+                return;
+        if ((single.hash != 1 && single.hash != 2) ||
+            single.hash_length != (single.hash == 1 ? 20 : 32) ||
+            single.status > TLS_OCSP_UNKNOWN ||
+            (single.next_update && single.next_update < single.this_update))
+                abort();
+        fuzz_inside(single.name_hash, single.hash_length);
+        fuzz_inside(single.key_hash, single.hash_length);
+        fuzz_inside(single.serial, single.serial_length);
+        if (!single.next_update &&
+            tls_revocation_fresh(single.this_update, 0, FUZZ_REVOCATION_NOW))
+                abort();
+        (void)tls_revocation_fresh(single.this_update, single.next_update,
+                                   FUZZ_REVOCATION_NOW);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        tls_ocsp ocsp;
+        p8 *buf;
+        positive length = size > 65536 ? 65536 : (positive)size;
+
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+        fuzz_start = buf;
+        fuzz_size = length;
+        if (!tls_parse_ocsp(buf, length, address_of ocsp))
+        {
+                byte_reader list = byte_reader_open(ocsp.responses,
+                                                    ocsp.responses_length);
+                positive count = 0;
+
+                fuzz_inside(ocsp.tbs, ocsp.tbs_length);
+                fuzz_inside(ocsp.sig_oid, ocsp.sig_oid_length);
+                fuzz_inside(ocsp.sig, ocsp.sig_length);
+                fuzz_inside(ocsp.responder, ocsp.responder_length);
+                fuzz_inside(ocsp.responses, ocsp.responses_length);
+                fuzz_inside(ocsp.certs, ocsp.certs_length);
+                if (!ocsp.sig_length || !ocsp.responses_length ||
+                    (ocsp.by_key && ocsp.responder_length != 20))
+                        abort();
+                while (byte_reader_left(&list))
+                {
+                        positive whole = 0;
+                        const p8 *one = tls_der_whole(&list, 0x30, address_of whole);
+
+                        if (!one || ++count > TLS_OCSP_RESPONSES)
+                                abort();
+                        fuzz_single(one, whole);
+                }
+        }
+        if (length > 1 && buf[0] == 0xd1)
+                fuzz_single(buf + 1, length - 1);
+        if (length > 1 && buf[0] == 0xd2)
+        {
+                for (int asked = 0; asked < 2; asked++)
+                {
+                        const p8 *response = null;
+                        positive response_length = 0;
+
+                        fuzz_start = buf + 1;
+                        fuzz_size = length - 1;
+                        if (tls_entry_status(buf + 1, length - 1, asked,
+                                             address_of response,
+                                             address_of response_length))
+                        {
+                                if (!asked && response)
+                                        abort();
+                                fuzz_inside(response, response_length);
+                        }
+                }
+        }
+        free(buf);
+        return 0;
+}
+"""
+    return tls_fuzz_run("tls ocsp", "tls_ocsp",
+                        shim + oids + "\n" + parsers + policy + framing + driver, 8192)
+
+
+def harness_tls_crl_fuzz(argv):
+    """Coverage-guided libFuzzer over the CRL parsers and their certificate
+    side.
+
+    Lifts tls_parse_crl, tls_parse_crl_scope, tls_crl_covers,
+    tls_revocation_fresh, the certificate's cRLDistributionPoints,
+    authorityKeyIdentifier and TLS Feature parsers and
+    tls_general_names_meet from src/net/net.c with tls_der_fuzz's pieces. A
+    CRL is parsed for a fixed serial (or, after the magic E1, the serial the
+    input names), every span it keeps is held inside the input, its entry
+    count to TLS_CRL_ENTRIES, a listed serial to one the CRL holds, and its
+    scope asked of a CA and an end entity whose distribution points the
+    input gives. Seeds come from tls_fuzz_seeds("tls_crl"). Bounded
+    fixed-seed run; 2 (NOT RUN) without clang/libFuzzer.
+
+        python3 test/differential.py --harness tls_crl_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    oids, parsers, policy, framing, shim = tls_der_fuzz_lift_parts(net)
+    driver = TLS_REVOCATION_FUZZ_DRIVER + r"""
+static fn fuzz_crl(p8 *bytes, positive length, const p8 *serial,
+                   positive serial_length)
+{
+        tls_crl crl;
+        tls_cert cert;
+
+        if (tls_parse_crl(bytes, length, serial, serial_length, address_of crl))
+                return;
+        fuzz_inside(crl.tbs, crl.tbs_length);
+        fuzz_inside(crl.sig_oid, crl.sig_oid_length);
+        fuzz_inside(crl.sig, crl.sig_length);
+        fuzz_inside(crl.issuer, crl.issuer_length);
+        fuzz_inside(crl.authority_key, crl.authority_key_length);
+        fuzz_inside(crl.scope.names, crl.scope.names_length);
+        if (crl.entries > TLS_CRL_ENTRIES || !crl.issuer ||
+            (crl.listed && !crl.entries) ||
+            (crl.next_update && crl.next_update < crl.this_update) ||
+            (!crl.scope.present && crl.scope.names))
+                abort();
+        memory_fill(address_of cert, 0, sizeof cert);
+        for (int ca = 0; ca < 2; ca++)
+        {
+                cert.ca = ca;
+                cert.crl_names = (p8 *)crl.scope.names;
+                cert.crl_names_length = crl.scope.names_length;
+                (void)tls_crl_covers(address_of crl.scope, address_of cert);
+                cert.crl_names = null;
+                if (tls_crl_covers(address_of crl.scope, address_of cert) &&
+                    crl.scope.names)
+                        abort();
+        }
+        (void)tls_revocation_fresh(crl.this_update, crl.next_update,
+                                   FUZZ_REVOCATION_NOW);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        static const p8 serial[] = {0x01, 0x02};
+        tls_cert cert;
+        tls_crl_scope scope;
+        p8 *buf;
+        p8 *key = null;
+        positive key_length = 0;
+        positive length = size > 65536 ? 65536 : (positive)size;
+
+        buf = (p8 *)malloc(length ? length : 1);
+        if (!buf)
+                return 0;
+        if (length)
+                memcpy(buf, data, length);
+        fuzz_start = buf;
+        fuzz_size = length;
+        fuzz_crl(buf, length, serial, sizeof serial);
+        if (length > 1)
+        {
+                p8 *rest = buf + 1;
+                positive left = length - 1;
+
+                fuzz_start = rest;
+                fuzz_size = left;
+                memory_fill(address_of cert, 0, sizeof cert);
+                switch (buf[0])
+                {
+                case 0xe1:
+                        if (rest[0] < left)
+                                fuzz_crl(rest + 1 + rest[0], left - 1 - rest[0],
+                                         rest + 1, rest[0]);
+                        break;
+                case 0xe2:
+                        if (!tls_parse_crl_scope(rest, left, address_of scope))
+                        {
+                                fuzz_inside(scope.names, scope.names_length);
+                                (void)tls_crl_covers(address_of scope, address_of cert);
+                        }
+                        break;
+                case 0xe3:
+                        if (!tls_parse_crl_points(rest, left, address_of cert))
+                        {
+                                fuzz_inside(cert.crl_url, cert.crl_url_length);
+                                fuzz_inside(cert.crl_names, cert.crl_names_length);
+                                if (cert.crl_url && (cert.crl_url_length < 8 ||
+                                                     !cert.crl_names))
+                                        abort();
+                        }
+                        break;
+                case 0xe4:
+                        if (!tls_parse_authority_key(rest, left, address_of key,
+                                                     address_of key_length))
+                                fuzz_inside(key, key_length);
+                        break;
+                case 0xe5:
+                        (void)tls_parse_tls_feature(rest, left, address_of cert);
+                        break;
+                case 0xe6:
+                        if (rest[0] < left)
+                                (void)tls_general_names_meet(
+                                    byte_reader_open(rest + 1, rest[0]),
+                                    byte_reader_open(rest + 1 + rest[0],
+                                                     left - 1 - rest[0]));
+                        break;
+                default:
+                        break;
+                }
+        }
+        free(buf);
+        return 0;
+}
+"""
+    return tls_fuzz_run("tls crl", "tls_crl",
+                        shim + oids + "\n" + parsers + policy + framing + driver, 16384)
+
+
 def harness_tls_hs_fuzz(argv):
     """Coverage-guided libFuzzer over the whole TLS 1.3 client protocol.
 
     Lifts src/net/net.c's record layer (tls_forget through the transcript)
-    and its handshake and application half (tls_hello_append through
+    and its handshake and application half (tls_share_length through
     tls_read_until) verbatim, with the crypto, the socket and the certificate
     verdict stubbed in BoringSSL's fuzzer-mode shape: the AEAD is the
     identity and opens when the tag's first byte is zero, the Finished MAC is
@@ -54520,7 +58025,7 @@ def harness_tls_hs_fuzz(argv):
         "// A TLS handshake length: three bytes, most significant first.\n"
         "static PURE positive tls_load_24",
         "static COLD bool tls_certificate_body_open")
-    protocol = sec(net, "static COLD bool tls_hello_append(",
+    protocol = sec(net, "static COLD positive tls_share_length(",
                    "#endif\n\n/*\n        Enough HTTP to fetch a file")
 
     shim = r"""
@@ -55240,22 +58745,33 @@ def tls_verify_chain_lift(net, now=None, aia=None):
         "static COLD bool tls_certificate_names_chain(").replace(
         "#include TLS_BENCH_ANCHOR\n", "")
     anchor_code += src_slice(net, "/* The last certificate served names its issuer.",
-                                "static COLD bool tls_date_now(p64 address_to value)")
+                                "/*\n        Whether the clock can be believed at all")
     if now:
         date = ("static bool tls_date_now(p64 address_to value)\n"
-                "{\n        address_to value = %s;\n        return true;\n}\n" % now)
+                "{\n        address_to value = %s;\n        return true;\n}\n"
+                "static bool tls_date_floor(p64 address_to value)\n"
+                "{\n        address_to value = %s;\n        return true;\n}\n" % (now, now))
     else:
-        date = "#include <time.h>\ntypedef struct tm tm;\n" + src_slice(
-            net, "static COLD bool tls_date_now(p64 address_to value)",
+        #   The floor is the clock's own business (tls_chains holds it); the
+        #   lift reads libc's clock as it is.
+        date = ("#include <time.h>\ntypedef struct tm tm;\n"
+                "static p64 clock_trust_floor(void) { return 0; }\n") + src_slice(
+            net, "static COLD bool tls_date_of(time_t stamp, p64 address_to value)",
             "static COLD bool tls_cert_current(")
+    #   Revocation lives with the HTTP client, which this lift has not: a
+    #   path that verifies is not revoked here, and wget is held to its
+    #   revocation answers live (tls_chains, tls_peer).
     return (r"""
 #define array_count(a) (sizeof(a) / sizeof((a)[0]))
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
+#define TLS_FAULT_CLOCK 4
 typedef struct
 {
         bool check_cert;
+        bool status_requested;
+        bool clock_bootstrap;
         p8 leaf_qx[48];
         p8 leaf_qy[48];
         p8 leaf_n[CRYPTO_RSA_BYTES];
@@ -55269,8 +58785,15 @@ typedef struct
             "                                   p8 address_to into, positive room)\n{\n" +
             (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
                     "        (void)room;\n        return 0;\n") + "}\n" +
+            "static COLD bool tls_revocation_holds(tls_conn address_to tls,\n"
+            "        tls_cert address_to certs, const positive address_to path,\n"
+            "        positive depth, tls_cert address_to top, const p8 address_to staple,\n"
+            "        positive staple_length, p64 now)\n{\n"
+            "        (void)tls; (void)certs; (void)path; (void)depth; (void)top;\n"
+            "        (void)staple; (void)staple_length; (void)now;\n"
+            "        return true;\n}\n" +
             src_slice(net, "static COLD bool tls_verify_chain(p8 address_to body",
-                         "static COLD bool tls_hello_append("))
+                         "static COLD positive tls_share_length("))
 
 
 #       The Public Suffix List file suffixes.inc was generated from, fetched
@@ -55369,14 +58892,32 @@ def public_suffix_is_suffix(rules, name):
 def public_suffix_probes(tables):
     """Names derived from every entry: the rule, a name under it and its
     parent, a wildcard's expansions and base, an exception and a name under
-    it, mixed case."""
+    it, mixed case -- and the names beside each in the sorted table, whose
+    first label is one byte shorter, one byte longer, or ends a letter
+    either side, which is where a front-coded walk decides it has passed
+    the key."""
     plain, wildcards, exceptions = tables
     names = set()
     for entry in plain + wildcards + exceptions:
         name = ".".join(reversed(entry.split(".")))
         names.update((name, "zz." + name, "zz.zz." + name, name.upper(),
                       name.partition(".")[2]))
+        first, _, rest = name.partition(".")
+        last = first[-1]
+        for near in (first[:-1], first + "a", first + "z",
+                     first[:-1] + chr(ord(last) - 1), first[:-1] + chr(ord(last) + 1)):
+            if near and rest and all(c.isalnum() or c == "-" for c in near):
+                names.add(near + "." + rest)
     names.update(("example.com", "example.foo", "co.uk.example", "github.io", "appspot.com"))
+    #   And every whole-label tail of each rule and every cut of it under its
+    #   top-level label: the keys that share the most with an entry and stop
+    #   short of it, where the walk steps over entries it has passed.
+    for entry in plain + wildcards + exceptions:
+        name = ".".join(reversed(entry.split(".")))
+        for cut in range(1, len(name)):
+            for near in (name[cut:], name[:cut] + "." + name.split(".")[-1]):
+                if not near.startswith(".") and ".." not in near and not near.endswith("."):
+                    names.add(near)
     return sorted(n for n in names if n.count(".") >= 1)
 
 
@@ -55495,7 +59036,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="tls-hostnames-") as temporary:
         work = Path(temporary)
         (work / "names.c").write_text(shim + oids + "\n" + parsers + driver)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
                                 "-o", str(work / "names"), str(work / "names.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -55659,7 +59200,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="tls-dates-") as temporary:
         work = Path(temporary)
         (work / "dates.c").write_text(shim + oids + "\n" + parsers + driver)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-fsanitize=address,undefined",
                                 "-o", str(work / "dates"), str(work / "dates.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -55678,6 +59219,32 @@ int main(void)
                "tag %#x %r: this client says %r, RFC 5280 says %s" % (tag, text, answer, want))
     checks(accepted > 200, "only %d of %d samples are valid: the grammar reaches little" % (
         accepted, len(samples)))
+    # The clock's build floor (net.c MOONWATER_CLOCK_FLOOR, which host.c's SNTP
+    # names SNTP_WALL_LEAST) is the date of the source: not ahead of the
+    # machine's own clock, and in a git checkout not more than 120 days behind
+    # the newest commit, so it moves with releases. The last-known-good file's
+    # ceiling is the end of SNTP's window, the same number in both files.
+    floor = re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll", net)
+    checks(floor is not None, "net.c no longer defines MOONWATER_CLOCK_FLOOR")
+    if floor:
+        floor = int(floor.group(1))
+        checks(floor <= time.time(),
+               "MOONWATER_CLOCK_FLOOR %d is ahead of this machine's clock" % floor)
+        if (HARNESS_ROOT / ".git").exists() and shutil.which("git"):
+            stamp = subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=HARNESS_ROOT,
+                                   capture_output=True, text=True)
+            if stamp.returncode == 0 and stamp.stdout.strip():
+                newest = int(stamp.stdout)
+                checks(newest - 120 * 86400 <= floor <= newest,
+                       "MOONWATER_CLOCK_FLOOR %d is not within 120 days before the newest "
+                       "commit %d" % (floor, newest))
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    checks("#define SNTP_WALL_LEAST MOONWATER_CLOCK_FLOOR\n" in host,
+           "host.c's SNTP_WALL_LEAST is not the clock's floor")
+    most = re.search(r"#define SNTP_WALL_MOST (\d+)ll", host)
+    good_most = re.search(r"#define CLOCK_GOOD_MOST (\d+)ll", net)
+    checks(most and good_most and most.group(1) == good_most.group(1),
+           "net.c's CLOCK_GOOD_MOST is not host.c's SNTP_WALL_MOST")
     return checks.verdict("tls dates", "tls-dates")
 
 
@@ -55795,7 +59362,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="public-suffixes-") as temporary:
         work = Path(temporary)
         (work / "suffix.c").write_text(shim + oids + "\n" + parsers + driver)
-        built = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
+        built = build_run([os.environ.get("CC", "cc"), "-O1", "-w", "-o",
                                 str(work / "suffix"), str(work / "suffix.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -55991,6 +59558,846 @@ def harness_anchors(argv):
             print("anchors: wrote %s (%d roots, %d key bytes)" % (path, len(fresh), sum(len(r[6]) for r in fresh)))
     print("anchors: %d roots, %d key bytes" % (len(anchors), at))
     return checks.verdict("anchors", "anchors")
+
+
+CT_P256_SPKI = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+
+
+def ct_logs_render(listing):
+    """src/net/ct_logs.inc from Chrome's log_list.json (v3) bytes: every log,
+    tiled or not, that is usable, qualified, read-only or retired, in the
+    list's order, its operator numbered in order of first appearance."""
+    import base64
+    import calendar
+    data = json.loads(listing)
+
+    def ms(stamp):
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")) * 1000
+
+    rows = []
+    operators = []
+    for operator in data["operators"]:
+        for kind in ("logs", "tiled_logs"):
+            for log in operator.get(kind, []):
+                state = next(iter(log["state"]))
+                if state not in ("usable", "qualified", "readonly", "retired"):
+                    continue
+                key = base64.b64decode(log["key"])
+                if len(key) != 91 or not key.startswith(CT_P256_SPKI) or key[26] != 4:
+                    raise ValueError("not a P-256 key: %s" % log["description"])
+                if hashlib.sha256(key).digest() != base64.b64decode(log["log_id"]):
+                    raise ValueError("a log id that is not its key's hash: %s" % log["description"])
+                if operator["name"] not in operators:
+                    operators.append(operator["name"])
+                interval = log.get("temporal_interval")
+                rows.append((log["description"], operator["name"], operators.index(operator["name"]),
+                             base64.b64decode(log["log_id"]), key[27:59], key[59:91],
+                             ms(log["state"]["retired"]["timestamp"]) if state == "retired" else 0,
+                             ms(interval["start_inclusive"]) if interval else 0,
+                             ms(interval["end_exclusive"]) if interval else 0))
+    hexes = lambda b: ", ".join("0x%02x" % x for x in b)
+    lines = ["/*",
+             "        Certificate Transparency logs: Chrome's list %s of %s" % (
+                 data["version"], data["log_list_timestamp"]),
+             "        (https://www.gstatic.com/ct/log_list/v3/log_list.json), sha256",
+             "        %s." % hashlib.sha256(listing).hexdigest(),
+             "        Every log usable, qualified, read-only or retired, tiled or not, its",
+             "        id (the SHA-256 of its key's SubjectPublicKeyInfo), its key (P-256,",
+             "        x and y), its operator numbered in order of first appearance, when",
+             "        it retired and the notAfter interval it takes, in milliseconds since",
+             "        the epoch (0 for none). To regenerate: python3 test/differential.py",
+             "        --harness ct_logs --log-list FILE --write.",
+             "*/",
+             "static const tls_ct_log tls_ct_logs[] = {"]
+    for name, operator, number, log_id, x, y, retired, start, end in rows:
+        lines.append("    /* %s (%s) */" % (name.replace("*/", "* /"), operator.replace("*/", "* /")))
+        lines.append("    {{%s}," % hexes(log_id))
+        lines.append("     {%s}," % hexes(x))
+        lines.append("     {%s}," % hexes(y))
+        lines.append("     %d, %dull, %dull, %dull}," % (number, retired, start, end))
+    lines.append("};")
+    return "\n".join(lines) + "\n", rows
+
+
+def harness_ct_logs(argv):
+    """The Certificate Transparency logs in src/net/ct_logs.inc.
+
+    Without --log-list, parses the file and holds it to what net.c relies on:
+    each id is the SHA-256 of its key's P-256 SubjectPublicKeyInfo, no id
+    twice, operators numbered from 0 without a gap, more than one operator,
+    an interval whose end is after its start. With --log-list FILE (Chrome's
+    log_list.json), the file must be what that list renders to when the
+    header names its digest, and with --write it is rewritten from it.
+
+        python3 test/differential.py --harness ct_logs
+        python3 test/differential.py --harness ct_logs --log-list log_list.json [--write]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness ct_logs")
+    parser.add_argument("--log-list")
+    parser.add_argument("--write", action="store_true")
+    args = parser.parse_args(argv)
+    path = HARNESS_ROOT / "src/net/ct_logs.inc"
+    text = path.read_text()
+    checks = Checks()
+    hexes = r"\{((?:0x[0-9a-f]{2}, ){31}0x[0-9a-f]{2})\}"
+    found = re.findall(r"\{" + hexes + r",\s*" + hexes + r",\s*" + hexes +
+                       r",\s*(\d+), (\d+)ull, (\d+)ull, (\d+)ull\}", text)
+    ids = set()
+    operators = set()
+    for log_id, x, y, operator, retired, start, end in found:
+        raw = lambda group: bytes(int(byte, 16) for byte in group.split(", "))
+        log_id, x, y = raw(log_id), raw(x), raw(y)
+        checks(hashlib.sha256(CT_P256_SPKI + b"\x04" + x + y).digest() == log_id,
+               "a log id that is not its key's hash: %s" % log_id.hex())
+        checks(log_id not in ids, "a log twice: %s" % log_id.hex())
+        ids.add(log_id)
+        operators.add(int(operator))
+        checks((int(start) == 0 and int(end) == 0) or int(end) > int(start),
+               "a log whose interval ends before it starts: %s" % log_id.hex())
+    checks(len(found) >= 20 and len(found) == text.count("    {{"),
+           "%d logs read of %d rows" % (len(found), text.count("    {{")))
+    checks(operators == set(range(len(operators))) and len(operators) >= 2,
+           "operators numbered %s" % sorted(operators))
+    if args.log_list:
+        listing = Path(args.log_list).read_bytes()
+        rendered, rows = ct_logs_render(listing)
+        if hashlib.sha256(listing).hexdigest() in text:
+            checks(rendered == text, "the list the header names does not render ct_logs.inc byte for byte")
+        if args.write:
+            path.write_text(rendered)
+            print("ct logs: wrote %s (%d logs)" % (path, len(rows)))
+    print("ct logs: %d logs, %d operators" % (len(found), len(operators)))
+    return checks.verdict("ct logs", "ct-logs")
+
+
+TLS_CT_DRIVER = r"""
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+
+/* For each case directory named on the command line, leaf.der and
+   issuer.der: whether tls_ct_holds holds for the leaf under the issuer. */
+b32 main(void)
+{
+        static p8 leaf[16384];
+        static p8 issuer[16384];
+
+        for (positive at = 1; at < program_argument_count(); at++)
+        {
+                p8 path[512];
+                tls_cert certs[2];
+                positive chain[2] = {0, 1};
+                bipolar leaf_length;
+                bipolar issuer_length;
+
+                string_copy_end(string_copy_end(path, program_argument(at)), (string_address) "/leaf.der");
+                leaf_length = file_slurp((string_address)path, leaf, sizeof leaf);
+                string_copy_end(string_copy_end(path, program_argument(at)), (string_address) "/issuer.der");
+                issuer_length = file_slurp((string_address)path, issuer, sizeof issuer);
+                if (leaf_length <= 0 || issuer_length <= 0 ||
+                    tls_parse_cert(leaf, (positive)leaf_length, certs, null) ||
+                    tls_parse_cert(issuer, (positive)issuer_length, certs + 1, null))
+                        string_format(log, "%s parse\n", program_argument(at));
+                else
+                        string_format(log, "%s %p\n", program_argument(at),
+                                      (positive)tls_ct_holds(certs, chain, 1, certs + 1));
+        }
+        log_flush();
+        return 0;
+}
+"""
+
+
+def harness_tls_ct(argv):
+    """Certificate Transparency at the tight tier (tls_ct_holds in src/net/net.c),
+    against an independent reading of RFC 6962 and Chrome's CT policy.
+
+    Six logs of the harness's own (five operators: two logs of one, one log
+    retired a month ago, one whose temporal interval holds no leaf here, one
+    retired with no current log beside it) sign SCTs with Python's
+    cryptography over the precertificate the harness builds, and each case
+    is a leaf and its issuer: the model says whether the leaf is logged --
+    SCTs that verify, from a log that counts now and takes the leaf's
+    notAfter, made by now, two operators at least, one log not retired, two
+    SCTs for 180 days or less and three beyond -- and tls_ct_holds, built
+    with the six logs (TLS_BENCH_CT), has to say the same. The harness's own
+    precertificate is held to cryptography's tbs_precertificate_bytes first.
+    Then end to end: a tight-tier wget built to trust a harness root fetches
+    from openssl s_server a leaf with SCTs from two operators and is refused
+    one without, in wget's words and with its status 5; a default-tier wget
+    takes either.
+
+        python3 test/differential.py --harness tls_ct [--cc CC] [--units]
+    """
+    import datetime
+    import socket
+    import struct
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        print("tls ct: NOT RUN -- needs Python's cryptography")
+        return 2
+    parser = argparse.ArgumentParser(prog="differential.py --harness tls_ct")
+    parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
+    parser.add_argument("--units", action="store_true",
+                        help="the cases through tls_ct_holds only, not wget end to end")
+    args = parser.parse_args(argv)
+    checks = Checks()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    now_ms = int(now.timestamp() * 1000)
+    day = datetime.timedelta(days=1)
+
+    def key(seed):
+        return ec.derive_private_key(0x6d6f6f6e776174657200 + seed, ec.SECP256R1())
+
+    def spki(private):
+        return private.public_key().public_bytes(serialization.Encoding.DER,
+                                                 serialization.PublicFormat.SubjectPublicKeyInfo)
+
+    def der_length(n):
+        return bytes([n]) if n < 0x80 else (bytes([0x81, n]) if n < 0x100 else bytes([0x82, n >> 8, n & 255]))
+
+    #   (operator, retired at, notAfter interval) in milliseconds.
+    logs = [(0, 0, None), (0, 0, None), (1, 0, None),
+            (2, now_ms - 30 * 86400000, None),
+            (3, 0, (now_ms + 400 * 86400000, now_ms + 800 * 86400000)),
+            (4, now_ms - 30 * 86400000, None)]
+    log_keys = [key(100 + at) for at in range(len(logs))]
+    log_ids = [hashlib.sha256(spki(k)).digest() for k in log_keys]
+    issuer_key = key(1)
+    other_key = key(2)
+    leaf_key = key(3)
+    issuer_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tls ct issuer")])
+    issuer = (x509.CertificateBuilder().subject_name(issuer_name).issuer_name(issuer_name)
+              .public_key(issuer_key.public_key()).serial_number(7)
+              .not_valid_before(now - 400 * day).not_valid_after(now + 4000 * day)
+              .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+              .sign(issuer_key, hashes.SHA256()))
+
+    def sct(log, tbs, issuer_spki, stamp=None, version=0, hash_id=4, broken=False, extensions=b""):
+        stamp = now_ms - 3600000 if stamp is None else stamp
+        signed = (b"\x00\x00" + struct.pack(">Q", stamp) + b"\x00\x01" +
+                  hashlib.sha256(issuer_spki).digest() + len(tbs).to_bytes(3, "big") + tbs +
+                  len(extensions).to_bytes(2, "big") + extensions)
+        signature = log_keys[log].sign(signed, ec.ECDSA(hashes.SHA256())) if log >= 0 else \
+            key(999).sign(signed, ec.ECDSA(hashes.SHA256()))
+        if broken:
+            signature = signature[:-1] + bytes([signature[-1] ^ 1])
+        log_id = log_ids[log] if log >= 0 else hashlib.sha256(b"no such log").digest()
+        return (bytes([version]) + log_id + struct.pack(">Q", stamp) +
+                len(extensions).to_bytes(2, "big") + extensions + bytes([hash_id, 3]) +
+                len(signature).to_bytes(2, "big") + signature)
+
+    def leaf_with(lifetime_days, scts, names=1, middle=False, trailing=b""):
+        #   The precertificate first: every field and extension but the
+        #   list, in the order the certificate will have them.
+        before = now - day
+        after = before + lifetime_days * day
+
+        def build(extension):
+            builder = (x509.CertificateBuilder()
+                       .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+                       .issuer_name(issuer_name).public_key(leaf_key.public_key())
+                       .serial_number(4242 + lifetime_days + names)
+                       .not_valid_before(before).not_valid_after(after))
+            parts = [x509.SubjectAlternativeName(
+                [x509.DNSName("localhost")] +
+                [x509.DNSName("n%03d.ct.example" % at) for at in range(names - 1)] +
+                [x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1"))])]
+            parts.append(x509.BasicConstraints(ca=False, path_length=None))
+            if extension is not None:
+                parts.insert(1 if middle else len(parts), extension)
+            for part in parts:
+                builder = builder.add_extension(part, critical=isinstance(part, x509.BasicConstraints))
+            return builder.sign(issuer_key, hashes.SHA256())
+        tbs = build(None).tbs_certificate_bytes
+        if scts is None:
+            return build(None), tbs
+        body = b"".join(len(one).to_bytes(2, "big") + one for one in
+                        (make(tbs) for make in scts))
+        listing = len(body).to_bytes(2, "big") + body + trailing
+        value = b"\x04" + der_length(len(listing)) + listing
+        leaf = build(x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.11129.2.4.2"), value))
+        return leaf, tbs
+
+    ispki = spki(issuer_key)
+    ospki = spki(other_key)
+
+    def good(log, **kw):
+        return lambda tbs: sct(log, tbs, ispki, **kw)
+
+    #   name, lifetime in days, SCTs, extra, logged
+    cases = [
+        ("two operators, 90 days", 90, [good(0), good(2)], {}, True),
+        ("two logs of one operator", 90, [good(0), good(1)], {}, False),
+        ("one SCT", 90, [good(2)], {}, False),
+        ("400 days, two SCTs", 400, [good(0), good(2)], {}, False),
+        ("400 days, three SCTs of two operators", 400, [good(0), good(1), good(2)], {}, True),
+        ("180 days, two SCTs", 180, [good(0), good(2)], {}, True),
+        ("a broken signature beside two that hold", 90, [good(0, broken=True), good(1), good(2)], {}, True),
+        ("a broken signature and one that holds", 90, [good(0, broken=True), good(2)], {}, False),
+        ("an SCT from an hour ahead", 90, [lambda tbs: sct(0, tbs, ispki, stamp=now_ms + 3600000), good(2)], {}, False),
+        ("a log nobody listed", 90, [good(-1), good(2)], {}, False),
+        ("a log retired after its SCT", 90, [lambda tbs: sct(3, tbs, ispki, stamp=now_ms - 60 * 86400000), good(2)], {}, True),
+        ("a log retired before its SCT", 90, [lambda tbs: sct(3, tbs, ispki, stamp=now_ms - 86400000), good(2)], {}, False),
+        ("two retired logs and no current one", 90,
+         [lambda tbs: sct(3, tbs, ispki, stamp=now_ms - 60 * 86400000),
+          lambda tbs: sct(5, tbs, ispki, stamp=now_ms - 60 * 86400000)], {}, False),
+        ("a log whose interval holds no such notAfter", 90, [good(4), good(2)], {}, False),
+        ("an SCT of version 2", 90, [good(0, version=1), good(2)], {}, False),
+        ("an SCT hashed with SHA-384", 90, [good(0, hash_id=5), good(2)], {}, False),
+        ("the list between two extensions", 90, [good(0), good(2)], {"middle": True}, True),
+        ("a TBS whose length shrinks a byte without its list", 90, [good(0), good(2)], {"names": 8}, True),
+        ("an SCT over another issuer's key", 90, [lambda tbs: sct(0, tbs, ospki), good(2)], {}, False),
+        ("a byte after the list", 90, [good(0), good(2)], {"trailing": b"\x00"}, False),
+        ("no list", 90, None, {}, False),
+        ("SCT extensions carried and signed", 90, [good(0, extensions=b"\x00\x00\x05\x00\x00\x00\x00\x2a"), good(2)], {}, True),
+        ("sixteen broken before two that hold", 90,
+         [good(0, broken=True)] * 16 + [good(1), good(2)], {}, False),
+    ]
+    with tempfile.TemporaryDirectory(prefix="tls-ct-") as temporary:
+        work = Path(temporary)
+        (work / "logs.h").write_text(
+            "static const tls_ct_log tls_bench_ct_logs[] = {\n" + "".join(
+                "    {{%s}, {%s}, {%s}, %d, %dull, %dull, %dull},\n" % (
+                    ", ".join("0x%02x" % b for b in log_ids[at]),
+                    ", ".join("0x%02x" % b for b in spki(log_keys[at])[27:59]),
+                    ", ".join("0x%02x" % b for b in spki(log_keys[at])[59:91]),
+                    operator, retired, interval[0] if interval else 0, interval[1] if interval else 0)
+                for at, (operator, retired, interval) in enumerate(logs)) + "};\n")
+        (work / "ctd").mkdir()
+        (work / "ctd" / "driver.c").write_text(TLS_CT_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
+        built = build_run(spark_shell_command(args.cc, work / "driver", None,
+                                                   ('TLS_BENCH_CT="%s"' % (work / "logs.h"),))
+                               [:-1] + [str(work / "ctd" / "driver.c")],
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            checks(False, "the CT driver builds")
+            return checks.verdict("tls ct", "tls-ct")
+        names = []
+        for at, (name, lifetime, scts, extra, logged) in enumerate(cases):
+            leaf, tbs = leaf_with(lifetime, scts, **extra)
+            if scts is not None and not extra.get("trailing"):
+                checks(leaf.tbs_precertificate_bytes == tbs,
+                       "%s: the harness's precertificate is cryptography's" % name)
+            folder = work / ("case%02d" % at)
+            folder.mkdir()
+            (folder / "leaf.der").write_bytes(leaf.public_bytes(serialization.Encoding.DER))
+            (folder / "issuer.der").write_bytes(issuer.public_bytes(serialization.Encoding.DER))
+            names.append(str(folder))
+        ran = subprocess.run([str(work / "driver")] + names, capture_output=True, text=True, timeout=120)
+        said = dict(line.split()[-2:] if False else (line.rsplit(" ", 1)[0], line.rsplit(" ", 1)[1])
+                    for line in ran.stdout.splitlines() if " " in line)
+        for at, (name, lifetime, scts, extra, logged) in enumerate(cases):
+            got = said.get(names[at])
+            checks(got == ("1" if logged else "0"),
+                   "%s: tls_ct_holds says %s, the model %s" % (name, got, "logged" if logged else "not"))
+
+        #   End to end, through wget at the tight tier.
+        if args.units:
+            return checks.verdict("tls ct", "tls-ct")
+        if not shutil.which("openssl"):
+            print("tls ct: end to end NOT RUN -- no openssl")
+            return checks.verdict("tls ct", "tls-ct")
+        root_key = bench_root_key(work)
+        (work / "root.key").write_bytes(root_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        anchor = bench_anchor(work)
+        root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tls ct root")])
+        intermediate = (x509.CertificateBuilder().subject_name(issuer_name).issuer_name(root_name)
+                        .public_key(issuer_key.public_key()).serial_number(8)
+                        .not_valid_before(now - 400 * day).not_valid_after(now + 3000 * day)
+                        .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
+                        .sign(root_key, hashes.SHA384()))
+        (work / "inter.pem").write_bytes(intermediate.public_bytes(serialization.Encoding.PEM))
+        (work / "leaf.key").write_bytes(leaf_key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        builds = build_together(
+            [spark_shell_command(args.cc, work / name, anchor, defines)
+             for name, defines in (
+                 ("shell_tight", ("MOONWATER_STRICT_NET=2", 'TLS_BENCH_CT="%s"' % (work / "logs.h"))),
+                 ("shell", ('TLS_BENCH_CT="%s"' % (work / "logs.h"),)))],
+            cwd=HARNESS_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        errors = [build.stderr for build in builds]
+        if any(build.returncode for build in builds):
+            print("".join(errors)[-3000:])
+            checks(False, "the tight and default shells build")
+            return checks.verdict("tls ct", "tls-ct")
+        for name in ("shell_tight", "shell"):
+            (work / name.replace("shell", "w")).mkdir()
+            (work / name.replace("shell", "w") / "wget").symlink_to(work / name)
+        for label, scts, tight_logged in (("SCTs from two operators", [good(0), good(2)], True),
+                                          ("no SCTs", None, False)):
+            leaf, _ = leaf_with(90, scts)
+            (work / "leaf.pem").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+            for shell, want in (("w_tight", tight_logged), ("w", True)):
+                probe = socket.socket()
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+                probe.close()
+                server = subprocess.Popen(
+                    ["openssl", "s_server", "-accept", "127.0.0.1:%d" % port, "-cert",
+                     str(work / "leaf.pem"), "-key", str(work / "leaf.key"), "-cert_chain",
+                     str(work / "inter.pem"), "-www", "-naccept", "1"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                for _ in range(8):
+                    ready = server.stdout.readline()
+                    if not ready or b"ACCEPT" in ready:
+                        break
+                fetched = subprocess.run([str(work / shell / "wget"), "-O", "/dev/null",
+                                          "https://127.0.0.1:%d/" % port],
+                                         capture_output=True, timeout=60,
+                                         env={"PATH": "/usr/bin:/bin", "HOME": str(work)})
+                server.kill()
+                server.wait()
+                tier = "tight" if shell == "w_tight" else "default"
+                if want:
+                    checks(fetched.returncode == 0, "%s tier, %s: fetched (%d %s)" % (
+                        tier, label, fetched.returncode, fetched.stderr[-200:]))
+                else:
+                    checks(fetched.returncode == 5 and
+                           b"was not logged as Certificate Transparency asks" in fetched.stderr,
+                           "%s tier, %s: refused in wget's words with status 5 (%d %s)" % (
+                               tier, label, fetched.returncode, fetched.stderr[-200:]))
+    return checks.verdict("tls ct", "tls-ct")
+
+
+DNS_ORACLE_DRIVER = r"""
+#include "../src/lib.util.c"
+#include "../src/net/net.c"
+
+/* Cases from the file named first: an id and a question's length, the
+   request (header and question), the reply; for each, what dns_reply_result
+   says and the address it found. */
+b32 main(void)
+{
+        static p8 cases[1 << 24];
+        bipolar size = file_slurp(program_argument(1), cases, sizeof cases);
+        positive at = 0;
+
+        while (size > 0 && at + 10 <= (positive)size)
+        {
+                p16 id = network_load_16(cases + at);
+                p16 question_length = network_load_16(cases + at + 2);
+                p16 request_length = network_load_16(cases + at + 4);
+                p8 request[600];
+                p8 reply[DNS_MAX_MESSAGE + 64];
+                positive reply_length;
+                p32 found = 0;
+                bipolar status;
+
+                at += 6;
+                memory_copy(request, cases + at, request_length);
+                at += request_length;
+                reply_length = network_load_32(cases + at);
+                at += 4;
+                memory_copy(reply, cases + at, reply_length);
+                at += reply_length;
+                status = dns_reply_result(reply, reply_length, id, request, question_length,
+                                          address_of found);
+                string_format(log, "%p %p\n", (positive)-status, (positive)(status ? 0 : found));
+        }
+        log_flush();
+        return 0;
+}
+"""
+
+
+def dns_oracle_model(reply, ident, request, question_length):
+    """What dns_reply_result answers, read again from RFC 1035 and the
+    resolver's own rules (net.c): the reply's identity, its header, every
+    record framed in every section with nothing after, compression held to
+    a ceiling, 127 jumps a name and a message's worth of jumps a walk, and
+    the address only along the name asked and its CNAME chain, 16 links at
+    most. (status, address)."""
+    OK, MALFORMED, NO_SUCH_NAME, NO_ADDRESS, REFUSED, TRY_TCP = 0, -3, -4, -5, -6, -8
+    size = len(reply)
+    available = min(size, 4096)
+
+    def copy_name(at, budget):
+        ceiling, pos, jumps, ended, out = size, at, 0, None, 0
+        name = b""
+        while True:
+            if pos >= ceiling:
+                return None
+            length = reply[pos]
+            if length & 0xc0 == 0xc0:
+                if pos + 1 >= ceiling:
+                    return None
+                target = (length & 0x3f) << 8 | reply[pos + 1]
+                if ended is None:
+                    ended = pos + 2
+                jumps += 1
+                if target >= pos or jumps > 127:
+                    return None
+                ceiling = pos
+                pos = target
+                continue
+            if length & 0xc0 or pos + 1 + length > ceiling or out + 1 + length > 255:
+                return None
+            name += reply[pos:pos + 1 + length]
+            out += 1 + length
+            if not length:
+                if budget is not None:
+                    if budget[0] < jumps:
+                        return None
+                    budget[0] -= jumps
+                return name, (pos + 1 if ended is None else ended)
+            pos += 1 + length
+
+    def records_end(at, count):
+        budget = [4096]
+        for _ in range(count):
+            got = copy_name(at, budget)
+            if got is None:
+                return None
+            ended = got[1]
+            if ended + 10 > size:
+                return None
+            length = reply[ended + 8] << 8 | reply[ended + 9]
+            if ended + 10 + length > size:
+                return None
+            at = ended + 10 + length
+        return at
+
+    if available < 12 + question_length:
+        return MALFORMED, 0
+    if (reply[0] << 8 | reply[1]) != ident or (reply[4] << 8 | reply[5]) != 1 or \
+            reply[12:12 + question_length] != request[12:12 + question_length]:
+        return MALFORMED, 0
+    flags = reply[2] << 8 | reply[3]
+    if not flags & 0x8000 or flags & (0x7800 | 0x0040):
+        return MALFORMED, 0
+    if flags & 0x0200:
+        return TRY_TCP, 0
+    if size > 4096:
+        return MALFORMED, 0
+    answers = reply[6] << 8 | reply[7]
+    at = 12 + question_length
+    end = records_end(at, answers)
+    if end is not None:
+        end = records_end(end, reply[8] << 8 | reply[9])
+    if end is not None:
+        end = records_end(end, reply[10] << 8 | reply[11])
+    if end is None or end != size:
+        return MALFORMED, 0
+    code = flags & 15
+    if code == 3:
+        return NO_SUCH_NAME, 0
+    if code:
+        return REFUSED, 0
+    budget = [4096]
+    got = copy_name(12, budget)
+    if got is None:
+        return MALFORMED, 0
+    wanted = got[0].lower()
+    for hop in range(min(answers, 16) + 1):
+        pos = at
+        alias = None
+        address = None
+        for _ in range(answers):
+            owner = copy_name(pos, budget)
+            if owner is None:
+                return MALFORMED, 0
+            pos = owner[1]
+            kind = reply[pos] << 8 | reply[pos + 1]
+            klass = reply[pos + 2] << 8 | reply[pos + 3]
+            length = reply[pos + 8] << 8 | reply[pos + 9]
+            data = pos + 10
+            is_wanted = owner[0].lower() == wanted
+            if klass == 1 and is_wanted and kind == 1:
+                if length != 4:
+                    return MALFORMED, 0
+                if address is None:
+                    address = int.from_bytes(reply[data:data + 4], "big")
+            elif klass == 1 and is_wanted and kind == 5:
+                if alias is not None:
+                    return MALFORMED, 0
+                target = copy_name(data, budget)
+                if target is None or target[1] != data + length:
+                    return MALFORMED, 0
+                alias = target[0]
+            pos = data + length
+        if alias is not None and address is not None:
+            return MALFORMED, 0
+        if address is not None:
+            return OK, address
+        if alias is None:
+            return NO_ADDRESS, 0
+        if alias.lower() == wanted:
+            return MALFORMED, 0
+        wanted = alias.lower()
+    return MALFORMED, 0
+
+
+def dns_oracle_cases(seed, count):
+    """Replies to a question, made from a grammar and then, for a third of
+    them, damaged: names asked and not, in any case, compressed backwards,
+    forwards, into a loop or down a long chain; A records of four bytes and
+    not; CNAME chains in order, reversed, looping and too long; glue;
+    authority and additional records; every rcode, opcode and flag; the
+    question echoed wrong; bytes cut and bytes added."""
+    import random
+    rng = random.Random(seed)
+    out = []
+    for _ in range(count):
+        ident = rng.randrange(65536)
+        labels = [rng.choice([b"www", b"Example", b"cdn", b"a" * rng.choice([1, 9, 63])])
+                  for _ in range(rng.randint(1, 4))] + [rng.choice([b"com", b"net", b"ORG"])]
+        qname = b"".join(bytes([len(x)]) + x for x in labels) + b"\x00"
+        question = qname + b"\x00\x01\x00\x01"
+        request = struct_pack_header(ident, 0x0100, 1, 0, 0, 0) + question
+        names = [qname, b"\x05alias\x07example\x03net\x00", b"\x06target\x07example\x03org\x00",
+                 b"\x04glue\x03com\x00", qname.swapcase() if rng.random() < 0.3 else qname]
+        records = []
+        shape = rng.randrange(8)
+        if shape == 0:
+            records.append((names[0], 1, 1, rng.randbytes(4)))
+        elif shape == 1:
+            records += [(names[0], 5, 1, names[1]), (names[1], 1, 1, rng.randbytes(4))]
+        elif shape == 2:
+            records += [(names[1], 1, 1, rng.randbytes(4)), (names[0], 5, 1, names[1])]
+        elif shape == 3:
+            chain = [names[0]] + [b"\x01" + bytes([97 + k]) + b"\x07example\x03com\x00"
+                                  for k in range(rng.randint(1, 20))]
+            records += [(chain[k], 5, 1, chain[k + 1]) for k in range(len(chain) - 1)]
+            records.append((chain[-1], 1, 1, rng.randbytes(4)))
+            rng.shuffle(records)
+        elif shape == 4:
+            records += [(names[0], 5, 1, names[1]), (names[1], 5, 1, names[0])]
+        elif shape == 5:
+            records += [(names[3], 1, 1, rng.randbytes(4)), (names[4], 1, 1, rng.randbytes(4))]
+        elif shape == 6:
+            records += [(names[0], 1, 1, rng.randbytes(rng.choice([0, 3, 5, 16])))]
+        else:
+            records += [(names[0], rng.choice([1, 5, 28, 16]), rng.choice([1, 3, 255]),
+                         rng.randbytes(rng.choice([4, 0, 8])))]
+        if rng.random() < 0.2:
+            records.append((names[0], 1, 1, rng.randbytes(4)))
+        authority = [(names[3], 2, 1, names[2])] if rng.random() < 0.3 else []
+        additional = [(names[2], 1, 1, rng.randbytes(4))] if rng.random() < 0.3 else []
+        flags = 0x8180 | rng.choice([0, 0, 0, 0, 0, 0, 0, 3, 2, 5, 1])
+        if rng.random() < 0.05:
+            flags ^= rng.choice([0x8000, 0x0800, 0x0200, 0x0040, 0x0020, 0x0010])
+        body = bytearray(question)
+        if rng.random() < 0.08:
+            body[1] ^= 0x20
+        offsets = {qname: 12}
+
+        def name(raw):
+            #   The whole name compressed back to where it was first written,
+            #   or written out; a forward or looping pointer now and then.
+            choice = rng.random()
+            if raw in offsets and choice < 0.6:
+                return bytes([0xc0 | offsets[raw] >> 8, offsets[raw] & 255])
+            if choice < 0.605:
+                return bytes([0xc0 | 0x0f, 0xff])
+            if choice < 0.61:
+                return bytes([0xc0 | (12 + len(body)) >> 8, (12 + len(body)) & 255])
+            offsets.setdefault(raw, 12 + len(body))
+            return raw
+
+        for section in (records, authority, additional):
+            for owner, kind, klass, data in section:
+                body += name(owner)
+                if kind in (2, 5) and isinstance(data, bytes) and data.endswith(b"\x00"):
+                    rdata = bytearray()
+                    start = len(body) + 10
+                    rdata += name(data) if rng.random() < 0.5 else data
+                    body += struct.pack(">HHIH", kind, klass, 300, len(rdata)) + rdata
+                else:
+                    body += struct.pack(">HHIH", kind, klass, 300, len(data)) + data
+        reply = bytearray(struct_pack_header(ident if rng.random() > 0.03 else ident ^ 1, flags,
+                                             1, len(records), len(authority), len(additional)))
+        reply += body
+        damage = rng.random()
+        if damage < 0.06:
+            reply = reply[:rng.randrange(len(reply))]
+        elif damage < 0.12:
+            reply += rng.randbytes(rng.randint(1, 4))
+        elif damage < 0.2:
+            for _ in range(rng.randint(1, 3)):
+                reply[rng.randrange(len(reply))] = rng.randrange(256)
+        out.append((ident, len(question), bytes(request), bytes(reply)))
+    return out
+
+
+def struct_pack_header(ident, flags, questions, answers, authorities, additional):
+    return struct.pack(">HHHHHH", ident, flags, questions, answers, authorities, additional)
+
+
+def harness_dns_oracle(argv):
+    """dns_reply_result against an independent reading of DNS replies.
+
+    The model (dns_oracle_model) is written from RFC 1035 and the resolver's
+    contract in net.c, not lifted from it; the cases (dns_oracle_cases) are
+    replies from a grammar, a third of them damaged. Both must give the same
+    status and, for an answer, the same address, for every case.
+
+        python3 test/differential.py --harness dns_oracle [--seed N] [--count N] [--cc CC]
+    """
+    parser = argparse.ArgumentParser(prog="differential.py --harness dns_oracle")
+    parser.add_argument("--seed", type=int, default=0x444e53)
+    parser.add_argument("--count", type=int, default=20000)
+    parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
+    args = parser.parse_args(argv)
+    checks = Checks()
+    cases = dns_oracle_cases(args.seed, args.count)
+    with tempfile.TemporaryDirectory(prefix="dns-oracle-") as temporary:
+        work = Path(temporary)
+        (work / "ctd").mkdir()
+        (work / "ctd" / "driver.c").write_text(DNS_ORACLE_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
+        built = build_run(spark_shell_command(args.cc, work / "driver")[:-1] +
+                               [str(work / "ctd" / "driver.c")],
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)
+        if built.returncode:
+            print(built.stderr[-3000:])
+            checks(False, "the DNS oracle driver builds")
+            return checks.verdict("dns oracle", "dns-oracle")
+        blob = b"".join(struct.pack(">HHH", ident, qlen, len(request)) + request +
+                        struct.pack(">I", len(reply)) + reply
+                        for ident, qlen, request, reply in cases)
+        (work / "cases").write_bytes(blob)
+        ran = subprocess.run([str(work / "driver"), str(work / "cases")], capture_output=True,
+                             text=True, timeout=600)
+        said = ran.stdout.split("\n")
+        tally = collections.Counter()
+        wrong = 0
+        for at, (ident, qlen, request, reply) in enumerate(cases):
+            want = dns_oracle_model(reply, ident, request, qlen)
+            line = said[at].split() if at < len(said) else []
+            got = (-int(line[0]), int(line[1])) if len(line) == 2 else None
+            tally[want[0]] += 1
+            if got != want:
+                wrong += 1
+                if wrong <= 8:
+                    print("  FAIL case %d: dns_reply_result %s, the model %s, reply %s" % (
+                        at, got, want, reply[:64].hex()))
+            checks.checks += 1
+            checks.failures += got != want
+        #   Not vacuous: every answer the resolver can give comes up.
+        for status, name in ((0, "an address"), (-3, "malformed"), (-4, "no such name"),
+                             (-5, "no address"), (-6, "refused"), (-8, "try TCP")):
+            checks(tally[status] >= 20, "the cases reach %s (%d)" % (name, tally[status]))
+        print("dns oracle: %d replies: %s" % (len(cases), ", ".join(
+            "%s %d" % (k, v) for k, v in sorted(tally.items()))))
+    return checks.verdict("dns oracle", "dns-oracle")
+
+
+def harness_guest_confinement(argv):
+    """The seccomp deaths qemu-user cannot show, on the machine itself.
+
+    qemu-user cannot install a seccomp filter for the program it runs, so on
+    arm64 and riscv64 the net and bowl lanes check only that the confined
+    children refuse to run there. This boots the image of that machine
+    (bootaa64.efi, bootriscv64.efi) on QEMU's virt board, carries CHECK_net
+    and CHECK_bowl built for it in on a stick, and runs CHECK_net's three
+    confinement groups (the client filter's decisions, the child dying of
+    each call it may not make, fetching through it) and CHECK_bowl whole
+    (the Wi-Fi station's filter, its statuses, and its confinement in a user
+    namespace) as root on that kernel. Each has to print its verdict with no
+    failure and no NOT RUN.
+
+        python3 test/differential.py --harness guest_confinement --image dist/bootaa64.efi
+    """
+    import threading
+    parser = argparse.ArgumentParser(prog="differential.py --harness guest_confinement")
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--timeout", type=int, default=3600)
+    args = parser.parse_args(argv)
+    image = Path(args.image).resolve()
+    machines = {
+        "aa64": ("arm64", "aarch64-linux-gnu-gcc", ["-mno-outline-atomics"],
+                 ["qemu-system-aarch64", "-machine", "virt,gic-version=3",
+                  "-cpu", "max,pauth-impdef=on"], "ttyAMA0"),
+        "riscv64": ("riscv64", "riscv64-linux-gnu-gcc",
+                    ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"],
+                    ["qemu-system-riscv64", "-machine", "virt", "-cpu", "max"], "ttyS0"),
+    }
+    key = next((k for k in machines if image.name.endswith(k + ".efi")), None)
+    if not key or not image.exists():
+        print("guest confinement: NOT RUN -- no arm64 or riscv64 image at %s" % image)
+        return 2
+    machine, cc, flags, emulator, console = machines[key]
+    if not shutil.which(cc) or not shutil.which(emulator[0]):
+        print("guest confinement: NOT RUN -- needs %s and %s" % (cc, emulator[0]))
+        return 2
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="guest-confinement-") as temporary:
+        work = Path(temporary)
+        stick = work / "stick"
+        stick.mkdir()
+        for name, section in (("netchk", "CHECK_net"), ("bowlchk", "CHECK_bowl")):
+            built = build_run(
+                [cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+                 "-fno-builtin", *flags, "-w", "-T", "src/build/spark.ld", "-Wl,-e,_start",
+                 "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-D" + section,
+                 "-o", str(stick / name), "test/checks.c"],
+                cwd=HARNESS_ROOT, capture_output=True, text=True)
+            checks(built.returncode == 0, "%s builds for %s: %s" % (section, machine, built.stderr[-300:]))
+            if built.returncode:
+                return checks.verdict("guest confinement", "guest-confinement-" + machine)
+        commands = (
+            "mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick\n"
+            "cd /tmp\n"
+            "echo @@net; /mnt/stick/netchk --only net_apart_filter_decisions "
+            "--only net_apart_confinement --only net_apart_fetching 2>&1; echo @@done\n"
+            "echo @@bowl; /mnt/stick/bowlchk 2>&1; echo @@done\n"
+            "poweroff\n")
+        guest = subprocess.Popen(
+            emulator + ["-m", "1G", "-smp", "2", "-kernel", str(image), "-no-reboot",
+                        "-display", "none", "-serial", "stdio", "-device", "qemu-xhci",
+                        "-drive", "if=none,id=stick,format=raw,file=fat:ro:%s,readonly=on" % stick,
+                        "-device", "usb-storage,drive=stick,removable=on",
+                        "-append", "console=%s drm_client_lib.active=" % console],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        transcript = bytearray()
+
+        def read():
+            while True:
+                chunk = guest.stdout.read1(65536)
+                if not chunk:
+                    return
+                transcript.extend(chunk)
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        started = time.monotonic()
+        #   The shell's prompt after init, then a moment for the machine
+        #   script, then the commands.
+        while time.monotonic() - started < args.timeout and guest.poll() is None:
+            if b"Run /init as init process" in transcript and b"$ " in transcript[
+                    transcript.find(b"Run /init as init process"):]:
+                break
+            time.sleep(1)
+        time.sleep(20)
+        try:
+            guest.stdin.write(commands.encode())
+            guest.stdin.flush()
+        except OSError:
+            pass
+        try:
+            guest.wait(timeout=max(60, args.timeout - (time.monotonic() - started)))
+        except subprocess.TimeoutExpired:
+            guest.kill()
+            guest.wait()
+        reader.join(timeout=5)
+        text = transcript.decode("latin-1").replace("\r", "")
+        (Path(os.environ.get("MOONWATER_GUEST_TRANSCRIPT", work / "transcript"))).write_text(text)
+        for label in ("net", "bowl"):
+            at = text.rfind("@@" + label + "\n")
+            part = text[at:text.find("@@done", at)] if at >= 0 else ""
+            verdict = re.search(r"(\d+) checks, (\d+) failures", part)
+            checks(verdict is not None and verdict.group(2) == "0" and int(verdict.group(1)) > 0,
+                   "%s on %s: %s" % (label, machine, verdict.group(0) if verdict else "no verdict"))
+            for line in part.splitlines():
+                if "FAIL" in line or "NOT RUN" in line:
+                    checks(False, "%s on %s: %s" % (label, machine, line.strip()))
+            if verdict:
+                print("guest confinement: %s on %s, %s" % (label, machine, verdict.group(0)))
+    return checks.verdict("guest confinement", "guest-confinement-" + machine)
 
 
 #       Public HTTPS hosts for x509_corpus: the popular sites, CDNs, clouds and
@@ -56250,7 +60657,7 @@ int main(int argc, char **argv)
 """
     source = tls_verify_hosted_source(net, (HARNESS_ROOT / "test/checks.c").read_text(), driver)
     (work / "verify.c").write_text(source)
-    built = subprocess.run(["clang", "-O2", "-std=gnu11", "-w", str(work / "verify.c"),
+    built = build_run(["clang", "-O2", "-std=gnu11", "-w", str(work / "verify.c"),
                             "-o", str(work / "verify")], capture_output=True, text=True)
     if built.returncode:
         print("x509 corpus: FAIL -- the lift does not build:\n" + built.stderr[-2000:])
@@ -56759,9 +61166,13 @@ def sntp_fuzz_seeds():
 
 def sntp_fuzz_source(host):
     """host.c's SNTP parse, selection and discipline arithmetic, lifted whole
-    by the literal anchors below, behind SNTP_FUZZ_SHIM."""
+    by the literal anchors below, behind SNTP_FUZZ_SHIM. The self-tests the
+    driver runs first (sntp_math_ok and locale_discipline_ok) live in
+    test/checks.c beside the machine check that runs them, and are lifted
+    from there."""
     sec = src_slice
     lib = (HARNESS_ROOT / "src/lib.util.c").read_text()
+    checks = (HARNESS_ROOT / "test/checks.c").read_text()
     parts = (
         sec(lib, "static bipolar clock_floor_divide(", "/*\n        The calendar, closed form"),
         sec(host, "#define SNTP_PORT 123", "static inline INLINE bipolar sntp_now_ns(void)"),
@@ -56773,8 +61184,15 @@ def sntp_fuzz_source(host):
         sec(host, "#define LOCALE_NTP_RETRY_LEAST", "/*\n        A query that runs in a child"),
         sec(host, "#define LOCALE_TIMEX_ESTERROR", "static fn locale_clock_mark_synced("),
         sec(host, "static bool locale_ntp_first;", "static const char locale_ntp_fallback"),
+        sec(checks, "#define SNTP_TEST_NOW \\\n", "/*\n        The NTS servers file, line by line"),
     )
-    return SNTP_FUZZ_SHIM + "\n".join(parts) + SNTP_FUZZ_DRIVER
+    #   The window's near edge is the clock's build floor, which net.c holds.
+    floor = re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+ll)",
+                      (HARNESS_ROOT / "src/net/net.c").read_text())
+    if not floor:
+        raise ValueError("MOONWATER_CLOCK_FLOOR is gone from net.c")
+    return (SNTP_FUZZ_SHIM + "#define MOONWATER_CLOCK_FLOOR " + floor.group(1) + "\n" +
+            "\n".join(parts) + SNTP_FUZZ_DRIVER)
 
 
 SNTP_ERA_DRIVER = r"""
@@ -56869,10 +61287,14 @@ def harness_sntp_era(argv):
     if SNTP_ERA_DRIVER not in source:
         print("  FAIL sntp era: the fuzz driver's text moved")
         return 1
-    least = int(re.search(r"#define SNTP_WALL_LEAST (\d+)ll", host).group(1))
+    #   The window's near edge is the clock's build floor, which net.c holds
+    #   and host.c names SNTP_WALL_LEAST.
+    least = int(re.search(r"#define MOONWATER_CLOCK_FLOOR (\d+)ll",
+                          (HARNESS_ROOT / "src/net/net.c").read_text()).group(1))
     most = int(re.search(r"#define SNTP_WALL_MOST (\d+)ll", host).group(1))
     instants = []
-    for text in ("2026-09-30 12:00:00", "2035-12-31 23:59:59", "2036-01-01 00:00:00",
+    for text in ("2026-09-30 12:00:00", "2026-10-02 12:00:00",
+                 "2035-12-31 23:59:59", "2036-01-01 00:00:00",
                  "2036-02-07 06:28:14", "2036-02-07 06:28:15", "2036-02-07 06:28:16",
                  "2036-02-07 06:28:17", "2037-06-01 00:00:00", "2038-01-19 03:14:07",
                  "2038-01-19 03:14:08", "2040-01-01 00:00:00", "2100-01-01 00:00:00",
@@ -56884,7 +61306,7 @@ def harness_sntp_era(argv):
         work = Path(temporary)
         for label, window in (("the shipped window", (least, most)),):
             (work / "era.c").write_text(source)
-            built = subprocess.run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
+            built = build_run([compiler, "-O1", "-g", "-std=gnu11", "-Wno-unused-function",
                                     "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                                     str(work / "era.c"), "-o", str(work / "era")],
                                    capture_output=True, text=True)
@@ -58061,6 +62483,125 @@ def crypto_vectors_lines(seed):
     sealed = AESGCM(key).encrypt(iv, b"", aad)
     emit("gcm", 1, key, iv, aad, b"", b"", sealed)
 
+    # ---- AES-SIV-CMAC-256 (RFC 5297; NTS's AEAD_AES_SIV_CMAC_256) -------
+    #   Fields: the 32-byte key, the strings before the plaintext (each a
+    #   two-byte length and its bytes), the plaintext, the ciphertext and the
+    #   16-byte tag that leads OpenSSL's output. RFC 5297's two examples
+    #   first, held to OpenSSL's answer too; then every length either side of
+    #   the padding and block edges under zero to three strings (NTS seals
+    #   with two: the packet so far, then the nonce); then the tag's every
+    #   byte flipped, the text and each string tampered, a string moved.
+    from cryptography.hazmat.primitives.ciphers.aead import AESSIV
+
+    def siv_emit(expect, key, strings, plain, cipher, tag):
+        packed = b"".join(len(part).to_bytes(2, "big") + part for part in strings)
+        emit("siv", expect, key, packed, plain, cipher, tag)
+
+    def siv_seal(key, strings, plain):
+        sealed = AESSIV(key).encrypt(plain, list(strings))
+        return sealed[16:], sealed[:16]
+
+    rfc = (
+        ("A.1", bytes.fromhex("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"),
+         [bytes.fromhex("101112131415161718191a1b1c1d1e1f2021222324252627")],
+         bytes.fromhex("112233445566778899aabbccddee"),
+         "85632d07c6e8f37f950acd320a2ecc9340c02b9690c4dc04daef7f6afe5c"),
+        ("A.2", bytes.fromhex("7f7e7d7c7b7a79787776757473727170404142434445464748494a4b4c4d4e4f"),
+         [bytes.fromhex("00112233445566778899aabbccddeeffdeaddadadeaddadaffeeddccbbaa99887766554433221100"),
+          bytes.fromhex("102030405060708090a0"), bytes.fromhex("09f911029d74e35bd84156c5635688c0")],
+         bytes.fromhex("7468697320697320736f6d6520706c61696e7465787420746f20656e6372797074207573696e67205349562d414553"),
+         "7bdb6e3b432667eb06f4d14bff2fbd0fcb900f2fddbe404326601965c889bf17dba77ceb094fa663b7a3f748ba8af829ea64ad544a272e9c485b62a3fd5c0d"),
+    )
+    for name, key, strings, plain, expected in rfc:
+        cipher, tag = siv_seal(key, strings, plain)
+        assert (tag + cipher).hex() == expected, "RFC 5297 %s: OpenSSL disagrees with the RFC" % name
+        siv_emit(1, key, strings, plain, cipher, tag)
+    for length in sorted({0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 100, 255, 256, 1000, 4096}):
+        key = draw(32)
+        strings = [draw(rng.choice((0, 1, 15, 16, 17, 40, 100))) for _ in range(rng.choice((0, 1, 2, 3)))]
+        plain = draw(length)
+        cipher, tag = siv_seal(key, strings, plain)
+        siv_emit(1, key, strings, plain, cipher, tag)
+    key, strings, plain = draw(32), [draw(70), draw(16)], draw(40)
+    cipher, tag = siv_seal(key, strings, plain)
+    for at in range(16):
+        flipped = bytearray(tag)
+        flipped[at] ^= 1 << rng.randrange(8)
+        siv_emit(0, key, strings, plain, cipher, bytes(flipped))
+    for at in (0, 39):
+        text = bytearray(cipher)
+        text[at] ^= 0x80
+        siv_emit(0, key, strings, plain, bytes(text), tag)
+    for index in (0, 1):
+        changed = list(strings)
+        changed[index] = bytes([changed[index][0] ^ 1]) + changed[index][1:]
+        siv_emit(0, key, changed, plain, cipher, tag)
+    siv_emit(0, key, strings[:1], plain, cipher, tag)
+    siv_emit(0, key, strings[::-1], plain, cipher, tag)
+    siv_emit(0, key, strings + [b""], plain, cipher, tag)
+
+    # ---- NTS replies (RFC 8915 5.6; nts_reply) ------------------------------
+    #   A server's reply as Python's AESSIV builds it: the header, the unique
+    #   identifier echoed, an unknown field maybe, and the authenticator with
+    #   the new cookies inside. Fields: the server-to-client key, the
+    #   identifier, the whole packet, the cookies the reply brings (each a
+    #   two-byte length and its bytes). Accepted as it stands, and refused for
+    #   every single byte changed, every shorter length, a foreign
+    #   identifier, the authenticator not last, a field of the wrong size, a
+    #   second identifier and a second authenticator.
+    def nts_ef(kind, body):
+        body = body + b"\0" * (-len(body) % 4)
+        return kind.to_bytes(2, "big") + (len(body) + 4).to_bytes(2, "big") + body
+
+    def nts_reply(key, uid, cookies, extras=(), echo=True, plain=None, nonce_length=16,
+                  auth_first=False):
+        head = draw(48)
+        head = bytes([0x24]) + head[1:]
+        body = (nts_ef(0x0104, uid) if echo else b"") + b"".join(extras)
+        inner = b"".join(nts_ef(0x0204, cookie) for cookie in cookies) if plain is None else plain
+        nonce = draw(nonce_length)
+        sealed = AESSIV(key).encrypt(inner, [head + body, nonce])
+        auth = nts_ef(0x0404, len(nonce).to_bytes(2, "big") + len(sealed).to_bytes(2, "big") +
+                      nonce + b"\0" * (-len(nonce) % 4) + sealed + b"\0" * (-len(sealed) % 4))
+        return head + body + auth
+
+    def nts_emit(expect, key, uid, packet, cookies):
+        emit("ntsreply", expect, key, uid, packet,
+             b"".join(len(c).to_bytes(2, "big") + c for c in cookies))
+
+    for count in (0, 1, 3, 8):
+        key, uid = draw(32), draw(32)
+        cookies = [draw(rng.choice((100, 96, 104, 101))) for _ in range(count)]
+        packet = nts_reply(key, uid, cookies)
+        nts_emit(1, key, uid, packet, [c + b"\0" * (-len(c) % 4) for c in cookies])
+        if count == 3:
+            for at in range(len(packet)):
+                flipped = bytearray(packet)
+                flipped[at] ^= 1 << rng.randrange(8)
+                nts_emit(0, key, uid, bytes(flipped), [])
+            for length in range(len(packet)):
+                nts_emit(0, key, uid, packet[:length], [])
+            nts_emit(0, key, draw(32), packet, [])
+            nts_emit(0, draw(32), uid, packet, [])
+            nts_emit(0, key, uid, packet + b"\0" * 4, [])
+            extra = nts_ef(0x0304, b"\0" * 100)
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, extras=[extra]), [c + b"\0" * (-len(c) % 4) for c in cookies])
+            nts_emit(0, key, uid, nts_reply(key, uid, cookies, extras=[nts_ef(0x0104, uid)]), [])
+            nts_emit(0, key, uid, nts_reply(key, uid, cookies, echo=False), [])
+            #   Authenticated fields that do not parse bring no cookie and no refusal.
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, plain=b"\0\0\0"), [])
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, nonce_length=0), [c + b"\0" * (-len(c) % 4) for c in cookies])
+            nts_emit(1, key, uid, nts_reply(key, uid, cookies, nonce_length=32), [c + b"\0" * (-len(c) % 4) for c in cookies])
+            #   A field of 12 bytes is shorter than RFC 7822 allows a field.
+            nts_emit(0, key, uid, nts_reply(key, uid, cookies, extras=[nts_ef(0x0999, b"\0" * 8)]), [])
+    #   More cookies than the state holds are kept up to its room, never past.
+    key, uid = draw(32), draw(32)
+    many = [draw(80) for _ in range(9)]
+    nts_emit(1, key, uid, nts_reply(key, uid, many), many[:8])
+    #   A cookie longer than the room is passed over, the rest kept.
+    long = [draw(300), draw(100)]
+    nts_emit(1, key, uid, nts_reply(key, uid, long), long[1:])
+
     # ---- X25519 -------------------------------------------------------
     p25519 = 2 ** 255 - 19
     #   RFC 7748 and Wycheproof's low-order and edge u: each of them makes
@@ -58308,11 +62849,25 @@ def crypto_vectors_lines(seed):
     #   prime from a key a bit longer and one from a key a bit shorter. Its
     #   primes are above sqrt(2) times their power of two, so the product
     #   has exactly the bits asked for.
+    #   Every prime pair the keys below take is asked for before the first is
+    #   used: OpenSSL makes them without the interpreter's lock, and the
+    #   8192-bit key is most of the time this generator spends on them.
+    rsa_sizes = ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
+                 (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3))
+
+    def prime_pair(size, e):
+        numbers = rsa.generate_private_key(public_exponent=e, key_size=size).private_numbers()
+        return numbers.p, numbers.q
+
+    prime_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2)))
+    prime_pairs = [prime_pool.submit(prime_pair, size, e)
+                   for bits, e in rsa_sizes + ((2048, 65537),)
+                   for size in ((bits,) if bits % 2 == 0 else (bits + 1, bits - 1))
+                   ]
+
     def rsa_key(bits, e):
         def primes(size):
-            numbers = rsa.generate_private_key(public_exponent=e,
-                                               key_size=size).private_numbers()
-            return numbers.p, numbers.q
+            return prime_pairs.pop(0).result()
 
         one, two = primes(bits) if bits % 2 == 0 else (primes(bits + 1)[0],
                                                         primes(bits - 1)[0])
@@ -58373,8 +62928,7 @@ def crypto_vectors_lines(seed):
         emit(scheme, want, be(n, k), be(e, 8), signature,
              message if scheme == "pss" else digest)
 
-    for bits, e in ((2048, 65537), (2049, 65537), (2055, 3), (3072, 65537),
-                    (4096, 65537), (8192, 65537), (2047, 65537), (2048, 3)):
+    for bits, e in rsa_sizes:
         n, (one, two, d) = rsa_key(bits, e)
         k = (bits + 7) // 8
         policy = bits >= 2048
@@ -58471,6 +63025,7 @@ def crypto_vectors_lines(seed):
     #   A modulus that is even, and an exponent that is even or one: refused
     #   before any arithmetic, by policy where OpenSSL has none.
     n, _ = rsa_key(2048, 65537)
+    prime_pool.shutdown()
     digest = draw(32)
     for bad_n, bad_e in ((n + 1, 65537), (n, 65536), (n, 1), (n, 2)):
         rsa_add("pkcs256", bad_n, bad_e, be(12345, 256), digest, policy=False)
@@ -58591,6 +63146,9 @@ b32 main(void)
         p8 secret[96], out[160], peer[97], peer_scalar[48], message[64], tag[16];
         p8 iv[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
         crypto_aesgcm_key key;
+        crypto_siv_key siv;
+        const p8 *siv_parts[2] = {message, message + 16};
+        positive siv_lengths[2] = {16, 8};
         positive used = 0;
         p64 seed = 0x9e3779b97f4a7c15ull * (p64)(p8)which[0];
 
@@ -58642,6 +63200,19 @@ b32 main(void)
                 tag[(p8)which[0] % 16] ^= 1;
                 out[0] = crypto_aesgcm_open(&key, iv, message, 16, message + 16, 32, tag);
                 break;
+        case 'k':
+                //      The NTS AEAD under a secret key: both AES schedules,
+                //      CMAC and the counter stream.
+                crypto_siv_prepare(&siv, secret);
+                crypto_siv_seal(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                memory_copy(out, tag, 16);
+                break;
+        case 'l':
+                crypto_siv_prepare(&siv, secret);
+                crypto_siv_seal(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                tag[(p8)which[0] % 16] ^= 1;
+                out[0] = crypto_siv_open(&siv, siv_parts, siv_lengths, 2, message + 24, 32, tag);
+                break;
         default: crypto_hkdf_extract(message, 32, secret, 32, out);
         }
         //      What was computed is read, or the compiler drops a compare
@@ -58657,7 +63228,8 @@ CRYPTO_SECRET_PRIMITIVES = (
     ("c", "ECDH P-384 public"), ("d", "ECDH P-384 shared"),
     ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
     ("g", "crypto_same"), ("i", "AES-128-GCM refusing a forged tag"),
-    ("h", "HKDF-Extract"), ("j", "AES key unwrap"))
+    ("h", "HKDF-Extract"), ("j", "AES key unwrap"),
+    ("k", "AES-SIV-CMAC-256 key and seal"), ("l", "AES-SIV-CMAC-256 refusing a forged tag"))
 
 #       What a secret is not allowed to choose a load or a store by, held
 #       by the same six secrets: where in their pages the data addresses a
@@ -58668,7 +63240,7 @@ CRYPTO_SECRET_PRIMITIVES = (
 #       secret's draw, and its address follows it by design.
 CRYPTO_SECRET_TRACED = (
     ("e", "AES-128-GCM key and seal"), ("f", "HMAC-SHA256 key"),
-    ("h", "HKDF-Extract"), ("j", "AES key unwrap"))
+    ("h", "HKDF-Extract"), ("j", "AES key unwrap"), ("k", "AES-SIV-CMAC-256 key and seal"))
 
 
 def crypto_x25519_instruction_counts():
@@ -58694,13 +63266,19 @@ def crypto_x25519_instruction_counts():
         glib = subprocess.run(["pkg-config", "--cflags", "glib-2.0"], capture_output=True,
                               text=True)
         plugin = work / "insn.so"
-        if glib.returncode or subprocess.run(
+        if glib.returncode or build_run(
                 [cc, "-O2", "-shared", "-fPIC"] + glib.stdout.split() +
                 ["-o", str(plugin), str(HARNESS_ROOT / "test/insn.c")],
                 capture_output=True).returncode:
             return ["x25519 instructions: NOT RUN -- the qemu plugin does not build"], False
-        unit = work / "count.c"
-        unit.write_text(CRYPTO_X25519_COUNT_C)
+        (work / "count.c").write_text(CRYPTO_X25519_COUNT_C)
+        (work / "secret.c").write_text(CRYPTO_SECRET_COUNT_C)
+
+        #   Every machine's two programs are built side by side, and then
+        #   every run of every program at once: each run is a process of its
+        #   own with a count that depends on nothing but the bytes it ran, the
+        #   emulator and the plugin, so a run is made once and kept.
+        machines = []
         for machine, compiler, flags, runner, cpus in (
                 ("x86_64", "x86_64-linux-gnu-gcc" if os.uname().machine != "x86_64" else "gcc",
                  ["-march=x86-64"], "qemu-x86_64",
@@ -58713,85 +63291,122 @@ def crypto_x25519_instruction_counts():
                 lines.append("x25519 instructions %s: NOT RUN -- no %s or %s"
                              % (machine, compiler, runner))
                 continue
-            binary = work / ("count." + machine)
-            built = subprocess.run(
-                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
-                                      "-fno-stack-protector", "-fno-builtin", "-w",
-                                      "-I", str(HARNESS_ROOT), "-T",
-                                      str(HARNESS_ROOT / "src/build/spark.ld"),
-                                      "-Wl,-e,_start", "-Wl,--build-id=none",
-                                      "-Wl,--no-warn-rwx-segments", "-o", str(binary),
-                                      str(unit)], capture_output=True, text=True)
-            if built.returncode:
-                lines.append("x25519 instructions %s: did not build\n%s"
-                             % (machine, built.stderr[-1500:]))
-                failed = True
-                continue
-            secret_binary = work / ("secret." + machine)
-            secret_unit = work / "secret.c"
-            secret_unit.write_text(CRYPTO_SECRET_COUNT_C)
-            built = subprocess.run(
-                [compiler] + flags + ["-O2", "-static", "-nostdlib", "-nostartfiles",
-                                      "-fno-stack-protector", "-fno-builtin", "-w",
-                                      "-I", str(HARNESS_ROOT), "-T",
-                                      str(HARNESS_ROOT / "src/build/spark.ld"),
-                                      "-Wl,-e,_start", "-Wl,--build-id=none",
-                                      "-Wl,--no-warn-rwx-segments", "-o", str(secret_binary),
-                                      str(secret_unit)], capture_output=True, text=True)
-            if built.returncode:
-                lines.append("secret instructions %s: did not build\n%s"
-                             % (machine, built.stderr[-1500:]))
-                failed = True
-                secret_binary = None
-            for body, cpu in cpus:
-                counts = []
-                for which in "anqz19":
-                    ran = subprocess.run([runner] + cpu + ["-plugin", str(plugin), str(binary),
-                                                           which],
-                                         capture_output=True, text=True)
-                    counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
-                                  else "exit %d" % ran.returncode)
-                same = len(set(counts)) == 1 and counts[0].isdigit()
-                failed = failed or not same
-                lines.append("x25519 instructions %s%s: %s" % (
-                    machine, " " + body if body else "",
-                    ("%s for each of six keys" % counts[0]) if same else
-                    "FAIL -- they differ: " + ", ".join(counts)))
-                if not secret_binary:
+            machines.append((machine, compiler, flags, runner, cpus))
+
+        def program(machine, compiler, flags, name, unit):
+            binary = work / ("%s.%s" % (name, machine))
+            return binary, [compiler] + flags + [
+                "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+                "-fno-builtin", "-w", "-I", str(HARNESS_ROOT), "-T",
+                str(HARNESS_ROOT / "src/build/spark.ld"), "-Wl,-e,_start",
+                "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-o", str(binary),
+                str(work / unit)]
+
+        wanted = [(machine, program(machine, compiler, flags, "count", "count.c"),
+                   program(machine, compiler, flags, "secret", "secret.c"))
+                  for machine, compiler, flags, _, _ in machines]
+        built = build_together([command for _, one, two in wanted for _, command in (one, two)],
+                               capture_output=True, text=True)
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(2, min(16, os.cpu_count() or 4))) as pool:
+            plan = []
+            for (machine, compiler, flags, runner, cpus), (_, (count, _), (secret, _)) in zip(
+                    machines, wanted):
+                one, two = built[0], built[1]
+                built = built[2:]
+                if one.returncode:
+                    lines.append("x25519 instructions %s: did not build\n%s"
+                                 % (machine, one.stderr[-1500:]))
+                    failed = True
                     continue
-                rows = []
-                for primitive, name in CRYPTO_SECRET_PRIMITIVES:
-                    counts = []
-                    for which in "anqz19":
-                        ran = subprocess.run(
-                            [runner] + cpu + ["-plugin", str(plugin), str(secret_binary),
-                                              primitive, which],
-                            capture_output=True, text=True)
-                        counts.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
-                                      else "exit %d" % ran.returncode)
+                if two.returncode:
+                    lines.append("secret instructions %s: did not build\n%s"
+                                 % (machine, two.stderr[-1500:]))
+                    failed = True
+                    secret = None
+
+                def runs(cpu, option, binary, *which):
+                    return [pool.submit(count_run, [runner] + cpu + ["-plugin", option,
+                                                                    str(binary), *which, key])
+                            for key in "anqz19"]
+
+                for body, cpu in cpus:
+                    plan.append((machine, body, "x25519", None, runs(cpu, str(plugin), count)))
+                    if not secret:
+                        continue
+                    plan.append((machine, body, "secret", None, [
+                        (name, runs(cpu, str(plugin), secret, primitive))
+                        for primitive, name in CRYPTO_SECRET_PRIMITIVES]))
+                    plan.append((machine, body, "traced", None, [
+                        (name, runs(cpu, str(plugin) + ",trace=on", secret, primitive))
+                        for primitive, name in CRYPTO_SECRET_TRACED]))
+            for machine, body, kind, _, futures in plan:
+                suffix = machine + (" " + body if body else "")
+                if kind == "x25519":
+                    counts = [future.result() for future in futures]
                     same = len(set(counts)) == 1 and counts[0].isdigit()
                     failed = failed or not same
-                    rows.append("%s %s" % (name, counts[0] if same else
-                                           "FAIL -- they differ: " + ", ".join(counts)))
-                lines.append("secret instructions %s%s, six secrets each: %s" % (
-                    machine, " " + body if body else "", "; ".join(rows)))
-                rows = []
-                for primitive, name in CRYPTO_SECRET_TRACED:
-                    traces = []
-                    for which in "anqz19":
-                        ran = subprocess.run(
-                            [runner] + cpu + ["-plugin", str(plugin) + ",trace=on",
-                                              str(secret_binary), primitive, which],
-                            capture_output=True, text=True)
-                        traces.append(ran.stderr.strip().split("\n")[-1] if ran.returncode == 0
-                                      else "exit %d" % ran.returncode)
-                    same = len(set(traces)) == 1 and traces[0].count(" ") == 1
-                    failed = failed or not same
-                    rows.append("%s %s" % (name, traces[0].split()[1] if same else
-                                           "FAIL -- the addresses differ: " + ", ".join(traces)))
-                lines.append("secret addresses %s%s, six secrets each: %s" % (
-                    machine, " " + body if body else "", "; ".join(rows)))
+                    lines.append("x25519 instructions %s: %s" % (
+                        suffix, ("%s for each of six keys" % counts[0]) if same else
+                        "FAIL -- they differ: " + ", ".join(counts)))
+                elif kind == "secret":
+                    rows = []
+                    for name, group in futures:
+                        counts = [future.result() for future in group]
+                        same = len(set(counts)) == 1 and counts[0].isdigit()
+                        failed = failed or not same
+                        rows.append("%s %s" % (name, counts[0] if same else
+                                               "FAIL -- they differ: " + ", ".join(counts)))
+                    lines.append("secret instructions %s, six secrets each: %s"
+                                 % (suffix, "; ".join(rows)))
+                else:
+                    rows = []
+                    for name, group in futures:
+                        traces = [future.result() for future in group]
+                        same = len(set(traces)) == 1 and traces[0].count(" ") == 1
+                        failed = failed or not same
+                        rows.append("%s %s" % (name, traces[0].split()[1] if same else
+                                               "FAIL -- the addresses differ: " + ", ".join(traces)))
+                    lines.append("secret addresses %s, six secrets each: %s"
+                                 % (suffix, "; ".join(rows)))
     return lines, failed
+
+
+def count_run(command):
+    """The last line a plugin run of qemu-user wrote, or "exit N": the same
+    for the same emulator, plugin, program and words, so the build cache
+    keeps it (a file named on the line counts by its bytes, ahead of any
+    ,option it carries)."""
+    root, verify = build_cache_setting()
+    entry = None
+    #   Where in their pages the data addresses of a traced run fall depends on
+    #   where the stack was put, which is not the program's alone: only the
+    #   counts, which are, are kept.
+    if root and not any("trace=on" in str(word) for word in command):
+        digest = hashlib.sha256(b"moonwater count cache 1\0")
+        digest.update(build_cache_tool(command[0], False).encode() + b"\0")
+        for word in command:
+            name, comma, option = word.partition(",")
+            path = Path(name)
+            if not word.startswith("-") and path.is_file():
+                digest.update(b"<file>" + hashlib.sha256(path.read_bytes()).digest() +
+                              comma.encode() + option.encode() + b"\0")
+            else:
+                digest.update(word.encode() + b"\0")
+        entry = root / "counts" / digest.hexdigest()[:2] / digest.hexdigest()
+        if entry.is_file() and not verify:
+            return entry.read_text()
+    ran = subprocess.run(command, capture_output=True, text=True)
+    answer = ran.stderr.strip().split("\n")[-1] if ran.returncode == 0 else "exit %d" % ran.returncode
+    if entry and (verify and entry.is_file() and entry.read_text() != answer):
+        raise RuntimeError("count cache: %s answers %r, the entry says %r"
+                           % (command[-2:], answer, entry.read_text()))
+    if entry and not entry.is_file():
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        staged = entry.with_name(".%s.%d.%d" % (entry.name, os.getpid(), time.monotonic_ns()))
+        staged.write_text(answer)
+        os.replace(staged, entry)
+    return answer
 
 
 def wycheproof_lines(directory):
@@ -58933,6 +63548,15 @@ def harness_crypto_vectors(argv):
       255-block ceiling), PBKDF2 over SHA-1 and SHA-256
     - AES-128-GCM across every turn size and tail, the tag's every byte
       flipped, the text and AAD tampered, GMAC over an empty text
+    - AES-SIV-CMAC-256 (RFC 5297, NTS's AEAD): RFC 5297 A.1 and A.2, held
+      to the RFC's own bytes, then every length either side of the padding
+      and block edges under zero to three strings, the tag's every byte
+      flipped, the text and each string tampered, a string moved or added
+    - NTS replies (RFC 8915 5.6, nts_reply) built by Python's AESSIV:
+      accepted as built, refused for every single changed byte, every
+      shorter length, a foreign identifier or key, the authenticator not
+      last, a second identifier, a field shorter than RFC 7822 allows;
+      cookies kept up to eight, one longer than the room passed over
     - X25519 on RFC 7748's low-order and non-canonical u, which must
       refuse the all-zero secret, and random pairs
     - P-256/P-384 key shares over the scalar range's ends and refusals,
@@ -60011,7 +64635,7 @@ def harness_crypto_fuzz(argv):
             probe = Path(temporary) / "probe.c"
             probe.write_text("#include <openssl/evp.h>\n"
                              "int main(void) { return EVP_aes_128_gcm() == 0; }\n")
-            if subprocess.run([clang, str(probe), "-o", str(Path(temporary) / "probe")] + extra,
+            if build_run([clang, str(probe), "-o", str(Path(temporary) / "probe")] + extra,
                               capture_output=True).returncode:
                 print("crypto fuzz: NOT RUN -- no OpenSSL headers or libcrypto to link")
                 return 2
@@ -60905,9 +65529,10 @@ def harness_bowl_sig_fuzz(argv):
 
 
 def harness_tls_fuzz(argv):
-    """tls_der_fuzz, tls_hs_fuzz, tls_verify_fuzz, waterlink_pre_fuzz,
-    waterlink_fuzz, dhcp_fuzz, sntp_fuzz, dns_fuzz, netlink_fuzz,
-    crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz, wifi_scan_fuzz and http_fuzz in turn: `sh test/run fuzz`.
+    """tls_der_fuzz, tls_ocsp_fuzz, tls_crl_fuzz, tls_hs_fuzz, tls_verify_fuzz,
+    waterlink_pre_fuzz, waterlink_fuzz, dhcp_fuzz, dhcp_frame_fuzz, sntp_fuzz,
+    dns_fuzz, netlink_fuzz, crypto_fuzz, bowl_sig_fuzz, wifi_eapol_fuzz,
+    wifi_scan_fuzz, wifi_sae_fuzz, nts_fuzz and http_fuzz in turn: `sh test/run fuzz`.
 
     Continuous by default, an hour a target with no run cap, unless
     MOONWATER_FUZZ_SECONDS / MOONWATER_FUZZ_RUNS say otherwise. With
@@ -60925,25 +65550,34 @@ def harness_tls_fuzz(argv):
     os.environ.setdefault("MOONWATER_FUZZ_RUNS", "20000" if report else "-1")
     os.environ.setdefault("MOONWATER_FUZZ_SECONDS", "5" if report else "3600")
     runs, seconds, _ = tls_fuzz_budget()
-    print("tls fuzz: der then hs then verify then waterlink pre then waterlink then dhcp then sntp then wifi eapol then wifi scan then dns then netlink then crypto then bowl sig then http "
+    print("tls fuzz: der then ocsp then crl then hs then verify then waterlink pre then waterlink then dhcp then dhcp frame then sntp then wifi eapol then wifi scan then wifi sae then nts then dns then netlink then crypto then bowl sig then http "
           "(runs=%d seconds=%d)" % (runs, seconds))
     seeds = {corpus: len(tls_fuzz_seeds(corpus))
-             for corpus in ("tls_der", "tls_hs", "waterlink", "dhcp", "sntp", "dns", "netlink", "crypto", "http")}
+             for corpus in ("tls_der", "tls_ocsp", "tls_crl", "tls_hs", "waterlink", "dhcp",
+                            "sntp", "dns", "netlink", "crypto", "http")}
     seeds["waterlink_pre"] = len(waterlink_pre_seeds())
     seeds["wifi_eapol"] = len(wifi_eapol_fuzz_seeds())
     seeds["wifi_scan"] = len(wifi_scan_fuzz_seeds())
+    seeds["wifi_sae"] = len(wifi_sae_fuzz_seeds())
     seeds["bowl_sig"] = len(bowl_sig_fuzz_seeds())
+    seeds["dhcp_frame"] = len(dhcp_frame_fuzz_seeds())
+    seeds["nts"] = len(nts_fuzz_seeds())
     targets = []
     for name, corpus, harness in (
             ("tls_der_fuzz", "tls_der", harness_tls_der_fuzz),
+            ("tls_ocsp_fuzz", "tls_ocsp", harness_tls_ocsp_fuzz),
+            ("tls_crl_fuzz", "tls_crl", harness_tls_crl_fuzz),
             ("tls_hs_fuzz", "tls_hs", harness_tls_hs_fuzz),
             ("tls_verify_fuzz", "tls_der", harness_tls_verify_fuzz),
             ("waterlink_pre_fuzz", "waterlink_pre", harness_waterlink_pre_fuzz),
             ("waterlink_fuzz", "waterlink", harness_waterlink_fuzz),
             ("dhcp_fuzz", "dhcp", harness_dhcp_fuzz),
+            ("dhcp_frame_fuzz", "dhcp_frame", harness_dhcp_frame_fuzz),
             ("sntp_fuzz", "sntp", harness_sntp_fuzz),
             ("wifi_eapol_fuzz", "wifi_eapol", harness_wifi_eapol_fuzz),
             ("wifi_scan_fuzz", "wifi_scan", harness_wifi_scan_fuzz),
+            ("wifi_sae_fuzz", "wifi_sae", harness_wifi_sae_fuzz),
+            ("nts_fuzz", "nts", harness_nts_fuzz),
             ("dns_fuzz", "dns", harness_dns_fuzz),
             ("netlink_fuzz", "netlink", harness_netlink_fuzz),
             ("crypto_fuzz", "crypto", harness_crypto_fuzz),
@@ -61027,7 +65661,8 @@ def harness_msan_net(argv):
          (same lift pieces as tls_der_fuzz)
       4. thin CHECK_net-equivalent probes (align/sizeof + parser shape checks);
          not a full freestanding CHECK_net under MSan
-      5. short tls_der_fuzz / tls_hs_fuzz / sntp_fuzz / wifi_eapol_fuzz /
+      5. short tls_der_fuzz / tls_ocsp_fuzz / tls_crl_fuzz / tls_hs_fuzz /
+         sntp_fuzz / wifi_eapol_fuzz /
          dns_fuzz / netlink_fuzz seed smokes with MOONWATER_MSAN=1
     Returns 2 (NOT RUN) when MSan is unavailable (Apple clang, many qemu
     images).
@@ -61057,7 +65692,7 @@ def harness_msan_net(argv):
         unit = work / (name + ".c")
         binary = work / name
         unit.write_text(source)
-        built = subprocess.run(msan_cc + [str(unit), "-o", str(binary)],
+        built = build_run(msan_cc + [str(unit), "-o", str(binary)],
                                capture_output=True, text=True)
         if built.returncode:
             return None, built.stderr
@@ -61104,7 +65739,8 @@ def harness_msan_net(argv):
         i = text.index(first)
         return text[i:text.index(following, i)]
 
-    # Shared hosted typedefs/macros for freestanding net.c lifts.
+    # Shared hosted typedefs/macros for freestanding net.c lifts. The tier is
+    # the default's, as a build with no header has it; the HTTP head reads it.
     base_shim = r"""
 #include <stdio.h>
 #include <stdlib.h>
@@ -61113,6 +65749,15 @@ def harness_msan_net(argv):
 #include <stddef.h>
 #include <stdbool.h>
 #include <ctype.h>
+#define STRICT_REFERENCE 0
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#ifndef MOONWATER_STRICT
+#define MOONWATER_STRICT STRICT_SAFE
+#endif
+#ifndef MOONWATER_STRICT_NET
+#define MOONWATER_STRICT_NET MOONWATER_STRICT
+#endif
 typedef uint8_t p8;
 """ + HOSTED_WIDE_TYPES + r"""
 #define memory_compare memcmp
@@ -61138,7 +65783,7 @@ static positive memory_span_without_byte(const void *block, p8 byte,
 """ + HOSTED_SPAN_BYTE + r"""
 """ + HOSTED_STRING_HELPERS + r"""
 """ + HOSTED_NETWORK_LOADS + r"""
-""" + byte_store_source() + byte_reader_source()
+""" + byte_store_source() + byte_reader_source() + positive_append_digit_source()
 
     # --- 1a. Generic wire-header pad prove (original). ---
     pad_source = r"""
@@ -61375,12 +66020,23 @@ int main(void)
     http_framing = sec(
         net,
         "static PURE bipolar http_header_end(",
-        "static bipolar http_unchunk(p8 address_to bytes, positive size);")
+        "/* Status and body framing have one interpretation in both clients.")
+
+    #   What the head checks ask of http_response_fields: the grammar alone.
+    http_head_valid = r"""
+static bool http_header_block_valid(p8 *bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, &response, &fields);
+}
+"""
 
     http_clean_source = base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 static int failures;
 
 static void expect_chunk(const char *label, const char *line, int want_ok,
@@ -61428,10 +66084,27 @@ int main(void)
                 failures++;
         }
 
+        /* A fold after an ordinary field is read at the default tier (as
+           wget and curl do) and refused at the tight one; after a framing
+           field it is refused at both. */
         hend = http_header_end((p8 *)fold, (positive)strlen(fold));
-        if (hend < 0 || http_header_block_valid((p8 *)fold, (positive)hend)) {
-                fprintf(stderr, "msan http: FAIL obs-fold must refuse\n");
+        if (hend < 0 ||
+            http_header_block_valid((p8 *)fold, (positive)hend) !=
+                (MOONWATER_STRICT_NET < STRICT_TIGHT)) {
+                fprintf(stderr, "msan http: FAIL obs-fold after an ordinary field\n");
                 failures++;
+        }
+        {
+                const char *framed =
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n 4\r\n\r\n";
+
+                hend = http_header_end((p8 *)framed, (positive)strlen(framed));
+                if (hend < 0 ||
+                    http_header_block_valid((p8 *)framed, (positive)hend)) {
+                        fprintf(stderr, "msan http: FAIL obs-fold after "
+                                "Content-Length must refuse\n");
+                        failures++;
+                }
         }
 
         /* NUL in field name: walk still bounded; validity refuses. */
@@ -61489,7 +66162,7 @@ int main(void)
         '#include <sanitizer/msan_interface.h>\n' + base_shim + r"""
 #define HTTP_OK 0
 #define HTTP_MALFORMED (-5)
-""" + http_framing + r"""
+""" + http_framing + http_head_valid + r"""
 int main(void)
 {
         /* Claim a full header block; poison the unread tail so the line walk
@@ -61997,11 +66670,14 @@ int main(void)
     os.environ["MOONWATER_MSAN"] = "1"
     try:
         der = harness_tls_der_fuzz([])
+        ocsp = harness_tls_ocsp_fuzz([])
+        crl = harness_tls_crl_fuzz([])
         hs = harness_tls_hs_fuzz([])
         dhcp = harness_dhcp_fuzz([])
         sntp = harness_sntp_fuzz([])
         wifi = harness_wifi_eapol_fuzz([])
         scan = harness_wifi_scan_fuzz([])
+        nts = harness_nts_fuzz([])
         dns = harness_dns_fuzz([])
         netlink = harness_netlink_fuzz([])
         crypto = harness_crypto_fuzz([])
@@ -62019,17 +66695,162 @@ int main(void)
               % (der, hs, sntp, dns, netlink, http))
         return 2
     checks(der == 0, "tls_der_fuzz clean under MSan")
+    checks(ocsp == 0, "tls_ocsp_fuzz clean under MSan")
+    checks(crl == 0, "tls_crl_fuzz clean under MSan")
     checks(hs == 0, "tls_hs_fuzz clean under MSan")
     checks(dhcp == 0, "dhcp_fuzz clean under MSan")
     checks(sntp == 0, "sntp_fuzz clean under MSan")
     checks(wifi == 0, "wifi_eapol_fuzz clean under MSan")
     checks(scan == 0, "wifi_scan_fuzz clean under MSan")
+    checks(nts in (0, 2), "nts_fuzz clean under MSan")
     checks(dns == 0, "dns_fuzz clean under MSan")
     checks(netlink == 0, "netlink_fuzz clean under MSan")
     checks(crypto in (0, 2), "crypto_fuzz clean under MSan")
     checks(bowl == 0, "bowl_sig_fuzz clean under MSan")
     checks(http == 0, "http_fuzz clean under MSan")
     return checks.verdict("msan net", "msan-net")
+
+
+def harness_net_lease_transitions(argv):
+    """Production lease installation/rollback/release over a recorded kernel seam.
+    Covers route conflicts and failures without root or network namespaces.
+    """
+    del argv
+    host = (HARNESS_ROOT / "src/sh/net.c").read_text()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+typedef uint8_t p8;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef char *string_address;
+#define address_to *
+#define address_of &
+#define fn void
+#define COLD
+#define CONST
+#define null NULL
+#define min(a,b) ((a) < (b) ? (a) : (b))
+#define memory_fill memset
+#define memory_copy memcpy
+#define memory_compare memcmp
+static void string_format(int writer, const char *format, ...) { (void)writer; (void)format; }
+static int net_out, writer_terminal_name;
+static string_address net_host_text(p8 *into, p32 host) { (void)host; return (char *)into; }
+#define IFNAME_SIZE 16
+#define DNS_SERVERS_MAX 3
+#define NETLINK_ROUTE_ONLINK 4
+#define RTM_NEWROUTE 24
+#define NLM_REQUEST 1
+#define NLM_ACK 4
+#define NLM_CREATE 1024
+#define NLM_EXCLUSIVE 512
+#define NLM_REPLACE 256
+#define ERROR_NO_ENTRY ENOENT
+#define ERROR_NO_PROCESS ESRCH
+#define ERROR_NO_DEVICE ENODEV
+typedef struct { p32 address, mask, router, nameserver, server, seconds, renewal, rebinding; } dhcp_lease;
+typedef struct { p32 index, host; p8 prefix; bool leased; positive others;
+                 p32 other_host[8]; p8 other_prefix[8]; } netlink_lease_search;
+static int new_route_status, fail_old_address, fail_old_route, foreign_deletes;
+static bool old_route, new_route;
+static positive net_seconds(void) { return 100; }
+static void net_flush(void) {}
+static bipolar net_refused(string_address doing, bipolar status) { (void)doing; return status; }
+static bipolar net_write_resolv(p32 server) { (void)server; return 0; }
+static void net_dns_lease_note(p32 server) { (void)server; }
+static positive net_resolver_choose(p32 server, p32 *servers) { servers[0] = server; return 1; }
+static bipolar net_write_resolv_servers(string_address path, p32 *servers, positive count)
+{ (void)path; (void)servers; (void)count; return 0; }
+static void string_copy_max_end(p8 *into, string_address from, positive most)
+{ strncpy((char *)into, from, most); into[most] = 0; }
+static bipolar netlink_leases_on(b32 handle, netlink_lease_search *found)
+{ (void)handle; (void)found; return 0; }
+static bipolar netlink_address_lease(b32 handle, p32 index, p32 host, p8 prefix,
+                                    p32 seconds, bool exclusive)
+{ (void)handle; (void)index; (void)host; (void)prefix; (void)seconds; (void)exclusive; return 0; }
+static bipolar netlink_address_delete(b32 handle, p32 index, p32 host, p8 prefix)
+{
+        (void)handle; (void)index; (void)prefix;
+        if (host == 0x0a000002 && fail_old_address) { fail_old_address = 0; return -EIO; }
+        return 0;
+}
+static bipolar netlink_route_change(b32 handle, int type, int flags, p32 dest,
+                                    p8 bits, p32 gateway, p32 index, p8 extra)
+{
+        (void)handle; (void)type; (void)flags; (void)dest; (void)bits; (void)index; (void)extra;
+        if (gateway == 0x0a000001) { old_route = true; return 0; }
+        if (!new_route_status) new_route = true;
+        return new_route_status;
+}
+static bipolar netlink_route_delete(b32 handle, p32 dest, p8 bits, p32 gateway, p32 index)
+{
+        (void)handle; (void)dest; (void)bits; (void)index;
+        if (gateway == 0x0a000001) {
+                if (fail_old_route) { fail_old_route = 0; return -EACCES; }
+                old_route = false;
+        } else {
+                if (new_route_status == -EEXIST) foreign_deletes++;
+                new_route = false;
+        }
+        return 0;
+}
+'''
+    source += src_slice(host, "/*\n        What this machine is holding, and since when.",
+                        "/* The lease clock")
+    source += src_slice(net, "static CONST COLD p8 dhcp_prefix_of(",
+                        "static COLD fn dhcp_lease_merge(")
+    source += src_slice(host, "static COLD bool net_change_gone(",
+                        "static COLD bool net_wired_off(")
+    source += r'''
+int main(void)
+{
+        int checks = 0, failures = 0;
+#define expect(ok, text) do { checks++; if (!(ok)) { failures++; \
+        printf("  FAIL conflict %d fault %d: %s\n", conflict, fault, text); } } while (0)
+        for (int conflict = 0; conflict < 2; conflict++)
+        for (int fault = 0; fault < 3; fault++) {
+                net_holding held = {.index = 7, .address_owned = true, .route_owned = true,
+                    .lease = {.address = 0x0a000002, .mask = 0xffffff00,
+                              .router = 0x0a000001, .seconds = 600}};
+                net_holding before = held;
+                dhcp_lease lease = held.lease;
+                p8 hardware[6] = {0};
+                lease.address++;
+                lease.router = 0x0a000004;
+                new_route_status = conflict ? -EEXIST : 0;
+                fail_old_address = fault == 1;
+                fail_old_route = fault == 2;
+                old_route = true;
+                new_route = conflict;
+                foreign_deletes = 0;
+                b32 result = net_apply_lease(1, 7, "test0", hardware, &lease, &held, false);
+                expect((result != 0) == (fault != 0), "I/O failure reaches the caller");
+                if (fault) {
+                        expect(!memcmp(&held, &before, sizeof held), "rollback keeps the prior lease");
+                        expect(old_route && new_route == (bool)conflict,
+                               "rollback restores owned objects and preserves the foreign route");
+                } else {
+                        expect(held.route_owned == !conflict,
+                               "deleting the old route cannot acquire the conflicting route");
+                        expect(net_holding_release(1, &held) == 0,
+                               "the resulting lease can be released");
+                        expect(new_route == (bool)conflict,
+                               "release removes only a route the client installed");
+                }
+                expect(!foreign_deletes, "no delete targets the foreign route");
+        }
+        printf("net-lease-transitions %d/%d\n", checks - failures, checks);
+        return failures != 0;
+}
+'''
+    return run_sanitized("net-lease-transitions", source, None)
 
 
 def harness_net_clock_fault(argv):
@@ -62085,7 +66906,7 @@ int main(void) {
             unit = Path(temporary) / "clock.c"
             binary = Path(temporary) / "clock"
             unit.write_text(source)
-            built = subprocess.run([clang, "-std=c11", "-O2",
+            built = build_run([clang, "-std=c11", "-O2",
                                     "-fsanitize=address,undefined", str(unit),
                                     "-o", str(binary)], capture_output=True, text=True)
             if built.returncode:
@@ -62353,7 +67174,7 @@ int main(void)
         unit = Path(temporary) / "wait.c"
         binary = Path(temporary) / "wait"
         unit.write_text(source)
-        built = subprocess.run([compiler, "-std=c11", "-O2",
+        built = build_run([compiler, "-std=c11", "-O2",
                                 "-fsanitize=address,undefined", "-I", str(HARNESS_ROOT),
                                 str(unit), "-o", str(binary)], capture_output=True, text=True)
         checks(built.returncode == 0, "production wait state model compiles")
@@ -62403,10 +67224,13 @@ typedef uint32_t p32;
 #define DHCP_OK 0
 #define DHCP_REFUSED (-2)
 #define DHCP_NO_OFFER (-1)
+#define HOST_BROADCAST 0xffffffffu
 typedef struct { p32 family, port, host; } socket_address_internet;
 typedef struct { positive began, budget; } network_deadline;
-typedef struct { positive serial; } dhcp_lease;
+typedef struct { positive serial; p32 address; } dhcp_lease;
 static unsigned script[5], prefix, calls;
+/* The packet socket, when the schedule is read off one (dhcp_frame_next). */
+static bipolar dhcp_frames = -1;
 static void require(bool ok) { if (!ok) abort(); }
 static unsigned event(unsigned at)
 {
@@ -62426,6 +67250,20 @@ static bipolar network_receive_next(bipolar handle, p8 *packet, positive room,
     packet[0] = kind;
     return kind == 5 ? -5 : kind == 6 ? 2 : kind == 7 ? 0 : 1;
 }
+/* The same schedule off the packet socket. A frame's destination is the
+   broadcast address or the offered one, alternately; and a reply the parser
+   refuses (event 0) becomes a whole ACK sent to another station's address,
+   which only the destination rule refuses, so the oracle is the same. */
+static bipolar dhcp_frame_next(bipolar frames, p8 *packet, positive room,
+                               socket_address_internet *peer, p32 *size,
+                               p32 *destination, const network_deadline *deadline)
+{
+    require(frames == 7);
+    bipolar got = network_receive_next(frames, packet, room, peer, size, deadline);
+    *destination = calls & 1 ? HOST_BROADCAST : 0x0a000015u;
+    if (got == 1 && packet[0] == 0) { packet[0] = 3; *destination = 0x0a000099u; }
+    return got;
+}
 static bipolar dhcp_read(p8 *packet, positive length, p32 xid, p8 *hardware,
                           dhcp_lease *lease, p8 *kind)
 {
@@ -62433,6 +67271,7 @@ static bipolar dhcp_read(p8 *packet, positive length, p32 xid, p8 *hardware,
     require(length == 1);
     if (packet[0] == 0) return -1;
     lease->serial = packet[0];
+    lease->address = 0x0a000015u;
     *kind = packet[0];
     return 0;
 }
@@ -62471,8 +67310,10 @@ int main(void)
     socket_address_internet peer = {AF_INET, 1, 1};
     network_deadline deadline = {1, 1};
     p8 packet[1], hardware[6] = {0};
+    for (unsigned framed = 0; framed < 2; ++framed)
     for (unsigned code = 0; code < 32768; ++code) {
         unsigned n = code;
+        dhcp_frames = framed ? 7 : -1;
         for (unsigned at = 0; at < 5; ++at) { script[at] = n % 8; n /= 8; }
         for (unsigned boundary = 0; boundary <= 64; ++boundary) {
             unsigned used, rejected;
@@ -62507,6 +67348,8 @@ int main(void)
                               ul_c_function(net, "dhcp_peer_matches"),
                               ul_c_function(net, "dhcp_receive"),
                               ul_c_function(net, "dhcp_complete")))
+    #   The receive's own reading (network_receive_next, dhcp_frame_next) is
+    #   the script above; what is lifted is what decides with it.
     source = source.replace("/* PRODUCTION */", production)
     compiler = shutil.which("clang")
     if not compiler:
@@ -62516,7 +67359,7 @@ int main(void)
         unit = Path(temporary) / "work.c"
         binary = Path(temporary) / "work"
         unit.write_text(source)
-        built = subprocess.run([compiler, "-std=c11", "-O2",
+        built = build_run([compiler, "-std=c11", "-O2",
                                 "-fsanitize=address,undefined", str(unit),
                                 "-o", str(binary)], capture_output=True, text=True)
         checks(built.returncode == 0, "production DHCP work model compiles")
@@ -62528,9 +67371,2427 @@ int main(void)
                 print(ran.stderr[-3000:])
             else:
                 print("  " + ran.stdout.strip())
-            checks(ran.returncode == 0 and "2129920 DHCP schedules" in ran.stdout,
-                   "all five-event schedules and all 65 work boundaries match the independent oracle")
+            #   2,129,920 schedules read off the client socket and the same
+            #   again off the packet socket (dhcp_frame_next).
+            checks(ran.returncode == 0 and "4259840 DHCP schedules" in ran.stdout,
+                   "all five-event schedules and all 65 work boundaries, off either socket, "
+                   "match the independent oracle")
     return checks.verdict("net parser work states", "net-parser-work-states")
+
+
+def harness_net_dhcp_exchange(argv):
+    """The DHCP client's exchanges, run over a recorded socket seam.
+
+    Production dhcp_ask, dhcp_reacquire, dhcp_give_back (DECLINE and
+    RELEASE), dhcp_say, dhcp_build and the lease rules are lifted; the
+    sockets, the packet socket an acquisition reads, the answer pipe, the clock
+    budget, the entropy and the receive loop are scripted, so the schedule of
+    attempts, every wait, the REQUEST built from an OFFER, the work allowance,
+    the order the sockets open and close in, what an exchange run apart says
+    down its pipe and when, and each failure of a send, an open or a timer can
+    be asserted without a server, a root or a second host. The expected
+    numbers are written out here, not computed by the code under test.
+    """
+    del argv
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    wait = (HARNESS_ROOT / "src/net/wait.c").read_text()
+    source = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint64_t positive;
+typedef int64_t bipolar;
+typedef uint8_t p8;
+typedef uint16_t p16;
+typedef uint32_t p32;
+typedef int32_t b32;
+typedef char *string_address;
+#define address_to *
+#define address_of &
+#define COLD
+#define CONST
+#define fn void
+#define null NULL
+#define AF_INET 2
+#define NETWORK_DISCARD_MAX 64
+#define HOST_ANY 0x00000000u
+#define HOST_BROADCAST 0xffffffffu
+#define network_order_16(v) ((p16)(v))
+#define network_order_32(v) ((p32)(v))
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_copy(to, from, n) memcpy((to), (from), (n))
+typedef uint64_t p64;
+typedef struct { p16 family; p16 port; p32 host; p64 pad; } socket_address_internet;
+typedef struct { positive began, budget; } network_deadline;
+/* CONSTANTS */
+static void network_store_16(p8 *b, p16 v) { b[0] = (p8)(v >> 8); b[1] = (p8)v; }
+static void network_store_32(p8 *b, p32 v)
+{ b[0] = (p8)(v >> 24); b[1] = (p8)(v >> 16); b[2] = (p8)(v >> 8); b[3] = (p8)v; }
+static p32 network_load_32(const p8 *b)
+{ return (p32)b[0] << 24 | (p32)b[1] << 16 | (p32)b[2] << 8 | b[3]; }
+
+static void require(bool ok, const char *what)
+{ if (!ok) { fprintf(stderr, "FAIL %s\n", what); abort(); } }
+
+/* The seam. */
+static bool fail_random, fail_spread, fail_open, fail_frames, fail_begin_at_valid;
+static int fail_begin_at, fail_send_at;
+static p8 spread_byte;
+static int opens, closes, sends, begins, completes, receives, serial;
+static int frame_opens, frame_closes;
+static p32 open_host; static bool open_broadcast;
+static struct { p8 bytes[300]; positive size; socket_address_internet to; bool has_to; } sent[64];
+static struct { positive seconds, nanoseconds; } budget[128];
+static bipolar complete_result;
+static struct { bool rebinding; p32 peer; positive seconds, nanoseconds; p32 transaction; } completed;
+static struct { int kind; } script[200];
+static int script_length, script_at;
+static dhcp_lease offer_lease;
+/* What happened, in order: T a transaction id drawn, S the spread drawn, F
+   the packet socket opened, U the client socket opened, f the packet socket
+   closed, u the client socket closed. */
+static char order[64]; static int ordered;
+static void happened(char what) { if (ordered < 63) order[ordered++] = what; order[ordered] = 0; }
+/* The answer pipe of an exchange run apart, and what was said down it, with
+   the number of sends made when it was. */
+static b32 dhcp_apart = -1;
+static bipolar dhcp_frames = -1;
+static struct { dhcp_answer said; int after_sends; } records[64];
+static int recorded;
+
+static bool dhcp_transaction_early(p32 *transaction)
+{ if (fail_random) return false; happened('T'); *transaction = 0x01020300u + (p32)++serial; return true; }
+static bipolar system_random_fill(void *into, positive size, int nonblocking)
+{ (void)nonblocking; happened('S'); if (fail_spread) return -1; memset(into, spread_byte, size); return 0; }
+/* The client socket's number: 77, or 0 when standard input was shut. */
+static b32 client_handle = 77;
+static bipolar dhcp_open(string_address device, p32 host, bool broadcast)
+{ (void)device; if (fail_open) return -1; happened('U'); opens++; open_host = host; open_broadcast = broadcast; return client_handle; }
+static bipolar dhcp_frames_open(string_address device)
+{ (void)device; require(dhcp_frames < 0, "no packet socket left open"); if (fail_frames) return -1; happened('F'); frame_opens++; return 88; }
+static void dhcp_frames_close(void)
+{ if (dhcp_frames >= 0) { require(dhcp_frames == 88, "close the packet socket opened"); happened('f'); frame_closes++; } dhcp_frames = -1; }
+static bipolar system_write_all(positive handle, const void *data, positive size)
+{
+    require((b32)handle == dhcp_apart && dhcp_apart >= 0, "a record goes only down the answer pipe");
+    require(size == sizeof(dhcp_answer), "one whole record at a time");
+    if (recorded < 64) { memcpy(&records[recorded].said, data, size); records[recorded].after_sends = sends; }
+    recorded++;
+    return (bipolar)size;
+}
+static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
+                           const socket_address_internet *to, positive tosize)
+{
+    (void)flags; (void)tosize; require(handle == client_handle, "send on the opened socket");
+    if (sends == fail_send_at) { sends++; return -1; }
+    if (sends < 64) {
+        memcpy(sent[sends].bytes, data, size < 300 ? size : 300);
+        sent[sends].size = size; sent[sends].has_to = to != NULL;
+        if (to) sent[sends].to = *to;
+    }
+    sends++;
+    return (bipolar)size;
+}
+static void socket_close(b32 handle) { require(handle == client_handle, "close the opened socket"); happened('u'); closes++; }
+static bool network_deadline_begin(network_deadline *deadline, positive seconds, positive nanoseconds)
+{
+    if (begins == fail_begin_at && fail_begin_at_valid) { begins++; return false; }
+    if (begins < 128) { budget[begins].seconds = seconds; budget[begins].nanoseconds = nanoseconds; }
+    begins++; deadline->began = 1; deadline->budget = 1; return true;
+}
+/* 0 nothing, 1 usable OFFER, 2 unusable OFFER, 3 an ACK where an OFFER belongs, 4 NAK */
+static bool dhcp_receive(bipolar handle, p8 *packet, positive room, p32 transaction,
+                         p8 *hardware, dhcp_lease *lease, p8 *kind,
+                         const socket_address_internet *expected_peer, bool any_peer_host,
+                         socket_address_internet *accepted_peer, positive *remaining,
+                         const network_deadline *deadline)
+{
+    (void)handle; (void)packet; (void)room; (void)transaction; (void)hardware;
+    (void)expected_peer; (void)any_peer_host; (void)accepted_peer; (void)deadline;
+    require(remaining != NULL, "the allowance is passed down");
+    receives++;
+    int next = script_at < script_length ? script[script_at++].kind : 0;
+    if (!next) return false;
+    *lease = offer_lease;
+    if (next == 2) lease->seconds = 0;
+    *kind = next == 3 ? DHCP_ACK : next == 4 ? DHCP_NAK : DHCP_OFFER;
+    return true;
+}
+static bipolar dhcp_complete(bipolar handle, p8 *packet, positive room, p32 transaction,
+                             p8 *hardware, dhcp_lease *lease, socket_address_internet *peer,
+                             bool rebinding, const network_deadline *deadline)
+{
+    (void)handle; (void)packet; (void)room; (void)hardware; (void)lease; (void)deadline;
+    completes++;
+    completed.rebinding = rebinding; completed.peer = peer->host; completed.transaction = transaction;
+    completed.seconds = budget[begins - 1].seconds; completed.nanoseconds = budget[begins - 1].nanoseconds;
+    return complete_result;
+}
+/* PRODUCTION */
+
+static void reset(void)
+{
+    fail_random = fail_spread = fail_open = fail_frames = fail_begin_at_valid = false;
+    fail_begin_at = fail_send_at = -1; spread_byte = 0;
+    opens = closes = sends = begins = completes = receives = 0;
+    frame_opens = frame_closes = recorded = ordered = 0; order[0] = 0;
+    dhcp_apart = -1; dhcp_frames = -1; client_handle = 77;
+    script_length = script_at = 0; complete_result = DHCP_OK;
+    memset(sent, 0, sizeof sent); memset(budget, 0, sizeof budget);
+    memset(records, 0, sizeof records);
+    offer_lease = (dhcp_lease){.address = 0x0a000015, .mask = 0xffffff00,
+        .router = 0x0a000001, .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
+}
+static void play(int kind) { script[script_length++].kind = kind; }
+static const p8 *option(const p8 *packet, p8 code, positive *length)
+{
+    for (positive at = DHCP_HEAD + 4; at < 300 && packet[at] != DHCP_OPTION_END;) {
+        if (packet[at] == DHCP_OPTION_PAD) { at++; continue; }
+        if (packet[at] == code) { *length = packet[at + 1]; return packet + at + 2; }
+        at += 2 + packet[at + 1];
+    }
+    return NULL;
+}
+static p8 packet_kind(int index)
+{ positive length = 0; const p8 *kind = option(sent[index].bytes, DHCP_OPTION_TYPE, &length);
+  require(kind && length == 1, "the message type is present"); return *kind; }
+static p32 option_address(int index, p8 code)
+{ positive length = 0; const p8 *value = option(sent[index].bytes, code, &length);
+  if (!value) return 0; require(length == 4, "an address option is four bytes"); return network_load_32(value); }
+static bool has_option(int index, p8 code) { positive length; return option(sent[index].bytes, code, &length) != NULL; }
+
+static positive expected_wait(int attempt, p8 spread)
+{
+    if (attempt == 0) return 50;
+    if (attempt < 12) return 250;
+    return (positive)(attempt - 11) * 2000 + (positive)spread * 2000 / 255 - 1000;
+}
+
+int main(void)
+{
+    p8 hardware[6] = {2, 0, 0, 0, 0, 7};
+    dhcp_lease lease;
+    unsigned long checks = 0;
+#define check(ok, what) do { checks++; require((ok), what); } while (0)
+
+    /* Silence: twenty DISCOVERs, each its own wait, one socket. */
+    p8 spreads[] = {0, 1, 128, 254, 255};
+    for (unsigned s = 0; s < sizeof spreads; s++) {
+        reset(); spread_byte = spreads[s];
+        check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER, "silence ends without an offer");
+        check(opens == 1 && closes == 1, "one socket, closed once");
+        check(sends == 20 && begins == 20 && receives == 20, "twenty attempts");
+        for (int i = 0; i < 20; i++) {
+            positive wait = expected_wait(i, spreads[s]);
+            check(packet_kind(i) == DHCP_DISCOVER, "a DISCOVER each attempt");
+            check(sent[i].has_to && sent[i].to.host == HOST_BROADCAST && sent[i].to.port == DHCP_SERVER_PORT,
+                  "to the broadcast address, server port");
+            check((sent[i].bytes[10] & 0x80) != 0, "asking for a broadcast reply");
+            check(sent[i].size == 300, "a 300 byte packet");
+            check(network_load_32(sent[i].bytes + 4) == network_load_32(sent[0].bytes + 4), "one transaction id");
+            check(budget[i].seconds == wait / 1000 && budget[i].nanoseconds == wait % 1000 * 1000000,
+                  "the wait of this attempt");
+        }
+        check(open_host == HOST_ANY && open_broadcast, "bound to any address, broadcast allowed");
+        /* The packet socket the answers are read from is opened after the
+           transaction and the spread are drawn and before the client socket,
+           whose opening confines the child; both are closed once. */
+        check(!strcmp(order, "TSFUuf") && frame_opens == 1 && frame_closes == 1 && dhcp_frames == -1,
+              "packet socket before the client socket, both closed once");
+    }
+    /* No entropy for the spread: the middle of it. */
+    reset(); fail_spread = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && sends == 20, "no spread, same twenty");
+    check(budget[12].seconds * 1000 + budget[12].nanoseconds / 1000000 == expected_wait(12, 128),
+          "a refused spread draws the middle");
+    /* No transaction id, no socket. */
+    reset(); fail_random = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_RANDOM && opens == 0 && sends == 0, "no entropy");
+    check(!order[0] && frame_opens == 0, "no entropy, no packet socket");
+    reset(); fail_open = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_SOCKET && sends == 0 && closes == 0, "no socket");
+    check(!strcmp(order, "TSFf") && frame_closes == 1 && dhcp_frames == -1,
+          "no client socket: the packet socket is closed too");
+    /* A kernel or a caller without packet sockets: the answers come over the
+       client socket, as a renewal's do. */
+    reset(); fail_frames = true; play(1); complete_result = DHCP_OK;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK && !strcmp(order, "TSUu") && frame_closes == 0,
+          "no packet socket: the exchange goes on over the client socket");
+
+    /* An OFFER is answered by one REQUEST that names it. */
+    struct { bipolar result; bipolar expect; int sends_after; } finals[] = {
+        {DHCP_OK, DHCP_OK, 2}, {DHCP_REFUSED, DHCP_REFUSED, 2}, {DHCP_NO_SOCKET, DHCP_NO_SOCKET, 2}};
+    for (unsigned f = 0; f < 3; f++) {
+        reset(); play(1); complete_result = finals[f].result;
+        check(dhcp_ask("x", hardware, &lease) == finals[f].expect, "the exchange's answer is returned");
+        check(sends == finals[f].sends_after && completes == 1 && closes == 1 && opens == 1, "DISCOVER, REQUEST, one completion");
+        check(packet_kind(0) == DHCP_DISCOVER && packet_kind(1) == DHCP_REQUEST, "DISCOVER then REQUEST");
+        check(option_address(1, DHCP_OPTION_REQUESTED) == 0x0a000015, "the offered address is asked for");
+        check(option_address(1, DHCP_OPTION_SERVER) == 0x0a000002, "from the server that offered it");
+        check(network_load_32(sent[1].bytes + 12) == 0, "ciaddr stays zero");
+        check((sent[1].bytes[10] & 0x80) != 0 && sent[1].to.host == HOST_BROADCAST, "broadcast");
+        check(!completed.rebinding && completed.transaction == network_load_32(sent[0].bytes + 4), "the same transaction");
+        check(completed.seconds == 0 && completed.nanoseconds == 250000000, "an ACK gets at least a quarter second");
+        check(!strcmp(order, "TSFUuf") && recorded == 0, "both sockets closed, nothing said without a pipe");
+        /* Run apart, it says its REQUEST is out just before the REQUEST
+           leaves (so no news the REQUEST sets off is read first), naming
+           the offer; a completion that answers says no more. */
+        reset(); dhcp_apart = 9; play(1); complete_result = finals[f].result;
+        check(dhcp_ask("x", hardware, &lease) == finals[f].expect, "the answer is the same apart");
+        check(recorded == 1 && records[0].said.status == DHCP_REQUESTED && records[0].after_sends == 1 &&
+              sends == 2, "one REQUESTED record, just before the REQUEST left");
+        check(!memcmp(&records[0].said.lease, &offer_lease, sizeof offer_lease), "the record names the offer");
+    }
+    /* A silent server after the REQUEST: the next attempt discovers again. */
+    reset(); play(1); complete_result = DHCP_NO_OFFER;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 1 && sends == 21, "a lost ACK is another DISCOVER");
+    check(packet_kind(1) == DHCP_REQUEST && packet_kind(2) == DHCP_DISCOVER, "REQUEST then DISCOVER again");
+    /* Apart, the window that ended unanswered is said before that DISCOVER,
+       so a cut after it is not held for an ACK that is no longer awaited. */
+    reset(); dhcp_apart = 9; play(1); complete_result = DHCP_NO_OFFER;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && sends == 21 && recorded == 2,
+          "REQUESTED then UNANSWERED");
+    check(records[0].said.status == DHCP_REQUESTED && records[1].said.status == DHCP_UNANSWERED &&
+          records[0].after_sends == 1 && records[1].after_sends == 2 &&
+          !memcmp(&records[1].said.lease, &offer_lease, sizeof offer_lease),
+          "the unanswered window is said before the next DISCOVER, naming the offer");
+    reset(); dhcp_apart = 9; play(1); fail_begin_at = 1; fail_begin_at_valid = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0 && recorded == 2 &&
+          records[1].said.status == DHCP_UNANSWERED, "a window that cannot start is unanswered");
+    reset(); dhcp_apart = 9; play(1); fail_send_at = 1;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && recorded == 2 &&
+          records[0].said.status == DHCP_REQUESTED && records[1].said.status == DHCP_UNANSWERED &&
+          records[1].after_sends == 2, "a REQUEST that never left is unanswered at once");
+    /* The ACK window of a later attempt is its own wait. */
+    reset(); for (int i = 0; i < 13; i++) play(0);
+    play(1); complete_result = DHCP_OK; spread_byte = 255;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK, "an offer at a late attempt");
+    /* attempt 13 waits (13 - 11) * 2000 + 2000 - 1000 = 5000 ms. */
+    check(completed.seconds == 5 && completed.nanoseconds == 0, "the ACK window follows the attempt's wait");
+    /* A REQUEST that cannot leave, or a window that cannot start, is no exchange. */
+    reset(); play(1); fail_send_at = 1;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0 && sends == 21, "a refused REQUEST ends the attempt");
+    reset(); play(1); fail_begin_at = 1; fail_begin_at_valid = true;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_NO_OFFER && completes == 0, "no window, no completion");
+    /* What is not a usable OFFER is rejected against the allowance. */
+    int junk[] = {2, 3, 4};
+    for (unsigned j = 0; j < 3; j++) {
+        for (int count = 62; count <= 66; count++) {
+            reset();
+            for (int i = 0; i < count; i++) play(junk[j]);
+            play(1); complete_result = DHCP_OK;
+            check(dhcp_ask("x", hardware, &lease) == DHCP_OK, "the offer is taken in the end");
+            /* 64 rejections are allowed, the 65th ends the attempt: the usable
+               offer is then read in the next one. */
+            check(packet_kind(sends - 1) == DHCP_REQUEST, "the last send is the REQUEST");
+            check(sends == (count <= 64 ? 2 : 3), "the allowance is per attempt and exactly 64");
+        }
+    }
+
+    /* Keeping an address. */
+    dhcp_lease held = {.address = 0x0a000015, .mask = 0xffffff00, .router = 0x0a000001,
+                       .nameserver = 0x0a000001, .server = 0x0a000002, .seconds = 3600};
+    reset(); lease = held;
+    check(dhcp_reacquire("x", hardware, &lease, false, 0) == DHCP_NO_OFFER && opens == 0, "no time to wait, no exchange");
+    reset(); lease = held; lease.seconds = 0;
+    check(dhcp_reacquire("x", hardware, &lease, false, 5) == DHCP_NO_OFFER && opens == 0, "a lease that is no lease");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_reacquire("x", hardware, &lease, false, 5) == DHCP_NO_RANDOM && opens == 0, "renewal needs entropy");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_reacquire("x", hardware, &lease, true, 5) == DHCP_NO_SOCKET && sends == 0, "renewal needs a socket");
+    for (int rebinding = 0; rebinding < 2; rebinding++) {
+        reset(); lease = held; complete_result = DHCP_OK;
+        check(dhcp_reacquire("x", hardware, &lease, rebinding, 7) == DHCP_OK, "the answer is returned");
+        check(opens == 1 && closes == 1 && sends == 1 && completes == 1, "one REQUEST, one completion");
+        check(open_host == held.address && open_broadcast == (bool)rebinding, "bound to the held address");
+        check(packet_kind(0) == DHCP_REQUEST, "a REQUEST");
+        check(network_load_32(sent[0].bytes + 12) == held.address, "ciaddr is the held address");
+        check(!has_option(0, DHCP_OPTION_REQUESTED) && !has_option(0, DHCP_OPTION_SERVER), "no requested address or server id");
+        check(sent[0].to.host == (rebinding ? HOST_BROADCAST : held.server) && sent[0].to.port == DHCP_SERVER_PORT, "unicast to the server, broadcast when rebinding");
+        check(((sent[0].bytes[10] & 0x80) != 0) == (bool)rebinding, "the broadcast flag follows rebinding");
+        check(completed.rebinding == (bool)rebinding && completed.peer == held.server, "the server is the expected peer");
+        check(completed.seconds == 7 && completed.nanoseconds == 0, "the caller's wait");
+    }
+    for (int kind = 0; kind < 3; kind++) {
+        bipolar results[] = {DHCP_OK, DHCP_REFUSED, DHCP_NO_OFFER};
+        reset(); lease = held; complete_result = results[kind];
+        check(dhcp_reacquire("x", hardware, &lease, false, 3) == results[kind], "the completion's answer passes through");
+    }
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_SOCKET && completes == 0 && closes == 1, "a refused send");
+    reset(); lease = held; fail_begin_at = 0; fail_begin_at_valid = true;
+    check(dhcp_reacquire("x", hardware, &lease, false, 3) == DHCP_NO_OFFER && completes == 0 && closes == 1, "no window");
+
+    /* A client socket numbered 0 -- the exchange started with standard
+       input shut -- is a socket like any other, and so is an answer's pipe. */
+    reset(); client_handle = 0; play(1); complete_result = DHCP_OK;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK && closes == 1, "an acquisition on socket 0");
+    reset(); lease = held; client_handle = 0; complete_result = DHCP_OK;
+    check(dhcp_reacquire("x", hardware, &lease, false, 7) == DHCP_OK && closes == 1, "a renewal on socket 0");
+    reset(); lease = held; client_handle = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_OK && sends == 1 && closes == 1,
+          "a decline on socket 0");
+    reset(); dhcp_apart = 0; play(1); complete_result = DHCP_OK;
+    check(dhcp_ask("x", hardware, &lease) == DHCP_OK && recorded == 1, "an answer's pipe numbered 0 is said down");
+
+    /* Giving an address back. */
+    reset(); lease = held; lease.address = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_OFFER && opens == 0, "nothing to decline");
+    reset(); lease = held; lease.server = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_OFFER && opens == 0, "no server to tell");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_RANDOM && opens == 0, "a decline needs a transaction");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_SOCKET && sends == 0, "a decline needs a socket");
+    reset(); lease = held;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_OK && sends == 1 && closes == 1, "a decline is one send");
+    check(packet_kind(0) == DHCP_DECLINE && sent[0].size == 300, "a DECLINE, 300 bytes");
+    check(option_address(0, DHCP_OPTION_REQUESTED) == held.address && option_address(0, DHCP_OPTION_SERVER) == held.server,
+          "it names the address and the server");
+    check(!has_option(0, DHCP_OPTION_ASK), "and asks for nothing");
+    check(sent[0].to.host == HOST_BROADCAST && sent[0].to.port == DHCP_SERVER_PORT && open_broadcast, "broadcast");
+    check(network_load_32(sent[0].bytes + 12) == 0, "ciaddr zero");
+    check((sent[0].bytes[10] & 0x80) == 0, "flags zero");
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_DECLINE) == DHCP_NO_SOCKET && closes == 1, "a refused decline is a failure");
+
+    /* And an address asked for that nothing here will use (RFC 2131 table
+       5's DHCPRELEASE): ciaddr the address, option 54 the server, no
+       requested address, no parameter list, flags zero, a transaction of
+       its own, broadcast from no address. */
+    reset(); lease = held;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_OK && opens == 1 && sends == 1 && closes == 1,
+          "a release is one send");
+    check(packet_kind(0) == DHCP_RELEASE && sent[0].size == 300, "a RELEASE, 300 bytes");
+    check(network_load_32(sent[0].bytes + 12) == held.address, "ciaddr is the address given back");
+    check(option_address(0, DHCP_OPTION_SERVER) == held.server && !has_option(0, DHCP_OPTION_REQUESTED),
+          "it names the server and asks for no address");
+    check(!has_option(0, DHCP_OPTION_ASK) && !has_option(0, DHCP_OPTION_LEASE), "nor for anything else");
+    check((sent[0].bytes[10] & 0x80) == 0 && network_load_32(sent[0].bytes + 16) == 0, "flags and yiaddr zero");
+    check(network_load_32(sent[0].bytes + 4) == 0x01020300u + (p32)serial, "a transaction of its own");
+    check(sent[0].to.host == HOST_BROADCAST && sent[0].to.port == DHCP_SERVER_PORT && open_broadcast &&
+          open_host == HOST_ANY, "broadcast, from no address");
+    reset(); lease = held; lease.address = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_OFFER && opens == 0, "nothing to release");
+    reset(); lease = held; lease.server = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_OFFER && opens == 0, "no server to release to");
+    reset(); lease = held; fail_random = true;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_RANDOM && opens == 0, "a release needs a transaction");
+    reset(); lease = held; fail_open = true;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_SOCKET && sends == 0, "a release needs a socket");
+    reset(); lease = held; fail_send_at = 0;
+    check(dhcp_give_back("x", hardware, &lease, DHCP_RELEASE) == DHCP_NO_SOCKET && closes == 1, "a refused release is a failure");
+    for (p8 kind = 0; kind < 16; kind++) {
+        if (kind == DHCP_DECLINE || kind == DHCP_RELEASE) continue;
+        reset(); lease = held;
+        check(dhcp_give_back("x", hardware, &lease, kind) == DHCP_NO_OFFER && opens == 0 && sends == 0,
+              "only a DECLINE or a RELEASE gives an address back");
+    }
+
+    /* The timers of a lease: T1 < T2 < the lifetime, or the defaults. */
+    p32 seconds_set[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 100, 3600, 86400, 0x7fffffff, 0x80000000u, 0xfffffffeu, 0xffffffffu};
+    for (unsigned s = 0; s < sizeof seconds_set / sizeof *seconds_set; s++)
+        for (unsigned a = 0; a < 12; a++)
+            for (unsigned b = 0; b < 12; b++) {
+                p32 total = seconds_set[s];
+                p32 values[12] = {0, 1, 2, total / 2 - 1, total / 2, total / 2 + 1, total - 2, total - 1, total,
+                                  total + 1, 0x7fffffff, 0xffffffffu};
+                p32 given_renewal = values[a], given_rebinding = values[b];
+                dhcp_lease timed = {.seconds = total, .renewal = given_renewal, .rebinding = given_rebinding};
+                bool ok = dhcp_lease_timers(&timed);
+                if (total < 3) {
+                    check(ok && !timed.renewal && !timed.rebinding, "a lease under three seconds keeps no timers");
+                    continue;
+                }
+                p32 default_renewal = total / 2, default_rebinding = total - (p32)(((uint64_t)total + 7) / 8);
+                p32 renewal = given_renewal ? given_renewal : default_renewal;
+                p32 rebinding = given_rebinding ? given_rebinding : default_rebinding;
+                if (!(renewal && renewal < rebinding && rebinding < total)) { renewal = default_renewal; rebinding = default_rebinding; }
+                check(ok && timed.renewal == renewal && timed.rebinding == rebinding, "timers are given or default, in order");
+                check(timed.renewal < timed.rebinding && timed.rebinding < total, "and always strictly ordered");
+            }
+    dhcp_lease none = {.seconds = 0, .renewal = 5, .rebinding = 9};
+    check(!dhcp_lease_timers(&none) && none.renewal == 5, "a zero lifetime is refused and left alone");
+    check(!dhcp_lease_timers(NULL), "no lease, no timers");
+
+    printf("dhcp exchange %lu/%lu\n", checks, checks);
+    return 0;
+}
+'''
+    constants = ul_c_span(net, r"^#define DHCP_CLIENT_PORT", r"^static bool dhcp_transaction_early")
+    production = "\n".join((
+        ul_c_function(wait, "network_discard_one"),
+        ul_c_function(net, "dhcp_mask_valid"),
+        ul_c_function(net, "dhcp_lease_timers"),
+        ul_c_function(net, "dhcp_build"),
+        ul_c_function(net, "dhcp_address_unicast"),
+        ul_c_function(net, "dhcp_prefix_clear"),
+        ul_c_function(net, "dhcp_lease_usable"),
+        ul_c_function(net, "dhcp_say"),
+        ul_c_function(net, "dhcp_ask"),
+        ul_c_function(net, "dhcp_reacquire"),
+        ul_c_function(net, "dhcp_give_back")))
+    source = source.replace("/* CONSTANTS */", constants).replace("/* PRODUCTION */", production)
+    compiler = shutil.which("clang")
+    if not compiler:
+        print("net dhcp exchange: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="net-dhcp-exchange-") as temporary:
+        unit = Path(temporary) / "exchange.c"
+        binary = Path(temporary) / "exchange"
+        unit.write_text(source)
+        built = build_run([compiler, "-std=gnu11", "-O1", "-g", "-w",
+                                "-fsanitize=address,undefined", str(unit),
+                                "-o", str(binary)], capture_output=True, text=True)
+        checks(built.returncode == 0, "production DHCP exchanges compile over the seam")
+        if built.returncode:
+            print(built.stderr[-3000:])
+        else:
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=120)
+            print("  " + ran.stdout.strip()) if ran.stdout.strip() else None
+            if ran.returncode:
+                print(ran.stderr[-3000:])
+            tally = re.search(r"dhcp exchange (\d+)/(\d+)", ran.stdout)
+            checks(ran.returncode == 0 and tally is not None,
+                   "every DHCP exchange, wait, packet field and failure matches the written expectation")
+    return checks.verdict("net dhcp exchange", "net-dhcp-exchange")
+
+
+def harness_net_exhaustive_proof(argv):
+    """Small security predicates of src/net/net.c, proved over their whole domains.
+
+    Each production function is compiled beside a specification written here
+    from the RFC or the policy its comment states, and the two are compared on
+    every input there is: every IPv4 address for the public-address rule, the
+    unicast rule and the mask rules; every address under every prefix length
+    for the lease's prefix rule; every four-byte DER length head at every
+    truncation; every OBJECT IDENTIFIER content of up to four bytes; every path
+    segment of up to four bytes and, over the six bytes it tells apart, up to
+    nine; every lease lifetime for the default renewal and rebinding times.
+    Agreement on all of them is a proof by exhaustion, of these functions
+    against these specifications; it says nothing about a function not named.
+
+        python3 test/differential.py --harness net_exhaustive_proof [--slices N] [PROOF...]
+    """
+    slices = os.cpu_count() or 4
+    if argv[:1] == ["--slices"] and len(argv) > 1:
+        slices = int(argv[1])
+        argv = argv[2:]
+    chosen = set(argv)
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    template = TEMPLATE_NET_EXHAUSTIVE
+    production = "\n".join([ul_c_typedefs(net, "dhcp_lease", "dhcp_gathered")] + [
+        ul_c_function(net, name) for name in (
+            "http_address_public", "dhcp_mask_valid", "dhcp_prefix_of",
+            "dhcp_address_unicast", "dhcp_prefix_clear", "dhcp_lease_timers",
+            "tls_asn1_length", "tls_oid_content_der", "http_dot_segment",
+            "dhcp_walk", "tls_date_value", "tls_der_integer", "tls_der_named_bits",
+            "tls_date_seconds", "tls_revocation_fresh")])
+    production = re.search(r"#define TLS_REVOCATION_SKEW .*\n", net).group(0) + production
+    source = template.replace("/* BYTE_READER */", byte_reader_source()).replace(
+        "/* PRODUCTION */", production)
+    compiler = shutil.which("cc") or shutil.which("clang")
+    with tempfile.TemporaryDirectory(prefix="net-exhaustive-") as temporary:
+        unit = Path(temporary) / "proof.c"
+        binary = Path(temporary) / "proof"
+        unit.write_text(source)
+        built = build_run([compiler, "-std=gnu11", "-O2", "-w", str(unit), "-o",
+                                str(binary)], capture_output=True, text=True)
+        guarded = Path(temporary) / "proof-asan"
+        if not built.returncode:
+            built = build_run([compiler, "-std=gnu11", "-O1", "-w",
+                                    "-fsanitize=address,undefined",
+                                    "-fno-sanitize-recover=all", str(unit), "-o",
+                                    str(guarded)], capture_output=True, text=True)
+        checks(built.returncode == 0, "the exhaustive proofs compile")
+        if built.returncode:
+            print(built.stderr[-3000:])
+            return checks.verdict("net exhaustive proof", "net-exhaustive-proof")
+        expected = {"public": 1 << 32, "mask": 1 << 32, "clear": 33 << 32,
+                    "der": 5 << 32, "oid": (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32),
+                    "dots": 1 + (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32) +
+                            sum(6 ** n for n in range(5, 10)),
+                    "timers": 1 << 32,
+                    "walk": 2 * sum(8 ** n for n in range(11)),
+                    "date": 80 * 100 * 100 + 100 ** 3 + 10000 + 2 * 100 ** 3 +
+                            256 * (17 + 13 * 256 + 17 + 15 * 256),
+                    "bits": 1 + (1 << 8) + (1 << 16) + (1 << 24) + (1 << 32),
+                    "dates": 4 * (datetime.date(2400, 1, 1) -
+                                  datetime.date(1950, 1, 1)).days}
+        for proof, total in expected.items():
+            if chosen and proof not in chosen:
+                continue
+            started = time.monotonic()
+            program = guarded if proof == "walk" else binary
+            runs = [subprocess.Popen([str(program), proof, str(index), str(slices)],
+                                     stdout=subprocess.PIPE, text=True)
+                    for index in range(slices)]
+            seen = reached = 0
+            failed = []
+            for run in runs:
+                out, _ = run.communicate()
+                for line in out.splitlines():
+                    if line.startswith("FAIL"):
+                        failed.append(line)
+                    elif line.startswith(proof + " "):
+                        seen += int(line.split()[1])
+                        reached += int(line.split()[3])
+                failed += [] if run.returncode == 0 else ["exit %d" % run.returncode]
+            for line in failed[:6]:
+                print("  " + line)
+            print("  %-7s %d inputs, %d of them accepted, %.1f s" % (
+                proof, seen, reached, time.monotonic() - started))
+            checks(not failed and seen == total,
+                   "%s: every input agrees with its specification (%d of %d seen)" %
+                   (proof, seen, total))
+            checks(0 < reached < seen,
+                   "%s: both answers occur, so the agreement is not vacuous" % proof)
+    return checks.verdict("net exhaustive proof", "net-exhaustive-proof")
+
+
+TEMPLATE_NET_EXHAUSTIVE = r'''#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int8_t b8; typedef int32_t b32; typedef uint64_t positive; typedef int64_t bipolar;
+typedef void *address_any; typedef const char *string_address;
+#define address_to *
+#define address_of &
+#define null NULL
+#define COLD
+#define CONST
+#define PURE
+#define INLINE
+#define TLS_OK 0
+#define TLS_FAIL (-1)
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define DHCP_OPTION_PAD 0
+#define DHCP_OPTION_END 255
+#define DHCP_OPTION_OVERLOAD 52
+#define memory_copy memmove
+static positive memory_span_byte(const void *block, p8 byte, positive size)
+{ const p8 *at = block; positive i = 0; while (i < size && at[i] == byte) i++; return i; }
+/* BYTE_READER */
+/* PRODUCTION */
+
+static unsigned long failures;
+static void fail(const char *what, unsigned long long a, unsigned long long b)
+{
+        if (failures++ < 8)
+                printf("FAIL %s %llx %llx\n", what, a, b);
+}
+
+/* ---- the specifications, written from the RFCs and the stated policy ---- */
+static bool in_block(p32 ip, p32 net, unsigned bits)
+{ p32 mask = bits ? ~0u << (32 - bits) : 0; return (ip & mask) == net; }
+/* Not public: this network, 10/8, shared 100.64/10, loopback, link-local,
+   172.16/12, IETF protocol 192.0.0/24, 192.168/16, benchmarking 198.18/15,
+   multicast and reserved 224/3 (which holds the limited broadcast). */
+static bool spec_public(p32 ip)
+{
+        static const struct { p32 net; unsigned bits; } inside[] = {
+            {0x00000000, 8}, {0x0a000000, 8}, {0x64400000, 10}, {0x7f000000, 8},
+            {0xa9fe0000, 16}, {0xac100000, 12}, {0xc0000000, 24}, {0xc0a80000, 16},
+            {0xc6120000, 15}, {0xe0000000, 3}};
+        for (unsigned i = 0; i < sizeof inside / sizeof *inside; i++)
+                if (in_block(ip, inside[i].net, inside[i].bits)) return false;
+        return true;
+}
+static bool spec_mask(p32 m)
+{
+        if (!m) return true;
+        for (unsigned k = 1; k <= 32; k++) if (m == (p32)(~0ull << (32 - k))) return true;
+        return false;
+}
+static unsigned spec_prefix(p32 m) { unsigned n = 0; while (m) { n += m & 1; m >>= 1; } return n; }
+static bool spec_unicast(p32 a) { return !in_block(a, 0, 8) && !in_block(a, 0x7f000000, 8) && !in_block(a, 0xe0000000, 3); }
+static bool spec_prefix_clear(p32 addr, p32 mask)
+{
+        p32 m = mask ? mask : 0xffffff00u;
+        p64 lo = addr & m, hi = lo | (p32)~m;
+        /* the prefix's addresses, as an interval, against each block's */
+        if (lo <= 0x00ffffffu) return false;
+        if (lo <= 0x7fffffffu && hi >= 0x7f000000u) return false;
+        if (hi >= 0xe0000000u) return false;
+        return m >= 0xfffffffeu || (addr != lo && addr != hi);
+}
+/* DER definite length at the front of b[0..size): consumed and value, or -1. */
+static int spec_der_length(const p8 *b, unsigned size, unsigned *value)
+{
+        if (size < 1) return -1;
+        if (b[0] < 0x80) { *value = b[0]; return 1; }
+        unsigned n = b[0] & 0x7f;
+        if (n < 1 || n > 3 || size < 1 + n || b[1] == 0) return -1;
+        unsigned v = 0;
+        for (unsigned i = 0; i < n; i++) v = v << 8 | b[1 + i];
+        if (v < 0x80) return -1;
+        *value = v;
+        return 1 + n;
+}
+/* X.690 8.19: arcs in base 128, the last octet of each with bit 8 clear and
+   no arc starting 0x80; at least one octet; nothing after the last arc. */
+/* X.690 8.3.2: INTEGER contents are one octet or more, and their first
+   nine bits are not all the same. */
+static bool spec_integer(const p8 *b, unsigned n)
+{
+        if (!n) return false;
+        if (n == 1) return true;
+        unsigned nine = (unsigned)b[0] << 1 | b[1] >> 7;
+        return nine != 0 && nine != 0x1ff;
+}
+/* X.690 8.6.2 and 11.2.2: a named bit list's BIT STRING contents are an
+   unused count of 0 to 7 and the bits; with no bits the count is 0, and
+   otherwise the last bit is a one and the unused bits after it are zero. */
+static bool spec_named_bits(const p8 *b, unsigned n)
+{
+        if (!n || b[0] > 7) return false;
+        if (n == 1) return b[0] == 0;
+        for (unsigned bit = 0; bit < b[0]; bit++)
+                if (b[n - 1] >> bit & 1) return false;
+        return b[n - 1] >> b[0] & 1;
+}
+static bool spec_leap(unsigned year)
+{
+        return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+static bool spec_oid(const p8 *b, unsigned n)
+{
+        if (!n) return false;
+        unsigned at = 0;
+        while (at < n) {
+                if (b[at] == 0x80) return false;
+                while (b[at] & 0x80) { at++; if (at == n) return false; }
+                at++;
+        }
+        return true;
+}
+/* ".", "..", each dot spelled "." or "%2e" in either case; 0 otherwise. */
+static unsigned spec_dots(const char *s, unsigned n)
+{
+        unsigned dots = 0, at = 0;
+        while (at < n) {
+                if (s[at] == '.') at += 1;
+                else if (n - at >= 3 && s[at] == '%' && s[at + 1] == '2' && (s[at + 2] == 'e' || s[at + 2] == 'E')) at += 3;
+                else return 0;
+                dots++;
+        }
+        return dots == 1 || dots == 2 ? dots : 0;
+}
+
+/* RFC 2132 and 3396: options are code, length, value; PAD is one byte; END
+   ends the region and only PAD may follow it; a region that ends without END
+   is cut short; an option met twice is one option, its pieces joined, and of
+   it the first four bytes are kept; the overload option (52) is allowed once,
+   in the primary region, one byte long, 1 to 3. */
+static int spec_walk(const p8 *b, unsigned n, dhcp_gathered *gathered, p8 *overload)
+{
+        unsigned at = 0;
+        while (at < n) {
+                p8 code = b[at++];
+                if (code == 255) {
+                        for (; at < n; at++) if (b[at]) return -1;
+                        return 0;
+                }
+                if (code == 0) continue;
+                if (at >= n) return -1;
+                unsigned length = b[at++];
+                if (length > n - at) return -1;
+                if (code == 52) {
+                        if (!overload || *overload || length != 1 || !b[at] || b[at] > 3) return -1;
+                        *overload = b[at];
+                }
+                for (unsigned i = 0; i < length; i++) {
+                        if (gathered[code].length < 4) gathered[code].first[gathered[code].length] = b[at + i];
+                        gathered[code].length++;
+                }
+                at += length;
+        }
+        return -1;
+}
+
+/* RFC 5280 4.1.2.5: UTCTime YYMMDDHHMMSSZ for 1950-2049, GeneralizedTime
+   YYYYMMDDHHMMSSZ from 2050, seconds present, Z, no fractions; a Gregorian
+   date and a time of day without a leap second. */
+static bool spec_date(p8 tag, const p8 *text, positive length, p64 *value)
+{
+        unsigned width = tag == 0x17 ? 2 : tag == 0x18 ? 4 : 0;
+        if (!width || length != width + 11 || text[length - 1] != 'Z') return false;
+        unsigned digit[15];
+        for (unsigned i = 0; i < width + 10; i++) {
+                if (text[i] < '0' || text[i] > '9') return false;
+                digit[i] = text[i] - '0';
+        }
+        unsigned year = 0;
+        for (unsigned i = 0; i < width; i++) year = year * 10 + digit[i];
+        if (width == 2) year = year < 50 ? 2000 + year : 1900 + year;
+        else if (year < 2050) return false;
+        unsigned month = digit[width] * 10 + digit[width + 1];
+        unsigned day = digit[width + 2] * 10 + digit[width + 3];
+        unsigned hour = digit[width + 4] * 10 + digit[width + 5];
+        unsigned minute = digit[width + 6] * 10 + digit[width + 7];
+        unsigned second = digit[width + 8] * 10 + digit[width + 9];
+        bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        unsigned days;
+        switch (month) {
+        case 1: case 3: case 5: case 7: case 8: case 10: case 12: days = 31; break;
+        case 4: case 6: case 9: case 11: days = 30; break;
+        case 2: days = leap ? 29 : 28; break;
+        default: return false;
+        }
+        if (day < 1 || day > days || hour > 23 || minute > 59 || second > 59) return false;
+        *value = ((((p64)year * 100 + month) * 100 + day) * 100 + hour) * 10000 +
+                 (p64)minute * 100 + second;
+        return true;
+}
+static void date_case(p8 tag, const p8 *text, positive length, unsigned long long *seen,
+                      unsigned long long *reached)
+{
+        p64 got = 0, want = 0;
+        bool accepted = tls_date_value(tag, (p8 *)text, length, &got);
+        bool expected = spec_date(tag, text, length, &want);
+        ++*seen;
+        *reached += accepted;
+        if (accepted != expected || (accepted && got != want))
+                fail("date", (unsigned long long)tag << 56 | length, accepted);
+}
+
+int main(int argc, char **argv)
+{
+        const char *which = argv[1];
+        p64 slice = strtoull(argv[2], 0, 10), slices = strtoull(argv[3], 0, 10);
+        p64 from = (0x100000000ull * slice) / slices, to = (0x100000000ull * (slice + 1)) / slices;
+        unsigned long long seen = 0, reached = 0;
+
+        if (!strcmp(which, "public")) {
+                for (p64 ip = from; ip < to; ip++, seen++)
+                {
+                        bool public = http_address_public((p32)ip);
+                        reached += public;
+                        if (public != spec_public((p32)ip)) fail("public", ip, 0);
+                }
+        } else if (!strcmp(which, "mask")) {
+                for (p64 m = from; m < to; m++, seen++) {
+                        bool ok = dhcp_mask_valid((p32)m);
+                        reached += ok;
+                        if (ok != spec_mask((p32)m)) fail("mask", m, ok);
+                        if (ok && m && dhcp_prefix_of((p32)m) != spec_prefix((p32)m)) fail("prefix", m, 0);
+                        if (dhcp_address_unicast((p32)m) != spec_unicast((p32)m)) fail("unicast", m, 0);
+                }
+                if (!slice && dhcp_prefix_of(0) != 24) fail("prefix of zero", 0, 0);
+        } else if (!strcmp(which, "clear")) {
+                for (p64 addr = from; addr < to; addr++)
+                        for (unsigned k = 1; k <= 33; k++, seen++) {
+                                /* 1 to 32 bits, and 33 for the mask a server
+                                   left out, which the lease reads as /24. */
+                                p32 mask = k == 33 ? 0 : (p32)(~0ull << (32 - k));
+                                bool clear = dhcp_prefix_clear((p32)addr, mask);
+                                reached += clear;
+                                if (clear != spec_prefix_clear((p32)addr, mask))
+                                        fail("prefix_clear", addr, mask);
+                        }
+        } else if (!strcmp(which, "der")) {
+                for (p64 word = from; word < to; word++)
+                        for (unsigned size = 0; size <= 4; size++, seen++) {
+                                p8 b[4] = {(p8)(word >> 24), (p8)(word >> 16), (p8)(word >> 8), (p8)word};
+                                positive at = 0, length = 0;
+                                unsigned value = 0;
+                                int want = spec_der_length(b, size, &value);
+                                bipolar got = tls_asn1_length(b, size, &at, &length);
+                                reached += got == TLS_OK;
+                                if ((got == TLS_OK) != (want >= 0) ||
+                                    (want >= 0 && (at != (positive)want || length != value)))
+                                        fail("der length", word, size);
+                        }
+        } else if (!strcmp(which, "oid")) {
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 1; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;  /* shorter strings once */
+                                p8 b[4];
+                                for (unsigned i = 0; i < n; i++) b[i] = (p8)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                bool oid = tls_oid_content_der(b, n);
+                                reached += oid;
+                                if (oid != spec_oid(b, n)) fail("oid", word, n);
+                        }
+                if (!slice && tls_oid_content_der((p8 *)"", 0)) fail("empty oid", 0, 0);
+        } else if (!strcmp(which, "bits")) {
+                /* Every content of up to four bytes as an INTEGER's and as a
+                   named bit list's. */
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 1; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;
+                                p8 b[4];
+                                for (unsigned i = 0; i < n; i++) b[i] = (p8)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                byte_reader r = byte_reader_open(b, n);
+                                bool named = tls_der_named_bits(r);
+                                reached += named;
+                                if (tls_der_integer(r) != spec_integer(b, n)) fail("integer", word, n);
+                                if (named != spec_named_bits(b, n)) fail("named bits", word, n);
+                        }
+                if (!slice) {
+                        byte_reader none = byte_reader_open((p8 *)"", 0);
+                        seen++;
+                        if (tls_der_integer(none) || tls_der_named_bits(none)) fail("empty", 0, 0);
+                }
+        } else if (!strcmp(which, "dates")) {
+                /* Every day from 1950 through 2399 at four times of day: its
+                   seconds past 1950-01-01 00:00:00 are the days counted one
+                   by one, times 86,400, and the time; and as a nextUpdate,
+                   with a thisUpdate of 1950-01-01, it holds at 2100-06-15
+                   12:00:00 exactly when it is no more than five minutes
+                   behind it. */
+                static const unsigned month_days[12] = {31, 28, 31, 30, 31, 30,
+                                                        31, 31, 30, 31, 30, 31};
+                static const unsigned times[4][3] = {{0, 0, 0}, {23, 59, 59},
+                                                     {12, 34, 56}, {11, 55, 0}};
+                const p64 first = 19500101000000ull, now = 21000615120000ull;
+                p64 base = tls_date_seconds(first), index = 0, now_index = 0;
+                for (unsigned y = 1950; y < 2100; y++)
+                        now_index += 365 + spec_leap(y);
+                for (unsigned m = 1; m < 6; m++)
+                        now_index += month_days[m - 1] + (m == 2 && spec_leap(2100));
+                now_index += 14;
+                p64 now_seconds = now_index * 86400 + 12 * 3600;
+                for (unsigned y = 1950; y < 2400; y++)
+                        for (unsigned m = 1; m <= 12; m++) {
+                                unsigned limit = month_days[m - 1] + (m == 2 && spec_leap(y));
+                                for (unsigned d = 1; d <= limit; d++, index++) {
+                                        if (index % slices != slice) continue;
+                                        for (unsigned t = 0; t < 4; t++, seen++) {
+                                                p64 packed = (((((p64)y * 100 + m) * 100 + d) * 100 +
+                                                               times[t][0]) * 100 + times[t][1]) * 100 + times[t][2];
+                                                p64 want = index * 86400 + times[t][0] * 3600 +
+                                                           times[t][1] * 60 + times[t][2];
+                                                bool fresh = tls_revocation_fresh(first, packed, now);
+                                                reached += fresh;
+                                                if (tls_date_seconds(packed) - base != want)
+                                                        fail("date seconds", packed, want);
+                                                if (fresh != (now_seconds <= want + 300))
+                                                        fail("fresh", packed, fresh);
+                                        }
+                                }
+                        }
+        } else if (!strcmp(which, "dots")) {
+                /* Every string of up to four bytes, then longer ones over the
+                   bytes the function tells apart: '.', '%', '2', 'e', 'E' and
+                   one stand-in for every other byte. */
+                for (p64 word = from; word < to; word++)
+                        for (unsigned n = 0; n <= 4; n++) {
+                                if (n < 4 && (word >> (8 * n))) continue;
+                                char s[4];
+                                for (unsigned i = 0; i < n; i++) s[i] = (char)(word >> (8 * (n - 1 - i)));
+                                seen++;
+                                positive dots = http_dot_segment(s, n);
+                                reached += dots != 0;
+                                if (dots != spec_dots(s, n)) fail("dots", word, n);
+                        }
+                if (!slice) {
+                        static const char alphabet[] = ".%2eEx";
+                        for (unsigned n = 5; n <= 9; n++) {
+                                unsigned long total = 1;
+                                for (unsigned i = 0; i < n; i++) total *= 6;
+                                for (unsigned long code = 0; code < total; code++, seen++) {
+                                        char s[9]; unsigned long c = code;
+                                        for (unsigned i = 0; i < n; i++) { s[i] = alphabet[c % 6]; c /= 6; }
+                                        if (http_dot_segment(s, n) != spec_dots(s, n)) fail("dots long", code, n);
+                                }
+                        }
+                }
+        } else if (!strcmp(which, "timers")) {
+                for (p64 s = from; s < to; s++, seen++) {
+                        if (s < 3) continue;
+                        p32 renewal = (p32)(s / 2), rebinding = (p32)(s - (s + 7) / 8);
+                        if (!(renewal && renewal < rebinding && rebinding < s)) fail("default timers", s, 0);
+                        dhcp_lease lease = {.seconds = (p32)s};
+                        if (!dhcp_lease_timers(&lease) || lease.renewal != renewal || lease.rebinding != rebinding)
+                                fail("timers", s, 0);
+                        else
+                                reached++;
+                }
+        } else if (!strcmp(which, "date")) {
+                /* The date and the time of day are judged apart by the code
+                   (every field is read from its own two digits and checked on
+                   its own; only the day depends on the month and the year), so
+                   every date is run with a valid time, every time with a valid
+                   date, and every position with every byte. Slices split the
+                   GeneralizedTime years. */
+                for (p64 year = 2050 + 80 * slice / slices; year < 2050 + 80 * (slice + 1) / slices; year++)
+                        for (unsigned month = 0; month < 100; month++)
+                                for (unsigned day = 0; day < 100; day++) {
+                                        char text[16];
+                                        snprintf(text, sizeof text, "%04u%02u%02u120000Z",
+                                                 (unsigned)year, month, day);
+                                        date_case(0x18, (p8 *)text, 15, &seen, &reached);
+                                }
+                if (slice == 0) {
+                        for (unsigned year = 0; year < 100; year++)
+                                for (unsigned month = 0; month < 100; month++)
+                                        for (unsigned day = 0; day < 100; day++) {
+                                                char text[16];
+                                                snprintf(text, sizeof text, "%02u%02u%02u120000Z",
+                                                         year, month, day);
+                                                date_case(0x17, (p8 *)text, 13, &seen, &reached);
+                                        }
+                        /* Years 0000-2049 in GeneralizedTime: refused whatever
+                           the date. And 2050-9999 at the leap-year turns. */
+                        for (unsigned year = 0; year < 10000; year++) {
+                                char text[16];
+                                snprintf(text, sizeof text, "%04u0229235959Z", year);
+                                date_case(0x18, (p8 *)text, 15, &seen, &reached);
+                        }
+                } else if (slice == 1) {
+                        for (unsigned hour = 0; hour < 100; hour++)
+                                for (unsigned minute = 0; minute < 100; minute++)
+                                        for (unsigned second = 0; second < 100; second++) {
+                                                char text[16];
+                                                snprintf(text, sizeof text, "490228%02u%02u%02uZ",
+                                                         hour, minute, second);
+                                                date_case(0x17, (p8 *)text, 13, &seen, &reached);
+                                                snprintf(text, sizeof text, "20500228%02u%02u%02uZ",
+                                                         hour, minute, second);
+                                                date_case(0x18, (p8 *)text, 15, &seen, &reached);
+                                        }
+                } else if (slice == 2) {
+                        /* Every byte at every position, every length 0 to 16,
+                           every tag. */
+                        static const char *const valid[] = {"491231235959Z", "20500101000000Z"};
+                        for (unsigned which_tag = 0; which_tag < 256; which_tag++)
+                                for (unsigned v = 0; v < 2; v++) {
+                                        positive length = v ? 15 : 13;
+                                        for (positive cut = 0; cut <= 16; cut++) {
+                                                p8 text[16] = {0};
+                                                memcpy(text, valid[v], length);
+                                                date_case((p8)which_tag, text, cut, &seen, &reached);
+                                        }
+                                        for (positive at = 0; at < length; at++)
+                                                for (unsigned byte = 0; byte < 256; byte++) {
+                                                        p8 text[16];
+                                                        memcpy(text, valid[v], length);
+                                                        text[at] = (p8)byte;
+                                                        date_case((p8)which_tag, text, length, &seen, &reached);
+                                                }
+                                }
+                }
+        } else if (!strcmp(which, "walk")) {
+                /* Every DHCP option region of up to ten bytes over the bytes
+                   dhcp_walk tells apart: PAD 0, END 255, the overload code 52,
+                   two other codes (1 and 3, so two buckets are told apart),
+                   and lengths and overload values 0, 1, 2, 3 and 4 and one
+                   long length (9). Any other byte acts as one of these in
+                   every position it can stand in. Each region is a buffer of
+                   exactly its size, so a read past it is caught (the walk
+                   build runs under AddressSanitizer). */
+                static const p8 alphabet[] = {0, 1, 2, 3, 4, 52, 255, 9};
+                p64 total = 0;
+                for (unsigned n = 0; n <= 10; n++) total += 1ull << (3 * n);
+                p64 begin = total * slice / slices, finish = total * (slice + 1) / slices, code = 0;
+                for (unsigned n = 0; n <= 10; n++)
+                        for (p64 index = 0; index < 1ull << (3 * n); index++, code++) {
+                                if (code < begin || code >= finish) continue;
+                                p8 *region = malloc(n ? n : 1);
+                                p64 c = index;
+                                for (unsigned i = 0; i < n; i++) { region[i] = alphabet[c & 7]; c >>= 3; }
+                                for (int primary = 0; primary < 2; primary++) {
+                                        dhcp_gathered got[256], want[256];
+                                        p8 overload = 0, want_overload = 0;
+                                        memset(got, 0, sizeof got);
+                                        memset(want, 0, sizeof want);
+                                        bipolar result = dhcp_walk(region, n, got, primary ? &overload : NULL);
+                                        int expected = spec_walk(region, n, want, primary ? &want_overload : NULL);
+                                        seen++;
+                                        reached += !result && primary && overload;
+                                        if ((result == 0) != (expected == 0) ||
+                                            (!result && (overload != want_overload ||
+                                                         memcmp(got, want, sizeof got))))
+                                                fail("dhcp walk", index, n);
+                                }
+                                free(region);
+                        }
+        } else {
+                printf("unknown proof %s\n", which);
+                return 2;
+        }
+        printf("%s %llu %lu %llu\n", which, seen, failures, reached);
+        return failures != 0;
+}
+'''
+
+
+NET_PROOF_SHIM = r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <assert.h>
+typedef uint8_t p8; typedef uint16_t p16; typedef uint32_t p32; typedef uint64_t p64;
+typedef int8_t b8; typedef int32_t b32; typedef uint64_t positive; typedef int64_t bipolar;
+typedef void *address_any; typedef char *string_address; typedef const char *const_string;
+#define address_to *
+#define address_of &
+#define null NULL
+#define end ((p8)0)
+#define fn void
+#define COLD
+#define CONST
+#define PURE
+#define INLINE
+#define MOONWATER_STRICT_NET 1
+#define STRICT_TIGHT 2
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define memory_copy_apart memcpy
+#define memory_copy memmove
+#define memory_compare memcmp
+#define memory_fill(at, v, n) memset((at), (int)(v), (n))
+#define memory_zero(at, n) memset((at), 0, (n))
+#define string_get(s) (*(const unsigned char *)(s))
+#define string_is(s, c) (*(s) == (c))
+/* A proof that holds because nothing reached its assertions proves nothing:
+   each harness marks the outcome it is about, and a second run built with
+   NET_PROOF_REACH has to reach it. */
+#ifdef NET_PROOF_REACH
+#define REACHED() assert(!"reached")
+#else
+#define REACHED() ((void)0)
+#endif
+positive nondet_positive(void); p8 nondet_p8(void); p16 nondet_p16(void);
+p32 nondet_p32(void); _Bool nondet_bool(void); int nondet_int(void);
+/* What the parsers ask of lib.c, written as the contracts lib.c's routines
+   keep (their own checks hold the assembly to them). */
+static address_any memory_first_of(address_any block, int value, positive size)
+{ p8 *at = block; for (positive i = 0; i < size; i++) if (at[i] == (p8)value) return at + i; return NULL; }
+static positive string_length(const void *s) { const char *at = s; positive n = 0; while (at[n]) n++; return n; }
+static positive memory_span_without_byte(address_any block, p8 byte, positive size)
+{ p8 *found = memory_first_of(block, byte, size); return found ? (positive)(found - (p8 *)block) : size; }
+static positive memory_text_span(const void *block, positive size)
+{ const p8 *at = block; positive i = 0;
+  while (i < size && (at[i] == '\t' || (at[i] >= ' ' && at[i] != 127))) i++; return i; }
+static positive string_span_max(const char *s, positive bound, const b8 *set)
+{ positive i = 0; while (i < bound && s[i] && set[(p8)s[i]]) i++; return i; }
+static positive string_span_without_set(const char *s, const char *set)
+{ positive i = 0; while (s[i] && !strchr(set, s[i])) i++; return i; }
+static b32 memory_compare_ascii_case(const void *one, const void *two, positive n)
+{ const p8 *a = one, *b = two;
+  for (positive i = 0; i < n; i++) { p8 x = a[i], y = b[i];
+    if (x >= 'A' && x <= 'Z') x |= 32; if (y >= 'A' && y <= 'Z') y |= 32;
+    if (x != y) return 1; } return 0; }
+static bool byte_is_alnum(p8 b) { return (b >= '0' && b <= '9') || ((b | 32) >= 'a' && (b | 32) <= 'z'); }
+static bool byte_is_alpha(p8 b) { return (b | 32) >= 'a' && (b | 32) <= 'z'; }
+static bool byte_is_digit(p8 b) { return b >= '0' && b <= '9'; }
+static bool byte_is_blank(p8 b) { return b == ' ' || b == '\t'; }
+static bool byte_is_control(p8 b) { return b < 32 || b == 127; }
+static positive digit_known(p8 c, positive base)
+{ positive v = c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'z' ? 10 + (c | 32) - 'a' : base;
+  return v < base ? v : base; }
+static bool string_digits_checked(string_address *text, positive base, positive *value)
+{ string_address at = *text; positive got = 0; bool any = false;
+  while (1) { positive d = digit_known(string_get(at), base); positive scaled;
+    if (d >= base) break;
+    if (__builtin_mul_overflow(got, base, &scaled) || __builtin_add_overflow(scaled, d, &got)) return false;
+    at++; any = true; }
+  if (!any) return false; *text = at; *value = got; return true; }
+static b8 string_set_blanks[256] = {[' '] = 1, ['\t'] = 1};
+static b8 string_set_http_token[256] = {['0' ... '9'] = 1, ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1,
+    ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1, ['*'] = 1, ['+'] = 1,
+    ['-'] = 1, ['.'] = 1, ['^'] = 1, ['_'] = 1, ['`'] = 1, ['|'] = 1, ['~'] = 1};
+static address_any memory_search(const void *block, positive size, const void *needle, positive n)
+{ const p8 *h = block; if (!n || n > size) return NULL;
+  for (positive i = 0; i + n <= size; i++) if (!memcmp(h + i, needle, n)) return (address_any)(h + i);
+  return NULL; }
+'''
+
+# (name, unwind, harness C, production function names, extra C before production,
+#  or a function of net.c's text that gives it)
+NET_PROOFS = [
+("byte_reader", 6, r'''
+/* Any sequence of reads, on a buffer of any length: every byte a read hands
+   back lies inside the buffer, and a failed reader stays failed and empty. */
+int main(void)
+{
+        positive length = nondet_positive();
+        __CPROVER_assume(length < ((positive)1 << 40));
+        p8 *buffer = malloc(length);
+        __CPROVER_assume(buffer != NULL);
+        byte_reader reader = byte_reader_open(buffer, length);
+        for (int step = 0; step < 4; step++)
+        {
+                bool failed = !byte_reader_ok(&reader);
+                positive left = byte_reader_left(&reader);
+                const p8 *here = reader.bytes;
+                positive count = nondet_positive();
+                int kind = nondet_int();
+                if (kind == 0) {
+                        const p8 *taken = byte_reader_take(&reader, count);
+                        if (taken) { REACHED(); assert(!failed && count <= left && taken == here);
+                                     assert(reader.left == left - count); }
+                        else assert(!byte_reader_ok(&reader) && !byte_reader_left(&reader));
+                } else if (kind == 1) {
+                        byte_reader window = byte_reader_window(&reader, count);
+                        assert(window.left <= left);
+                        if (byte_reader_ok(&window) && window.left)
+                                assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
+                } else if (kind == 2) {
+                        byte_reader window = byte_reader_vector16(&reader);
+                        if (byte_reader_ok(&window) && window.left)
+                                assert(window.bytes >= buffer && window.bytes + window.left <= buffer + length);
+                } else if (kind == 3) {
+                        (void)byte_reader_u32(&reader);
+                } else {
+                        (void)byte_reader_u8(&reader);
+                }
+                if (failed) assert(!byte_reader_ok(&reader) && !byte_reader_left(&reader));
+                if (byte_reader_ok(&reader) && reader.left)
+                        assert(reader.bytes >= buffer && reader.bytes + reader.left <= buffer + length);
+                assert(reader.left <= left);
+        }
+        return 0;
+}
+''', [], ""),
+("byte_store", 2, r'''
+/* An append of any length to a store of any room writes inside the room. */
+int main(void)
+{
+        positive room = nondet_positive(), used = nondet_positive(), length = nondet_positive();
+        __CPROVER_assume(room < 64 && length < 64);
+        p8 *bytes = malloc(room ? room : 1), *data = malloc(length ? length : 1);
+        __CPROVER_assume(bytes && data);
+        byte_store store = {bytes, room, used};
+        bool ok = byte_store_append_exact(&store, data, length);
+        if (ok) { REACHED(); assert(used <= room && length <= room - used && store.used == used + length); }
+        else assert(store.used == used);
+        return 0;
+}
+''', [], ""),
+("dns_copy_name", 18, r'''
+#define DNS_MALFORMED (-3)
+#define DNS_NAME_MAX 255
+#define DNS_POINTER_HOPS 127
+/* PRODUCTION */
+#define N 7
+int main(void)
+{
+        p8 message[N], into[64];
+        positive size = nondet_positive(), at = nondet_positive(), room = nondet_positive();
+        positive ended = 7, pointers = nondet_positive();
+        bool shared = nondet_bool();
+        __CPROVER_assume(size <= N && at <= N + 1 && room <= 64);
+        positive before = pointers;
+        bipolar got = dns_copy_name(message, size, at, into, room, &ended,
+                                    shared ? &pointers : null);
+        if (got >= 0) {
+                if (got > 4) REACHED();
+                assert(got >= 1 && got <= DNS_NAME_MAX && (positive)got <= room);
+                assert(into[got - 1] == 0);
+                assert(ended > at && ended <= size);
+                assert(!shared || pointers <= before);
+        }
+        return 0;
+}
+''', ["dns_copy_name"], ""),
+("tls_asn1", 6, r'''
+/* PRODUCTION */
+#define N 8
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive(), at = nondet_positive(), stop = 0, length = 0;
+        p8 tag = nondet_p8(); p8 *value = NULL;
+        __CPROVER_assume(size <= N && at <= N + 1);
+        positive start = at;
+        int which = nondet_int();
+        if (which == 0) {
+                if (tls_asn1_enter(bytes, size, tag, &at, &stop) == TLS_OK) {
+                        if (stop > at) REACHED();
+                        assert(start < at && at <= stop && stop <= size);
+                }
+        } else if (which == 1) {
+                if (tls_asn1_skip(bytes, size, &at) == TLS_OK)
+                        assert(start < at && at <= size);
+        } else {
+                if (tls_asn1_take(bytes, size, tag, &at, &value, &length) == TLS_OK)
+                        assert(value == bytes + start && length == at - start && at <= size);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_asn1_skip", "tls_asn1_take"], "#define TLS_OK 0\n#define TLS_FAIL (-1)\n"),
+("netlink_find", 14, r'''
+/* PRODUCTION */
+#define N 24
+int main(void)
+{
+        p8 bytes[N];
+        positive length = nondet_positive(), size = 99;
+        p16 type = nondet_p16();
+        __CPROVER_assume(length <= N);
+        p8 *value = netlink_find_span(bytes, length, type, &size);
+        if (value) {
+                if (size) REACHED();
+                assert(value >= bytes && size <= length && value + size <= bytes + length);
+        }
+        return 0;
+}
+''', ["netlink_attributes", "netlink_finding_take", "netlink_find_span"],
+ "#define NLA_TYPE_MASK 0x3fff\n#define netlink_align(value) (((value) + 3) & ~(positive)3)\n"
+ "typedef struct { p16 length; p16 type; } netlink_attribute;\n"
+ "typedef bool (*netlink_attribute_visitor)(p16 type, p8 *value, positive size, address_any context);\n"
+ "typedef struct { p16 type; address_any value; positive size; } netlink_finding;\n"),
+("http_head", 12, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive();
+        __CPROVER_assume(size <= N);
+        bipolar header = http_header_end(bytes, size);
+        if (header >= 0) {
+                assert(header >= 2 && (positive)header <= size);
+                assert(bytes[header - 1] == '\n' && bytes[header - 2] == '\n' ||
+                       (header >= 4 && bytes[header - 1] == '\n' && bytes[header - 2] == '\r'));
+        }
+        http_response response = {.code = nondet_bool() ? 200 : 301};
+        http_framing_fields fields;
+        if (http_response_fields(bytes, size, &response, &fields)) {
+                REACHED();
+                assert(size >= 1 && bytes[size - 1] == '\n');
+                if (fields.transfer) assert((p8 *)fields.transfer >= bytes &&
+                        (p8 *)fields.transfer + fields.transfer_size <= bytes + size);
+                if (fields.length) assert((p8 *)fields.length >= bytes &&
+                        (p8 *)fields.length + fields.length_size <= bytes + size);
+                if (response.location) assert((p8 *)response.location >= bytes &&
+                        (p8 *)response.location + response.location_length <= bytes + size);
+        }
+        return 0;
+}
+''', ["http_header_end", "http_token_byte", "http_field_name", "http_line_valid",
+      "http_response_is_redirect", "http_length_values", "http_response_fields"],
+ "typedef struct { b32 code; p8 body_kind; positive body_length; string_address location; positive location_length; } http_response;\n"
+ "typedef struct { string_address transfer; string_address length; positive transfer_size; positive length_size; positive length_value; } http_framing_fields;\n"
+ "#define positive_max (~(positive)0)\n"
+ "static bool positive_append_digit(positive *value, positive digit, positive limit)\n"
+ "{ positive made; if (__builtin_mul_overflow(*value, 10, &made) ||\n"
+ "  __builtin_add_overflow(made, digit, &made) || made > limit) return false;\n"
+ "  *value = made; return true; }\n"),
+("http_chunk", 17, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        p8 line[N];
+        positive length = nondet_positive(), chunk = 12345;
+        __CPROVER_assume(length <= N);
+        bipolar got = http_chunk_line(line, length, &chunk);
+        if (got == HTTP_OK) { if (chunk) REACHED(); assert(length >= 2 && line[length - 1] == '\n'); }
+        else assert(chunk == 12345);
+        bipolar trailer = http_trailer_line(line, length);
+        assert(trailer == 1 || trailer == 0 || trailer == HTTP_MALFORMED);
+        return 0;
+}
+''', ["http_token_byte", "http_field_name", "http_line_valid", "http_chunk_extensions_valid",
+      "http_chunk_line", "http_trailer_line"], "#define HTTP_OK 0\n#define HTTP_MALFORMED (-5)\n"),
+("http_url", 14, r'''
+/* PRODUCTION */
+#define N 10
+int main(void)
+{
+        char url[N + 1];
+        url[N] = 0;
+        p8 host[8];
+        p16 port = 1234;
+        string_address path = NULL;
+        bool tls = nondet_bool();
+        positive room = nondet_positive();
+        __CPROVER_assume(room <= sizeof host);
+        if (http_split_into(url, host, room, &port, &path, &tls) == HTTP_OK) {
+                positive length = strlen((char *)host);
+                if (port != 80 && port != 443) REACHED();
+                assert(length >= 1 && length < room);
+                for (positive i = 0; i < length; i++) assert(http_host_byte(host[i]));
+                assert(port >= 1);
+                if (__CPROVER_same_object(path, url))
+                        assert(path >= url && path <= url + N);
+                else
+                        assert(path[0] == '/' && !path[1]);
+        }
+        return 0;
+}
+''', ["http_host_byte", "http_scheme_length", "http_web_scheme", "http_ipv4_spelling",
+      "http_split_into"],
+ "#define HTTP_OK 0\n#define HTTP_BAD_URL (-1)\n#define HTTP_SCHEME (-12)\n#define HTTP_PORT 80\n"
+ "#define HTTP_HTTPS_PORT 443\n#define HTTP_URL_MAX 2048\n"
+ "/* lib.c's host_into: the dotted quad, no terminator, its length. */\n"
+ "static positive host_into(p8 *into, p32 host)\n"
+ "{ positive n = 0;\n"
+ "  for (int k = 3; k >= 0; k--) { p8 octet = (p8)(host >> (8 * k));\n"
+ "    if (octet >= 100) into[n++] = (p8)('0' + octet / 100);\n"
+ "    if (octet >= 10) into[n++] = (p8)('0' + octet / 10 % 10);\n"
+ "    into[n++] = (p8)('0' + octet % 10);\n"
+ "    if (k) into[n++] = '.'; }\n"
+ "  return n; }\n"),
+("http_path", 12, r'''
+/* PRODUCTION */
+#define N 8
+static bool dot_free(const p8 *path, positive length)
+{
+        positive at = 0;
+        while (at < length) {
+                positive start = at + 1, stop = start;
+                while (stop < length && path[stop] != '/') stop++;
+                if (http_dot_segment((string_address)path + start, stop - start)) return false;
+                at = stop;
+        }
+        return true;
+}
+int main(void)
+{
+        p8 path[N + 1], copy[N + 1];
+        path[N] = 0;
+        __CPROVER_assume(path[0] == '/');
+        for (int i = 0; i < N; i++) __CPROVER_assume(path[i] != '?' && path[i] != '#');
+        positive before = strlen((char *)path);
+        http_path_simplify(path);
+        positive after = strlen((char *)path);
+        if (after < before) REACHED();
+        assert(after <= before && after >= 1 && path[0] == '/');
+        assert(dot_free(path, after));
+        memcpy(copy, path, N + 1);
+        http_path_simplify(copy);
+        assert(!memcmp(copy, path, after + 1));
+        return 0;
+}
+''', ["http_dot_segment", "http_path_simplify"], ""),
+("tls_constraints", 18, r'''
+/* TYPEDEFS tls_cert */
+/* PRODUCTION */
+/* RFC 5280 4.2.1.9 in DER: SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+   pathLenConstraint INTEGER (0..MAX) OPTIONAL }, nothing else and nothing
+   after it. DER leaves out a default, so cA is either absent or 01 01 FF; the
+   integer is minimal and not negative; a path length needs cA true. Lengths
+   are short-form here because no valid value reaches 128 bytes. */
+static bool spec_constraints(const p8 *v, positive n, bool *ca, bool *present, positive *path)
+{
+        *ca = false; *present = false; *path = 0;
+        if (n < 2 || v[0] != 0x30 || v[1] != n - 2) return false;
+        positive at = 2;
+        if (at < n && v[at] == 0x01) {
+                if (n - at < 3 || v[at + 1] != 1 || v[at + 2] != 0xff) return false;
+                *ca = true; at += 3;
+        }
+        if (at < n && v[at] == 0x02) {
+                if (n - at < 2) return false;
+                positive bytes = v[at + 1];
+                if (bytes == 0 || bytes > 8 || bytes > n - at - 2) return false;
+                const p8 *x = v + at + 2;
+                if (x[0] & 0x80) return false;
+                if (bytes > 1 && x[0] == 0 && !(x[1] & 0x80)) return false;
+                positive value = 0;
+                for (positive i = 0; i < bytes; i++) value = value << 8 | x[i];
+                *present = true; *path = value; at += 2 + bytes;
+        }
+        if (at != n) return false;
+        return !*present || *ca;
+}
+#define N 15
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        __CPROVER_assume(length <= N);
+        tls_cert cert;
+        memset(&cert, 0, sizeof cert);
+        bool ca, present; positive path;
+        bool expected = spec_constraints(value, length, &ca, &present, &path);
+        bool accepted = tls_parse_basic_constraints(value, length, &cert) == TLS_OK;
+        if (accepted && present && path > 255) REACHED();
+        assert(accepted == expected);
+        if (accepted)
+                assert(cert.ca == ca && cert.path_length_present == present &&
+                       (!present || cert.path_length == path));
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_asn1_true", "tls_parse_basic_constraints"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"),
+("tls_key_usage", 8, r'''
+/* TYPEDEFS tls_cert */
+/* PRODUCTION */
+/* RFC 5280 4.2.1.3 in DER: a BIT STRING of the nine named bits, trailing
+   zero bits removed (so the unused count is exactly the trailing zeros of a
+   nonzero final octet), decipherOnly (bit 8) only beside keyAgreement (bit 4),
+   no bit past the ninth. */
+static bool spec_usage(const p8 *v, positive n, bool *sign, bool *cert_sign)
+{
+        if (n < 3 || v[0] != 0x03 || v[1] != n - 2 || v[1] > 3) return false;
+        positive bytes = v[1] - 1;
+        p8 unused = v[2];
+        const p8 *bits = v + 3;
+        if (!bytes || unused > 7) return false;
+        p8 last = bits[bytes - 1];
+        if (!last) return false;
+        unsigned zeros = 0;
+        while (!((last >> zeros) & 1)) zeros++;
+        if (zeros != unused) return false;
+        if (bytes == 2 && (bits[1] != 0x80 || !(bits[0] & 0x08))) return false;
+        *sign = bits[0] & 0x80; *cert_sign = bits[0] & 0x04;
+        return true;
+}
+#define N 6
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        __CPROVER_assume(length <= N);
+        tls_cert cert;
+        memset(&cert, 0, sizeof cert);
+        bool sign = false, cert_sign = false;
+        bool expected = spec_usage(value, length, &sign, &cert_sign);
+        bool accepted = tls_parse_key_usage(value, length, &cert) == TLS_OK;
+        if (accepted && sign && cert_sign) REACHED();
+        assert(accepted == expected);
+        if (accepted) assert(cert.digital_signature == sign && cert.key_cert_sign == cert_sign);
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_named_bits",
+      "tls_parse_key_usage"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define CRYPTO_RSA_BYTES 1024\n"
+ "#define positive_max (~(positive)0)\n"),
+("dhcp_frame", 22, r'''
+/* PRODUCTION */
+/* 32 bytes: an IPv4 header with one option word, or without one and four
+   bytes of message, after UDP's. CBMC takes 9 s at 28, 131 s at 32, and ran
+   past an hour at 40 (the checksum's sum, written two ways, over every
+   byte); dhcp_frame_fuzz is what covers longer frames. */
+#define N 32
+#define M 48
+/* RFC 1071 over 16-bit words, written the other way round from dhcp_sum:
+   whole words first, a last odd byte as the high half of one more. */
+static p32 spec_sum(const p8 *b, positive n, p32 sum)
+{
+        for (positive i = 0; i + 1 < n; i += 2)
+                sum += (p32)b[i] << 8 | b[i + 1];
+        if (n & 1)
+                sum += (p32)b[n - 1] << 8;
+        sum = (sum & 0xffff) + (sum >> 16);
+        sum = (sum & 0xffff) + (sum >> 16);
+        return sum;
+}
+static p32 spec_load32(const p8 *b) { return (p32)b[0] << 24 | (p32)b[1] << 16 | (p32)b[2] << 8 | b[3]; }
+/* RFC 791 and RFC 768 by index: the verdict, and where the message is. */
+static bool spec_unframe(const p8 *f, positive n, bool vouched, positive *offset, positive *length)
+{
+        if (n < 20) return false;
+        positive header = (positive)(f[0] & 15) * 4, total = (positive)f[2] << 8 | f[3];
+        if (f[0] >> 4 != 4 || header < 20 || total < header + 8 || total > n) return false;
+        if ((f[6] & 0x3f) || f[7] || f[9] != 17) return false;
+        if (spec_sum(f, header, 0) != 0xffff) return false;
+        const p8 *u = f + header;
+        positive udp = (positive)u[4] << 8 | u[5];
+        if (((p32)u[0] << 8 | u[1]) != 67 || ((p32)u[2] << 8 | u[3]) != 68 || udp < 8 || udp > total - header)
+                return false;
+        if ((u[6] || u[7]) && !vouched) {
+                p8 pseudo[12] = {f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19],
+                                 0, 17, (p8)(udp >> 8), (p8)udp};
+                if (spec_sum(u, udp, spec_sum(pseudo, 12, 0)) != 0xffff) return false;
+        }
+        *offset = header + 8;
+        *length = udp - 8;
+        return true;
+}
+/* Every frame of up to N bytes: the judge reads only inside it, agrees with
+   RFC 791 and 768 on the verdict and on the addresses, the port and the
+   message's place, and every frame it accepts the kernel's prefilter keeps.
+   The control buffer's reader is dhcp_frame_control's: one problem for both
+   ran past an hour. */
+int main(void)
+{
+        p8 frame[N];
+        positive size = nondet_positive();
+        bool vouched = nondet_bool();
+        positive offset = 0, length = 0;
+        dhcp_frame got;
+        __CPROVER_assume(size <= N);
+        bool accepted = dhcp_unframe(frame, size, vouched, &got);
+        assert(accepted == spec_unframe(frame, size, vouched, &offset, &length));
+        if (accepted) {
+                REACHED();
+                assert(got.message == frame + offset && got.length == length);
+                assert(got.message + got.length <= frame + size);
+                assert(got.source == spec_load32(frame + 12) && got.destination == spec_load32(frame + 16));
+                assert(got.source_port == 67);
+                assert(spec_filter(frame, size) != 0);
+        }
+        return 0;
+}
+''', ["dhcp_sum", "dhcp_unframe"], lambda net: dhcp_frame_proof_lift(net)),
+("dhcp_frame_control", 10, r'''
+/* PRODUCTION */
+#define M 48
+/* cmsg(3): length (its 16-byte header in it), level, type, data, padding
+   to eight; PACKET_AUXDATA's tp_status bits 3 and 7 vouch for the checksum. */
+static bool spec_vouched(const p8 *c, positive n)
+{
+        for (positive at = 0; n - at >= 16 && at <= n;) {
+                p64 length = 0;
+                for (int i = 7; i >= 0; i--) length = length << 8 | c[at + i];
+                p32 level = c[at + 8] | (p32)c[at + 9] << 8 | (p32)c[at + 10] << 16 | (p32)c[at + 11] << 24;
+                p32 type = c[at + 12] | (p32)c[at + 13] << 8 | (p32)c[at + 14] << 16 | (p32)c[at + 15] << 24;
+                if (length < 16 || length > n - at) return false;
+                if (level == 263 && type == 8) return length >= 20 && (c[at + 16] & 0x88);
+                at += (positive)((length + 7) & ~(p64)7);
+        }
+        return false;
+}
+/* Every control buffer of up to M bytes: the reader reads only inside it and
+   says the checksum is vouched for exactly when cmsg(3) and PACKET_AUXDATA do. */
+int main(void)
+{
+        p8 control[M];
+        positive held = nondet_positive();
+        __CPROVER_assume(held <= M);
+        bool said = dhcp_frame_vouched(control, held);
+        assert(said == spec_vouched(control, held));
+        if (said)
+                REACHED();
+        return 0;
+}
+''', ["dhcp_frame_vouched"], lambda net: dhcp_frame_proof_lift(net)),
+("dhcp_frame_filter", 34, r'''
+/* PRODUCTION */
+#define N 68
+/* Every frame of up to 68 bytes, so every header length the filter can be
+   asked to step over: one the judge accepts with its UDP checksum vouched for
+   -- the most it accepts of any frame -- the kernel's prefilter keeps. */
+int main(void)
+{
+        p8 frame[N];
+        positive size = nondet_positive();
+        dhcp_frame got;
+        __CPROVER_assume(size <= N);
+        if (dhcp_unframe(frame, size, true, &got)) {
+                if ((frame[0] & 15) == 15) REACHED();
+                assert(spec_filter(frame, size) != 0);
+                assert(got.message >= frame && got.message + got.length <= frame + size);
+        }
+        return 0;
+}
+''', ["dhcp_sum", "dhcp_unframe"], lambda net: dhcp_frame_proof_lift(net)),
+("tls_der_cursor", 9, r'''
+/* PRODUCTION */
+#define N 8
+/* One DER value off any reader of up to N bytes, whatever its tag: the
+   window is inside the reader's bytes past a header of two octets or more,
+   the reader resumes where the window ends, and a refusal leaves the reader
+   failed and empty. The same bytes as INTEGER contents and as a named bit
+   list's: accepted only when DER's one spelling (X.690 8.3.2, 11.2.2). */
+int main(void)
+{
+        p8 bytes[N];
+        positive size = nondet_positive();
+        p8 tag = nondet_p8();
+        __CPROVER_assume(size <= N);
+        byte_reader reader = byte_reader_open(bytes, size);
+        byte_reader inside = tls_der_value(&reader, tag);
+        if (byte_reader_ok(&inside)) {
+                if (inside.left) REACHED();
+                assert(byte_reader_ok(&reader) && bytes[0] == tag);
+                assert(inside.bytes >= bytes + 2 && inside.bytes + inside.left <= bytes + size);
+                assert(reader.bytes == inside.bytes + inside.left &&
+                       reader.left == (positive)(bytes + size - reader.bytes));
+        } else
+                assert(!byte_reader_ok(&reader) && !reader.left);
+        byte_reader whole = byte_reader_open(bytes, size);
+        if (tls_der_integer(whole)) {
+                assert(size >= 1);
+                if (size >= 2)
+                        assert(!(bytes[0] == 0 && bytes[1] < 0x80) &&
+                               !(bytes[0] == 0xff && bytes[1] >= 0x80));
+        }
+        if (tls_der_named_bits(whole)) {
+                assert(size >= 1 && bytes[0] <= 7);
+                if (size > 1) {
+                        p8 last = bytes[size - 1];
+                        assert((last >> bytes[0]) & 1);
+                        assert(!(last & ((1u << bytes[0]) - 1)));
+                } else
+                        assert(!bytes[0]);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_integer",
+      "tls_der_named_bits"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n"),
+("tls_entry_status", 4, r'''
+/* PRODUCTION */
+#define N 20
+/* A CertificateEntry's extensions of any bytes up to N: accepted empty, or
+   when asked as exactly one status_request of type ocsp whose response is
+   at least a byte and ends the extensions -- and that response is handed
+   back inside them, eight bytes in. Unasked, only empty passes. */
+int main(void)
+{
+        p8 bytes[N];
+        positive length = nondet_positive();
+        bool asked = nondet_bool();
+        const p8 *response = (const p8 *)bytes;
+        positive response_length = 99;
+        __CPROVER_assume(length <= N);
+        if (tls_entry_status(bytes, length, asked, &response, &response_length)) {
+                if (!length) {
+                        assert(!response && !response_length);
+                } else {
+                        REACHED();
+                        assert(asked && bytes[0] == 0 && bytes[1] == 5 && bytes[4] == 1);
+                        assert(response == bytes + 8 && response_length >= 1 &&
+                               response_length == length - 8);
+                }
+        }
+        return 0;
+}
+''', ["tls_entry_status"], ""),
+("tls_tls_feature", 12, r'''
+/* PRODUCTION */
+#define N 12
+/* A TLS Feature value of any bytes up to N: when it parses and says
+   must-staple, the INTEGER 5 is in it (02 01 05). */
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        tls_cert cert = {false};
+        __CPROVER_assume(length <= N);
+        if (tls_parse_tls_feature(value, length, &cert) == TLS_OK && cert.must_staple) {
+                bool five = false;
+                REACHED();
+                for (positive at = 0; at + 3 <= length; at++)
+                        five |= value[at] == 2 && value[at + 1] == 1 && value[at + 2] == 5;
+                assert(five && value[0] == 0x30);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_peek",
+      "tls_der_integer", "tls_parse_tls_feature"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n"
+ "typedef struct { bool must_staple; } tls_cert;\n"),
+("tls_authority_key", 10, r'''
+/* PRODUCTION */
+#define N 12
+/* An authorityKeyIdentifier value of any bytes up to N: when it parses,
+   the key identifier it keeps lies inside it, past its own two-byte
+   header, and an issuer [1] never comes without its serial [2]. */
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        p8 *key = (p8 *)1;
+        positive key_length = 99;
+        __CPROVER_assume(length <= N);
+        if (tls_parse_authority_key(value, length, &key, &key_length) == TLS_OK) {
+                assert(value[0] == 0x30);
+                if (key) {
+                        REACHED();
+                        assert(key >= value + 4 && key + key_length <= value + length);
+                } else
+                        assert(!key_length);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_peek",
+      "tls_der_integer", "tls_general_names_valid", "tls_parse_authority_key"],
+ "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n"),
+("tls_crl_scope", 10, r'''
+/* PRODUCTION */
+#define N 12
+/* An issuingDistributionPoint value of any bytes up to N: when it parses,
+   it is not empty, at most one of user, CA and attribute certificates only
+   is set, and the names it keeps are inside it -- a fullName, never a
+   relative name. */
+int main(void)
+{
+        p8 value[N];
+        positive length = nondet_positive();
+        tls_crl_scope scope;
+        __CPROVER_assume(length <= N);
+        if (tls_parse_crl_scope(value, length, &scope) == TLS_OK) {
+                if (scope.user_only || scope.ca_only) REACHED();
+                assert(scope.present && length >= 3 && value[0] == 0x30);
+                assert(scope.user_only + scope.ca_only + scope.attribute_only <= 1);
+                if (scope.names)
+                        assert(!scope.relative && scope.names >= value + 6 &&
+                               scope.names + scope.names_length <= value + length &&
+                               scope.names_length >= 2);
+        }
+        return 0;
+}
+''', ["tls_asn1_length", "tls_asn1_enter", "tls_der_value", "tls_der_peek",
+      "tls_der_flag", "tls_der_named_bits", "tls_general_names_valid",
+      "tls_parse_crl_scope"],
+ lambda net: "#define TLS_OK 0\n#define TLS_FAIL (-1)\n#define positive_max (~(positive)0)\n" +
+ ul_c_typedefs(net, "tls_crl_scope") + "\n"),
+]
+
+
+def dhcp_frame_proof_lift(net):
+    """What the DHCP frame proofs take from net.c beside its functions: the
+    ports and control-message numbers, the frame and filter-step types, and
+    the filter's own bytes; then the classic BPF the kernel runs them as."""
+    return "\n".join(
+        re.findall(r"^#define (?:DHCP_CLIENT_PORT|DHCP_SERVER_PORT|DHCP_SOL_PACKET|"
+                   r"DHCP_PACKET_AUXDATA|DHCP_CHECKSUM_NOT_READY|DHCP_CHECKSUM_VALID) .*$",
+                   net, re.M) +
+        [ul_c_typedefs(net, "dhcp_frame", "net_filter_step"),
+         re.search(r"^static const net_filter_step dhcp_frame_filter\[\] = \{.*?\}\};",
+                   net, re.M | re.S).group(0),
+         DHCP_FRAME_SPEC_FILTER]) + "\n"
+
+
+DHCP_FRAME_SPEC_FILTER = r'''/* The kernel's classic BPF for a socket filter: a load past the packet ends
+   the program with 0, which drops it. */
+static p32 spec_filter(const p8 *packet, positive size)
+{
+        p32 a = 0, x = 0;
+        for (positive pc = 0; pc < sizeof dhcp_frame_filter / sizeof *dhcp_frame_filter; pc++) {
+                const net_filter_step *step = dhcp_frame_filter + pc;
+                positive at = step->value;
+                if (step->code == 0x30) { if (at >= size) return 0; a = packet[at]; }
+                else if (step->code == 0x28) { if (at + 2 > size) return 0; a = (p32)packet[at] << 8 | packet[at + 1]; }
+                else if (step->code == 0xb1) { if (at >= size) return 0; x = (packet[at] & 15u) * 4; }
+                else if (step->code == 0x48) { at += x; if (at + 2 > size) return 0; a = (p32)packet[at] << 8 | packet[at + 1]; }
+                else if (step->code == 0x15) pc += a == step->value ? step->jump_true : step->jump_false;
+                else if (step->code == 0x45) pc += a & step->value ? step->jump_true : step->jump_false;
+                else if (step->code == 0x06) return step->value;
+                else assert(!"an instruction the model does not know");
+        }
+        assert(!"the filter ran off its end");
+        return 0;
+}
+'''
+
+
+def harness_net_bounded_proof(argv):
+    """Bounded model checking of the network parsers with CBMC.
+
+    For every input up to each proof's size -- every byte, every length, every
+    starting offset and room a caller may pass -- CBMC proves that the
+    production function reads and writes only inside its objects, has no
+    pointer or signed overflow, terminates within the stated number of loop
+    iterations (an unwinding assertion, not a cut-off), and keeps the property
+    the proof asserts: a DNS name of at most 255 bytes ending in its root inside
+    the message, an ASN.1 value inside its parent, a netlink attribute inside
+    its datagram, a response field inside the head, a URL's host of host bytes
+    only, a path with no dot segment left that a second pass leaves alone, a
+    DHCP reply frame judged as RFC 791 and 768 judge it, with every frame the
+    judge accepts kept by the classic BPF prefilter the kernel runs for the
+    packet socket (the filter's own bytes, lifted). The byte reader and the
+    byte store are proved for buffers of any length.
+
+    The parsers call lib.c through the contracts written in NET_PROOF_SHIM;
+    lib.c's own checks hold its routines to them. A bound is a bound: a proof
+    for messages of up to N bytes is not one for longer messages, though the
+    reader and store proofs, which every parser reads and writes through, are
+    not bounded. Needs cbmc on PATH or in MOONWATER_CBMC; NOT RUN without it.
+
+        python3 test/differential.py --harness net_bounded_proof [NAME...]
+    """
+    cbmc = os.environ.get("MOONWATER_CBMC") or shutil.which("cbmc")
+    if not cbmc or not Path(cbmc).exists():
+        print("net bounded proof: NOT RUN -- needs cbmc (set MOONWATER_CBMC)")
+        return 2
+    checks = Checks()
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    chosen = set(argv)
+    common = NET_PROOF_SHIM + byte_reader_source() + byte_store_source()
+    with tempfile.TemporaryDirectory(prefix="net-bounded-") as temporary:
+        for name, unwind, harness, functions, extra in NET_PROOFS:
+            if chosen and name not in chosen:
+                continue
+            production = "\n".join(ul_c_function(net, function) for function in functions)
+            harness = re.sub(r"/\* TYPEDEFS ([\w ]+) \*/",
+                             lambda m: ul_c_typedefs(net, *m.group(1).split()), harness)
+            #   An extra that is a function lifts what it needs from the
+            #   source (a table the kernel is handed, say) rather than say it.
+            source = common + (extra(net) if callable(extra) else extra) + \
+                harness.replace("/* PRODUCTION */", production)
+            unit = Path(temporary) / (name + ".c")
+            unit.write_text(source)
+            started = time.monotonic()
+            try:
+                ran = subprocess.run(
+                    [cbmc, str(unit), "--bounds-check", "--pointer-check",
+                     "--pointer-overflow-check", "--signed-overflow-check",
+                     "--unwind", str(unwind), "--unwinding-assertions",
+                     "--object-bits", "12"],
+                    capture_output=True, text=True, timeout=3600)
+            except subprocess.TimeoutExpired:
+                print("  %-14s NOT proved: cbmc ran past an hour" % name)
+                checks(False, "%s: cbmc finished within an hour" % name)
+                continue
+            proved = "VERIFICATION SUCCESSFUL" in ran.stdout
+            failed = [line for line in ran.stdout.splitlines() if ": FAILURE" in line]
+            reach = subprocess.run(
+                [cbmc, str(unit), "-D", "NET_PROOF_REACH", "--unwind", str(unwind),
+                 "--object-bits", "12", "--stop-on-fail"],
+                capture_output=True, text=True, timeout=3600)
+            reached = "VERIFICATION FAILED" in reach.stdout and '!"reached"' in reach.stdout
+            print("  %-14s %s, %s, in %.0f s" % (
+                name, "proved" if proved else "NOT proved",
+                "its outcome reached" if reached else "its outcome NOT reached",
+                time.monotonic() - started))
+            for line in failed[:6]:
+                print("    " + line.strip())
+            if not proved and not failed:
+                print(ran.stdout[-1500:] + ran.stderr[-1500:])
+            checks(proved, "%s: memory safety, termination and its property hold for every input in bound" % name)
+            checks(reached, "%s: the outcome the proof is about is reachable, so the proof is not vacuous" % name)
+    return checks.verdict("net bounded proof", "net-bounded-proof")
+
+
+#       Mutants that cannot be told apart from the original by any input, each
+#       with the reason. Keyed by function, the stripped source line, the
+#       operator flipped and which occurrence of it on that line, so a moved
+#       line keeps its entry and an edited one loses it.
+NET_MUTATION_EQUIVALENT = {
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "&&", 1): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "&&", 2): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "<", 1): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_lease_timers", 'return renewal && renewal < rebinding && rebinding < lease->seconds;', "<", 2): "After the defaults are applied every reachable state has 0 < renewal < rebinding < seconds (net_exhaustive_proof 'timers' proves the defaults for every lifetime, and the given pair is kept only when it already satisfies that), so a weaker conjunction is true wherever the original is.",
+    ("dhcp_walk", "taken = before < 4 ? min(byte_reader_left(&value), 4 - before)", "<", 1):
+        "At before == 4 the taken branch is min(left, 0) == 0, the other branch's value.",
+    ("netlink_attribute_add", "if (padded > length)", ">", 1):
+        "At padded == length the fill is of no bytes.",
+    ("netlink_nested_end", "if (buffer->used - start > 0xffffu)", ">", 1):
+        "Every append moves used by a multiple of four from a start that is one, so the span is never 0xffff, the one value where > and >= part.",
+    ("netlink_receive_one", "return got < 0 ? got : 0;", "<", 1):
+        "At got == 0 both arms answer 0.",
+    ("netlink_walk", "if (got <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the walk's own deadline check answers -1, as this does.",
+    ("netlink_find", "if (header->length < at)", "<", 1):
+        "At header->length == at the span is empty and holds no attribute, so the search answers null as the refusal does.",
+    ("netlink_link_seen", "for (positive at = 0; at < search->skip_count && at < 8; at++)", "<", 2):
+        "skip_count is never above 8: the watcher adds to skip only below 8 and the radio's list of other links holds at most 8, so at < skip_count already ends the loop by 8.",
+    ("dns_write_name", "if (used >= room || !length || length > 63 ||", ">=", 1):
+        "At used == room the next test, length > room - used, refuses every label, which has at least one byte.",
+    ("dns_copy_name", "if (target >= here || ++jumps > DNS_POINTER_HOPS)", ">=", 1):
+        "A pointer to its own offset moves the ceiling there, so the next read finds nothing left and the name is refused as malformed either way.",
+    ("dns_answer_address", "if (wanted_length < 0)", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_answer_address", "if (owner_length < 0 || !byte_reader_ok(&tail))", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_answer_address", "if (alias_length < 0 ||", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_answer_address", "if (alias_length == wanted_length &&", "==", 1):
+        "Names of different lengths cannot share the shorter one's bytes, whose last is its zero end, where the longer still has a label. At equal lengths a CNAME to itself is found again on every pass until the hops run out, and the walk answers DNS_MALFORMED as the refusal does.",
+    ("dns_records_end", "if (length < 0)", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_reply_result", "positive available = size > DNS_MAX_MESSAGE ? DNS_MAX_MESSAGE : size;", ">", 1):
+        "At size == DNS_MAX_MESSAGE both arms are DNS_MAX_MESSAGE.",
+    ("dns_reply_result", "if (records_end < 0)", "<", 1):
+        "A records end is at least the header and the question, never 0.",
+    ("dns_reply_result", "if (records_end < 0 || (positive)records_end != size)", "<", 1):
+        "A records end is at least the header and the question, never 0.",
+    ("dns_stream_connect_until", "if (status < 0)", "<", 1):
+        "A connect that answered 0 is connected: waiting for it to be writable returns at once and SO_ERROR is 0, so the socket is answered either way.",
+    ("dns_servers", "if (got <= 0)", "<=", 1):
+        "An empty file gives the loop nothing to read, and no servers are answered either way.",
+    ("dns_servers", "if (stop - line < 12 ||", "<", 1):
+        "A line of twelve leaves one byte for the address, and string_to_host takes only a dotted quad of seven to fifteen.",
+    ("dns_servers", "if (!length || length >= sizeof kept)", ">=", 1):
+        "A word of sixty-four bytes is no dotted quad, which string_to_host takes only up to fifteen, so it names no server either way.",
+    ("dns_mix_case", "for (positive at = 0; at < length; at++)", "<", 1):
+        "The byte after the name is where dns_build_request writes the question's type next, over whatever case it was given.",
+    ("dns_build_request", "if (room < DNS_HEADER + 4 + DNS_EDNS_LENGTH)", "<", 1):
+        "At that room the name is given none, and every name needs at least its zero byte: dns_write_name refuses it either way.",
+    ("dns_build_request", "if (written < 0)", "<", 1): "a copied name holds at least its terminating zero byte, so its length is never 0 and < 0 and <= 0 agree.",
+    ("dns_query_once", "if (written < 0)", "<", 1):
+        "The request's name is at least one byte, and the send of a request at least a header long answers its length or an error, never 0.",
+    ("dns_resolve_at", "for (positive attempt = 0; attempt < 3; attempt++)", "<", 1):
+        "Each fallback turns its own feature off and the statuses that ask for one come back only while it is on, so after two the third attempt always breaks.",
+    ("dns_resolve_at", "return status == DNS_CASE_FOLDED || status == DNS_EDNS_SILENT", "||", 1):
+        "DNS_CASE_FOLDED and DNS_EDNS_SILENT come back only while mixing and EDNS0 are on, and each turns its own off and asks again, so neither is ever the status the loop ends with.",
+    ("net_ipv6_literal", "if (length < 2 || text[length - 1] != ']')", "<", 1):
+        "At length 2 the text is \"[]\", which leaves nothing inside and holds no colon, so it is refused either way.",
+    ("net_ipv6_literal", "for (; at < length && digits < 5; at++, digits++)", "<", 1):
+        "The text is terminated at length, so reading text[length] finds the end byte, which is no hex digit, and the group ends there either way.",
+    ("net_ipv6_literal", "for (; at < length && digits < 5; at++, digits++)", "&&", 1):
+        "Past length the end byte stops the group as above; past four digits the group is refused as too long however many more are read.",
+    ("net_ipv6_literal", "for (; at < length && digits < 5; at++, digits++)", "<", 2):
+        "A sixth digit is refused by digits > 4 as the fifth was.",
+    ("net_ipv6_literal", "gap = gap < count ? gap : count;", "<", 1):
+        "At gap == count both arms are the same value.",
+    ("tls_host_match", "if (!name_length || name[0] != '*' || name_length < 3 || name[1] != '.')", "<", 1):
+        "A wildcard of three bytes, \"*.x\", leaves one label beneath its star, and the next test refuses that (dot + 1 >= rest) as this one does.",
+    ("tls_suffix_in", "for (positive at = 0; at < size && list[at];)", "<", 1):
+        "Every list ends in the literal's own NUL at size - 1 after its last entry's, so the walk stops on list[at] before at reaches size.",
+    ("tls_parse_validity", "if (address_to at >= validity_stop)", ">=", 1):
+        "At at == validity_stop the next step, tls_asn1_enter bounded by validity_stop, reads nothing and refuses, as this does.",
+    ("tls_date_now", "return stamp >= 0 && (p64)stamp >= clock_trust_floor() &&", ">=", 1):
+        "A clock that reads 0 is below the trust floor, which is the build's own date, so the next test refuses it either way.",
+    ("http_line_valid", "return http_field_name(line, stop) >= 0;", ">=", 1):
+        "http_field_name answers -1 for an empty name, so it never answers 0.",
+    ("http_header", "if (stop > line && bytes[stop - 1] == '\\r')", ">", 1):
+        "An empty line after the first follows a LF, never a CR; one at offset 0 starts with LF, which no header name starts with, so whatever stop becomes the line is passed over.",
+    ("http_header", "if (stop - line <= want || bytes[line + want] != ':')", "<=", 1):
+        "At stop - line == want the byte at line + want is the line's CR or LF, never ':', so the line is passed over either way.",
+    ("http_response_fields", "while (at < size)", "<", 1):
+        "One more turn at at == size finds a line with no LF and answers false, which is what the loop's end answers.",
+    ("http_response_fields", "if (stop > line && bytes[stop - 1] == '\\r')", ">", 1):
+        "An empty line after the first follows a LF; at offset 0 the status line is empty and refused, and a stop moved by the byte before the buffer is a status line refused as well.",
+    ("http_chunk_extensions_valid", "while (at < stop && http_token_byte(*at))", "<", 1): "The byte at stop is the line's own CR or LF, which is no token byte, no '=', no '\"' and no blank, so reading it changes nothing.",
+    ("http_chunk_extensions_valid", "if (at < stop && *at == '=')", "<", 1): "The byte at stop is the line's own CR or LF, which is no token byte, no '=', no '\"' and no blank, so reading it changes nothing.",
+    ("http_chunk_extensions_valid", "for (at++; at < stop && *at != '\"'; at++)", "<", 1):
+        "At at == stop the byte read is the line's CR or LF: a control, refused in the loop, as the unclosed quote is refused after it.",
+    ("http_chunk_line", "if (stop > number && stop[-1] == '\\r')", ">", 1):
+        "A line of only a LF has no size digits, and is refused as malformed whatever stop becomes.",
+    ("http_chunk_line", "if (number < stop && byte_is_blank(number[0]))", "<", 1): "The byte at stop is the line's own CR or LF, which is no token byte, no '=', no '\"' and no blank, so reading it changes nothing.",
+    ("http_chunk_line", "if (number < stop && byte_is_blank(number[0]))", "&&", 1):
+        "Where number[0] is not a blank, the span of blanks it would skip is empty; at stop the byte is CR or LF, no blank.",
+    ("http_chunk_line", "if (number < stop && !http_chunk_extensions_valid(number, stop))", "<", 1):
+        "At number == stop the extensions are empty and valid.",
+    ("http_url_escape", "if (scheme > length)", ">", 1):
+        "At scheme == length nothing follows the scheme: the slashes test reads nothing, and the verbatim walk and the escaping run the same either way.",
+    ("http_origin_form", "if ((path[0] != '/' && !root) || length > room ||", ">", 1):
+        "At length == room the next test, root >= room - length, refuses it as this does.",
+    ("http_response_fields", "if (name < 0)", "<", 1):
+        "http_field_name answers -1 for an empty name, so it never answers 0.",
+    ("http_response_framing_scan", "if (scan > HTTP_HEAD_MAX)", ">", 1):
+        "At scan == HTTP_HEAD_MAX both arms leave it HTTP_HEAD_MAX.",
+    ("http_response_framing_scan", "return status == HTTP_NO_REPLY &&", "==", 1):
+        "http_status_code answers HTTP_NO_REPLY only below thirteen bytes, never with HTTP_HEAD_MAX of them, and HTTP_MALFORMED stays HTTP_MALFORMED either way.",
+    ("http_response_framing_scan", "if (header < 0)", "<", 1):
+        "http_header_end answers the end of a terminator, at least 2, or -1; never 0.",
+    ("http_response_framing_scan", "address_to searched = max(at, scan > 3 ? scan - 3 : 0);", ">", 1):
+        "At scan == 3 both arms are 0.",
+    ("http_body_read", "if (n < 0 || (positive)n > room)", "||", 1):
+        "A negative n, read as a positive, is past any room, so the conjunction holds wherever n < 0 does; a read never answers more than room.",
+    ("http_write_spans", "while (count && (positive)wrote >= spans->length)", ">=", 1):
+        "A span written exactly is left at length 0, which the next writev writes as nothing: the same bytes go out.",
+    ("http_copy", "if (body->store->used > body->store_limit ||", ">", 1):
+        "At used == store_limit the next test refuses every got, which is never 0 there.",
+    ("http_line", "while (used < limit)", "<", 1):
+        "At used == limit the line has no room left: another read finds it too long all the same, and the loop's end answers HTTP_MALFORMED.",
+    ("http_copy_trailers", "while (total < HTTP_HEAD_MAX)", "<", 1):
+        "At total == HTTP_HEAD_MAX every further line is longer than the room left and refused, as the loop's end refuses.",
+    ("http_absolutize", "if (length >= sizeof kept ||", ">=", 1):
+        "The one caller escapes the Location into a buffer of HTTP_URL_MAX first, so it is never as long as kept.",
+    ("http_absolutize", "if (used + length + 1 > sizeof merged)", ">", 1):
+        "A merged path that fills merged exactly is refused by http_put_url, which puts the scheme and host before it in a room of the same size.",
+    ("http_lookup", "if (string_to_host(host) < 0 && http_host_loopback(host))", "<", 1):
+        "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
+    ("http_lookup_wanted", "if (string_to_host(host) >= 0 || http_host_loopback(host))", ">=", 1):
+        "0.0.0.0 answers 0 either way: as its own address through http_lookup, or as no address from a resolver.",
+    ("http_address_public", "if (a == 127)", "==", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_log_find", "for (positive at = 0; at < array_count(tls_bench_ct_logs); at++)", "<", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_holds", "if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&", "==", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_holds", "if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&", "&&", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_holds", "if (top->curve == 2 && !memory_compare(top->qx, tls_bench_anchor_x, 48) &&", "!", 1): "Bench only: the line is compiled under TLS_BENCH_ANCHOR or TLS_BENCH_CT, which only the loopback HTTPS bench defines, never a shipped image or a check build.",
+    ("tls_ct_log_find", "for (positive at = 0; at < array_count(tls_ct_logs); at++)", "<", 1):
+        "One entry past the table is no log: its 32 bytes would have to equal an SCT's log id, which names a log in the table or none.",
+    ("tls_ct_precert", "if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||", "||", 1):
+        "tls_ct_holds asks for a precertificate only of a leaf with SCTs.",
+    ("tls_ct_precert", "if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||", "||", 2):
+        "tls_parse_cert sets extensions inside the TBSCertificate, so it is never below tbs.",
+    ("tls_ct_precert", "if (!leaf->scts || !leaf->extensions || leaf->extensions < tbs ||", "<", 1):
+        "tls_parse_cert sets extensions past the TBSCertificate's own header, so it is never tbs itself.",
+    ("tls_ct_precert", "if (cut < list_at || cut_length > list_stop - cut)", "||", 1):
+        "tls_parse_cert takes the SCT extension from inside the extension list, so it never runs past the list's end.",
+    ("tls_ct_sct_verifies", "if (precert_length >= 1u << 24 ||", ">=", 1):
+        "A precertificate of 2^24 bytes cannot be named in the three length bytes a log signed, so no signature verifies over what the mutant would sign either.",
+    ("tls_ct_holds", "if (!length || !byte_reader_ok(address_of list) || !byte_reader_end(address_of list))", "||", 1):
+        "With no precertificate no SCT's signature verifies, so the leaf is not held either way.",
+    ("tls_public_suffix", "if (length >= sizeof key)", ">=", 1):
+        "A name of 256 bytes fills key exactly and is no rule, the longest of which is far shorter: false either way.",
+    ("tls_public_suffix", "b32 order = memory_compare(run, key, run_top < top ? run_top : top);", "<", 1):
+        "At run_top == top both arms are the same length.",
+    ("tls_public_suffix", "if (order < 0 || (!order && run_top < top))", "<", 2):
+        "!order with run_top == top has already ended the search a line above.",
+    ("tls_public_suffix", "while (*table && (*table < 'A' || *table > 'Z'))", "||", 1): "The line is the skip over entries already behind the key, and also the copy of an entry's text, whose mutants public_suffixes kills. In the skip, stepping a byte at a time or through a 'Z' header lands on the same next entry that can matter: over every rule, the names beside each and every prefix and tail of each (93,228 names) the lookup answers as the original does.",
+    ("tls_public_suffix", "while (*table && (*table < 'A' || *table > 'Z'))", ">", 1): "The line is the skip over entries already behind the key, and also the copy of an entry's text, whose mutants public_suffixes kills. In the skip, stepping a byte at a time or through a 'Z' header lands on the same next entry that can matter: over every rule, the names beside each and every prefix and tail of each (93,228 names) the lookup answers as the original does.",
+    ("tls_public_suffix", "entry_length = shared < entry_length ? shared : entry_length;", "<", 1):
+        "At shared == entry_length both arms are the same value.",
+    ("tls_public_suffix", "matched = shared < matched ? shared : matched;", "<", 1):
+        "At shared == matched both arms are the same value.",
+    ("tls_public_suffix", "if (entry_length < sizeof entry)", "<", 1):
+        "No entry of the table is 256 bytes long, so entry_length never reaches the size of entry.",
+    ("tls_public_suffix", "while (matched < key_length && matched < entry_length &&", "<", 1):
+        "Past the key's end the walk can only find the key a prefix of a longer entry, which no later entry equals: the lookup answers false either way.",
+    ("net_apart", "if (want > most + 1)", ">", 1):
+        "At want == most + 1 both arms leave it most + 1.",
+    ("dhcp_read", "if (size < DHCP_HEAD + 4)", "<", 1):
+        "A reply of only its header and cookie carries no message type and is refused either way.",
+    ("dhcp_frame_vouched", "while (byte_reader_left(&messages) >= 16)", ">=", 1):
+        "A last message of exactly sixteen bytes is only its header and holds no status, so it vouches for nothing either way.",
+    ("dhcp_frames_open", "if (!length || length >= sizeof request.name)", "||", 1):
+        "An empty name, opened, names no interface: SIOCGIFINDEX refuses it and the socket is closed with -1, as the refusal answers.",
+    ("dhcp_frames_open", "if (!length || length >= sizeof request.name)", ">=", 1):
+        "A name of sixteen bytes has no room for its end in an ifreq: SIOCGIFINDEX finds no such interface and -1 is answered either way.",
+    ("dhcp_frame_next", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers NETWORK_SILENT, as this does.",
+    ("dhcp_frame_next", "if (got < 0)", "<", 1):
+        "A frame of no bytes is no frame: it is answered 0, as the refusal of a frame is.",
+    ("dhcp_ask", "(wait < 250 ? 250 : wait % 1000) * 1000000))", "<", 1):
+        "At wait == 250 both arms are 250.",
+    ("network_deadline_left", "if (!deadline->began || !now || now < deadline->began)", "||", 2):
+        "A clock that reads 0 or behind the start makes the elapsed time wrap past any budget, which answers false as this does.",
+    ("network_wait_set", "for (positive at = 0; ready > 0 && at < count; at++)", ">", 1):
+        "A poll that answers 0 leaves every revents 0, so no descriptor reads as invalid either way.",
+    ("network_stream_read_some_for", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by, and network_stream_read_some_until, whose first step is that deadline's check, answers -1 as this does.",
+    ("network_stream_send_all_until", "if (network_wait_writable_until(handle, deadline) <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers false, as this does.",
+    ("network_stream_timeout", "if ((!seconds && !microseconds) || microseconds >= 1000000)", ">=", 1):
+        "A timeval of a million microseconds is refused by setsockopt with EDOM, and false is answered either way.",
+    ("http_line", "if (!body->link || used >= limit)", ">=", 1):
+        "At used == limit the loop below does not run, and its end answers HTTP_MALFORMED as this does.",
+    ("dns_tls_mode", "if (got < 0)", "<", 1):
+        "At got == 0 the assignment sets 0.",
+    ("net_filter_put", "if (filter->used < NET_FILTER_STEPS)", "<", 1):
+        "At used == NET_FILTER_STEPS the mutant stores one step past steps, which is undefined, and the compiler, free to take the index as in range, drops the store: a filter one step too long is counted and refused the same.",
+    ("http_run_apart", "if (ran != NET_APART_OK || answer.used < sizeof said)", "||", 1):
+        "A child that did not end well and still wrote a whole said wrote lengths that do not add up to what arrived, which http_apart_believed refuses as HTTP_APART; one that ended well wrote all it said.",
+    ("dns_resolve_apart", "dns_apart_ask ask = {server, name, server >= 0 ? 5 : 3, false};", ">=", 1):
+        "A server of 0.0.0.0 is this machine, where nothing answers DNS: the query is refused at once and neither budget is waited out.",
+    ("net_resolve_v4_apart", "if (numeric < 0 && http_host_loopback(name))", "<", 1):
+        "string_to_host answers 0 only for 0.0.0.0, which is no loopback name.",
+    ("dns_resolve_wanted", "for (positive at = 0; at < have; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
+    ("dns_resolve_wanted", "for (; count < array_count(dns_tls_public); count++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
+    ("dns_resolve_wanted", "for (positive at = 0; at < count; at++)", "<", 1): "Past the walk's end the mutant reads one slot past what was filled -- uninitialized, or past the array -- and asks whatever server those bytes name; no input sets them, so no check can tell it apart but by luck. Which servers the walk does ask is held by dns_tls.",
+    ("http_run", "if (string_length(start) >= sizeof url)", ">=", 1):
+        "A URL of HTTP_URL_MAX bytes is refused as HTTP_BAD_URL by http_split_into, which takes fewer, so the answer is the same.",
+    ("net_resolve_v4_apart", "if (numeric >= 0)", ">=", 1):
+        "0.0.0.0 asked of the child is answered by the child's own net_resolve_v4 as the literal it is: DNS_OK and 0, as here.",
+    # ---- fold netlink: entries below this line
+    #
+    ("netlink_attribute_add", "if (buffer->used > 0xffffffffu - padded)", ">", 1):
+        "used and padded are both multiples of four (the header is aligned and every append adds a padded length), so their sum is never 0xffffffff, the one value where > and >= part.",
+    # ---- fold dns: entries below this line
+    #
+    # ---- fold crypto: entries below this line
+    #
+    # ---- fold tls-core: entries below this line
+    #
+    # ---- fold x509: entries below this line
+    #
+    # ---- fold revoke-ct: entries below this line
+    #
+    # ---- fold http: entries below this line
+    ("http_header_end", "if (crlf && (!bare || crlf < bare))", "<", 1):
+        "crlf and bare are the LFs that begin \\n\\r\\n and \\n\\n. The byte after the LF is CR in one and LF in the other, "
+        "so the two positions are never equal, and crlf <= bare picks the same spelling as crlf < bare.",
+    #
+    # ---- fold nts: entries below this line
+    #
+    # ---- fold apart: entries below this line
+    #
+    ("nts_ke_apart", "else if (!(status = (bipolar)said.status))", "!", 1):
+        "nts_ke zeroes its state whenever it fails (its own memory_fill on the way out), so a failed answer copies zeros over the zeros the caller filled: the copy changes nothing for any child that is nts_ke, and only a child that was not would differ.",
+    ("network_deadline_begin_within", "if (deadline->budget > enclosing.budget - elapsed)", ">", 1):
+        "At budget == enclosing.budget - elapsed both arms leave it that.",
+    ("network_receive_until", "if (ready <= 0)", "<=", 1):
+        "A wait that answers 0 is a deadline gone by; going round again, the loop's own deadline check answers the silent value, as this does.",
+    # ---- fold dhcp: entries below this line
+    #
+    # ---- fold shnet: entries below this line
+    #
+    # ---- fold wifi: entries below this line
+    #
+    # ---- fold host-net: entries below this line
+    #
+    # ---- fold waterlink: entries below this line
+    #
+}
+
+NET_MUTATION_FAMILIES = r"^(dns_|netlink_|http_|dhcp_|tls_|tls12_|nts_|clock_|network_|net_)"
+NET_MUTATION_EXCLUDED = r"^(crypto_|tls_bench|tls_anchor|tls_share|tls_derive|tls_traffic|tls_finished_mac|tls_transcript)"
+NET_MUTATION_OPERATORS = ((" >= ", " > "), (" > ", " >= "), (" <= ", " < "), (" < ", " <= "),
+                          (" == ", " != "), (" != ", " == "), (" && ", " || "), (" || ", " && "))
+
+
+def net_tier_lines(text):
+    """The line numbers (1-based) inside a #if or #ifdef that names
+    MOONWATER_STRICT: code only a tier's build compiles."""
+    inside = set()
+    stack = []
+    for number, line in enumerate(text.split("\n"), 1):
+        word = line.strip()
+        if word.startswith("#if"):
+            stack.append("MOONWATER_STRICT" in word)
+        elif word.startswith("#endif") and stack:
+            stack.pop()
+        elif any(stack):
+            inside.add(number)
+    return inside
+
+
+def net_mutants(root, pattern=None):
+    """Every single-operator mutant of the network code's decisions: each
+    comparison flipped to its neighbour, each && and || swapped, each !
+    dropped, on a line that decides (if, while, for, return, ?:)."""
+    wanted = re.compile(pattern) if pattern else re.compile(NET_MUTATION_FAMILIES)
+    excluded = re.compile(NET_MUTATION_EXCLUDED)
+    mutants = []
+    for relative in ("src/net/net.c", "src/net/wait.c"):
+        source = (root / relative).read_text()
+        code = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'',
+                      lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
+        lines = code.split("\n")
+        original = source.split("\n")
+        at = 0
+        while at < len(lines):
+            line = lines[at]
+            if line and not line[0].isspace() and line[0] not in "#}":
+                head = at
+                while head + 1 < len(lines) and "{" not in lines[head] and \
+                        not lines[head].rstrip().endswith(";") and head - at < 8:
+                    head += 1
+                if head < len(lines) and lines[head].strip() == "{":
+                    name = re.search(r"(\w+)\s*\(", " ".join(lines[at:head + 1]))
+                    name = name.group(1) if name else "?"
+                    stop = head + 1
+                    while stop < len(lines) and not lines[stop].startswith("}"):
+                        stop += 1
+                    if wanted.match(name) and not excluded.match(name):
+                        for number in range(head + 1, stop):
+                            text = lines[number]
+                            if not re.search(r"\b(if|while|for)\b|return|\?", text) and \
+                                    not re.match(r"\s*(\|\||&&)", text):
+                                continue
+                            seen = collections.Counter()
+                            changes = [(m.start(), a, b) for a, b in NET_MUTATION_OPERATORS
+                                       for m in re.finditer(re.escape(a), text)]
+                            changes += [(m.start(), "!", "") for m in
+                                        re.finditer(r"(?<![\w)\]])!(?=[\w(])", text)]
+                            for column, a, b in sorted(changes):
+                                seen[a] += 1
+                                mutants.append({
+                                    "file": relative, "line": number + 1, "column": column,
+                                    "from": a, "to": b, "function": name,
+                                    "text": original[number].strip(),
+                                    "key": (name, original[number].strip(), a.strip() or "!",
+                                            seen[a])})
+                    at = stop
+            at += 1
+    return mutants
+
+
+def harness_net_mutation(argv):
+    """Mutation testing of the network code against its checks.
+
+    Each decision in src/net/net.c and src/net/wait.c is flipped once (a
+    comparison to its neighbour, && and || swapped, a ! dropped) in a copy of
+    the tree, and the oracle is run on the copy: CHECK_net, built and run
+    natively, then the harnesses that lift the mutated function's family
+    (--oracle full). A mutant no check notices is a decision no check holds.
+    Survivors listed in NET_MUTATION_EQUIVALENT, each with the reason no input
+    can tell it apart, do not count. Linux x86-64 only.
+
+        python3 test/differential.py --harness net_mutation [--functions REGEX]
+            [--jobs N] [--oracle checks|full] [--limit N] [--list] [--journal FILE]
+
+    With --journal each verdict is appended to FILE as it is reached, and the
+    mutants FILE already judges are not run again: a run of seven hours that
+    dies is taken up where it stopped.
+    """
+    import concurrent.futures
+    options = {"--functions": None, "--jobs": str(max(1, (os.cpu_count() or 2) // 4)),
+               "--oracle": "checks", "--limit": "0", "--journal": None}
+    listing = "--list" in argv
+    argv = [word for word in argv if word != "--list"]
+    while argv:
+        if argv[0] in options and len(argv) > 1:
+            options[argv[0]] = argv[1]
+            argv = argv[2:]
+        else:
+            print("net_mutation: unknown argument %s" % argv[0])
+            return 2
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        print("net mutation: NOT RUN -- builds CHECK_net natively on Linux x86-64")
+        return 2
+    mutants = net_mutants(HARNESS_ROOT, options["--functions"])
+    if int(options["--limit"]):
+        mutants = mutants[:int(options["--limit"])]
+    if listing:
+        for mutant in mutants:
+            print("%s:%d %s %r -> %r | %s" % (mutant["file"], mutant["line"], mutant["function"],
+                                               mutant["from"], mutant["to"], mutant["text"]))
+        return 0
+    families = (
+        (r"^http_(path_simplify|dot_segment)$", ["net_bounded_proof http_path", "http_urls"]),
+        (r"^http_(chunk_line|chunk_extensions_valid|trailer_line)$", ["net_bounded_proof http_chunk"]),
+        (r"^http_(header_end|response_fields|field_name|line_valid|token_byte)$",
+         ["net_bounded_proof http_head", "http_response_framing"]),
+        (r"^http_(split_into|scheme_length|web_scheme|host_byte|absolutize|origin_form|put_url)$",
+         ["net_bounded_proof http_url", "http_urls"]),
+        (r"^http_", ["http_response_framing", "http_urls", "https_downgrade", "http_fuzz"]),
+        (r"^dns_copy_name$", ["net_bounded_proof dns_copy_name", "dns_oracle --count 4000",
+                              "dns_fuzz"]),
+        (r"^dns_(reply_result|reply_identity|records_end|answer_address|message_at)$",
+         ["dns_oracle --count 4000", "dns_fuzz"]),
+        (r"^dns_(query_tls|resolve_wanted|tls_mode|apart_|resolve_apart)", ["dns_tls", "dns_fuzz"]),
+        (r"^dns_", ["dns_fuzz"]),
+        (r"^tls_asn1_", ["net_bounded_proof tls_asn1", "net_exhaustive_proof --slices 4 der",
+                         "tls_der_fuzz"]),
+        (r"^tls_oid_content_der$", ["net_exhaustive_proof --slices 4 oid"]),
+        (r"^tls_(public_suffix|suffix_in)$", ["public_suffixes", "tls_hostnames"]),
+        (r"^tls_(host_match|general_name_match|name_allowed|dns_within|email_within)$",
+         ["tls_hostnames", "tls_chains"]),
+        (r"^tls_date_value$", ["net_exhaustive_proof --slices 8 date", "tls_dates"]),
+        (r"^tls_parse_basic_constraints$", ["net_bounded_proof tls_constraints", "tls_chains"]),
+        (r"^tls_parse_key_usage$", ["net_bounded_proof tls_key_usage", "tls_chains"]),
+        (r"^tls_(date_now|parse_validity)$", ["tls_dates", "tls_chains"]),
+        (r"^tls_(ct_|der_length_put$|trust_holds$)", ["tls_ct --units"]),
+        (r"^tls_(parse_extensions|parse_cert)$",
+         ["tls_ct --units", "tls_der_fuzz", "tls_verify_fuzz", "tls_chains"]),
+        (r"^tls_", ["tls_der_fuzz", "tls_hs_fuzz", "tls_verify_fuzz", "tls_chains"]),
+        (r"^tls12_", ["tls_hs_fuzz", "tls_chains"]),
+        (r"^nts_", ["nts_fuzz"]),
+        (r"^netlink_(attributes|find_span|finding_take)$", ["net_bounded_proof netlink_find",
+                                                            "netlink_fuzz"]),
+        (r"^netlink_", ["netlink_fuzz"]),
+        (r"^dhcp_walk$", ["net_exhaustive_proof --slices 8 walk", "dhcp_fuzz"]),
+        (r"^dhcp_(mask_valid|prefix_of|address_unicast)$", ["net_exhaustive_proof --slices 4 mask"]),
+        (r"^dhcp_prefix_clear$", ["net_exhaustive_proof --slices 8 clear"]),
+        (r"^dhcp_lease_timers$", ["net_exhaustive_proof --slices 4 timers", "net_dhcp_exchange"]),
+        (r"^dhcp_", ["net_dhcp_exchange", "net_parser_work_states", "dhcp_fuzz"]),
+        (r"^network_", ["net_wait_states", "net_clock_fault", "net_parser_work_states"]),
+    )
+    compiler = shutil.which("cc") or shutil.which("gcc")
+    build = [compiler, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+             "-fno-builtin", "-march=x86-64", "-w", "-T", "src/build/spark.ld",
+             "-Wl,-e,_start", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+             "-DCHECK_net", "-fwhole-program", "-o"]
+    workspace = Path(tempfile.mkdtemp(prefix="net-mutation-", dir=str(HARNESS_ROOT.parent)))
+    tier_lines = {name: net_tier_lines((HARNESS_ROOT / name).read_text())
+                  for name in {mutant["file"] for mutant in mutants}}
+
+    def tree_copy(target):
+        #   Hard links for everything but the file mutated, so a copy is cheap
+        #   and the original is never written.
+        subprocess.run(["cp", "-al", str(HARNESS_ROOT), str(target)], check=True)
+        shutil.rmtree(target / ".git", ignore_errors=True)
+
+    #   Each mutant runs in a session of its own: a flipped guard can turn a
+    #   kill of a child into kill(0, SIGKILL), which took the whole run with it.
+    def judge(index_mutant):
+        index, mutant = index_mutant
+        tree = workspace / ("m%d" % index)
+        tree_copy(tree)
+        path = tree / mutant["file"]
+        lines = path.read_text().split("\n")
+        line = lines[mutant["line"] - 1]
+        column, before, after = mutant["column"], mutant["from"], mutant["to"]
+        if line[column:column + len(before)] != before:
+            shutil.rmtree(tree, ignore_errors=True)
+            return index, "stale", ""
+        lines[mutant["line"] - 1] = line[:column] + after + line[column + len(before):]
+        path.unlink()
+        path.write_text("\n".join(lines))
+        try:
+            built = subprocess.run(build + [str(tree / "chk"), "test/checks.c"], cwd=tree,
+                                   capture_output=True, text=True, timeout=600)
+            if built.returncode:
+                return index, "invalid", ""
+            ran = subprocess.run([str(tree / "chk")], cwd=tree, capture_output=True,
+                                 text=True, timeout=300, start_new_session=True)
+            if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
+                caught = re.search(r"FAIL ([^\n]*)", ran.stdout)
+                return index, "killed", "CHECK_net" + (": " + caught.group(1)[:80] if caught else "")
+            #   A decision a tier compiles in is only there in that tier's
+            #   build: the hardened and the locked CHECK_net, as the net lane
+            #   runs them, judge a mutant on a line that names one.
+            if "MOONWATER_STRICT" in mutant["text"] or mutant["line"] in tier_lines.get(
+                    mutant["file"], set()):
+                for tier in ("2", "3"):
+                    built = build_run(build[:-1] + ["-DMOONWATER_STRICT=" + tier, "-o",
+                                                         str(tree / "chk"), "test/checks.c"],
+                                           cwd=tree, capture_output=True, text=True,
+                                           timeout=600)
+                    if built.returncode:
+                        return index, "invalid", ""
+                    ran = subprocess.run([str(tree / "chk")], cwd=tree, capture_output=True,
+                                         text=True, timeout=300, start_new_session=True)
+                    if ran.returncode or not re.search(r" 0 failures\s*$", ran.stdout):
+                        return index, "killed", "CHECK_net at tier " + tier
+            if options["--oracle"] == "full":
+                for family, harnesses in families:
+                    if not re.match(family, mutant["function"]):
+                        continue
+                    for harness in harnesses:
+                        words = harness.split()
+                        environment = dict(os.environ, MOONWATER_FUZZ_RUNS="20000",
+                                           MOONWATER_FUZZ_SECONDS="3")
+                        ran = subprocess.run([sys.executable, str(tree / "test/differential.py"),
+                                              "--harness"] + words, cwd=tree, env=environment,
+                                             capture_output=True, text=True, timeout=1800,
+                                             start_new_session=True)
+                        if ran.returncode not in (0, 2):
+                            return index, "killed", harness
+                    break
+            return index, "survived", ""
+        except subprocess.TimeoutExpired:
+            return index, "killed", "timeout"
+        finally:
+            shutil.rmtree(tree, ignore_errors=True)
+
+    checks = Checks()
+    outcomes = collections.Counter()
+    survivors = []
+    started = time.monotonic()
+    judged = {}
+    journal = None
+    if options["--journal"]:
+        if os.path.exists(options["--journal"]):
+            with open(options["--journal"]) as kept:
+                for row in kept:
+                    try:
+                        entry = json.loads(row)
+                    except ValueError:
+                        continue
+                    judged[json.dumps(entry["key"])] = entry["outcome"]
+        journal = open(options["--journal"], "a")
+    pending = []
+    for index, mutant in enumerate(mutants):
+        spelled = json.dumps(mutant["key"])
+        if spelled in judged:
+            outcomes[judged[spelled]] += 1
+            if judged[spelled] == "survived":
+                survivors.append(mutant)
+        else:
+            pending.append((index, mutant))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(int(options["--jobs"])) as pool:
+            for index, outcome, by in pool.map(judge, pending):
+                outcomes[outcome] += 1
+                if outcome == "survived":
+                    survivors.append(mutants[index])
+                if journal:
+                    journal.write(json.dumps({"key": mutants[index]["key"], "outcome": outcome,
+                                              "by": by}) + "\n")
+                    journal.flush()
+    finally:
+        if journal:
+            journal.close()
+        shutil.rmtree(workspace, ignore_errors=True)
+    #   An entry whose line no longer exists is a reason for code that is
+    #   gone: every key has to name a mutant of the code as it is.
+    if not options["--functions"]:
+        current = {mutant["key"] for mutant in net_mutants(HARNESS_ROOT, None)}
+        stale = [key for key in NET_MUTATION_EQUIVALENT if key not in current]
+        checks(not stale, "every equivalent mutant names code that is still there: %s" %
+               "; ".join("%s %r" % (key[0], key[1][:60]) for key in stale[:8]))
+    explained = [m for m in survivors if m["key"] in NET_MUTATION_EQUIVALENT]
+    unexplained = [m for m in survivors if m["key"] not in NET_MUTATION_EQUIVALENT]
+    for mutant in unexplained:
+        print("  SURVIVED %s:%d %s %r -> %r | %s" % (
+            mutant["file"], mutant["line"], mutant["function"], mutant["from"],
+            mutant["to"], mutant["text"][:100]))
+    print("  %d mutants: %d killed, %d survived (%d of them equivalent with a reason), "
+          "%d did not build, %d stale; %.0f s" % (
+              len(mutants), outcomes["killed"], outcomes["survived"], len(explained),
+              outcomes["invalid"], outcomes["stale"], time.monotonic() - started))
+    checks(outcomes["killed"] > 0, "the oracle kills mutants at all")
+    checks(not unexplained, "every mutant is killed or explained as equivalent")
+    return checks.verdict("net mutation", "net-mutation")
 
 
 def harness_net_math_proof(argv):
@@ -62586,8 +69847,9 @@ def harness_net_math_proof(argv):
     checks(all(guard in clamp_source for guard in (
         "enclosing = *outer;", "deadline->began < enclosing.began",
         "elapsed = deadline->began - enclosing.began;",
-        "if (elapsed >= enclosing.budget)", "left = enclosing.budget - elapsed;",
-        "if (deadline->budget > left)", "deadline->budget = left;")),
+        "if (elapsed >= enclosing.budget)",
+        "if (deadline->budget > enclosing.budget - elapsed)",
+        "deadline->budget = enclosing.budget - elapsed;")),
         "production nested-deadline guards and clamp match the proved arithmetic")
 
     # Bit-blast x + 1 and x & (x + 1), least-significant bit first. States
@@ -62676,7 +69938,7 @@ int main(void) {
             source = Path(temporary) / "proof.c"
             binary = Path(temporary) / "proof"
             source.write_text(proof_c)
-            built = subprocess.run([clang, "-std=c11", "-O2", "-fsanitize=address,undefined",
+            built = build_run([clang, "-std=c11", "-O2", "-fsanitize=address,undefined",
                                     str(source), "-o", str(binary)],
                                    capture_output=True, text=True)
             checks(built.returncode == 0, "production AES proof subject compiles")
@@ -62731,9 +69993,9 @@ int main(void) {
 
 NET_DEPENDENCY_PRIMITIVES = frozenset("""
 array_count array_store_release array_store_reserve
-byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
+byte_reader_dead byte_reader_end byte_reader_here byte_reader_left byte_reader_ok byte_reader_open
 byte_reader_skip byte_reader_take byte_reader_u16 byte_reader_u16le
-byte_reader_u24 byte_reader_u32 byte_reader_u8 byte_reader_vector16
+byte_reader_u24 byte_reader_u32 byte_reader_u32le byte_reader_u8 byte_reader_vector16
 byte_reader_vector24 byte_reader_vector8 byte_reader_window
 byte_store_append_exact byte_store_release byte_store_reserve
 memory_compare memory_compare_ascii_case memory_copy memory_copy_apart
@@ -62745,13 +70007,14 @@ network_receive_next network_store_16 network_store_32 network_store_64 network_
 network_stream_read_some_for network_stream_read_some_until
 network_stream_send_all_for network_stream_send_all_until network_stream_timeout
 network_transaction_secure network_wait_readable_until network_wait_writable_until
-positive_into socket_bind socket_close socket_connect socket_name socket_new
+positive_append_digit positive_into socket_bind socket_close socket_connect socket_name socket_new
 socket_option_get socket_option_set socket_receive socket_send string_compare_max
 string_copy string_copy_max_end string_digits_checked string_digits_max
 string_equals string_first_of string_first_of_or_end string_get string_has_prefix
 string_is string_last_of string_length string_span_max string_span_without_set
-string_to_host system_call_1 system_call_2 system_call_3 system_call_5
-system_random_fill system_read_retry
+string_to_host system_call system_call_1 system_call_2 system_call_3 system_call_5
+system_child_fork system_close system_random_fill system_read_retry
+system_signal_action system_signal_install system_wait4_retry system_write_all
 """.split())
 
 
@@ -62765,6 +70028,12 @@ WIRE_ALIASES = {
     "NLMSG_IS_NOOP": "NLMSG_NOOP", "NLMSG_IS_ERROR": "NLMSG_ERROR",
     "NLMSG_IS_DONE": "NLMSG_DONE", "NETLINK_HEADER": "NLMSG_HDRLEN",
     "IFNAME_SIZE": "IFNAMSIZ",
+    #   The DHCP client's packet socket and its confinement.
+    "DHCP_SOL_PACKET": "SOL_PACKET", "DHCP_PACKET_AUXDATA": "PACKET_AUXDATA",
+    "DHCP_CHECKSUM_NOT_READY": "TP_STATUS_CSUMNOTREADY", "DHCP_CHECKSUM_VALID": "TP_STATUS_CSUM_VALID",
+    "DHCP_SO_ATTACH_FILTER": "SO_ATTACH_FILTER", "DHCP_SO_LOCK_FILTER": "SO_LOCK_FILTER",
+    "DHCP_SIOCGIFINDEX": "SIOCGIFINDEX", "DHCP_PACKET_HOST": "PACKET_HOST",
+    "DHCP_PACKET_BROADCAST": "PACKET_BROADCAST", "DHCP_MSG_CTRUNC": "MSG_CTRUNC",
 }
 
 #       Families of names the uapi headers own. A define here whose name is
@@ -62815,7 +70084,8 @@ def harness_wire_constants(argv):
     headers = ("sys/socket.h", "netinet/in.h", "netinet/tcp.h", "sys/prctl.h",
                "linux/netlink.h", "linux/rtnetlink.h", "linux/genetlink.h",
                "linux/nl80211.h", "linux/if.h", "linux/if_ether.h", "linux/if_arp.h",
-               "linux/audit.h", "linux/seccomp.h", "linux/filter.h", "linux/udp.h")
+               "linux/audit.h", "linux/seccomp.h", "linux/filter.h", "linux/udp.h",
+               "linux/if_packet.h", "linux/sockios.h")
     head = "".join("#include <%s>\n" % h for h in headers) + "#include <stdio.h>\n"
 
     def program(names):
@@ -62834,7 +70104,7 @@ def harness_wire_constants(argv):
         missing = set(re.findall(r"[‘'](\w+)[’'] undeclared", probe.stderr))
         known = [n for n in names if n not in missing]
         unit.write_text(program(known))
-        built = subprocess.run(["cc", "-w", str(unit), "-o", str(Path(work) / "wire")],
+        built = build_run(["cc", "-w", str(unit), "-o", str(Path(work) / "wire")],
                                capture_output=True, text=True)
         if built.returncode:
             print("  FAIL wire constants did not build:\n" + built.stderr[-2000:])
@@ -62892,7 +70162,7 @@ def harness_net_dependency_closure(argv):
     source = Path(__file__).resolve().read_text()
     run = (HARNESS_ROOT / "test/run").read_text()
     evidence = ("crypto_vectors", "crypto_fuzz", "tls_der_fuzz", "tls_hs_fuzz",
-                "tls_verify_fuzz", "dns_fuzz", "dhcp_fuzz", "netlink_fuzz",
+                "tls_verify_fuzz", "dns_fuzz", "dhcp_fuzz", "dhcp_frame_fuzz", "netlink_fuzz",
                 "http_fuzz", "tls_peer", "wget_mutation", "net_netem", "msan_net",
                 "net_wait_states", "net_parser_work_states")
     for name in evidence:
@@ -62934,6 +70204,8 @@ def harness_security_hygiene(argv):
     - http_response_framing's CASES / MUST_ACCEPT / DELIBERATE agree, and its
       DELIBERATE rows keep the must-disagree assert against http.client
     - https_downgrade keeps several Location shapes
+    - the HTTP/TLS engine is entered only through a task handed to net_apart
+      (the confined child), and net_apart never runs a task unfiltered
     """
     del argv
     checks = Checks()
@@ -62941,12 +70213,14 @@ def harness_security_hygiene(argv):
     source = Path(__file__).resolve().read_text()
 
     security = ("tls_chains", "https_downgrade", "http_response_framing",
-                "tls_der_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
-                "dhcp_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
-                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz",
+                "tls_der_fuzz", "tls_ocsp_fuzz", "tls_crl_fuzz", "tls_hs_fuzz", "tls_fuzz", "msan_net", "pathname_race",
+                "dhcp_fuzz", "dhcp_frame_fuzz", "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "tls_peer",
+                "http_fuzz", "http_urls", "wifi_eapol_fuzz", "wifi_scan_fuzz", "wifi_key_state",
+                "wifi_sae_fuzz",
                 "bowl_sig_fuzz", "wget_mutation", "wget_hostile", "sntp_era", "net_netem",
                 "net_dependency_closure", "net_math_proof", "net_clock_fault", "net_wait_states", "net_parser_work_states",
-                "protected_links", "hostile_strings", "state_cuts")
+                "net_dhcp_exchange", "net_lease_transitions", "net_exhaustive_proof", "net_bounded_proof",
+                "protected_links", "hostile_strings", "state_cuts", "nts_fuzz", "nts", "dns_tls")
     for name in security + ("tls_verify_fuzz",):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
     table = re.search(r"^HARNESS_CHECKS = \{$(.*?)^\}$", source, re.M | re.S)
@@ -62961,13 +70235,19 @@ def harness_security_hygiene(argv):
         checks(name in HARNESS_CHECKS, "differential.py: %s is not registered" % name)
         checks("--harness " + name in run, "test/run: no lane asks for --harness " + name)
         checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
-    for name in ("tls_der_fuzz", "tls_hs_fuzz", "pathname_race", "dhcp_fuzz",
+    #   A soft skip is a note of that name, or a job of the soft class, which
+    #   notes it in jobs_wait.
+    for name in ("tls_der_fuzz", "tls_ocsp_fuzz", "tls_crl_fuzz", "tls_hs_fuzz",
+                 "pathname_race", "dhcp_fuzz", "dhcp_frame_fuzz",
                  "sntp_fuzz", "dns_fuzz", "netlink_fuzz", "http_fuzz", "wifi_eapol_fuzz",
-                 "wifi_scan_fuzz", "bowl_sig_fuzz"):
-        checks(name + ": skipped (soft)" in run, "test/run: no soft skip for " + name)
+                 "wifi_scan_fuzz", "wifi_sae_fuzz", "bowl_sig_fuzz", "nts_fuzz", "nts"):
+        checks(name + ": skipped (soft)" in run or re.search(
+            r"^\s*job soft python3 test/differential\.py --harness %s(?:\s|$)" % name, run, re.M),
+            "test/run: no soft skip for " + name)
 
     names = set()
-    for corpus in ("tls_der", "tls_hs", "dhcp", "sntp", "dns", "netlink", "http"):
+    for corpus in ("tls_der", "tls_ocsp", "tls_crl", "tls_hs", "dhcp", "sntp", "dns",
+                   "netlink", "http"):
         seeds = tls_fuzz_seeds(corpus)
         names.update(seeds)
         checks(bool(seeds), "tls_fuzz_seeds(%r) is empty" % corpus)
@@ -63009,6 +70289,32 @@ def harness_security_hygiene(argv):
             line = text.count("\n", 0, call.start()) + 1
             if path.name != "wait.c" or "static bool" not in text[call.start() - 12:call.start()]:
                 unbounded.append("%s:%d" % (path.relative_to(HARNESS_ROOT), line))
+        #   recvmsg is spelled as a system call, not socket_receive: the same
+        #   rule, or every caller of the function that passes its flags on
+        #   (sntp_receive_message) asks for DONTWAIT itself.
+        for call in re.finditer(r"\bsystem_call_\d\(\s*syscall\(recvmsg\)", text):
+            statement = text[call.start():text.index(";", call.start())]
+            if "DONTWAIT" in statement:
+                continue
+            owner = re.findall(r"^static [^\n(]*\b(\w+)\(", text[:call.start()], re.M)
+            callers = [text[found.start():text.index(";", found.start())]
+                       for found in re.finditer(r"\b%s\(" % owner[-1], text)
+                       if not text[text.rfind("\n", 0, found.start()) + 1:found.start()].startswith("static")
+                       ] if owner else []
+            if not callers or not all("DONTWAIT" in caller for caller in callers):
+                blocking.append("%s:%d" % (path.relative_to(HARNESS_ROOT),
+                                           text.count("\n", 0, call.start()) + 1))
+    #   TLS_BENCH_ANCHOR trusts one more root and lets a fetch reach 127/8, so
+    #   only harness builds may define it; the image build and the lanes' own
+    #   shell never do, and the tight tier keeps no such hook.
+    benched = [str(path.relative_to(HARNESS_ROOT))
+               for path in [HARNESS_ROOT / "build.sh", HARNESS_ROOT / "test/run"] +
+               sorted(path for path in (HARNESS_ROOT / "src/build").rglob("*")
+                      if path.is_file()) +
+               sorted(path for path in (HARNESS_ROOT / "kernel").rglob("*")
+                      if path.is_file() and path.stat().st_size < 1_000_000)
+               if path.is_file() and "TLS_BENCH_" in path.read_text(errors="replace")]
+    checks(not benched, "a production build names TLS_BENCH_*: " + ", ".join(benched))
     checks(not blocking, "a blocking socket_receive in the network sources: " + ", ".join(blocking))
     checks(not unbounded,
            "network_stream_send_all has no deadline; use network_stream_send_all_for or _until: "
@@ -63085,6 +70391,8 @@ def harness_security_hygiene(argv):
         ("tls12_certificate_request", ("body",)),
         ("tls_check_cert_verify", ("msg",)),
         ("dhcp_walk", ("region",)),
+        ("dhcp_unframe", ("frame",)),
+        ("dhcp_frame_vouched", ("control",)),
         ("netlink_attributes", ("bytes",)),
         ("dns_copy_name", ("message",)),
         ("dns_message_at", ("message",)),
@@ -63097,11 +70405,32 @@ def harness_security_hygiene(argv):
         ("tls_asn1_enter", ("bytes",)),
         ("tls_asn1_skip", ("bytes",)),
         ("tls_asn1_take", ("bytes",)),
+        ("tls_entry_status", ("bytes",)),
+        ("tls12_certificate_status", ("body",)),
+        ("tls_parse_crl_points", ("value",)),
+        ("tls_parse_authority_key", ("value",)),
+        ("tls_parse_tls_feature", ("value",)),
+        ("tls_parse_ocsp_single", ("bytes",)),
+        ("tls_parse_ocsp", ("bytes",)),
+        ("tls_parse_crl_scope", ("value",)),
+        ("tls_parse_crl", ("bytes",)),
         ("wifi_gtk_take", ("plain",)),
+        ("wifi_sae_frame_read", ("frame",)),
+        ("wifi_assoc_status_read", ("frame",)),
         ("radio_rsn_security", ("element",)),
+        ("radio_ies_security", ("elements",)),
+        ("radio_ies_element", ("elements",)),
         ("radio_bss_read", ("elements",)),
         ("bowl_signature_read", ("bytes",)),
         ("net_arp_claims", ("packet",)),
+        ("tls_alpn_named", ("body",)),
+        ("nts_ke_complete", ("data",)),
+        ("nts_ke_reply", ("data",)),
+        ("nts_cookies_take", ("plain",)),
+        ("nts_reply", ("reply",)),
+        ("http_length_values", ("value",)),
+        ("http_url_escape", ("url",)),
+        ("http_ipv4_spelling", ("host",)),
     )
     #   The kernel log is anybody's to read on this image (DMESG_RESTRICT is
     #   off) and the ring-0 terminal draws it, so every part of a host_kmsg
@@ -63159,6 +70488,87 @@ def harness_security_hygiene(argv):
                                                     "http:///"))
     checks(shapes >= 4, "https_downgrade: %d Location shapes, want several" % shapes)
 
+    #   The clients' network half runs in a confined child (net_apart in
+    #   src/net/net.c). The engine's entry points are called only by the
+    #   engine itself and by a task handed to net_apart, so a client that
+    #   called http_run, tls_connect or any of the rest from its own process
+    #   fails here until it goes through net_apart and is named below; a
+    #   task is handed to net_apart and never called; and the primitive
+    #   takes nothing from seccomp but success, ENOSYS included.
+    confined_callers = {
+        "http_run": {"http_get", "http_fetch_to", "http_spider", "http_apart_task",
+                     "locale_auto_ask"},
+        "http_get": set(),
+        "http_fetch_to": set(),
+        "http_spider": set(),
+        "http_link_open": {"http_run"},
+        "http_stream_open": {"http_link_open", "tls_plain_get", "nts_ke"},
+        "tls_plain_get": {"tls_aia_fetch", "tls_crl_get"},
+        "tls_connect": {"http_link_open"},
+        "tls_connect_until": {"tls_connect", "nts_ke", "dns_query_tls"},
+        "tls_aia_fetch": {"tls_verify_chain"},
+        "locale_auto_ask": {"locale_auto_ask_task"},
+        "nts_ke": {"nts_ke_task"},
+        "dns_query_tls": {"dns_resolve_wanted"},
+        "dns_resolve_wanted": {"http_lookup_wanted", "dns_apart_task"},
+        "http_lookup_wanted": {"http_run"},
+        "sntp_query_at": {"sntp_apart_task"},
+        #   The Wi-Fi station: the join and the keeper's loop only in the
+        #   confined station, which only its broker forks, which only a join
+        #   apart starts.
+        "nl80211_join": {"radio_station_run"},
+        "wifi_keep": {"radio_station_run"},
+        "radio_station_run": {"radio_broker"},
+        "radio_broker": {"radio_join_apart"},
+        #   The listener reads mDNS only in its confined reader.
+        "waterlink_mdns_read": {"link_mdns_child"},
+        "net_resolve_v4": {"http_lookup", "dns_apart_task"},
+        "dns_resolve_any": {"dns_resolve_wanted", "net_resolve_v4"},
+        "dns_resolve_at": {"dns_resolve_any", "dns_apart_task"},
+        "http_lookup": {"http_lookup_wanted", "tls_plain_get", "nts_ke",
+                        "sntp_apart_task"},
+        "sntp_exchange": {"sntp_query_at"},
+    }
+    apart_tasks = {"http_apart_task": "src/net/net.c",
+                   "nts_ke_task": "src/net/net.c",
+                   "dns_apart_task": "src/net/net.c",
+                   "locale_auto_ask_task": "src/sh/host.c",
+                   "sntp_apart_task": "src/sh/host.c"}
+    found_callers = {}
+    for path in sorted(list((HARNESS_ROOT / "src").rglob("*.c")) +
+                       list((HARNESS_ROOT / "src").rglob("*.inc"))):
+        current = None
+        for line in uncommented(path.read_text(errors="replace")).splitlines():
+            head = re.match(r"^(?:static|fn|b32|bool|bipolar|positive|p\d+|void|int|"
+                            r"string_address)\b[^;=]*?\b(\w+)\(", line)
+            if head:
+                current = head.group(1)
+            for name in list(confined_callers) + list(apart_tasks):
+                if re.search(r"\b%s\s*\(" % name, line) and current != name:
+                    found_callers.setdefault(name, set()).add(
+                        "%s:%s" % (path.relative_to(HARNESS_ROOT), current))
+    for name, allowed in confined_callers.items():
+        for caller in sorted(found_callers.get(name, set())):
+            checks(caller.split(":", 1)[1] in allowed,
+                   "confinement: %s calls %s outside net_apart; run it in a task "
+                   "handed to net_apart and name the task in confined_callers" %
+                   (caller, name))
+    for task, home in apart_tasks.items():
+        text = uncommented((HARNESS_ROOT / home).read_text())
+        checks(re.search(r"\bnet_apart\(\s*%s\b" % task, text) is not None,
+               "confinement: %s is no longer handed to net_apart in %s" % (task, home))
+        for caller in sorted(found_callers.get(task, set())):
+            checks(False, "confinement: %s calls the task %s directly" % (caller, task))
+    apart = uncommented(net)
+    install = re.search(r"static COLD bool net_filter_install\(.*?^\}$", apart, re.M | re.S)
+    child = re.search(r"static DEAD_END COLD fn net_apart_child\(.*?^\}$", apart, re.M | re.S)
+    checks(install is not None and "ENOSYS" not in install.group(0) and
+           "== 0" in install.group(0),
+           "confinement: net_filter_install must take only success from seccomp")
+    checks(child is not None and "!net_filter_install(" in child.group(0) and
+           "NET_APART_EXIT_UNCONFINED" in child.group(0),
+           "confinement: net_apart_child must refuse to run its task unfiltered")
+
     print("security hygiene %d/%d" % (checks.checks - checks.failures, checks.checks))
     return 1 if checks.failures else 0
 
@@ -63189,7 +70599,9 @@ HOSTILE_SOURCES = {
         "locale_auto_from_headers": "words pass locale_auto_word and must name a zone in the table",
     },
     "waterlink_mdns_read": {
-        "link_nearby_heard": "names pass link_name_for (link_name_good)",
+        "link_mdns_child": "the listener's confined reader: the reading goes back as "
+                           "waterlink_found, and its names pass link_name_for "
+                           "(link_name_good) in link_nearby_heard",
     },
     "file_machine_read": {
         "build_arch_here": "build tool, the machine field only",
@@ -64699,7 +72111,7 @@ int main(int argc, char **argv)
     with tempfile.TemporaryDirectory(prefix="machine-scan-") as temporary:
         work = Path(temporary)
         (work / "scan.c").write_text(source)
-        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined",
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", "-w", "-o", str(work / "scan"),
                                 str(work / "scan.c")], capture_output=True, text=True)
         if built.returncode:
@@ -64839,7 +72251,7 @@ int main(int argc, char **argv)
     with tempfile.TemporaryDirectory(prefix="machine-scan-pin-") as temporary:
         work = Path(temporary)
         (work / "scan.c").write_text(source)
-        subprocess.run([cc, "-O1", "-w", "-o", str(work / "scan"), str(work / "scan.c")], check=True)
+        build_run([cc, "-O1", "-w", "-o", str(work / "scan"), str(work / "scan.c")], check=True)
         pinned = work / "conditional.sh"
         pinned.write_text("if false; then\n moonwater_reset() { :; }\nfi\n")
         said = subprocess.run([str(work / "scan"), str(pinned)], capture_output=True, text=True).stdout.split()
@@ -65008,7 +72420,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="machine-stop-") as temporary:
         work = Path(temporary)
         (work / "stop.c").write_text(stop_source)
-        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
                                 str(work / "stop"), str(work / "stop.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -65128,7 +72540,7 @@ int main(void)
     with tempfile.TemporaryDirectory(prefix="machine-lift-") as temporary:
         work = Path(temporary)
         (work / "lift.c").write_text(lift_source)
-        built = subprocess.run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
+        built = build_run([cc, "-O1", "-g", "-fsanitize=address,undefined", "-w", "-o",
                                 str(work / "lift"), str(work / "lift.c")],
                                capture_output=True, text=True)
         if built.returncode:
@@ -65546,7 +72958,7 @@ def harness_waterlink_noise(argv):
     return checks.verdict("waterlink noise:", "waterlink-noise")
 
 
-NET_NETEM_DHCP_SERVER = r"""import socket, struct, sys, time, threading
+NET_NETEM_DHCP_SERVER = r"""import os, socket, struct, sys, time, threading
 mode = sys.argv[1]
 OFFER_IP = "10.88.0.50"; BAD_IP = "10.88.0.66"; SERVER = "10.88.0.2"
 #   The pool: an address a client DECLINEs (RFC 2131 4.4.1) is marked in use
@@ -65577,30 +72989,43 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"cb")
 s.bind(("0.0.0.0", 67))
 log = open(sys.argv[2], "a", buffering=1)
-seen_discover = 0; naked = False
+seen_discover = 0; naked = False; requests = 0; first_seen = {}
+#   hold: the scene's word that its link news is in, so the late ACK follows it.
+nudged = os.path.join(os.path.dirname(sys.argv[2]), "nudged")
 def send(pkt, delay=0.0):
+    #   unicast: to the address offered, which a client without one never
+    #   receives on a UDP socket (the scene gives the far end its MAC).
+    to = (socket.inet_ntoa(pkt[16:20]), 68) if mode == "unicast" else ("255.255.255.255", 68)
     def go():
-        time.sleep(delay); s.sendto(pkt, ("255.255.255.255", 68))
+        time.sleep(delay); s.sendto(pkt, to)
     threading.Thread(target=go, daemon=True).start()
 while True:
     data, _ = s.recvfrom(2048)
     if len(data) < 241 or data[0] != 1: continue
     xid, chaddr, opts = parse(data)
     t = opts.get(53, b"\0")[0]
-    if t == 4:
+    if t in (4, 7):
         asked = opts.get(50, b""); named = opts.get(54, b"")
-        log.write("%.3f rx type 4 xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
-            time.time(), xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
+        log.write("%.3f rx type %d xid %s req %s sid %s ciaddr %s flags %d ask %s\n" % (
+            time.time(), t, xid.hex(), socket.inet_ntoa(asked) if len(asked) == 4 else "-",
             socket.inet_ntoa(named) if len(named) == 4 else "-", socket.inet_ntoa(data[12:16]),
             struct.unpack("!H", data[10:12])[0], "yes" if 55 in opts else "-"))
-        if len(asked) == 4 and named == socket.inet_aton(SERVER):
+        if t == 4 and len(asked) == 4 and named == socket.inet_aton(SERVER):
             declined.add(socket.inet_ntoa(asked))
         continue
     log.write("%.3f rx type %d xid %s\n" % (time.time(), t, xid.hex()))
     if mode == "mute-watch": continue
     if t == 1:
         seen_discover += 1
+        first_seen.setdefault(xid, time.time())
         if mode == "drop3" and seen_discover <= 3: continue
+        #   hold: the OFFER waits for an attempt whose ACK window is a second
+        #   or more (2.8 s into a transaction, after the quarter-second ones),
+        #   and hold-silent for one whose window outlasts the grace (three
+        #   seconds or more, from 3.8 s). Counted by transaction: the watcher
+        #   may cut its first at once, for the news of its own start.
+        if mode == "hold" and time.time() - first_seen[xid] < 2.7: continue
+        if mode == "hold-silent" and time.time() - first_seen[xid] < 3.7: continue
         msgs = []
         if mode == "stale":  msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 2, BAD_IP))
         msgs.append(reply(xid, chaddr, 2, current()))
@@ -65608,8 +73033,21 @@ while True:
         for m in msgs:
             for _ in range(3 if mode == "dup" else 1): send(m, d)
     elif t == 3:
+        requests += 1
         if mode == "nak" and not naked:
             naked = True; send(reply(xid, chaddr, 6, "0.0.0.0")); continue
+        #   The first REQUEST answered once the scene's link news is in, or
+        #   never.
+        if mode == "hold-silent" and requests == 1: continue
+        if mode == "hold" and requests == 1:
+            def late(pkt=reply(xid, chaddr, 5, current())):
+                for _ in range(300):
+                    if os.path.exists(nudged): break
+                    time.sleep(0.01)
+                time.sleep(0.05)
+                s.sendto(pkt, ("255.255.255.255", 68))
+                log.write("%.3f tx late ack\n" % time.time())
+            threading.Thread(target=late, daemon=True).start(); continue
         msgs = []
         if mode == "stale": msgs.append(reply(bytes(a ^ 0xff for a in xid), chaddr, 5, BAD_IP))
         msgs.append(reply(xid, chaddr, 5, current()))
@@ -65715,8 +73153,23 @@ try:
     label = "%s %s%s%s" % (kind, mode, " under netem" if netem_on else "",
                            " rp_filter " + os.environ["NETEM_RP_FILTER"]
                            if os.environ.get("NETEM_RP_FILTER", "0") != "0" else "")
+    if os.environ.get("NETEM_RP_FILTER", "0") != "0":
+        #   The setting is the scene: a write that did not take would make
+        #   every row below pass for nothing.
+        said = [open("/proc/sys/net/ipv4/conf/%s/rp_filter" % scope).read().strip()
+                for scope in ("all", "eth0")]
+        say(said == [os.environ["NETEM_RP_FILTER"]] * 2,
+            "%s: rp_filter reads %s on all and on the client's link" % (label, "/".join(said)))
     if kind == "dhcp":
         want = "10.88.0.51" if mode.startswith("conflict") else "10.88.0.50"
+        if mode == "unicast":
+            #   The far end may send to the offered address before the
+            #   client answers ARP for it: it is told the client's MAC.
+            probe = socket.socket()
+            mac = ":".join("%02x" % b for b in
+                           fcntl.ioctl(probe, 0x8927, struct.pack("256s", b"eth0"))[18:24])
+            probe.close()
+            there("ip", "neigh", "replace", "10.88.0.50", "lladdr", mac, "dev", "cb", "nud", "permanent")
         if mode.startswith("conflict"):
             #   A station already on the offered address: the far namespace's
             #   kernel answers the client's ARP probes for it.
@@ -65765,6 +73218,63 @@ try:
             say(bool(after) and after[0] - declined_at >= 10.0,
                 "%s: the watcher waits ten seconds after a DECLINE before it asks again (%s)" % (
                     label, "%.2f s" % (after[0] - declined_at) if after else "no DISCOVER after it"))
+            watcher.kill()
+            watcher.wait()
+            sink.close()
+            client = subprocess.CompletedProcess([], 0 if address() == want else 1,
+                                                 open(top + "/watch.out").read(), "")
+        elif mode in ("hold", "hold-silent"):
+            #   Link news (an MTU change on the client's link) as soon as the
+            #   server has a REQUEST: the exchange is let finish. hold: the
+            #   ACK comes 0.6 s later and is taken, in the one transaction.
+            #   hold-silent: it never comes; after the grace the exchange is
+            #   cut, the address given back with a DHCPRELEASE, and the next
+            #   pass leases.
+            sink = open(top + "/watch.out", "w")
+            watcher = subprocess.Popen([top + "/ip", "watch"], env=env, stdin=subprocess.DEVNULL,
+                                       stdout=sink, stderr=sink)
+            procs.append(watcher)
+            nudged = None
+            while time.time() - began < 40 and address() != want:
+                if nudged is None and " rx type 3 " in dhcp_log():
+                    run("ip", "link", "set", "eth0", "mtu", "1400")
+                    nudged = time.time()
+                    open(top + "/nudged", "w").close()
+                time.sleep(0.02)
+            lines = dhcp_log().splitlines()
+            asked = sorted({line.split(" xid ")[1].split()[0] for line in lines
+                            if " rx type 1 " in line or " rx type 3 " in line})
+            #   The transactions from the first REQUEST on: the one the news
+            #   came into, and any the watcher began after cutting it.
+            first_request = next((at for at, line in enumerate(lines) if " rx type 3 " in line), len(lines))
+            after = sorted({line.split(" xid ")[1].split()[0] for line in lines[first_request:]
+                            if " rx type 1 " in line or " rx type 3 " in line})
+            releases = [line for line in lines if " rx type 7 " in line]
+            say(nudged is not None, "%s: link news came while a REQUEST waited for its ACK" % label)
+            if mode == "hold":
+                #   And before the ACK left, or the grace was never asked for.
+                acked = next((float(line.split()[0]) for line in lines if " tx late ack" in line), None)
+                say(nudged is not None and acked is not None and nudged < acked,
+                    "%s: the news came before the ACK was sent (%s)" % (
+                        label, "%.2f s before" % (acked - nudged)
+                        if nudged is not None and acked is not None else "no ACK sent"))
+            if mode == "hold":
+                say(len(after) == 1, "%s: the exchange the news came into was let finish, no transaction "
+                    "after its REQUEST (%s)" % (label, " ".join(after)))
+                say(not releases, "%s: nothing was given back (%d)" % (label, len(releases)))
+            else:
+                first = next((float(line.split()[0]) for line in lines if " rx type 3 " in line), None)
+                say(len(releases) == 1 and releases[0].split(" xid ")[1].split()[1:] ==
+                    ["req", "-", "sid", "10.88.0.2", "ciaddr", "10.88.0.50", "flags", "0", "ask", "-"],
+                    "%s: the REQUEST never answered is given back once, by a RELEASE naming the address "
+                    "in ciaddr and the server, asking for nothing (%s)" % (label, " | ".join(releases)))
+                say(bool(releases) and first is not None and
+                    1.5 <= float(releases[0].split()[0]) - first <= 4.0,
+                    "%s: after the grace, not at the news (%s)" % (
+                        label, "%.2f s" % (float(releases[0].split()[0]) - first)
+                        if releases and first is not None else "none"))
+                say(bool(releases) and releases[0].split(" xid ")[1].split()[0] not in asked,
+                    "%s: the RELEASE has a transaction id of its own" % label)
             watcher.kill()
             watcher.wait()
             sink.close()
@@ -65903,7 +73413,7 @@ def harness_net_epoch_mutants(argv):
                 continue
             (top / "src/sh/net.c").write_text(original.replace(before, after))
             binary = top / "epoch"
-            built = subprocess.run(
+            built = build_run(
                 [args.cc, "-O2", "-static", "-nostdlib", "-nostartfiles",
                  "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w",
                  "-T", str(top / "src/build/spark.ld"), "-Wl,-e,_start",
@@ -65949,7 +73459,14 @@ def harness_net_netem(argv):
     no ciaddr, no parameter list, a transaction id of its own) and the next
     `ip auto` takes the address the server offers instead, and `ip watch`
     does the same by itself, waiting at least ten seconds before it asks
-    again.
+    again. The replies are read off a packet socket: `ip auto` has to lease
+    with rp_filter 1 and 2 on the client (read back from the namespace), and
+    from a server that unicasts its OFFER and ACK to the offered address. And
+    `ip watch` with link news the moment the server has a REQUEST: an ACK 0.6
+    s later is taken in the same transaction; one that never comes leaves
+    the exchange cut after the grace, the address given back by one
+    DHCPRELEASE (ciaddr the address, the server named, nothing asked), and a
+    lease from the next pass.
     `moonwater time sync` is the SNTP client, with `/root/ntp.server` naming
     the far end: it has to take a clean, tripled, late or once-dropped answer,
     take the right one of a forged reply (wrong origin, three hours off) and
@@ -65997,7 +73514,7 @@ def harness_net_netem(argv):
         if args.shell:
             shutil.copy(args.shell, top / "shell")
         else:
-            built = subprocess.run(spark_shell_command(args.cc, top / "shell"),
+            built = build_run(spark_shell_command(args.cc, top / "shell"),
                                    cwd=HARNESS_ROOT, capture_output=True, text=True)
             if built.returncode:
                 print(built.stderr[-3000:])
@@ -66012,11 +73529,17 @@ def harness_net_netem(argv):
         #   miss the defender one run in twelve, so the conflict scenes are
         #   asked on a clean wire.
         scenes += [("dhcp", mode, "", "0") for mode in ("conflict", "conflict-watch", "mute-watch")]
+        #   The OFFER at rp_filter 1 and 2, which a UDP socket never gets
+        #   from a server it has no route to; replies unicast to the offered
+        #   address, which it never gets either; and link news between a
+        #   REQUEST and its ACK.
+        scenes += [("dhcp", "clean", "", rp) for rp in ("1", "2")]
+        scenes += [("dhcp", mode, "", "0") for mode in ("unicast", "hold", "hold-silent")]
         scenes += [("sntp", mode, netem, "0") for netem in impairments
                    for mode in ("clean", "dup", "spoof", "late", "drop2", "skewed", "kod")]
         checks = Checks()
         for kind, mode, netem, rp in scenes:
-            for leftover in ("dhcp.log", "ntp.log"):
+            for leftover in ("dhcp.log", "ntp.log", "nudged"):
                 (top / leftover).unlink(missing_ok=True)
             said = top / "said"
             with open(said, "wb") as sink:
@@ -67191,7 +74714,9 @@ for holder in spaces.values():
 
 
 # The helpers every generated guest script starts with: counted questions,
-# a family's tally printed reversed so the console's echo never answers.
+# a family's tally printed reversed so the console's echo never answers, and
+# printed twice a moment apart: the kernel's own console lines land where
+# they land, and one cut a tally in half (backoff 7 of 7, read as missing).
 GUEST_PRELUDE = r'''scen_ok=0
 scen_all=0
 scen_strip() { sed -e 's/^.\[1m\[Moonwater\].\[0m //' -e 's/^\[Moonwater\] //'; }
@@ -67202,7 +74727,7 @@ scen_same() { if cmp -s /tmp/sc.want /tmp/sc.got; then scen_pass; else scen_miss
 scen_same_file() { cp "$2" /tmp/sc.got 2>/dev/null || : > /tmp/sc.got; scen_same "$1"; }
 scen_status() { if [ "$2" = "$3" ]; then scen_pass; else scen_miss "$1: status $3, wanted $2"; head -c 300 /tmp/sc.got 2>/dev/null; echo; fi; }
 scen_count() { if [ "$2" = "$3" ]; then scen_pass; else scen_miss "$1: $3, wanted $2"; fi; }
-scen_done() { printf 'scen-%s-%s-of-%s\n' "$1" "$scen_ok" "$scen_all" | rev; scen_ok=0; scen_all=0; }
+scen_done() { t=$(printf 'scen-%s-%s-of-%s\n' "$1" "$scen_ok" "$scen_all" | rev); printf '%s\n' "$t"; sleep 0.2; printf '%s\n' "$t"; scen_ok=0; scen_all=0; }
 scen_expect_empty() { moonwater bind init 2>&1 | grep -c 'nothing runs at boot' > /tmp/sc.got; printf '1\n' > /tmp/sc.want; scen_same 'settings start from none'; }
 scen_zombies() { n=0; for f in /proc/[0-9]*/status; do s=$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "$f" 2>/dev/null); pp=$(sed -n 's/^PPid:[[:space:]]*//p' "$f" 2>/dev/null); [ "$s" = Z ] && [ "$pp" = 1 ] && n=$((n + 1)); done; echo $n; }
 scen_find() { for p in /proc/[0-9]*; do c=$(tr '\000' ' ' < $p/cmdline 2>/dev/null); case $c in *"$1"*) echo ${p#/proc/};; esac; done; }'''
@@ -67898,8 +75423,13 @@ typedef struct
 } nl80211;
 #define NL80211_KEYTYPE_GROUP 0
 #define NL80211_KEYTYPE_PAIRWISE 1
+#define WLAN_CIPHER_CCMP 0x000fac04u
+#define WLAN_CIPHER_BIP_CMAC_128 0x000fac06u
 #define WIFI_EAPOL_HDR 99
 #define PACKET_HOST 0
+#ifndef STRICT_TIGHT
+#define STRICT_TIGHT 2
+#endif
 
 static const p8 *fz_at;
 static positive fz_left;
@@ -67952,6 +75482,9 @@ static p8 fz_sta_tk[16], fz_sta_gtk[4][16];
 static positive fz_sta_tk_when, fz_sta_gtk_when[4];
 static bool fz_sta_tk_set, fz_sta_gtk_set[4], fz_authorized;
 static int fz_installs;
+static bipolar fz_key_error;
+static bipolar fz_send_error;
+static p8 fz_gtk_draws;
 static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
 
 static bipolar socket_send(b32 handle, const void *data, positive size, b32 flags,
@@ -67966,6 +75499,8 @@ static bipolar socket_send(b32 handle, const void *data, positive size, b32 flag
         memcpy(fz_sent, data, size);
         fz_sent_length = size;
         fz_sends++;
+        if (fz_send_error)
+                return fz_send_error;
         return (bipolar)size;
 }
 
@@ -68011,19 +75546,24 @@ static bipolar system_random_fill(address_any into, positive length, positive fl
    never twice the same (a reinstalled key is a reset nonce: KRACK) and
    never back over a key the access point made after it (an old group key
    in again is the same reset, of a key it has moved on from). */
+static bipolar fz_new_igtk(p8 idx, p8 *key);
 static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8 *mac,
                                p8 *key, positive key_length, p8 *seq, positive seq_length,
-                               bool group_default)
+                               bool group_default, p32 cipher)
 {
         positive when;
 
         (void)session, (void)index, (void)seq;
+        if (cipher == WLAN_CIPHER_BIP_CMAC_128)
+                return fz_new_igtk(idx, key);
         if (key_length != 16)
                 abort();
+        if (fz_key_error)
+                return fz_key_error;
         fz_installs++;
         if (type == NL80211_KEYTYPE_PAIRWISE)
         {
-                when = fz_made_when(0, key);
+                when = fz_made_when(4, key);
                 if (idx || !mac || memcmp(mac, fz_ap, 6) || group_default || !when ||
                     (fz_sta_tk_set && (!memcmp(key, fz_sta_tk, 16) || when <= fz_sta_tk_when)))
                         abort();
@@ -68032,7 +75572,7 @@ static bipolar nl80211_new_key(nl80211 *session, p32 index, p8 idx, p32 type, p8
                 fz_sta_tk_when = when;
                 return 0;
         }
-        when = idx && idx <= 3 ? fz_made_when(idx, key) : 0;
+        when = idx <= 3 ? fz_made_when(idx, key) : 0;
         if (!when || mac || seq_length != 6 || !group_default ||
             (fz_sta_gtk_set[idx] &&
              (!memcmp(key, fz_sta_gtk[idx], 16) || when <= fz_sta_gtk_when[idx])))
@@ -68048,6 +75588,43 @@ static bipolar nl80211_authorize(nl80211 *session, p32 index, p8 *mac)
         if (!fz_sta_tk_set || !mac || memcmp(mac, fz_ap, 6))
                 abort();
         fz_authorized = true;
+        return 0;
+}
+
+/* The group management keys the access point made, under their key ids, and
+   the ones the station put in: one goes in only on a link that asked for
+   protection, only as the access point made it, and never twice the same. */
+static p8 fz_igtk_made[64][17];
+static positive fz_igtk_made_count;
+static p8 fz_sta_igtk[2][16];
+static bool fz_sta_igtk_set[2];
+static int fz_igtk_installs;
+static bipolar fz_igtk_error;
+static bool fz_protected;
+static void fz_igtk_add(p8 idx, const p8 *key)
+{
+        if (fz_igtk_made_count < 64)
+        {
+                fz_igtk_made[fz_igtk_made_count][0] = idx;
+                memcpy(fz_igtk_made[fz_igtk_made_count++] + 1, key, 16);
+        }
+}
+static bipolar fz_new_igtk(p8 idx, p8 *key)
+{
+        bool made = false;
+
+        if (!fz_protected || (idx != 4 && idx != 5))
+                abort();
+        for (positive at = 0; at < fz_igtk_made_count; at++)
+                made |= fz_igtk_made[at][0] == idx && !memcmp(fz_igtk_made[at] + 1, key, 16);
+        if (!made || (fz_sta_igtk_set[idx - 4] && !memcmp(key, fz_sta_igtk[idx - 4], 16)))
+                abort();
+        if (fz_igtk_error)
+                return fz_igtk_error;
+        fz_igtk_installs++;
+        fz_installs++;
+        memcpy(fz_sta_igtk[idx - 4], key, 16);
+        fz_sta_igtk_set[idx - 4] = true;
         return 0;
 }
 """
@@ -68083,6 +75660,31 @@ static wifi_link fz_link;
 static p8 fz_pmk[32], fz_anonce[32], fz_ptk[64], fz_pending[64], fz_rsc[8];
 static p64 fz_replay, fz_verified;
 static bool fz_pending_set, fz_ptk_set, fz_clean;
+/* Mode 0 is WPA2-PSK: key descriptor version 2 and HMAC-SHA1. Mode 1 is
+   PSK-SHA256 with management frame protection: version 3, AES-CMAC, and an
+   IGTK in message 3 and group message 1. Mode 2 is SAE: version 0, the same
+   CMAC and IGTK, and an RSN extension element when the access point says
+   hash-to-element. Message 3 carries the access point's own RSN element (and
+   extension element), which the station saw when it chose it -- or saw
+   nothing, joining by name, and holds it to nothing. */
+static int fz_mode;
+static p8 fz_ap_rsn[64], fz_ap_rsnx[3], fz_ap_igtk[16], fz_ap_igtk_id;
+static positive fz_ap_rsn_length, fz_ap_rsnx_length;
+static bool fz_seen, fz_extension;
+static p16 fz_version(void)
+{
+        return fz_mode == 0 ? 2 : fz_mode == 1 ? 3 : 0;
+}
+static void fz_mic(const p8 *kck, p8 *frame, positive n, p8 *out)
+{
+        p8 hash[20];
+
+        if (fz_mode)
+                crypto_aes_cmac((p8 *)kck, frame, n, hash);
+        else
+                crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, frame, n, hash);
+        memcpy(out, hash, 16);
+}
 /* A message 1 in the access point's name with another ANonce, answered as
    wpa_supplicant answers it: the handshake in progress cannot finish, and
    only a message 1 of the access point's own starts one that can. What is
@@ -68106,7 +75708,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         f[1] = 3;
         network_store_16(f + 2, (p16)(95 + n));
         f[4] = 2;
-        network_store_16(f + 5, info);
+        network_store_16(f + 5, (p16)((info & ~7) | fz_version()));
         network_store_16(f + 7, 16);
         network_store_64(f + 9, fz_replay);
         if (nonce)
@@ -68116,12 +75718,7 @@ static positive fz_frame(p8 *f, p16 info, const p8 *nonce, const p8 *data, posit
         if (n)
                 memcpy(f + 99, data, n);
         if (kck)
-        {
-                p8 hash[20];
-
-                crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, f, 99 + n, hash);
-                memcpy(f + 81, hash, 16);
-        }
+                fz_mic(kck, f, 99 + n, f + 81);
         return 99 + n;
 }
 
@@ -68132,14 +75729,20 @@ static bool fz_held_moved(const wifi_link *before)
         return memcmp(before->replay, fz_link.replay, 8) ||
                before->replay_set != fz_link.replay_set ||
                before->installed != fz_link.installed ||
-               memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64);
+               before->gtk_installed != fz_link.gtk_installed ||
+               before->igtk_installed != fz_link.igtk_installed ||
+               memcmp(before->ptk, fz_link.ptk, 64) || memcmp(before->gtk, fz_link.gtk, 64) ||
+               memcmp(before->igtk, fz_link.igtk, 32);
 }
 
 /* After any frame: one the station did not answer moved nothing it holds and
-   put no key in, and the replay counter moved only with an answer. */
+   put no key in, and the replay counter moved only with an answer. A frame
+   whose keys the driver refused one of may leave the others in, unanswered,
+   for the access point to send again under the same counter. */
 static void fz_after(const wifi_link *before, int installs)
 {
-        if ((!fz_sends && (installs != fz_installs || fz_held_moved(before))) ||
+        if ((!fz_sends && !fz_key_error && !fz_igtk_error &&
+             (installs != fz_installs || fz_held_moved(before))) ||
             (memcmp(before->replay, fz_link.replay, 8) && fz_sends != 1))
                 abort();
 }
@@ -68191,35 +75794,65 @@ static bipolar fz_receive(const p8 *frame, positive length, const socket_address
    it answers and a MIC under kck. */
 static void fz_answer(p16 info, const p8 *kck)
 {
-        p8 copy[512], hash[20];
+        p8 copy[512], hash[16];
 
+        info = (p16)((info & ~7) | fz_version());
         if (fz_sends != 1 || fz_sent_length < 99 || network_load_16(fz_sent + 5) != info ||
             network_load_64(fz_sent + 9) != fz_replay)
                 abort();
         memcpy(copy, fz_sent, fz_sent_length);
         memset(copy + 81, 0, 16);
-        crypto_hmac(DIGEST_SHA1, 20, (p8 *)kck, 16, copy, fz_sent_length, hash);
+        fz_mic(kck, copy, fz_sent_length, hash);
         if (memcmp(hash, fz_sent + 81, 16))
                 abort();
 }
 
-/* The GTK KDE after the RSN element for message 3, alone for group message
-   1, padded and wrapped under the KEK. */
+/* The IGTK KDE: 00-0F-AC:9, the key id, the packet number, the key. */
+static positive fz_igtk_kde(p8 *plain, p8 idx, const p8 *key)
+{
+        positive n = 0;
+
+        plain[n++] = 0xdd, plain[n++] = 28;
+        plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 9;
+        plain[n++] = idx, plain[n++] = 0;
+        memcpy(plain + n, fz_rsc, 6);
+        n += 6;
+        memcpy(plain + n, key, 16);
+        return n + 16;
+}
+
+/* The access point's RSN element and, when it has one, its extension
+   element, then the GTK KDE for message 3; the GTK KDE alone for group
+   message 1; an IGTK KDE after it where the network protects its management
+   frames; padded and wrapped under the KEK. */
+//      Transition Disable bits for the access point to send, or 0.
+static p8 fz_ap_transition;
+
 static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 {
-        p8 plain[64];
+        p8 plain[160];
         positive n = 0;
 
         if (rsn)
         {
-                memcpy(plain, wifi_rsn_ie, sizeof wifi_rsn_ie);
-                n = sizeof wifi_rsn_ie;
+                memcpy(plain, fz_ap_rsn, fz_ap_rsn_length);
+                n = fz_ap_rsn_length;
+                memcpy(plain + n, fz_ap_rsnx, fz_ap_rsnx_length);
+                n += fz_ap_rsnx_length;
         }
         plain[n++] = 0xdd, plain[n++] = 22;
         plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 1;
         plain[n++] = fz_ap_gtk_idx, plain[n++] = 0;
         memcpy(plain + n, fz_ap_gtk, 16);
         n += 16;
+        if (fz_mode)
+                n += fz_igtk_kde(plain + n, fz_ap_igtk_id, fz_ap_igtk);
+        if (fz_ap_transition)
+        {
+                plain[n++] = 0xdd, plain[n++] = 5;
+                plain[n++] = 0, plain[n++] = 0x0f, plain[n++] = 0xac, plain[n++] = 0x20;
+                plain[n++] = fz_ap_transition;
+        }
         if (n % 8)
         {
                 plain[n++] = 0xdd;
@@ -68232,22 +75865,88 @@ static positive fz_key_data(p8 *out, const p8 *kek, bool rsn)
 
 static void fz_new_gtk(void)
 {
-        static p8 turn;
-
         fz_take(fz_ap_gtk, 16);
-        fz_ap_gtk[0] ^= ++turn;
+        fz_ap_gtk[0] ^= ++fz_gtk_draws;
         fz_ap_gtk[1] ^= 0x5a;
-        fz_ap_gtk_idx = fz_ap_gtk_idx == 1 ? 2 : 1;
+        fz_ap_gtk_idx = (fz_ap_gtk_idx + 1) & 3;
         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+        if (!fz_mode)
+                return;
+        fz_take(fz_ap_igtk, 16);
+        fz_ap_igtk[0] ^= fz_gtk_draws;
+        fz_ap_igtk_id = fz_ap_igtk_id == 4 ? 5 : 4;
+        fz_igtk_add(fz_ap_igtk_id, fz_ap_igtk);
+}
+
+/* Whether the station holds the access point's current IGTK, which it must
+   after a handshake on a protected link and need not on another. */
+static bool fz_igtk_held(void)
+{
+        return !fz_mode || (fz_sta_igtk_set[fz_ap_igtk_id - 4] &&
+                            !memcmp(fz_sta_igtk[fz_ap_igtk_id - 4], fz_ap_igtk, 16));
 }
 
 int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 {
+        p8 how;
+
         fz_at = data, fz_left = size;
         memset(&fz_link, 0, sizeof fz_link);
         fz_link.eapol = 3, fz_link.session.handle = 4, fz_link.index = 7;
         memcpy(fz_link.sta, fz_sta, 6);
         memcpy(fz_link.bssid, fz_ap, 6);
+        //      The network: its kind, then whether the access point says
+        //      hash-to-element and whether the station saw its elements
+        //      (bit 0 not set: no scan, a join by name) and in which frame.
+        how = fz_byte();
+        fz_mode = how % 3;
+        fz_link.akm = fz_mode == 2 ? 8 : fz_mode == 1 ? 6 : 2;
+        fz_link.version = wifi_key_version(fz_link.akm);
+        fz_link.pmf = fz_mode ? WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED : 0;
+        fz_protected = fz_link.pmf != 0;
+        fz_link.rsn_length = (p8)wifi_rsn_build(fz_link.rsn, fz_link.akm, fz_link.pmf, 0);
+        fz_ap_rsn_length = wifi_rsn_build(fz_ap_rsn, fz_link.akm,
+                                          fz_mode == 1 ? WIFI_PMF_CAPABLE : fz_link.pmf, 0);
+        fz_ap_rsnx_length = 0;
+        fz_extension = fz_mode == 2 && (how & 4);
+        if (fz_extension)
+        {
+                static const p8 rsnx[3] = {244, 1, 0x20};
+
+                memcpy(fz_ap_rsnx, rsnx, 3);
+                fz_ap_rsnx_length = 3;
+                memcpy(fz_link.rsn + fz_link.rsn_length, rsnx, 3);
+                fz_link.rsn_length += 3;
+        }
+        fz_seen = !(how & 16);
+        if (fz_seen)
+        {
+                positive which = (how >> 5) % 3;
+
+                for (positive frame = 0; frame < 2; frame++)
+                        if (which == 2 || which == frame)
+                        {
+                                memcpy(fz_link.seen.rsn[frame], fz_ap_rsn, fz_ap_rsn_length);
+                                fz_link.seen.rsn_length[frame] = (p16)fz_ap_rsn_length;
+                                memcpy(fz_link.seen.rsnx[frame], fz_ap_rsnx, fz_ap_rsnx_length);
+                                fz_link.seen.rsnx_length[frame] = (p16)fz_ap_rsnx_length;
+                        }
+                //      A forged frame in the other's place, which took the
+                //      protection away: what the access point really sends
+                //      still matches the one that is its own.
+                if (which < 2)
+                {
+                        positive other = 1 - which;
+
+                        fz_link.seen.rsn_length[other] = (p16)wifi_rsn_build(
+                            fz_link.seen.rsn[other], fz_link.akm == 8 ? 2 : fz_link.akm, 0, 0);
+                }
+        }
+        fz_igtk_made_count = 0;
+        fz_igtk_installs = 0;
+        fz_igtk_error = 0;
+        memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+        fz_ap_igtk_id = 5;
         fz_take(fz_pmk, 32);
         memcpy(fz_link.pmk, fz_pmk, 32);
         fz_replay = fz_byte();
@@ -68259,6 +75958,9 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
         fz_sta_tk_set = fz_authorized = fz_pending_bent = false;
         fz_made_count = fz_order = fz_sta_tk_when = 0;
         fz_installs = 0;
+        fz_key_error = 0;
+        fz_send_error = 0;
+        fz_gtk_draws = 0;
         fz_draws = 0;
         memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
         memset(fz_sta_gtk_when, 0, sizeof fz_sta_gtk_when);
@@ -68267,7 +75969,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
 
         for (int ops = 0; fz_left && ops < 24; ops++)
         {
-                p8 op = fz_byte() % 11;
+                p8 op = fz_byte() % 12;
                 p8 frame[512], wrapped[CRYPTO_WRAP_MOST + 8];
                 positive n;
                 bipolar step;
@@ -68279,11 +75981,11 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         fz_replay++;
                         step = fz_deliver(frame, fz_frame(frame, 0x008a, fz_anonce, 0, 0, 0));
                         if (step != 0 || fz_sends != 1 ||
-                            network_load_16(fz_sent + 97) != sizeof wifi_rsn_ie ||
-                            memcmp(fz_sent + 99, wifi_rsn_ie, sizeof wifi_rsn_ie))
+                            network_load_16(fz_sent + 97) != fz_link.rsn_length ||
+                            memcmp(fz_sent + 99, fz_link.rsn, fz_link.rsn_length))
                                 abort();
                         wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
-                                 fz_pending);
+                                 fz_pending, fz_link.akm);
                         fz_answer(0x010a, fz_pending);
                         fz_pending_set = true;
                         fz_pending_bent = false;
@@ -68292,7 +75994,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                 else if (op == 1 && fz_pending_set)     /* message 3 */
                 {
                         memcpy(fz_ap_tk, fz_pending + 32, 16);
-                        fz_made_add(0, fz_ap_tk);
+                        fz_made_add(4, fz_ap_tk);
                         fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
                         fz_replay++;
                         n = fz_key_data(wrapped, fz_pending + 16, true);
@@ -68300,7 +76002,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         step = fz_deliver(frame, n);
                         if (fz_clean && !fz_pending_bent &&
                             (step != 1 || !fz_authorized ||
-                             memcmp(fz_sta_tk, fz_pending + 32, 16)))
+                             memcmp(fz_sta_tk, fz_pending + 32, 16) || !fz_igtk_held()))
                                 abort();
                         if (step == 1)
                         {
@@ -68321,7 +76023,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
                         fz_g1_length = n;
                         step = fz_deliver(frame, n);
-                        if (fz_clean && step != 2)
+                        if (fz_clean && (step != 2 || !fz_igtk_held()))
                                 abort();
                         if (step == 2)
                         {
@@ -68342,12 +76044,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 network_store_64(fz_m3 + 9, fz_replay);
                                 memcpy(frame, fz_m3, n);
                                 memset(frame + 81, 0, 16);
-                                {
-                                        p8 hash[20];
-
-                                        crypto_hmac(DIGEST_SHA1, 20, fz_ptk, 16, frame, n, hash);
-                                        memcpy(frame + 81, hash, 16);
-                                }
+                                fz_mic(fz_ptk, frame, n, frame + 81);
                         }
                         else
                         {
@@ -68475,15 +76172,22 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         bool unwraps = mode == 0;
                         bool clean = fz_clean && (group || !fz_pending_bent);
                         bool want = false, cut = false;
+                        bool rsn_first = false, rsn_good = false, rsnx_first = false, rsnx_good = false;
                         p8 plain[CRYPTO_WRAP_MOST], kek[16], want_key[16], want_idx = 0;
+                        p8 igtk_key[16], igtk_id = 0;
 
                         //      The key data, element by element: what the
                         //      station must take is the first GTK KDE whose
-                        //      key id is not 0, before anything cut short.
+                        //      key id is in 0..3, before anything cut short;
+                        //      the first IGTK KDE whose key id is 4 or 5,
+                        //      on a link with protection; and message 3 is
+                        //      taken only when its first RSN element (and,
+                        //      with hash-to-element, its first extension
+                        //      element) is the access point's.
                         n = 0;
                         for (positive item = 0; item < items && !cut; item++)
                         {
-                                p8 kind = fz_byte() % 9;
+                                p8 kind = fz_byte() % 10;
 
                                 if (kind == 0 || kind == 1 || kind == 8)
                                 {
@@ -68506,7 +76210,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                         if (body > 16)
                                                 plain[n + 16] = fz_byte();
                                         n += body;
-                                        if (kind == 0 && (id & 3) && !want)
+                                        if (kind == 0 && !want)
                                         {
                                                 want = true;
                                                 want_idx = id & 3;
@@ -68515,16 +76219,36 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 }
                                 else if (kind == 2)     /* the IGTK KDE */
                                 {
-                                        plain[n++] = 0xdd, plain[n++] = 28;
-                                        plain[n++] = 0x00, plain[n++] = 0x0f;
-                                        plain[n++] = 0xac, plain[n++] = 0x09;
-                                        fz_take(plain + n, 24);
-                                        n += 24;
+                                        p8 pick = fz_byte();
+                                        p8 id = pick % 3 == 0 ? 4 : pick % 3 == 1 ? 5 : fz_byte();
+                                        p8 key[16];
+
+                                        fz_take(key, 16);
+                                        n += fz_igtk_kde(plain + n, id, key);
+                                        if ((id == 4 || id == 5) && !igtk_id)
+                                        {
+                                                igtk_id = id;
+                                                memcpy(igtk_key, key, 16);
+                                        }
                                 }
-                                else if (kind == 3)     /* the RSN element */
+                                else if (kind == 3)     /* the RSN element, the access point's or one bent */
                                 {
-                                        memcpy(plain + n, wifi_rsn_ie, sizeof wifi_rsn_ie);
-                                        n += sizeof wifi_rsn_ie;
+                                        p8 bend = fz_byte();
+
+                                        memcpy(plain + n, fz_ap_rsn, fz_ap_rsn_length);
+                                        if (bend & 1)
+                                                plain[n + 2 + (bend >> 1) % (fz_ap_rsn_length - 2)] ^= 0x10;
+                                        if (!rsn_first)
+                                                rsn_good = !(bend & 1);
+                                        rsn_first = true;
+                                        n += fz_ap_rsn_length;
+                                }
+                                else if (kind == 9 && fz_ap_rsnx_length)        /* the extension element */
+                                {
+                                        memcpy(plain + n, fz_ap_rsnx, fz_ap_rsnx_length);
+                                        rsnx_good |= !rsnx_first;
+                                        rsnx_first = true;
+                                        n += fz_ap_rsnx_length;
                                 }
                                 else if (kind == 4)     /* padding */
                                         plain[n++] = 0xdd, plain[n++] = 0;
@@ -68580,6 +76304,8 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         }
 
                         fz_replay++;
+                        if (unwraps && igtk_id)
+                                fz_igtk_add(igtk_id, igtk_key);
                         if (group)
                         {
                                 if (unwraps && want)
@@ -68590,7 +76316,10 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                 }
                                 n = fz_frame(frame, 0x1382, 0, wrapped, n, fz_ptk);
                                 step = fz_deliver(frame, n);
-                                if (clean && step != (unwraps && want ? 2 : 0))
+                                if (clean && (step != (unwraps && want ? 2 : 0) ||
+                                              (step == 2 && fz_mode && igtk_id &&
+                                               (!fz_sta_igtk_set[igtk_id - 4] ||
+                                                memcmp(fz_sta_igtk[igtk_id - 4], igtk_key, 16)))))
                                         abort();
                                 if (step == 2)
                                 {
@@ -68601,22 +76330,30 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         }
                         else
                         {
+                                bool shown = !fz_seen || (rsn_good && (!fz_extension || rsnx_good));
+
                                 memcpy(fz_ap_tk, fz_pending + 32, 16);
                                 if (unwraps)
                                 {
-                                        fz_made_add(0, fz_ap_tk);
+                                        fz_made_add(4, fz_ap_tk);
                                         if (want)
                                                 fz_made_add(want_idx, want_key);
                                 }
                                 n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, n, fz_pending);
                                 step = fz_deliver(frame, n);
-                                if (clean && (step != (unwraps ? 1 : 0) ||
-                                              (unwraps && (!fz_authorized ||
-                                                           memcmp(fz_sta_tk, fz_pending + 32, 16) ||
-                                                           (want && (!fz_sta_gtk_set[want_idx] ||
-                                                                     memcmp(fz_sta_gtk[want_idx],
-                                                                            want_key, 16)))))))
+                                if (clean && (step != (!unwraps ? 0 : shown ? 1 : WIFI_REFUSE_ELEMENTS) ||
+                                              (unwraps && !shown && (fz_sends || fz_authorized != fz_ptk_set)) ||
+                                              (unwraps && shown &&
+                                               (!fz_authorized ||
+                                                memcmp(fz_sta_tk, fz_pending + 32, 16) ||
+                                                (want && (!fz_sta_gtk_set[want_idx] ||
+                                                          memcmp(fz_sta_gtk[want_idx], want_key, 16))) ||
+                                                (fz_mode && igtk_id &&
+                                                 (!fz_sta_igtk_set[igtk_id - 4] ||
+                                                  memcmp(fz_sta_igtk[igtk_id - 4], igtk_key, 16)))))))
                                         abort();
+                                if (unwraps && !shown && step == WIFI_REFUSE_ELEMENTS)
+                                        continue;
                                 if (step == 1)
                                 {
                                         fz_answer(0x030a, fz_pending);
@@ -68632,6 +76369,70 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                                                 fz_ap_gtk_idx = want_idx;
                                         }
                                 }
+                        }
+                        if (step > 0 && fz_mode && igtk_id)
+                        {
+                                memcpy(fz_ap_igtk, igtk_key, 16);
+                                fz_ap_igtk_id = igtk_id;
+                        }
+                }
+                else if (op == 11 && fz_pending_set)    /* message 3 naming less than the access point offered */
+                {
+                        //      The access point's own element with WPA3 taken
+                        //      away (bit 0) and its protection kept (bit 1)
+                        //      or not, and its extension element left out
+                        //      (bit 2): a station that saw the access point
+                        //      offer more takes none of them, sends nothing
+                        //      and keys nothing.
+                        p8 plain[160];
+                        p8 how = fz_byte();
+                        p8 protection = fz_mode == 1 ? WIFI_PMF_CAPABLE : fz_link.pmf;
+                        positive k;
+                        bool shown;
+
+                        k = wifi_rsn_build(plain, fz_link.akm == 8 && (how & 1) ? 2 : fz_link.akm,
+                                           how & 2 ? protection : 0, 0);
+                        shown = !fz_seen;
+                        for (positive frame_at = 0; frame_at < 2; frame_at++)
+                                shown |= fz_link.seen.rsn_length[frame_at] == k &&
+                                         !memcmp(fz_link.seen.rsn[frame_at], plain, k);
+                        if (!(how & 4))
+                        {
+                                memcpy(plain + k, fz_ap_rsnx, fz_ap_rsnx_length);
+                                k += fz_ap_rsnx_length;
+                        }
+                        else
+                                shown &= !fz_seen || !fz_extension;
+                        plain[k++] = 0xdd, plain[k++] = 22;
+                        plain[k++] = 0, plain[k++] = 0x0f, plain[k++] = 0xac, plain[k++] = 1;
+                        plain[k++] = fz_ap_gtk_idx, plain[k++] = 0;
+                        memcpy(plain + k, fz_ap_gtk, 16);
+                        k += 16;
+                        if (k % 8)
+                        {
+                                plain[k++] = 0xdd;
+                                while (k % 8)
+                                        plain[k++] = 0;
+                        }
+                        fz_wrap(fz_pending + 16, plain, k, wrapped);
+                        memcpy(fz_ap_tk, fz_pending + 32, 16);
+                        fz_made_add(4, fz_ap_tk);
+                        fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                        fz_replay++;
+                        n = fz_frame(frame, 0x13ca, fz_anonce, wrapped, k + 8, fz_pending);
+                        step = fz_deliver(frame, n);
+                        if (fz_clean && !fz_pending_bent &&
+                            (step != (shown ? 1 : WIFI_REFUSE_ELEMENTS) || (!shown && fz_sends)))
+                                abort();
+                        if (step == 1)
+                        {
+                                fz_answer(0x030a, fz_pending);
+                                memcpy(fz_ptk, fz_pending, 64);
+                                memcpy(fz_m3, frame, n);
+                                fz_m3_length = n;
+                                fz_verified = fz_replay;
+                                fz_ptk_set = true;
+                                fz_pending_set = false;
                         }
                 }
                 else if (op == 10)      /* a message 1 framed every way */
@@ -68670,7 +76471,7 @@ int LLVMFuzzerTestOneInput(const p8 *data, positive size)
                         {
                                 memcpy(fz_anonce, nonce, 32);
                                 wifi_ptk(fz_pmk, (p8 *)fz_ap, (p8 *)fz_sta, fz_anonce, fz_sent + 17,
-                                         fz_pending);
+                                         fz_pending, fz_link.akm);
                                 fz_answer(0x010a, fz_pending);
                                 fz_pending_set = true;
                                 fz_pending_bent = false;
@@ -68706,6 +76507,310 @@ def wifi_eapol_fuzz_source(net, host, checks):
                       WIFI_EAPOL_FUZZ_DRIVER))
 
 
+def harness_wifi_key_state(argv):
+    """Authenticated GTK install/retry/roam transitions in all four key slots.
+    Uses the EAPOL production lift and real MIC/key-wrap crypto under ASan/UBSan;
+    records driver calls so a missing install cannot pass by comparing zero bytes.
+    """
+    del argv
+    clang = shutil.which("clang")
+    if not clang:
+        print("wifi key state: NOT RUN -- needs clang with ASan/UBSan")
+        return 2
+    host = (HARNESS_ROOT / "src/sh/host.c").read_text()
+    source = wifi_eapol_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                   host, (HARNESS_ROOT / "test/checks.c").read_text())
+    source += src_slice(host, "static COLD fn wifi_roam(",
+                        "static COLD fn wifi_keep(")
+    source += r'''
+static int state_checks, state_failures;
+static void state_check(bool ok, const char *what, int idx, int zero, int pairwise)
+{
+        state_checks++;
+        if (!ok) {
+                state_failures++;
+                printf("  FAIL slot %d zero %d pairwise %d: %s\n", idx, zero, pairwise, what);
+        }
+}
+static bipolar state_gtk(bool pairwise)
+{
+        p8 frame[512], wrapped[128];
+        positive n = fz_key_data(wrapped, fz_ptk + 16, pairwise);
+        fz_replay++;
+        n = fz_frame(frame, pairwise ? 0x13ca : 0x1382,
+                     pairwise ? fz_anonce : 0, wrapped, n, fz_ptk);
+        return fz_deliver(frame, n);
+}
+int main(void)
+{
+        for (int idx = 0; idx < 4; idx++)
+        for (int zero = 0; zero < 2; zero++)
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                (void)LLVMFuzzerTestOneInput(NULL, 0);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_ap_gtk_idx = idx;
+                memset(fz_ap_gtk, zero ? 0 : 0x35, sizeof fz_ap_gtk);
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(idx, fz_ap_gtk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_sta_gtk_set[idx] && !memcmp(fz_sta_gtk[idx], fz_ap_gtk, 16),
+                            "first GTK is installed", idx, zero, pairwise);
+                int installs = fz_installs;
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_installs == installs,
+                            "retransmission never reinstalls a key", idx, zero, pairwise);
+                fz_ap_gtk[7] ^= 1;
+                fz_made_add(idx, fz_ap_gtk);
+                state_check(state_gtk(false) == 2 && fz_installs == installs + 1 &&
+                            !memcmp(fz_sta_gtk[idx], fz_ap_gtk, 16),
+                            "changed GTK replaces the installed key", idx, zero, pairwise);
+
+                /* Roaming drops the old driver's keys. Receiving identical
+                   bytes from the next AP must install them in its new slot. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                fz_sta_tk_set = fz_authorized = false;
+                memset(fz_ap_gtk, 0, sizeof fz_ap_gtk);
+                fz_made_add(idx, fz_ap_gtk);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                state_check(!fz_link.gtk_installed && state_gtk(true) == 1 && fz_sta_gtk_set[idx],
+                            "roaming clears installed-key state", idx, zero, pairwise);
+
+                /* A driver refusal cannot make an empty slot look installed.
+                   Test group rekey, independently of pairwise installation. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_key_error = -5;
+                state_check(state_gtk(false) == -5 && !fz_sta_gtk_set[idx] &&
+                            !fz_link.gtk_installed && !fz_link.replay_set,
+                            "driver refusal fails the transition", idx, zero, pairwise);
+                fz_key_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_sta_gtk_set[idx],
+                            "same-counter retry after refusal installs", idx, zero, pairwise);
+
+                /* If the key went in but its acknowledgement did not go
+                   out, the same frame is answered without reinstalling it. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_send_error = -5;
+                installs = fz_installs;
+                state_check(state_gtk(false) == -1 && fz_sta_gtk_set[idx] &&
+                            fz_link.gtk_installed && !fz_link.replay_set,
+                            "reply refusal leaves the installed key retryable",
+                            idx, zero, pairwise);
+                fz_send_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_installs == installs + 1,
+                            "reply retry does not reinstall the key",
+                            idx, zero, pairwise);
+        }
+
+        /* The group management key of a link with protection (PSK-SHA256,
+           mode 1, and SAE, mode 2), in both of its slots, zero bytes a key
+           like any other, held to the same rules as the group key. */
+        for (int mode = 1; mode < 3; mode++)
+        for (int idx = 4; idx < 6; idx++)
+        for (int zero = 0; zero < 2; zero++)
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                p8 kind[1] = {(p8)mode};
+                int igtk_installs;
+
+                (void)LLVMFuzzerTestOneInput(kind, 1);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_ap_igtk_id = (p8)idx;
+                memset(fz_ap_igtk, zero ? 0 : 0x6b, sizeof fz_ap_igtk);
+                fz_igtk_add(fz_ap_igtk_id, fz_ap_igtk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_sta_igtk_set[idx - 4] && !memcmp(fz_sta_igtk[idx - 4], fz_ap_igtk, 16) &&
+                            (fz_link.igtk_installed & (1u << (idx - 4))),
+                            "first IGTK is installed", idx, zero, pairwise);
+                igtk_installs = fz_igtk_installs;
+                state_check(state_gtk(false) == 2 && fz_igtk_installs == igtk_installs,
+                            "a group message with the same IGTK never reinstalls it", idx, zero, pairwise);
+                fz_ap_igtk[3] ^= 1;
+                fz_igtk_add(fz_ap_igtk_id, fz_ap_igtk);
+                state_check(state_gtk(false) == 2 && fz_igtk_installs == igtk_installs + 1 &&
+                            !memcmp(fz_sta_igtk[idx - 4], fz_ap_igtk, 16),
+                            "a changed IGTK replaces the installed one", idx, zero, pairwise);
+
+                /* Roaming drops it: the same bytes from the next access point
+                   go into the new association. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memcpy(fz_link.seen.rsn[0], fz_ap_rsn, fz_ap_rsn_length);
+                fz_link.seen.rsn_length[0] = (p16)fz_ap_rsn_length;
+                memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                igtk_installs = fz_igtk_installs;
+                state_check(!fz_link.igtk_installed && state_gtk(false) == 2 &&
+                            fz_igtk_installs == igtk_installs + 1 && fz_sta_igtk_set[idx - 4],
+                            "roaming clears the installed IGTK", idx, zero, pairwise);
+
+                /* A refusal by the driver fails the group handshake: nothing
+                   answered, the replay counter not consumed, and the same
+                   counter again installs it. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_igtk_error = -5;
+                state_check(state_gtk(false) == -5 && !fz_sta_igtk_set[idx - 4] &&
+                            !fz_link.igtk_installed && !fz_link.replay_set && fz_sends == 0,
+                            "an IGTK the driver refuses fails the group handshake", idx, zero, pairwise);
+                fz_igtk_error = 0;
+                fz_replay--;
+                state_check(state_gtk(false) == 2 && fz_sta_igtk_set[idx - 4] && fz_link.replay_set,
+                            "and the same counter again puts it in", idx, zero, pairwise);
+
+                /* A link that asked for no protection takes none, whatever
+                   the key data holds. */
+                wifi_roam(&fz_link, (p8 *)fz_ap);
+                memset(fz_sta_igtk_set, 0, sizeof fz_sta_igtk_set);
+                memset(fz_sta_gtk_set, 0, sizeof fz_sta_gtk_set);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.installed = true;
+                fz_link.pmf = 0;
+                fz_protected = false;
+                igtk_installs = fz_igtk_installs;
+                state_check(state_gtk(false) == 2 && fz_igtk_installs == igtk_installs &&
+                            !fz_link.igtk_installed,
+                            "a link without protection never takes an IGTK", idx, zero, pairwise);
+        }
+
+        /* Message 3 is held to the RSN element the access point showed. */
+        for (int mode = 0; mode < 3; mode++) {
+                p8 kind[1] = {(p8)mode};
+                int installs;
+
+                (void)LLVMFuzzerTestOneInput(kind, 1);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_link.seen.rsn[0][5] ^= 1;
+                fz_link.seen.rsn[1][5] ^= 1;
+                installs = fz_installs;
+                state_check(state_gtk(true) == WIFI_REFUSE_ELEMENTS && fz_sends == 0 &&
+                            fz_installs == installs && !fz_authorized && fz_link.pending_set,
+                            "a message 3 that shows another RSN element is neither answered nor keyed",
+                            mode, 0, 1);
+                fz_link.seen.rsn[0][5] ^= 1;
+                fz_link.seen.rsn[1][5] ^= 1;
+                fz_replay--;
+                state_check(state_gtk(true) == 1 && fz_authorized,
+                            "and the access point's own, at the same counter, is", mode, 0, 1);
+                memset(&fz_link.seen, 0, sizeof fz_link.seen);
+        }
+
+        /* Transition Disable is taken from an authenticated message 3 and
+           group message, and from nothing a key does not check. */
+        for (int pairwise = 0; pairwise < 2; pairwise++) {
+                (void)LLVMFuzzerTestOneInput(NULL, 0);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                memcpy(fz_link.ptk, fz_ptk, 64);
+                fz_link.pending_set = pairwise;
+                fz_link.installed = !pairwise;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_link.transition_disable = 0;
+                fz_ap_transition = WIFI_TRANSITION_WPA3_PERSONAL;
+                memset(fz_ptk, 0x43, sizeof fz_ptk);
+                state_check(state_gtk(pairwise) <= 0 && !fz_link.transition_disable,
+                            "Transition Disable under a key the station does not hold is not taken",
+                            0, 0, pairwise);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                state_check(state_gtk(pairwise) == (pairwise ? 1 : 2) &&
+                            fz_link.transition_disable == WIFI_TRANSITION_WPA3_PERSONAL,
+                            "Transition Disable for WPA3-Personal in an authenticated message is taken",
+                            0, 0, pairwise);
+                fz_ap_transition = 0;
+        }
+
+        /* And to the extension element: hash-to-element's, left out of
+           message 3 where the beacon had it, is a downgrade. */
+        {
+                p8 kind[1] = {14};      /* SAE (14 % 3), hash-to-element (4), seen */
+                int installs;
+
+                (void)LLVMFuzzerTestOneInput(kind, 1);
+                memset(fz_ptk, 0x42, sizeof fz_ptk);
+                memset(fz_anonce, 0x24, sizeof fz_anonce);
+                memcpy(fz_link.anonce, fz_anonce, 32);
+                memcpy(fz_link.pending, fz_ptk, 64);
+                fz_link.pending_set = true;
+                fz_made_add(4, fz_ptk + 32);
+                fz_made_add(fz_ap_gtk_idx, fz_ap_gtk);
+                fz_ap_rsnx_length = 0;
+                installs = fz_installs;
+                state_check(state_gtk(true) == WIFI_REFUSE_ELEMENTS && fz_sends == 0 &&
+                            fz_installs == installs && fz_link.seen.rsnx_length[0] == 3,
+                            "a message 3 without the extension element the beacon had is refused",
+                            2, 0, 1);
+                fz_ap_rsnx_length = 3;
+                fz_replay--;
+                state_check(state_gtk(true) == 1 && fz_authorized,
+                            "and with it, taken", 2, 0, 1);
+        }
+        printf("wifi key state %d/%d\n", state_checks - state_failures, state_checks);
+        return state_failures != 0;
+}
+'''
+    with tempfile.TemporaryDirectory(prefix="wifi-key-state-") as temporary:
+        unit = Path(temporary) / "state.c"
+        binary = unit.with_suffix("")
+        unit.write_text(source)
+        built = build_run([clang, "-O1", "-g", "-fsanitize=address,undefined",
+                                "-fno-sanitize-recover=all", str(unit), "-o", str(binary)],
+                               capture_output=True, text=True, timeout=120)
+        if built.returncode:
+            print(built.stderr[-2000:], file=sys.stderr)
+            return 1
+        ran = subprocess.run(
+            [str(binary)], capture_output=True, text=True, timeout=30,
+            env=dict(os.environ,
+                     ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
+                     UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0"))
+        print(ran.stdout, end="")
+        print(ran.stderr, end="", file=sys.stderr)
+        tally = re.search(r"wifi key state (\d+)/(\d+)", ran.stdout)
+        if tally:
+            write_tally("wifi-key-state", *tally.groups())
+        elif not ran.stderr:
+            print("wifi key state: test exited %d without a tally" % ran.returncode,
+                  file=sys.stderr)
+        return 1 if ran.returncode or not tally else 0
+
+
 def wifi_eapol_fuzz_seeds():
     """Whole exchanges in the driver's op language: a handshake, then every
     rekey and resend, replays and bent bits after it. Each op byte is
@@ -68723,7 +76828,9 @@ def wifi_eapol_fuzz_seeds():
         return op(0, draw(32), draw(32)) + op(1)
 
     seeds = {"empty.bin": b""}
-    start = draw(32) + b"\x05"
+    # The first byte is the network (wifi_eapol_fuzz's mode and how the
+    # station saw the access point); 0 is WPA2-PSK seen in its latest frame.
+    start = b"\x00" + draw(32) + b"\x05"
     seeds["handshake.bin"] = start + handshake()
     seeds["group_rekey.bin"] = start + handshake() + op(2, draw(16)) + op(2, draw(16))
     seeds["ptk_rekey.bin"] = start + handshake() + op(0, draw(32), draw(32)) + op(1)
@@ -68780,6 +76887,36 @@ def wifi_eapol_fuzz_seeds():
                             op(10, b"\x1c\x00\x00", draw(32)) +
                             op(10, b"\x24\x04\x00", draw(32), draw(4), b"\x00\x04") +
                             op(10, b"\x00\x00\x00", draw(32)) + op(1))
+    # PSK-SHA256 with protection (the network byte 1 mod 3) and SAE (2 mod
+    # 3): an IGTK in message 3 and in every group message, the CMAC, the
+    # elements message 3 is held to -- seen in the latest frame (bits 5 and 6
+    # 0), the beacon (1), both (2), a forged frame beside the real one, or
+    # not at all (bit 4) -- and an extension element for hash-to-element
+    # (bit 2).
+    for name, network in (("pmf", 0x01), ("pmf_beacon", 0x22), ("pmf_unseen", 0x10),
+                          ("sae", 0x02), ("sae_h2e", 0x0e), ("sae_both", 0x44),
+                          ("sae_unseen", 0x14)):
+        begin = bytes((network,)) + draw(32) + b"\x05" + draw(32)
+
+        def group():
+            return op(2, draw(16), draw(16))
+
+        seeds[name + "_handshake.bin"] = begin + handshake() + group() + group()
+        seeds[name + "_rekeys.bin"] = (begin + handshake() + group() + op(0, draw(32), draw(32)) +
+                                       op(1) + op(3) + op(4) + group() + op(4))
+        seeds[name + "_elements.bin"] = (begin + op(0, draw(32), draw(32)) + op(11, b"\x00") +
+                                         op(11, b"\x05") + op(11, b"\x06") + op(11, b"\x07") +
+                                         op(11, b"\x02") + group())
+        seeds[name + "_no_extension.bin"] = (begin + op(0, draw(32), draw(32)) +
+                                             op(9, b"\x00", b"\x02", b"\x03\x00", gtk(0, 1)) +
+                                             op(1) + group())
+        seeds[name + "_key_data.bin"] = (begin + op(0, draw(32), draw(32)) +
+                                         op(9, b"\x00", b"\x04", b"\x03\x00", b"\x09",
+                                            b"\x02\x00" + draw(16), gtk(0, 1)) +
+                                         op(9, b"\x01", b"\x03", b"\x02\x01" + draw(16), gtk(0, 2),
+                                            b"\x02\x02\x07" + draw(16)) +
+                                         op(0, draw(32), draw(32)) +
+                                         op(9, b"\x00", b"\x02", b"\x03\x05", gtk(0, 3)))
     return seeds
 
 
@@ -68817,6 +76954,805 @@ def harness_wifi_eapol_fuzz(argv):
         write_tally("wifi-eapol-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi eapol", wifi_eapol_fuzz_seeds(), source, 2048)
+
+
+#       wifi_sae_fuzz: what the lift of host.c's SAE exchange stands on --
+#       the netlink message readers net.c has, an entropy and a clock and a
+#       budget file the driver owns, and a count of the commits taken in.
+WIFI_SAE_FUZZ_SHIM = r"""
+#ifndef STRICT_TIGHT
+#define STRICT_TIGHT 2
+#endif
+#ifndef NLA_TYPE_MASK
+#define NLA_TYPE_MASK 0x3fff
+#endif
+#ifndef memory_load_unaligned
+#define memory_load_unaligned(type, at) \
+        ({ type loaded_; memcpy(&loaded_, (at), sizeof loaded_); loaded_; })
+#endif
+#define AT_FDCWD (-100)
+#define HOST_CLOCK_BOOTTIME 7
+#define NET_STATE_DIR "/run/moonwater"
+typedef struct
+{
+        b32 handle;
+        p16 family;
+        p32 mlme;
+        p32 scan;
+} nl80211;
+
+/* The input's bytes, and a fixed stream while the exchange's two sides are
+   made once for the whole run. */
+static const p8 *fz_at;
+static positive fz_left;
+static bool fz_fixed;
+static p64 fz_fixed_draws = 0x9e3779b97f4a7c15ull;
+static p8 fz_byte(void)
+{
+        if (!fz_left)
+                return 0;
+        fz_left--;
+        return *fz_at++;
+}
+static bipolar system_random_fill(address_any into, positive length, positive flags)
+{
+        p8 *bytes = into;
+
+        (void)flags;
+        for (positive at = 0; at < length; at++)
+        {
+                //      xorshift64 for the fixed stream: no period short
+                //      enough to hand two commits the same draws.
+                fz_fixed_draws ^= fz_fixed_draws << 13;
+                fz_fixed_draws ^= fz_fixed_draws >> 7;
+                fz_fixed_draws ^= fz_fixed_draws << 17;
+                bytes[at] = fz_fixed ? (p8)(fz_fixed_draws >> 24) : fz_byte();
+        }
+        return 0;
+}
+
+/* The budget's clock and file. */
+static p64 fz_now_ms;
+static p64 system_clock_ns(b32 clock)
+{
+        (void)clock;
+        return (fz_now_ms + 86400000ull) * 1000000ull;
+}
+static p8 fz_file[4096];
+static positive fz_file_size;
+static bool fz_file_there;
+static bipolar file_read_once_at(b32 directory, const void *path, address_any into, positive room)
+{
+        (void)directory, (void)path;
+        if (!fz_file_there)
+                return -2;
+        memcpy(into, fz_file, fz_file_size < room ? fz_file_size : room);
+        return (bipolar)(fz_file_size < room ? fz_file_size : room);
+}
+static void host_state_ready(void) {}
+static bipolar host_write_file(const void *path, const p8 *bytes, positive length, positive mode,
+                               bool sync)
+{
+        (void)path, (void)mode, (void)sync;
+        if (length > sizeof fz_file)
+                abort();
+        memcpy(fz_file, bytes, length);
+        fz_file_size = length;
+        fz_file_there = true;
+        return 0;
+}
+"""
+
+WIFI_SAE_FUZZ_DRIVER = r"""
+/* Every commit taken in goes through here: counted, and answered from what
+   the run worked out once for the commits it knows (the multiplications
+   are what is expensive, and checks.c holds them to the standard's
+   values), and worked out in full for any other. */
+static int fz_takes;
+#define FZ_KNOWN 4
+static p8 fz_known_scalar[FZ_KNOWN][32], fz_known_element[FZ_KNOWN][64];
+static wifi_sae fz_known_after[FZ_KNOWN];
+static positive fz_known_count;
+static bool fz_sae_take(wifi_sae *sae, const p8 *scalar, const p8 *element)
+{
+        fz_takes++;
+        for (positive at = 0; at < fz_known_count; at++)
+                if (!memcmp(scalar, fz_known_scalar[at], 32) && !memcmp(element, fz_known_element[at], 64))
+                {
+                        memcpy(sae, &fz_known_after[at], sizeof *sae);
+                        return true;
+                }
+        return wifi_sae_take(sae, scalar, element);
+}
+#define wifi_sae_take(sae, scalar, element) fz_sae_take(sae, scalar, element)
+"""
+
+WIFI_SAE_FUZZ_MODEL = r"""
+static const p8 fz_ap[6] = {2, 0, 0, 0, 1, 0}, fz_sta[6] = {2, 0, 0, 0, 2, 0};
+static const p8 fz_stranger[6] = {2, 0, 0, 0, 9, 0};
+#define FZ_FAMILY 0x1c
+#define FZ_INDEX 7
+#define FZ_PORT 0x5ae
+static wifi_sae fz_sta_sae, fz_ap_sae;
+static bool fz_ready;
+
+/* The two sides, made once: one password element, the station's commit and
+   the access point's, each taken in by the other, which must agree; and
+   commits of three others who know the element, which the station takes in
+   to a KCK the access point does not have. */
+static void fz_prepare(void)
+{
+        wifi_sae sta, ap;
+
+        if (fz_ready)
+                return;
+        fz_ready = true;
+        fz_fixed = true;
+        memset(&fz_sta_sae, 0, sizeof fz_sta_sae);
+        if (!wifi_sae_pwe((p8 *)"fuzz-password", 13, (p8 *)fz_sta, (p8 *)fz_ap, fz_sta_sae.pwe) ||
+            !wifi_sae_commit(&fz_sta_sae))
+                abort();
+        memcpy(&fz_ap_sae, &fz_sta_sae, sizeof fz_ap_sae);
+        if (!wifi_sae_commit(&fz_ap_sae))
+                abort();
+        memcpy(&sta, &fz_sta_sae, sizeof sta);
+        memcpy(&ap, &fz_ap_sae, sizeof ap);
+        if (!wifi_sae_commit_good(&sta, ap.scalar, ap.element) ||
+            !wifi_sae_commit_good(&ap, sta.scalar, sta.element) ||
+            !(wifi_sae_take)(&sta, ap.scalar, ap.element) || !(wifi_sae_take)(&ap, sta.scalar, sta.element) ||
+            memcmp(sta.kck, ap.kck, 32) || memcmp(sta.pmk, ap.pmk, 32) || memcmp(sta.pmkid, ap.pmkid, 16))
+        {
+                fprintf(stderr, "the two sides of the exchange do not agree\n");
+                abort();
+        }
+        memcpy(fz_known_scalar[0], ap.scalar, 32);
+        memcpy(fz_known_element[0], ap.element, 64);
+        memcpy(&fz_known_after[0], &sta, sizeof sta);
+        memcpy(&fz_ap_sae, &ap, sizeof ap);
+        fz_known_count = 1;
+        for (positive at = 1; at < FZ_KNOWN; at++)
+        {
+                wifi_sae other;
+
+                memcpy(&other, &fz_sta_sae, sizeof other);
+                if (!wifi_sae_commit(&other))
+                        abort();
+                memcpy(fz_known_scalar[at], other.scalar, 32);
+                memcpy(fz_known_element[at], other.element, 64);
+                memcpy(&fz_known_after[at], &fz_sta_sae, sizeof fz_sta_sae);
+                if (!(wifi_sae_take)(&fz_known_after[at], other.scalar, other.element))
+                        abort();
+                fz_known_count++;
+        }
+        fz_fixed = false;
+}
+
+/* One generic netlink message in a heap block exactly its size: the header,
+   the command, and the attributes given. */
+static p8 *fz_message(p16 type, p32 port, p8 command, p32 index, bool timed_out,
+                      const p8 *frame, positive frame_length, positive *whole)
+{
+        positive size = 16 + 4 + (index ? 8 : 0) + (timed_out ? 4 : 0) +
+                        (frame ? 4 + ((frame_length + 3) & ~(positive)3) : 0);
+        p8 *message = calloc(1, size);
+        p32 head[4] = {(p32)size, type, 1, port};
+        positive at = 20;
+
+        memcpy(message, head, 16);
+        message[16] = command;
+        message[17] = 1;
+        if (index)
+        {
+                p16 attribute[2] = {8, 3};
+
+                memcpy(message + at, attribute, 4);
+                memcpy(message + at + 4, &index, 4);
+                at += 8;
+        }
+        if (timed_out)
+        {
+                p16 attribute[2] = {4, 65};
+
+                memcpy(message + at, attribute, 4);
+                at += 4;
+        }
+        if (frame)
+        {
+                p16 attribute[2] = {(p16)(4 + frame_length), 51};
+
+                memcpy(message + at, attribute, 4);
+                memcpy(message + at + 4, frame, frame_length);
+        }
+        *whole = size;
+        return message;
+}
+
+/* An authentication frame of SAE from a sender. */
+static positive fz_auth(p8 *into, const p8 *from, p16 transaction, p16 status, const p8 *body,
+                        positive length)
+{
+        memset(into, 0, 30);
+        into[0] = 0xb0;
+        memcpy(into + 4, fz_sta, 6);
+        memcpy(into + 10, from, 6);
+        memcpy(into + 16, from, 6);
+        into[24] = 3;
+        into[26] = (p8)transaction, into[27] = (p8)(transaction >> 8);
+        into[28] = (p8)status, into[29] = (p8)(status >> 8);
+        memcpy(into + 30, body, length);
+        return 30 + length;
+}
+
+/* What the exchange is expected to have done, kept beside it. */
+typedef struct
+{
+        bool done;
+        bipolar result;
+        bool token_sent;
+        bool taken;
+        positive taken_which;
+        positive frames;
+        p8 body[200];
+        positive body_length;
+} fz_want;
+
+static void fz_confirm_body(p8 *body, positive *length)
+{
+        p8 counter[2] = {1, 0};
+
+        body[0] = 2, body[1] = 0, body[2] = 0, body[3] = 0, body[4] = 1, body[5] = 0;
+        wifi_sae_confirm(fz_known_after[0].kck, counter, fz_sta_sae.scalar, fz_sta_sae.element,
+                         fz_ap_sae.scalar, fz_ap_sae.element, body + 6);
+        *length = 38;
+}
+
+/* One message through the exchange and the model, and the two held to each
+   other; the commits taken are counted, never more than one. */
+static void fz_step(wifi_sae_turn *turn, fz_want *want, p8 *message, positive whole)
+{
+        wifi_sae_turn before = *turn;
+        bool more;
+
+        turn->body_length = 0;
+        more = wifi_sae_news((netlink_header *)message, turn);
+        if (more != !turn->done || fz_takes > 1 || turn->frames > WIFI_SAE_FRAMES_MOST + 1)
+        {
+                fprintf(stderr, "the exchange went past its bounds\n");
+                abort();
+        }
+        if (before.done && memcmp(&before, turn, offsetof(wifi_sae_turn, body)))
+        {
+                fprintf(stderr, "an exchange that ended was moved\n");
+                abort();
+        }
+        (void)whole;
+        if (turn->done != want->done || (want->done && turn->result != want->result) ||
+            turn->token_sent != want->token_sent || turn->taken != want->taken ||
+            turn->frames != want->frames || turn->body_length != want->body_length ||
+            memcmp(turn->body, want->body, want->body_length))
+        {
+                fprintf(stderr, "the exchange: done %d/%d result %ld/%ld token %d/%d taken %d/%d "
+                                "frames %lu/%lu body %lu/%lu\n",
+                        turn->done, want->done, (long)turn->result, (long)want->result,
+                        turn->token_sent, want->token_sent, turn->taken, want->taken,
+                        (unsigned long)turn->frames, (unsigned long)want->frames,
+                        (unsigned long)turn->body_length, (unsigned long)want->body_length);
+                abort();
+        }
+        //      The PMK is the access point's only through its own commit,
+        //      and a result of 0 is that commit and its confirm.
+        if (turn->done && !turn->result &&
+            (want->taken_which != 0 || memcmp(turn->sae->pmk, fz_known_after[0].pmk, 32)))
+                abort();
+        free(message);
+}
+
+static void fz_end(fz_want *want, bipolar result)
+{
+        if (!want->done)
+                want->done = true, want->result = result;
+}
+
+/*
+        One exchange: its method (hunt or hash-to-element) and then messages
+        the input chooses, each a heap block of its own size -- the access
+        point's commit and confirm, forged ones and malformed ones, tokens
+        of every length in and out of their container, refusals, the link
+        sent away, the kernel's timeout and errors, frames from another
+        sender and of other commands, bytes of no shape, and floods of each.
+*/
+static void exchange_model(void)
+{
+        wifi_sae sae;
+        wifi_sae_turn turn;
+        fz_want want;
+        bool h2e = fz_byte() & 1;
+
+        memcpy(&sae, &fz_sta_sae, sizeof sae);
+        memset(&turn, 0, sizeof turn);
+        turn.sae = &sae;
+        turn.bssid = fz_ap;
+        turn.index = FZ_INDEX;
+        turn.family = FZ_FAMILY;
+        turn.port = FZ_PORT;
+        turn.h2e = h2e;
+        memset(&want, 0, sizeof want);
+        fz_takes = 0;
+        for (positive steps = 0; fz_left && steps < 200; steps++)
+        {
+                p8 op = fz_byte() % 16;
+                p8 frame[400], body[300];
+                positive length = 0, whole, repeat = op == 15 ? 1 + fz_byte() % 70 : 1;
+                p16 status = h2e ? WIFI_SAE_H2E_STATUS : 0;
+
+                if (op == 15)
+                        op = fz_byte() % 15;
+                for (positive again = 0; again < repeat; again++)
+                {
+                        p8 *message = 0;
+                        bool auth = false;
+
+                        want.body_length = 0;
+                        switch (op)
+                        {
+                        case 0: /* the access point's commit, or one of another who knows the element */
+                        case 1:
+                        {
+                                positive which = op == 0 ? 0 : 1 + fz_byte() % (FZ_KNOWN - 1);
+
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                memcpy(body + 2, fz_known_scalar[which], 32);
+                                memcpy(body + 34, fz_known_element[which], 64);
+                                length = fz_auth(frame, fz_ap, 1, status, body, 98);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                auth = true;
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && !want.taken)
+                                {
+                                        want.taken = true;
+                                        want.taken_which = which;
+                                        if (which == 0)
+                                                fz_confirm_body(want.body, &want.body_length);
+                                        else
+                                        {
+                                                p8 counter[2] = {1, 0};
+
+                                                want.body[0] = 2, want.body[1] = 0, want.body[2] = 0;
+                                                want.body[3] = 0, want.body[4] = 1, want.body[5] = 0;
+                                                wifi_sae_confirm(fz_known_after[which].kck, counter,
+                                                                 fz_sta_sae.scalar, fz_sta_sae.element,
+                                                                 fz_known_scalar[which],
+                                                                 fz_known_element[which], want.body + 6);
+                                                want.body_length = 38;
+                                        }
+                                }
+                                break;
+                        }
+                        case 2: /* a commit to pass over: off the curve, out of range, our own, another group, the other method */
+                        {
+                                p8 how = fz_byte() % 7;
+                                p16 group = WIFI_SAE_GROUP;
+                                p16 sent = status;
+
+                                memcpy(body + 2, fz_known_scalar[0], 32);
+                                memcpy(body + 34, fz_known_element[0], 64);
+                                if (how == 0)
+                                        body[34 + 63] ^= 1;
+                                else if (how == 1)
+                                        memset(body + 2, 0, 32);
+                                else if (how == 2)
+                                        memset(body + 2, 0, 31), body[33] = 1;
+                                else if (how == 3)
+                                        memset(body + 2, 0xff, 32);
+                                else if (how == 4)
+                                {
+                                        memcpy(body + 2, fz_sta_sae.scalar, 32);
+                                        memcpy(body + 34, fz_sta_sae.element, 64);
+                                }
+                                else if (how == 5)
+                                        group = 20;
+                                else
+                                        sent = h2e ? 0 : WIFI_SAE_H2E_STATUS;
+                                body[0] = (p8)group, body[1] = 0;
+                                length = fz_auth(frame, fz_ap, 1, sent, body, 98);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && !want.taken && how == 6)
+                                        fz_end(&want, -111);
+                                break;
+                        }
+                        case 3: /* a token asked for: of every length, in its container or not */
+                        {
+                                positive token = fz_byte() % (WIFI_SAE_TOKEN_MOST + 2);
+                                bool boxed = fz_byte() & 1;
+                                positive at = 2;
+                                positive raw;
+                                bool reads;
+
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                if (boxed)
+                                {
+                                        body[at++] = 255;
+                                        body[at++] = (p8)(1 + token);
+                                        body[at++] = WIFI_SAE_TOKEN_EXTENSION;
+                                }
+                                for (positive one = 0; one < token; one++)
+                                        body[at++] = fz_byte();
+                                //      A bare token never begins like a container.
+                                if (!boxed && token)
+                                        body[2] &= 0x7f;
+                                raw = at - 2;
+                                length = fz_auth(frame, fz_ap, 1, WIFI_SAE_TOKEN_STATUS, body, at);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                //      Read only as the method has it: the
+                                //      container's contents, or the rest of the
+                                //      frame, of one byte to the most.
+                                reads = h2e ? boxed && token && token <= WIFI_SAE_TOKEN_MOST
+                                            : raw && raw <= WIFI_SAE_TOKEN_MOST;
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && reads)
+                                {
+                                        if (want.token_sent || want.taken)
+                                                fz_end(&want, -111);
+                                        else
+                                        {
+                                                want.token_sent = true;
+                                                want.body_length = wifi_sae_commit_body(
+                                                    &fz_sta_sae, body + (h2e ? 5 : 2), h2e ? token : raw,
+                                                    want.body, h2e);
+                                        }
+                                }
+                                break;
+                        }
+                        case 4: /* the access point's confirm, or one a bit off */
+                        case 5:
+                        {
+                                p8 counter[2] = {fz_byte(), fz_byte()};
+
+                                body[0] = counter[0], body[1] = counter[1];
+                                wifi_sae_confirm(fz_ap_sae.kck, counter, fz_ap_sae.scalar, fz_ap_sae.element,
+                                                 fz_sta_sae.scalar, fz_sta_sae.element, body + 2);
+                                if (op == 5)
+                                        body[2 + fz_byte() % 32] ^= (p8)(1 + fz_byte() % 255);
+                                length = fz_auth(frame, fz_ap, 2, 0, body, 34);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else if (!want.done && want.taken)
+                                        fz_end(&want, op == 4 && want.taken_which == 0 ? 0 : -13);
+                                break;
+                        }
+                        case 6: /* a refusal */
+                        {
+                                p16 transaction = 1 + (fz_byte() & 1);
+                                p16 refused = (p16)(1 + fz_byte());
+
+                                if (refused == WIFI_SAE_TOKEN_STATUS || refused == WIFI_SAE_H2E_STATUS)
+                                        refused = 1;
+                                length = fz_auth(frame, fz_ap, transaction, refused, body, 0);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else
+                                        fz_end(&want, want.taken ? -13 : -111);
+                                break;
+                        }
+                        case 7: /* the link sent away */
+                                message = fz_message(FZ_FAMILY, 0,
+                                                     fz_byte() & 1 ? NL80211_CMD_DEAUTHENTICATE
+                                                                   : NL80211_CMD_DISASSOCIATE,
+                                                     FZ_INDEX, false, 0, 0, &whole);
+                                fz_end(&want, want.taken ? -13 : -111);
+                                break;
+                        case 8: /* the kernel gave up */
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     true, 0, 0, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                else
+                                        fz_end(&want, -110);
+                                break;
+                        case 9: /* the access point's commit, from someone else */
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                memcpy(body + 2, fz_known_scalar[0], 32);
+                                memcpy(body + 34, fz_known_element[0], 64);
+                                length = fz_auth(frame, fz_stranger, 1, status, body, 98);
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, length, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                break;
+                        case 10: /* an error: ours, another's, or none */
+                        {
+                                p8 how = fz_byte() % 3;
+                                p8 error[36];
+                                b32 code = how == 2 ? 0 : -16;
+                                p32 head[4] = {36, 2, 0, how == 1 ? FZ_PORT + 1 : FZ_PORT};
+
+                                memset(error, 0, sizeof error);
+                                memcpy(error, head, 16);
+                                memcpy(error + 16, &code, 4);
+                                message = malloc(36);
+                                memcpy(message, error, 36);
+                                whole = 36;
+                                if (how == 0)
+                                        fz_end(&want, want.taken ? -13 : -111);
+                                break;
+                        }
+                        case 11: /* another family, another link, another command */
+                        {
+                                p8 how = fz_byte() % 3;
+
+                                message = fz_message(how == 0 ? FZ_FAMILY + 1 : FZ_FAMILY, 0,
+                                                     how == 2 ? NL80211_CMD_ASSOCIATE
+                                                              : NL80211_CMD_DEAUTHENTICATE,
+                                                     how == 1 ? FZ_INDEX + 1 : FZ_INDEX, false, 0, 0,
+                                                     &whole);
+                                break;
+                        }
+                        case 12: /* bytes of no shape as the frame */
+                        {
+                                positive size = fz_byte() % 200;
+
+                                for (positive one = 0; one < size; one++)
+                                        frame[one] = fz_byte();
+                                //      Not by chance one this reads.
+                                if (size >= 30)
+                                        frame[24] = 0;
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, size, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                break;
+                        }
+                        case 13: /* an authentication event with no frame */
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, 0, 0, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                break;
+                        default: /* the access point's commit cut, or with a byte after a confirm */
+                        {
+                                positive cut = fz_byte() % 128;
+
+                                body[0] = WIFI_SAE_GROUP, body[1] = 0;
+                                memcpy(body + 2, fz_known_scalar[0], 32);
+                                memcpy(body + 34, fz_known_element[0], 64);
+                                length = fz_auth(frame, fz_ap, 1, status, body, 98);
+                                if (cut >= length)
+                                        cut = length - 1;
+                                message = fz_message(FZ_FAMILY, 0, NL80211_CMD_AUTHENTICATE, FZ_INDEX,
+                                                     false, frame, cut, &whole);
+                                if (!want.done && ++want.frames > WIFI_SAE_FRAMES_MOST)
+                                        fz_end(&want, -111);
+                                //      Cut inside the header or the group it is
+                                //      nobody's; with the group whole it is a
+                                //      refusal or nothing, and never a commit.
+                                break;
+                        }
+                        }
+                        (void)auth;
+                        fz_step(&turn, &want, message, whole);
+                }
+        }
+}
+
+/*
+        The budget against a model of it: a schedule of exchanges asked for,
+        each an access point of eight and a time step, every one allowed
+        exactly when the access point has had fewer than WIFI_SAE_PEER_MOST
+        and all of them fewer than WIFI_SAE_ALL_MOST in the window before
+        it; and the file it keeps cut, padded, rotten and in the future.
+*/
+static void budget_model(void)
+{
+        p64 at[256];
+        p8 who[256];
+        positive count = 0;
+        p8 bssid[8][6];
+
+        fz_now_ms = 1000000;
+        fz_file_there = false;
+        fz_file_size = 0;
+        if (fz_byte() & 1)
+        {
+                //      A file somebody left: any bytes.
+                fz_file_size = fz_byte() % 400;
+                for (positive one = 0; one < fz_file_size; one++)
+                        fz_file[one] = fz_byte();
+                fz_file_there = true;
+                //      What the model cannot know of it, the budget may
+                //      count; only an empty start is held to the model.
+                for (positive one = 0; one < 4 && fz_left; one++)
+                {
+                        p8 address[6] = {2, 0, 0, 0, 7, (p8)one};
+
+                        (void)wifi_sae_budget(address);
+                }
+                return;
+        }
+        for (positive one = 0; one < 8; one++)
+        {
+                memset(bssid[one], 0, 6);
+                bssid[one][0] = 2, bssid[one][5] = (p8)one;
+        }
+        for (positive step = 0; fz_left && step < 256; step++)
+        {
+                p8 pick = fz_byte();
+                positive peer = 0, all = 0;
+                bool allowed;
+
+                fz_now_ms += (pick >> 3) * (pick & 0x80 ? 1000 : 50);
+                for (positive one = 0; one < count; one++)
+                        if (fz_now_ms - at[one] < WIFI_SAE_WINDOW_MS)
+                        {
+                                all++;
+                                peer += who[one] == (pick & 7);
+                        }
+                allowed = wifi_sae_budget(bssid[pick & 7]);
+                if (allowed != (peer < WIFI_SAE_PEER_MOST && all < WIFI_SAE_ALL_MOST))
+                {
+                        fprintf(stderr, "the budget allowed %d with %lu and %lu in the window\n",
+                                allowed, (unsigned long)peer, (unsigned long)all);
+                        abort();
+                }
+                if (allowed && count < 256)
+                {
+                        at[count] = fz_now_ms;
+                        who[count++] = pick & 7;
+                }
+        }
+}
+
+int LLVMFuzzerTestOneInput(const p8 *data, positive size)
+{
+        fz_prepare();
+        fz_at = data, fz_left = size;
+        if (fz_byte() & 1)
+                budget_model();
+        else
+                exchange_model();
+        return 0;
+}
+"""
+
+
+def radio_station_lift(host):
+    """What a lift of host.c's Wi-Fi state readers needs of the station's
+    channel: its questions' numbers and types as host.c has them, and the
+    station's end, which in a lift is never open (-1), so the asks below are
+    never made."""
+    return src_slice(host, "//      A socket of whole messages for the broker's channel",
+                     "//      The station's end of its broker's channel; -1 everywhere else.") + r"""
+static b32 radio_station = -1;
+static void radio_station_ask(radio_ask *ask, radio_answer *answer)
+{
+        (void)ask;
+        memset(answer, 0, sizeof(*answer));
+}
+static bipolar radio_station_number(p32 what, const p8 *ssid, positive ssid_length,
+                                const p8 *bssid, p8 mask, p8 rules)
+{
+        (void)what; (void)ssid; (void)ssid_length; (void)bssid; (void)mask; (void)rules;
+        return 0;
+}
+"""
+
+
+def wifi_sae_fuzz_source(net, host, checks):
+    """The SAE lift: net.c's hosted crypto, its netlink message readers,
+    host.c's nl80211 constants and finders and the SAE section from the
+    password element to the budget, with every commit taken counted."""
+    crypto = crypto_fuzz_source(net, checks, False)
+    if CRYPTO_FUZZ_DRIVER_C not in crypto:
+        raise ValueError("crypto_fuzz_source no longer ends in its driver")
+    crypto = crypto.replace(CRYPTO_FUZZ_DRIVER_C, "")
+    headers = src_slice(net, "#define NETLINK_HEADER 16", "#define RTM_NEWLINK 16")
+    header = src_slice(net, "//      Every field here is the machine's own byte order.",
+                            "//      ifinfomsg.")
+    attribute = src_slice(net, "//      rtattr", "/*\n        A message being built")
+    finding = src_slice(net, "typedef bool (address_to netlink_attribute_visitor)",
+                             "/* The fixed body a family puts after the header.")
+    status = src_slice(net, "static COLD bipolar netlink_status(",
+                            "/*\n        The messages of one datagram in turn")
+    constants = src_slice(host, "#define GENL_ID_CTRL 16", "typedef struct\n{\n        b32 handle;")
+    finds = src_slice(host, "static COLD p32 nl80211_find_u32(",
+                            "/* The command of a generic netlink message,")
+    command = src_slice(host, "/* The command of a generic netlink message,",
+                              "/* Whether a hardware address is one")
+    sae = src_slice(host, "/*\n        WPA3-Personal's SAE",
+                          "/*\n        One authentication frame of the exchange")
+    exchange = src_slice(host, "/*\n        One authentication frame of the exchange",
+                               "static COLD bipolar nl80211_authenticate(")
+    return "\n".join((crypto, "#include <ctype.h>", "#include <stddef.h>", WIFI_SAE_FUZZ_SHIM,
+                      headers, header, attribute, finding, status, constants, finds, command,
+                      radio_station_lift(host), sae, WIFI_SAE_FUZZ_DRIVER, exchange,
+                      WIFI_SAE_FUZZ_MODEL))
+
+
+def wifi_sae_fuzz_seeds():
+    """Exchanges in the driver's language: a method byte, then ops -- the
+    access point's commit (0) and confirm (4), others' commits (1), commits
+    to pass over (2), tokens (3), confirms a bit off (5), refusals (6), the
+    link sent away (7), the kernel's timeout (8), a stranger's commit (9),
+    errors (10), other messages (11), bytes (12), an empty event (13), cut
+    frames (14) and floods of any (15) -- and budget schedules (odd first
+    byte)."""
+    rng = random.Random(1916)
+
+    def draw(size):
+        return bytes(rng.getrandbits(8) for _ in range(size))
+
+    seeds = {"empty.bin": b""}
+    for method in (0, 1):
+        tag = "h2e" if method else "hunt"
+        base = bytes((0, method))
+        seeds["%s_joins.bin" % tag] = base + bytes((0, 4, 1, 0))
+        seeds["%s_token.bin" % tag] = base + bytes((3, 32, method)) + draw(32) + bytes((0, 4, 1, 0))
+        seeds["%s_token_twice.bin" % tag] = (base + bytes((3, 16, method)) + draw(16) +
+                                             bytes((3, 16, method)) + draw(16))
+        seeds["%s_token_sizes.bin" % tag] = (base + bytes((3, 0, method, 3, 64, method)) + draw(64) +
+                                             bytes((3, 65, method)) + draw(65) +
+                                             bytes((3, 62, 1 - method)) + draw(62))
+        seeds["%s_forged_first.bin" % tag] = base + bytes((1, 0, 0, 4, 1, 0))
+        seeds["%s_pass_over.bin" % tag] = (base + b"".join(bytes((2, how)) for how in range(6)) +
+                                           bytes((0, 4, 1, 0)))
+        seeds["%s_other_method.bin" % tag] = base + bytes((2, 6, 0))
+        seeds["%s_confirm_first.bin" % tag] = base + bytes((4, 1, 0, 0, 5, 1, 0, 3, 4))
+        seeds["%s_flood.bin" % tag] = base + bytes((15, 69, 1, 2, 15, 69, 12, 40)) + draw(40)
+        seeds["%s_refused.bin" % tag] = base + bytes((6, 0, 76, 0, 6, 1, 1))
+        seeds["%s_ends.bin" % tag] = base + bytes((9, 10, 1, 10, 2, 11, 0, 11, 1, 11, 2, 13,
+                                                   14, 40, 7, 0, 8))
+        seeds["%s_error.bin" % tag] = base + bytes((0, 10, 0))
+    seeds["budget_one_peer.bin"] = b"\x01\x00" + bytes((0x08,)) * 10
+    seeds["budget_many.bin"] = b"\x01\x00" + bytes(((at % 8) | 0x08) for at in range(40))
+    seeds["budget_window.bin"] = b"\x01\x00" + bytes((0x08,)) * 7 + bytes((0xff,)) * 4 + bytes((0x08,)) * 4
+    seeds["budget_rotten.bin"] = b"\x01\x01\x40" + draw(64)
+    return seeds
+
+
+def harness_wifi_sae_fuzz(argv):
+    """libFuzzer over host.c's SAE exchange as the access point's frames move
+    it: wifi_sae_news and the frame reader under it, with the commit and
+    confirm computations and the budget, lifted by their anchors over net.c's
+    hosted crypto and its netlink readers. The input is an exchange -- the
+    method, then the access point's commit and confirm, commits of others who
+    know the password element, commits to pass over (off the curve, out of
+    range, a reflection, another group or method), tokens of every length in
+    and out of their container, refusals, the link sent away, timeouts,
+    netlink errors, strangers, other messages, shapeless bytes, cut frames,
+    floods of any -- or a schedule for the budget. Each message is a heap
+    block exactly its size. Held: at most one commit is taken in (the two
+    multiplications), at most WIFI_SAE_FRAMES_MOST events are read, one
+    token round, the first confirm decides, nothing moves an exchange that
+    ended, every frame to send is the one the model builds, a result of 0
+    is the access point's own commit and confirm and its PMK; and the
+    budget allows an exchange exactly when the access point has had fewer
+    than WIFI_SAE_PEER_MOST and all fewer than WIFI_SAE_ALL_MOST in the
+    window, and survives any file left at its name. The two sides are made
+    once and must agree. Bounded fixed-seed; 2 when clang/libFuzzer is
+    absent.
+
+        python3 test/differential.py --harness wifi_sae_fuzz
+    """
+    del argv
+    try:
+        source = wifi_sae_fuzz_source((HARNESS_ROOT / "src/net/net.c").read_text(),
+                                      (HARNESS_ROOT / "src/sh/host.c").read_text(),
+                                      (HARNESS_ROOT / "test/checks.c").read_text())
+    except (ValueError, RuntimeError) as exc:
+        print("  FAIL wifi sae fuzz: " + str(exc))
+        write_tally("wifi-sae-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("wifi sae", wifi_sae_fuzz_seeds(), source, 4096)
 
 
 def wifi_scan_fuzz_seeds():
@@ -68946,6 +77882,26 @@ def wifi_scan_fuzz_seeds():
     seeds["visit_wiphy_bit.bin"] = visitor(
         2, attribute(1, u32(1)), attribute(217, b"\x00\x80"))
     seeds["visit_disassoc_zero.bin"] = visitor(6, attribute(3, u32(3)), attribute(51, bytes(26)))
+    # What a join is told: PSK-SHA256, SAE and both, with and without
+    # protection, an RSN extension element that says hash-to-element or does
+    # not, and a probe response that takes protection away beside a beacon
+    # that offers it.
+    rsnx = element(244, b"\x20")
+    seeds["ies_sha256_pmf.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(6, caps=0x00c0))
+    seeds["ies_sae_h2e.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(8, caps=0x00c0)) + rsnx
+    seeds["ies_sae_no_h2e.bin"] = (b"\x01\x00\x00\x00" + ssid + element(48, rsn(8, caps=0x00c0)) +
+                                   element(244, b"\x01"))
+    seeds["ies_h2e_before_rsn.bin"] = b"\x01\x00\x00\x00" + ssid + rsnx + element(48, rsn(2, 8, caps=0x0080))
+    seeds["ies_empty_rsnx.bin"] = b"\x01\x00\x00\x00" + ssid + element(48, rsn(8)) + element(244, b"")
+    seeds["ies_stripped_response.bin"] = b"\x01\x0c\x00\x00" + ssid + element(48, rsn(2, 8, caps=0x0080)) + rsnx
+    seeds["rsn_sae_ext.bin"] = b"\x03" + rsn(24, caps=0x00c0)
+    seeds["rsn_vendor.bin"] = b"\x03" + b"\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x50\x6f\x01"
+    seeds["rsn_gcmp_group.bin"] = b"\x03" + rsn(2, group=b"\x00\x0f\xac\x08", caps=0x0080)
+    # Mode 7: twins that offer no protection of a network that taught the
+    # join it has it.
+    seeds["downgrade_twins.bin"] = b"\x07" + bytes((9, 0)) + bytes(rng.getrandbits(8) for _ in range(12))
+    seeds["downgrade_given_up.bin"] = b"\x07" + bytes((62, 5)) + bytes(rng.getrandbits(8) for _ in range(64))
+    seeds["downgrade_untaught.bin"] = b"\x07" + bytes((5, 2)) + bytes(6)
     seeds["pick_five_quick.bin"] = b"\x05" + bytes((4, 0)) + bytes((10, 0)) * 5
     seeds["pick_four_slow.bin"] = b"\x05" + bytes((3, 6)) + bytes((10, 19)) * 4
     seeds["pick_given_up.bin"] = b"\x05" + bytes((2, 1)) + bytes((20, 3, 69, 0, 5, 39))
@@ -68955,6 +77911,13 @@ def wifi_scan_fuzz_seeds():
 
 WIFI_SCAN_FUZZ_PRELUDE = r"""
 #define RADIO_SSID_MOST 32
+#ifndef STRICT_TIGHT
+#define STRICT_SAFE 1
+#define STRICT_TIGHT 2
+#endif
+#ifndef MOONWATER_STRICT_NET
+#define MOONWATER_STRICT_NET STRICT_SAFE
+#endif
 typedef struct
 {
         b32 handle;
@@ -68971,6 +77934,7 @@ typedef struct
 WIFI_PICK_FUZZ_PRELUDE = r"""
 #define NET_STATE_DIR "/run/moonwater"
 #define HOST_CLOCK_BOOTTIME 7
+static bool radio_pick_given_up;
 #ifndef AT_FDCWD
 #define AT_FDCWD (-100)
 #endif
@@ -69024,56 +77988,80 @@ static bool radio_air_scan(nl80211 *session, p32 index, p8 *ssid, positive ssid_
 """
 
 WIFI_SCAN_FUZZ_DRIVER = r"""
+/* A cipher suite counted the long way. */
+static p8 cipher_model(const p8 *suite)
+{
+        if (suite[0] != 0x00 || suite[1] != 0x0f || suite[2] != 0xac)
+                return WIFI_CIPHER_OTHER;
+        return suite[3] == 4 ? WIFI_CIPHER_CCMP : suite[3] == 2 ? WIFI_CIPHER_TKIP : WIFI_CIPHER_OTHER;
+}
+
 /* The parser as it stood before it read through byte_reader, kept as the
    model: an RSN element's group cipher, pairwise ciphers, key management
-   and capabilities, counted the long way. */
-static p8 rsn_model(const p8 *element, positive length)
+   and capabilities, counted the long way, and what it offers a join. What
+   is cut short is WPA2 as the join always asked it, CCMP and PSK. */
+static p8 rsn_model(const p8 *element, positive length, wifi_rsn_caps *caps)
 {
         positive at = 2 + 4;
         positive count;
-        bool ccmp = false, psk = false, other = false, sae = false, eap = false, owe = false;
-        bool group_ccmp;
+        bool psk = false, sae = false, ft = false, eap = false, owe = false;
         positive which;
         unsigned capabilities = 0;
 
+        memset(caps, 0, sizeof *caps);
+        caps->group = WIFI_CIPHER_CCMP;
+        caps->pairwise = WIFI_CIPHER_CCMP;
+        caps->akms = WIFI_AKM_PSK;
         if (length < at + 2)
                 return RADIO_WPA2;
-        group_ccmp = element[2] == 0x00 && element[3] == 0x0f && element[4] == 0xac &&
-                     element[5] == 4;
         count = element[at] | (element[at + 1] << 8);
         at += 2;
         if (length < at + 4 * count + 2)
                 return RADIO_WPA2;
+        caps->group = cipher_model(element + 2);
+        caps->pairwise = 0;
+        caps->akms = 0;
         for (which = 0; which < count; which++, at += 4)
-                if (element[at] == 0x00 && element[at + 1] == 0x0f && element[at + 2] == 0xac &&
-                    element[at + 3] == 4)
-                        ccmp = true;
+                caps->pairwise |= cipher_model(element + at);
         count = element[at] | (element[at + 1] << 8);
         at += 2;
         for (which = 0; which < count && at + 4 <= length; which++, at += 4)
         {
                 p8 suite = element[at + 3];
                 if (element[at] != 0x00 || element[at + 1] != 0x0f || element[at + 2] != 0xac)
-                        continue;
-                if (suite == 2)
-                        psk = true;
-                else if (suite == 4 || suite == 6)
-                        other = true;
-                else if (suite == 8 || suite == 9 || suite == 24 || suite == 25)
-                        sae = true;
-                else if (suite == 18)
-                        owe = true;
+                        caps->akms |= WIFI_AKM_OTHER;
+                else if (suite == 2)
+                        psk = true, caps->akms |= WIFI_AKM_PSK;
+                else if (suite == 6)
+                        psk = true, caps->akms |= WIFI_AKM_PSK_SHA256;
+                else if (suite == 8)
+                        sae = true, caps->akms |= WIFI_AKM_SAE;
                 else
-                        eap = true;
+                {
+                        caps->akms |= WIFI_AKM_OTHER;
+                        if (suite == 4 || suite == 9 || suite == 24 || suite == 25)
+                                ft = true;
+                        else if (suite == 18)
+                                owe = true;
+                        else
+                                eap = true;
+                }
         }
         if (which == count && at + 2 <= length)
                 capabilities = element[at] | (element[at + 1] << 8);
-        if (!psk && !other)
-                return sae ? RADIO_WPA3 : owe ? RADIO_OWE : eap ? RADIO_EAP : RADIO_WPA2;
-        if (!psk)
-                return sae ? RADIO_WPA3 : RADIO_FT256;
-        if (!group_ccmp || !ccmp)
+        caps->pmf = (p8)((capabilities & 0x80 ? WIFI_PMF_CAPABLE : 0) |
+                         (capabilities & 0x40 ? WIFI_PMF_REQUIRED : 0));
+        if (!psk && !sae && (ft || owe || eap))
+                return ft ? RADIO_FT : owe ? RADIO_OWE : RADIO_EAP;
+        if (!psk && !sae)
+        {
+                caps->akms |= WIFI_AKM_PSK;
+                psk = true;
+        }
+        if (caps->group != WIFI_CIPHER_CCMP || !(caps->pairwise & WIFI_CIPHER_CCMP))
                 return RADIO_TKIP;
+        if (!psk)
+                return RADIO_WPA3;
         if (capabilities & 0x40)
                 return RADIO_PMF;
         return sae ? RADIO_WPA23 : RADIO_WPA2;
@@ -69082,13 +78070,21 @@ static p8 rsn_model(const p8 *element, positive length)
 /* What a beacon's elements say, counted the long way: the first name element
    (the one the kernel joins by: a later one is not this access point's name,
    and one over 32 bytes or empty leaves it with none), the first RSN element, a WPA vendor
-   element, and what the capability bit says when there is neither. */
+   element, and what the capability bit says when there is neither; what the
+   RSN element offers, with hash-to-element from the first RSN extension
+   element; and the two elements whole, as message 3 is held to them. */
 static void elements_model(const p8 *ies, positive size, p16 capability,
-                           p8 *ssid, p8 *ssid_length, p8 *security)
+                           p8 *ssid, p8 *ssid_length, p8 *security, wifi_rsn_caps *caps,
+                           const p8 **rsn_at, positive *rsn_length,
+                           const p8 **rsnx_at, positive *rsnx_length)
 {
-        bool rsn = false, wpa = false, named = false;
+        bool rsn = false, wpa = false, named = false, extension = false;
+        p8 h2e = 0;
         *ssid_length = 0;
         *security = RADIO_OPEN;
+        memset(caps, 0, sizeof *caps);
+        *rsn_at = *rsnx_at = 0;
+        *rsn_length = *rsnx_length = 0;
         for (positive at = 0; at + 2 <= size;)
         {
                 p8 id = ies[at];
@@ -69108,14 +78104,25 @@ static void elements_model(const p8 *ies, positive size, p16 capability,
                 else if (id == 48 && !rsn)
                 {
                         rsn = true;
-                        *security = rsn_model(data, span);
+                        *security = rsn_model(data, span, caps);
+                        *rsn_at = ies + at;
+                        *rsn_length = 2 + span;
+                }
+                else if (id == 244 && !extension)
+                {
+                        extension = true;
+                        h2e = span && (data[0] & 0x20) ? 1 : 0;
+                        *rsnx_at = ies + at;
+                        *rsnx_length = 2 + span;
                 }
                 else if (id == 221 && span >= 4 && data[0] == 0x00 && data[1] == 0x50 &&
                          data[2] == 0xf2 && data[3] == 1)
                         wpa = true;
                 at += 2 + span;
         }
-        if (!rsn)
+        if (rsn)
+                caps->h2e = h2e;
+        else
                 *security = wpa ? RADIO_WPA : (capability & 0x10) ? RADIO_WEP : RADIO_OPEN;
 }
 
@@ -69150,9 +78157,10 @@ static void check_one(netlink_header *header)
         radio_heard one;
         radio_air air;
 
-        if (radio_bss_read(header, &one) &&
-            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_FT256 ||
-             one.beacon_security > RADIO_FT256))
+        if (radio_bss_read(header, &one, NULL) &&
+            (one.ssid_length > RADIO_SSID_MOST || one.security > RADIO_FT ||
+             one.beacon_security > RADIO_FT || one.caps.h2e > 1 || one.caps.pmf > 3 ||
+             one.caps.akms > 15 || one.caps.group > 7 || one.caps.pairwise > 7))
         {
                 fprintf(stderr, "a scan row out of range\n");
                 abort();
@@ -69302,20 +78310,23 @@ typedef struct
         b32 mbm;
         p32 fail_ms;
         p32 frequency;
+        p8 protection;
 } air_station;
 static air_station air_world[AIR_TWINS + 1];
 static positive air_world_count;
+static wifi_rsn_caps air_caps;
+static wifi_seen air_seen;
 
 static void radio_air_dump(nl80211 *session, p32 index, netlink_visitor visit,
                            address_any context)
 {
-        static const p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
-                                 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
-                                 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
-
         (void)session, (void)index;
         for (positive at = 0; at < air_world_count; at++)
         {
+                //      WPA2, with the capabilities each station has.
+                p8 ies[] = {0, 9, 'm', 'o', 'o', 'n', 'w', 'a', 't', 'e', 'r',
+                            48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
+                            1, 0, 0, 0x0f, 0xac, 2, air_world[at].protection, 0};
                 p8 nest[160], body[200], *stop, *message;
                 p8 *put = nest;
                 p32 seen = 100;
@@ -69369,7 +78380,7 @@ static void pick_model(const p8 *data, positive size)
                 air_station *one = null;
 
                 if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency,
-                                     true) != 1)
+                                     true, 0, false, &air_caps, &air_seen) != 1)
                         abort();
                 for (positive at = 0; at <= twins && !one; at++)
                         if (!memcmp(air_world[at].bssid, chosen, 6))
@@ -69388,6 +78399,56 @@ static void pick_model(const p8 *data, positive size)
                 air_now_ms += one->fail_ms;
                 radio_avoid_add(chosen);
                 air_now_ms += 1000;
+        }
+}
+
+/* Mode 7: twins that offer less than the network has taught the join. The
+   real access point offers protection, and a saved network that once saw
+   it offered (WIFI_RULE_PMF) has up to sixty-three twins by its name that
+   do not, louder or quieter, the real one given up on or not: the join
+   chooses the real one first, and is told what it offers and showed. With
+   no such rule, it chooses among them all by signal, as before. */
+static void downgrade_model(const p8 *data, positive size)
+{
+        positive twins = size ? 1 + data[0] % AIR_TWINS : 1;
+        bool given_up = size > 1 && (data[1] & 1);
+        bool taught = !(size > 1 && (data[1] & 2));
+        positive turn = size > 1 ? data[1] >> 2 : 0;
+        nl80211 session = {0};
+        p8 chosen[6];
+        p32 frequency = 0;
+        air_station *real = 0;
+
+        air_now_ms = 0;
+        air_avoid_there = false;
+        air_avoid_size = 0;
+        air_world_count = twins + 1;
+        for (positive at = 0; at <= twins; at++)
+        {
+                air_station *one = air_world + (at + turn) % (twins + 1);
+                positive from = 2 + at;
+
+                memset(one, 0, sizeof *one);
+                one->bssid[0] = 2;
+                one->bssid[4] = 0x5b;
+                one->bssid[5] = (p8)at;
+                one->frequency = 2412 + 5 * (p32)(at % 13);
+                one->mbm = !at ? -7000 : -100 * (b32)(from < size ? data[from] % 70 : 30);
+                one->protection = !at ? 0x80 : 0;
+                if (!at)
+                        real = one;
+        }
+        if (given_up)
+                radio_avoid_add(real->bssid);
+        if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency, true,
+                             taught ? WIFI_RULE_PMF : 0, false, &air_caps, &air_seen) != 1)
+                abort();
+        if (taught && (memcmp(chosen, real->bssid, 6) || !(air_caps.pmf & WIFI_PMF_CAPABLE) ||
+                       air_caps.akms != WIFI_AKM_PSK || air_seen.rsn_length[0] != 22 ||
+                       air_seen.rsn[0][0] != 48 || air_seen.rsn[0][20] != 0x80))
+        {
+                fprintf(stderr, "a twin that offers no protection was chosen over the real one\n");
+                abort();
         }
 }
 
@@ -69416,7 +78477,8 @@ static void gate_model(void)
                 air_scans = 0;
                 air_scan_age_ms = cases[at].age;
                 answer = radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen,
-                                          &frequency, cases[at].force);
+                                          &frequency, cases[at].force, 0, false, &air_caps,
+                                          &air_seen);
                 //      Nothing was in the air before or after: not in range.
                 //      Declined to scan, and told so: not a failure of its own.
                 if (answer != 0 || (air_scans != 0) != cases[at].scanned ||
@@ -69446,7 +78508,8 @@ static void gate_model(void)
                 p32 frequency = 0;
 
                 if (radio_bss_choose(&session, 7, (p8 *)"moonwater", 9, true, chosen, &frequency,
-                                     false) != 1 || air_scans != 1)
+                                     false, 0, false, &air_caps, &air_seen) != 1 ||
+                    air_scans != 1)
                 {
                         fprintf(stderr, "a given-up access point in the cache is not doubted\n");
                         abort();
@@ -69597,9 +78660,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         gate_model();
         if (!size)
                 return 0;
-        mode = data[0] % 7;
+        mode = data[0] % 8;
         data++;
         size--;
+        if (mode == 7)
+        {
+                downgrade_model(data, size);
+                return 0;
+        }
         if (mode == 6)
         {
                 visitors_model(data, size);
@@ -69619,10 +78687,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         {
                 /* An RSN element alone, against the model. */
                 p8 *copy = malloc(size ? size : 1);
+                wifi_rsn_caps got, want;
+
                 memcpy(copy, data, size);
-                if (radio_rsn_security(copy, size) != rsn_model(copy, size))
+                if (radio_rsn_security(copy, size, &got) != rsn_model(copy, size, &want))
                 {
                         fprintf(stderr, "radio_rsn_security disagrees with the model\n");
+                        abort();
+                }
+                if (memcmp(&got, &want, sizeof got))
+                {
+                        fprintf(stderr, "the RSN element's offer disagrees with the model\n");
                         abort();
                 }
                 free(copy);
@@ -69645,7 +78720,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 positive ies_size = size;
                 p16 capability = 0;
                 p8 key = 0, sstr[RADIO_SSID_MOST + 1], sl = 0, sec = 0;
-                static const p8 forged[] = {0, 1, 'x'};
+                static const p8 bare[] = {0, 1, 'x'};
+                //      And one with an RSN element that offers no protection,
+                //      which is what a downgrade needs the join to read.
+                static const p8 stripped[] = {0, 1, 'x', 48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0,
+                                              0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 2, 0, 0};
+                const p8 *forged = bare;
+                positive forged_size = sizeof bare;
 
                 if (mode == 0)
                 {
@@ -69671,11 +78752,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         if (key & 4)
                         {
                                 /* A probe response in the real access point's
-                                   name with no RSN element, as the latest
-                                   frame, and the real beacon's elements
-                                   beside it. */
+                                   name with no RSN element, or with one that
+                                   offers no protection, as the latest frame,
+                                   and the real beacon's elements beside it. */
+                                if (key & 8)
+                                        forged = stripped, forged_size = sizeof stripped;
                                 at = put_attribute(at, NL80211_BSS_INFORMATION_ELEMENTS,
-                                                   forged, sizeof forged);
+                                                   forged, forged_size);
                                 at = put_attribute(at, NL80211_BSS_BEACON_IES, ies, ies_size);
                         }
                         else
@@ -69689,33 +78772,67 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                         p8 *stop = put_attribute(body, NL80211_ATTR_BSS | 0x8000, nest, nest_size);
                         netlink_header *header;
                         radio_heard one;
+                        wifi_seen seen;
 
                         message = wrap_message(body, (positive)(stop - body), &whole, 34);
                         header = (netlink_header *)message;
                         check_one(header);
-                        if (mode == 1 && radio_bss_read(header, &one))
+                        if (mode == 1 && radio_bss_read(header, &one, &seen))
                         {
-                                elements_model(ies, ies_size, capability, sstr, &sl, &sec);
+                                wifi_rsn_caps caps;
+                                const p8 *rsn_at, *rsnx_at;
+                                positive rsn_length, rsnx_length;
+
+                                elements_model(ies, ies_size, capability, sstr, &sl, &sec, &caps,
+                                               &rsn_at, &rsn_length, &rsnx_at, &rsnx_length);
                                 if (key & 4)
                                 {
                                         /* The latest frame says what it says, and
                                            the beacon's own elements are kept
                                            apart: what the real access point
-                                           asks of a station is still there. */
-                                        p8 bare_ssid[RADIO_SSID_MOST + 1], bare_length = 0, bare = 0;
+                                           asks of a station is still there, and
+                                           what either offers is what the join
+                                           is told. */
+                                        p8 bare_ssid[RADIO_SSID_MOST + 1], bare_length = 0, bare_class = 0;
+                                        wifi_rsn_caps forged_caps;
+                                        const p8 *forged_rsn, *forged_rsnx;
+                                        positive forged_rsn_length, forged_rsnx_length;
 
-                                        elements_model(forged, sizeof forged, capability,
-                                                       bare_ssid, &bare_length, &bare);
-                                        if (one.ssid_length != bare_length || one.security != bare ||
-                                            one.beacon_security != sec)
+                                        elements_model(forged, forged_size, capability, bare_ssid,
+                                                       &bare_length, &bare_class, &forged_caps,
+                                                       &forged_rsn, &forged_rsn_length, &forged_rsnx,
+                                                       &forged_rsnx_length);
+                                        caps.akms |= forged_caps.akms;
+                                        caps.pmf |= forged_caps.pmf;
+                                        caps.group |= forged_caps.group;
+                                        caps.pairwise |= forged_caps.pairwise;
+                                        caps.h2e |= forged_caps.h2e;
+                                        if (one.ssid_length != bare_length || one.security != bare_class ||
+                                            one.beacon_security != sec || memcmp(&one.caps, &caps, sizeof caps))
                                         {
                                                 fprintf(stderr, "a beacon's elements were not kept apart\n");
+                                                abort();
+                                        }
+                                        if (seen.rsn_length[0] != forged_rsn_length ||
+                                            (forged_rsn_length && memcmp(seen.rsn[0], forged_rsn, forged_rsn_length)) ||
+                                            seen.rsn_length[1] != rsn_length ||
+                                            (rsn_length && memcmp(seen.rsn[1], rsn_at, rsn_length)) ||
+                                            seen.rsnx_length[1] != rsnx_length ||
+                                            (rsnx_length && memcmp(seen.rsnx[1], rsnx_at, rsnx_length)))
+                                        {
+                                                fprintf(stderr, "the elements seen are not the two frames'\n");
                                                 abort();
                                         }
                                 }
                                 else if (one.ssid_length != sl || memcmp(one.ssid, sstr, sl) ||
                                          one.security != sec || one.beacon_security != sec ||
-                                         one.frequency != 2412 || one.seen != 9)
+                                         one.frequency != 2412 || one.seen != 9 ||
+                                         memcmp(&one.caps, &caps, sizeof caps) ||
+                                         seen.rsn_length[0] != rsn_length ||
+                                         (rsn_length && memcmp(seen.rsn[0], rsn_at, rsn_length)) ||
+                                         seen.rsnx_length[0] != rsnx_length ||
+                                         (rsnx_length && memcmp(seen.rsnx[0], rsnx_at, rsnx_length)) ||
+                                         seen.rsn_length[1] || seen.rsnx_length[1])
                                 {
                                         fprintf(stderr, "a scan row is not what its elements say\n");
                                         abort();
@@ -69792,17 +78909,218 @@ def harness_wifi_scan_fuzz(argv):
                                    "/* Whether the station the machine is associated through is authorized")
         pick = src_slice(host, "/*\n        The access points given up on",
                                    "static radio_heard address_to radio_air_find(")
+        caps = src_slice(host, "/*\n        What an access point's RSN element offers",
+                               "/* The RSN element a station offers")
+        seen = src_slice(host, "#define WIFI_ELEMENT_ROOM",
+                               "/* Whether an element of message 3 is one of the two seen")
+        station = radio_station_lift(host)
     except ValueError as error:
         print("  FAIL wifi scan fuzz lift: " + str(error))
         write_tally("wifi-scan-fuzz", 0, 1)
         return 1
     return tls_fuzz_run("wifi scan", wifi_scan_fuzz_seeds(),
                         NET_ZONE_FUZZ_SHIM + byte_reader_source() + wait + netlink +
-                        WIFI_SCAN_FUZZ_PRELUDE + constants + records + family_info + finds +
-                        command + news + groups + iface_seen + wiphy_seen + station_seen +
-                        link_news + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
+                        WIFI_SCAN_FUZZ_PRELUDE + station + caps + seen + constants + records +
+                        family_info + finds + command + news + groups + iface_seen + wiphy_seen +
+                        station_seen + link_news + scan + WIFI_PICK_FUZZ_PRELUDE + pick +
                         WIFI_SCAN_FUZZ_DRIVER, 4096)
 
+
+
+NTS_FUZZ_PRELUDE = r"""
+#define NTS_FUZZ_SHIM 1
+#define byte_is_alnum(b) (((b) >= '0' && (b) <= '9') || ((b) >= 'a' && (b) <= 'z') || \
+                          ((b) >= 'A' && (b) <= 'Z'))
+static fn crypto_forget(address_any at, positive length)
+{
+        memset(at, 0, length);
+        __asm__ __volatile__("" : : "r"(at) : "memory");
+}
+/* The cipher is not what this target is about: a tag opens when its first
+   byte is odd, so that the reply's decrypted fields are reached, and the
+   plaintext is the ciphertext with one byte changed so that the lift cannot
+   pass the input through unread. */
+typedef struct { p8 key[32]; } crypto_siv_key;
+static fn crypto_siv_prepare(crypto_siv_key *key, const p8 *raw)
+{
+        memcpy(key->key, raw, 32);
+}
+static fn crypto_siv_seal(const crypto_siv_key *key, const p8 **parts,
+                          const positive *lengths, positive count, p8 *text,
+                          positive length, p8 *tag)
+{
+        for (positive at = 0; at < count; at++)
+                if (lengths[at] && !parts[at])
+                        abort();
+        (void)key;
+        (void)text;
+        (void)length;
+        memset(tag, 0xa5, 16);
+}
+static bool crypto_siv_open(const crypto_siv_key *key, const p8 **parts,
+                            const positive *lengths, positive count, p8 *text,
+                            positive length, const p8 *tag)
+{
+        (void)key;
+        for (positive at = 0; at < count; at++)
+                if (lengths[at] && !parts[at])
+                        abort();
+        if (!(tag[0] & 1))
+                return false;
+        (void)text[length ? length - 1 : 0];
+        return true;
+}
+"""
+
+NTS_FUZZ_DRIVER = r"""
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        static nts_state state;
+        static nts_exchange exchange;
+        p8 *bytes;
+        p8 mode = size ? data[0] : 0;
+
+        if (!size)
+                return 0;
+        size--;
+        data++;
+        /* Exactly the input's size, so ASan sees every byte past it. */
+        bytes = malloc(size ? size : 1);
+        memcpy(bytes, data, size);
+        memset(&state, 0, sizeof state);
+        if (mode % 3 == 0)
+        {
+                bipolar verdict = nts_ke_reply(bytes, size, &state);
+
+                (void)nts_ke_complete(bytes, size);
+                if (verdict == NTS_KE_OK)
+                {
+                        if (!state.count || state.count > NTS_COOKIES || !state.port ||
+                            (state.server[0] &&
+                             !nts_name_ok(state.server, strlen((char *)state.server))))
+                                abort();
+                        for (positive at = 0; at < state.count; at++)
+                                if (!state.length[at] || state.length[at] > NTS_COOKIE_MAX)
+                                        abort();
+                        if (!nts_ke_complete(bytes, size))
+                                abort();
+                }
+        }
+        else if (mode % 3 == 1)
+        {
+                static p8 key[32];
+
+                memset(&exchange, 0, sizeof exchange);
+                exchange.state = &state;
+                crypto_siv_prepare(&exchange.s2c, key);
+                if (size >= 48 + 36)
+                        memcpy(exchange.uid, bytes + 48 + 4, 32);
+                if (nts_reply(&exchange, bytes, size) == NTS_REPLY_OK &&
+                    state.count > NTS_COOKIES)
+                        abort();
+                for (positive at = 0; at < state.count; at++)
+                        if (!state.length[at] || state.length[at] > NTS_COOKIE_MAX)
+                                abort();
+        }
+        else
+        {
+                static p8 packet[NTS_PACKET_ROOM];
+                positive room = NTS_HEADER + (size > 600 ? 600 : size);
+                positive length;
+
+                memset(&exchange, 0, sizeof exchange);
+                exchange.state = &state;
+                state.count = 1 + (mode >> 2) % NTS_COOKIES;
+                for (positive at = 0; at < state.count; at++)
+                {
+                        state.length[at] = (p16)(1 + (size + at * 37) % NTS_COOKIE_MAX);
+                        memset(state.cookie[at], 0x11 + (int)at, state.length[at]);
+                }
+                memset(packet, 0, sizeof packet);
+                length = nts_request(&exchange, packet, room);
+                if (length > room || (length && (length - NTS_HEADER) % 4))
+                        abort();
+        }
+        free(bytes);
+        return 0;
+}
+"""
+
+
+def nts_fuzz_seeds():
+    """Name to bytes for the nts corpus: a mode byte (0 the key-establishment
+    reply's parser, 1 an NTP reply's extension fields, 2 a request built over
+    cookies of the input's shape) and the input. Replies are the good one,
+    every record of it cut off and doubled, and NTP replies whose
+    authenticator tag opens (an odd first byte) with cookies, with none, with
+    a field of the wrong size and with bytes after it."""
+    def record(kind, body):
+        return struct.pack(">HH", kind, len(body)) + body
+
+    good = (record(0x8001, b"\0\0") + record(0x8004, b"\0\x0f") + record(0x8006, b"time.example") +
+            record(0x8007, b"\x10\x1b") + record(5, b"A" * 100) * 8 + record(0x8000, b""))
+    seeds = {"ke_good.bin": b"\0" + good, "ke_empty.bin": b"\0",
+             "ke_error.bin": b"\0" + record(0x8002, b"\0\0") + record(0x8000, b""),
+             "ke_warning.bin": b"\0" + record(3, b"\0\1") + record(0x8000, b""),
+             "ke_long_cookie.bin": b"\0" + record(0x8001, b"\0\0") + record(0x8004, b"\0\x0f") +
+                                   record(5, b"B" * 300) + record(0x8000, b""),
+             "ke_trailing.bin": b"\0" + good + b"\0"}
+    for cut in (1, 5, 9, 20, 60):
+        seeds["ke_cut_%d.bin" % cut] = b"\0" + good[:cut]
+
+    def ef(kind, body):
+        body = body + b"\0" * (-len(body) % 4)
+        return struct.pack(">HH", kind, len(body) + 4) + body
+
+    uid = bytes(range(32))
+    header = bytes([0x24, 2]) + bytes(46)
+
+    def reply(inner, tag=b"\xa5" * 16, extras=b""):
+        sealed = tag + inner
+        return (header + ef(0x0104, uid) + extras +
+                ef(0x0404, struct.pack(">HH", 16, len(sealed)) + b"N" * 16 + sealed))
+
+    cookies = b"".join(ef(0x0204, b"C" * 100) for _ in range(3))
+    seeds["reply_cookies.bin"] = b"\1" + reply(cookies)
+    seeds["reply_none.bin"] = b"\1" + reply(b"")
+    seeds["reply_bad_tag.bin"] = b"\1" + reply(cookies, tag=b"\xa4" * 16)
+    seeds["reply_short_inner.bin"] = b"\1" + reply(b"\0\0\0")
+    seeds["reply_extra_field.bin"] = b"\1" + reply(cookies, extras=ef(0x0304, bytes(100)))
+    seeds["reply_trailing.bin"] = b"\1" + reply(cookies) + bytes(4)
+    seeds["reply_plain.bin"] = b"\1" + header
+    seeds["request_a.bin"] = b"\2" + bytes(40)
+    seeds["request_b.bin"] = b"\x1e" + bytes(400)
+    return seeds
+
+
+def harness_nts_fuzz(argv):
+    """Coverage-guided libFuzzer over the NTS wire code in src/net/net.c:
+    nts_ke_reply and nts_ke_complete (the key-establishment reply, bytes from
+    whoever answers on port 4460), nts_reply (an NTP reply's extension
+    fields and the cookies inside its authenticator) and nts_request (the
+    packet built over cookies of any shape). The cipher is a stand-in whose
+    tag opens when its first byte is odd, since the target is the parsing
+    (crypto_vectors holds the cipher to OpenSSL and the replies to an
+    independent builder); what ASan cannot see is asserted: a reply that is
+    taken leaves one to eight cookies of a size the state holds, a name that
+    is a host name and a port that is not zero, and is complete at its end;
+    a request is whole four-byte fields and within its room. Exit 2 (NOT RUN)
+    without clang/libFuzzer.
+
+        python3 test/differential.py --harness nts_fuzz
+    """
+    del argv
+    net = (HARNESS_ROOT / "src/net/net.c").read_text()
+    try:
+        nts = src_slice(net, "#define NTS_KE_PORT 4460",
+                        "/* The keys a finished handshake yields: RFC 8915 4.2. */")
+    except ValueError as error:
+        print("  FAIL nts fuzz lift: " + str(error))
+        write_tally("nts-fuzz", 0, 1)
+        return 1
+    return tls_fuzz_run("nts", nts_fuzz_seeds(),
+                        NET_ZONE_FUZZ_SHIM + byte_reader_source() + NTS_FUZZ_PRELUDE + nts +
+                        NTS_FUZZ_DRIVER, 4096)
 
 
 def harness_wifi_air(argv):
@@ -69827,7 +79145,8 @@ def harness_wifi_air(argv):
              went in on standard input
       join   a wrong password is "did not accept the password", an open
              network joins with nothing on standard input, and a network
-             that asks for WPA3 alone is saved and not tried
+             that asks for WPA3 alone is joined, refuses a wrong password in
+             words and takes the right one again
       air    bare moonwater wifi against a model of radio_wifi_status once
              the scan the joins left has expired: every network strongest
              first, marked joined or saved, its name made safe; then with
@@ -69835,9 +79154,21 @@ def harness_wifi_air(argv):
              is not joined, there and in moonwater status
       watch  ip watch leases the station and never the radio's monitor
              (hwsim0) or an access point in the machine's own namespace
-      twin   a stronger twin of a saved WPA2 network, open or WPA3 alone: the
-             machine stays off it with the real one gone and joins the real
-             one, never the twin, when it is back
+      twin   a stronger twin of a saved WPA2 network, open or WPA3 alone
+             under a password its owner never chose: the machine stays off
+             it with the real one gone and joins the real one, never the
+             twin, when it is back
+      pmf    management frame protection: deauthentication and
+             disassociation frames spoofed by a third radio (hwsim_radio
+             inject) are believed by a link without it and ignored by one
+             with it, required or optional; a twin without it of a network
+             that offered it is never joined, and bare wifi says why; TKIP is
+             refused in words that say what to change
+      sae    WPA3: the exchange with wpa_supplicant's access point alone and
+             beside WPA2 (whose PSK is not the password, so only WPA3 can
+             join), spoofed frames ignored, a wrong password said at once;
+             and (--hostapd) hostapd with each password element method and
+             an anti-clogging token, held to its own log
       reassoc the link held while idle; the access point gone and back,
              joined again; a twin by the same name taking over when the
              first goes, and the first again after it
@@ -69850,11 +79181,10 @@ def harness_wifi_air(argv):
              seconds and not by every pass, one with a wrong password is
              tried at growing intervals and not back to back, and a join
              that works leaves no record
-      class  WPA2 that asks for protected management frames, for TKIP as
-             its group cipher or (--hostapd with CONFIG_IEEE80211R) for
-             FT-PSK alone is said and not tried, by the name of what it asks
-             for, and ranks behind a plain WPA2 twin of its name that is
-             much the quieter
+      class  (--hostapd) WPA2 that asks for TKIP as its group cipher or
+             (with CONFIG_IEEE80211R) for FT-PSK alone is said and not tried,
+             by the name of what it asks for, and ranks behind a plain WPA2
+             twin of its name that is much the quieter
       rekey  (--hostapd, a hostapd built with CONFIG_TESTING_OPTIONS) the
              access point's group and pairwise rekeys and resent messages
              answered with the link and its data intact; an access point
@@ -69957,6 +79287,11 @@ def harness_wifi_air(argv):
     # Said reversed, so the lane can tell an image without the hwsim profile
     # from one whose scenarios failed.
     prep.append("[ -d /sys/module/mac80211_hwsim ] && echo hwsm-on | rev")
+    # The kernel's ring is a few dozen kilobytes and an hour of scenarios
+    # wraps it, so a count of lines taken before a step and after it could
+    # go down: the scenarios read their own copy, followed from the start.
+    prep.append("command dmesg --follow > /tmp/kmsg.all 2>&1 &")
+    prep.append("dmesg() { cat /tmp/kmsg.all; }")
     prep.append("for i in $(seq 40); do [ -b /dev/sda1 ] && break; sleep 0.25; done")
     prep.append("mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick")
     prep.append("L=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib\"")
@@ -70090,15 +79425,23 @@ def harness_wifi_air(argv):
     lines = []
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap1\" %s > /tmp/sc.got 2>&1; scen_status 'join wrong password' 1 $?; echo \"wifi-time wrong-password $(took $t0)\"" % q(wrong))
     # The access point sends the machine away some three seconds after it
-    # gives up on message 2; the join used to wait out eight on its own.
-    lines.append("echo \"wifi-time wrong-password-handshake $(took $(associated_at))\"")
-    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $(associated_at))\" 'BEGIN { print (t < 6) }')\"")
+    # gives up on message 2; the join used to wait out eight on its own. A
+    # WPA3 network turns the password away in the exchange before any
+    # association, which is said at once; the clock then runs from the add.
+    lines.append("a1=$(associated_at); case $(awk -v a=\"$a1\" -v t=\"$t0\" 'BEGIN { print (a < t) }') in 1) a1=$t0 ;; esac")
+    lines.append("echo \"wifi-time wrong-password-handshake $(took $a1)\"")
+    lines.append("scen_count 'join wrong password said within 6 s of associating' 1 \"$(awk -v t=\"$(took $a1)\" 'BEGIN { print (t < 6) }')\"")
     lines.append("scen_count 'join wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
     lines.append("t0=$(uptime_now); moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open' 0 $?; echo \"wifi-time open $(took $t0)\"")
     lines.append("scen_count 'join open joined' 1 \"$(grep -c -x -F \"[Moonwater] wifi joined $ap2\" /tmp/sc.got)\"")
-    lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 1 $?" % q(sae["password"]))
-    lines.append("scen_count 'join WPA3 alone refused' 1 \"$(grep -c 'saved, but it asks for WPA3, which moonwater cannot join yet' /tmp/sc.got)\"")
-    lines.append("scen_count 'join WPA3 still joined to the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")
+    lines.append("t0=$(uptime_now); moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone' 0 $?; echo \"wifi-time wpa3 $(took $t0)\"" % q(sae["password"]))
+    lines.append("scen_count 'join WPA3 alone joined' 1 \"$(joined \"$ap3\")\"")
+    lines.append("moonwater wifi add \"$ap3\" %s > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone, wrong password' 1 $?" % q(sae["password"] + "x"))
+    lines.append("scen_count 'join WPA3 wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
+    lines.append("printf '%%s\\n' %s | moonwater wifi add \"$ap3\" - > /tmp/sc.got 2>&1; scen_status 'join WPA3 alone, right password again' 0 $?" % q(sae["password"]))
+    # The machine is left on the open network, as the rest of the lane expects.
+    lines.append("moonwater wifi add \"$ap2\" < /dev/null > /tmp/sc.got 2>&1; scen_status 'join open again' 0 $?")
+    lines.append("scen_count 'join WPA3 then back on the open one' 1 \"$(moonwater status 2>/dev/null | grep -c -x -F \"  wifi joined $ap2\")\"")
     family("join", lines)
 
     # ---- air
@@ -70154,8 +79497,10 @@ def harness_wifi_air(argv):
         if kind == "open":
             body.append("key_mgmt=NONE")
         else:
+            #       WPA3 by the real name with a password its owner never
+            #       chose: the machine may try it and must be turned away.
             body += ["proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=SAE", "ieee80211w=2",
-                     "sae_password=\"%s\"" % good["password"]]
+                     "sae_password=\"%s\"" % (good["password"] + "-not-it")]
         body.append("}")
         lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); tm%d=$(cat /sys/class/net/$tn/address); "
                      "it%d=$(/mnt/stick/hwsim_radio move $NS $tn)" % (at, at))
@@ -70180,6 +79525,177 @@ def harness_wifi_air(argv):
     lines.append("dmesg | grep -a -e \"$S:\" | tail -40 | sed 's/^/twin-log /'")
     lines.append("kill $(cat /tmp/twin0.pid) $(cat /tmp/twin1.pid); rm -f /root/wifi")
     family("twin", lines)
+
+    # ---- pmf: management frame protection (802.11w). A radio in range that
+    # knows no key sends deauthentication and disassociation frames in the
+    # access point's name (hwsim_radio inject): an access point that requires
+    # protection and a station that negotiated it must ignore them, and one
+    # that offers none must be believed, which shows the frames land. A saved
+    # network that once offered protection is never joined through a twin
+    # that does not; TKIP and WPA1 are refused in words that say what to fix.
+    lines = []
+    pm_word = "pmf-password-1"
+    chan = {"req": 1, "opt": 6, "off": 11}
+
+    def pmf_ap(tag, ssid, channel, extra, mgmt=None, globals_=()):
+        body = list(globals_) + ["network={", "ssid=%s" % ssid.encode().hex(), "mode=2",
+                "frequency=%d" % (2407 + 5 * channel), "proto=RSN"] + \
+            (mgmt or ["key_mgmt=WPA-PSK", "psk=\"%s\"" % pm_word]) + extra + ["}"]
+        return [
+            "/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); %sm=$(cat /sys/class/net/$tn/address); "
+            "%si=$(/mnt/stick/hwsim_radio move $NS $tn)" % (tag, tag),
+            "printf '%%s\\n' %s > /tmp/%s.conf" % (" ".join(q(line) for line in body), tag),
+            "$A $W -B -d -i $%si -c /tmp/%s.conf -D nl80211 -f /tmp/%s.log -P /tmp/%s.pid" % (tag, tag, tag, tag),
+            "for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag,
+            "$A /mnt/stick/hwsim_radio power $%si 12" % tag,
+        ]
+
+    def spoof(tag, kind, times, channel):
+        return ("$A /mnt/stick/hwsim_radio inject $ai %d %s $sta $%sm $%sm 7 %d"
+                % (2407 + 5 * channel, kind, tag, tag, times))
+
+    def dm(text):
+        return "$(dmesg | grep -c \"%s\")" % text
+
+    def join_word(name):
+        return "printf '%%s\\n' %s | moonwater wifi add %s - > /tmp/sc.got 2>&1" % (q(pm_word), name)
+
+    lines.append("rm -f /root/wifi /root/wifi.rules /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines.append("/mnt/stick/hwsim_radio new > /dev/null; tn=$(station $S); ai=$(/mnt/stick/hwsim_radio move $NS $tn); "
+                 "$A /mnt/stick/hwsim_radio power $ai 20")
+    lines.append("sta=$(cat /sys/class/net/$S/address)")
+    # The contrast first: no protection offered, a spoofed deauthentication believed.
+    lines += pmf_ap("pa", "pmfoff", chan["off"], ["ieee80211w=0", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfoff") + "; scen_status 'pmf join, none offered' 0 $?")
+    lines.append("scen_count 'pmf none offered, joined' 1 \"$(joined pmfoff)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $pam"), dm("$S: authenticate with $pam")))
+    lines.append(spoof("pa", "deauth", 3, chan["off"]))
+    lines.append("for i in $(seq 40); do [ \"%s\" -gt \"$d0\" ] && break; sleep 0.25; done" % dm("$S: deauthenticated from $pam"))
+    lines.append("scen_count 'pmf none offered, a spoofed deauthentication is believed' 1 \"$([ \"%s\" -gt \"$d0\" ] && echo 1 || echo 0)\"" % dm("$S: deauthenticated from $pam"))
+    lines.append("for i in $(seq 120); do [ \"$(joined pmfoff)\" = 1 ] && [ \"%s\" -gt \"$a0\" ] && break; sleep 0.5; done" % dm("$S: authenticate with $pam"))
+    lines.append("scen_count 'pmf none offered, joined again after it' 1 \"$(joined pmfoff)\"")
+    lines.append("kill $(cat /tmp/pa.pid); rm -f /root/wifi /root/wifi.rules")
+    # Required by the access point.
+    lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfreq") + "; scen_status 'pmf join, required' 0 $?")
+    lines.append("scen_count 'pmf required, joined' 1 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf required, the network is remembered as offering it' 1 \"$(grep -c -x 'pmf pmfreq' /root/wifi.rules)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $pbm"), dm("$S: authenticate with $pbm")))
+    lines.append(spoof("pb", "deauth", 5, chan["req"]))
+    lines.append(spoof("pb", "disassoc", 5, chan["req"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'pmf required, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $pbm"))
+    lines.append("scen_count 'pmf required, spoofed disassociation ignored' 0 \"%s\"" % dm("$S: disassociated from $pbm"))
+    lines.append("scen_count 'pmf required, still joined' 1 \"$(joined pmfreq)\"")
+    lines.append("scen_count 'pmf required, never left the access point' 0 \"$(( %s - a0 ))\"" % dm("$S: authenticate with $pbm"))
+    # A twin of the same name that offers no protection is never joined.
+    lines.append("kill $(cat /tmp/pb.pid)")
+    lines.append("for i in $(seq 60); do [ \"$(joined pmfreq)\" = 0 ] && break; sleep 0.5; done")
+    lines += pmf_ap("pc", "pmfreq", chan["off"], ["ieee80211w=0", "pairwise=CCMP", "group=CCMP"])
+    lines.append("$A /mnt/stick/hwsim_radio power $pci 19; n0=%s; sleep 25" % dm("$S: associated"))
+    lines.append("scen_count 'pmf downgrade twin never joined' 0 \"$(( %s - n0 ))\"" % dm("$S: associated"))
+    lines.append("scen_count 'pmf downgrade twin, not joined' 0 \"$(joined pmfreq)\"")
+    # Bare wifi lists the air as last heard until that is 30 seconds old,
+    # and the machine's pass may have scanned just before the twin came up.
+    lines.append("for i in $(seq 20); do moonwater wifi > /tmp/sc.got 2>&1; n=$(scen_strip < /tmp/sc.got | grep -c 'no longer offers management frame protection'); "
+                 "[ \"$n\" = 1 ] && break; sleep 2; done; "
+                 "scen_count 'pmf downgrade twin, bare wifi says why' 1 \"$n\"; [ \"$n\" = 1 ] || sed 's/^/pmf-said /' /tmp/sc.got")
+    lines.append("kill $(cat /tmp/pc.pid)")
+    lines += pmf_ap("pb", "pmfreq", chan["req"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"])
+    lines.append("for i in $(seq 120); do [ \"$(joined pmfreq)\" = 1 ] && break; sleep 0.5; done")
+    lines.append("scen_count 'pmf real access point back, joined' 1 \"$(joined pmfreq)\"")
+    lines.append("kill $(cat /tmp/pb.pid); rm -f /root/wifi /root/wifi.rules")
+    # Optional: negotiated when both offer it.
+    lines += pmf_ap("pd", "pmfopt", chan["opt"], ["ieee80211w=1", "pairwise=CCMP", "group=CCMP"])
+    lines.append(join_word("pmfopt") + "; scen_status 'pmf join, optional' 0 $?")
+    lines.append("d0=%s" % dm("$S: deauthenticated from $pdm"))
+    lines.append(spoof("pd", "deauth", 5, chan["opt"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'pmf optional, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $pdm"))
+    lines.append("scen_count 'pmf optional, still joined' 1 \"$(joined pmfopt)\"")
+    lines.append("scen_count 'pmf optional, the network is remembered as offering it' 1 \"$(grep -c -x 'pmf pmfopt' /root/wifi.rules 2>/dev/null)\"")
+    lines.append("kill $(cat /tmp/pd.pid); rm -f /root/wifi")
+    # TKIP is refused with words that say what to change.
+    lines += pmf_ap("pe", "pmftkip", chan["off"], ["pairwise=TKIP CCMP", "group=TKIP"])
+    lines.append(join_word("pmftkip") + "; scen_status 'pmf TKIP group refused' 1 $?")
+    lines.append("scen_count 'pmf TKIP group says so' 1 \"$(grep -c 'saved, but it asks for TKIP, which is broken and never joined; set the access point to WPA2 or WPA3 with AES (CCMP)' /tmp/sc.got)\"")
+    lines.append("kill $(cat /tmp/pe.pid); rm -f /root/wifi /root/wifi.rules")
+    family("pmf", lines)
+
+    # ---- sae: WPA3-Personal. The join is an SAE exchange (commit, commit,
+    # confirm, confirm) through the kernel's authentication command, the
+    # PMK it makes and a four-way handshake on it, with protected
+    # management frames required. Against wpa_supplicant's own access point:
+    # WPA3 alone, WPA2 and WPA3 together, and a wrong password turned away
+    # at once; against hostapd, each password element method and the
+    # anti-clogging token a busy access point asks for.
+    lines = []
+    sae_word = "sae-password-1"
+    sae_mgmt = ["key_mgmt=SAE", "sae_password=\"%s\"" % sae_word]
+    lines.append("rm -f /root/wifi /root/wifi.rules /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    lines += pmf_ap("sa", "saeonly", chan["opt"], ["ieee80211w=2", "pairwise=CCMP", "group=CCMP"], sae_mgmt)
+    lines.append("t0=$(uptime_now); printf '%%s\\n' %s | moonwater wifi add saeonly - > /tmp/sc.got 2>&1; scen_status 'sae join, WPA3 alone' 0 $?; echo \"wifi-time sae $(took $t0)\"" % q(sae_word))
+    lines.append("scen_count 'sae WPA3 alone, joined' 1 \"$(joined saeonly)\"")
+    lines.append("d0=%s; a0=%s" % (dm("$S: deauthenticated from $sam"), dm("$S: authenticate with $sam")))
+    lines.append(spoof("sa", "deauth", 5, chan["opt"]))
+    lines.append(spoof("sa", "disassoc", 5, chan["opt"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'sae spoofed management frames ignored' 0 \"$(( %s - d0 + %s - a0 ))\"" % (dm("$S: deauthenticated from $sam"), dm("$S: authenticate with $sam")))
+    lines.append("scen_count 'sae still joined' 1 \"$(joined saeonly)\"")
+    lines.append("scen_count 'sae WPA3 remembered, and as offering protection' 2 \"$(grep -c -x -e 'pmf saeonly' -e 'sae saeonly' /root/wifi.rules)\"")
+    lines.append("t0=$(uptime_now); moonwater wifi add saeonly %s > /tmp/sc.got 2>&1; scen_status 'sae wrong password' 1 $?; echo \"wifi-time sae-wrong $(took $t0)\"" % q(sae_word + "x"))
+    lines.append("scen_count 'sae wrong password says so' 1 \"$(grep -c 'saved, but the network did not accept the password' /tmp/sc.got)\"")
+    lines.append("scen_count 'sae wrong password said within 8 s' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 8) }')\"")
+    lines.append("kill $(cat /tmp/sa.pid); rm -f /root/wifi /root/wifi.rules")
+    # Both at once: WPA3 is used, and a network that answers one of them only is still joined.
+    lines += pmf_ap("sb", "saetrans", chan["req"], ["ieee80211w=1", "pairwise=CCMP", "group=CCMP"],
+                    ["key_mgmt=WPA-PSK SAE", "psk=\"%s\"" % (sae_word + "-psk-is-another"), "sae_password=\"%s\"" % sae_word])
+    lines.append(join_word("saetrans").replace(q(pm_word), q(sae_word)) + "; scen_status 'sae join, WPA2 and WPA3' 0 $?")
+    #       The PSK of this access point is not the password given, so a join
+    #       that took the WPA2 side of it would have been turned away: joining
+    #       is WPA3 having been used.
+    lines.append("scen_count 'sae transition, joined with WPA3 (the PSK is another one)' 1 \"$(joined saetrans)\"")
+    lines.append("d0=%s" % dm("$S: deauthenticated from $sbm"))
+    lines.append(spoof("sb", "deauth", 5, chan["req"]))
+    lines.append("sleep 3")
+    lines.append("scen_count 'sae transition, spoofed deauthentication ignored' 0 \"$(( %s - d0 ))\"" % dm("$S: deauthenticated from $sbm"))
+    lines.append("kill $(cat /tmp/sb.pid); rm -f /root/wifi /root/wifi.rules")
+    # hostapd itself, which says more of what it does: WPA3 alone with each
+    # password element method it speaks, and once with a token demanded of
+    # every commit; its own log is what says how far the exchange went.
+    if hostapd:
+        lines.append("H=\"$L /mnt/stick/hostapd\"")
+        for at, (pwe_mode, channel, token) in enumerate(((0, 11, False), (2, 1, False), (0, 6, True),
+                                                         (1, 3, False), (1, 8, True))):
+            tag = "sh%d" % at
+            word = "hostapd-sae-%d" % at
+            what = "sae_pwe=%d%s" % (pwe_mode, ", anti-clogging token" if token else "")
+            #       An access point that says it takes hash-to-element (sae_pwe 1 and 2)
+            #       gets it, and one that does not (0) gets the hunt.
+            lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); "
+                         "%sm=$(cat /sys/class/net/$r/address); %si=$(/mnt/stick/hwsim_radio move $NS $r)" % (tag, tag))
+            conf = ["driver=nl80211", "ssid2=%s" % ("saeh%d" % at).encode().hex(), "hw_mode=g",
+                    "channel=%d" % channel, "wpa=2", "wpa_key_mgmt=SAE", "rsn_pairwise=CCMP",
+                    "ieee80211w=2", "sae_password=%s" % word, "sae_pwe=%d" % pwe_mode]
+            #       An access point under load asks for a token before it does
+            #       the curve: a threshold of 0 is always.
+            if token:
+                conf.append("sae_anti_clogging_threshold=0")
+            lines.append("printf '%%s\\n' \"interface=$%si\" %s > /tmp/%s.conf" % (tag, " ".join(q(c) for c in conf), tag))
+            lines.append("$A $H -B -dd -t -P /tmp/%s.pid -f /tmp/%s.log /tmp/%s.conf" % (tag, tag, tag))
+            lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/%s.log 2>/dev/null && break; sleep 0.25; done" % tag)
+            lines.append("$A /mnt/stick/hwsim_radio power $%si 14" % tag)
+            lines.append("printf '%%s\\n' %s | moonwater wifi add saeh%d - > /tmp/sc.got 2>&1; scen_status 'sae hostapd, %s' 0 $?" % (q(word), at, what))
+            lines.append("scen_count 'sae hostapd %d, joined' 1 \"$(joined saeh%d)\"" % (at, at))
+            lines.append("scen_count 'sae hostapd %d used %s' 1 \"$(grep -c 'SAE: Derive keys - H2E=%d' /tmp/%s.log | awk '{ print ($1 > 0) }')\""
+                         % (at, "hash-to-element" if pwe_mode else "the hunt", 1 if pwe_mode else 0, tag))
+            lines.append("sleep 1; scen_count 'sae hostapd %d took the exchange to Accepted and the handshake to its end' 1 "
+                         "\"$(grep -c -e 'SAE: State Confirmed -> Accepted' -e 'EAPOL-4WAY-HS-COMPLETED' /tmp/%s.log | awk '{ print ($1 > 1) }')\"" % (at, tag))
+            if token:
+                lines.append("scen_count 'sae hostapd %d asked for a token and was given it' 1 \"$(grep -c 'SAE: Request anti-clogging token' /tmp/%s.log | awk '{ print ($1 > 0) }')\"" % (at, tag))
+                lines.append("grep -a -e 'SAE:' -e 'nti-clogging' /tmp/%s.log | grep -a -v -e 'pwd-' -e 'counter' -e 'nl80211' | head -40 | sed 's/^/sae-hostapd-%d /'" % (tag, at))
+            lines.append("kill $(cat /tmp/%s.pid); rm -f /root/wifi /root/wifi.rules" % tag)
+    family("sae", lines)
 
     # ---- starve: twins of the saved WPA2 network that ask for WPA2 as it
     # does, every one louder, under another password: each takes message 2
@@ -70292,12 +79808,17 @@ def harness_wifi_air(argv):
     # ---- class: WPA2 that asks for what the join cannot give is said, and
     # not tried, with what it asks for as its name; and none of them ranks
     # ahead of a plain WPA2 twin of the name that is much the quieter.
+    # (Protected management frames, which this family once held to the
+    # same, are joined now: the pmf family.)
     lines = []
     extra = []
-    powers = {"pmf": 14, "tkip": 13, "ft": 12}
-    kinds = ["pmf"] + (["tkip", "ft"] if hostapd else [])
-    words = {"pmf": "PMF", "tkip": "TKIP", "ft": "FT/256"}
-    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
+    powers = {"tkip": 13, "ft": 12}
+    kinds = ["tkip", "ft"] if hostapd else []
+    words = {"tkip": "TKIP", "ft": "FT/EXT"}
+    clauses = {"tkip": "TKIP, which is broken and never joined; set the access point to WPA2 "
+                       "or WPA3 with AES (CCMP)",
+               "ft": "FT/EXT, which moonwater cannot join yet"}
+    lines.append("moonwater wifi remove \"$ap0\" > /dev/null 2>&1; rm -f /root/wifi /root/wifi.rules /run/moonwater/wifi.avoid /run/moonwater/wifi.last")
     lines.append("H=\"$L /mnt/stick/hostapd\"")
     for at, kind in enumerate(kinds):
         ssid = name(plain, taken)
@@ -70305,56 +79826,50 @@ def harness_wifi_air(argv):
         extra.append((kind, ssid, password))
         lines.append("cl%d=\"$(printf '%s')\"" % (at, octal(ssid)))
         lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); cr%d=$(/mnt/stick/hwsim_radio move $NS $r)" % at)
-        if kind in ("ft", "tkip"):
-            # wpa_supplicant's own access point picks its group cipher from its
-            # pairwise ones and has no FT, so these two are hostapd's: a TKIP
-            # pairwise cipher beside CCMP makes TKIP the group cipher, which a
-            # station that offers CCMP as the group's is refused for.
-            conf = ["driver=nl80211", "ssid2=%s" % ssid.hex(), "hw_mode=g", "channel=%d" % (1, 6, 11)[at],
-                    "wpa=2", "wpa_passphrase=%s" % password]
-            if kind == "ft":
-                conf += ["wpa_key_mgmt=FT-PSK", "rsn_pairwise=CCMP", "mobility_domain=a1b2",
-                         "ft_psk_generate_local=1", "nas_identifier=cl.example"]
-            else:
-                conf += ["wpa_key_mgmt=WPA-PSK", "rsn_pairwise=CCMP TKIP"]
-            lines.append("printf '%%s\\n' \"interface=$cr%d\" %s > /tmp/cl%d.conf" % (at, " ".join(q(c) for c in conf), at))
-            lines.append("$A $H -B -dd -t -P /tmp/cl%d.pid -f /tmp/cl%d.log /tmp/cl%d.conf" % (at, at, at))
+        # wpa_supplicant's own access point picks its group cipher from its
+        # pairwise ones and has no FT, so these two are hostapd's: a TKIP
+        # pairwise cipher beside CCMP makes TKIP the group cipher, which a
+        # station that offers CCMP as the group's is refused for.
+        conf = ["driver=nl80211", "ssid2=%s" % ssid.hex(), "hw_mode=g", "channel=%d" % (1, 6, 11)[at],
+                "wpa=2", "wpa_passphrase=%s" % password]
+        if kind == "ft":
+            conf += ["wpa_key_mgmt=FT-PSK", "rsn_pairwise=CCMP", "mobility_domain=a1b2",
+                     "ft_psk_generate_local=1", "nas_identifier=cl.example"]
         else:
-            body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * (1, 6, 11)[at]),
-                    "proto=RSN", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password,
-                    "pairwise=CCMP", "group=CCMP", "ieee80211w=2", "}"]
-            lines.append("printf '%%s\\n' %s > /tmp/cl%d.conf" % (" ".join(q(line) for line in body), at))
-            lines.append("$A $W -B -i $cr%d -c /tmp/cl%d.conf -D nl80211 -f /tmp/cl%d.log -P /tmp/cl%d.pid" % (at, at, at, at))
+            conf += ["wpa_key_mgmt=WPA-PSK", "rsn_pairwise=CCMP TKIP"]
+        lines.append("printf '%%s\\n' \"interface=$cr%d\" %s > /tmp/cl%d.conf" % (at, " ".join(q(c) for c in conf), at))
+        lines.append("$A $H -B -dd -t -P /tmp/cl%d.pid -f /tmp/cl%d.log /tmp/cl%d.conf" % (at, at, at))
         lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cl%d.log 2>/dev/null && break; sleep 0.25; done" % at)
         lines.append("$A /mnt/stick/hwsim_radio power $cr%d %d" % (at, powers[kind]))
     lines.append("sleep 31")
     for at, (kind, ssid, password) in enumerate(extra):
         lines.append("t0=$(uptime_now); moonwater wifi add \"$cl%d\" %s > /tmp/sc.got 2>&1; scen_status 'class %s refused' 1 $?; echo \"wifi-time class-%s $(took $t0)\"" % (at, q(password), kind, kind))
-        lines.append("scen_count 'class %s says what it asks for' 1 \"$(grep -c 'saved, but it asks for %s, which moonwater cannot join yet' /tmp/sc.got)\"" % (kind, words[kind]))
+        lines.append("scen_count 'class %s says what it asks for' 1 \"$(grep -c -F 'saved, but it asks for %s' /tmp/sc.got)\"" % (kind, clauses[kind]))
         lines.append("scen_count 'class %s refused without a join' 1 \"$(awk -v t=\"$(took $t0)\" 'BEGIN { print (t < 12) }')\"" % kind)
         lines.append("scen_count 'class %s is listed under its name' 1 \"$(moonwater wifi 2>&1 | scen_strip | grep -F -e \"$cl%d\" | grep -c ' %s ')\"" % (kind, at, words[kind]))
     # The twins: a plain WPA2 network by the name of the first, much the
     # quieter, and the first itself, much the louder and asking for more:
     # the machine joins the plain one, having authenticated with the other
     # not at all.
-    kind, ssid, password = extra[0]
-    lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); tm=$(cat /sys/class/net/$r/address); ctw=$(/mnt/stick/hwsim_radio move $NS $r)")
-    body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * 9),
-            "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password, "}"]
-    lines.append("printf '%%s\\n' %s > /tmp/cltwin.conf" % " ".join(q(line) for line in body))
-    lines.append("$A $W -B -i $ctw -c /tmp/cltwin.conf -D nl80211 -f /tmp/cltwin.log -P /tmp/cltwin.pid")
-    lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cltwin.log 2>/dev/null && break; sleep 0.25; done")
-    lines.append("$A /mnt/stick/hwsim_radio power $ctw 3")
-    lines.append("sleep 31; q0=$(dmesg | grep -c \"$S: authenticate with\")")
-    lines.append("t0=$(uptime_now); moonwater wifi add \"$cl0\" %s > /tmp/sc.got 2>&1; scen_status 'class twin joined' 0 $?; echo \"wifi-time class-twin $(took $t0)\"" % q(password))
-    lines.append("scen_count 'class the plain one joined' 1 \"$(joined \"$cl0\")\"")
-    lines.append("scen_count 'class one authentication, with the plain one' 1 \"$(( $(dmesg | grep -c \"$S: authenticate with\") - q0 ))\"")
-    lines.append("scen_count 'class authenticated with the plain one' 1 \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | grep -c \"$tm\")\"")
-    for at in range(len(extra)):
-        lines.append("moonwater wifi remove \"$cl%d\" > /dev/null 2>&1" % at)
-        lines.append("kill $(cat /tmp/cl%d.pid) 2>/dev/null" % at)
-    lines.append("kill $(cat /tmp/cltwin.pid); rm -f /root/wifi")
-    family("class", lines)
+    if extra:
+        kind, ssid, password = extra[0]
+        lines.append("/mnt/stick/hwsim_radio new > /dev/null; r=$(station $S); tm=$(cat /sys/class/net/$r/address); ctw=$(/mnt/stick/hwsim_radio move $NS $r)")
+        body = ["network={", "ssid=%s" % ssid.hex(), "mode=2", "frequency=%d" % (2407 + 5 * 9),
+                "proto=RSN", "pairwise=CCMP", "group=CCMP", "key_mgmt=WPA-PSK", "psk=\"%s\"" % password, "}"]
+        lines.append("printf '%%s\\n' %s > /tmp/cltwin.conf" % " ".join(q(line) for line in body))
+        lines.append("$A $W -B -i $ctw -c /tmp/cltwin.conf -D nl80211 -f /tmp/cltwin.log -P /tmp/cltwin.pid")
+        lines.append("for i in $(seq 40); do grep -q AP-ENABLED /tmp/cltwin.log 2>/dev/null && break; sleep 0.25; done")
+        lines.append("$A /mnt/stick/hwsim_radio power $ctw 3")
+        lines.append("sleep 31; q0=$(dmesg | grep -c \"$S: authenticate with\")")
+        lines.append("t0=$(uptime_now); moonwater wifi add \"$cl0\" %s > /tmp/sc.got 2>&1; scen_status 'class twin joined' 0 $?; echo \"wifi-time class-twin $(took $t0)\"" % q(password))
+        lines.append("scen_count 'class the plain one joined' 1 \"$(joined \"$cl0\")\"")
+        lines.append("scen_count 'class one authentication, with the plain one' 1 \"$(( $(dmesg | grep -c \"$S: authenticate with\") - q0 ))\"")
+        lines.append("scen_count 'class authenticated with the plain one' 1 \"$(dmesg | grep -a \"$S: authenticate with\" | tail -1 | grep -c \"$tm\")\"")
+        for at in range(len(extra)):
+            lines.append("moonwater wifi remove \"$cl%d\" > /dev/null 2>&1" % at)
+            lines.append("kill $(cat /tmp/cl%d.pid) 2>/dev/null" % at)
+        lines.append("kill $(cat /tmp/cltwin.pid); rm -f /root/wifi")
+        family("class", lines)
 
     # ---- rekey: hostapd, whose control socket starts rekeys on demand.
     # Two access points by one name, the first much the stronger, each
@@ -70399,7 +79914,7 @@ def harness_wifi_air(argv):
         # one it can find and end by then, or the link is left with a keeper
         # whose keys are of an association that is gone, deaf to the
         # group rekey, whose MIC it cannot check.
-        lines.append("moonwater wifi add \"$rk\" %s > /tmp/sc.a 2>&1 & moonwater wifi add \"$rk\" %s > /tmp/sc.b 2>&1 & wait" % (q(word), q(word)))
+        lines.append("moonwater wifi add \"$rk\" %s > /tmp/sc.a 2>&1 & a=$!; moonwater wifi add \"$rk\" %s > /tmp/sc.b 2>&1 & b=$!; wait $a $b" % (q(word), q(word)))
         lines.append("sleep 4; scen_count 'rekey two adds together, joined' 1 \"$(joined \"$rk\")\"")
         lines.append("scen_count 'rekey two adds together, one keeper' 1 \"$(awk -v i=\"$(stat -c %i /run/moonwater/wifi.keeper)\" '$6 ~ (\":\" i \"$\") { n++ } END { print n + 0 }' /proc/locks)\"")
         lines.append("g2=$(grep -c 'group key handshake completed' /tmp/rk0.log); $HC -i $j0 raw REKEY_GTK > /dev/null; sleep 6")
@@ -73468,6 +82983,13 @@ static bipolar link_groups_save(link_groups address_to groups)
             "/*\n        Every interface with an IPv4 address"),
         sec(near, "static bool link_nearby_send(", "// Goodbye, with TTL zero"),
         sec(near, "// The same place is greeted once in a while",
+            "/*\n        The mDNS reader, apart."),
+        #   The listener reads mDNS in a confined child; the fuzz reads it in
+        #   place, since the reading is what it fuzzes.
+        "static bool link_mdns_read_apart(const p8 *packet, positive length,\n"
+        "                                 struct waterlink_found *found)\n"
+        "{\n        return waterlink_mdns_read(packet, length, found);\n}\n",
+        sec(near, "/*\n        One mDNS packet from the local link",
             "/*\n        The listener's turn:"),
         sec(near, "// Read what is waiting on the mDNS socket",
             "#endif // WATERLINK_NEARBY_INCLUDED"),
@@ -74729,6 +84251,7 @@ static void state_post(p64 now)
 static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
 {
         bool alone = false;
+        bool due = waterlink_wake(link, now) <= now;
         positive used;
 
         static p8 marks[WATERLINK_PAYLOAD];
@@ -74736,7 +84259,11 @@ static positive state_fill_one(struct waterlink_link *link, p64 now, p8 *into)
         memset(marks, 0xa5, WATERLINK_PAYLOAD);
         memset(state_fill, 0xa5, WATERLINK_PAYLOAD);
         used = waterlink_fill(link, state_fill, now, &alone);
-        if (used > WATERLINK_PAYLOAD ||
+        /* An empty fill may consume a loss timer and move the next wake into
+           the future. It only spins the service if the link remains due at
+           the same clock. The simulator used to hide that by advancing time. */
+        if ((due && !used && waterlink_wake(link, now) <= now) ||
+            used > WATERLINK_PAYLOAD ||
             memcmp(state_fill + used, marks, WATERLINK_PAYLOAD - used))
                 abort();
         if (used && into)
@@ -75148,12 +84675,12 @@ int main(void)
         probe.write_text("int main(void) { return 0; }\n")
         sanitizer_flags = [clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                            "-fno-sanitize-recover=all"]
-        if subprocess.run(sanitizer_flags + [str(probe), "-o", str(work / "probe")],
+        if build_run(sanitizer_flags + [str(probe), "-o", str(work / "probe")],
                           capture_output=True, text=True).returncode:
             print("waterlink script scan: NOT RUN -- compiler lacks ASan/UBSan")
             return 2
         (work / "scan.c").write_text(driver)
-        built = subprocess.run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
+        built = build_run([clang, "-O1", "-g", "-w", "-fsanitize=address,undefined",
                                 "-fno-sanitize-recover=all", str(work / "scan.c"), "-o",
                                 str(work / "scan")], capture_output=True, text=True)
         if built.returncode:
@@ -75347,7 +84874,7 @@ int main(int argc, char **argv)
             checks(sabotaged != region, "%s: the constant to change is in its block" % arch)
             for label, text in (("plain", region), ("sabotaged", sabotaged)):
                 (work / ("wide-%s.c" % label)).write_text(macros(arch) + text)
-                built = subprocess.run(compiler + cflags + ["-O2", "-o", str(work / label), str(work / "test.c"),
+                built = build_run(compiler + cflags + ["-O2", "-o", str(work / label), str(work / "test.c"),
                                                             str(work / ("wide-%s.c" % label))],
                                        capture_output=True, text=True)
                 if built.returncode:
@@ -76623,7 +86150,7 @@ def harness_kernel_ports(argv):
                     lines.append('printf("#define %s %%ld\\n", (long)(%s));' % (words[0], rest.split(None, 1)[1]))
             lines.append("return 0; }")
             (work / "offsets.c").write_text("\n".join(lines))
-            built = subprocess.run(["cc", "-w", "-o", str(work / "offsets"), str(work / "offsets.c")], capture_output=True, text=True)
+            built = build_run(["cc", "-w", "-o", str(work / "offsets"), str(work / "offsets.c")], capture_output=True, text=True)
             if built.returncode:
                 print("  the offsets did not build for %s: %s" % (arch, built.stderr[-500:]))
                 return None
@@ -76642,7 +86169,7 @@ def harness_kernel_ports(argv):
                     '#define ASM_FUNC(name) ".globl " #name "\\n.type " #name ", @function\\n" #name ":\\n"\n'
                     '#define ASM_END(name) ".size " #name ", .-" #name "\\n"\n#define ASM_RET "ret\\n"\n' + wide_region)
                 objects.append(str(work / "wide.c"))
-            built = subprocess.run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
+            built = build_run(compiler + cflags + [defines, "-DCONFIG_FS_ENCRYPTION=1", "-DCONFIG_UNICODE=1", "-O2", "-w", "-Wl,--allow-multiple-definition", "-I", str(work), "-o", str(work / "test")] + objects,
                                    capture_output=True, text=True)
             if built.returncode:
                 print("  build failed for %s:\n%s" % (arch, built.stderr[-1500:]))
@@ -81415,13 +90942,13 @@ def harness_font_reference(argv):
         work = Path(temporary)
         (work / "dump.c").write_text(FONT_DUMPER)
         (work / "compare.c").write_text(FONT_COMPARATOR)
-        built = subprocess.run([cc, "-O2", "-Wall", "-o", str(work / "compare"), str(work / "compare.c")] +
+        built = build_run([cc, "-O2", "-Wall", "-o", str(work / "compare"), str(work / "compare.c")] +
                                freetype + ["-lm"], capture_output=True, text=True, check=False)
         if built.returncode:
             print("font reference: NOT RUN -- FreeType does not build here: " + built.stderr.strip()[-300:])
             return 2
         march = ["-march=x86-64"] if platform.machine() == "x86_64" else []
-        built = subprocess.run([cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
+        built = build_run([cc, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector",
                                 "-fno-builtin", "-w"] + march +
                                ["-T", str(root / "src/build/spark.ld"), "-Wl,-e,_start", "-Wl,--build-id=none",
                                 "-Wl,--no-warn-rwx-segments", "-I", str(root / "src"),
@@ -81532,6 +91059,7 @@ HARNESS_CHECKS = {
     "terminfo_install": harness_terminfo_install,
     "dhcp_packets": harness_dhcp_packets,
     "dhcp_fuzz": harness_dhcp_fuzz,
+    "dhcp_frame_fuzz": harness_dhcp_frame_fuzz,
     "term_fuzz": harness_term_fuzz,
     "bowl_json_fuzz": harness_bowl_json_fuzz,
     "term_streams": harness_term_streams,
@@ -81546,6 +91074,8 @@ HARNESS_CHECKS = {
     "moonwater_script": harness_moonwater_script,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,
+    "nts": harness_nts,
+    "nts_fuzz": harness_nts_fuzz,
     "tls_peer": harness_tls_peer,
     "https_downgrade": harness_https_downgrade,
     "http_response_framing": harness_http_response_framing,
@@ -81555,13 +91085,18 @@ HARNESS_CHECKS = {
     "sntp_era": harness_sntp_era,
     "http_urls": harness_http_urls,
     "tls_der_fuzz": harness_tls_der_fuzz,
+    "tls_ocsp_fuzz": harness_tls_ocsp_fuzz,
+    "tls_crl_fuzz": harness_tls_crl_fuzz,
     "tls_hs_fuzz": harness_tls_hs_fuzz,
     "tls_verify_fuzz": harness_tls_verify_fuzz,
     "sntp_fuzz": harness_sntp_fuzz,
     "wifi_eapol_fuzz": harness_wifi_eapol_fuzz,
+    "wifi_sae_fuzz": harness_wifi_sae_fuzz,
+    "wifi_key_state": harness_wifi_key_state,
     "wifi_scan_fuzz": harness_wifi_scan_fuzz,
     "bowl_sig_fuzz": harness_bowl_sig_fuzz,
     "wget_mutation": harness_wget_mutation,
+    "dns_tls": harness_dns_tls,
     "wget_hostile": harness_wget_hostile,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,
@@ -81577,6 +91112,11 @@ HARNESS_CHECKS = {
     "net_clock_fault": harness_net_clock_fault,
     "net_wait_states": harness_net_wait_states,
     "net_parser_work_states": harness_net_parser_work_states,
+    "net_dhcp_exchange": harness_net_dhcp_exchange,
+    "net_exhaustive_proof": harness_net_exhaustive_proof,
+    "net_bounded_proof": harness_net_bounded_proof,
+    "net_mutation": harness_net_mutation,
+    "net_lease_transitions": harness_net_lease_transitions,
     "net_math_proof": harness_net_math_proof,
     "wire_constants": harness_wire_constants,
     "net_dependency_closure": harness_net_dependency_closure,
@@ -81586,6 +91126,10 @@ HARNESS_CHECKS = {
     "hostile_strings": harness_hostile_strings,
     "state_cuts": harness_state_cuts,
     "machine_scan": harness_machine_scan,
+    "ct_logs": harness_ct_logs,
+    "tls_ct": harness_tls_ct,
+    "dns_oracle": harness_dns_oracle,
+    "guest_confinement": harness_guest_confinement,
     "waterlink_noise": harness_waterlink_noise,
     "waterlink_mdns": harness_waterlink_mdns,
     "waterlink_sanitized": harness_waterlink_sanitized,
@@ -81599,7 +91143,11 @@ def harness_main(argv):
     if not argv or argv[0] not in HARNESS_CHECKS:
         print("harness: one of " + " ".join(HARNESS_CHECKS), file=sys.stderr)
         return 2
-    return HARNESS_CHECKS[argv[0]](argv[1:])
+    began = time.monotonic()
+    try:
+        return HARNESS_CHECKS[argv[0]](argv[1:])
+    finally:
+        record_time(" ".join(["harness", *argv[:1]]), time.monotonic() - began)
 
 
 

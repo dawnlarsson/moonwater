@@ -1378,6 +1378,18 @@ static b32 link_main(string_address address_to arguments, positive count)
         if (shape < array_count(link_shapes) &&
             (count < link_shapes[shape].least || count > link_shapes[shape].most))
                 return host_usage();
+        //      serve's one further word is the descriptor link on hands the
+        //      listener it starts, digits and nothing else; any other word
+        //      started a listener that never came back to say it was wrong.
+        if (shape < array_count(link_shapes) && count == 4 &&
+            string_equals(verb, "serve"))
+        {
+                positive descriptor;
+
+                if (!string_digits_checked_exact(arguments[3], 10,
+                                                 address_of descriptor))
+                        return host_usage();
+        }
 
         //      A word that is no verb and no name a machine could have (help
         //      and leave are words of the groups, not verbs) is a machine of

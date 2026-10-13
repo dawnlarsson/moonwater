@@ -57,8 +57,9 @@ moonwater bios [reboot]                whether firmware setup is on offer; reboo
 
 moonwater wired [on|off]               the wired links; off keeps them down
 moonwater wifi [on|off]                the radio, saved networks and those in range
-moonwater wifi add SSID [PASSWORD|-]   remember a network and join it; asks for
-                                       the password, - reads it from stdin
+moonwater wifi add SSID [PASSWORD|-] [wpa2]  remember a network and join it; asks for
+                                       the password, - reads it from stdin; wpa2 lets
+                                       a tight tier join it without WPA3
 moonwater wifi remove SSID             forget a saved network, and leave it
 moonwater bluetooth [on|off]           the radio and the remembered devices
 moonwater bluetooth add NAME           keep a device's name; the radio goes on for what pairs
@@ -72,10 +73,14 @@ moonwater timezone auto                from the network, one Cloudflare request
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
 moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
+moonwater ntp nts [on|off|only]        authenticated time (RFC 8915) first; only refuses plain [on]
+moonwater ntp nts servers [NAME[:PORT]...|default]
+                                       who is asked for it, up to four
 
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network's [auto]
+moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
@@ -107,6 +112,12 @@ behind it: `moonwater dns ADDRESS...` keeps up to three of your own instead
 (`/root/dns`, written to `/etc/resolv.conf` now, at every boot and at every
 lease), and `dns auto` goes back. 1.1.1.1 is written only for a network whose
 lease names no resolver, and is asked by a lookup only when the file names none.
+`moonwater dns tls on` asks wget's, fetch's and `host`'s names over TLS (port
+853) of the resolvers known to offer it, 1.1.1.1, 1.0.0.1, 9.9.9.9 and
+149.112.112.112 (the ones `dns` names, or else all four), and falls back to the
+plain lookup within two seconds; `only` sends no name in the clear. It is off by
+default: a captive portal or a first lease with the clock unset would charge
+every lookup the two seconds.
 
 Commands given to `moonwater` run as root through the shell, as if typed.
 `bind init` runs in the background and keeps each command's output in
@@ -142,26 +153,45 @@ wired to the hardware and cannot be bound.
 **Wifi.** Bare `moonwater wifi` lists networks strongest first (`*` joined,
 `+` saved). When wifi cannot work it says why in one line -- no hardware, no
 driver, missing firmware, rfkill, switched off, or why the last join failed.
-Open and WPA2 (including WPA2/WPA3 mixed) networks can be joined, WPA2 with
-CCMP and plain PSK, no protected management frames required; WPA2 that asks
-for TKIP (`TKIP`), for PMF (`PMF`) or for FT or PSK-SHA256 key management
-(`FT/256`), WPA3-only, 802.1X and WEP networks are saved but not tried, and
-are listed under those names. The machine's own rejoin leaves a network that was
-not there, or refused the password, alone for three seconds, then twice as long
-each time to a minute, and scans for it at most every thirty seconds. A password on the command line
+Open, WPA2 (PSK and PSK-SHA256) and WPA3 networks can be joined, WPA3 whenever
+a network offers it, with CCMP, and with protected management frames whenever
+the access point offers them, so a spoofed deauthentication does not end the
+link (`PMF` in the list is a network that requires them). A network that once
+offered protection, or was joined with WPA3, is not joined again without it
+until `wifi remove` or an add with another password. TKIP (`TKIP`, `WPA`) is
+refused with a reason that says what to change; FT and the extended-key WPA3
+suites (`FT/EXT`), 802.1X and WEP networks are saved but not tried, and are
+listed under those names. The tight network tier requires protected management
+frames and joins WPA2 only for a network saved with `wpa2`. The machine's own
+rejoin leaves a network that was not there, refused the password or was refused
+by those rules alone for three seconds, then twice as long each time to a
+minute, and scans for it at most every thirty seconds. A password on the command line
 shows in `ps`, so leave it off or pipe it with `-`. The image carries the
 firmware its wifi and bluetooth drivers load, fetched from linux-firmware at a
 pinned commit and checked against pinned SHA-256s; no blob is in this
 repository.
 
-**Time.** NTP runs from boot until turned off, walking several public servers
-until the kernel reports the clock synchronised. NTP sampling takes five
-samples a query and keeps the one with the fastest round trip, RFC 5905's clock
-filter, so a queueing spike never sets the clock; it also asks three servers
-and believes the one with the least root distance among those whose answers
-agree, so one wrong server cannot set it either. A server named in
-`/root/ntp.server` is asked first, but a step past two seconds still needs a
-second server to agree when the clock already has a plausible wall time. The
+**Time.** NTP runs from boot until turned off. It asks Network Time Security
+servers first (RFC 8915: `time.cloudflare.com`, `nts.netnod.se`,
+`ptbtime1.ptb.de`, or those `moonwater ntp nts servers` names), whose answers
+are authenticated, and falls back to several public pool servers, whose
+answers are not, only when none can be reached; `moonwater ntp` says which set
+the clock last, and `moonwater ntp nts only` refuses the pool altogether. NTP
+sampling takes five samples a query and keeps the one with the fastest round
+trip, RFC 5905's clock filter, so a queueing spike never sets the clock; it
+also asks three servers and believes the one with the least root distance
+among those whose answers agree, so one wrong server cannot set it either. A
+server named in `/root/ntp.server` is asked first, and alone, in plain (unless
+NTS is only), but a step past two seconds still needs a second server to agree
+when the clock already has a plausible wall time. The clock has a floor: the
+date of the source this was built from, or the latest time the machine knew
+for certain (`/root/clock.good`, an authenticated answer's time or the floor
+the boot began with plus the seconds since, written forward only), whichever
+is later. A clock below it is unset, not wrong: certificates are not judged
+against it (`wget` says so and names `moonwater time sync`), no answer earlier
+than it is taken, and the NTS key establishment, until an answer has been
+authenticated this boot, is judged as of the floor, which is how an unset or
+wrong clock gets set. The
 timezone is auto until set by hand: on each new network the machine makes one
 HTTPS request to Cloudflare and takes the zone it reports, at most once every
 three minutes. There is no zoneinfo directory: each of tzdata's 420 zones maps
@@ -743,7 +773,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
 | `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
 | `sec_text` | `STRICT_TEXT` 2 | 3 |
-| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch` | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise; a public certificate has to be logged (Certificate Transparency) | 3 |
 | `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
@@ -780,7 +810,7 @@ coreutils does:
 | `cp -r` | makes the new directory where it goes and fills it | builds it in a private stage and publishes it whole |
 | `install` | leaves the copy in place, mode 0600, when the owner asked for is refused | takes the copy away and says it was not published |
 | `pinky -l` | copies each user's `~/.project` and `~/.plan` to the terminal as they are | leaves them out |
-| `wget`, `fetch` and every other HTTP client in the tree | accept a `204` that declares `Content-Length` or `Transfer-Encoding` (its body is never read; the connection closes after the one response) and read a `205`'s content like any other body, as wget and curl do | refuse a `204` that declares any body framing and a `205` with a non-zero length, chunked or close-delimited content (RFC 9110 15.3.5, 15.3.6, RFC 9112 6.1) |
+| `wget`, `fetch` and every other HTTP client in the tree | accept a `204` that declares `Content-Length` or `Transfer-Encoding` (its body is never read; the connection closes after the one response), read a `205`'s content like any other body, and take a `Content-Length` that repeats one number (twice, or `3, 3`), a folded line after an ordinary field and any byte but NUL and a bare CR in the reason phrase, as wget and curl do | refuse a `204` that declares any body framing, a `205` with a non-zero length, chunked or close-delimited content (RFC 9110 15.3.5, 15.3.6, RFC 9112 6.1), a repeated or listed `Content-Length`, any folded line and a control byte in the reason phrase |
 
 Every row but the HTTP one has a check in `floodlight_hardened` (`test/run`),
 run against a shell built from `kernel/profile/sec_hardened`'s configuration;
@@ -823,11 +853,22 @@ deliberately non-certifying: a gap is visible work, not a silently skipped test
 or a claim that the risk does not apply.
 
 ```
-sh test/run                     every lane
+sh test/run -j 8 --changed      the seams this tree has changed from main
+sh test/run -j 8 --seam net     one seam's lanes (sh test/run --seams lists them)
 sh test/run shell text          named lanes only
+sh test/run --plan --changed    which lanes that is, and none run
+sh test/run --all               every lane, asked for on purpose
 sh test/run bench               the benchmarks
 sh test/run bench --list        what there is to measure
 ```
+
+The whole suite is hours of a machine, so a command line naming nothing is
+refused and `--all` asks again on a terminal. Every lane is in one seam and every file in the tree is in one, and
+the suite's own three files select none: name the seams they are meant for
+beside `--changed`. Builds are kept under `~/.cache/moonwater-test`, keyed by
+the compiler, the command line and the preprocessed text, so a run builds only
+what changed (`MOONWATER_TEST_CACHE=off` or `=verify`), and a run ends with the
+slowest steps.
 
 For a procedural network campaign with clang's libFuzzer, ASan and UBSan:
 

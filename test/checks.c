@@ -9370,6 +9370,54 @@ static fn hash_reference_blake2b(p64 address_to st, const p8 address_to d, posit
         }
 }
 
+#elif defined(SHARED_filter_run)
+/* Classic BPF as seccomp runs it, over one call: the client filter's checks
+   (CHECK_net) and the Wi-Fi station's (CHECK_bowl). */
+static p32 net_filter_run(const net_filter address_to filter, p32 arch,
+                          p32 number, const p64 address_to arguments)
+{
+        p8 data[64];
+        p32 accumulator = 0;
+
+        memory_fill(data, 0, sizeof data);
+        memory_copy(data, address_of number, 4);
+        memory_copy(data + 4, address_of arch, 4);
+        memory_copy(data + 16, arguments, 6 * sizeof(p64));
+        for (positive at = 0; at < filter->used && at < NET_FILTER_STEPS; at++)
+        {
+                net_filter_step step = filter->steps[at];
+
+                switch (step.code)
+                {
+                case NET_FILTER_LOAD:
+                        if (step.value > sizeof data - 4)
+                                return 0;
+                        memory_copy(address_of accumulator, data + step.value, 4);
+                        break;
+                case NET_FILTER_AND:
+                        accumulator &= step.value;
+                        break;
+                case NET_FILTER_ALWAYS:
+                        at += step.value;
+                        break;
+                case NET_FILTER_EQUAL:
+                        at += accumulator == step.value ? step.jump_true
+                                                        : step.jump_false;
+                        break;
+                case NET_FILTER_ANY_BIT:
+                        at += accumulator & step.value ? step.jump_true
+                                                       : step.jump_false;
+                        break;
+                case NET_FILTER_RETURN:
+                        return step.value;
+                default:
+                        return 0;
+                }
+        }
+        //      Off the end: the kernel refuses such a program at install.
+        return 0;
+}
+
 #else /* the sections */
 
 #ifdef CHECK_standard
@@ -50059,10 +50107,11 @@ static fn test_exec(void)
         are closed except the two kept, whatever their order, and the ones
         below `from` are not touched. The child answers with the number of
         descriptors that are not what that says, and 100 when the call
-        itself said false.
+        itself said false. A third kept one goes through
+        descriptors_close_outside, which the two-kept form is.
 */
-static fn test_close_except_case(string_address name, p32 from, p32 first,
-                                 p32 second)
+static fn test_close_three_case(string_address name, p32 from, p32 first,
+                                p32 second, p32 third)
 {
         b32 status = 0;
         b32 child;
@@ -50074,19 +50123,23 @@ static fn test_close_except_case(string_address name, p32 from, p32 first,
         {
                 positive wrong = 0;
                 bipolar null_device = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
+                p32 keep[3] = {first, second, third};
 
                 for (positive at = 0; at < 16; at++)
                         system_call_3(syscall(dup3), (positive)null_device, at, 0);
                 if (null_device >= 16)
                         system_close(null_device);
 
-                if (!descriptors_close_except(from, first, second))
+                if (third == descriptors_none
+                        ? !descriptors_close_except(from, first, second)
+                        : !descriptors_close_outside(from, keep, 3))
                         _exit(100);
 
                 for (positive at = 0; at < 16; at++)
                 {
                         bool open = system_call_3(syscall(fcntl), at, 1, 0) >= 0;
-                        bool wanted = at < from || at == first || at == second;
+                        bool wanted = at < from || at == first || at == second ||
+                                      at == third;
 
                         wrong += open != wanted;
                 }
@@ -50097,8 +50150,21 @@ static fn test_close_except_case(string_address name, p32 from, p32 first,
         same(name, WEXITSTATUS(status), 0);
 }
 
+static fn test_close_except_case(string_address name, p32 from, p32 first,
+                                 p32 second)
+{
+        test_close_three_case(name, from, first, second, descriptors_none);
+}
+
 static fn test_close_except(void)
 {
+        test_close_three_case("close_outside: three kept, out of order", 3, 11, 5, 8);
+        test_close_three_case("close_outside: three adjacent", 3, 6, 4, 5);
+        test_close_three_case("close_outside: one below from, two above", 3, 9, 1, 4);
+        test_close_three_case("close_outside: one twice and one missing", 3, 7,
+                              descriptors_none, 7);
+        test_close_three_case("close_outside: the last of the sixteen and two below it",
+                              0, 15, 0, 14);
         test_close_except_case("close_except: all from 3 up", 3, descriptors_none,
                                descriptors_none);
         test_close_except_case("close_except: one kept", 3, 5, descriptors_none);
@@ -54018,9 +54084,50 @@ typedef struct
         positive length;
 } http_test_span;
 
+//      The next writev answers that it wrote nothing.
+static bool http_writev_zero;
+
+/* Syscalls by number that answer as set instead of being made: the ids a
+   confined child gives up, the seccomp it installs. */
+#define NET_FAKE_CALLS 512
+static bool net_faked[NET_FAKE_CALLS];
+static bipolar net_fake[NET_FAKE_CALLS];
+
+static fn net_fake_set(positive number, bipolar result)
+{
+        net_faked[number] = true;
+        net_fake[number] = result;
+}
+
+static fn net_fakes_clear(void)
+{
+        memory_fill(net_faked, 0, sizeof net_faked);
+}
+
+static bipolar net_call1(positive number, positive one)
+{
+        if (number < NET_FAKE_CALLS && net_faked[number])
+                return net_fake[number];
+        return (system_call_1)(number, one);
+}
+
+static bipolar net_call2(positive number, positive one, positive two)
+{
+        if (number < NET_FAKE_CALLS && net_faked[number])
+                return net_fake[number];
+        return (system_call_2)(number, one, two);
+}
+
 static bipolar http_net_call3(positive number, positive one, positive two,
                               positive three)
 {
+        if (number < NET_FAKE_CALLS && net_faked[number])
+                return net_fake[number];
+        if (number == syscall(writev) && http_writev_zero)
+        {
+                http_writev_zero = false;
+                return 0;
+        }
         if (number == syscall(writev))
                 http_writev_calls++;
         if (number == syscall(writev) && http_writev_short_limit)
@@ -54066,12 +54173,20 @@ static bipolar http_net_call3(positive number, positive one, positive two,
         return (system_call_3)(number, one, two, three);
 }
 
+//      The next send answers that it moved nothing.
+static bool net_send_zero;
+
 static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                                     b32 flags, address_any to, positive to_size)
 {
         net_send_calls++;
         if (!(flags & MSG_DONTWAIT))
                 net_send_blocking_calls++;
+        if (net_send_zero)
+        {
+                net_send_zero = false;
+                return 0;
+        }
         if (net_send_capture)
         {
                 net_send_capture_length = min(size, net_send_capture_room);
@@ -54117,6 +54232,11 @@ static bipolar net_test_socket_send(b32 handle, address_any data, positive size,
                              size, (positive)flags, (positive)to, to_size);
 }
 
+/* The next receive answers this length and reads nothing, as a datagram's
+   MSG_TRUNC peek of that length or a fill that came back empty would. */
+static bool net_recv_report;
+static positive net_recv_report_length;
+
 static bipolar net_test_socket_receive(b32 handle, address_any data,
                                        positive size, b32 flags,
                                        address_any from, address_any from_size)
@@ -54144,6 +54264,14 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
                 return system_call_6(syscall(recvfrom), (positive)handle,
                                     (positive)data, size, (positive)flags,
                                     (positive)from, (positive)from_size);
+        }
+        if (net_recv_report)
+        {
+                net_recv_report = false;
+                net_recv_short_hit = true;
+                if (from && from_size)
+                        memory_fill(from, 0, *(p32 address_to)from_size);
+                return (bipolar)net_recv_report_length;
         }
         if (net_recv_eintr_sticky || net_recv_eintr_once)
         {
@@ -54195,18 +54323,30 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
 }
 
 static positive net_poll_calls;
+//      Polls that answer at once that nothing became ready: a deadline gone by.
+static positive net_poll_silent;
 
 static bipolar net_test_poll_wait(system_poll_descriptor address_to descriptors,
                                   positive count, timespec address_to limit,
                                   positive address_to signal_mask)
 {
         net_poll_calls++;
+        if (net_poll_silent)
+        {
+                net_poll_silent--;
+                return 0;
+        }
         return system_poll_wait(descriptors, count, limit, signal_mask);
 }
 
 static positive net_slurp_calls;
 static positive net_search_bytes;
 static positive net_name_calls;
+//      getsockname refused, or answered as a netlink socket on that port, so a
+//      datagram pair stands for a routing socket that hears only the kernel.
+static bipolar net_name_error;
+static bool net_name_short;
+static p32 net_name_netlink_port;
 static positive net_text_span_calls;
 static fn net_io_faults_clear(void);
 
@@ -54220,13 +54360,110 @@ static bipolar net_test_socket_name(b32 handle, address_any address,
                                     p32 address_to length)
 {
         net_name_calls++;
+        if (net_name_error)
+                return net_name_error;
+        if (net_name_short)
+        {
+                net_name_short = false;
+                address_to length = 1;
+                return 0;
+        }
+        if (net_name_netlink_port)
+        {
+                socket_address_netlink self = {.family = AF_NETLINK,
+                                               .port = net_name_netlink_port};
+
+                memory_copy(address, address_of self, sizeof self);
+                address_to length = sizeof self;
+                return 0;
+        }
         return socket_name(handle, address, length);
+}
+
+/* The wall clock, read as this when it is set. */
+static bool net_time_set;
+static time_t net_time_stamp;
+
+static time_t net_test_time(time_t address_to into)
+{
+        time_t stamp = net_time_set ? net_time_stamp : time(null);
+
+        if (into)
+                address_to into = stamp;
+        return stamp;
+}
+
+/* A file read that answers this text instead, as resolv.conf would. */
+static string_address net_slurp_text;
+
+/* connect: done, then answered as this status; bind: counted; randomness:
+   refused this many times, as a pool that is not ready refuses. */
+static bool net_connect_report;
+static bipolar net_connect_report_status;
+static positive net_bind_calls;
+static positive net_random_refuse;
+
+static positive net_connect_refuse;
+
+static bipolar net_test_socket_connect(b32 handle, address_any address, positive size)
+{
+        bipolar status;
+
+        //      Refused without asking the kernel: no packet leaves for an
+        //      address the check names only to be refused.
+        if (net_connect_refuse)
+        {
+                net_connect_refuse--;
+                return -ECONNREFUSED;
+        }
+        status = socket_connect(handle, address, size);
+
+        if (!net_connect_report)
+                return status;
+        net_connect_report = false;
+        return net_connect_report_status;
+}
+
+static bipolar net_test_socket_bind(b32 handle, address_any address, positive size)
+{
+        net_bind_calls++;
+        return socket_bind(handle, address, size);
+}
+
+static bipolar net_test_random_fill(address_any into, positive length, positive flags)
+{
+        if (net_random_refuse)
+        {
+                net_random_refuse--;
+                return -EAGAIN;
+        }
+        return system_random_fill(into, length, flags);
+}
+
+static bipolar net_test_slurp_regular_at(bipolar directory, string_address path,
+                                         p8 address_to into, positive capacity, positive flags)
+{
+        if (net_slurp_text)
+        {
+                positive length = min(string_length(net_slurp_text), capacity);
+
+                memory_copy(into, net_slurp_text, length);
+                return (bipolar)length;
+        }
+        return file_slurp_regular_at(directory, path, into, capacity, flags);
 }
 
 static bipolar net_test_file_slurp(string_address path, p8 address_to into,
                                    positive capacity)
 {
         net_slurp_calls++;
+        if (net_slurp_text)
+        {
+                positive length = min(string_length(net_slurp_text), capacity);
+
+                memory_copy(into, net_slurp_text, length);
+                return (bipolar)length;
+        }
         return file_slurp(path, into, capacity);
 }
 
@@ -54241,8 +54478,15 @@ static address_any net_test_memory_search(address_any block, positive size,
 #define memory_search net_test_memory_search
 #define memory_text_span net_test_memory_text_span
 #define socket_name net_test_socket_name
+#define socket_connect(...) net_test_socket_connect(__VA_ARGS__)
+#define socket_bind(...) net_test_socket_bind(__VA_ARGS__)
+#define time(...) net_test_time(__VA_ARGS__)
+#define file_slurp_regular_at(...) net_test_slurp_regular_at(__VA_ARGS__)
+#define system_random_fill(...) net_test_random_fill(__VA_ARGS__)
 #define system_poll_wait net_test_poll_wait
 #define system_call_3(...) http_net_call3(__VA_ARGS__)
+#define system_call_1(...) net_call1(__VA_ARGS__)
+#define system_call_2(...) net_call2(__VA_ARGS__)
 #define socket_send(...) net_test_socket_send(__VA_ARGS__)
 #define socket_receive(...) net_test_socket_receive(__VA_ARGS__)
 #define memory_reserve(...) net_test_memory_reserve(__VA_ARGS__)
@@ -54253,11 +54497,18 @@ static address_any net_test_memory_search(address_any block, positive size,
 #undef memory_search
 #undef memory_text_span
 #undef socket_name
+#undef socket_connect
+#undef socket_bind
+#undef time
+#undef file_slurp_regular_at
+#undef system_random_fill
 #undef system_poll_wait
 #undef memory_reserve
 #undef socket_receive
 #undef socket_send
 #undef system_call_3
+#undef system_call_1
+#undef system_call_2
 
 /* qemu-user arches get --emulated from test/run; native host arch does not. */
 static bool net_as_emulated(void)
@@ -54316,6 +54567,30 @@ static bool net_as_emulated(void)
                              / "a ninth Certificate list entry past certs[8] is refused"
           AEAD sequence      TLS_AES_GCM_RECORD_LIMIT
             at-limit refuse: "TLS write/read keys stop at their AES-GCM usage limit"
+
+        Revocation
+          staple bytes       TLS_OCSP_MAX (16384)
+            exact+one-over:  "an OCSP response of exactly TLS_OCSP_MAX bytes parses"
+                             / "an OCSP response one byte past TLS_OCSP_MAX is refused"
+          single responses   TLS_OCSP_RESPONSES (16)
+            exact+one-over:  "an OCSP response of TLS_OCSP_RESPONSES SingleResponses parses"
+                             / "an OCSP response of one SingleResponse more is refused"
+          response certs     TLS_OCSP_CERTS (4)
+            exact+one-over:  "an OCSP response carrying TLS_OCSP_CERTS certificates parses"
+                             / "an OCSP response carrying one certificate more is refused"
+          list extensions    TLS_LIST_EXTENSIONS (16)
+            exact+one-over:  "an OCSP response of TLS_LIST_EXTENSIONS extensions parses"
+                             / "an OCSP response of one extension more is refused",
+                             "a CRL of TLS_LIST_EXTENSIONS extensions parses"
+                             / "a CRL of one extension more is refused"
+          CRL entries        TLS_CRL_ENTRIES (524288)
+            exact+one-over:  "a CRL of TLS_CRL_ENTRIES revoked certificates parses"
+                             / "a CRL of one revoked certificate more is refused"
+          clock skew         TLS_REVOCATION_SKEW (300 s)
+            exact+one-over:  "an answer holds five minutes past its nextUpdate and not a second more",
+                             "an answer holds five minutes before its thisUpdate and not a second more"
+          CRL bytes, time    TLS_CRL_MAX, TLS_REVOCATION_SECONDS: tls_plain_get's
+                             reads (tls_chains serves the CRLs it fetches)
 
         HTTP
           URL length         HTTP_URL_MAX (2048)
@@ -54836,6 +55111,771 @@ static fn netlink_nonblocking_retries(void)
                 }
 }
 
+/*
+        The edges of the HTTP framing decisions: header lines ended by a bare
+        LF, a name that is the start of a longer one, a header that is not
+        there, the first status that is not a success, chunk-size lines and
+        trailers without their LF, and chunk extensions whose name, value or
+        quoted string carries one byte out of place.
+*/
+static fn http_decision_edges(void)
+{
+        static p8 bare[] = "HTTP/1.1 200 OK\nX-A: abc\n\n";
+        static p8 prefixed[] = "HTTP/1.1 200 OK\r\nX-Ab: 1\r\n\r\n";
+        positive length = 77;
+        string_address value;
+
+        value = http_header(bare, sizeof bare - 1, "X-A", address_of length, null);
+        check("a header line ended by a bare LF keeps its last byte",
+              value && length == 3 && !memory_compare(value, "abc", 3));
+        length = 77;
+        check("a header whose name only starts with the one asked for is not it",
+              !http_header(prefixed, sizeof prefixed - 1, "X-A", address_of length, null) &&
+                  length == 77);
+        check("300 is not a success and 299 is",
+              !http_response_is_success(300) && http_response_is_success(299));
+        {
+                static const struct
+                {
+                        const char address_to line;
+                        bipolar want;
+                } chunks[] = {
+                    {"5;a b\r\n", HTTP_MALFORMED},       // a blank inside a name
+                    {"5;a=b c\r\n", HTTP_MALFORMED},     // and inside a value
+                    {"1;a;\"x\"\r\n", HTTP_MALFORMED},   // a name that is a quoted string
+                    {"1;a=\"\\\"x\"\r\n", HTTP_OK},      // an escaped quote inside one
+                    {"1;a=\"bc\"\r\n", HTTP_OK},
+                    {"5\r", HTTP_MALFORMED},             // no LF
+                    {"5;a\n", HTTP_OK},                  // a bare LF after an extension
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(chunks); at++)
+                {
+                        positive size = 99;
+
+                        wrong += http_chunk_line((p8 address_to)chunks[at].line,
+                                                 string_length(chunks[at].line),
+                                                 address_of size) != chunks[at].want;
+                }
+                check("chunk-size lines at the edges of their grammar", wrong == 0);
+        }
+        check("a trailer without its LF is refused",
+              http_trailer_line((p8 address_to)"X: y", 4) == HTTP_MALFORMED);
+        check("a trailer whose last byte is a control is refused",
+              http_trailer_line((p8 address_to)"X:\x01\n", 4) == HTTP_MALFORMED);
+        {
+                static p8 foreign[] = "HTTP/1.1 200 OK\r\nX-Abcdefghijklmno: chunked\r\n"
+                                      "X-Abcdefghijkl: 5\r\n\r\n";
+                static p8 blank[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: \r\n\r\n";
+                http_response response = {.code = 200};
+                http_framing_fields fields;
+
+                check("headers as long as the framing ones but named otherwise frame nothing",
+                      http_response_fields(foreign, sizeof foreign - 1, address_of response,
+                                           address_of fields) &&
+                          !fields.transfer && !fields.length && !fields.length_value);
+                check("a framing header whose value is only a blank has a value of nothing",
+                      http_response_fields(blank, sizeof blank - 1, address_of response,
+                                           address_of fields) &&
+                          fields.transfer && fields.transfer_size == 0);
+        }
+        {
+                static const char *codes[] = {"HTTP/1.1 599 X\r\n\r\n", "HTTP/1.1 600 X\r\n\r\n"};
+                bipolar status[2];
+
+                for (positive at = 0; at < 2; at++)
+                {
+                        http_response response = {0};
+                        positive resume = 0, searched = 0, header_length = 0;
+
+                        status[at] = http_response_framing_scan(
+                            (p8 address_to)codes[at], string_length(codes[at]), address_of resume,
+                            address_of searched, address_of header_length, address_of response);
+                }
+                check("a status of 599 is a status and 600 is not",
+                      status[0] != HTTP_MALFORMED && status[1] == HTTP_MALFORMED);
+        }
+        {
+                bipolar saved = system_call_1(syscall(dup), 0);
+                http_link link = {.handle = -1};
+
+                if (saved >= 0)
+                        system_close(0);
+                link.handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                http_link_close(address_of link);
+                check("a connection on descriptor 0 is closed like any other",
+                      system_call_3(syscall(fcntl), 0, 1, 0) < 0 && link.handle == -1);
+                if (saved >= 0)
+                {
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
+                        system_close((b32)saved);
+                }
+        }
+        {
+                static const bipolar pairs[][2] = {
+                    {TLS_UNTRUSTED, HTTP_UNTRUSTED}, {TLS_EXPIRED, HTTP_EXPIRED},
+                    {TLS_NOT_YET, HTTP_NOT_YET},     {TLS_MISMATCH, HTTP_MISMATCH},
+                    {TLS_REVOKED, HTTP_REVOKED},     {TLS_UNCHECKED, HTTP_UNCHECKED},
+                    {TLS_CLOCK, HTTP_CLOCK},         {TLS_UNLOGGED, HTTP_UNLOGGED},
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(pairs); at++)
+                        wrong += http_tls_status(pairs[at][0]) != pairs[at][1];
+                check("each TLS refusal is said as its own HTTP status", wrong == 0);
+        }
+        {
+                b32 ends[2];
+                p8 bytes[4] = "abcd";
+                http_span spans[1] = {{bytes, 4}};
+
+                if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0)
+                {
+                        http_writev_zero = true;
+                        http_write_failure = 0;
+                        check("a write that moves nothing is a full disk, not a loop",
+                              !http_write_spans(ends[1], spans, 1, 4) &&
+                                  http_write_failure == -ENOSPC);
+                        http_writev_zero = false;
+                        system_close(ends[0]);
+                        system_close(ends[1]);
+                }
+        }
+        {
+                http_body body = {0};
+                positive seconds = 0, nanoseconds = 0;
+
+                body.read_seconds = 2;
+                body.deadline = (network_deadline){1000000000, 2500000000};
+                net_clock_now = 1000000000;
+                net_clock_step = 1;
+                check("a body's whole budget shortens the idle wait only when it is shorter",
+                      http_body_wait(address_of body, address_of seconds, address_of nanoseconds) &&
+                          seconds == 2 && nanoseconds == 0);
+                net_clock_step = 0;
+        }
+        check("a target's percent that spells no hex digit is not decoded",
+              http_request_component_valid("/%z0", HTTP_REQUEST_TARGET));
+        check("a target's CR spelled after a percent that spells none is found",
+              !http_request_component_valid("/%0%0d", HTTP_REQUEST_TARGET));
+        check("a field's percent is no escape",
+              http_request_component_valid("a%0d", HTTP_REQUEST_FIELD));
+        {
+                p8 out[16];
+
+                check("an absolute Location as long as the room is refused",
+                      http_absolutize(false, "h", 80, "/", "http://h/x", out, 10) ==
+                          HTTP_BAD_URL);
+                check("a scheme-relative Location that fits the room exactly is taken",
+                      http_absolutize(true, "h", 443, "/", "//h/x", out, 12) == HTTP_OK &&
+                          !memory_compare(out, "https://h/x", 12));
+        }
+        {
+                b32 code = 0;
+
+                check("a status line of thirteen bytes is read",
+                      http_status_code((p8 address_to)"HTTP/1.1 200 ", 13, address_of code) ==
+                              HTTP_OK &&
+                          code == 200);
+        }
+        {
+                static const struct
+                {
+                        const char address_to text;
+                        positive mode;
+                } words[] = {{"on\n", DNS_TLS_ON}, {"on \n", DNS_TLS_ON}, {"only", DNS_TLS_ONLY},
+                             {"on", DNS_TLS_ON},    {"off\n\n", DNS_TLS_OFF}};
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(words); at++)
+                {
+                        net_slurp_text = (string_address)words[at].text;
+                        wrong += dns_tls_mode() != words[at].mode;
+                }
+                net_slurp_text = null;
+                check("the DNS over TLS word is read without its newline and blanks", wrong == 0);
+        }
+        net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
+        net_random_refuse = 1000;
+        check("a name that is not the machine's is not looked up as loopback",
+              http_lookup("example.invalid") == 0);
+        net_io_faults_clear();
+        check("the literal 0.0.0.0 is no name rebound", !http_name_rebound("0.0.0.0", 0));
+}
+
+/*
+        The edges of the certificate name and DER decisions: a length of four
+        bytes, a BOOLEAN reader at its end, a host of 256 bytes, the address
+        0.0.0.0, a wildcard over a name that ends in a dot, an excluded
+        wildcard of no labels, and a mailbox whose host is the base itself.
+*/
+static fn tls_decision_edges(void)
+{
+        {
+                p8 four[] = {0x84, 0x01, 0x02, 0x03, 0x04};
+                positive at = 0, length = 0;
+
+                check("a DER length of four bytes is refused, however long the value",
+                      tls_asn1_length(four, sizeof four, address_of at, address_of length) ==
+                          TLS_FAIL);
+        }
+        {
+                //      The BOOLEAN would start at 1, which is where its
+                //      container ends; the byte there belongs to whatever
+                //      comes next, and happens to be a BOOLEAN's tag.
+                p8 bytes[] = {0x30, 0x01, 0x01, 0xff};
+                positive at = 1;
+                bool value = false;
+
+                check("a BOOLEAN reader at the end of its container reads nothing past it",
+                      tls_asn1_true(bytes, 1, address_of at, address_of value) == TLS_OK &&
+                          !value && at == 1);
+        }
+        {
+                static char host[257];
+                p8 zero[4] = {0};
+
+                memory_fill(host, 'a', 256);
+                check("a host of 256 bytes matches no name, even its own",
+                      !tls_general_name_match(host, 0x82, (p8 address_to)host, 256));
+                check("the address 0.0.0.0 matches an iPAddress of 0.0.0.0",
+                      tls_general_name_match("0.0.0.0", 0x87, zero, 4));
+        }
+        check("a wildcard over a name ending in a dot leaves no label beneath it",
+              !tls_host_match("x.a.", (p8 address_to)"*.a..", 5));
+        check("an excluded wildcard of no labels is not taken into a base it differs from",
+              !tls_dns_within((p8 address_to)"*..", 3, (p8 address_to)"x..", 3, true));
+        {
+                p64 now = 0, floor = 0;
+
+                net_time_set = true;
+                net_time_stamp = (time_t)clock_trust_floor();
+                check("a clock that reads the trust floor exactly is believed",
+                      tls_date_now(address_of now) && tls_date_floor(address_of floor) &&
+                          now == floor);
+                net_time_stamp = (time_t)clock_trust_floor() - 1;
+                check("a clock a second below the floor is not",
+                      !tls_date_now(address_of now));
+                net_io_faults_clear();
+        }
+        {
+                //      A TBSCertificate whose extensions start with the SCT
+                //      list: the precertificate is the same TBS without it.
+                static p8 tbs[] = {0x30, 0x15, 0x02, 0x01, 0x01, 0xa3, 0x10, 0x30, 0x0e,
+                                   0x30, 0x05, 0x06, 0x03, 0x01, 0x02, 0x03,
+                                   0x30, 0x05, 0x06, 0x03, 0x04, 0x05, 0x06};
+                static const p8 want[] = {0x30, 0x0e, 0x02, 0x01, 0x01, 0xa3, 0x09, 0x30, 0x07,
+                                          0x30, 0x05, 0x06, 0x03, 0x04, 0x05, 0x06};
+                static tls_cert leaf;
+                p8 out[sizeof tbs];
+
+                memory_fill(address_of leaf, 0, sizeof leaf);
+                leaf.tbs = tbs;
+                leaf.tbs_length = sizeof tbs;
+                leaf.extensions = tbs + 5;
+                leaf.sct_extension = tbs + 9;
+                leaf.sct_extension_length = 7;
+                leaf.scts = tbs;
+                check("an SCT extension that is the first of the extensions is cut from the precertificate",
+                      tls_ct_precert(address_of leaf, out, sizeof out) == sizeof want &&
+                          !memory_compare(out, want, sizeof want));
+        }
+        check("a mailbox whose host is the base .b itself is not under it",
+              tls_email_within((p8 address_to)"u@.example.com", 14,
+                               (p8 address_to)".example.com", 12) == TLS_OUTSIDE);
+        {
+                //      basicConstraints: cA TRUE, and after the value the
+                //      byte that follows it in the buffer, which is no part
+                //      of it -- here an INTEGER's tag.
+                static p8 ca_then[] = {0x30, 0x03, 0x01, 0x01, 0xff, 0x02};
+                static p8 empty_integer[] = {0x30, 0x05, 0x01, 0x01, 0xff, 0x02, 0x00, 0x00};
+                static p8 eight[] = {0x30, 0x0d, 0x01, 0x01, 0xff, 0x02, 0x08,
+                                     0x01, 0, 0, 0, 0, 0, 0, 0};
+                static p8 negative[] = {0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x80};
+                static p8 trailing[] = {0x30, 0x06, 0x01, 0x01, 0xff, 0x04, 0x01, 0x00};
+                static tls_cert cert;
+
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("basicConstraints ends at its own length, not at the byte after it",
+                      tls_parse_basic_constraints(ca_then, 5, address_of cert) == TLS_OK &&
+                          cert.ca && !cert.path_length_present);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a pathLenConstraint of no bytes is refused",
+                      tls_parse_basic_constraints(empty_integer, 7, address_of cert) == TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a pathLenConstraint of eight bytes is read",
+                      tls_parse_basic_constraints(eight, sizeof eight, address_of cert) ==
+                              TLS_OK &&
+                          cert.path_length == (positive)1 << 56);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("a negative pathLenConstraint of one byte is refused",
+                      tls_parse_basic_constraints(negative, sizeof negative, address_of cert) ==
+                          TLS_FAIL);
+                memory_fill(address_of cert, 0, sizeof cert);
+                check("basicConstraints with bytes after its fields is refused",
+                      tls_parse_basic_constraints(trailing, sizeof trailing, address_of cert) ==
+                          TLS_FAIL);
+        }
+}
+
+/*
+        The edges of the waits every exchange is built on: a deadline that
+        never began, a random draw as wide as a word, a read whose wait went
+        by, a send that moved nothing, and a send that moved part of its
+        bytes and then found the wait for the rest already over.
+*/
+static fn network_wait_edges(void)
+{
+        b32 pair[2];
+        p8 data[4] = "abcd";
+        p8 drained[16];
+        network_deadline deadline;
+        positive seconds = 0, nanoseconds = 0;
+        p64 word = 0;
+
+        net_clock_now = 1000;
+        net_clock_step = 1;
+        deadline = (network_deadline){0, 1000000000000};
+        check("a deadline that never began has no time left",
+              !network_deadline_left(address_of deadline, address_of seconds,
+                                     address_of nanoseconds));
+        net_clock_step = 0;
+        check("a random draw as wide as a word is made, and one wider is not",
+              network_transaction_secure(address_of word, sizeof word) &&
+                  !network_transaction_secure(address_of word, sizeof word + 1));
+        if (system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0, (positive)pair) != 0)
+        {
+                check("network wait fixture opens", false);
+                return;
+        }
+        net_io_faults_clear();
+        net_poll_silent = 1;
+        check("a read whose wait goes by answers -1, not 0",
+              network_deadline_begin(address_of deadline, 5, 0) &&
+                  network_stream_read_some_until(pair[0], drained, sizeof drained,
+                                                 address_of deadline) == -1);
+        net_io_faults_clear();
+        net_send_zero = true;
+        check("a send that moves nothing fails, and is not tried for ever",
+              network_deadline_begin(address_of deadline, 5, 0) &&
+                  !network_stream_send_all_until(pair[0], data, sizeof data,
+                                                 address_of deadline));
+        net_io_faults_clear();
+        net_send_zero = true;
+        check("a first send that moves nothing fails too",
+              !network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
+        net_io_faults_clear();
+        net_send_short_limit = 2;
+        net_poll_silent = 1;
+        check("a send that moved part of its bytes sends the rest without waiting to be writable",
+              network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
+        net_io_faults_clear();
+        net_send_error = NETWORK_TRY_AGAIN;
+        check("a first send told to try again waits and sends",
+              network_stream_send_all_for(pair[0], data, sizeof data, 5, 0));
+        net_io_faults_clear();
+        while (socket_receive(pair[1], drained, sizeof drained, MSG_DONTWAIT, null, null) > 0)
+                ;
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/*
+        The edges of each netlink decision, one check at each: a body or an
+        attribute of exactly the most its length field holds, an attribute of
+        no payload in the middle of a chain and at its end, a message of
+        exactly its header and body, a datagram of exactly the most, a fill
+        that came back empty, a socket whose name could not be had, a request
+        of nothing, a walk whose deadline went by and one that heard only
+        somebody who is not the kernel, a link raised, and a socket that the
+        kernel numbered 0.
+*/
+static p8 netlink_edge_payload[0xffff];
+
+static fn netlink_decision_edges(void)
+{
+        netlink_buffer request = {0}, reply = {0};
+        b32 pair[2];
+        bipolar opened;
+
+        net_memory_reserve_fail = true;
+        net_memory_reserve_fail_hit = false;
+        check("a netlink body of the most nlmsg_len holds is asked room for, not refused",
+              !netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 1,
+                             0xffffffffu - NETLINK_HEADER) &&
+                  net_memory_reserve_fail_hit && !request.failed);
+        net_memory_reserve_fail = false;
+        net_memory_reserve_fail_hit = false;
+        check("a netlink body one byte past it is refused before any room is asked",
+              !netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 1,
+                             0xffffffffu - NETLINK_HEADER + 1) &&
+                  request.failed && !net_memory_reserve_fail_hit);
+        netlink_forget(address_of request);
+
+        check("an attribute of the most payload rta_len holds is added whole",
+              netlink_begin(address_of request, RTM_NEWLINK, NLM_REQUEST, 1, 0) &&
+                  netlink_attribute_add(address_of request, 1, netlink_edge_payload,
+                                        0xffffu - sizeof(netlink_attribute)) &&
+                  !request.failed &&
+                  ((netlink_attribute address_to)(request.bytes + NETLINK_HEADER))->length ==
+                      0xffffu);
+        check("an attribute one byte longer is refused",
+              !netlink_attribute_add(address_of request, 1, netlink_edge_payload,
+                                     0xffffu - sizeof(netlink_attribute) + 1) &&
+                  request.failed);
+        netlink_forget(address_of request);
+
+        {
+                //      An empty attribute, then one of four bytes; then the
+                //      same the other way round, the empty one last.
+                p8 chain[12] = {4, 0, 1, 0, 8, 0, 2, 0, 'w', 'x', 'y', 'z'};
+                p8 tail[12] = {8, 0, 1, 0, 'w', 'x', 'y', 'z', 4, 0, 2, 0};
+                positive size = 99;
+                p8 address_to found = netlink_find_span(chain, sizeof chain, 2, address_of size);
+
+                check("an attribute with no payload does not end the chain",
+                      found == chain + 8 && size == 4);
+                size = 99;
+                found = netlink_find_span(tail, sizeof tail, 2, address_of size);
+                check("an attribute with no payload is found at the very end",
+                      found == tail + 12 && size == 0);
+        }
+        {
+                struct { netlink_header header; netlink_link link; } whole = {
+                    .header = {.length = NETLINK_HEADER + sizeof(netlink_link)}};
+
+                check("a message of exactly its header and body has that body",
+                      netlink_message_body(address_of whole.header, sizeof(netlink_link)) ==
+                          (address_any)address_of whole.link);
+        }
+
+        opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_DGRAM, 0,
+                               (positive)pair);
+        check("netlink decision fixture opens", opened == 0);
+        if (opened)
+                return;
+        {
+                netlink_header frame = {.length = NETLINK_HEADER, .type = RTM_NEWLINK};
+                netlink_header drained;
+                p32 port = 77;
+
+                (void)socket_send(pair[1], address_of frame, sizeof frame, 0, null, 0);
+                net_io_faults_clear();
+                net_recv_report = true;
+                net_recv_report_length = NETLINK_DATAGRAM_MAX;
+                net_memory_reserve_fail = true;
+                net_memory_reserve_fail_hit = false;
+                check("a datagram of exactly the most is given room, not refused as too big",
+                      netlink_receive_one(pair[0], address_of reply, false) == -1 &&
+                          net_memory_reserve_fail_hit);
+                net_memory_reserve_fail = false;
+                net_io_faults_clear();
+
+                net_recv_arm_after = 1;
+                net_recv_report = true;
+                net_recv_report_length = 0;
+                check("a fill that comes back empty after a datagram was seen is a failure",
+                      netlink_receive_one(pair[0], address_of reply, false) == -1 &&
+                          reply.used == 0);
+                net_io_faults_clear();
+
+                check("netlink_receive reads a waiting datagram whole",
+                      netlink_receive(pair[0], address_of reply, address_of port) ==
+                              (bipolar)sizeof frame &&
+                          port == 0);
+                (void)socket_send(pair[1], address_of frame, sizeof frame, 0, null, 0);
+                port = 77;
+                net_name_error = -EBADF;
+                check("a socket whose name cannot be had is refused before it is read",
+                      netlink_receive(pair[0], address_of reply, address_of port) == -EBADF &&
+                          port == 77);
+                net_io_faults_clear();
+                net_name_short = true;
+                check("a socket name shorter than its family is refused",
+                      netlink_receive(pair[0], address_of reply, address_of port) == -1 &&
+                          port == 77);
+                net_io_faults_clear();
+                while (socket_receive(pair[0], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) > 0)
+                        ;
+        }
+        {
+                struct { netlink_header header; b32 status; } refused = {
+                    .header = {.length = NETLINK_HEADER + 4, .type = NLMSG_IS_ERROR,
+                               .sequence = 91},
+                    .status = -EIO};
+                netlink_buffer nothing = {0};
+                netlink_header drained;
+
+                (void)socket_send(pair[1], address_of refused, sizeof refused, 0, null, 0);
+                check("a request of nothing is still sent and its answer read",
+                      netlink_walk(pair[0], address_of nothing, 91, address_of reply, null,
+                                   null) == -EIO);
+                while (socket_receive(pair[1], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) >= 0)
+                        ;
+
+                check("netlink walk fixture request builds",
+                      netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 92, 0));
+                net_io_faults_clear();
+                net_poll_silent = 1;
+                check("a walk whose deadline goes by with nothing heard fails",
+                      netlink_walk(pair[0], address_of request, 92, address_of reply, null,
+                                   null) == -1);
+                net_io_faults_clear();
+                while (socket_receive(pair[1], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) >= 0)
+                        ;
+
+                refused.header.sequence = 93;
+                (void)socket_send(pair[1], address_of refused, sizeof refused, 0, null, 0);
+                net_name_netlink_port = 4242;
+                net_poll_silent = 1;
+                check("a walk that hears only a sender who is not the kernel waits on, then fails",
+                      netlink_begin(address_of request, RTM_GETLINK, NLM_REQUEST, 93, 0) &&
+                          netlink_walk(pair[0], address_of request, 93, address_of reply, null,
+                                       null) == -1);
+                net_io_faults_clear();
+                while (socket_receive(pair[1], address_of drained, sizeof drained, MSG_DONTWAIT,
+                                      null, null) >= 0)
+                        ;
+                netlink_forget(address_of request);
+        }
+        {
+                struct { netlink_header header; b32 status; } done = {
+                    .header = {.length = NETLINK_HEADER + 4, .type = NLMSG_IS_ERROR,
+                               .sequence = netlink_sequence_next},
+                    .status = 0};
+                struct { netlink_header header; netlink_link link; } sent = {0};
+
+                (void)socket_send(pair[1], address_of done, sizeof done, 0, null, 0);
+                check("a link is raised by one acknowledged request",
+                      netlink_link_flag_up(pair[0], 7, true) == 0);
+                check("the request raises IFF_UP on that link and changes nothing else",
+                      socket_receive(pair[1], address_of sent, sizeof sent, MSG_DONTWAIT, null,
+                                     null) == (bipolar)sizeof sent &&
+                          sent.header.type == RTM_NEWLINK && sent.link.index == 7 &&
+                          sent.link.flags == IFF_UP && sent.link.change == IFF_UP);
+        }
+        netlink_forget(address_of reply);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+
+        {
+                //      The kernel hands out the lowest free number, and with
+                //      standard input closed that is 0: still a socket, which
+                //      has to be bound like any other.
+                bipolar saved = system_call_1(syscall(dup), 0);
+                bipolar handle;
+                socket_address_netlink self = {0};
+                p32 length = sizeof self;
+                bool bound;
+
+                if (saved >= 0)
+                        system_close(0);
+                handle = netlink_open_groups(0);
+                bound = handle == 0 && socket_name(0, address_of self, address_of length) == 0 &&
+                        self.family == AF_NETLINK && self.port != 0;
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                if (saved >= 0)
+                {
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
+                        system_close((b32)saved);
+                }
+                check("a netlink socket numbered 0 is bound like any other",
+                      bound || (handle < 0 && net_as_emulated()));
+        }
+}
+
+/*
+        Which datagrams complete a transaction. Only the kernel's reply to this
+        request does: its sequence and its port together. A datagram that
+        carries one and not the other is somebody else's, and so is one from
+        a socket that is not the kernel. Each is drawn and dropped, at most
+        NETWORK_DISCARD_MAX of them, and the walk gives up on the next.
+*/
+static fn netlink_reply_matching(void)
+{
+        struct { netlink_header header; b32 error; } stranger = {
+            .header = {.length = sizeof stranger, .type = NLMSG_IS_ERROR,
+                       .sequence = 55},
+            .error = -EPERM};
+        const struct { p32 port, sequence; } strangers[] = {
+            {9, 55}, {0, 56}, {9, 56}, {0xffffffffu, 55}, {0, 0}};
+
+        for (positive row = 0; row < array_count(strangers); row++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                p8 left[NETLINK_HEADER];
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink matching fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                stranger.header.port = strangers[row].port;
+                stranger.header.sequence = strangers[row].sequence;
+                check("a stranger's reply and the real one queue",
+                      socket_send(pair[1], address_of stranger, sizeof stranger,
+                                  0, null, 0) == sizeof stranger &&
+                          socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done);
+                check("a reply with the wrong port or sequence does not end the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) == 0);
+                check("the walk drew the stranger and its own reply",
+                      socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                                     null, null) == NETWORK_TRY_AGAIN);
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* The allowance: NETWORK_DISCARD_MAX strangers are dropped and the
+           real reply after them still answers; one more and the walk ends. */
+        for (positive count = NETWORK_DISCARD_MAX - 1;
+             count <= NETWORK_DISCARD_MAX + 1; count++)
+        {
+                b32 pair[2];
+                netlink_buffer request = {0}, reply = {0};
+                netlink_header done = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                netlink_header other = {.length = NETLINK_HEADER,
+                    .type = RTM_NEWLINK, .sequence = 56};
+                bool queued = true;
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink allowance fixture opens", opened == 0);
+                if (opened)
+                        continue;
+                for (positive at = 0; at < count; at++)
+                        queued &= socket_send(pair[1], address_of other,
+                            sizeof other, 0, null, 0) == sizeof other;
+                queued &= socket_send(pair[1], address_of done, sizeof done, 0,
+                                      null, 0) == sizeof done;
+                check("the strangers and the real reply queue", queued);
+                check("strangers up to the allowance are dropped, one more ends the walk",
+                      netlink_begin(address_of request, RTM_GETLINK,
+                                    NLM_REQUEST, 55, 0) &&
+                          netlink_walk(pair[0], address_of request, 55,
+                                       address_of reply, null, null) ==
+                              (count <= NETWORK_DISCARD_MAX ? 0 : -1));
+                netlink_forget(address_of request);
+                netlink_forget(address_of reply);
+                socket_close(pair[0]);
+                socket_close(pair[1]);
+        }
+
+        /* A reply that is not from the kernel, or an empty datagram, is no
+           reply at all. */
+        {
+                b32 pair[2];
+                netlink_buffer reply = {0};
+                p8 nothing = 0;
+                netlink_header whole = {.length = NETLINK_HEADER,
+                    .type = NLMSG_IS_DONE, .sequence = 55};
+                bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                                SOCK_DGRAM, 0, (positive)pair);
+
+                check("netlink empty-datagram fixture opens", opened == 0);
+                if (!opened)
+                {
+                        check("an empty datagram is refused",
+                              socket_send(pair[1], address_of nothing, 0, 0,
+                                          null, 0) == 0 &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == -1);
+                        check("a whole one after it is read",
+                              socket_send(pair[1], address_of whole, sizeof whole,
+                                          0, null, 0) == sizeof whole &&
+                                  netlink_receive_one(pair[0], address_of reply,
+                                                      false) == sizeof whole &&
+                                  reply.used == sizeof whole);
+                        netlink_forget(address_of reply);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                }
+        }
+
+        /* A datagram sender is the kernel only when it says it is netlink and
+           port zero, in an address of the whole size. */
+        {
+                socket_address_netlink source = {.family = AF_NETLINK, .port = 0};
+
+                check("the kernel as sender is accepted",
+                      netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_INET;
+                check("another family at port zero is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.family = AF_NETLINK;
+                source.port = 1;
+                check("port one is a process, not the kernel",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+                source.port = 0xffffffffu;
+                check("the largest port is refused",
+                      !netlink_source_is_kernel(address_of source, sizeof source));
+        }
+}
+
+/* netlink_each: a visitor that says stop ends the walk without failing it, a
+   cut or short message fails it, and what came before the cut was visited. */
+static bool netlink_count_all(netlink_header address_to header,
+                              address_any context)
+{
+        (void)header;
+        (*(positive address_to)context)++;
+        return true;
+}
+
+static fn netlink_each_stops(void)
+{
+        netlink_header one = {.length = NETLINK_HEADER, .type = RTM_NEWLINK};
+        p8 bytes[NETLINK_HEADER * 3];
+        netlink_buffer reply = {bytes, sizeof bytes, sizeof bytes, false};
+        positive visited = 0;
+
+        memory_copy(bytes, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        memory_copy(bytes + 2 * NETLINK_HEADER, address_of one, NETLINK_HEADER);
+        check("every message of a datagram is visited",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 3);
+        visited = 0;
+        check("a visitor that stops is no failure and sees no more",
+              netlink_each(address_of reply, netlink_stop_after_first,
+                           address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            2 * NETLINK_HEADER;
+        check("a message longer than what arrived fails the datagram after those before it",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 2);
+        visited = 0;
+        ((netlink_header address_to)(bytes + 2 * NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER - 1;
+        check("a length under its own header fails the datagram",
+              !netlink_each(address_of reply, netlink_count_all,
+                            address_of visited) && visited == 1);
+        visited = 0;
+        ((netlink_header address_to)(bytes + NETLINK_HEADER))->length =
+            NETLINK_HEADER;
+        reply.used = 2 * NETLINK_HEADER + NETLINK_HEADER - 1;
+        check("bytes after the last whole header are no message",
+              netlink_each(address_of reply, netlink_count_all,
+                           address_of visited) && visited == 2);
+}
+
 static fn error_frames(void)
 {
         b32 pair[2];
@@ -54935,7 +55975,8 @@ static fn error_frames(void)
                 socket_send(pair[1], &more, sizeof more, 0, null, 0);
                 socket_send(pair[1], &finished, sizeof finished, 0, null, 0);
                 check("an interrupted netlink dump fails after draining the rest",
-                      netlink_walk(pair[0], &request, 91, &reply, null, null) == -1 &&
+                      netlink_walk(pair[0], &request, 91, &reply, null, null) ==
+                          NETLINK_DUMP_CHANGED &&
                           socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
                                          null, null) == NETWORK_TRY_AGAIN);
                 p8 discarded[NETLINK_HEADER];
@@ -54946,6 +55987,96 @@ static fn error_frames(void)
         }
         netlink_forget(&request);
         netlink_forget(&reply);
+        socket_close(pair[0]);
+        socket_close(pair[1]);
+}
+
+/* A link message named eth9, on the peer at one sequence. */
+static fn netlink_named_link(b32 peer, p32 sequence, p32 index)
+{
+        netlink_buffer message = {0};
+
+        if (netlink_begin(address_of message, RTM_NEWLINK, 0, sequence,
+                          sizeof(netlink_link)) &&
+            netlink_attribute_add(address_of message, IFLA_IFNAME, "eth9", 5))
+        {
+                netlink_link address_to link = netlink_body(address_of message);
+
+                link->kind = NETLINK_LINK_ETHER;
+                link->index = index;
+                socket_send(peer, message.bytes, message.used, 0, null, 0);
+        }
+        netlink_forget(address_of message);
+}
+
+static fn netlink_done(b32 peer, p32 sequence)
+{
+        netlink_header done = {.length = NETLINK_HEADER,
+                               .type = NLMSG_IS_DONE, .sequence = sequence};
+
+        socket_send(peer, &done, sizeof done, 0, null, 0);
+}
+
+/* A dump the kernel changed under: a marked message and a DONE marked too. */
+static fn netlink_changed_dump(b32 peer, p32 sequence)
+{
+        netlink_header marked = {.length = NETLINK_HEADER,
+                                 .type = RTM_NEWLINK,
+                                 .flags = 2 | NLM_DUMP_INTERRUPTED,
+                                 .sequence = sequence};
+        netlink_header finished = {.length = NETLINK_HEADER,
+                                   .type = NLMSG_IS_DONE,
+                                   .flags = NLM_DUMP_INTERRUPTED,
+                                   .sequence = sequence};
+
+        socket_send(peer, &marked, sizeof marked, 0, null, 0);
+        socket_send(peer, &finished, sizeof finished, 0, null, 0);
+}
+
+/* A dump the kernel changed underneath is asked again, whole, under the next
+   sequence number, by a visitor that starts over, and three changed dumps in
+   a row are the answer: no fourth try. The replies are queued on the peer,
+   at the sequence numbers the calls will take, before the call. */
+static fn dump_restart_frames(void)
+{
+        b32 pair[2];
+        bipolar opened = system_call_4(syscall(socketpair), AF_UNIX,
+                                       SOCK_DGRAM, 0, (positive)pair);
+        netlink_search search;
+        p32 first;
+        p8 left[NETLINK_HEADER];
+
+        check("dump restart test socket pair opens", opened == 0);
+        if (opened)
+                return;
+
+        /* The first try finds eth9 as index 8 before the kernel says the
+           table changed, so a visitor left as it was keeps index 8. */
+        first = netlink_sequence_next;
+        netlink_named_link(pair[1], first, 8);
+        netlink_changed_dump(pair[1], first);
+        netlink_named_link(pair[1], first + 1, 9);
+        netlink_done(pair[1], first + 1);
+        memory_fill(address_of search, 0, sizeof search);
+        search.wanted = (string_address)"eth9";
+        check("a changed dump is asked again and the answer kept is the second",
+              netlink_link_find((b32)pair[0], address_of search) == 0 &&
+                  search.found && search.index == 9);
+
+        first = netlink_sequence_next;
+        netlink_changed_dump(pair[1], first);
+        netlink_changed_dump(pair[1], first + 1);
+        netlink_changed_dump(pair[1], first + 2);
+        netlink_changed_dump(pair[1], first + 3);
+        memory_fill(address_of search, 0, sizeof search);
+        search.wanted = (string_address)"eth9";
+        check("a dump changed on every try is the answer after three tries",
+              netlink_link_find((b32)pair[0], address_of search) ==
+                  NETLINK_DUMP_CHANGED);
+        check("and the fourth dump queued was never asked for",
+              socket_receive(pair[0], left, sizeof left, MSG_DONTWAIT,
+                             null, null) == NETLINK_HEADER);
+
         socket_close(pair[0]);
         socket_close(pair[1]);
 }
@@ -55019,6 +56150,381 @@ static fn link_candidates(void)
                       look.found != kinds[at].skipped);
                 netlink_forget(&message);
         }
+}
+
+/*
+        Which link a lease is looked for on, and whether it is wireless.
+        Messages are built the way the kernel writes them and fed to the
+        visitor in the order a dump would bring them.
+*/
+typedef struct
+{
+        string_address name;
+        p32 index;
+        p32 flags;
+        p16 kind;
+        //      0 nothing, 1 link info of kind "wlan", 2 link info of kind
+        //      "bridge", 3 the wireless extension attribute, 4 kind "wla"
+        p8 wireless;
+        positive hardware_width;
+        positive downs_width;
+} link_spec;
+
+static bool link_feed(netlink_visitor visit, address_any context,
+                      const link_spec address_to spec)
+{
+        netlink_buffer message = {0};
+        p8 hardware[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        p32 downs = 9;
+        bool built = netlink_begin(&message, RTM_NEWLINK, 0, 1,
+                                   sizeof(netlink_link)) &&
+                     netlink_attribute_add(&message, IFLA_IFNAME, spec->name,
+                                           string_length(spec->name) + 1);
+        bool wanted;
+
+        if (spec->hardware_width)
+                built &= netlink_attribute_add(&message, IFLA_ADDRESS, hardware,
+                                               spec->hardware_width);
+        if (spec->downs_width)
+                built &= netlink_attribute_add(&message, IFLA_CARRIER_DOWN_COUNT,
+                                               &downs, spec->downs_width);
+        if (spec->wireless == 1 || spec->wireless == 2 || spec->wireless == 4)
+        {
+                positive nested = netlink_nested_begin(&message, IFLA_LINKINFO);
+
+                built &= netlink_attribute_add(
+                    &message, IFLA_INFO_KIND,
+                    spec->wireless == 1 ? "wlan" : spec->wireless == 4 ? "wla"
+                                                                       : "bridge",
+                    spec->wireless == 1 ? 4 : spec->wireless == 4 ? 3 : 6);
+                netlink_nested_end(&message, nested);
+        }
+        if (spec->wireless == 3)
+                built &= netlink_attribute_add(&message, IFLA_WIRELESS, hardware, 4);
+        check("a synthetic link builds", built && !message.failed);
+        if (!built)
+        {
+                netlink_forget(&message);
+                return false;
+        }
+        netlink_link address_to link = netlink_body(&message);
+
+        link->index = spec->index;
+        link->kind = spec->kind;
+        link->flags = spec->flags;
+        wanted = visit((netlink_header address_to)message.bytes, context);
+        netlink_forget(&message);
+        return wanted;
+}
+
+static bool link_see(netlink_search address_to search,
+                     const link_spec address_to spec)
+{
+        return link_feed(netlink_link_seen, search, spec);
+}
+
+static fn link_choice(void)
+{
+        static const link_spec wired_idle = {"eth0", 1, 0, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wired_up = {"eth1", 2, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wifi_up = {"wlan0", 3, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 4};
+        static const link_spec wifi_idle = {"wlan1", 4, 0, NETLINK_LINK_ETHER, 1, 6, 4};
+        static const link_spec wired_up_later = {"eth2", 5, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 4};
+        static const link_spec wifi_up_later = {"wlan2", 6, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 4};
+
+        /* Carrier beats none, in either order; with both, prefer decides, and
+           with no preference the first stays. */
+        static const struct
+        {
+                p8 prefer;
+                const link_spec *first, *second;
+                p32 expect;
+        } orders[] = {
+            {NETLINK_PREFER_ANY, &wired_idle, &wired_up, 2},
+            {NETLINK_PREFER_ANY, &wired_up, &wired_idle, 2},
+            {NETLINK_PREFER_ANY, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_ANY, &wifi_up, &wired_up, 3},
+            {NETLINK_PREFER_ANY, &wired_up, &wifi_up, 2},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wired_up, 2},
+            {NETLINK_PREFER_WIRED, &wired_up, &wifi_up, 2},
+            {NETLINK_PREFER_WIRED, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wifi_up_later, 3},
+            {NETLINK_PREFER_WIRED, &wired_idle, &wifi_up, 3},
+            {NETLINK_PREFER_WIRED, &wifi_up, &wired_idle, 3},
+            {NETLINK_PREFER_WIFI, &wired_up, &wifi_up, 3},
+            {NETLINK_PREFER_WIFI, &wifi_up, &wired_up, 3},
+            {NETLINK_PREFER_WIFI, &wifi_up, &wifi_up_later, 3},
+            {NETLINK_PREFER_WIFI, &wired_up, &wired_up_later, 2},
+            {NETLINK_PREFER_WIFI, &wifi_idle, &wired_up, 2},
+            {NETLINK_PREFER_WIFI, &wired_up, &wifi_idle, 2},
+        };
+
+        for (positive row = 0; row < array_count(orders); row++)
+        {
+                netlink_search search = {.skip_loopback = true,
+                                         .prefer = orders[row].prefer};
+
+                check("a dump keeps walking while it looks for the best link",
+                      link_see(&search, orders[row].first) &&
+                          link_see(&search, orders[row].second));
+                check("the best link wins by carrier, then by preference, then by order",
+                      search.found && search.index == orders[row].expect);
+        }
+
+        /* No wired links when the caller says so. */
+        {
+                netlink_search search = {.skip_loopback = true, .skip_wired = true};
+
+                link_see(&search, &wired_up);
+                check("a wired link is no candidate when wired is off", !search.found);
+                link_see(&search, &wifi_idle);
+                check("a wireless one is", search.found && search.wireless &&
+                                               search.index == 4);
+        }
+
+        /* The skip list is exactly skip_count long, and at most eight. */
+        for (positive count = 0; count <= 8; count++)
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = (p8)count,
+                                         .skip = {3, 4, 5, 6, 7, 8, 9, 2}};
+                link_spec at = wired_up;
+
+                at.index = 2;
+                link_see(&search, &at);
+                check("an index on the skip list is skipped, one past its count is not",
+                      search.found == (count < 8));
+        }
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = 1,
+                                         .skip = {5}};
+                link_spec at = wired_up;
+
+                at.index = 0;
+                link_see(&search, &at);
+                check("only skip_count entries are compared", search.found);
+        }
+        {
+                netlink_search search = {.skip_loopback = true, .skip_count = 9,
+                                         .skip = {1, 2, 3, 4, 5, 6, 7, 8}};
+                link_spec at = wired_up;
+
+                at.index = 9;
+                link_see(&search, &at);
+                check("the skip list is never read past its eight", search.found);
+        }
+
+        /* By name: the one named, only, and the first of it. */
+        {
+                netlink_search search = {.wanted = "wlan0"};
+
+                check("a link looked for by name is not another, and the dump goes on",
+                      link_see(&search, &wired_up) && !search.found);
+                check("it is taken when named, and the dump stops",
+                      !link_see(&search, &wifi_up) && search.found &&
+                          search.wireless && search.index == 3);
+                link_see(&search, &wifi_up_later);
+                check("a second of the name changes nothing",
+                      search.index == 3);
+        }
+
+        /* What the message says of its link. */
+        {
+                static const struct { positive hardware, downs; bool has, counted; } widths[] = {
+                    {6, 4, true, true}, {4, 8, false, false}, {8, 2, false, false},
+                    {0, 0, false, false}, {6, 0, true, false}, {0, 4, false, true}};
+
+                for (positive row = 0; row < array_count(widths); row++)
+                {
+                        netlink_search search = {.skip_loopback = true};
+                        link_spec at = wired_up;
+
+                        at.hardware_width = widths[row].hardware;
+                        at.downs_width = widths[row].downs;
+                        link_see(&search, &at);
+                        check("a hardware address is taken at six bytes and no other length",
+                              search.found && search.has_hardware == widths[row].has &&
+                                  (!widths[row].has ||
+                                   !memory_compare(search.hardware, "\1\2\3\4\5\6", 6)));
+                        check("the carrier count is taken at four bytes and no other length",
+                              search.carrier_counted == widths[row].counted &&
+                                  (!widths[row].counted || search.carrier_downs == 9));
+                }
+        }
+        {
+                static const struct { string_address name; p8 how; bool wireless; } kinds[] = {
+                    {"eth0", 0, false}, {"eth0", 1, true}, {"eth0", 2, false},
+                    {"eth0", 3, true}, {"eth0", 4, false}, {"wl0", 0, true},
+                    {"wlan0", 0, true}, {"wifi0", 0, true}, {"w0", 0, false},
+                    {"wx0", 0, false}, {"awifi", 0, false}};
+
+                for (positive row = 0; row < array_count(kinds); row++)
+                {
+                        netlink_search search = {.skip_loopback = true};
+                        link_spec at = wired_up;
+
+                        at.name = kinds[row].name;
+                        at.wireless = kinds[row].how;
+                        link_see(&search, &at);
+                        check("a link is wireless by its kind, its extension or its name",
+                              search.found && search.wireless == kinds[row].wireless);
+                }
+        }
+        {
+                netlink_search search = {.skip_loopback = true};
+                link_spec loopback = wired_up;
+
+                loopback.flags |= IFF_LOOPBACK;
+                link_see(&search, &loopback);
+                check("loopback is never a candidate", !search.found);
+        }
+}
+
+/* The wired links, as `moonwater wired` lists them: Ethernet that is not
+   loopback and not wireless, in the order met, a handful at most. */
+static fn wired_listing(void)
+{
+        netlink_wired wired = {0};
+        link_spec spec = {"eth0", 1, IFF_RUNNING, NETLINK_LINK_ETHER, 0, 6, 0};
+        link_spec loopback = {"lo", 1, IFF_LOOPBACK | IFF_RUNNING, NETLINK_LINK_ETHER, 0, 0, 0};
+        link_spec tunnel = {"tun0", 2, IFF_RUNNING, 65534, 0, 0, 0};
+        link_spec radio = {"hwsim0", 3, IFF_RUNNING, NETLINK_LINK_ETHER, 3, 6, 0};
+        link_spec station = {"wlan0", 4, IFF_RUNNING, NETLINK_LINK_ETHER, 1, 6, 0};
+        link_spec bridge = {"br0", 5, 0, NETLINK_LINK_ETHER, 2, 6, 0};
+
+        check("a link walk goes on after each link",
+              link_feed(netlink_wired_seen, &wired, &loopback) &&
+                  link_feed(netlink_wired_seen, &wired, &tunnel) &&
+                  link_feed(netlink_wired_seen, &wired, &radio) &&
+                  link_feed(netlink_wired_seen, &wired, &station));
+        check("loopback, other framings and wireless links are not wired",
+              wired.count == 0);
+        check("an Ethernet link of kind bridge is wired",
+              link_feed(netlink_wired_seen, &wired, &bridge) && wired.count == 1 &&
+                  wired.link[0].index == 5 && wired.link[0].flags == 0 &&
+                  !string_compare_max(wired.link[0].name, "br0", 4));
+        for (positive at = 0; at < NETLINK_WIRED_MOST + 3; at++)
+        {
+                p8 name[IFNAME_SIZE] = "eth";
+
+                name[3] = (p8)('a' + at);
+                name[4] = 0;
+                spec.name = (string_address)name;
+                spec.index = 10 + (p32)at;
+                link_feed(netlink_wired_seen, &wired, &spec);
+        }
+        check("at most a handful are listed",
+              wired.count == NETLINK_WIRED_MOST);
+        check("in the order met, with their flags",
+              wired.link[1].index == 10 && wired.link[1].flags == IFF_RUNNING &&
+                  !string_compare_max(wired.link[1].name, "etha", 5) &&
+                  wired.link[NETLINK_WIRED_MOST - 1].index ==
+                      10 + NETLINK_WIRED_MOST - 2);
+}
+
+/*
+        The addresses on a link that this client put there: protocol dhcp, a
+        local address, the link asked about, IPv4. The one asked after is a
+        lease; the others are kept, up to a handful.
+*/
+static fn lease_stamps(void)
+{
+        netlink_lease_search search;
+        netlink_buffer message = {0};
+        bool built = true;
+
+        static const struct
+        {
+                p8 family;
+                p32 index;
+                p8 prefix;
+                int proto;          /* -1 no attribute */
+                positive proto_size;
+                p32 host;
+                positive local_size; /* 0 no attribute */
+                bool leased;
+                positive others;
+        } rows[] = {
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, true, 0},
+            {AF_INET, 7, 16, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 1},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000006, 4, false, 1},
+            {AF_INET, 8, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 0},
+            {10, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, 3, 1, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 2, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, -1, 0, 0x0a000005, 4, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 3, false, 0},
+            {AF_INET, 7, 24, IFA_PROTO_DHCP, 1, 0x0a000005, 0, false, 0},
+        };
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 proto = (p8)rows[row].proto;
+                p32 host = network_order_32(rows[row].host);
+                netlink_address address_to body;
+
+                memory_fill(address_of search, 0, sizeof search);
+                search.index = 7;
+                search.host = 0x0a000005;
+                search.prefix = 24;
+                built = netlink_begin(&message, RTM_NEWADDR, 0, 1,
+                                      sizeof(netlink_address));
+                if (rows[row].proto >= 0)
+                        built &= netlink_attribute_add(&message, IFA_PROTO, &proto,
+                                                       rows[row].proto_size);
+                if (rows[row].local_size)
+                        built &= netlink_attribute_add(&message, IFA_LOCAL, &host,
+                                                       rows[row].local_size);
+                check("a synthetic address builds", built);
+                if (!built)
+                        break;
+                body = netlink_body(&message);
+                body->family = rows[row].family;
+                body->index = rows[row].index;
+                body->prefix = rows[row].prefix;
+                check("an address is a lease of this client only when it says so, whole",
+                      netlink_lease_seen((netlink_header address_to)message.bytes,
+                                         &search) &&
+                          search.leased == rows[row].leased &&
+                          search.others == rows[row].others);
+                if (rows[row].others)
+                        check("another lease is remembered with its prefix",
+                              search.other_host[0] == rows[row].host &&
+                                  search.other_prefix[0] == rows[row].prefix);
+                netlink_forget(&message);
+        }
+
+        /* A handful of others, in the order met, and no more. */
+        memory_fill(address_of search, 0, sizeof search);
+        search.index = 7;
+        search.host = 0x0a000005;
+        search.prefix = 24;
+        for (positive at = 0; at < NETLINK_LEASES_MAX + 3; at++)
+        {
+                p8 proto = IFA_PROTO_DHCP;
+                p32 host = network_order_32(0x0a000100 + (p32)at);
+                netlink_address address_to body;
+
+                built = netlink_begin(&message, RTM_NEWADDR, 0, 1,
+                                      sizeof(netlink_address)) &&
+                        netlink_attribute_add(&message, IFA_PROTO, &proto, 1) &&
+                        netlink_attribute_add(&message, IFA_LOCAL, &host, 4);
+                check("a synthetic address builds", built);
+                if (!built)
+                        break;
+                body = netlink_body(&message);
+                body->family = AF_INET;
+                body->index = 7;
+                body->prefix = (p8)(16 + at);
+                netlink_lease_seen((netlink_header address_to)message.bytes, &search);
+                netlink_forget(&message);
+        }
+        check("only a handful of other leases are kept", search.others == NETLINK_LEASES_MAX);
+        for (positive at = 0; at < NETLINK_LEASES_MAX; at++)
+                check("and in the order they came",
+                      search.other_host[at] == 0x0a000100 + at &&
+                          search.other_prefix[at] == 16 + at);
+        check("the one asked about was none of them", !search.leased);
+        netlink_forget(&message);
 }
 
 static fn talking(void)
@@ -55120,7 +56626,7 @@ static fn talking(void)
                 check("adding it again is not an error",
                       netlink_address_add((b32)handle, 1, mine, 24) == 0);
                 check("exclusive acquisition refuses an address already present",
-                      netlink_address_acquire((b32)handle, 1, mine, 24) == -17);
+                      netlink_address_lease((b32)handle, 1, mine, 24, 0, true) == -17);
 
                 probe = socket_new(AF_INET, SOCK_DGRAM, 0);
                 check("a probe socket opens", probe >= 0);
@@ -55150,8 +56656,10 @@ static fn talking(void)
                    EXCLUSIVE must leave the first route installed. */
                 check("exclusive acquisition refuses a pre-existing default route",
                       route_added == 0 &&
-                          netlink_route_acquire((b32)handle, 0, 0,
-                                                0x0a090802, 1) == -17);
+                          netlink_route_change((b32)handle, RTM_NEWROUTE,
+                                               NLM_REQUEST | NLM_ACK | NLM_CREATE |
+                                                   NLM_EXCLUSIVE,
+                                               0, 0, 0x0a090802, 1, 0) == -17);
 
                 //      And one through a gateway no configured address can
                 //      reach, which the kernel refuses -- "Nexthop has invalid
@@ -55805,7 +57313,7 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
         if (which == DNS_TCP_OVERSIZED)
         {
                 network_store_16(frame, DNS_MAX_MESSAGE + 1);
-                network_stream_send_all(stream, frame, sizeof frame);
+                network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
         }
         else
         {
@@ -55815,38 +57323,38 @@ static fn dns_tcp_test_server(bipolar datagram, bipolar listening,
                 {
                         timespec pause = {1, 200000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else if (which == DNS_TCP_SPLIT)
                 {
-                        network_stream_send_all(stream, frame, 1);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, 3);
-                        network_stream_send_all(stream, reply + 3, length - 3);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, 3, 5, 0);
+                        network_stream_send_all_for(stream, reply + 3, length - 3, 5, 0);
                 }
                 else if (which == DNS_TCP_SHORT)
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length / 2);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length / 2, 5, 0);
                 }
                 else if (which == DNS_TCP_DEADLINE)
                 {
                         timespec pause = {0, 700000000};
 
-                        network_stream_send_all(stream, frame, 1);
+                        network_stream_send_all_for(stream, frame, 1, 5, 0);
                         system_call_2(syscall(nanosleep),
                                       (positive)address_of pause, 0);
-                        network_stream_send_all(stream, frame + 1, 1);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame + 1, 1, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
                 else
                 {
-                        network_stream_send_all(stream, frame, sizeof frame);
-                        network_stream_send_all(stream, reply, length);
+                        network_stream_send_all_for(stream, frame, sizeof frame, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
                 }
         }
 
@@ -55945,6 +57453,351 @@ static fn resolving_truncated(void)
               dns_tcp_loopback_case(DNS_TCP_DEADLINE, null,
                                      address_of elapsed) == DNS_NO_REPLY &&
                   elapsed < NETWORK_NANOSECONDS + NETWORK_NANOSECONDS / 2);
+}
+
+/*
+        A loopback server that answers one DNS question as the case says: an
+        address over UDP, the same after an empty datagram, a bare rcode, an
+        address over TCP, or a TCP frame that names the most a reply may be
+        and then ends. The question is echoed without its EDNS0 option.
+*/
+enum
+{
+        DNS_ANSWER_UDP,
+        DNS_ANSWER_UDP_EMPTY_FIRST,
+        DNS_ANSWER_UDP_FORMERR,
+        DNS_ANSWER_UDP_REFUSED,
+        DNS_ANSWER_TCP,
+        DNS_ANSWER_TCP_MOST,
+};
+
+static positive dns_answer_build(p8 address_to reply, const p8 address_to request,
+                                 positive got, p16 code)
+{
+        static const p8 record[] = {0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4,
+                                    192, 0, 2, 7};
+        positive question = got - DNS_HEADER -
+                            (network_load_16((p8 address_to)request + 10) ? DNS_EDNS_LENGTH : 0);
+        positive length = DNS_HEADER + question;
+
+        memory_copy(reply, request, length);
+        network_store_16(reply + 2, network_load_16((p8 address_to)request + 2) |
+                                        DNS_FLAG_RESPONSE | code);
+        network_store_16(reply + 6, code ? 0 : 1);
+        network_store_16(reply + 8, 0);
+        network_store_16(reply + 10, 0);
+        if (!code)
+        {
+                memory_copy(reply + length, record, sizeof record);
+                length += sizeof record;
+        }
+        return length;
+}
+
+static DEAD_END fn dns_answer_server(bipolar datagram, bipolar listening, positive which)
+{
+        p8 request[DNS_MAX_MESSAGE];
+        p8 reply[DNS_MAX_MESSAGE];
+        p8 frame[2];
+        socket_address_internet client;
+        p32 client_size = sizeof client;
+        network_deadline deadline;
+        bipolar got;
+        positive length;
+
+        if (!network_deadline_begin(address_of deadline, 5, 0))
+                system_call_1(syscall(exit_group), 1);
+        if (which == DNS_ANSWER_TCP || which == DNS_ANSWER_TCP_MOST)
+        {
+                bipolar stream;
+
+                if (network_wait_readable_until(listening, address_of deadline) <= 0)
+                        system_call_1(syscall(exit_group), 1);
+                stream = socket_accept((b32)listening, null, null, SOCK_CLOEXEC);
+                if (stream < 0 ||
+                    !network_stream_read_all(stream, frame, 2, address_of deadline))
+                        system_call_1(syscall(exit_group), 1);
+                got = network_load_16(frame);
+                if ((positive)got > sizeof request ||
+                    !network_stream_read_all(stream, request, (positive)got, address_of deadline))
+                        system_call_1(syscall(exit_group), 1);
+                if (which == DNS_ANSWER_TCP_MOST)
+                {
+                        network_store_16(frame, DNS_MAX_MESSAGE);
+                        network_stream_send_all_for(stream, frame, 2, 5, 0);
+                }
+                else
+                {
+                        length = dns_answer_build(reply, request, (positive)got, 0);
+                        network_store_16(frame, (p16)length);
+                        network_stream_send_all_for(stream, frame, 2, 5, 0);
+                        network_stream_send_all_for(stream, reply, length, 5, 0);
+                }
+                socket_close((b32)stream);
+                system_call_1(syscall(exit_group), 0);
+        }
+        if (network_wait_readable_until(datagram, address_of deadline) <= 0)
+                system_call_1(syscall(exit_group), 1);
+        got = socket_receive((b32)datagram, request, sizeof request, 0, address_of client,
+                             address_of client_size);
+        if (got < DNS_HEADER)
+                system_call_1(syscall(exit_group), 1);
+        length = dns_answer_build(reply, request, (positive)got,
+                                  which == DNS_ANSWER_UDP_FORMERR    ? 1
+                                  : which == DNS_ANSWER_UDP_REFUSED ? 5
+                                                                    : 0);
+        if (which == DNS_ANSWER_UDP_EMPTY_FIRST)
+                (void)socket_send((b32)datagram, reply, 0, 0, address_of client, sizeof client);
+        (void)socket_send((b32)datagram, reply, length, 0, address_of client, sizeof client);
+        system_call_1(syscall(exit_group), 0);
+}
+
+/* The case asked of a server on a loopback port, over UDP by dns_query_once
+   or over TCP by dns_retry_tcp, with standard input closed for the asking
+   when stdin_closed is, so the asking socket is numbered 0. */
+static bipolar dns_answer_case(positive which, bool edns, bool stdin_closed,
+                               p32 address_to found)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar child;
+        bipolar result = DNS_NO_SERVER;
+        bipolar saved = -1;
+        positive raw = 0;
+
+        if (listening < 0 || datagram < 0 ||
+            socket_bind((b32)listening, address_of where, sizeof where) < 0 ||
+            socket_listen((b32)listening, 1) < 0 ||
+            socket_name((b32)listening, address_of where, address_of size) < 0 ||
+            socket_bind((b32)datagram, address_of where, sizeof where) < 0)
+                goto done;
+        child = system_call_2(syscall(clone), SIGCHLD, 0);
+        if (child < 0)
+                goto done;
+        if (!child)
+                dns_answer_server(datagram, listening, which);
+        if (stdin_closed)
+        {
+                saved = system_call_1(syscall(dup), 0);
+                if (saved >= 0)
+                        system_close(0);
+        }
+        {
+                network_deadline deadline;
+
+                if (!network_deadline_begin(address_of deadline, 3, 0))
+                        result = DNS_NO_REPLY;
+                else if (which == DNS_ANSWER_TCP || which == DNS_ANSWER_TCP_MOST)
+                {
+                        p8 request[DNS_MAX_MESSAGE];
+                        positive question_length, request_length;
+                        bool mixed = false;
+
+                        if (dns_build_request(request, sizeof request,
+                                              (string_address)"answer.example", 0x5150,
+                                              address_of mixed, false, address_of question_length,
+                                              address_of request_length) > 0)
+                                result = dns_retry_tcp(address_of where, request, request_length,
+                                                       0x5150, question_length, found,
+                                                       address_of deadline);
+                }
+                else
+                        result = dns_query_once(HOST_LOOPBACK, network_order_16(where.port),
+                                                (string_address)"answer.example", found, false,
+                                                edns, address_of deadline);
+        }
+        if (saved >= 0)
+        {
+                system_call_3(syscall(dup3), (positive)saved, 0, 0);
+                system_close((b32)saved);
+        }
+        if (system_wait4_retry((b32)child, address_of raw, 0, null) != child)
+                result = DNS_NO_SERVER;
+done:
+        if (datagram >= 0)
+                socket_close((b32)datagram);
+        if (listening >= 0)
+                socket_close((b32)listening);
+        return result;
+}
+
+//      A loopback TCP port that refuses, and one that listens.
+static p16 dns_port_refusing(void)
+{
+        socket_address_internet where = {
+            .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        bipolar handle = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+        if (handle < 0)
+                return 0;
+        if (socket_bind((b32)handle, address_of where, sizeof where) < 0 ||
+            socket_name((b32)handle, address_of where, address_of size) < 0)
+                where.port = 0;
+        socket_close((b32)handle);
+        return where.port;
+}
+
+/*
+        The edges of the resolver's own decisions: its socket numbered 0, an
+        empty datagram before the answer, rcodes with and without EDNS0, a
+        TCP frame of the most and a query of the most, a connect that
+        finished at once or was already under way or never became writable,
+        the bind of a random port and the letters at the ends of the
+        alphabet, a nameserver of 0.0.0.0, the literal 0.0.0.0 itself, and
+        randomness refused.
+*/
+static fn resolving_decision_edges(void)
+{
+        p32 found = 0;
+
+        {
+                //      Said when it fails, with the status the query gave: the
+                //      lane's one failure of this check was otherwise unexplained.
+                bipolar status = dns_answer_case(DNS_ANSWER_UDP, false, true, address_of found);
+
+                if (status != DNS_OK || found != 0xc0000207)
+                        string_format(log, "  numbered-0 query: status %b, found %p\n",
+                                      status, (positive)found);
+                check("a resolver whose socket is numbered 0 still asks and is answered",
+                      status == DNS_OK && found == 0xc0000207);
+        }
+        found = 0;
+        check("a TCP retry whose socket is numbered 0 still asks and is answered",
+              dns_answer_case(DNS_ANSWER_TCP, false, true, address_of found) == DNS_OK &&
+                  found == 0xc0000207);
+        found = 0;
+        check("an empty datagram before the answer is passed over, not taken as no server",
+              dns_answer_case(DNS_ANSWER_UDP_EMPTY_FIRST, false, false, address_of found) ==
+                      DNS_OK &&
+                  found == 0xc0000207);
+        check("FORMERR to a query without EDNS0 is a refusal, not a cue to drop EDNS0",
+              dns_answer_case(DNS_ANSWER_UDP_FORMERR, false, false, null) == DNS_REFUSED);
+        check("REFUSED to a query with EDNS0 is a refusal, not a cue to drop EDNS0",
+              dns_answer_case(DNS_ANSWER_UDP_REFUSED, true, false, null) == DNS_REFUSED);
+        check("a TCP frame of the most a reply may be is read, not refused as too big",
+              dns_answer_case(DNS_ANSWER_TCP_MOST, false, false, null) == DNS_NO_REPLY);
+        {
+                static p8 most[DNS_MAX_MESSAGE];
+                socket_address_internet dead = {.family = AF_INET,
+                                                .port = dns_port_refusing(),
+                                                .host = network_order_32(HOST_LOOPBACK)};
+                network_deadline deadline;
+
+                check("a query of the most a message may be is sent, not refused",
+                      dead.port && network_deadline_begin(address_of deadline, 2, 0) &&
+                          dns_retry_tcp(address_of dead, most, DNS_MAX_MESSAGE, 1, 1, null,
+                                        address_of deadline) == DNS_NO_REPLY);
+        }
+        {
+                socket_address_internet where = {
+                    .family = AF_INET, .host = network_order_32(HOST_LOOPBACK)};
+                p32 size = sizeof where;
+                bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                network_deadline deadline;
+                bipolar handle;
+                bipolar saved;
+
+                if (listening < 0 ||
+                    socket_bind((b32)listening, address_of where, sizeof where) < 0 ||
+                    socket_listen((b32)listening, 8) < 0 ||
+                    socket_name((b32)listening, address_of where, address_of size) < 0 ||
+                    !network_deadline_begin(address_of deadline, 2, 0))
+                {
+                        check("DNS connect fixture listens", false);
+                        if (listening >= 0)
+                                socket_close((b32)listening);
+                        return;
+                }
+                saved = system_call_1(syscall(dup), 0);
+                if (saved >= 0)
+                        system_close(0);
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                if (saved >= 0)
+                {
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
+                        system_close((b32)saved);
+                }
+                check("a TCP connect whose socket is numbered 0 is kept", handle == 0);
+
+                net_connect_report = true;
+                net_connect_report_status = 0;
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                check("a connect that finished at once is used", handle >= 0);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                net_connect_report = true;
+                net_connect_report_status = -EALREADY;
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                check("a connect already under way is waited for, not given up", handle >= 0);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                net_connect_report = true;
+                net_connect_report_status = -EINPROGRESS;
+                net_poll_silent = 1;
+                handle = dns_stream_connect_until(address_of where, address_of deadline);
+                check("a connect that never became writable before the deadline fails", handle < 0);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+                net_io_faults_clear();
+                socket_close((b32)listening);
+        }
+        {
+                bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+                net_bind_calls = 0;
+                if (handle >= 0)
+                        dns_bind_random_port((b32)handle);
+                check("a random port is bound at the first try that takes", net_bind_calls == 1);
+                net_bind_calls = 0;
+                if (handle >= 0)
+                        dns_bind_random_port((b32)handle);
+                check("a socket that will not bind is tried eight times and no more",
+                      net_bind_calls == 8);
+                if (handle >= 0)
+                        socket_close((b32)handle);
+        }
+        {
+                p8 low[63], high[63];
+                bool upper = false, lower = false;
+
+                memory_fill(low, 'a', sizeof low);
+                memory_fill(high, 'z', sizeof high);
+                check("the name's case is mixed", dns_mix_case(low, sizeof low) &&
+                                                     dns_mix_case(high, sizeof high));
+                for (positive at = 0; at < sizeof low; at++)
+                {
+                        upper |= low[at] == 'A';
+                        lower |= high[at] == 'Z';
+                }
+                check("an a takes either case", upper);
+                check("a z takes either case", lower);
+        }
+        {
+                p32 servers[2] = {9, 9};
+
+                net_slurp_text = (string_address)"nameserver 0.0.0.0\n";
+                check("a nameserver of 0.0.0.0 is a nameserver",
+                      dns_servers((string_address)"/etc/resolv.conf", servers, 2) == 1 &&
+                          servers[0] == 0);
+                net_slurp_text = (string_address)"";
+                found = 9;
+                check("the literal 0.0.0.0 is its own address, asked of nobody",
+                      net_resolve_v4((string_address)"0.0.0.0", address_of found, 1) == DNS_OK &&
+                          found == 0);
+                net_slurp_text = null;
+        }
+        net_random_refuse = 2;
+        check("a query with no randomness for its id is not asked",
+              dns_query_once(HOST_LOOPBACK, dns_port_refusing(),
+                             (string_address)"answer.example", null, false, false,
+                             &(network_deadline){0, 0}) == DNS_NO_RANDOM);
+        net_io_faults_clear();
 }
 
 static bipolar net_test_write(string_address path, string_address text)
@@ -56574,6 +58427,17 @@ static bool http_response_framing_harness_case(
 }
 
 //      The URL, the headers and the chunk framing -- all of it pure.
+//      The grammar of a head and nothing else: what http_response_fields
+//      makes of it under a 200, which keeps no Location.
+static bool http_header_block_valid(p8 address_to bytes, positive size)
+{
+        http_response response = {.code = 200};
+        http_framing_fields fields;
+
+        return http_response_fields(bytes, size, address_of response,
+                                    address_of fields);
+}
+
 static fn fetching(void)
 {
         p8 name[64];
@@ -56661,6 +58525,100 @@ static fn fetching(void)
                          address_of port, address_of path, address_of tls) == HTTP_OK);
         check("the port is read", port == 8080);
         check("the path after a port", string_equals(path, (string_address) "/x"));
+
+        /* inet_aton's spellings: the address GNU wget and curl connect to,
+           written as the dotted quad by default, refused at the tight tier;
+           the edge of each part's share, and what is no such spelling. */
+        {
+                static const struct
+                {
+                        const char *host;
+                        bool spelling;
+                        p32 address;
+                } spellings[] = {
+                    {"127.1", true, 0x7f000001}, {"0x7f.1", true, 0x7f000001},
+                    {"0177.0.0.1", true, 0x7f000001}, {"2130706433", true, 0x7f000001},
+                    {"0X7F.0X0.0.01", true, 0x7f000001}, {"0", true, 0},
+                    {"4294967295", true, 0xffffffff}, {"0xffffffff", true, 0xffffffff},
+                    {"1.16777215", true, 0x01ffffff}, {"1.2.65535", true, 0x0102ffff},
+                    {"255.255.255.255", true, 0xffffffff}, {"010.0.0.1", true, 0x08000001},
+                    {"4294967296", false, 0}, {"1.16777216", false, 0},
+                    {"1.2.65536", false, 0}, {"256.1", false, 0}, {"1.2.3.256", false, 0},
+                    {"1.2.3.4.5", false, 0}, {"0x", false, 0}, {"0x.1", false, 0},
+                    {"08", false, 0}, {"1.2.3.", false, 0}, {"1..2", false, 0},
+                    {".1", false, 0}, {"", false, 0}, {"1a", false, 0},
+                    {"99999999999999999999", false, 0},
+                };
+
+                for (positive at = 0; at < array_count(spellings); at++)
+                {
+                        p32 address = 0xdeadbeef;
+                        bool spelled = http_ipv4_spelling(
+                            (const p8 address_to)spellings[at].host,
+                            string_length((string_address)spellings[at].host),
+                            address_of address);
+
+                        check("an inet_aton spelling is read as inet_aton reads it",
+                              spelled == spellings[at].spelling &&
+                                  (!spelled || address == spellings[at].address));
+                }
+                check("a spelled address is the dotted quad by default and refused tight",
+                      MOONWATER_STRICT_NET >= STRICT_TIGHT
+                          ? http_split_into((string_address) "http://0x7f.1:8080/x", name,
+                                            sizeof name, address_of port, address_of path,
+                                            address_of tls) == HTTP_BAD_URL
+                          : http_split_into((string_address) "http://0x7f.1:8080/x", name,
+                                            sizeof name, address_of port, address_of path,
+                                            address_of tls) == HTTP_OK &&
+                                string_equals(name, (string_address) "127.0.0.1") &&
+                                port == 8080 &&
+                                string_equals(path, (string_address) "/x"));
+                check("the dotted quad itself and a name ending in the root's dot are "
+                      "left alone in every tier",
+                      http_split_into((string_address) "http://10.0.0.1/", name,
+                                      sizeof name, address_of port, address_of path,
+                                      address_of tls) == HTTP_OK &&
+                          string_equals(name, (string_address) "10.0.0.1") &&
+                          http_split_into((string_address) "http://127.1./", name,
+                                          sizeof name, address_of port, address_of path,
+                                          address_of tls) == HTTP_OK &&
+                          string_equals(name, (string_address) "127.1."));
+                /* A name the resolver rebinds onto this machine, "this
+                   network" or the link-local block, which the tight tier
+                   refuses on every hop; an address in the URL, localhost and
+                   an intranet answer are not that. */
+                check("a name answered with loopback, 0/8 or link-local is rebound",
+                      http_name_rebound((string_address) "evil.example", 0x7f000001) &&
+                          http_name_rebound((string_address) "evil.example", 0x7fffffff) &&
+                          http_name_rebound((string_address) "evil.example", 0x00000001) &&
+                          http_name_rebound((string_address) "evil.example", 0xa9fea9fe) &&
+                          http_name_rebound((string_address) "a", 0xa9fe0000) &&
+                          http_name_rebound((string_address) "127.0.0.1.", 0x7f000001));
+                check("an address, localhost, or a name answered inside the network "
+                      "or outside it is not rebound",
+                      !http_name_rebound((string_address) "127.0.0.1", 0x7f000001) &&
+                          !http_name_rebound((string_address) "169.254.169.254",
+                                             0xa9fea9fe) &&
+                          !http_name_rebound((string_address) "localhost", 0x7f000001) &&
+                          !http_name_rebound((string_address) "a.LocalHost.", 0x7f000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x0a000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xc0a80001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x64400001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xa9fd0001) &&
+                          !http_name_rebound((string_address) "evil.example", 0xa9ff0001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x08080808) &&
+                          !http_name_rebound((string_address) "evil.example", 0x80000001) &&
+                          !http_name_rebound((string_address) "evil.example", 0x01000000));
+                check("a spelled address needs room for its dotted quad",
+                      http_split_into((string_address) "http://1/", name, 8,
+                                      address_of port, address_of path,
+                                      address_of tls) == HTTP_BAD_URL &&
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                           (http_split_into((string_address) "http://1/", name, 9,
+                                            address_of port, address_of path,
+                                            address_of tls) == HTTP_OK &&
+                            string_equals(name, (string_address) "0.0.0.1"))));
+        }
 
         check("a bare host gets a slash",
               http_split_into((string_address) "http://dawning.dev", name, sizeof name,
@@ -57005,6 +58963,46 @@ static fn fetching(void)
                                                     address_of response) ==
                                   HTTP_MALFORMED);
                 }
+                /* A Content-Length list at the default tier: the largest
+                   number there is, twice, is one number; one more than it is
+                   not a number; the first element's digits are the span the
+                   framing reads, blanks and a second field around it. */
+                {
+                        static const char largest[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615 ,"
+                            "\t18446744073709551615\r\n\r\n";
+                        static const char past[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551616,"
+                            "18446744073709551616\r\n\r\n";
+                        static const char spread[] =
+                            "HTTP/1.1 200 OK\r\nContent-Length:  007 , 7\t\r\n"
+                            "X: y\r\ncontent-length: 7\r\n\r\n";
+                        http_framing_fields fields;
+                        http_response plain = {.code = 200};
+
+                        check("the largest Content-Length listed twice is one number "
+                              "by default, and a list at the tight tier",
+                              (http_response_framing((p8 address_to)largest,
+                                                     sizeof largest - 1, address_of header,
+                                                     address_of response) == HTTP_OK &&
+                               response.body_kind == HTTP_BODY_LENGTH &&
+                               response.body_length == positive_max) ==
+                                  (MOONWATER_STRICT_NET < STRICT_TIGHT));
+                        check("a Content-Length past 2^64-1 is malformed in every list",
+                              http_response_framing((p8 address_to)past, sizeof past - 1,
+                                                    address_of header,
+                                                    address_of response) ==
+                                  HTTP_MALFORMED);
+                        check("the framing reads the first listed number's digits",
+                              http_response_fields((p8 address_to)spread,
+                                                   sizeof spread - 1, address_of plain,
+                                                   address_of fields) ==
+                                  (MOONWATER_STRICT_NET < STRICT_TIGHT) &&
+                                  (MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                                   (fields.length_size == 3 &&
+                                    !memory_compare(fields.length, "007", 3) &&
+                                    fields.length_value == 7)));
+                }
         }
 
         /* Exercise every byte class, not only one example from each.  This
@@ -57018,6 +59016,11 @@ static fn fetching(void)
                 p8 value[] = "HTTP/1.1 200 OK\r\nX: x\r\n\r\n";
                 p8 status[] = "HTTP/1.1 200 x\r\nX: value\r\n\r\n";
                 bool text = (byte >= 0x20 || byte == '\t') && byte != 0x7f;
+                /* The default takes any byte in the reason phrase but NUL,
+                   CR and LF, as wget and curl do (only the code is read);
+                   the tight tier holds it to text. */
+                bool reason = text || (MOONWATER_STRICT_NET < STRICT_TIGHT &&
+                                       byte && byte != '\r' && byte != '\n');
 
                 name[19] = (p8)byte;
                 value[20] = (p8)byte;
@@ -57028,8 +59031,8 @@ static fn fetching(void)
                                   http_token_byte((p8)byte));
                 check("every HTTP field-value byte has its text classification",
                       http_header_block_valid(value, sizeof value - 1) == text);
-                check("every HTTP reason byte has its text classification",
-                      http_header_block_valid(status, sizeof status - 1) == text);
+                check("every HTTP reason byte has its tier's classification",
+                      http_header_block_valid(status, sizeof status - 1) == reason);
         }
 
         for (b32 status = 299; status <= 309; status++)
@@ -57133,6 +59136,55 @@ static fn fetching(void)
                                 "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n"
                                 "Content-Length: 2\r\n\r\nx",
                                 "");
+                /* What wget and curl both accept: the default reads these,
+                   the tight tier refuses them.  What curl refuses, or the
+                   two read apart, stays refused in both. */
+                framing_harness("content-length-equal-twice",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"
+                                "Content-Length: 3\r\n\r\nabc", "abc");
+                framing_harness("cl-list-same",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello",
+                                "hello");
+                framing_harness("cl-field-and-list-same",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+                                "Content-Length: 5 ,05\r\n\r\nhello", "hello");
+                framing_harness("cl-list-then-different-field", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n"
+                                "Content-Length: 6\r\n\r\nhello!", "");
+                framing_harness("cl-list-trailing-comma", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5,\r\n\r\nhello",
+                                "");
+                framing_harness("cl-list-different", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, 6\r\n\r\nhello!",
+                                "");
+                framing_harness("cl-list-overflow", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5, "
+                                "18446744073709551621\r\n\r\nhello", "");
+                framing_harness("obs-fold-date",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nDate: Mon,\r\n 01 Jan\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("obs-fold-location-on-200",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 OK\r\nLocation: /a\r\n /b\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("obs-fold-after-cl-chain", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n a\r\n b\r\n\r\n",
+                                "");
+                framing_harness("obs-fold-te", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                                " , gzip\r\n\r\n0\r\n\r\n", "");
+                framing_harness("obs-fold-control", false, FRAME,
+                                "HTTP/1.1 200 OK\r\nX: a\r\n b\x01c\r\n"
+                                "Content-Length: 0\r\n\r\n", "");
+                framing_harness("reason-phrase-control",
+                                MOONWATER_STRICT_NET < STRICT_TIGHT, FRAME,
+                                "HTTP/1.1 200 O\x01K\r\nContent-Length: 0\r\n\r\n", "");
+                framing_harness("reason-phrase-nul", false, FRAME,
+                                "HTTP/1.1 200 O\x00K\r\nContent-Length: 0\r\n\r\n", "");
                 framing_harness("bare-cr-in-location", false, FRAME,
                                 "HTTP/1.1 302 Found\r\n"
                                 "Location: /safe\rhidden\r\n\r\n",
@@ -57208,6 +59260,36 @@ static fn fetching(void)
                                        address_of used) == HTTP_OK &&
                           used == sizeof expected - 1 &&
                           !memory_compare(request, expected, used));
+
+                static const p8 head_expected[] =
+                    "HEAD /x HTTP/1.1\r\n"
+                    "Host: example.com:8080\r\n"
+                    "User-Agent: Test\r\n"
+                    "Accept: */*\r\n"
+                    "Connection: close\r\n\r\n";
+
+                check("wget --spider's request is the same request with HEAD",
+                      http_request(request, sizeof request, true,
+                                   (string_address)"example.com", 8080,
+                                   (string_address)"/x", false, '1',
+                                   (string_address)"Test", address_of used) == HTTP_OK &&
+                          used == sizeof head_expected - 1 &&
+                          !memory_compare(request, head_expected, used) &&
+                          http_request(request, sizeof head_expected - 1, true,
+                                       (string_address)"example.com", 8080,
+                                       (string_address)"/x", false, '1',
+                                       (string_address)"Test", address_of used) ==
+                              HTTP_OK &&
+                          http_request(request, sizeof head_expected - 2, true,
+                                       (string_address)"example.com", 8080,
+                                       (string_address)"/x", false, '1',
+                                       (string_address)"Test", address_of used) ==
+                              HTTP_BAD_URL);
+                check("only the spider's manners ask HEAD, and they follow as wget does",
+                      http_manners_spider.head && http_manners_spider.follow &&
+                          !http_manners_spider.undeclared_most &&
+                          !http_manners_wget.head && !http_manners_fetch.head &&
+                          !http_manners_zone.head);
 
                 static const p8 fragmentless[] =
                     "GET /x?q=one HTTP/1.1\r\n"
@@ -58004,8 +60086,8 @@ static fn network_stream_send_timeout(void)
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
                 positive began = clock_monotonic_nanoseconds();
-                bool sent = network_stream_send_all(
-                    pair[0], payload, payload_size);
+                bool sent = network_stream_send_all_for(
+                    pair[0], payload, payload_size, 0, 100000000);
                 positive elapsed = clock_monotonic_nanoseconds() - began;
 
                 socket_close(pair[0]);
@@ -58319,7 +60401,7 @@ static fn http_header_deadlines(void)
                                           address_of link, head, sizeof head,
                                           address_of used, address_of header,
                                           address_of response, 0, 100000000,
-                                          false) == HTTP_NO_REPLY);
+                                          false, null) == HTTP_NO_REPLY);
                         }
                         socket_close(pair[0]);
                         if (child > 0)
@@ -58515,8 +60597,8 @@ static fn http_tcp_latency_policy(void)
                                                SOCK_CLOEXEC | SOCK_NONBLOCK);
                 p8 bytes[2];
                 network_deadline deadline;
-                bool sent = network_stream_send_all(handle, (p8 address_to)"F", 1) &&
-                            network_stream_send_all(handle, (p8 address_to)"R", 1);
+                bool sent = network_stream_send_all_for(handle, (p8 address_to)"F", 1, 5, 0) &&
+                            network_stream_send_all_for(handle, (p8 address_to)"R", 1, 5, 0);
 
                 check("consecutive small TCP writes retain exact stream bytes",
                       peer >= 0 && sent &&
@@ -58617,6 +60699,72 @@ static fn http_tls_resource_exhaustion(void)
                           !net_memory_reserve_fail && !store.used &&
                           !store.bytes);
                 http_forget(address_of store);
+        }
+
+        /* The ceiling on a body that declared no length, with a small one:
+           exactly that many bytes and then the end is a body, one more is
+           HTTP_UNDECLARED and is never written, and a chunk that would pass
+           it is refused before a byte of it is; no ceiling takes it all.
+           The shipped ceiling is the tight tier's wget's alone. */
+        {
+                static p8 seventeen[] = "abcdefghijklmnopq";
+                static p8 chunked_exact[] = "8\r\nabcdefgh\r\n8\r\nijklmnop\r\n0\r\n\r\n";
+                static p8 chunked_over[] =
+                    "8\r\nabcdefgh\r\n8\r\nijklmnop\r\n1\r\nq\r\n0\r\n\r\n";
+                static p8 chunked_whole[] = "11\r\nabcdefghijklmnopq\r\n0\r\n\r\n";
+                http_response close_body = {.code = 200, .body_kind = HTTP_BODY_CLOSE};
+                http_response chunked = {.code = 200, .body_kind = HTTP_BODY_CHUNKED};
+                p8 out[64];
+                //      Never written: no read reaches a socket here.
+                p8 scratch[64];
+                struct
+                {
+                        p8 address_to wire;
+                        positive length;
+                        const http_response address_to response;
+                        positive most;
+                        bipolar want;
+                        positive written;
+                } rows[] = {
+                    {seventeen, 16, address_of close_body, 16, HTTP_OK, 16},
+                    {seventeen, 17, address_of close_body, 16, HTTP_UNDECLARED, 16},
+                    {seventeen, 17, address_of close_body, 0, HTTP_OK, 17},
+                    {seventeen, 0, address_of close_body, 16, HTTP_OK, 0},
+                    {chunked_exact, sizeof chunked_exact - 1, address_of chunked, 16,
+                     HTTP_OK, 16},
+                    {chunked_over, sizeof chunked_over - 1, address_of chunked, 16,
+                     HTTP_UNDECLARED, 16},
+                    {chunked_whole, sizeof chunked_whole - 1, address_of chunked, 16,
+                     HTTP_UNDECLARED, 0},
+                    {chunked_over, sizeof chunked_over - 1, address_of chunked, 0,
+                     HTTP_OK, 17},
+                };
+
+                for (positive at = 0; at < array_count(rows); at++)
+                {
+                        http_body body = {
+                            .stash = rows[at].wire,
+                            .stash_used = rows[at].length,
+                            .scratch = scratch,
+                            .output = out,
+                            .undeclared_most = rows[at].most,
+                        };
+                        bipolar status = http_copy_body(address_of body, -1,
+                                                        rows[at].response);
+
+                        check("a body that declared no length is held to its ceiling",
+                              status == rows[at].want &&
+                                  (positive)(body.output - out) == rows[at].written &&
+                                  !memory_compare(out, "abcdefghijklmnopq",
+                                                  rows[at].written));
+                }
+                check("only the tight tier's wget has a ceiling on an undeclared body",
+                      HTTP_UNDECLARED_MOST == (positive)1 << 30 &&
+                          http_manners_wget.undeclared_most ==
+                              (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                                   ? HTTP_UNDECLARED_MOST : 0) &&
+                          !http_manners_fetch.undeclared_most &&
+                          !http_manners_zone.undeclared_most);
         }
 
         if (net_as_emulated())
@@ -59226,6 +61374,19 @@ static fn net_io_faults_clear(void)
         net_recv_arm_after = 0;
         net_recv_fill_length = 0;
         memory_fill(net_recv_fill, 0, sizeof net_recv_fill);
+        net_recv_report = false;
+        net_recv_report_length = 0;
+        net_poll_silent = 0;
+        net_name_error = 0;
+        net_name_short = false;
+        net_name_netlink_port = 0;
+        net_slurp_text = null;
+        net_connect_report = false;
+        net_connect_report_status = 0;
+        net_random_refuse = 0;
+        net_time_set = false;
+        net_send_zero = false;
+        net_connect_refuse = 0;
 }
 
 /* Procedural interruption counts and deadline budgets exercise both recovery
@@ -59342,8 +61503,8 @@ static fn tls_key_update_write_deadlines(void)
                         net_clock_step = 1000000;
                         deadline = (network_deadline){1000000, 5000000};
                         status = relative
-                            ? tls_borrow(address_of receiver, 1, address_of span,
-                                         address_of got, 0, 5000000)
+                            ? tls_borrow_within(address_of receiver, 1, address_of span,
+                                         address_of got, 0, 5000000, null)
                             : tls_take(address_of receiver, 1, address_of span,
                                        address_of got, address_of deadline, 0, 0, false);
                         check("KeyUpdate backpressure and EINTR cannot escape the read deadline",
@@ -59443,6 +61604,47 @@ static fn tls_lending_and_fatal_states(void)
                         tls_forget(address_of link.session);
                 }
 
+        {
+                //      The body's first byte waits in the stash and the next
+                //      record is forged: the copy fails at the record, and
+                //      writes nothing of what it had gathered for the write.
+                b32 pair[2];
+                b32 ends[2];
+                tls_conn sender = {0};
+                http_link link = {.tls = true, .session = {
+                    .encrypted = true, .application = true}};
+                http_body body = {.link = address_of link,
+                    .stash = (p8 address_to)"a", .stash_used = 1};
+                bool opened = system_call_4(syscall(socketpair), AF_UNIX, SOCK_STREAM, 0,
+                                            (positive)pair) == 0 &&
+                              system_call_2(syscall(pipe2), (positive)ends,
+                                            O_CLOEXEC | O_NONBLOCK) == 0;
+                p8 drained[4];
+
+                check("TLS lending failure fixture opens", opened);
+                if (opened)
+                {
+                        link.handle = link.session.handle = pair[0];
+                        crypto_aesgcm_prepare(address_of sender.c_gcm, key);
+                        crypto_aesgcm_prepare(address_of link.session.s_gcm, key);
+                        crypto_aesgcm_prepare(address_of link.session.c_gcm, key);
+                        link.session.receive_end = tls_seal(address_of sender, TLS_CT_APP,
+                            (p8 address_to)"b", 1, link.session.receive);
+                        link.session.receive[link.session.receive_end - 1] ^= 1;
+                        link.session.receive_high = link.session.receive_end;
+                        net_io_faults_clear();
+                        check("a body whose next record is forged fails without writing what it gathered",
+                              http_copy(address_of body, ends[1], 2, true) == HTTP_NO_REPLY &&
+                                  system_read_once((positive)ends[0], drained, sizeof drained) < 0);
+                        system_close(ends[0]);
+                        system_close(ends[1]);
+                        socket_close(pair[0]);
+                        socket_close(pair[1]);
+                        tls_forget(address_of sender);
+                        tls_forget(address_of link.session);
+                }
+        }
+
         for (positive version = 0; version < 2; version++)
         {
                 tls_conn sender = {.tls12 = version != 0};
@@ -59461,13 +61663,13 @@ static fn tls_lending_and_fatal_states(void)
                                 (p8 address_to)"ok", 2, receiver.receive + at);
                 receiver.receive_end = receiver.receive_high = at;
                 check("a fatal TLS protocol refusal spends both record keys",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL &&
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL &&
                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT);
                 check("buffered data cannot reopen a fatally refused TLS stream",
-                      tls_lend(address_of receiver, 2, address_of span,
-                               address_of got) == TLS_FAIL);
+                      tls_lend_until(address_of receiver, 2, address_of span,
+                               address_of got, null) == TLS_FAIL);
                 net_send_calls = 0;
                 check("a fatally refused TLS stream cannot send application data",
                       tls_write(address_of receiver, (p8 address_to)"no", 2) ==
@@ -59506,12 +61708,12 @@ static fn tls_unexpected_type_matrix(void)
                                     (p8 address_to)"ok", 2, receiver.receive + at);
                                 receiver.receive_end = receiver.receive_high = at;
                                 check("every unexpected TLS record type is a permanent refusal",
-                                      tls_lend(address_of receiver, 2, address_of span,
-                                               address_of got) == TLS_FAIL &&
+                                      tls_lend_until(address_of receiver, 2, address_of span,
+                                               address_of got, null) == TLS_FAIL &&
                                           receiver.seq_read == TLS_AES_GCM_RECORD_LIMIT &&
                                           receiver.seq_write == TLS_AES_GCM_RECORD_LIMIT &&
-                                          tls_lend(address_of receiver, 2, address_of span,
-                                                   address_of got) == TLS_FAIL);
+                                          tls_lend_until(address_of receiver, 2, address_of span,
+                                                   address_of got, null) == TLS_FAIL);
                                 tls_forget(address_of sender);
                                 tls_forget(address_of receiver);
                         }
@@ -59593,7 +61795,7 @@ static fn network_stream_interruption_deadlines(void)
                               net_recv_interruptions && net_recv_eintr_hit);
                 net_io_faults_clear();
                 check("a timed-out interrupted read leaves data for recovery",
-                      network_stream_read_now(pair[0], address_of byte, 1) == 1 &&
+                      socket_receive((b32)pair[0], address_of byte, 1, MSG_DONTWAIT, null, 0) == 1 &&
                               byte == 'x');
         }
         net_io_faults_clear();
@@ -60468,8 +62670,8 @@ static fn network_stream_sigpipe(void)
                 positive default_action[4] = {0, 0, 0, 0};
                 bipolar reset = system_signal_action(
                     13, address_of default_action, null, 8);
-                bool sent = network_stream_send_all(
-                    pair[0], (p8 address_to)"x", 1);
+                bool sent = network_stream_send_all_for(
+                    pair[0], (p8 address_to)"x", 1, 5, 0);
 
                 socket_close(pair[0]);
                 system_call_1(syscall(exit_group), reset < 0 ? 3
@@ -60501,7 +62703,7 @@ static bool tls_post_handshake_valid(p8 address_to messages,
 
         memory_fill(tls, 0, TLS_CONN_HEAD);
         tls->handle = -1;
-        valid = tls_post_handshake_append(tls, messages, length) == TLS_OK &&
+        valid = tls_post_handshake_append_until(tls, messages, length, null) == TLS_OK &&
                 !tls->post_handshake_used;
         tls_forget(tls);
         return valid;
@@ -60618,8 +62820,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged and genuine records queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS forged record is refused",
@@ -60657,8 +62859,8 @@ static fn tls_closure_boundaries(void)
                         receiver.encrypted = true;
                         receiver.application = true;
                         check("TLS forged CCS and genuine record queue",
-                              network_stream_send_all(pair[1], forged,
-                                                      sizeof forged) &&
+                              network_stream_send_all_for(pair[1], forged,
+                                                      sizeof forged, 5, 0) &&
                                   tls_send_enc(address_of sender, TLS_CT_APP,
                                                data, sizeof data) == TLS_OK);
                         check("TLS CCS after the application keys is refused",
@@ -61985,6 +64187,9 @@ static fn tls_certificate_identity_rules(void)
                     {"1:2:3:4:5:6:7:8", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08}},
                     {"1:2:3:4:5:6:192.0.2.1", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0xc0, 0x00, 0x02, 0x01}},
                     {"1:2:3:4:5:6:7::", true, {0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x00}},
+                    {"a:A:f:F:9::", true, {0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0f, 0x00, 0x0f, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"::0.0.0.0", true, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+                    {"1:2:3:4:5:6:7x8", false, {0}},
                     {"1:2:3:4:5:6:7:8:9", false, {0}},
                     {"1::2::3", false, {0}},
                     {":1", false, {0}},
@@ -63588,11 +65793,11 @@ static fn tls_post_handshake_framing(void)
                 memory_fill(tls, 0, TLS_CONN_HEAD);
                 tls->handle = -1;
                 check("a fragmented post-handshake ticket is held",
-                      tls_post_handshake_append(tls, ticket, 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket, 7, null) == TLS_OK &&
                           tls->post_handshake_used == 7);
                 check("a fragmented post-handshake ticket is reassembled",
-                      tls_post_handshake_append(tls, ticket + 7,
-                                                sizeof ticket - 7) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, ticket + 7,
+                                                sizeof ticket - 7, null) == TLS_OK &&
                           !tls->post_handshake_used);
                 tls_forget(tls);
         }
@@ -63657,10 +65862,10 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 tls->seq_read = 9;
                 check("a KeyUpdate split across records is held",
-                      tls_post_handshake_append(tls, key_update, 3) == TLS_OK &&
+                      tls_post_handshake_append_until(tls, key_update, 3, null) == TLS_OK &&
                           tls->seq_read == 9);
                 check("a KeyUpdate split across records rekeys when whole",
-                      tls_post_handshake_append(tls, key_update + 3, 2) ==
+                      tls_post_handshake_append_until(tls, key_update + 3, 2, null) ==
                               TLS_OK &&
                           !tls->seq_read &&
                           memory_compare(tls->s_ap_traffic, zeros, 32) &&
@@ -63669,7 +65874,7 @@ static fn tls_post_handshake_framing(void)
                 tls->handle = -1;
                 key_update[4] = 1;
                 check("a KeyUpdate asking for one cannot be answered unsent",
-                      tls_post_handshake_append(tls, key_update, 5) == TLS_FAIL);
+                      tls_post_handshake_append_until(tls, key_update, 5, null) == TLS_FAIL);
                 key_update[4] = 0;
                 tls_forget(tls);
         }
@@ -66941,16 +69146,16 @@ static fn crypto_rsa_served_sizes(void)
                   child.sig_length == 512);
         check("ISRG Root X1's 4096-bit PKCS#1 signature over Root YR verifies",
               child.sig_length == 512 &&
-                  tls_anchor_verifies(address_of child, 20260101000000ull));
+                  tls_anchor_verifies(address_of child, 20260101000000ull, null));
         if (child.sig_length == 512)
         {
                 child.sig[child.sig_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped signature bit",
-                      !tls_anchor_verifies(address_of child, 20260101000000ull));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull, null));
                 child.sig[child.sig_length - 1] ^= 1;
                 child.tbs[child.tbs_length - 1] ^= 1;
                 check("the 4096-bit verify refuses one flipped TBS bit",
-                      !tls_anchor_verifies(address_of child, 20260101000000ull));
+                      !tls_anchor_verifies(address_of child, 20260101000000ull, null));
                 child.tbs[child.tbs_length - 1] ^= 1;
         }
 
@@ -67592,7 +69797,7 @@ static fn tls_trust_anchor_chains(void)
                 return;
 
         check("kernel.org's Atlas intermediate finds GlobalSign Root CA - R3 by Name",
-              tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
+              tls_anchor_verifies(address_of atlas_cert, 20260101000000ull, null));
         check("a served GTS Root R1 cross-certificate carries an anchor key",
               tls_spki_is_anchor(address_of gts_cert, 20260101000000ull) &&
                   !tls_spki_is_anchor(address_of wr2_cert, 20260101000000ull));
@@ -67601,19 +69806,19 @@ static fn tls_trust_anchor_chains(void)
                                           address_of gts_cert) &&
                   tls_verify_one(address_of wr2_cert, address_of gts_cert));
         check("Sectigo OV R36 verifies under Root R46 with sha384WithRSAEncryption",
-              tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
+              tls_anchor_verifies(address_of r36_cert, 20260101000000ull, null));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("the SHA-384 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of r36_cert, 20260101000000ull));
+              !tls_anchor_verifies(address_of r36_cert, 20260101000000ull, null));
         r36_cert.sig[r36_cert.sig_length - 1] ^= 1;
         check("Certum Trusted Root CA verifies under Certum Trusted Network CA with sha512WithRSAEncryption",
-              tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
+              tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null));
         certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
         check("the SHA-512 PKCS#1 verify refuses one flipped signature bit",
-              !tls_anchor_verifies(address_of certum_cert, 20260101000000ull));
+              !tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
         check("an issuer Name no anchor carries fails closed",
-              !tls_anchor_verifies(address_of atlas_cert, 20260101000000ull));
+              !tls_anchor_verifies(address_of atlas_cert, 20260101000000ull, null));
         atlas_cert.issuer[atlas_cert.issuer_length - 1] ^= 1;
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -67652,6 +69857,361 @@ static fn tls_trust_anchor_chains(void)
                 }
                 check("a root with a distrust-after date anchors leaves up to it and none after",
                       dated >= 1 && !wrong);
+        }
+}
+
+/*
+        Network Time Security's key establishment reply (RFC 8915 4) and the
+        request's packet, without a network. The reply parser is fed every
+        record the standard defines in every way it can be wrong: an error
+        or a warning, a protocol or algorithm other than the one asked for,
+        one named twice, one missing, an unknown critical record (and an
+        unknown one that is not critical, which passes), a server name that
+        is no host name, a port of zero, bytes after the end record, no end
+        record, and the good reply cut at every length. The request is
+        checked for its layout and that it spends the cookie it carries.
+*/
+static positive nts_record(p8 address_to into, positive at, p16 type,
+                           const p8 address_to body, positive length)
+{
+        network_store_16(into + at, type);
+        network_store_16(into + at + 2, (p16)length);
+        memory_copy(into + at + 4, body, length);
+        return at + 4 + length;
+}
+
+static fn nts_ke_pieces(void)
+{
+        static p8 reply[2048];
+        static p8 cookie[300];
+        static nts_state state;
+        static const p8 zero2[2] = {0, 0};
+        static const p8 one2[2] = {0, 1};
+        static const p8 aead[2] = {0, NTS_AEAD_SIV_CMAC_256};
+        static const p8 other_aead[2] = {0, 30};
+        static const p8 two_aead[4] = {0, NTS_AEAD_SIV_CMAC_256, 0, 30};
+        static const p8 port[2] = {0x10, 0x1b};
+        struct
+        {
+                string_address name;
+                p8 parts[8];
+                bool accept;
+        } rows[] = {
+            /* 'n' NPN, 'N' NPN of 1, 'e' NPN empty, 'a' AEAD 15, 'A' AEAD
+               30, 'B' AEAD of two, 'c' a cookie of 100, 'L' of 300, 'k' an
+               unknown critical record, 'u' an unknown quiet one, 'E' an
+               error, 'W' a warning, 's' a server, 'S' a bad server, 'p' a
+               port, 'P' a port of zero, 'z' the end, 'y' an end with a
+               body, 'x' an end that is not critical. */
+            {"the smallest good reply", "nacz", true},
+            {"a server and a port", "nascpcz", true},
+            {"in another order", "canzz", false},
+            {"an error record", "nacEz", false},
+            {"a warning record", "nacWz", false},
+            {"no protocol", "acz", false},
+            {"a protocol other than NTPv4", "NacZ", false},
+            {"an empty protocol list", "eacz", false},
+            {"the protocol twice", "nnacz", false},
+            {"no algorithm", "ncz", false},
+            {"an algorithm other than SIV", "nAcz", false},
+            {"two algorithms", "nBcz", false},
+            {"the algorithm twice", "naacz", false},
+            {"no cookie", "naz", false},
+            {"a cookie too long and none else", "naLz", false},
+            {"a long cookie then a good one", "naLcz", true},
+            {"an unknown critical record", "nackz", false},
+            {"an unknown record that is not critical", "nacuz", true},
+            {"no end", "nac", false},
+            {"an end with a body", "nacy", false},
+            {"an end that is not critical", "nacx", false},
+            {"a server name that is no name", "nacSz", false},
+            {"the server twice", "nassz", false},
+            {"a port of zero", "nacPz", false},
+            {"the port twice", "nacppz", false},
+            {"nothing", "", false},
+        };
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                positive at = 0;
+                bipolar verdict;
+                bool ok;
+
+                memory_fill(cookie, 0x41, sizeof cookie);
+                for (const p8 *part = rows[row].parts; *part; part++)
+                        switch (*part)
+                        {
+                        case 'n': at = nts_record(reply, at, 0x8001, zero2, 2); break;
+                        case 'N': at = nts_record(reply, at, 0x8001, one2, 2); break;
+                        case 'e': at = nts_record(reply, at, 0x8001, zero2, 0); break;
+                        case 'a': at = nts_record(reply, at, 0x8004, aead, 2); break;
+                        case 'A': at = nts_record(reply, at, 0x8004, other_aead, 2); break;
+                        case 'B': at = nts_record(reply, at, 0x8004, two_aead, 4); break;
+                        case 'c': at = nts_record(reply, at, 5, cookie, 100); break;
+                        case 'L': at = nts_record(reply, at, 5, cookie, 300); break;
+                        case 'k': at = nts_record(reply, at, 0x8099, zero2, 2); break;
+                        case 'u': at = nts_record(reply, at, 0x0099, zero2, 2); break;
+                        case 'E': at = nts_record(reply, at, 0x8002, zero2, 2); break;
+                        case 'W': at = nts_record(reply, at, 0x0003, zero2, 2); break;
+                        case 's': at = nts_record(reply, at, 0x8006, (const p8 address_to)"time.example", 12); break;
+                        case 'S': at = nts_record(reply, at, 0x8006, (const p8 address_to)"not a name", 10); break;
+                        case 'p': at = nts_record(reply, at, 0x8007, port, 2); break;
+                        case 'P': at = nts_record(reply, at, 0x8007, zero2, 2); break;
+                        case 'z': at = nts_record(reply, at, 0x8000, zero2, 0); break;
+                        case 'y': at = nts_record(reply, at, 0x8000, zero2, 2); break;
+                        case 'x': at = nts_record(reply, at, 0x0000, zero2, 0); break;
+                        case 'Z': at = nts_record(reply, at, 0x8000, zero2, 0); break;
+                        }
+                verdict = nts_ke_reply(reply, at, &state);
+                ok = (verdict == NTS_KE_OK) == rows[row].accept;
+                checks++;
+                if (!ok)
+                {
+                        failures++;
+                        string_format(log, "  FAIL an NTS-KE reply: %s\n",
+                                      rows[row].name);
+                }
+        }
+
+        /* The parts a good reply leaves: cookies kept, the port, the name. */
+        {
+                positive at = 0;
+                bipolar verdict;
+
+                at = nts_record(reply, at, 0x8001, zero2, 2);
+                at = nts_record(reply, at, 0x8004, aead, 2);
+                at = nts_record(reply, at, 0x8006, (const p8 address_to)"time.example", 12);
+                at = nts_record(reply, at, 0x8007, port, 2);
+                for (positive i = 0; i < 10; i++)
+                {
+                        memory_fill(cookie, (p8)(0x30 + i), 100);
+                        at = nts_record(reply, at, 5, cookie, 100);
+                }
+                at = nts_record(reply, at, 0x8000, zero2, 0);
+                verdict = nts_ke_reply(reply, at, &state);
+                check("a full reply keeps eight cookies, the name and the port",
+                      verdict == NTS_KE_OK && state.count == NTS_COOKIES &&
+                          state.port == 0x101b &&
+                          string_equals((string_address)state.server, "time.example") &&
+                          state.length[7] == 100 && state.cookie[7][0] == 0x37 &&
+                          state.cookie[0][99] == 0x30);
+                check("a complete reply is complete at its end and at no shorter length",
+                      nts_ke_complete(reply, at));
+                for (positive cut = 0; cut < at; cut++)
+                        if (nts_ke_complete(reply, cut) ||
+                            nts_ke_reply(reply, cut, &state) == NTS_KE_OK)
+                        {
+                                check("a reply cut short is not complete and not a reply", false);
+                                break;
+                        }
+                check("a reply with a byte after its end record is refused",
+                      (reply[at] = 0, nts_ke_reply(reply, at + 1, &state) != NTS_KE_OK));
+        }
+
+        check("host names: letters, digits, dots and hyphens, between labels",
+              !nts_name_ok((const p8 address_to)"a.-b", 4) &&
+                  !nts_name_ok((const p8 address_to)"a-.b", 4) &&
+                  !nts_name_ok((const p8 address_to)"a-", 2) &&
+                  nts_name_ok((const p8 address_to)"a--b.c", 6) &&
+                  nts_name_ok((const p8 address_to)"time.example", 12) &&
+                  nts_name_ok((const p8 address_to)"127.0.0.1", 9) &&
+                  nts_name_ok((const p8 address_to)"a-b.c-d", 7) &&
+                  !nts_name_ok((const p8 address_to)"", 0) &&
+                  !nts_name_ok((const p8 address_to)".a", 2) &&
+                  !nts_name_ok((const p8 address_to)"a.", 2) &&
+                  !nts_name_ok((const p8 address_to)"a..b", 4) &&
+                  !nts_name_ok((const p8 address_to)"-a", 2) &&
+                  !nts_name_ok((const p8 address_to)"a b", 3) &&
+                  !nts_name_ok((const p8 address_to)"a/b", 3) &&
+                  !nts_name_ok((const p8 address_to)"a\x1b" "b", 3) &&
+                  !nts_name_ok(cookie, 64));
+
+        /*
+                nts_state_ok at its bounds: one to eight cookies, a cookie of
+                one to NTS_COOKIE_MAX bytes, a port that is not zero, and a
+                time server that is a name or empty. Each rule is tested
+                alone, so each one's negation is refused by one row.
+        */
+        {
+                static nts_state good;
+
+                memory_zero(&good, sizeof good);
+                good.port = NTS_NTP_PORT;
+                good.count = 1;
+                good.length[0] = 1;
+                check("nts_state_ok takes one cookie of one byte, on the default port",
+                      nts_state_ok(&good));
+                good.count = NTS_COOKIES;
+                for (positive at = 0; at < NTS_COOKIES; at++)
+                        good.length[at] = 1;
+                check("nts_state_ok takes eight cookies, all of one byte",
+                      nts_state_ok(&good));
+                good.count = NTS_COOKIES + 1;
+                check("nts_state_ok refuses nine cookies", !nts_state_ok(&good));
+                good.count = 0;
+                check("nts_state_ok refuses no cookies", !nts_state_ok(&good));
+                good.count = 2;
+                good.length[0] = NTS_COOKIE_MAX;
+                good.length[1] = NTS_COOKIE_MAX;
+                check("nts_state_ok takes two cookies of the largest size",
+                      nts_state_ok(&good));
+                good.length[1] = NTS_COOKIE_MAX + 1;
+                check("nts_state_ok refuses a second cookie one byte too long",
+                      !nts_state_ok(&good));
+                good.length[1] = 0;
+                check("nts_state_ok refuses an empty second cookie", !nts_state_ok(&good));
+                good.length[1] = 1;
+                good.length[0] = 0;
+                check("nts_state_ok refuses an empty first cookie", !nts_state_ok(&good));
+                good.length[0] = 1;
+                good.port = 0;
+                check("nts_state_ok refuses port zero", !nts_state_ok(&good));
+                good.port = NTS_NTP_PORT;
+                memory_copy(good.server, "time.example", 13);
+                good.server[13] = end;
+                check("nts_state_ok takes a time server that is a name",
+                      nts_state_ok(&good));
+                memory_copy(good.server, "a b", 4);
+                check("nts_state_ok refuses a time server that is not a name",
+                      !nts_state_ok(&good));
+        }
+
+        /* Whether NTS is asked: on, off and only as written, and anything
+           else, a missing file included, the tier's default -- only at the
+           tight tier, where plain time is not taken unless someone says so,
+           and on below it. This file is built at both. */
+        check("ntp.nts: on, off and only are what they say",
+              nts_mode_of((string_address) "on") == NTS_ON &&
+                  nts_mode_of((string_address) "off") == NTS_OFF &&
+                  nts_mode_of((string_address) "only") == NTS_ONLY);
+        check("ntp.nts: no word, or one it does not know, is the tier's default",
+              nts_mode_of((string_address) "") == NTS_MODE_DEFAULT &&
+                  nts_mode_of((string_address) "On") == NTS_MODE_DEFAULT &&
+                  nts_mode_of((string_address) "only ") == NTS_MODE_DEFAULT &&
+                  NTS_MODE_DEFAULT == (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                                           ? NTS_ONLY : NTS_ON));
+
+        /* The request: header, identifier, one cookie (spent), a placeholder
+           of its size for each cookie the state is then short of eight, and
+           the authenticator last. */
+        {
+                static p8 packet[NTS_PACKET_ROOM];
+                static nts_state spent;
+                nts_exchange exchange;
+                positive length;
+                positive used;
+                positive holders;
+
+                memory_fill(&spent, 0, sizeof spent);
+                memory_fill(packet, 0, sizeof packet);
+                for (positive i = 0; i < 32; i++)
+                {
+                        spent.c2s[i] = (p8)i;
+                        spent.s2c[i] = (p8)(i + 32);
+                }
+                spent.count = 2;
+                spent.length[0] = 100;
+                spent.length[1] = 101;
+                memory_fill(spent.cookie[0], 0x11, 100);
+                memory_fill(spent.cookie[1], 0x22, 101);
+                nts_exchange_open(&exchange, &spent);
+                length = nts_request(&exchange, packet, sizeof packet);
+                used = NTS_HEADER;
+                /* Two cookies, one spent: seven to ask for back, six of them
+                   as placeholders beside the cookie sent. */
+                check("a request is the header, an identifier, the cookie padded to four, six placeholders and a 40-byte authenticator",
+                      length == NTS_HEADER + 36 + 108 + 6 * 108 + 40 &&
+                          packet[used] == 0x01 && packet[used + 1] == 0x04 &&
+                          packet[used + 3] == 36 &&
+                          !memory_compare(packet + used + 4, exchange.uid, 32) &&
+                          packet[used + 36] == 0x02 && packet[used + 37] == 0x04 &&
+                          packet[used + 39] == 108 && packet[used + 40] == 0x22 &&
+                          packet[used + 40 + 100] == 0x22 &&
+                          packet[used + 40 + 101] == 0);
+                holders = 0;
+                for (positive at = used + 36 + 108; at + 108 < length; at += 108)
+                {
+                        bool zero = true;
+
+                        for (positive in = 4; in < 108; in++)
+                                zero = zero && !packet[at + in];
+                        if (packet[at] == 0x03 && packet[at + 1] == 0x04 &&
+                            packet[at + 3] == 108 && zero)
+                                holders++;
+                }
+                check("six placeholders of the cookie's size, all zero, then the authenticator",
+                      holders == 6 && packet[length - 40] == 0x04 &&
+                          packet[length - 39] == 0x04 && packet[length - 37] == 40);
+                check("the request spends the cookie it carries and keeps the other",
+                      spent.count == 1 && spent.length[0] == 100 &&
+                          spent.cookie[0][0] == 0x11 && spent.length[1] == 0 &&
+                          spent.cookie[1][0] == 0);
+                check("a request with no cookie left is no request",
+                      nts_request(&exchange, packet, sizeof packet) != 0 &&
+                          nts_request(&exchange, packet, sizeof packet) == 0);
+                /* A full state asks for no placeholder, and a packet with room
+                   for fewer than seven asks for as many as it has room for. */
+                memory_fill(&spent, 0, sizeof spent);
+                spent.count = NTS_COOKIES;
+                for (positive i = 0; i < NTS_COOKIES; i++)
+                {
+                        spent.length[i] = 100;
+                        memory_fill(spent.cookie[i], (p8)i, 100);
+                }
+                nts_exchange_open(&exchange, &spent);
+                length = nts_request(&exchange, packet, sizeof packet);
+                check("a state of eight cookies spends one and sends no placeholder",
+                      length == NTS_HEADER + 36 + 104 + 40 && spent.count == 7);
+                spent.count = 1;
+                nts_exchange_open(&exchange, &spent);
+                length = nts_request(&exchange, packet, NTS_HEADER + 36 + 104 + 2 * 104 + 40 + 7);
+                check("a packet with room for two placeholders carries two, and stays within its room",
+                      length == NTS_HEADER + 36 + 104 + 2 * 104 + 40);
+                nts_exchange_close(&exchange);
+        }
+}
+
+/*
+        DNS over TLS's setting and the resolvers it asks (dns_tls harness
+        has the exchange): on, off and only as written, anything else the
+        tier's default -- off, and only at the tight tier, which this file is
+        built at too -- and the four public resolvers known to offer it.
+*/
+static fn dns_tls_pieces(void)
+{
+        check("dns.tls: on, off and only are what they say",
+              dns_tls_mode_of((string_address) "on") == DNS_TLS_ON &&
+                  dns_tls_mode_of((string_address) "off") == DNS_TLS_OFF &&
+                  dns_tls_mode_of((string_address) "only") == DNS_TLS_ONLY);
+        check("dns.tls: no word, or one it does not know, is the tier's default",
+              dns_tls_mode_of((string_address) "") == DNS_TLS_DEFAULT &&
+                  dns_tls_mode_of((string_address) "tls-only") == DNS_TLS_DEFAULT &&
+                  dns_tls_mode_of((string_address) "ON") == DNS_TLS_DEFAULT &&
+                  DNS_TLS_DEFAULT == (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                                          ? DNS_TLS_ONLY : DNS_TLS_OFF));
+        check("the four public resolvers offer TLS, and nothing else is taken to",
+              dns_offers_tls(0x01010101u) && dns_offers_tls(0x01000001u) &&
+                  dns_offers_tls(0x09090909u) && dns_offers_tls(0x95707070u) &&
+                  !dns_offers_tls(0x08080808u) && !dns_offers_tls(0x0a000001u) &&
+                  !dns_offers_tls(0x01010102u) && !dns_offers_tls(0));
+        {
+                p8 udp[DNS_MAX_MESSAGE];
+                p8 small[DNS_HEADER + 4 + DNS_EDNS_LENGTH - 1];
+                bool mixed = false;
+                positive question = 0;
+                positive length = 0;
+
+                check("a request is the header, the name, A IN and the EDNS option",
+                      dns_build_request(udp, sizeof udp,
+                                        (string_address) "example.test", 0x1234,
+                                        &mixed, true, &question, &length) == 14 &&
+                          question == 18 && length == DNS_HEADER + 18 + DNS_EDNS_LENGTH &&
+                          udp[0] == 0x12 && udp[1] == 0x34 && udp[11] == 1 &&
+                          udp[DNS_HEADER + 18 + 2] == 41);
+                check("a request with no room is refused before anything is written",
+                      dns_build_request(small, sizeof small,
+                                        (string_address) "a", 1, &mixed, false,
+                                        &question, &length) < 0);
         }
 }
 
@@ -68292,6 +70852,33 @@ static fn redirect_urls(void)
                                address_of body, address_of code) == HTTP_BAD_URL &&
                           http_fetch_to((string_address)"http://127.0.0.1:1/%0d",
                                         -1, false, address_of code, null) == HTTP_BAD_URL);
+                /* What wget and a redirect send instead: the bytes after the
+                   authority escaped, the authority as written, in exactly the
+                   room the answer and its terminator take. */
+                {
+                        static const char typed[] = "h:8/a b\\c\xc3\xa9?d e#f g";
+                        static const char typed_want[] =
+                            "h:8/a%20b%5Cc%C3%A9?d%20e#f%20g";
+                        static const char spaced[] = "//h b/c d%20%zz";
+                        static const char spaced_want[] = "//h b/c%20d%20%zz";
+                        p8 escaped[64];
+
+                        check("a typed URL is escaped after its authority, as wget and curl send it",
+                              http_url_escape((string_address)typed, sizeof typed - 1,
+                                              true, escaped, sizeof typed_want) ==
+                                      HTTP_OK &&
+                                  !memory_compare(escaped, typed_want,
+                                                  sizeof typed_want));
+                        check("an escaped URL needs room for its terminator as well",
+                              http_url_escape((string_address)typed, sizeof typed - 1,
+                                              true, escaped, sizeof typed_want - 1) ==
+                                  HTTP_BAD_URL);
+                        check("a reference keeps its network-path authority and every escape",
+                              http_url_escape((string_address)spaced, sizeof spaced - 1,
+                                              false, escaped, sizeof escaped) == HTTP_OK &&
+                                  !memory_compare(escaped, spaced_want,
+                                                  sizeof spaced_want));
+                }
 
                 /* Absolute Location that already fills the next-URL buffer. */
                 {
@@ -68410,7 +70997,7 @@ static fn fetching_for_real(void)
                                     "short";
                 p8 answer_repeated[] = "HTTP/1.0 200 OK\r\n"
                                        "Content-Length: 5\r\n"
-                                       "content-LENGTH: 5\r\n"
+                                       "content-LENGTH: 6\r\n"
                                        "\r\n"
                                        "hello";
                 p8 answer_conflicting[] = "HTTP/1.0 200 OK\r\n"
@@ -68645,7 +71232,7 @@ static fn fetching_for_real(void)
                       status == HTTP_MALFORMED);
 
                 status = http_get(url, address_of body, address_of code);
-                check("case-insensitive repeated lengths are refused",
+                check("case-insensitive repeated lengths that disagree are refused",
                       status == HTTP_MALFORMED);
 
                 status = http_get(url, address_of body, address_of code);
@@ -69140,55 +71727,2537 @@ static fn fetching_for_real(void)
 }
 
 /*
-        The exchange's confinement, as net_dhcp_apart's child meets it: the
-        socket and the answer's pipe stay open and nothing else does, the
-        answer's write is allowed, and a call beyond the exchange's own kills
-        the child with SIGSYS. qemu-user cannot filter itself, so there the
-        last step is NOT RUN rather than a pass.
+        A redirect chain held to one budget: a server that answers every hop
+        a redirect after 300 ms, and a client whose manners give the whole
+        fetch a second. The chain stops on the clock, well before its twenty
+        redirects (six seconds) run out; with no budget it would take them
+        all, which is the default's GNU behaviour and is not waited for here.
 */
-static fn dhcp_confinement(void)
+static fn http_chain_deadline(void)
+{
+        socket_address_internet where;
+        p32 size = sizeof where;
+        b32 one = 1;
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM, 0);
+        bipolar child;
+        p8 url[64];
+        positive began;
+        positive took;
+        bipolar status;
+        b32 code = 0;
+        http_manners chained = http_manners_wget;
+
+        check("the chain deadline's listener opens", listening >= 0);
+        if (listening < 0)
+                return;
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one,
+                          sizeof one);
+        memory_fill(address_of where, 0, sizeof where);
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        if (socket_bind((b32)listening, address_of where, sizeof where) ||
+            socket_listen((b32)listening, 8) ||
+            socket_name((b32)listening, address_of where, address_of size))
+        {
+                check("the chain deadline's listener binds", false);
+                socket_close((b32)listening);
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+        {
+                static const p8 again[] = "HTTP/1.1 302 Found\r\nLocation: /again\r\n"
+                                          "Content-Length: 0\r\n\r\n";
+                p8 said[512];
+
+                for (positive hop = 0; hop < HTTP_HOPS; hop++)
+                {
+                        timespec pause = {0, 300000000};
+                        bipolar taken = socket_accept((b32)listening, 0, 0, 0);
+
+                        if (taken < 0)
+                                break;
+                        socket_receive((b32)taken, said, sizeof said, 0, 0, 0);
+                        system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                        system_write_all((positive)taken, again, sizeof again - 1);
+                        socket_shutdown((b32)taken, SHUT_BOTH);
+                        socket_close((b32)taken);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        check("the chain deadline's server starts", child > 0);
+        if (child > 0)
+        {
+                memory_copy(url, "http://127.0.0.1:", 17);
+                url[17 + positive_into(url + 17, network_order_16(where.port))] = end;
+                chained.chain_seconds = 1;
+                began = clock_monotonic_nanoseconds();
+                status = http_run((string_address)url, address_of chained, false, -1,
+                                  null, address_of code, null, null);
+                took = clock_monotonic_nanoseconds() - began;
+                check("a redirect chain stops on its whole budget, not its hop count",
+                      status == HTTP_NO_REPLY && took < 3000000000u);
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_wait4_retry((b32)child, null, 0, null);
+        }
+        socket_close((b32)listening);
+        check("only the tight tiers give a fetch one budget",
+              http_manners_wget.chain_seconds ==
+                      (MOONWATER_STRICT_NET >= STRICT_TIGHT
+                           ? (positive)(HTTP_HEAD_SECONDS + HTTP_BODY_SECONDS) : 0) &&
+                  http_manners_spider.chain_seconds == http_manners_wget.chain_seconds &&
+                  http_manners_zone.chain_seconds ==
+                      (MOONWATER_STRICT_NET >= STRICT_TIGHT ? 20 : 0));
+}
+
+/*
+        A loopback server that plays canned responses, one a connection, in
+        order: each response's first `at_once` bytes at once and the rest a
+        byte every `pause` milliseconds. The first line of each request is
+        written to lines, which the caller reads.
+*/
+typedef struct
+{
+        const p8 address_to bytes;
+        positive length;
+        positive at_once;
+        positive pause;
+} http_canned;
+
+static bipolar http_canned_serve(const http_canned address_to list, positive count,
+                                 p16 address_to port, b32 address_to lines)
+{
+        socket_address_internet where = {.family = AF_INET,
+                                         .host = network_order_32(HOST_LOOPBACK)};
+        p32 size = sizeof where;
+        b32 one = 1;
+        b32 pipe_ends[2];
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bipolar child;
+
+        if (listening < 0 ||
+            system_call_2(syscall(pipe2), (positive)pipe_ends, O_CLOEXEC) != 0)
+        {
+                if (listening >= 0)
+                        socket_close((b32)listening);
+                return -1;
+        }
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one, sizeof one);
+        if (socket_bind((b32)listening, address_of where, sizeof where) ||
+            socket_listen((b32)listening, 8) ||
+            socket_name((b32)listening, address_of where, address_of size))
+        {
+                socket_close((b32)listening);
+                system_close(pipe_ends[0]);
+                system_close(pipe_ends[1]);
+                return -1;
+        }
+        child = system_fork();
+        if (!child)
+        {
+                //      A client that gave up closes its end mid-trickle; the
+                //      next response is still owed to the next connection.
+                system_signal_install(SIGPIPE, (positive)SIG_IGN, 0, 0, null);
+                for (positive at = 0; at < count; at++)
+                {
+                        p8 request[4096];
+                        bipolar got;
+                        positive line = 0;
+                        bipolar taken = socket_accept((b32)listening, 0, 0, SOCK_CLOEXEC);
+
+                        if (taken < 0)
+                                break;
+                        got = socket_receive((b32)taken, request, sizeof request, 0, 0, 0);
+                        while (got > 0 && line < (positive)got && request[line] != '\r' &&
+                               request[line] != '\n')
+                                line++;
+                        request[line] = '\n';
+                        system_write_all((positive)pipe_ends[1], request, line + 1);
+                        system_write_all((positive)taken, list[at].bytes, list[at].at_once);
+                        for (positive byte = list[at].at_once; byte < list[at].length; byte++)
+                        {
+                                timespec pause = {0, (b64)list[at].pause * 1000000};
+
+                                system_call_2(syscall(nanosleep), (positive)address_of pause, 0);
+                                system_write_all((positive)taken, list[at].bytes + byte, 1);
+                        }
+                        socket_shutdown((b32)taken, SHUT_BOTH);
+                        socket_close((b32)taken);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        socket_close((b32)listening);
+        system_close(pipe_ends[1]);
+        address_to port = network_order_16(where.port);
+        address_to lines = pipe_ends[0];
+        return child;
+}
+
+static fn http_canned_end(bipolar child, b32 lines)
+{
+        if (child > 0)
+        {
+                system_call_2(syscall(kill), (positive)child, SIGKILL);
+                system_wait4_retry((b32)child, null, 0, null);
+        }
+        if (lines >= 0)
+                system_close(lines);
+}
+
+//      "http://127.0.0.1:<port><path>" into url.
+static fn http_canned_url(p8 address_to url, p16 port, string_address path)
+{
+        positive at = 17;
+
+        memory_copy(url, "http://127.0.0.1:", 17);
+        at += positive_into(url + at, port);
+        string_copy(url + at, path);
+}
+
+/*
+        A head's blank line is one line end, the same whichever of its
+        spellings it has: a lone LF before a CRLF blank line ("Name: v\n\r\n")
+        ends the head as the field walk ends it (the CR of a blank line is
+        dropped there), so header_end, the framing and the body all agree on
+        where the head stops.  A head that ended on such a blank line used to
+        find no terminator at all and waited for more bytes until the peer
+        closed or the head limit was hit.
+*/
+static fn http_mixed_line_ends(void)
+{
+        static const p8 lf_then_crlf[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\n\r\n";
+        static const p8 lone_lf_then_crlf[] =
+            "HTTP/1.1 200 OK\nContent-Length: 0\n\r\n";
+        static const p8 crlf_then_lf[] =
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\n";
+        http_response response;
+        positive header = 0;
+        bipolar head_end;
+
+        head_end = http_header_end((p8 address_to)lf_then_crlf,
+                              sizeof lf_then_crlf - 1);
+        check("a head ending LF CRLF ends where its blank line does",
+              head_end == (bipolar)(sizeof lf_then_crlf - 1));
+        head_end = http_header_end((p8 address_to)lone_lf_then_crlf,
+                              sizeof lone_lf_then_crlf - 1);
+        check("a head with only LF line ends before a CRLF blank line ends",
+              head_end == (bipolar)(sizeof lone_lf_then_crlf - 1));
+        check("a response whose blank line is LF CRLF is framed whole",
+              http_response_framing((p8 address_to)lf_then_crlf,
+                                    sizeof lf_then_crlf - 1, address_of header,
+                                    address_of response) == HTTP_OK &&
+                  header == sizeof lf_then_crlf - 1 &&
+                  response.code == 200 && response.body_kind == HTTP_BODY_LENGTH);
+        check("a response with a lone LF first is framed whole",
+              http_response_framing((p8 address_to)lone_lf_then_crlf,
+                                    sizeof lone_lf_then_crlf - 1,
+                                    address_of header,
+                                    address_of response) == HTTP_OK &&
+                  header == sizeof lone_lf_then_crlf - 1);
+        check("a response with CRLF then a lone LF blank line still is",
+              http_response_framing((p8 address_to)crlf_then_lf,
+                                    sizeof crlf_then_lf - 1, address_of header,
+                                    address_of response) == HTTP_OK &&
+                  header == sizeof crlf_then_lf - 1);
+}
+
+/*
+        The edges of a whole fetch (http_run) and of one run apart
+        (http_run_apart): a path with a dot segment, the code and the head
+        kept only for an answer and both left alone for a refusal, TLS
+        refused where it is not allowed, a URL as long as the buffer, a body
+        that outlasts its budget held in memory and written out, a child
+        that could not confine itself, the statuses a child may say, and a
+        trailer block of exactly the most a head may be.
+*/
+static fn http_run_edges(void)
+{
+        static p8 trailed[16384 + 64];
+        static const p8 ok[] = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+        static const p8 slow[] = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789";
+        http_canned list[6];
+        positive trailed_length = 0;
+        p8 url[HTTP_URL_MAX + 8];
+        p8 line[512];
+        p16 port = 0;
+        b32 lines = -1;
+        bipolar child;
+
+        {
+                //      Chunked "hello", then trailers whose lines and blank
+                //      end come to 16384 bytes, the most a head may be.
+                static const p8 start[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                          "5\r\nhello\r\n0\r\n";
+                memory_copy(trailed, start, sizeof start - 1);
+                trailed_length = sizeof start - 1;
+                for (positive half = 0; half < 2; half++)
+                {
+                        memory_copy(trailed + trailed_length, "X-Pad: ", 7);
+                        memory_fill(trailed + trailed_length + 7, 'a', 8182);
+                        memory_copy(trailed + trailed_length + 7 + 8182, "\r\n", 2);
+                        trailed_length += 8191;
+                }
+                memory_copy(trailed + trailed_length, "\r\n", 2);
+                trailed_length += 2;
+        }
+        list[0] = (http_canned){ok, sizeof ok - 1, sizeof ok - 1, 0};
+        list[1] = (http_canned){ok, sizeof ok - 1, sizeof ok - 1, 0};
+        list[2] = (http_canned){slow, sizeof slow - 1, sizeof slow - 11, 300};
+        list[3] = (http_canned){slow, sizeof slow - 1, sizeof slow - 11, 300};
+        list[4] = (http_canned){trailed, trailed_length, trailed_length, 0};
+        child = http_canned_serve(list, 5, address_of port, address_of lines);
+        check("the canned HTTP server starts", child > 0);
+        if (child <= 0)
+                return;
+        {
+                http_buffer body = {0};
+                http_buffer head = {0};
+                b32 code = 0;
+                bipolar status;
+
+                http_canned_url(url, port, "/a/../b");
+                status = http_run((string_address)url, address_of http_manners_fetch, false, -1,
+                                  address_of body, address_of code, null, address_of head);
+                check("a fetch answers with its body, its code and the head it ended on",
+                      status == HTTP_OK && code == 200 && body.used == 2 &&
+                          !memory_compare(body.bytes, "hi", 2) && head.used > 12 &&
+                          !memory_compare(head.bytes, "HTTP/1.1 200", 12));
+                check("the request names the path without its dot segment",
+                      system_read_retry((positive)lines, line, 7) == 7 &&
+                          !memory_compare(line, "GET /b ", 7));
+                while (system_read_once((positive)lines, line, 1) == 1 && line[0] != '\n')
+                        ;
+                byte_store_release(address_of body);
+                byte_store_release(address_of head);
+                if (!net_as_emulated())
+                {
+                        http_canned_url(url, port, "/");
+                        status = http_run_apart((string_address)url, address_of http_manners_fetch,
+                                                false, -1, address_of body, address_of code,
+                                                null, address_of head);
+                        check("a fetch apart answers the same, its head kept",
+                              status == HTTP_OK && code == 200 && body.used == 2 &&
+                                  head.used > 12 && !memory_compare(head.bytes, "HTTP/1.1 200", 12));
+                        byte_store_release(address_of body);
+                        byte_store_release(address_of head);
+                }
+                else
+                {
+                        //      The canned response the fetch apart would have
+                        //      taken, taken so the next one is the slow one.
+                        http_canned_url(url, port, "/");
+                        (void)http_get((string_address)url, address_of body, address_of code);
+                        byte_store_release(address_of body);
+                }
+        }
+        {
+                http_manners budget = http_manners_fetch;
+                http_buffer body = {0};
+                b32 code = 0;
+                positive began = clock_monotonic_nanoseconds();
+
+                budget.body_seconds = 1;
+                http_canned_url(url, port, "/");
+                check("a body held in memory that outlasts its budget is cut off",
+                      http_run((string_address)url, address_of budget, false, -1, address_of body,
+                               address_of code, null, null) == HTTP_NO_REPLY &&
+                          clock_monotonic_nanoseconds() - began < 2500000000u);
+                byte_store_release(address_of body);
+                {
+                        bipolar sink = system_open_at(AT_FDCWD, "/dev/null", 1 | O_CLOEXEC);
+                        bipolar status = http_run((string_address)url, address_of budget, false, sink,
+                                                  null, address_of code, null, null);
+
+                        check("a body written out has the budget at the tight tiers only",
+                              MOONWATER_STRICT_NET >= STRICT_TIGHT ? status == HTTP_NO_REPLY
+                                                                   : status == HTTP_OK);
+                        if (sink >= 0)
+                                system_close((b32)sink);
+                }
+        }
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+
+                bipolar got = http_run((string_address)url, address_of http_manners_fetch, false, -1,
+                               address_of body, address_of code, null, null);
+                check("a chunked body whose trailers come to exactly the most a head may be is read",
+                      got == HTTP_OK && body.used == 5);
+                byte_store_release(address_of body);
+        }
+        http_canned_end(child, lines);
+        {
+                //      Heads that parse, then fail: a Content-Length that is
+                //      no number, and a chunked body whose size is none.
+                static const p8 bad_length[] = "HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n";
+                static const p8 bad_chunk[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                              "zz\r\n";
+                http_canned failing[2] = {
+                    {bad_length, sizeof bad_length - 1, sizeof bad_length - 1, 0},
+                    {bad_chunk, sizeof bad_chunk - 1, sizeof bad_chunk - 1, 0}};
+                bipolar server = http_canned_serve(failing, net_as_emulated() ? 1 : 2,
+                                                   address_of port, address_of lines);
+                b32 code = 777;
+
+                check("the failing HTTP server starts", server > 0);
+                http_canned_url(url, port, "/");
+                check("a fetch whose head fails leaves the code alone",
+                      server > 0 &&
+                          http_run((string_address)url, address_of http_manners_fetch, false, -1,
+                                   null, address_of code, null, null) == HTTP_MALFORMED &&
+                          code == 777);
+                if (server > 0 && !net_as_emulated())
+                {
+                        http_buffer head = {0};
+                        http_buffer body = {0};
+
+                        check("a fetch apart whose body fails after its head is kept still fails",
+                              http_run_apart((string_address)url, address_of http_manners_fetch,
+                                             false, -1, address_of body, null, null,
+                                             address_of head) == HTTP_MALFORMED);
+                        byte_store_release(address_of head);
+                        byte_store_release(address_of body);
+                }
+                http_canned_end(server, lines);
+                lines = -1;
+        }
+        {
+                http_buffer head = {0};
+                b32 code = 777;
+                socket_address_internet dead = {.family = AF_INET,
+                                                .port = dns_port_refusing(),
+                                                .host = network_order_32(HOST_LOOPBACK)};
+
+                http_canned_url(url, network_order_16(dead.port), "/");
+                check("a refused fetch leaves the code and the head alone",
+                      http_run((string_address)url, address_of http_manners_fetch, false, -1, null,
+                               address_of code, null, address_of head) != HTTP_OK &&
+                          code == 777 && !head.used);
+                if (!net_as_emulated())
+                {
+                        check("a refused fetch apart leaves the head alone",
+                              http_run_apart((string_address)url, address_of http_manners_fetch,
+                                             false, -1, null, address_of code, null,
+                                             address_of head) != HTTP_OK &&
+                                  !head.used);
+                        net_fake_set(syscall(seccomp), -EACCES);
+                        check("a fetch apart whose child cannot confine itself is refused for that",
+                              http_run_apart((string_address)url, address_of http_manners_fetch,
+                                             false, -1, null, null, null, null) == HTTP_CONFINE);
+                        {
+                                p32 found = 9;
+
+                                check("a lookup apart whose child cannot confine itself is refused for that",
+                                      dns_resolve_apart(0x7f000001, (string_address)"example.test",
+                                                        address_of found) == DNS_CONFINE);
+                        }
+                        net_fakes_clear();
+                }
+                byte_store_release(address_of head);
+        }
+        {
+                http_manners plain = http_manners_fetch;
+
+                plain.allow_tls = false;
+                check("https is refused where TLS is not allowed",
+                      http_run("https://127.0.0.1:1/", address_of plain, false, -1, null, null,
+                               null, null) == HTTP_TLS);
+        }
+        {
+                memory_copy(url, "http://h/", 9);
+                memory_fill(url + 9, 'a', HTTP_URL_MAX - 9);
+                url[HTTP_URL_MAX] = end;
+                check("a URL as long as the buffer it would be copied into is refused",
+                      http_run((string_address)url, address_of http_manners_fetch, false, -1, null,
+                               null, null, null) == HTTP_BAD_URL);
+        }
+        {
+                static const b64 statuses[][2] = {
+                    {HTTP_OK, 1}, {HTTP_UNLOGGED, 1}, {-5, 1}, {-6, 0},
+                    {HTTP_UNLOGGED - 1, 0}, {1, 0}};
+                static const b64 dns[][2] = {
+                    {DNS_OK, 1}, {DNS_TLS_FAILED, 1}, {DNS_TLS_FAILED - 1, 0}, {1, 0}};
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(statuses); at++)
+                        wrong += http_apart_status(statuses[at][0]) != (bool)statuses[at][1];
+                for (positive at = 0; at < array_count(dns); at++)
+                        wrong += dns_apart_status(dns[at][0]) != (bool)dns[at][1];
+                check("a child apart is believed only in the statuses its work can say", wrong == 0);
+        }
+        if (!net_as_emulated())
+        {
+                p32 found = 9;
+
+                check("0.0.0.0 is its own address apart, asked of nobody",
+                      net_resolve_v4_apart("0.0.0.0", address_of found, 1) == DNS_OK && found == 0);
+                check("an address is its own address apart",
+                      http_lookup_apart("10.1.2.3") == 0x0a010203);
+                net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
+                net_random_refuse = 1000;
+                found = 9;
+                check("a name that is not the machine's is not loopback apart",
+                      net_resolve_v4_apart("example.invalid", address_of found, 1) != DNS_OK &&
+                          found != HOST_LOOPBACK &&
+                          http_lookup_apart("example.invalid") == 0);
+                net_io_faults_clear();
+        }
+        {
+                network_deadline deadline;
+                p32 found = 0;
+
+                net_random_refuse = 2;
+                net_connect_refuse = 1;
+                check("a query over TLS with no randomness for its id is not asked",
+                      network_deadline_begin(address_of deadline, 1, 0) &&
+                          dns_query_tls(0x01010101, "example.test", address_of found,
+                                        address_of deadline) == DNS_NO_RANDOM);
+                net_io_faults_clear();
+                net_slurp_text = (string_address)"nameserver 127.0.0.1\n";
+                net_connect_refuse = 8;
+                dns_tls_held = DNS_TLS_ONLY + 1;
+                check("only over TLS, when no resolver can be reached, is no reply rather than a TLS failure",
+                      dns_resolve_wanted("/etc/resolv.conf", "example.test", address_of found, 1) ==
+                          DNS_NO_REPLY);
+                dns_tls_held = 0;
+                net_io_faults_clear();
+        }
+}
+
+/*
+        The exchange's confinement, as net_dhcp_apart's child meets it: the
+        client socket, the packet socket and the answer's pipe stay open and
+        nothing else does; the answer's write and a send on the client socket
+        are allowed; a write or a send on the packet socket (which could put
+        any frame on the wire), or any call beyond the exchange's own, kills
+        the child with SIGSYS. And no filter is no exchange: where seccomp
+        answers ENOSYS -- a filter installed first that answers so, or
+        qemu-user, which cannot filter itself -- the confinement refuses. The
+        child says what it got to by its exit code: 3 refused, 4 a descriptor
+        left open or closed, 5 a call that should have killed it did not, 6
+        the refusal asked for, 7 no refusal.
+*/
+#define DHCP_TEST_ALLOWED 0
+#define DHCP_TEST_WRITE_FRAMES 1
+#define DHCP_TEST_SEND_FRAMES 2
+#define DHCP_TEST_NO_SECCOMP 3
+//      The allowed scenario with the answer's pipe, or the packet socket,
+//      numbered 0, as it is when the exchange starts with standard input shut.
+#define DHCP_TEST_APART_ZERO 4
+#define DHCP_TEST_FRAMES_ZERO 5
+
+static b32 dhcp_confined_child(positive scenario, bipolar spare, p8 address_to said)
 {
         b32 ends[2];
         b32 status = 0;
-        p8 byte = 0;
-        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        bipolar child;
 
-        check("DHCP confinement fixture opens",
-              spare >= 0 &&
-                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
-        if (spare < 0)
-                return;
-        bipolar child = system_fork();
+        address_to said = 0;
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return -1;
+        child = system_fork();
         if (child == 0)
         {
                 bipolar handle = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                bipolar frames = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                socket_address_internet discard = {
+                    .family = AF_INET, .port = network_order_16(9),
+                    .host = network_order_32(HOST_LOOPBACK)};
+                p8 byte = 1;
 
-                dhcp_apart = ends[1];
-                if (handle < 0 || !dhcp_confine((b32)handle))
-                        system_call_1(syscall(exit_group), 3);
+                if (scenario == DHCP_TEST_NO_SECCOMP)
+                {
+                        //      seccomp answers ENOSYS from here on, as on a
+                        //      kernel built without it.
+                        net_filter_step steps[] = {
+                            {0x20, 0, 0, 0},
+                            {0x15, 0, 1, (p32)syscall(seccomp)},
+                            {0x06, 0, 0, 0x00050000u | ENOSYS},
+                            {0x06, 0, 0, SECCOMP_RET_ALLOW}};
+                        struct
+                        {
+                                p16 count;
+                                net_filter_step address_to steps;
+                        } filter = {4, steps};
+
+                        system_call_5(syscall(prctl), 38, 1, 0, 0, 0);
+                        system_call_3(syscall(seccomp), 1, 0,
+                                      (positive)address_of filter);
+                }
+                b32 answer = ends[1];
+
+                if (scenario == DHCP_TEST_APART_ZERO &&
+                    system_call_3(syscall(dup3), (positive)ends[1], 0, 0) == 0)
+                {
+                        system_close(ends[1]);
+                        answer = 0;
+                }
+                if (scenario == DHCP_TEST_FRAMES_ZERO && frames >= 0 &&
+                    system_call_3(syscall(dup3), (positive)frames, 0, 0) == 0)
+                {
+                        system_close((b32)frames);
+                        frames = 0;
+                }
+                dhcp_apart = answer;
+                dhcp_frames = frames;
+                if (handle < 0 || frames < 0 || !dhcp_confine((b32)handle))
+                        system_call_1(syscall(exit_group),
+                                      scenario == DHCP_TEST_NO_SECCOMP ? 6 : 3);
+                if (scenario == DHCP_TEST_NO_SECCOMP)
+                        system_call_1(syscall(exit_group), 7);
                 if (system_call_1(syscall(close), (positive)spare) != -EBADF ||
                     system_call_1(syscall(close), (positive)ends[0]) != -EBADF)
                         system_call_1(syscall(exit_group), 4);
-                byte = 1;
-                system_call_3(syscall(write), (positive)ends[1],
+                system_call_3(syscall(write), (positive)answer,
                               (positive)address_of byte, 1);
-                system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                if (scenario == DHCP_TEST_WRITE_FRAMES)
+                        system_call_3(syscall(write), (positive)frames,
+                                      (positive)address_of byte, 1);
+                else if (scenario == DHCP_TEST_SEND_FRAMES)
+                        socket_send((b32)frames, address_of byte, 1, 0,
+                                    address_of discard, sizeof discard);
+                else
+                {
+                        byte = 2;
+                        socket_send((b32)handle, address_of byte, 1, 0,
+                                    address_of discard, sizeof discard);
+                        system_call_3(syscall(write), (positive)answer,
+                                      (positive)address_of byte, 1);
+                        //      The packet socket was kept: it closes.
+                        if (system_call_1(syscall(close), (positive)frames) != 0)
+                                system_call_1(syscall(exit_group), 4);
+                        system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                }
                 system_call_1(syscall(exit_group), 5);
         }
         system_close(ends[1]);
-        system_read_retry((positive)ends[0], address_of byte, 1);
+        while (child > 0)
+        {
+                p8 byte = 0;
+
+                if (system_read_retry((positive)ends[0], address_of byte, 1) != 1)
+                        break;
+                address_to said = byte;
+        }
         if (child > 0)
                 system_call_4(syscall(wait4), (positive)child,
                               (positive)address_of status, 0, 0);
         system_close(ends[0]);
-        system_close(spare);
-        check("the confined exchange keeps only its socket and pipe, and may answer",
-              child > 0 && byte == 1);
-        if (net_as_emulated() && status == 5 << 8)
+        return child > 0 ? status : -1;
+}
+
+static fn dhcp_confinement(void)
+{
+        p8 said = 0;
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        b32 status;
+
+        check("DHCP confinement fixture opens", spare >= 0);
+        if (spare < 0)
+                return;
+        status = dhcp_confined_child(DHCP_TEST_NO_SECCOMP, spare, address_of said);
+        check("an exchange where seccomp answers ENOSYS refuses to run unfiltered",
+              status == 6 << 8);
+        status = dhcp_confined_child(DHCP_TEST_ALLOWED, spare, address_of said);
+        if (net_as_emulated())
+        {
+                check("under qemu-user, which cannot filter itself, the exchange refuses",
+                      status == 3 << 8);
                 log_direct(str("net: DHCP seccomp filter NOT RUN -- qemu-user\n"));
+                system_close(spare);
+                return;
+        }
+        check("the confined exchange keeps only its sockets and pipe, may answer and send",
+              said == 2);
+        check("the confined exchange dies on a call outside its own",
+              (status & 0x7f) == 31);
+        status = dhcp_confined_child(DHCP_TEST_WRITE_FRAMES, spare, address_of said);
+        check("a write on the packet socket kills the confined exchange",
+              said == 1 && (status & 0x7f) == 31);
+        status = dhcp_confined_child(DHCP_TEST_SEND_FRAMES, spare, address_of said);
+        check("a send on the packet socket kills the confined exchange",
+              said == 1 && (status & 0x7f) == 31);
+        {
+                //      The head (architecture, then the call), two pinned
+                //      blocks of five, the nine calls allowed and the two
+                //      answers: twenty-five steps, the pinned descriptors
+                //      where the blocks put them.
+                static net_filter filter;
+                b32 kept = dhcp_apart;
+
+                dhcp_apart = 6;
+                dhcp_filter_build(address_of filter, 5);
+                dhcp_apart = kept;
+                check("the exchange's filter is its head, two pinned calls, nine others and its answers",
+                      filter.used == 4 + 2 * 5 + 9 + 2 &&
+                          filter.steps[4].value == (p32)syscall(sendto) &&
+                          filter.steps[6].value == 5 &&
+                          filter.steps[9].value == (p32)syscall(write) &&
+                          filter.steps[11].value == 6);
+        }
+        status = dhcp_confined_child(DHCP_TEST_APART_ZERO, spare, address_of said);
+        check("an exchange whose answer's pipe is descriptor 0 is confined all the same",
+              said == 2 && (status & 0x7f) == 31);
+        status = dhcp_confined_child(DHCP_TEST_FRAMES_ZERO, spare, address_of said);
+        check("an exchange whose packet socket is descriptor 0 keeps it",
+              said == 2 && (status & 0x7f) == 31);
+        system_close(spare);
+}
+
+/*
+        The exchange's own sockets, made for real in a user and network
+        namespace of the check's own, where it is root over a loopback of its
+        own: with standard input shut, so the first socket each opens is
+        numbered 0 -- a packet socket that is opened and closed, and a client
+        socket bound to port 68 that is no broadcast socket unless asked --
+        and a frame of exactly the room a frame has, sent over loopback from
+        port 67 to 68 and read off the packet socket. The child says what
+        held as bits down a pipe; 0x80 is a namespace it could not make.
+*/
+static fn dhcp_sockets_in_namespace(void)
+{
+        b32 ends[2];
+        bipolar child;
+        p8 bits = 0;
+        positive raw = 0;
+
+        if (net_as_emulated() ||
+            system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return;
+        child = system_fork();
+        if (!child)
+        {
+                p8 map[48];
+                positive uid = (positive)system_call(syscall(getuid));
+                positive gid = (positive)system_call(syscall(getgid));
+                p8 said = 0;
+                bipolar route;
+
+                if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNET) < 0 ||
+                    net_test_write("/proc/self/setgroups", "deny") < 0)
+                {
+                        said = 0x80;
+                        system_write_all((positive)ends[1], address_of said, 1);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                net_test_map(map, uid);
+                (void)net_test_write("/proc/self/uid_map", (string_address)map);
+                net_test_map(map, gid);
+                (void)net_test_write("/proc/self/gid_map", (string_address)map);
+                route = netlink_open_groups(0);
+                if (route >= 0)
+                {
+                        (void)netlink_link_up((b32)route, 1);
+                        socket_close((b32)route);
+                }
+                system_close(0);
+                {
+                        bipolar frames = dhcp_frames_open("lo");
+
+                        said |= frames == 0 ? 1 : 0;
+                        dhcp_frames = frames;
+                        dhcp_frames_close();
+                        said |= system_call_3(syscall(fcntl), 0, 1, 0) < 0 ? 2 : 0;
+                }
+                {
+                        bipolar handle = dhcp_open("lo", HOST_ANY, false);
+                        socket_address_internet bound = {0};
+                        p32 length = sizeof bound;
+                        b32 broadcast = 1;
+                        p32 size = sizeof broadcast;
+
+                        if (handle == 0 &&
+                            socket_name(0, address_of bound, address_of length) == 0 &&
+                            bound.port == network_order_16(DHCP_CLIENT_PORT))
+                                said |= 4;
+                        if (handle >= 0 &&
+                            socket_option_get((b32)handle, SOL_SOCKET, SO_BROADCAST,
+                                              address_of broadcast, address_of size) == 0 &&
+                            !broadcast)
+                                said |= 8;
+                        if (handle >= 0)
+                                socket_close((b32)handle);
+                }
+                {
+                        static p8 payload[DHCP_FRAME_ROOM - 28];
+                        static p8 into[DHCP_FRAME_ROOM];
+                        bipolar frames = dhcp_frames_open("lo");
+                        bipolar sender = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                        socket_address_internet from = {.family = AF_INET,
+                            .port = network_order_16(DHCP_SERVER_PORT),
+                            .host = network_order_32(HOST_LOOPBACK)};
+                        socket_address_internet to = {.family = AF_INET,
+                            .port = network_order_16(DHCP_CLIENT_PORT),
+                            .host = network_order_32(HOST_LOOPBACK)};
+                        network_deadline deadline;
+
+                        memory_fill(payload, 0x5a, sizeof payload);
+                        if (frames >= 0 && sender >= 0 &&
+                            socket_bind((b32)sender, address_of from, sizeof from) == 0 &&
+                            socket_send((b32)sender, payload, sizeof payload, 0, address_of to,
+                                        sizeof to) == (bipolar)sizeof payload &&
+                            network_deadline_begin(address_of deadline, 2, 0))
+                        {
+                                //      Loopback shows the frame leaving and
+                                //      arriving; only the arrival is read.
+                                for (positive tries = 0; tries < 4; tries++)
+                                {
+                                        socket_address_internet peer;
+                                        p32 peer_size = sizeof peer;
+                                        p32 destination = 0;
+                                        bipolar got = dhcp_frame_next(
+                                            frames, into, sizeof into, address_of peer,
+                                            address_of peer_size, address_of destination,
+                                            address_of deadline);
+
+                                        if (got == (bipolar)sizeof payload)
+                                        {
+                                                said |= 16;
+                                                break;
+                                        }
+                                        if (got < 0)
+                                                break;
+                                }
+                        }
+                }
+                system_write_all((positive)ends[1], address_of said, 1);
+                system_call_1(syscall(exit_group), 0);
+        }
+        system_close(ends[1]);
+        if (child > 0)
+        {
+                (void)system_read_retry((positive)ends[0], address_of bits, 1);
+                (void)system_wait4_retry(child, address_of raw, 0, null);
+        }
+        system_close(ends[0]);
+        if (child <= 0 || bits == 0x80)
+        {
+                log_direct(str("net: DHCP sockets in a namespace NOT RUN -- no user namespace\n"));
+                return;
+        }
+        check("a packet socket numbered 0 is opened, and closed", (bits & 3) == 3);
+        check("a client socket numbered 0 is bound to port 68", (bits & 4) != 0);
+        check("a client socket not asked to broadcast does not", (bits & 8) != 0);
+        check("a frame of exactly the room a frame has is read", (bits & 16) != 0);
+}
+
+/*
+        The frame judge (dhcp_unframe), against frames written here: a reply
+        whose headers and checksums are right is taken with its addresses,
+        port and message; each thing IP or UDP would refuse, one at a time,
+        is refused; padding after the datagram, IP options, the reserved flag,
+        a UDP length short of the payload and an absent UDP checksum are not;
+        a wrong UDP checksum is, unless the kernel vouches for it
+        (dhcp_frame_vouched, over control messages written here too).
+*/
+static p32 dhcp_test_fold(const p8 address_to bytes, positive count, p32 sum)
+{
+        for (positive at = 0; at < count; at++)
+                sum += at & 1 ? bytes[at] : (p32)bytes[at] << 8;
+        while (sum >> 16)
+                sum = (sum & 0xffff) + (sum >> 16);
+        return sum;
+}
+
+//      Both checksums written for the header and UDP lengths the frame says.
+static fn dhcp_test_sums(p8 address_to frame, positive header)
+{
+        positive udp = (positive)frame[header + 4] << 8 | frame[header + 5];
+        p8 pseudo[12];
+        p32 sum;
+
+        frame[10] = frame[11] = 0;
+        network_store_16(frame + 10, (p16)~dhcp_test_fold(frame, header, 0));
+        memory_copy(pseudo, frame + 12, 8);
+        pseudo[8] = 0;
+        pseudo[9] = 17;
+        network_store_16(pseudo + 10, (p16)udp);
+        frame[header + 6] = frame[header + 7] = 0;
+        sum = (p16)~dhcp_test_fold(frame + header, udp, dhcp_test_fold(pseudo, 12, 0));
+        network_store_16(frame + header + 6, (p16)(sum ? sum : 0xffff));
+}
+
+//      A frame of `message` from 10.0.2.2:67 to 255.255.255.255:68 with
+//      `options` bytes of IP options; its length.
+static positive dhcp_test_frame(p8 address_to frame, const p8 address_to message,
+                                positive length, positive options)
+{
+        positive header = 20 + options;
+
+        memory_zero(frame, header + 8);
+        frame[0] = (p8)(0x40 | header / 4);
+        network_store_16(frame + 2, (p16)(header + 8 + length));
+        network_store_16(frame + 6, 0x4000);
+        frame[8] = 64;
+        frame[9] = 17;
+        network_store_32(frame + 12, 0x0a000202);
+        network_store_32(frame + 16, 0xffffffff);
+        for (positive at = 20; at < header; at++)
+                frame[at] = 1;
+        network_store_16(frame + header, 67);
+        network_store_16(frame + header + 2, 68);
+        network_store_16(frame + header + 4, (p16)(8 + length));
+        memory_copy(frame + header + 8, message, length);
+        dhcp_test_sums(frame, header);
+        return header + 8 + length;
+}
+
+/*
+        Certificate Transparency on a real certificate: 1.1.1.1's leaf, as its
+        server sent it on 2026-10-11 (valid to 2026-12-21, 355 days, so three
+        SCTs are asked), and its issuer. Its three SCTs are from DigiCert
+        Wyvern2026h2, Sectigo Tiger2026h2 and Google Xenon2026h2, each signed
+        by the real log over the precertificate tls_ct_precert rebuilds: they
+        hold for as long as those logs are in ct_logs.inc (a log that retires
+        later still counts an SCT it made before), and when the table drops
+        them this fixture is the one to replace. One SCT's signature broken
+        leaves two, too few for 355 days; the issuer's key changed makes every
+        issuer_key_hash wrong. And every log in the table is named by the
+        SHA-256 of its own key's SubjectPublicKeyInfo.
+*/
+static const p8 ct_real_leaf[] = {
+    0x30, 0x82, 0x05, 0x81, 0x30, 0x82, 0x05, 0x08, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x10, 0x4e,
+    0xd0, 0x33, 0x04, 0xc4, 0x6b, 0x87, 0xa8, 0xc2, 0xeb, 0x55, 0x69, 0xdb, 0x9e, 0xba, 0x0c, 0x30,
+    0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03, 0x30, 0x6f, 0x31, 0x0b, 0x30,
+    0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x55, 0x53, 0x31, 0x0e, 0x30, 0x0c, 0x06, 0x03,
+    0x55, 0x04, 0x08, 0x0c, 0x05, 0x54, 0x65, 0x78, 0x61, 0x73, 0x31, 0x10, 0x30, 0x0e, 0x06, 0x03,
+    0x55, 0x04, 0x07, 0x0c, 0x07, 0x48, 0x6f, 0x75, 0x73, 0x74, 0x6f, 0x6e, 0x31, 0x11, 0x30, 0x0f,
+    0x06, 0x03, 0x55, 0x04, 0x0a, 0x0c, 0x08, 0x53, 0x53, 0x4c, 0x20, 0x43, 0x6f, 0x72, 0x70, 0x31,
+    0x2b, 0x30, 0x29, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x22, 0x53, 0x53, 0x4c, 0x2e, 0x63, 0x6f,
+    0x6d, 0x20, 0x53, 0x53, 0x4c, 0x20, 0x49, 0x6e, 0x74, 0x65, 0x72, 0x6d, 0x65, 0x64, 0x69, 0x61,
+    0x74, 0x65, 0x20, 0x43, 0x41, 0x20, 0x45, 0x43, 0x43, 0x20, 0x52, 0x32, 0x30, 0x1e, 0x17, 0x0d,
+    0x32, 0x35, 0x31, 0x32, 0x33, 0x31, 0x31, 0x39, 0x32, 0x30, 0x30, 0x31, 0x5a, 0x17, 0x0d, 0x32,
+    0x36, 0x31, 0x32, 0x32, 0x31, 0x31, 0x39, 0x32, 0x30, 0x30, 0x31, 0x5a, 0x30, 0x72, 0x31, 0x0b,
+    0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x55, 0x53, 0x31, 0x13, 0x30, 0x11, 0x06,
+    0x03, 0x55, 0x04, 0x08, 0x0c, 0x0a, 0x43, 0x61, 0x6c, 0x69, 0x66, 0x6f, 0x72, 0x6e, 0x69, 0x61,
+    0x31, 0x16, 0x30, 0x14, 0x06, 0x03, 0x55, 0x04, 0x07, 0x0c, 0x0d, 0x53, 0x61, 0x6e, 0x20, 0x46,
+    0x72, 0x61, 0x6e, 0x63, 0x69, 0x73, 0x63, 0x6f, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55, 0x04,
+    0x0a, 0x0c, 0x10, 0x43, 0x6c, 0x6f, 0x75, 0x64, 0x66, 0x6c, 0x61, 0x72, 0x65, 0x2c, 0x20, 0x49,
+    0x6e, 0x63, 0x2e, 0x31, 0x1b, 0x30, 0x19, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x12, 0x63, 0x6c,
+    0x6f, 0x75, 0x64, 0x66, 0x6c, 0x61, 0x72, 0x65, 0x2d, 0x64, 0x6e, 0x73, 0x2e, 0x63, 0x6f, 0x6d,
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x63, 0x83, 0x50, 0x25, 0x12,
+    0xea, 0x72, 0x78, 0x19, 0xeb, 0x32, 0x47, 0xaf, 0xc1, 0x05, 0x52, 0x9c, 0x2a, 0x2b, 0x60, 0x8a,
+    0x84, 0x4e, 0x75, 0x6d, 0x81, 0x48, 0x47, 0xc1, 0xc7, 0xbe, 0xcf, 0x85, 0x79, 0x6c, 0x12, 0x29,
+    0x5b, 0x50, 0xb3, 0xcc, 0xec, 0x50, 0xa1, 0x94, 0x9e, 0xdc, 0x44, 0x08, 0x07, 0x0c, 0x80, 0x1a,
+    0x93, 0xd3, 0xbd, 0x78, 0x11, 0x7b, 0xb6, 0xa3, 0xc8, 0xea, 0xac, 0xa3, 0x82, 0x03, 0x81, 0x30,
+    0x82, 0x03, 0x7d, 0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04, 0x02, 0x30,
+    0x00, 0x30, 0x1f, 0x06, 0x03, 0x55, 0x1d, 0x23, 0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0x0d, 0x74,
+    0x66, 0x0a, 0x5e, 0x9f, 0xe2, 0x2c, 0xec, 0xd5, 0xc2, 0x5d, 0x25, 0x04, 0x7f, 0x75, 0x32, 0xba,
+    0xff, 0x7d, 0x30, 0x71, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01, 0x04, 0x65,
+    0x30, 0x63, 0x30, 0x3f, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x02, 0x86, 0x33,
+    0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x63, 0x65, 0x72, 0x74, 0x2e, 0x73, 0x73, 0x6c, 0x2e,
+    0x63, 0x6f, 0x6d, 0x2f, 0x53, 0x53, 0x4c, 0x63, 0x6f, 0x6d, 0x2d, 0x53, 0x75, 0x62, 0x43, 0x41,
+    0x2d, 0x53, 0x53, 0x4c, 0x2d, 0x45, 0x43, 0x43, 0x2d, 0x33, 0x38, 0x34, 0x2d, 0x52, 0x32, 0x2e,
+    0x63, 0x65, 0x72, 0x30, 0x20, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x86,
+    0x14, 0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x6f, 0x63, 0x73, 0x70, 0x73, 0x2e, 0x73, 0x73,
+    0x6c, 0x2e, 0x63, 0x6f, 0x6d, 0x30, 0x81, 0xa6, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x81, 0x9e,
+    0x30, 0x81, 0x9b, 0x82, 0x12, 0x63, 0x6c, 0x6f, 0x75, 0x64, 0x66, 0x6c, 0x61, 0x72, 0x65, 0x2d,
+    0x64, 0x6e, 0x73, 0x2e, 0x63, 0x6f, 0x6d, 0x82, 0x14, 0x2a, 0x2e, 0x63, 0x6c, 0x6f, 0x75, 0x64,
+    0x66, 0x6c, 0x61, 0x72, 0x65, 0x2d, 0x64, 0x6e, 0x73, 0x2e, 0x63, 0x6f, 0x6d, 0x87, 0x04, 0x01,
+    0x00, 0x00, 0x01, 0x87, 0x04, 0x01, 0x01, 0x01, 0x01, 0x87, 0x04, 0xa2, 0x9f, 0x24, 0x01, 0x87,
+    0x04, 0xa2, 0x9f, 0x2e, 0x01, 0x87, 0x10, 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01, 0x87, 0x10, 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x11, 0x87, 0x10, 0x26, 0x06, 0x47, 0x00, 0x47,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x87, 0x10, 0x26, 0x06, 0x47,
+    0x00, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x82, 0x0f, 0x6f,
+    0x6e, 0x65, 0x2e, 0x6f, 0x6e, 0x65, 0x2e, 0x6f, 0x6e, 0x65, 0x2e, 0x6f, 0x6e, 0x65, 0x30, 0x23,
+    0x06, 0x03, 0x55, 0x1d, 0x20, 0x04, 0x1c, 0x30, 0x1a, 0x30, 0x08, 0x06, 0x06, 0x67, 0x81, 0x0c,
+    0x01, 0x02, 0x02, 0x30, 0x0e, 0x06, 0x0c, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0xa9, 0x30, 0x01,
+    0x03, 0x01, 0x02, 0x30, 0x13, 0x06, 0x03, 0x55, 0x1d, 0x25, 0x04, 0x0c, 0x30, 0x0a, 0x06, 0x08,
+    0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01, 0x30, 0x44, 0x06, 0x03, 0x55, 0x1d, 0x1f, 0x04,
+    0x3d, 0x30, 0x3b, 0x30, 0x39, 0xa0, 0x37, 0xa0, 0x35, 0x86, 0x33, 0x68, 0x74, 0x74, 0x70, 0x3a,
+    0x2f, 0x2f, 0x63, 0x72, 0x6c, 0x73, 0x2e, 0x73, 0x73, 0x6c, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x53,
+    0x53, 0x4c, 0x63, 0x6f, 0x6d, 0x2d, 0x53, 0x75, 0x62, 0x43, 0x41, 0x2d, 0x53, 0x53, 0x4c, 0x2d,
+    0x45, 0x43, 0x43, 0x2d, 0x33, 0x38, 0x34, 0x2d, 0x52, 0x32, 0x2e, 0x63, 0x72, 0x6c, 0x30, 0x1d,
+    0x06, 0x03, 0x55, 0x1d, 0x0e, 0x04, 0x16, 0x04, 0x14, 0x2c, 0x28, 0xec, 0x54, 0x20, 0xb6, 0x86,
+    0x00, 0x26, 0x55, 0xaa, 0x69, 0xbb, 0xb6, 0xc3, 0x65, 0x2e, 0x16, 0xfa, 0x1f, 0x30, 0x0e, 0x06,
+    0x03, 0x55, 0x1d, 0x0f, 0x01, 0x01, 0xff, 0x04, 0x04, 0x03, 0x02, 0x07, 0x80, 0x30, 0x82, 0x01,
+    0x7f, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x04, 0x02, 0x04, 0x82, 0x01,
+    0x6f, 0x04, 0x82, 0x01, 0x6b, 0x01, 0x69, 0x00, 0x76, 0x00, 0xc2, 0x31, 0x7e, 0x57, 0x45, 0x19,
+    0xa3, 0x45, 0xee, 0x7f, 0x38, 0xde, 0xb2, 0x90, 0x41, 0xeb, 0xc7, 0xc2, 0x21, 0x5a, 0x22, 0xbf,
+    0x7f, 0xd5, 0xb5, 0xad, 0x76, 0x9a, 0xd9, 0x0e, 0x52, 0xcd, 0x00, 0x00, 0x01, 0x9b, 0x75, 0xe3,
+    0x81, 0x6b, 0x00, 0x00, 0x04, 0x03, 0x00, 0x47, 0x30, 0x45, 0x02, 0x20, 0x7b, 0x90, 0x06, 0xd3,
+    0x61, 0x01, 0xbe, 0x2f, 0x28, 0x63, 0x84, 0x1c, 0x21, 0x7b, 0x55, 0x53, 0xeb, 0x2c, 0x70, 0x89,
+    0xce, 0x4e, 0xb7, 0x2c, 0x80, 0xa8, 0x08, 0x1b, 0x74, 0xd3, 0x34, 0xf5, 0x02, 0x21, 0x00, 0xc9,
+    0x68, 0x26, 0xaa, 0x91, 0x44, 0x0e, 0x16, 0x18, 0x7f, 0xbb, 0x42, 0x7d, 0xb3, 0xc7, 0x28, 0x81,
+    0x50, 0xd2, 0x6e, 0xc5, 0x02, 0x77, 0xe4, 0xbc, 0x06, 0xed, 0x77, 0x18, 0xad, 0x62, 0xbd, 0x00,
+    0x77, 0x00, 0xc8, 0xa3, 0xc4, 0x7f, 0xc7, 0xb3, 0xad, 0xb9, 0x35, 0x6b, 0x01, 0x3f, 0x6a, 0x7a,
+    0x12, 0x6d, 0xe3, 0x3a, 0x4e, 0x43, 0xa5, 0xc6, 0x46, 0xf9, 0x97, 0xad, 0x39, 0x75, 0x99, 0x1d,
+    0xcf, 0x9a, 0x00, 0x00, 0x01, 0x9b, 0x75, 0xe3, 0x81, 0xdc, 0x00, 0x00, 0x04, 0x03, 0x00, 0x48,
+    0x30, 0x46, 0x02, 0x21, 0x00, 0xca, 0xf8, 0xe7, 0x8a, 0x37, 0x4e, 0x76, 0x93, 0x29, 0x7d, 0xb2,
+    0x4c, 0x6a, 0xaa, 0xf7, 0x23, 0x33, 0x41, 0x27, 0x32, 0x30, 0x28, 0xa9, 0xf5, 0xbf, 0xc3, 0x6a,
+    0x03, 0x26, 0x17, 0xbe, 0x2b, 0x02, 0x21, 0x00, 0xd8, 0x4d, 0x4c, 0xaf, 0xa0, 0x27, 0xa9, 0x53,
+    0x0c, 0x61, 0xe3, 0x11, 0x32, 0xa0, 0xbb, 0x22, 0x12, 0xf8, 0x11, 0x9a, 0x12, 0x7c, 0x9b, 0xb5,
+    0x25, 0x1b, 0xc5, 0xab, 0x09, 0x4b, 0x40, 0x68, 0x00, 0x76, 0x00, 0xd8, 0x09, 0x55, 0x3b, 0x94,
+    0x4f, 0x7a, 0xff, 0xc8, 0x16, 0x19, 0x6f, 0x94, 0x4f, 0x85, 0xab, 0xb0, 0xf8, 0xfc, 0x5e, 0x87,
+    0x55, 0x26, 0x0f, 0x15, 0xd1, 0x2e, 0x72, 0xbb, 0x45, 0x4b, 0x14, 0x00, 0x00, 0x01, 0x9b, 0x75,
+    0xe3, 0x82, 0x32, 0x00, 0x00, 0x04, 0x03, 0x00, 0x47, 0x30, 0x45, 0x02, 0x20, 0x42, 0x71, 0x38,
+    0x15, 0x48, 0xfb, 0x6e, 0x98, 0x78, 0x8e, 0x73, 0x99, 0x80, 0x04, 0x4d, 0x39, 0x48, 0xda, 0x27,
+    0x85, 0x0f, 0xbf, 0x1c, 0xa9, 0x4c, 0xfe, 0x66, 0x79, 0x7e, 0xe8, 0xf2, 0x02, 0x02, 0x21, 0x00,
+    0xb5, 0x7d, 0x47, 0xd7, 0x99, 0xa4, 0x32, 0x95, 0xb3, 0x8a, 0x3a, 0xf9, 0x8f, 0x2e, 0x41, 0x84,
+    0x08, 0xb2, 0x19, 0x5c, 0xe9, 0xda, 0xc3, 0x49, 0x2e, 0x4e, 0x8d, 0xe9, 0xf7, 0x43, 0x67, 0x47,
+    0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03, 0x03, 0x67, 0x00, 0x30,
+    0x64, 0x02, 0x30, 0x1b, 0x2e, 0xb5, 0x3f, 0x7f, 0x34, 0xee, 0x2a, 0x79, 0xc9, 0xdc, 0x5e, 0x3f,
+    0xe1, 0x5a, 0xea, 0xf3, 0xfd, 0x05, 0x81, 0xb2, 0x4e, 0xc6, 0xca, 0xb6, 0x41, 0xef, 0x54, 0x80,
+    0xd4, 0xfe, 0xd0, 0x30, 0x10, 0xe8, 0x9c, 0x5a, 0x72, 0x7e, 0x41, 0x10, 0x5a, 0x88, 0x96, 0x00,
+    0xd7, 0xcf, 0x0f, 0x02, 0x30, 0x12, 0xfc, 0xe5, 0xba, 0x42, 0xcf, 0x30, 0xd3, 0xc2, 0x29, 0x63,
+    0x80, 0x70, 0x4a, 0xcb, 0x37, 0x91, 0x51, 0xea, 0x1e, 0x24, 0xa8, 0xc1, 0x33, 0x77, 0x52, 0xea,
+    0x4e, 0x3b, 0xb1, 0xe2, 0x34, 0x8d, 0x5d, 0x6c, 0xc2, 0xb2, 0x05, 0x63, 0x9c, 0xec, 0x49, 0x9f,
+    0x8a, 0xb7, 0x32, 0x32, 0x85,
+};
+
+static const p8 ct_real_issuer[] = {
+    0x30, 0x82, 0x03, 0x7a, 0x30, 0x82, 0x02, 0xff, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x10, 0x1c,
+    0xd7, 0x12, 0x12, 0xde, 0x15, 0x10, 0xd9, 0x12, 0x82, 0xda, 0x33, 0x10, 0x4a, 0x10, 0x2f, 0x30,
+    0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03, 0x30, 0x7c, 0x31, 0x0b, 0x30,
+    0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x55, 0x53, 0x31, 0x0e, 0x30, 0x0c, 0x06, 0x03,
+    0x55, 0x04, 0x08, 0x0c, 0x05, 0x54, 0x65, 0x78, 0x61, 0x73, 0x31, 0x10, 0x30, 0x0e, 0x06, 0x03,
+    0x55, 0x04, 0x07, 0x0c, 0x07, 0x48, 0x6f, 0x75, 0x73, 0x74, 0x6f, 0x6e, 0x31, 0x18, 0x30, 0x16,
+    0x06, 0x03, 0x55, 0x04, 0x0a, 0x0c, 0x0f, 0x53, 0x53, 0x4c, 0x20, 0x43, 0x6f, 0x72, 0x70, 0x6f,
+    0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x31, 0x31, 0x30, 0x2f, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c,
+    0x28, 0x53, 0x53, 0x4c, 0x2e, 0x63, 0x6f, 0x6d, 0x20, 0x52, 0x6f, 0x6f, 0x74, 0x20, 0x43, 0x65,
+    0x72, 0x74, 0x69, 0x66, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x20, 0x41, 0x75, 0x74, 0x68,
+    0x6f, 0x72, 0x69, 0x74, 0x79, 0x20, 0x45, 0x43, 0x43, 0x30, 0x1e, 0x17, 0x0d, 0x31, 0x39, 0x30,
+    0x33, 0x30, 0x37, 0x31, 0x39, 0x34, 0x32, 0x34, 0x32, 0x5a, 0x17, 0x0d, 0x33, 0x34, 0x30, 0x33,
+    0x30, 0x33, 0x31, 0x39, 0x34, 0x32, 0x34, 0x32, 0x5a, 0x30, 0x6f, 0x31, 0x0b, 0x30, 0x09, 0x06,
+    0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x55, 0x53, 0x31, 0x0e, 0x30, 0x0c, 0x06, 0x03, 0x55, 0x04,
+    0x08, 0x0c, 0x05, 0x54, 0x65, 0x78, 0x61, 0x73, 0x31, 0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04,
+    0x07, 0x0c, 0x07, 0x48, 0x6f, 0x75, 0x73, 0x74, 0x6f, 0x6e, 0x31, 0x11, 0x30, 0x0f, 0x06, 0x03,
+    0x55, 0x04, 0x0a, 0x0c, 0x08, 0x53, 0x53, 0x4c, 0x20, 0x43, 0x6f, 0x72, 0x70, 0x31, 0x2b, 0x30,
+    0x29, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x22, 0x53, 0x53, 0x4c, 0x2e, 0x63, 0x6f, 0x6d, 0x20,
+    0x53, 0x53, 0x4c, 0x20, 0x49, 0x6e, 0x74, 0x65, 0x72, 0x6d, 0x65, 0x64, 0x69, 0x61, 0x74, 0x65,
+    0x20, 0x43, 0x41, 0x20, 0x45, 0x43, 0x43, 0x20, 0x52, 0x32, 0x30, 0x76, 0x30, 0x10, 0x06, 0x07,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62,
+    0x00, 0x04, 0x84, 0x39, 0x69, 0xf7, 0xd2, 0xe1, 0x18, 0x28, 0x32, 0xc5, 0xbb, 0x8b, 0x02, 0x8c,
+    0x54, 0x35, 0x56, 0xea, 0x45, 0x69, 0xe3, 0x2d, 0x42, 0x3a, 0x95, 0x5b, 0x25, 0x92, 0x03, 0xbf,
+    0x8a, 0x16, 0x58, 0xe7, 0xb1, 0x56, 0x85, 0x43, 0x68, 0x60, 0xb3, 0x87, 0x10, 0x93, 0x57, 0xff,
+    0x45, 0x0d, 0x88, 0x35, 0x2c, 0x1d, 0x54, 0x26, 0x14, 0xd2, 0x2e, 0x6a, 0xb1, 0xba, 0x26, 0xdb,
+    0x4a, 0xe2, 0x81, 0x48, 0x43, 0x87, 0xd7, 0x4c, 0xfe, 0xbe, 0x9b, 0x11, 0x9e, 0xf9, 0x78, 0x51,
+    0x3c, 0xf7, 0xd9, 0x12, 0x08, 0x8d, 0x78, 0xc6, 0xa4, 0xe1, 0x61, 0x52, 0xcf, 0x74, 0xb1, 0x25,
+    0xf9, 0xdc, 0xa3, 0x82, 0x01, 0x51, 0x30, 0x82, 0x01, 0x4d, 0x30, 0x12, 0x06, 0x03, 0x55, 0x1d,
+    0x13, 0x01, 0x01, 0xff, 0x04, 0x08, 0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00, 0x30, 0x1f,
+    0x06, 0x03, 0x55, 0x1d, 0x23, 0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0x82, 0xd1, 0x85, 0x73, 0x30,
+    0xe7, 0x35, 0x04, 0xd3, 0x8e, 0x02, 0x92, 0xfb, 0xe5, 0xa4, 0xd1, 0xc4, 0x21, 0xe8, 0xcd, 0x30,
+    0x78, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01, 0x04, 0x6c, 0x30, 0x6a, 0x30,
+    0x46, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x02, 0x86, 0x3a, 0x68, 0x74, 0x74,
+    0x70, 0x3a, 0x2f, 0x2f, 0x77, 0x77, 0x77, 0x2e, 0x73, 0x73, 0x6c, 0x2e, 0x63, 0x6f, 0x6d, 0x2f,
+    0x72, 0x65, 0x70, 0x6f, 0x73, 0x69, 0x74, 0x6f, 0x72, 0x79, 0x2f, 0x53, 0x53, 0x4c, 0x63, 0x6f,
+    0x6d, 0x2d, 0x52, 0x6f, 0x6f, 0x74, 0x43, 0x41, 0x2d, 0x45, 0x43, 0x43, 0x2d, 0x33, 0x38, 0x34,
+    0x2d, 0x52, 0x31, 0x2e, 0x63, 0x72, 0x74, 0x30, 0x20, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05,
+    0x07, 0x30, 0x01, 0x86, 0x14, 0x68, 0x74, 0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x6f, 0x63, 0x73, 0x70,
+    0x73, 0x2e, 0x73, 0x73, 0x6c, 0x2e, 0x63, 0x6f, 0x6d, 0x30, 0x11, 0x06, 0x03, 0x55, 0x1d, 0x20,
+    0x04, 0x0a, 0x30, 0x08, 0x30, 0x06, 0x06, 0x04, 0x55, 0x1d, 0x20, 0x00, 0x30, 0x1d, 0x06, 0x03,
+    0x55, 0x1d, 0x25, 0x04, 0x16, 0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03,
+    0x02, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01, 0x30, 0x3b, 0x06, 0x03, 0x55,
+    0x1d, 0x1f, 0x04, 0x34, 0x30, 0x32, 0x30, 0x30, 0xa0, 0x2e, 0xa0, 0x2c, 0x86, 0x2a, 0x68, 0x74,
+    0x74, 0x70, 0x3a, 0x2f, 0x2f, 0x63, 0x72, 0x6c, 0x73, 0x2e, 0x73, 0x73, 0x6c, 0x2e, 0x63, 0x6f,
+    0x6d, 0x2f, 0x73, 0x73, 0x6c, 0x2e, 0x63, 0x6f, 0x6d, 0x2d, 0x65, 0x63, 0x63, 0x2d, 0x52, 0x6f,
+    0x6f, 0x74, 0x43, 0x41, 0x2e, 0x63, 0x72, 0x6c, 0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d, 0x0e, 0x04,
+    0x16, 0x04, 0x14, 0x0d, 0x74, 0x66, 0x0a, 0x5e, 0x9f, 0xe2, 0x2c, 0xec, 0xd5, 0xc2, 0x5d, 0x25,
+    0x04, 0x7f, 0x75, 0x32, 0xba, 0xff, 0x7d, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x1d, 0x0f, 0x01, 0x01,
+    0xff, 0x04, 0x04, 0x03, 0x02, 0x01, 0x86, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+    0x04, 0x03, 0x03, 0x03, 0x69, 0x00, 0x30, 0x66, 0x02, 0x31, 0x00, 0xc5, 0x8b, 0x7a, 0x62, 0x59,
+    0x3f, 0x37, 0xc1, 0x5c, 0x87, 0xfd, 0xdf, 0x80, 0xa6, 0x0a, 0xc0, 0x8e, 0x40, 0xd3, 0x5d, 0x50,
+    0x30, 0xa5, 0xb4, 0x87, 0x71, 0x7d, 0x25, 0x6f, 0xcd, 0x5f, 0xf1, 0x7b, 0xa1, 0x8b, 0x56, 0xaf,
+    0x19, 0x63, 0x85, 0xe1, 0xfc, 0x9f, 0x60, 0x6b, 0x90, 0x3c, 0x9b, 0x02, 0x31, 0x00, 0x94, 0x2c,
+    0x64, 0x2c, 0x4d, 0x2f, 0x41, 0x36, 0x1c, 0x17, 0x3a, 0xd1, 0xdb, 0x8a, 0x28, 0x83, 0x2c, 0x3a,
+    0x56, 0x48, 0x13, 0x9b, 0xdd, 0xbe, 0x8e, 0x2a, 0x89, 0x4c, 0xee, 0x52, 0x48, 0x0f, 0x50, 0x51,
+    0xad, 0x3d, 0xd9, 0x2e, 0x5c, 0x4c, 0xa8, 0x87, 0x90, 0x7d, 0x9c, 0x38, 0xce, 0xa6,
+};
+
+static fn tls_ct_real(void)
+{
+        static const p8 prefix[] = {0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48,
+                                    0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+                                    0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04};
+        static p8 leaf[sizeof ct_real_leaf];
+        static p8 issuer[sizeof ct_real_issuer];
+        tls_cert certs[2];
+        positive chain[2] = {0, 1};
+        bool named = true;
+
+        for (positive at = 0; at < array_count(tls_ct_logs); at++)
+        {
+                p8 spki[sizeof prefix + 64];
+                p8 digest[32];
+
+                memory_copy(spki, prefix, sizeof prefix);
+                memory_copy(spki + sizeof prefix, tls_ct_logs[at].x, 32);
+                memory_copy(spki + sizeof prefix + 32, tls_ct_logs[at].y, 32);
+                crypto_sha256_of(spki, sizeof spki, digest);
+                named = named && !memory_compare(digest, tls_ct_logs[at].id, 32);
+        }
+        check("every CT log is named by the SHA-256 of its key", named && array_count(tls_ct_logs) >= 20);
+
+        memory_copy(leaf, ct_real_leaf, sizeof leaf);
+        memory_copy(issuer, ct_real_issuer, sizeof issuer);
+        check("the CT fixture parses",
+              !tls_parse_cert(leaf, sizeof leaf, certs, null) &&
+                  !tls_parse_cert(issuer, sizeof issuer, certs + 1, null) &&
+                  certs[0].scts && certs[1].spki);
+        check("1.1.1.1's leaf is logged as Chrome's CT policy asks",
+              tls_ct_holds(certs, chain, 1, certs + 1));
+        //      The last byte of the first SCT's signature (2 + 2 + its 118
+        //      bytes in: version, id, timestamp, extensions, algorithms,
+        //      length, then 71 of signature).
+        certs[0].scts[2 + 2 + 118 - 1] ^= 1;
+        check("with one SCT broken, two are too few for 355 days",
+              !tls_ct_holds(certs, chain, 1, certs + 1));
+        {
+                //      The tier decides whether that refuses the path: from
+                //      the tight one up it does, for being unlogged, and
+                //      below it the path goes on to its revocation checks.
+                static tls_conn conn;
+                bool held;
+
+                memory_fill(address_of conn, 0, sizeof conn);
+                held = tls_trust_holds(address_of conn, certs, chain, 1, certs + 1, null, 0,
+                                       20260601000000);
+                if (MOONWATER_STRICT_NET >= STRICT_TIGHT)
+                        check("at this tier a path whose leaf is unlogged is refused for that",
+                              !held && conn.fault == TLS_FAULT_UNLOGGED);
+                else
+                        check("below the tight tier an unlogged leaf is no reason to refuse",
+                              conn.fault != TLS_FAULT_UNLOGGED);
+        }
+        certs[0].scts[2 + 2 + 118 - 1] ^= 1;
+        check("and mended, it holds again", tls_ct_holds(certs, chain, 1, certs + 1));
+        {
+                static p8 roomy[sizeof ct_real_leaf];
+                static p8 exact[sizeof ct_real_leaf];
+                positive need = tls_ct_precert(certs, roomy, sizeof roomy);
+
+                check("a precertificate fits a room of exactly its length",
+                      need && tls_ct_precert(certs, exact, need) == need &&
+                          !memory_compare(roomy, exact, need));
+        }
+        {
+                //      The fixture's SCTs, three of them for a leaf of 355
+                //      days, after fourteen from a log nobody knows: the
+                //      first sixteen read hold only two of the three.
+                static p8 list[2 + 17 * 160];
+                p8 address_to kept = certs[0].scts;
+                positive kept_length = certs[0].scts_length;
+                byte_reader reader = byte_reader_open(kept, kept_length);
+                byte_reader entries = byte_reader_vector16(address_of reader);
+                const p8 address_to real[3] = {0};
+                positive real_length[3] = {0};
+                positive found = 0, used = 2;
+
+                while (byte_reader_left(address_of entries) && found < 3)
+                {
+                        byte_reader one = byte_reader_vector16(address_of entries);
+
+                        real[found] = byte_reader_here(address_of one);
+                        real_length[found++] = byte_reader_left(address_of one);
+                }
+                for (positive at = 0; found == 3 && at < 17; at++)
+                {
+                        const p8 address_to from = at < 14 ? real[0] : real[at - 14];
+                        positive length = at < 14 ? real_length[0] : real_length[at - 14];
+
+                        if (used + 2 + length > sizeof list)
+                                break;
+                        network_store_16(list + used, (p16)length);
+                        memory_copy(list + used + 2, from, length);
+                        if (at < 14)
+                                list[used + 2 + 1] ^= 0xff; // another log's id
+                        used += 2 + length;
+                }
+                network_store_16(list, (p16)(used - 2));
+                certs[0].scts = list;
+                certs[0].scts_length = used;
+                check("the fixture has three SCTs to rebuild its list from", found == 3);
+                check("no more than sixteen SCTs of a list are read",
+                      !tls_ct_holds(certs, chain, 1, certs + 1));
+                certs[0].scts = null;
+                check("a leaf with no SCTs is not logged", !tls_ct_holds(certs, chain, 1, certs + 1));
+                certs[0].scts = kept;
+                certs[0].scts_length = kept_length;
+                {
+                        const p8 address_to key = certs[1].spki;
+
+                        certs[1].spki = null;
+                        check("an issuer with no key logs nothing",
+                              !tls_ct_holds(certs, chain, 1, certs + 1));
+                        certs[1].spki = key;
+                }
+        }
+        {
+                p8 out[5];
+
+                check("DER lengths at their edges take the next form",
+                      tls_der_header(out, 0x30, 0x7f) == 2 && out[1] == 0x7f &&
+                          tls_der_header(out, 0x30, 0x80) == 3 && out[1] == 0x81 &&
+                          out[2] == 0x80 && tls_der_header(out, 0x30, 0xff) == 3 &&
+                          tls_der_header(out, 0x30, 0x100) == 4 && out[1] == 0x82 &&
+                          tls_der_header(out, 0x30, 0xffff) == 4 &&
+                          tls_der_header(out, 0x30, 0x10000) == 5 && out[1] == 0x83 &&
+                          out[2] == 1 && !out[3] && !out[4] && out[0] == 0x30);
+        }
+        {
+                tls_ct_log ct = {0};
+
+                check("an SCT made this very millisecond counts",
+                      tls_ct_log_counts(address_of ct, 5000, 0, 5000));
+                ct.retired = 5000;
+                check("an SCT made the millisecond its log retired does not",
+                      !tls_ct_log_counts(address_of ct, 5000, 0, 9000) &&
+                          tls_ct_log_counts(address_of ct, 4999, 0, 9000));
+        }
+        {
+                //      v1, an id, a timestamp, no extensions, SHA-256 and
+                //      ECDSA, then the signature's length and its bytes.
+                static p8 sct[1 + 32 + 8 + 2 + 2 + 2 + 2];
+                tls_ct_sct read;
+                byte_reader reader;
+
+                memory_fill(sct, 0, sizeof sct);
+                sct[1 + 32 + 8 + 2] = 4;
+                sct[1 + 32 + 8 + 2 + 1] = 3;
+                sct[1 + 32 + 8 + 2 + 2 + 1] = 1; // one byte of signature
+                reader = byte_reader_open(sct, sizeof sct - 1);
+                check("an SCT read whole is taken",
+                      tls_ct_sct_read(address_of reader, address_of read));
+                reader = byte_reader_open(sct, sizeof sct);
+                check("an SCT with a byte after it is refused",
+                      !tls_ct_sct_read(address_of reader, address_of read));
+                sct[1 + 32 + 8 + 2 + 2 + 1] = 0;
+                reader = byte_reader_open(sct, sizeof sct - 2);
+                check("an SCT with no signature is refused",
+                      !tls_ct_sct_read(address_of reader, address_of read));
+        }
+        certs[1].spki[certs[1].spki_length - 1] ^= 1;
+        check("under another issuer's key, no SCT holds", !tls_ct_holds(certs, chain, 1, certs + 1));
+}
+
+static fn dhcp_frames_judged(void)
+{
+        p8 message[61];
+        p8 frame[200];
+        p8 copy[200];
+        dhcp_frame got;
+        positive size;
+
+        for (positive at = 0; at < sizeof message; at++)
+                message[at] = (p8)(at * 7 + 3);
+        size = dhcp_test_frame(frame, message, sizeof message, 0);
+        {
+                positive empty = dhcp_test_frame(copy, message, 0, 0);
+
+                check("a reply frame of an empty datagram is a frame of nothing",
+                      dhcp_unframe(copy, empty, false, address_of got) && got.length == 0);
+        }
+        check("a reply frame with its headers right is taken",
+              dhcp_unframe(frame, size, false, address_of got) &&
+                  got.source == 0x0a000202 && got.destination == 0xffffffff &&
+                  got.source_port == 67 && got.message == frame + 28 &&
+                  got.length == sizeof message &&
+                  !memory_compare(got.message, message, sizeof message));
+        {
+                bool refused = true;
+
+                for (positive cut = 0; cut < size; cut++)
+                        refused &= !dhcp_unframe(frame, cut, false, address_of got);
+                check("a reply frame cut at any byte is refused", refused);
+        }
+        memory_copy(copy, frame, size);
+        memory_fill(copy + size, 0xa5, 20);
+        check("link padding after the datagram is not read",
+              dhcp_unframe(copy, size + 20, false, address_of got) &&
+                  got.length == sizeof message);
+        {
+                positive with = dhcp_test_frame(copy, message, sizeof message, 8);
+
+                check("IP options are stepped over",
+                      dhcp_unframe(copy, with, false, address_of got) &&
+                          got.message == copy + 36 && got.length == sizeof message);
+        }
+
+        //      One field at a time, the checksums written again after it
+        //      unless the checksum is the field.
+        static const struct
+        {
+                p8 at;
+                p8 value;
+                bool sums;
+                bool taken;
+        } faults[] = {
+            {0, 0x65, true, false},     // version 6
+            {0, 0x44, true, false},     // a header of four words
+            {6, 0x60, true, false},     // more fragments
+            {7, 0x01, true, false},     // a fragment offset
+            {6, 0x41, true, false},     // an offset's high bits
+            {6, 0xc0, true, true},      // the reserved flag
+            {6, 0x00, true, true},      // may fragment, but did not
+            {9, 6, true, false},        // TCP
+            {11, 0, false, false},      // the header checksum off
+            {21, 68, true, false},      // from port 68
+            {23, 67, true, false},      // to port 67
+            {27, 0, false, false},      // the UDP checksum off
+            {3, 0, true, false},        // a total length past what was read
+        };
+        for (positive at = 0; at < array_count(faults); at++)
+        {
+                memory_copy(copy, frame, size);
+                copy[faults[at].at] ^= faults[at].at == 11 || faults[at].at == 27
+                                           ? 1
+                                           : copy[faults[at].at] ^ faults[at].value;
+                if (faults[at].at == 3)
+                        network_store_16(copy + 2, (p16)(size + 1));
+                if (faults[at].sums)
+                        dhcp_test_sums(copy, 20);
+                if (faults[at].taken)
+                        check("a header field IP does not refuse is not refused",
+                              dhcp_unframe(copy, size, false, address_of got));
+                else
+                        check("a header field IP or UDP refuses is refused",
+                              !dhcp_unframe(copy, size, false, address_of got));
+        }
+        memory_copy(copy, frame, size);
+        copy[27] ^= 1;
+        check("a wrong UDP checksum the kernel vouches for is not asked about",
+              dhcp_unframe(copy, size, true, address_of got));
+        copy[26] = copy[27] = 0;
+        check("a UDP datagram with no checksum is taken",
+              dhcp_unframe(copy, size, false, address_of got));
+        memory_copy(copy, frame, size);
+        network_store_16(copy + 24, 7);
+        dhcp_test_sums(copy, 20);
+        check("a UDP length shorter than its header is refused",
+              !dhcp_unframe(copy, size, false, address_of got));
+        network_store_16(copy + 24, (p16)(sizeof message + 9));
+        dhcp_test_sums(copy, 20);
+        check("a UDP length past the IP payload is refused",
+              !dhcp_unframe(copy, size, false, address_of got));
+        network_store_16(copy + 24, (p16)(sizeof message + 5));
+        dhcp_test_sums(copy, 20);
+        check("a UDP length short of the IP payload cuts the message, as the kernel cuts it",
+              dhcp_unframe(copy, size, false, address_of got) &&
+                  got.length == sizeof message - 3);
+        network_store_16(copy + 2, 27);
+        dhcp_test_sums(copy, 20);
+        check("an IP total length with no room for UDP's header is refused",
+              !dhcp_unframe(copy, size, false, address_of got));
+
+        //      The kernel's word on the checksum: PACKET_AUXDATA, alone or
+        //      after another control message.
+        {
+                p8 control[64];
+
+                memory_zero(control, sizeof control);
+                control[0] = 36;
+                network_store_16(control + 8, 0x0701);  // 263, little-endian
+                control[12] = 8;
+                control[16] = 8;
+                check("TP_STATUS_CSUMNOTREADY vouches for the checksum",
+                      dhcp_frame_vouched(control, 40));
+                control[16] = 0x80;
+                check("TP_STATUS_CSUM_VALID vouches for the checksum",
+                      dhcp_frame_vouched(control, 40));
+                control[16] = 0x77;
+                check("no other status does",
+                      !dhcp_frame_vouched(control, 40));
+                control[16] = 8;
+                check("a message cut short vouches for nothing",
+                      !dhcp_frame_vouched(control, 19) &&
+                          !dhcp_frame_vouched(control, 15));
+                control[0] = 18;
+                check("PACKET_AUXDATA too short for its status vouches for nothing",
+                      !dhcp_frame_vouched(control, 40));
+                control[0] = 0;
+                check("a message length under its own header ends the walk",
+                      !dhcp_frame_vouched(control, 40));
+                //      A message of only its header, then PACKET_AUXDATA.
+                memory_zero(control, sizeof control);
+                control[0] = 16;
+                control[16] = 36;
+                network_store_16(control + 24, 0x0701);
+                control[28] = 8;
+                control[32] = 8;
+                check("a control message of only its header is stepped over",
+                      dhcp_frame_vouched(control, 56));
+                //      SOL_PACKET with another type, and type 8 at another level.
+                memory_zero(control, sizeof control);
+                control[0] = 36;
+                network_store_16(control + 8, 0x0701);
+                control[12] = 99;
+                control[16] = 0x80;
+                check("another SOL_PACKET message is no word on the checksum",
+                      !dhcp_frame_vouched(control, 40));
+                control[8] = 1;
+                control[9] = 0;
+                control[12] = 8;
+                check("type 8 at another level is no word on the checksum",
+                      !dhcp_frame_vouched(control, 40));
+                memory_zero(control, sizeof control);
+                control[0] = 20;
+                control[12] = 29;
+                control[24] = 36;
+                network_store_16(control + 32, 0x0701);
+                control[36] = 8;
+                control[40] = 8;
+                check("PACKET_AUXDATA after another message is found",
+                      dhcp_frame_vouched(control, 64));
+                control[7] = 0x40;
+                check("a length past the buffer ends the walk",
+                      !dhcp_frame_vouched(control, 64));
+        }
+}
+
+/*
+        The packet socket in a kernel, in user and network namespaces of the
+        check's own, on their loopback: dhcp_frames_open refuses a link that
+        is not there and a name that cannot be one, and its filter cannot be
+        taken off. A reply sent to another station's address is read and
+        refused, once, against the allowance, and one to port 69 never
+        reaches the socket (nor does the copy this machine sends: a socket
+        bound to one protocol is not handed outgoing frames); then a reply to
+        the offered address is taken with its peer and nothing charged.
+        Loopback leaves UDP checksums for a card to finish, so the reply is
+        taken only if the kernel's word on that (dhcp_frame_vouched) is read.
+        The child answers by bits over 0x80: 1 a name that should not open
+        did, 2 lo did not, 4 the filter came off, 8 the other station's reply
+        was taken or miscounted, 16 ours was not taken right.
+*/
+static positive dhcp_test_reply(p8 address_to packet, p32 transaction,
+                                const p8 address_to hardware, p32 offered,
+                                p32 server)
+{
+        positive at = DHCP_HEAD + 4;
+
+        memory_zero(packet, 300);
+        packet[0] = 2;
+        packet[1] = 1;
+        packet[2] = 6;
+        network_store_32(packet + 4, transaction);
+        network_store_32(packet + 16, offered);
+        memory_copy(packet + 28, hardware, 6);
+        network_store_32(packet + DHCP_HEAD, DHCP_COOKIE);
+        packet[at++] = DHCP_OPTION_TYPE;
+        packet[at++] = 1;
+        packet[at++] = DHCP_OFFER;
+        packet[at++] = DHCP_OPTION_SERVER;
+        packet[at++] = 4;
+        network_store_32(packet + at, server);
+        at += 4;
+        packet[at] = DHCP_OPTION_END;
+        return 300;
+}
+
+static fn dhcp_test_frames_child(positive uid, positive gid)
+{
+        p8 hardware[6] = {2, 0, 0, 0, 0, 9};
+        p8 packet[1024];
+        p8 reply[300];
+        p32 transaction = 0x5eed0001;
+        b32 bits = 0x80;
+        b32 one = 1;
+        dhcp_lease lease;
+        p8 kind = 0;
+        socket_address_internet any = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT)};
+        socket_address_internet peer;
+        socket_address_internet me = {
+            .family = AF_INET, .port = network_order_16(DHCP_SERVER_PORT),
+            .host = network_order_32(HOST_LOOPBACK)};
+        socket_address_internet to = {.family = AF_INET};
+        network_deadline deadline;
+        positive remaining;
+        bipolar lo;
+        bipolar frames;
+        bipolar server;
+        b32 nl;
+
+        if (!net_test_enter_namespaces(uid, gid))
+                system_call_1(syscall(exit_group), 0x7f);
+        lo = net_test_index((string_address)"lo");
+        nl = (b32)netlink_open_groups(0);
+        if (lo <= 0 || (bipolar)nl < 0 || netlink_link_up(nl, (p32)lo) < 0)
+                system_call_1(syscall(exit_group), 0x7f);
+        if (dhcp_frames_open((string_address)"moonwater-none") >= 0 ||
+            dhcp_frames_open((string_address)"") >= 0 ||
+            dhcp_frames_open((string_address)"sixteen-bytes-xx") >= 0)
+                bits |= 1;
+        frames = dhcp_frames_open((string_address)"lo");
+        server = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (frames < 0 || server < 0 ||
+            socket_bind((b32)server, address_of me, sizeof me) < 0)
+                system_call_1(syscall(exit_group), bits | 2 | 8 | 16);
+        //      SO_DETACH_FILTER, refused once the filter is locked.
+        if (socket_option_set((b32)frames, SOL_SOCKET, 27, address_of one,
+                              sizeof one) != -EPERM)
+                bits |= 4;
+        dhcp_frames = frames;
+
+        dhcp_test_reply(reply, transaction, hardware, HOST_LOOPBACK, 0x0a090902);
+        to.port = network_order_16(69);
+        to.host = network_order_32(HOST_LOOPBACK);
+        socket_send((b32)server, reply, sizeof reply, 0, address_of to, sizeof to);
+        to.port = network_order_16(DHCP_CLIENT_PORT);
+        to.host = network_order_32(0x7f000002);
+        socket_send((b32)server, reply, sizeof reply, 0, address_of to, sizeof to);
+        remaining = NETWORK_DISCARD_MAX;
+        if (!network_deadline_begin(address_of deadline, 0, 300000000) ||
+            dhcp_receive(-1, packet, sizeof packet, transaction, hardware,
+                         address_of lease, address_of kind, address_of any, true,
+                         address_of peer, address_of remaining,
+                         address_of deadline) ||
+            remaining != NETWORK_DISCARD_MAX - 1)
+                bits |= 8;
+
+        dhcp_test_reply(reply, transaction, hardware, HOST_LOOPBACK, 0x0a090903);
+        to.host = network_order_32(HOST_LOOPBACK);
+        socket_send((b32)server, reply, sizeof reply, 0, address_of to, sizeof to);
+        remaining = NETWORK_DISCARD_MAX;
+        if (!network_deadline_begin(address_of deadline, 2, 0) ||
+            !dhcp_receive(-1, packet, sizeof packet, transaction, hardware,
+                          address_of lease, address_of kind, address_of any, true,
+                          address_of peer, address_of remaining,
+                          address_of deadline) ||
+            kind != DHCP_OFFER || lease.address != HOST_LOOPBACK ||
+            lease.server != 0x0a090903 ||
+            peer.host != network_order_32(HOST_LOOPBACK) ||
+            peer.port != network_order_16(DHCP_SERVER_PORT) ||
+            remaining != NETWORK_DISCARD_MAX)
+                bits |= 16;
+        dhcp_frames_close();
+        socket_close((b32)server);
+        system_call_1(syscall(exit_group), bits);
+}
+
+static fn dhcp_frames_on_loopback(void)
+{
+        b32 status = 0;
+        bipolar child;
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: DHCP packet socket NOT RUN -- under emulation\n"));
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+                dhcp_test_frames_child((positive)system_call(syscall(getuid)),
+                                       (positive)system_call(syscall(getgid)));
+        if (child < 0 ||
+            system_call_4(syscall(wait4), (positive)child,
+                          (positive)address_of status, 0, 0) < 0 ||
+            status >> 8 == 0x7f)
+        {
+                log_direct(str("net: DHCP packet socket NOT RUN -- user or network namespaces unavailable\n"));
+                return;
+        }
+        check("the packet socket refuses a link that is not there and a name that cannot be one",
+              (status >> 8 & 0x81) == 0x80);
+        check("the packet socket opens on a link, its filter attached and locked",
+              (status >> 8 & 0x86) == 0x80);
+        check("a reply to another station's address is refused and counted, and port 69 never read",
+              (status >> 8 & 0x88) == 0x80);
+        check("a reply to the offered address is taken off the packet socket with its peer",
+              (status >> 8 & 0x90) == 0x80);
+}
+
+/*
+        The clients' network half, apart (net_apart in src/net/net.c).
+
+        The filter first, as a program: run here by a small classic-BPF
+        interpreter over the calls a fetch makes and the calls it must never
+        make, so its decisions are proved on all three machines, qemu-user
+        included, where the kernel cannot run it. Then, natively, the child
+        itself: it keeps its answer pipe, the one descriptor it was handed and
+        standard error, and nothing else; every call fetching needs works in
+        it; and each call it has no business making kills it with SIGSYS
+        after it has answered. qemu-user cannot filter itself, and there the
+        primitive must refuse to run the task at all -- which is the pass --
+        and the deaths are NOT RUN.
+*/
+#define SHARED_filter_run
+#include "checks.c"
+#undef SHARED_filter_run
+
+//      check() with a name made at run time.
+static fn net_apart_check(string_address name, bool passed)
+{
+        checks++;
+        if (!passed)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", name);
+        }
+}
+
+static fn net_apart_filter_decisions(void)
+{
+        static const struct
+        {
+                string_address name;
+                p32 number;
+                p64 arguments[6];
+                p32 answer;
+        } rows[] = {
+            {"recvfrom", syscall(recvfrom), {0}, SECCOMP_RET_ALLOW},
+            {"writev", syscall(writev), {0}, SECCOMP_RET_ALLOW},
+            {"ppoll", syscall(ppoll), {0}, SECCOMP_RET_ALLOW},
+            {"getrandom", syscall(getrandom), {0}, SECCOMP_RET_ALLOW},
+            {"connect", syscall(connect), {0}, SECCOMP_RET_ALLOW},
+            {"bind", syscall(bind), {0}, SECCOMP_RET_ALLOW},
+            {"exit_group", syscall(exit_group), {0}, SECCOMP_RET_ALLOW},
+            {"an IPv4 TCP socket", syscall(socket),
+             {AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0}, SECCOMP_RET_ALLOW},
+            {"a nonblocking IPv4 TCP socket", syscall(socket),
+             {AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0},
+             SECCOMP_RET_ALLOW},
+            {"an IPv4 UDP socket", syscall(socket),
+             {AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0}, SECCOMP_RET_ALLOW},
+            {"a unix socket", syscall(socket), {AF_UNIX, SOCK_STREAM, 0},
+             SECCOMP_RET_KILL_PROCESS},
+            {"a netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE}, SECCOMP_RET_KILL_PROCESS},
+            {"a packet socket", syscall(socket), {AF_PACKET, SOCK_DGRAM, 0},
+             SECCOMP_RET_KILL_PROCESS},
+            {"an IPv6 socket", syscall(socket), {AF_INET6, SOCK_STREAM, 0},
+             SECCOMP_RET_KILL_PROCESS},
+            {"a raw IPv4 socket", syscall(socket),
+             {AF_INET, SOCK_RAW, IPPROTO_ICMP}, SECCOMP_RET_KILL_PROCESS},
+            {"an IPv4 socket that names its protocol", syscall(socket),
+             {AF_INET, SOCK_STREAM, IPPROTO_TCP}, SECCOMP_RET_KILL_PROCESS},
+            {"an IPv4 socket with a flag fetching never sets", syscall(socket),
+             {AF_INET, SOCK_STREAM | 0x100, 0}, SECCOMP_RET_KILL_PROCESS},
+            {"SO_RCVTIMEO", syscall(setsockopt), {3, SOL_SOCKET, SO_RCVTIMEO},
+             SECCOMP_RET_ALLOW},
+            {"SO_SNDTIMEO", syscall(setsockopt), {3, SOL_SOCKET, SO_SNDTIMEO},
+             SECCOMP_RET_ALLOW},
+            {"TCP_NODELAY", syscall(setsockopt), {3, IPPROTO_TCP, TCP_NODELAY},
+             SECCOMP_RET_ALLOW},
+            {"SO_BINDTODEVICE", syscall(setsockopt),
+             {3, SOL_SOCKET, SO_BINDTODEVICE}, SECCOMP_RET_KILL_PROCESS},
+            {"SO_REUSEADDR", syscall(setsockopt), {3, SOL_SOCKET, SO_REUSEADDR},
+             SECCOMP_RET_KILL_PROCESS},
+            {"a socket-level number at the TCP level", syscall(setsockopt),
+             {3, IPPROTO_TCP, SO_RCVTIMEO}, SECCOMP_RET_KILL_PROCESS},
+            {"TCP_NODELAY's number at the socket level", syscall(setsockopt),
+             {3, SOL_SOCKET, TCP_NODELAY}, SECCOMP_RET_KILL_PROCESS},
+            {"an IP-level option", syscall(setsockopt), {3, IPPROTO_IP, 1},
+             SECCOMP_RET_KILL_PROCESS},
+            {"SO_ERROR read back", syscall(getsockopt), {3, SOL_SOCKET, SO_ERROR},
+             SECCOMP_RET_ALLOW},
+            {"SO_RCVBUF read back", syscall(getsockopt), {3, SOL_SOCKET, SO_RCVBUF},
+             SECCOMP_RET_KILL_PROCESS},
+            {"memory to read and write", syscall(mmap), {0, 4096, 3, 0x22},
+             SECCOMP_RET_ALLOW},
+            {"executable memory", syscall(mmap), {0, 4096, 5, 0x22},
+             SECCOMP_RET_KILL_PROCESS},
+            {"openat", syscall(openat), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"execve", syscall(execve), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"ptrace", syscall(ptrace), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"mprotect", syscall(mprotect), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"ioctl", syscall(ioctl), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"kill", syscall(kill), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"prctl", syscall(prctl), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"seccomp", syscall(seccomp), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"read", syscall(read), {0}, SECCOMP_RET_KILL_PROCESS},
+            {"x32's recvfrom", syscall(recvfrom) | 0x40000000u, {0},
+             SECCOMP_RET_KILL_PROCESS},
+        };
+        net_filter filter;
+        static const p64 none[6] = {0};
+        bool landed = true;
+
+        net_filter_build(address_of filter, false);
+        check("the client filter fits its program",
+              filter.used > 8 && filter.used <= NET_FILTER_STEPS);
+        if (filter.used > NET_FILTER_STEPS)
+                return;
+        for (positive at = 0; at < filter.used; at++)
+        {
+                net_filter_step step = filter.steps[at];
+
+                if (step.code == NET_FILTER_EQUAL || step.code == NET_FILTER_ANY_BIT)
+                        landed = landed && at + 1 + step.jump_true < filter.used &&
+                                 at + 1 + step.jump_false < filter.used;
+                else if (step.code == NET_FILTER_ALWAYS)
+                        landed = landed && at + 1 + step.value < filter.used;
+        }
+        check("every jump of the client filter lands inside it", landed);
+        check("the client filter ends in an answer",
+              filter.steps[filter.used - 1].code == NET_FILTER_RETURN);
+        for (positive at = 0; at < array_count(rows); at++)
+        {
+                p8 name[128];
+                p8 address_to put = string_copy_end(name, (string_address) "the client filter ");
+
+                put = string_copy_end(put, rows[at].answer == SECCOMP_RET_ALLOW
+                                               ? (string_address) "allows "
+                                               : (string_address) "kills ");
+                string_copy_max_end(put, rows[at].name, name + sizeof name - put - 1);
+                net_apart_check(name, net_filter_run(address_of filter, NET_APART_ARCH,
+                                                     rows[at].number,
+                                                     rows[at].arguments) ==
+                                          rows[at].answer);
+        }
+        check("the client filter kills a call from another architecture",
+              net_filter_run(address_of filter, NET_APART_ARCH ^ 1,
+                             syscall(recvfrom), none) == SECCOMP_RET_KILL_PROCESS);
+
+        //      A time query's filter: the fetch's, and recvmsg and the two
+        //      timestamp options, which the fetch's still refuses.
+        {
+                static const struct
+                {
+                        string_address name;
+                        p32 number;
+                        p64 arguments[6];
+                } added[] = {
+                    {"recvmsg", syscall(recvmsg), {0}},
+                    {"SO_TIMESTAMPNS", syscall(setsockopt),
+                     {3, SOL_SOCKET, NET_APART_SO_TIMESTAMPNS}},
+                    {"SO_TIMESTAMPING", syscall(setsockopt),
+                     {3, SOL_SOCKET, NET_APART_SO_TIMESTAMPING}},
+                };
+                net_filter timed;
+
+                net_filter_build(address_of timed, true);
+                check("the time filter fits its program",
+                      timed.used > filter.used && timed.used <= NET_FILTER_STEPS);
+                if (timed.used > NET_FILTER_STEPS)
+                        return;
+                for (positive at = 0; at < array_count(added); at++)
+                {
+                        net_apart_check(added[at].name,
+                                        net_filter_run(address_of timed, NET_APART_ARCH,
+                                                       added[at].number,
+                                                       added[at].arguments) ==
+                                                SECCOMP_RET_ALLOW &&
+                                            net_filter_run(address_of filter,
+                                                           NET_APART_ARCH,
+                                                           added[at].number,
+                                                           added[at].arguments) ==
+                                                SECCOMP_RET_KILL_PROCESS);
+                }
+                for (positive at = 0; at < array_count(rows); at++)
+                        net_apart_check(rows[at].name,
+                                        net_filter_run(address_of timed, NET_APART_ARCH,
+                                                       rows[at].number,
+                                                       rows[at].arguments) ==
+                                            rows[at].answer);
+                check("the time filter kills a timestamp option at the TCP level",
+                      net_filter_run(address_of timed, NET_APART_ARCH,
+                                     syscall(setsockopt),
+                                     (p64[6]){3, IPPROTO_TCP,
+                                              NET_APART_SO_TIMESTAMPNS}) ==
+                          SECCOMP_RET_KILL_PROCESS);
+        }
+}
+
+typedef struct
+{
+        bipolar spare;
+        bipolar kept;
+        positive bad;
+} net_apart_probe;
+
+#define NET_APART_PROBE_ANSWER 8
+
+/* What the child finds, eight bytes of 1 when all is as it should be, then
+   the call it was asked to make when it has no business making it. */
+static bool net_apart_probe_task(address_any context, bipolar answer)
+{
+        net_apart_probe address_to probe = context;
+        p8 said[NET_APART_PROBE_ANSWER] = {0};
+        b32 one = 1;
+        b32 error = 0;
+        p32 error_size = sizeof error;
+        timeval limit = {1, 0};
+        timespec now = {0, 0};
+        p8 random[16];
+        socket_address_internet here = {.family = AF_INET,
+                                        .host = network_order_32(HOST_LOOPBACK)};
+        bipolar stream = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        bipolar datagram = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bipolar page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+        static string_address const nothing[] = {null};
+
+        said[0] = system_close(probe->spare) == -EBADF;
+        said[1] = system_write_once(probe->kept, "", 0) == 0 &&
+                  system_write_once(2, "", 0) == 0;
+        said[2] = stream >= 0 && datagram >= 0;
+        said[3] = socket_option_set((b32)stream, SOL_SOCKET, SO_RCVTIMEO,
+                                    address_of limit, sizeof limit) == 0 &&
+                  socket_option_set((b32)stream, SOL_SOCKET, SO_SNDTIMEO,
+                                    address_of limit, sizeof limit) == 0 &&
+                  socket_option_set((b32)stream, IPPROTO_TCP, TCP_NODELAY,
+                                    address_of one, sizeof one) == 0 &&
+                  socket_option_get((b32)stream, SOL_SOCKET, SO_ERROR,
+                                    address_of error, address_of error_size) == 0;
+        said[4] = system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
+                                (positive)address_of now) == 0 &&
+                  system_random_fill(random, sizeof random, 0) == 0;
+        said[5] = page > 0 && system_call_2(syscall(munmap), (positive)page, 4096) == 0;
+        said[6] = socket_bind((b32)datagram, address_of here, sizeof here) == 0;
+        said[7] = 1;
+        if (stream >= 0)
+                socket_close((b32)stream);
+        if (datagram >= 0)
+                socket_close((b32)datagram);
+        if (system_write_all((positive)answer, said, sizeof said) != sizeof said)
+                return false;
+
+        switch (probe->bad)
+        {
+        case 1:
+                system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                break;
+        case 2:
+                system_call_3(syscall(execve), (positive) "/bin/true",
+                              (positive)nothing, (positive)nothing);
+                break;
+        case 3:
+                system_call_4(syscall(ptrace), 0, 0, 0, 0);
+                break;
+        case 4:
+                socket_new(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                break;
+        case 5:
+                socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE);
+                break;
+        case 6:
+                socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                break;
+        case 7:
+                socket_new(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                break;
+        case 8:
+                socket_new(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMP);
+                break;
+        case 9:
+                system_call_6(syscall(mmap), 0, 4096, 5, 0x22, (positive)-1, 0);
+                break;
+        case 10:
+                system_call_3(syscall(mprotect), 0, 4096, 1);
+                break;
+        case 11:
+                system_call_3(syscall(ioctl), 2, 0x5401 /* TCGETS */, 0);
+                break;
+        }
+        return true;
+}
+
+static fn net_apart_confinement(void)
+{
+        static const string_address bad[] = {
+            null, "openat", "execve", "ptrace", "a unix socket", "a netlink socket",
+            "a packet socket", "an IPv6 socket", "a raw socket",
+            "executable memory", "mprotect", "ioctl"};
+        b32 ends[2];
+        bipolar spare = system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        bool emulated = net_as_emulated();
+
+        check("the client confinement fixture opens",
+              spare >= 0 &&
+                  system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) == 0);
+        if (spare < 0)
+                return;
+
+        for (positive at = 0; at < array_count(bad); at++)
+        {
+                net_apart_probe probe = {spare, ends[1], at};
+                byte_store answer = {0};
+                bipolar ran = net_apart(net_apart_probe_task, address_of probe,
+                                        ends[1], address_of answer, 64, false);
+                bool all = answer.used == NET_APART_PROBE_ANSWER;
+                p8 name[96];
+
+                for (positive byte = 0; all && byte < answer.used; byte++)
+                        all = answer.bytes[byte] == 1;
+                if (emulated)
+                {
+                        check("under qemu-user the client child refuses rather than run unfiltered",
+                              ran == NET_APART_UNCONFINED && !answer.used);
+                        byte_store_release(address_of answer);
+                        continue;
+                }
+                if (!at)
+                {
+                        check("the confined client keeps its pipe, its output and standard error, and nothing else; every call fetching needs works",
+                              ran == NET_APART_OK && all);
+                        byte_store_release(address_of answer);
+                        continue;
+                }
+                string_copy_max_end(string_copy_end(name, (string_address) "the confined client dies of "),
+                                    bad[at], 48);
+                net_apart_check(name, ran == NET_APART_DIED &&
+                                          net_apart_signal == SIGSYS && all);
+                byte_store_release(address_of answer);
+        }
+        if (emulated)
+                log_direct(str("net: client seccomp filter NOT RUN -- qemu-user (the refusal is checked)\n"));
+
+        system_close(ends[0]);
+        system_close(ends[1]);
+        system_close(spare);
+}
+
+/* What the edge tasks do in the confined child, which may only write: say
+   `bytes` bytes, then write a byte into keep (blocking when its pipe is
+   full, dying when nobody reads it), or say whether keep takes a write. */
+typedef struct
+{
+        positive bytes;
+        bool spill;
+        bool probe_keep;
+        bool fail;
+        bipolar keep;
+} net_apart_edge;
+
+static bool net_apart_edge_task(address_any context, bipolar answer)
+{
+        net_apart_edge address_to edge = (net_apart_edge address_to)context;
+        p8 bytes[160];
+
+        memory_fill(bytes, 'x', sizeof bytes);
+        if (edge->probe_keep)
+        {
+                p8 one = system_write_all((positive)edge->keep, bytes, 1) == 1;
+
+                return system_write_all((positive)answer, address_of one, 1) == 1;
+        }
+        if (edge->bytes &&
+            system_write_all((positive)answer, bytes, edge->bytes) != (bipolar)edge->bytes)
+                return false;
+        if (edge->spill)
+                (void)system_write_all((positive)edge->keep, bytes, 1);
+        return !edge->fail;
+}
+
+/*
+        The edges of the confined child's own decisions: who it becomes, as
+        root and not, whatever setgroups, setresgid and setresuid answer; a
+        filter one step too long, and one of exactly the most steps; an
+        answer of exactly the most, of nothing, and of too much from a child
+        still running; a child that could not confine itself; one that died
+        writing into a pipe nobody reads; and descriptor 0 kept.
+*/
+static fn net_apart_edges(void)
+{
+        {
+                static const struct
+                {
+                        bipolar uid, euid, groups, gid, uid_set;
+                        bool want;
+                } rows[] = {
+                    {1000, 1000, -EIO, -EIO, -EIO, true}, // not root: nothing to give up
+                    {0, 0, 0, 0, 0, true},
+                    {0, 0, -EPERM, -EINVAL, -EINVAL, true},
+                    {0, 0, -EIO, 0, 0, false},
+                    {0, 0, 0, -EIO, 0, false},
+                    {0, 0, 0, 0, -EIO, false},
+                    {0, 1000, -EIO, 0, 0, false}, // root by one id is root
+                };
+                positive wrong = 0;
+
+                for (positive at = 0; at < array_count(rows); at++)
+                {
+                        net_fake_set(syscall(getuid), rows[at].uid);
+                        net_fake_set(syscall(geteuid), rows[at].euid);
+                        net_fake_set(syscall(setgroups), rows[at].groups);
+                        net_fake_set(syscall(setresgid), rows[at].gid);
+                        net_fake_set(syscall(setresuid), rows[at].uid_set);
+                        wrong += net_apart_nobody() != rows[at].want;
+                        net_fakes_clear();
+                }
+                check("the confined child gives up its ids as each answer says", wrong == 0);
+        }
+        {
+                static net_filter filter;
+
+                filter.used = 0;
+                for (positive at = 0; at <= NET_FILTER_STEPS; at++)
+                        net_filter_put(address_of filter, 0x20, 0, 0, 0);
+                check("a filter one step too long is counted, not written past its end, and refused",
+                      filter.used == NET_FILTER_STEPS + 1 && !net_filter_install(address_of filter));
+                filter.used = NET_FILTER_STEPS;
+                net_filter_past(address_of filter, NET_FILTER_STEPS);
+                check("a jump past a filter that is full writes nothing past its end",
+                      filter.used == NET_FILTER_STEPS);
+        }
+        {
+                bipolar child = system_fork();
+
+                if (!child)
+                {
+                        static net_filter filter;
+
+                        filter.used = 0;
+                        for (positive at = 1; at < NET_FILTER_STEPS; at++)
+                                net_filter_put(address_of filter, 0x20, 0, 0, 0);
+                        net_filter_put(address_of filter, 0x06, 0, 0, 0x7fff0000);
+                        system_call_1(syscall(exit_group),
+                                      system_call_5(syscall(prctl), PR_SET_NO_NEW_PRIVS, 1, 0,
+                                                    0, 0) == 0 &&
+                                              net_filter_install(address_of filter)
+                                          ? 0 : 1);
+                }
+                positive raw = 1;
+
+                if (child > 0)
+                        (void)system_wait4_retry(child, address_of raw, 0, null);
+                check("a filter of exactly the most steps is installed",
+                      child > 0 && (raw == 0 || net_as_emulated()));
+        }
+        if (net_as_emulated())
+                return;
+        {
+                net_apart_edge edge = {.bytes = 8, .keep = -1};
+                byte_store answer = {0};
+
+                check("an answer of exactly the most is whole",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_OK &&
+                          answer.used == 8);
+                byte_store_release(address_of answer);
+                edge.bytes = 0;
+                check("an answer of nothing is an answer",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_OK &&
+                          !answer.used);
+                byte_store_release(address_of answer);
+                net_fake_set(syscall(seccomp), -EACCES);
+                check("a child that cannot install its filter does nothing and says so",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_UNCONFINED &&
+                          !answer.used);
+                net_fakes_clear();
+                byte_store_release(address_of answer);
+        }
+        {
+                b32 hold[2];
+
+                if (system_call_2(syscall(pipe2), (positive)hold, O_CLOEXEC) == 0)
+                {
+                        //      keep's pipe full, so the child's byte into it
+                        //      waits for a reader that never comes.
+                        static p8 fill[65536];
+                        net_apart_edge edge = {.bytes = 16, .spill = true, .keep = hold[1]};
+                        byte_store answer = {0};
+                        bool full = system_write_all((positive)hold[1], fill, sizeof fill) ==
+                                    (bipolar)sizeof fill;
+
+                        check("a child still running when it says too much is killed for it",
+                              full &&
+                                  net_apart(net_apart_edge_task, address_of edge, hold[1],
+                                            address_of answer, 8, false) == NET_APART_DIED &&
+                                  net_apart_signal == SIGKILL);
+                        byte_store_release(address_of answer);
+                        system_close(hold[0]);
+                        system_close(hold[1]);
+                }
+        }
+        {
+                positive died = 0;
+
+                for (positive round = 0; round < 8; round++)
+                {
+                        net_apart_edge edge = {.keep = -1};
+                        byte_store answer = {0};
+
+                        net_memory_reserve_fail = true;
+                        died += net_apart(net_apart_edge_task, address_of edge, -1,
+                                          address_of answer, 8, false) == NET_APART_DIED;
+                        net_memory_reserve_fail = false;
+                        byte_store_release(address_of answer);
+                }
+                check("an answer that could not be held is no answer, however the child ended",
+                      died == 8);
+        }
+        {
+                net_apart_edge edge = {.fail = true, .keep = -1};
+                byte_store answer = {0};
+
+                check("a child whose work failed is no answer, though it said nothing amiss",
+                      net_apart(net_apart_edge_task, address_of edge, -1, address_of answer, 8,
+                                false) == NET_APART_DIED);
+                byte_store_release(address_of answer);
+        }
+        {
+                bipolar child = system_fork();
+
+                if (!child)
+                {
+                        b32 hold[2];
+                        net_apart_edge edge = {.spill = true};
+                        byte_store answer = {0};
+
+                        system_signal_install(SIGPIPE, (positive)SIG_DFL, 0, 0, null);
+                        if (system_call_2(syscall(pipe2), (positive)hold, O_CLOEXEC))
+                                system_call_1(syscall(exit_group), 2);
+                        system_close(hold[0]);
+                        edge.keep = hold[1];
+                        (void)net_apart(net_apart_edge_task, address_of edge, hold[1],
+                                        address_of answer, 8, false);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                positive raw = 0;
+
+                if (child > 0)
+                        (void)system_wait4_retry(child, address_of raw, 0, null);
+                check("a child that dies writing into a pipe nobody reads takes its caller with it",
+                      child > 0 && (raw & 0x7f) == SIGPIPE);
+        }
+        {
+                bipolar saved = system_call_1(syscall(dup), 0);
+                bipolar quiet;
+                net_apart_edge edge = {.probe_keep = true, .keep = 0};
+                byte_store answer = {0};
+                bipolar ran;
+
+                if (saved >= 0)
+                        system_close(0);
+                quiet = system_open_at(AT_FDCWD, "/dev/null", 1 | O_CLOEXEC);
+                ran = net_apart(net_apart_edge_task, address_of edge, 0, address_of answer, 8,
+                                false);
+                if (quiet >= 0)
+                        system_close((b32)quiet);
+                if (saved >= 0)
+                {
+                        system_call_3(syscall(dup3), (positive)saved, 0, 0);
+                        system_close((b32)saved);
+                }
+                check("descriptor 0, kept for the child, is still open in it",
+                      quiet == 0 && ran == NET_APART_OK && answer.used == 1 && answer.bytes[0] == 1);
+                byte_store_release(address_of answer);
+        }
+}
+
+/*
+        A fetch through the confinement, end to end, from a server on
+        loopback that also looks at the client while it waits for the
+        answer: the server's parent is this process, and so is the confined
+        child's, so the child is the other pid in this process's children,
+        and its status must say a filter (Seccomp 2) and no new privileges.
+        A server that cannot read those says 2, and the check says NOT RUN.
+*/
+static p8 net_apart_seen_confined(void)
+{
+        p8 path[96];
+        p8 text[1024];
+        p8 address_to put;
+        bipolar parent = system_call(syscall(getppid));
+        bipolar self = system_call(syscall(getpid));
+        bipolar got;
+        positive at = 0;
+
+        put = string_copy_end(path, (string_address) "/proc/");
+        put += positive_into(put, (positive)parent);
+        put = string_copy_end(put, (string_address) "/task/");
+        put += positive_into(put, (positive)parent);
+        string_copy_end(put, (string_address) "/children");
+        got = file_slurp(path, text, sizeof text - 1);
+        if (got <= 0)
+                return 2;
+        text[got] = end;
+        while (at < (positive)got)
+        {
+                positive pid = 0;
+                p8 status[2048];
+                bipolar read;
+
+                while (at < (positive)got && (text[at] < '0' || text[at] > '9'))
+                        at++;
+                while (at < (positive)got && text[at] >= '0' && text[at] <= '9')
+                        pid = pid * 10 + (positive)(text[at++] - '0');
+                if (!pid || pid == (positive)self)
+                        continue;
+                put = string_copy_end(path, (string_address) "/proc/");
+                put += positive_into(put, pid);
+                string_copy_end(put, (string_address) "/status");
+                read = file_slurp(path, status, sizeof status - 1);
+                if (read <= 0)
+                        continue;
+                status[read] = end;
+                return memory_search(status, (positive)read, "\nSeccomp:\t2\n", 12) &&
+                       memory_search(status, (positive)read, "\nNoNewPrivs:\t1\n", 15);
+        }
+        return 2;
+}
+
+static p8 net_apart_body_byte(positive at)
+{
+        return (p8)('a' + at % 26);
+}
+
+/* Each length a connection: the request read, the client looked at (the
+   answer on proof), then a 200 with that many bytes of the alphabet. */
+static DEAD_END fn net_apart_server(bipolar listening, const positive address_to bodies,
+                                    positive count, b32 proof)
+{
+        for (positive round = 0; round < count; round++)
+        {
+                p8 request[2048];
+                p8 head[128];
+                p8 chunk[8192];
+                p8 address_to put;
+                p8 seen;
+                positive sent = 0;
+                bipolar taken = socket_accept((b32)listening, 0, 0, 0);
+
+                if (taken < 0)
+                        break;
+                socket_receive((b32)taken, request, sizeof request, 0, 0, 0);
+                seen = net_apart_seen_confined();
+                system_write_all((positive)proof, address_of seen, 1);
+                put = string_copy_end(head, (string_address) "HTTP/1.1 200 OK\r\nContent-Length: ");
+                put += positive_into(put, bodies[round]);
+                put = string_copy_end(put, (string_address) "\r\nConnection: close\r\n\r\n");
+                system_write_all((positive)taken, head, (positive)(put - head));
+                while (sent < bodies[round])
+                {
+                        positive part = min(sizeof chunk, bodies[round] - sent);
+
+                        for (positive at = 0; at < part; at++)
+                                chunk[at] = net_apart_body_byte(sent + at);
+                        if (system_write_all((positive)taken, chunk, part) != part)
+                                break;
+                        sent += part;
+                }
+                socket_shutdown((b32)taken, SHUT_BOTH);
+                socket_close((b32)taken);
+        }
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+static bool net_apart_body_right(const p8 address_to bytes, positive length,
+                                 positive want)
+{
+        if (length != want || (want && !bytes))
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (bytes[at] != net_apart_body_byte(at))
+                        return false;
+        return true;
+}
+
+typedef struct
+{
+        string_address url;
+        bool held;
+        positive count;
+        p32 servers[DNS_SERVERS_MAX];
+} net_apart_planted;
+
+/* The engine itself, run in the child the way http_run_apart runs it, then
+   a call no fetch makes: the answer says the fetch worked, and the death
+   says the filter was there all along. */
+static bool net_apart_planted_task(address_any context, bipolar answer)
+{
+        net_apart_planted address_to planted = context;
+        http_buffer body = {0};
+        b32 code = 0;
+        b64 said[2];
+
+        said[0] = http_get(planted->url, address_of body, address_of code);
+        said[1] = said[0] == HTTP_OK &&
+                  net_apart_body_right(body.bytes, body.used, 1000) && code == 200;
+        if (system_write_all((positive)answer, said, sizeof said) != sizeof said)
+                return false;
+        system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+        return true;
+}
+
+/* The resolver in the child: it read resolv.conf before its filter went
+   on (the servers it holds are the ones this process reads now), and a
+   lookup after it opens nothing -- a UDP query to loopback, answered or
+   refused, and the child still alive to say so. */
+static bool net_apart_resolver_task(address_any context, bipolar answer)
+{
+        net_apart_planted address_to planted = context;
+        p32 found = 0;
+        b64 said[2];
+
+        said[0] = dns_held.held && dns_held.count == planted->count &&
+                  !memory_compare(dns_held.servers, planted->servers,
+                                  planted->count * sizeof(p32));
+        dns_held.count = 1;
+        dns_held.servers[0] = HOST_LOOPBACK;
+        said[1] = dns_resolve_any((string_address) "/moonwater/not/read",
+                                  (string_address) "moonwater-apart.invalid",
+                                  address_of found, 1);
+        return system_write_all((positive)answer, said, sizeof said) == sizeof said;
+}
+
+static fn net_apart_fetching(void)
+{
+        static const positive bodies[] = {1000, 70000, 1000, 12 * 1024 * 1024};
+        socket_address_internet where = {0};
+        p32 size = sizeof where;
+        b32 one = 1;
+        b32 proof[2] = {-1, -1};
+        bool emulated = net_as_emulated();
+        bipolar listening = socket_new(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        bipolar server;
+        p8 url[64];
+        p8 seen[4] = {0};
+        positive url_used;
+
+        check("the confined fetch server opens",
+              listening >= 0 &&
+                  system_call_2(syscall(pipe2), (positive)proof, O_CLOEXEC) == 0);
+        if (listening < 0)
+                return;
+        where.family = AF_INET;
+        where.host = network_order_32(HOST_LOOPBACK);
+        socket_option_set((b32)listening, SOL_SOCKET, SO_REUSEADDR, address_of one,
+                          sizeof one);
+        check("the confined fetch server listens",
+              socket_bind((b32)listening, address_of where, sizeof where) == 0 &&
+                  socket_listen((b32)listening, 4) == 0 &&
+                  socket_name((b32)listening, address_of where, address_of size) == 0);
+        url_used = string_copy_end(url, (string_address) "http://127.0.0.1:") - url;
+        url_used += positive_into(url + url_used, network_order_16(where.port));
+        string_copy_end(url + url_used, (string_address) "/apart/file.bin");
+
+        server = system_fork();
+        if (server == 0)
+        {
+                system_close(proof[0]);
+                net_apart_server(listening, bodies, array_count(bodies), proof[1]);
+        }
+        system_close(proof[1]);
+        check("the confined fetch server starts", server > 0);
+        if (server <= 0)
+        {
+                system_close(proof[0]);
+                socket_close((b32)listening);
+                return;
+        }
+
+        //      fetch's manners: the body comes back over the pipe.
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status = http_get_apart(url, address_of body, address_of code);
+
+                if (emulated)
+                        check("under qemu-user a confined fetch is refused, not run unfiltered",
+                              status == HTTP_CONFINE && !body.used);
+                else
+                        check("a fetch through the confinement brings its body back whole",
+                              status == HTTP_OK && code == 200 &&
+                                  net_apart_body_right(body.bytes, body.used, bodies[0]));
+                http_forget(address_of body);
+        }
+
+        //      wget's manners: the child writes the body into the file it
+        //      was handed, and says where it ended.
+        {
+                p8 path[96];
+                p8 ended[HTTP_URL_MAX];
+                b32 code = 0;
+                bipolar file;
+                bipolar status;
+                p8 address_to back = null;
+                positive back_room = 0;
+                positive back_used = 0;
+
+                string_copy_end(string_copy_end(path, (string_address) "/tmp/moonwater-net-apart-"),
+                                (string_address) "file");
+                positive_into_string(path + string_length(path), system_nonce());
+                file = system_open_at_mode(AT_FDCWD, path,
+                                           FILE_READ_WRITE | FILE_CREATE | FILE_EXCLUSIVE |
+                                               O_CLOEXEC, 0600);
+                check("the confined download's file opens", file >= 0);
+                if (file >= 0)
+                {
+                        system_remove_at(AT_FDCWD, path, 0);
+                        string_copy(ended, (string_address) "unset");
+                        status = http_fetch_to_apart(url, file, false, address_of code,
+                                                     ended);
+                        if (!emulated && array_store_reserve(back, back_room, 0,
+                                                             bodies[1] + 1, 4096))
+                        {
+                                bipolar got;
+
+                                system_seek(file, 0, 0);
+                                while ((got = system_read_retry((positive)file,
+                                                                back + back_used,
+                                                                back_room - back_used)) > 0)
+                                        back_used += (positive)got;
+                        }
+                        if (emulated)
+                                check("under qemu-user a confined download is refused, not run unfiltered",
+                                      status == HTTP_CONFINE);
+                        else
+                                check("a download through the confinement lands in the file it was handed and says where it ended",
+                                      status == HTTP_OK && code == 200 &&
+                                          string_equals(ended, url) &&
+                                          net_apart_body_right(back, back_used, bodies[1]));
+                        array_store_release(back, back_room, back_used);
+                        system_close(file);
+                }
+        }
+
+        //      A planted call no fetch makes, after a fetch that worked.
+        {
+                net_apart_planted planted = {url};
+                byte_store answer = {0};
+                b64 said[2] = {0, 0};
+                bipolar ran = net_apart(net_apart_planted_task, address_of planted, -1,
+                                        address_of answer, 64, false);
+
+                if (answer.used == sizeof said)
+                        memory_copy(said, answer.bytes, sizeof said);
+                if (emulated)
+                        check("under qemu-user the planted child is refused before it runs",
+                              ran == NET_APART_UNCONFINED);
+                else
+                        check("a planted openat after a confined fetch kills the child with SIGSYS, the fetch having worked",
+                              ran == NET_APART_DIED && net_apart_signal == SIGSYS &&
+                                  said[0] == HTTP_OK && said[1] == 1);
+                byte_store_release(address_of answer);
+        }
+
+        //      A body past 8 MiB, which the store grows by mremap and
+        //      madvise, inside the filter.
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status = http_get_apart(url, address_of body, address_of code);
+
+                if (!emulated)
+                        check("a 12 MiB body grows its store inside the confinement",
+                              status == HTTP_OK && code == 200 &&
+                                  net_apart_body_right(body.bytes, body.used, bodies[3]));
+                http_forget(address_of body);
+        }
+
+        //      What the server saw of the client each time it was asked. It
+        //      has served every connection it was going to by now; one that
+        //      never came (a fetch refused) would leave it in accept.
+        system_call_2(syscall(kill), (positive)server, SIGKILL);
+        system_wait4_retry((b32)server, null, 0, null);
+        for (positive at = 0; at < sizeof seen; at++)
+                if (system_read_retry((positive)proof[0], seen + at, 1) != 1)
+                        break;
+        system_close(proof[0]);
+        socket_close((b32)listening);
+        if (emulated)
+                log_direct(str("net: client confinement end to end NOT RUN -- qemu-user (the refusal is checked)\n"));
+        else if (seen[0] == 2 || seen[1] == 2)
+                log_direct(str("net: client confinement seen from outside NOT RUN -- no /proc children\n"));
         else
-                check("the confined exchange dies on a call outside its own",
-                      (status & 0x7f) == 31);
+                check("the server saw the fetching child under a filter with no new privileges, both times",
+                      seen[0] == 1 && seen[1] == 1);
+
+        //      A port nothing listens on is the same answer in the child.
+        {
+                http_buffer body = {0};
+                b32 code = 0;
+                bipolar status = http_get_apart((string_address) "http://127.0.0.1:1/",
+                                                address_of body, address_of code);
+
+                check("a refused connection is the same answer through the confinement",
+                      status == (emulated ? HTTP_CONFINE : HTTP_NO_ROUTE));
+                http_forget(address_of body);
+        }
+
+        //      The resolver, held.
+        {
+                net_apart_planted planted = {url};
+                byte_store answer = {0};
+                b64 said[2] = {0, 0};
+                bipolar ran;
+
+                planted.count = dns_servers((string_address) "/etc/resolv.conf",
+                                            planted.servers, DNS_SERVERS_MAX);
+                ran = net_apart(net_apart_resolver_task, address_of planted, -1,
+                                address_of answer, 64, false);
+                if (answer.used == sizeof said)
+                        memory_copy(said, answer.bytes, sizeof said);
+                if (emulated)
+                        check("under qemu-user the resolver child is refused before it runs",
+                              ran == NET_APART_UNCONFINED);
+                else
+                        check("the confined child holds the servers resolv.conf named and looks a name up without opening it",
+                              ran == NET_APART_OK && answer.used == sizeof said &&
+                                  said[0] == 1 && said[1] != DNS_OK);
+                byte_store_release(address_of answer);
+        }
+}
+
+/*
+        nts_ke_apart, which is the key establishment asked of a child. A
+        refused connection is the answer the same call gives in this process,
+        with the state left empty; and a child that cannot be forked is no
+        answer at all: HTTP_APART, never the unconfined status, which is for a
+        child that could not confine itself. Root's fork is not refused by
+        the process limit, so that half is NOT RUN as root.
+*/
+#define NET_APART_NPROC 6
+
+static bool net_apart_nts_empty(const nts_state address_to state)
+{
+        const p8 *bytes = (const p8 *)state;
+
+        for (positive at = 0; at < sizeof *state; at++)
+                if (bytes[at])
+                        return false;
+        return true;
+}
+
+static fn net_apart_nts(void)
+{
+        bool emulated = net_as_emulated();
+        nts_state apart;
+        nts_state direct;
+        bipolar expect;
+        bipolar status;
+        struct
+        {
+                positive current;
+                positive maximum;
+        } limit, lowered;
+
+        memory_fill(address_of apart, 0xa5, sizeof apart);
+        status = nts_ke_apart((string_address) "127.0.0.1", 1, false,
+                              address_of apart);
+        if (emulated)
+                expect = HTTP_CONFINE;
+        else
+        {
+                memory_fill(address_of direct, 0xa5, sizeof direct);
+                expect = nts_ke((string_address) "127.0.0.1", 1, false,
+                                address_of direct);
+        }
+        check("a refused key establishment is the same answer through the confinement, and leaves no state",
+              status == expect && net_apart_nts_empty(address_of apart));
+
+        if (emulated)
+                return;
+        if (system_call(syscall(getuid)) == 0)
+        {
+                log_direct(str("net: nts_ke_apart without a child NOT RUN -- root's fork is not limited\n"));
+                return;
+        }
+        if (system_call_4(syscall(prlimit64), 0, NET_APART_NPROC, 0,
+                          (positive)address_of limit) != 0)
+        {
+                log_direct(str("net: nts_ke_apart without a child NOT RUN -- no prlimit64\n"));
+                return;
+        }
+        lowered = limit;
+        lowered.current = 0;
+        system_call_4(syscall(prlimit64), 0, NET_APART_NPROC,
+                      (positive)address_of lowered, 0);
+        memory_fill(address_of apart, 0xa5, sizeof apart);
+        status = nts_ke_apart((string_address) "127.0.0.1", 1, false,
+                              address_of apart);
+        system_call_4(syscall(prlimit64), 0, NET_APART_NPROC,
+                      (positive)address_of limit, 0);
+        check("with no child to be had, the key establishment is HTTP_APART and leaves no state",
+              status == HTTP_APART && net_apart_nts_empty(address_of apart));
 }
 
 /*
@@ -69578,6 +74647,83 @@ static fn leasing(void)
                               dhcp_read(packet, DHCP_HEAD + 14, 0xdeadbeef,
                                         hardware, address_of lease,
                                         address_of kind) < 0);
+
+                        p8 trial[1024];
+
+                        /* Every value of the control names the regions it
+                           walks, 1 the file and 2 the server name, 3 both,
+                           and no others: a region it does not name may hold
+                           anything, one it does must end in END. 0 and 4 name
+                           nothing the RFC defines. */
+                        for (positive value = 0; value <= 4; value++)
+                                for (positive ends = 0; ends < 4; ends++)
+                                {
+                                        bool file_walked = value == 1 || value == 3;
+                                        bool name_walked = value == 2 || value == 3;
+                                        bool file_ends = ends & 1;
+                                        bool name_ends = ends & 2;
+                                        bool expected = value >= 1 && value <= 3 &&
+                                            (!file_walked || file_ends) &&
+                                            (!name_walked || name_ends);
+
+                                        memory_fill(trial, 0, sizeof trial);
+                                        trial[0] = 2;
+                                        trial[1] = 1;
+                                        trial[2] = 6;
+                                        network_store_32(trial + 4, 0xdeadbeef);
+                                        network_store_32(trial + 16, 0x0a00020f);
+                                        memory_copy(trial + 28, hardware, 6);
+                                        network_store_32(trial + DHCP_HEAD,
+                                                         DHCP_COOKIE);
+                                        trial[DHCP_HEAD + 4] = DHCP_OPTION_TYPE;
+                                        trial[DHCP_HEAD + 5] = 1;
+                                        trial[DHCP_HEAD + 6] = DHCP_OFFER;
+                                        trial[DHCP_HEAD + 7] = DHCP_OPTION_OVERLOAD;
+                                        trial[DHCP_HEAD + 8] = 1;
+                                        trial[DHCP_HEAD + 9] = (p8)value;
+                                        trial[DHCP_HEAD + 10] = DHCP_OPTION_END;
+                                        //      A region that ends is END and then
+                                        //      padding; one that does not is
+                                        //      options that run off its end.
+                                        memory_fill(trial + DHCP_FILE,
+                                                    file_ends ? 0 : 1,
+                                                    DHCP_HEAD - DHCP_FILE);
+                                        memory_fill(trial + DHCP_SNAME,
+                                                    name_ends ? 0 : 1,
+                                                    DHCP_FILE - DHCP_SNAME);
+                                        if (file_ends)
+                                                trial[DHCP_FILE] = DHCP_OPTION_END;
+                                        if (name_ends)
+                                                trial[DHCP_SNAME] = DHCP_OPTION_END;
+                                        check("DHCP overload walks the regions its value names and no others",
+                                              (dhcp_read(trial, DHCP_HEAD + 11,
+                                                         0xdeadbeef, hardware,
+                                                         address_of lease,
+                                                         address_of kind) == 0) ==
+                                                  expected);
+                                }
+
+                        /* The hardware type and address length each have to
+                           be Ethernet's, alone. */
+                        for (positive wrong = 0; wrong < 4; wrong++)
+                        {
+                                memory_fill(trial, 0, sizeof trial);
+                                trial[0] = 2;
+                                trial[1] = wrong & 1 ? 6 : 1;
+                                trial[2] = wrong & 2 ? 4 : 6;
+                                network_store_32(trial + 4, 0xdeadbeef);
+                                network_store_32(trial + 16, 0x0a00020f);
+                                memory_copy(trial + 28, hardware, 6);
+                                network_store_32(trial + DHCP_HEAD, DHCP_COOKIE);
+                                trial[DHCP_HEAD + 4] = DHCP_OPTION_TYPE;
+                                trial[DHCP_HEAD + 5] = 1;
+                                trial[DHCP_HEAD + 6] = DHCP_OFFER;
+                                trial[DHCP_HEAD + 7] = DHCP_OPTION_END;
+                                check("a reply is read only for Ethernet in both its type and length",
+                                      (dhcp_read(trial, DHCP_HEAD + 8, 0xdeadbeef,
+                                                 hardware, address_of lease,
+                                                 address_of kind) == 0) == !wrong);
+                        }
                         packet[DHCP_HEAD + 10] = DHCP_OPTION_END;
                         packet[DHCP_FILE] = DHCP_OPTION_OVERLOAD;
                         packet[DHCP_FILE + 1] = 1;
@@ -70606,12 +75752,1309 @@ static positive net_descriptors_open(void)
         return open;
 }
 
+/*
+        Revocation: what a certificate names its revocation by, the stapled
+        OCSP answer, the CRL, the tiers over them, the TLS 1.2 and 1.3 wire
+        that carries a staple, and the ceilings.
+
+        The fixtures are a P-256 CA and what it issued and signed at fixed
+        dates -- thisUpdate 2026-10-08, nextUpdate 2026-10-15 -- made once
+        by Python's cryptography (an RSA certificate beside them for the key
+        rebuilt from its parts); the rows ask at 2026-10-10 unless they say.
+        A CRL reaches tls_crl_answer through the process's cache
+        (revocation_hold), so no row fetches anything.
+*/
+static const char revocation_rsa_hex[] =
+    "308202ab30820193a003020102020112300d06092a864886f70d01010b050030"
+    "193117301506035504030c0e7265766f636174696f6e20727361301e170d3236"
+    "303130313030303030305a170d3237303130313030303030305a301931173015"
+    "06035504030c0e7265766f636174696f6e2072736130820122300d06092a8648"
+    "86f70d01010105000382010f003082010a0282010100d8fe047396d9de9ff1e1"
+    "d6f16aaecace36555ceed784dccf1c47c2e32469831a79dd0aa54716358b0a59"
+    "14b25f814bd4442780c57802eb4ed0ae1e3f2a02131bc1f4013fe060e685e72b"
+    "7142c50d637f09859fcd3961880c68f666f20fda63422846de718e46aa97a917"
+    "c115b65a5b47149621071a9e6ee9b40c189dec899946fdbc409a70a98a2b4fa8"
+    "eac6acedf350ccb2b496492265b798367bf441becbe625684b6144f20d4cf018"
+    "66a885afff5065bf5e4a845ce8ba4be69862dc4c323cb4e31acfbee46928a789"
+    "36ee2be52d6814a6ffd66fb93cccc24c2312464c52c8ec4b5a184d5231ab3c65"
+    "0965c86b171bc977d20dbfd630129da5bee5a11ef1070203010001300d06092a"
+    "864886f70d01010b0500038201010097ffd339f942252411cffe78c2ebc3e575"
+    "a2bff96ff37d0553f678ca1a27d99581752630778f2c5bee5d0c32a0dcc6e0af"
+    "22a425728b6d0963ae877dd250a25ca809e8f0539be186376aa38422dccf6d4e"
+    "6a3211cce1974322f4529f3e6907719965872624a10dc1fb4f4844de10596bad"
+    "40e96f284cdecbb1032ab8ff056d694d24ef8b8d1054d088013ceb7302a2b918"
+    "d4147eac68dee6a3c6d987e8bb56d2cde3088d8c00ac5a91e755c2f3b360507f"
+    "5597fd1c405dd7410a1b7d2b936eb48e63d57b76ec90ed1950f4869317572057"
+    "4ed401551e4fa4099e2a30f07026b0750aa12a6efeb83deeff8997fccf8b78f5"
+    "2ff66ecb030ff7a90f82da06f1018b";
+static const char revocation_ca_hex[] =
+    "3082016030820107a003020102020110300a06082a8648ce3d04030230183116"
+    "301406035504030c0d7265766f636174696f6e206361301e170d323630313031"
+    "3030303030305a170d3237303130313030303030305a30183116301406035504"
+    "030c0d7265766f636174696f6e2063613059301306072a8648ce3d020106082a"
+    "8648ce3d03010703420004fbd0ea5bd96b8586f096b43c0753748e9aea493ce7"
+    "5ea2e1a86b572a15d3aa3a3c96371a3a3f5b91ddcfb18ffcc8e91652cbdfa0ec"
+    "44d966e80bac6bca0ce8f2a3423040300f0603551d130101ff040530030101ff"
+    "300e0603551d0f0101ff040403020106301d0603551d0e041604146c4da71146"
+    "594dba1e533ecb9555740aca994533300a06082a8648ce3d0403020347003044"
+    "02200f1d8d2aa3230e5e121e1b836130054070c938e0c0445eac9a0b8571f8eb"
+    "4721022049e23c67cf391a6d3ad3864766714af2a772714df75042de4ae7a857"
+    "772a0693";
+static const char revocation_leaf_hex[] =
+    "308201c63082016ba00302010202021001300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301a31183016060355"
+    "04030c0f7265766f636174696f6e206c6561663059301306072a8648ce3d0201"
+    "06082a8648ce3d03010703420004a619b7fce3c6b29b25bf4f3e2c92c4e3eae5"
+    "282b662c265be2bf63c2b94fbf049f3f199563b7111e3fb7ee6ef8fe3663eb03"
+    "b2b7bb74be2d69fbf915521edf0ca381a230819f301f0603551d230418301680"
+    "146c4da71146594dba1e533ecb9555740aca994533300c0603551d130101ff04"
+    "023000300e0603551d0f0101ff04040302078030130603551d25040c300a0608"
+    "2b06010505070301301d0603551d110416301482127265766f636174696f6e2e"
+    "6578616d706c65302a0603551d1f04233021301fa01da01b8619687474703a2f"
+    "2f63726c2e6578616d706c652f63612e63726c300a06082a8648ce3d04030203"
+    "49003046022100c30fb0794040811db5c16b6def110911b9cef9bb6f6ac4c00a"
+    "dbb0ab4ba01d2e022100b1e1b1c8c966347b734194d4a7c70c562d9699b3c1be"
+    "fafad20d3b5c12c725c2";
+static const char revocation_staple_hex[] =
+    "308201d930820180a00302010202021002300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301c311a3018060355"
+    "04030c117265766f636174696f6e20737461706c653059301306072a8648ce3d"
+    "020106082a8648ce3d0301070342000478ea8dac1a5ccecae4bc5c5fd57e803d"
+    "1e2c5e0074e2d38071d725484c35adc8f7aaf41223b128a741f478272a2f29c9"
+    "1e49654b8e48d670d0a29729f73c4456a381b53081b2301f0603551d23041830"
+    "1680146c4da71146594dba1e533ecb9555740aca994533300c0603551d130101"
+    "ff04023000300e0603551d0f0101ff04040302078030130603551d25040c300a"
+    "06082b06010505070301301d0603551d110416301482127265766f636174696f"
+    "6e2e6578616d706c65302a0603551d1f04233021301fa01da01b861968747470"
+    "3a2f2f63726c2e6578616d706c652f63612e63726c301106082b060105050701"
+    "1804053003020105300a06082a8648ce3d040302034700304402204da154d088"
+    "f670e06dc899e5c15f18eb33351d535b9962860477c02e45b3759702207e390f"
+    "c06dbe76a3c815227fabbc63c4c7fab0f8cf935adebf50112927a74bf1";
+static const char revocation_bare_hex[] =
+    "308201983082013da00302010202021003300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301a31183016060355"
+    "04030c0f7265766f636174696f6e20626172653059301306072a8648ce3d0201"
+    "06082a8648ce3d0301070342000402b28c18765e0dd60f1962db12bf8edc5d7d"
+    "ffcadebdbe255631db4f54a3e44b9c60f5ac824b0d6aa4b5475eaf02b5000bf8"
+    "1d706a13c7d60ef2d752d3f1e93ba3753073301f0603551d230418301680146c"
+    "4da71146594dba1e533ecb9555740aca994533300c0603551d130101ff040230"
+    "00300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06"
+    "010505070301301d0603551d110416301482127265766f636174696f6e2e6578"
+    "616d706c65300a06082a8648ce3d0403020349003046022100fbcacda2a60a99"
+    "ff41178a2c17bd968b152fffb0f7b8df703b0c9960382fdc81022100945baba1"
+    "83d7031975dfa79a8ff4cbd2d0ad8b4add67604d161d95ffdcc50856";
+static const char revocation_part_hex[] =
+    "308201c53082016aa00302010202021004300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301a31183016060355"
+    "04030c0f7265766f636174696f6e20706172743059301306072a8648ce3d0201"
+    "06082a8648ce3d030107034200048346af94d7bced6868ab557c3cbc70210d43"
+    "a8ee83ae734d122486cae15a0db7ac256088f686aafc16cab6b958d807f5df2d"
+    "8035e91feaf89481a10bcd4cb082a381a130819e301f0603551d230418301680"
+    "146c4da71146594dba1e533ecb9555740aca994533300c0603551d130101ff04"
+    "023000300e0603551d0f0101ff04040302078030130603551d25040c300a0608"
+    "2b06010505070301301d0603551d110416301482127265766f636174696f6e2e"
+    "6578616d706c6530290603551d1f04223020301ea01ca01a8618687474703a2f"
+    "2f63726c2e6578616d706c652f372e63726c300a06082a8648ce3d0403020349"
+    "003046022100b78ec854f45bb2896c1296abc2f9e31f15fbaaa74e32e978cb8d"
+    "8c4987b06b35022100f8c4f2f833ce2b684e587755110e69e79bf893824041a2"
+    "320edb7223a046771a";
+static const char revocation_responder_hex[] =
+    "3082016e30820115a00302010202022001300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301f311d301b060355"
+    "04030c147265766f636174696f6e20726573706f6e6465723059301306072a86"
+    "48ce3d020106082a8648ce3d030107034200042e72b66f019e8efcd2a2957f5d"
+    "6f0d2c5b02306a0eb6075779bbfc7219e86a04eb96ef9f756cc7c143cfd8a00f"
+    "747ff2cf300d11a6fc38881533a7e7a8cf3fdea3483046301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f01"
+    "01ff04040302078030130603551d25040c300a06082b06010505070309300a06"
+    "082a8648ce3d04030203470030440220214863f73994453df9bae81ffb6846df"
+    "bd071e62982f0406d453137eefd16ae102204edf434e7f670a454e92ff175f6b"
+    "86f4004dc5c14db06e00f1259cd918361612";
+static const char revocation_pretender_hex[] =
+    "3082016e30820115a00302010202022002300a06082a8648ce3d040302301831"
+    "16301406035504030c0d7265766f636174696f6e206361301e170d3236303130"
+    "313030303030305a170d3237303130313030303030305a301f311d301b060355"
+    "04030c147265766f636174696f6e2070726574656e6465723059301306072a86"
+    "48ce3d020106082a8648ce3d03010703420004af6f4ca508c11a13df7432389e"
+    "9469ab39c04e718fcb4569822fde49149ea23ffcdd3281f7a25e1ca65740d36b"
+    "b3a0c5f83438e2bc44ee84bab8394700a1fd59a3483046301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f01"
+    "01ff04040302078030130603551d25040c300a06082b06010505070301300a06"
+    "082a8648ce3d040302034700304402207443a88dd2d5e863fd309efa01713f96"
+    "5468b9852641d64468ddad5988babb1a0220571033d981309b0229729e81d34b"
+    "b9e7b749335d3a16d66a45a09b174005a7dd";
+static const char revocation_ocsp_good_hex[] =
+    "308201040a0100a081fe3081fb06092b06010505073001010481ed3081ea3081"
+    "90a21604146c4da71146594dba1e533ecb9555740aca994533180f3230323631"
+    "3030393139333532385a30653063303b300906052b0e03021a0500041419b089"
+    "c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb95"
+    "55740aca994533020210018000180f32303236313030383030303030305aa011"
+    "180f32303236313031353030303030305a300a06082a8648ce3d040302034900"
+    "3046022100c3d9057512ce787e7f39177c7d967c6f9228c703b98c032272f563"
+    "f1455fd65d022100ab3fcd9b7875537350cac7cb85f0b3c3a824c661cc7b3aed"
+    "a3c8ae15c924f172";
+static const char revocation_ocsp_good256_hex[] =
+    "308201230a0100a082011c3082011806092b0601050507300101048201093082"
+    "01053081ada21604146c4da71146594dba1e533ecb9555740aca994533180f32"
+    "303236313030393139333532385a308181307f3057300d060960864801650304"
+    "02010500042041194f23ca1d5cae965d5d21befdab72de61d03b3dcdf6870688"
+    "ca0dbcaecd4e0420ced35bc29a23f88e5da705633c66b1905c5b10fbc5a2454b"
+    "c5f0953660dc89b7020210018000180f32303236313030383030303030305aa0"
+    "11180f32303236313031353030303030305a300a06082a8648ce3d0403020347"
+    "0030440220112380f2adc492ab68181b73f73528cf23d46802035984a2ad8de5"
+    "8c8add218502207de259383804e54f783baa0cacafc03de209f68bb12c4b33f7"
+    "cca7be5c50dba2";
+static const char revocation_ocsp_revoked_hex[] =
+    "3082011c0a0100a08201153082011106092b0601050507300101048201023081"
+    "ff3081a6a21604146c4da71146594dba1e533ecb9555740aca994533180f3230"
+    "3236313030393139333532385a307b3079303b300906052b0e03021a05000414"
+    "19b089c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e53"
+    "3ecb9555740aca99453302021001a116180f3230323631303031303030303030"
+    "5aa0030a0101180f32303236313030383030303030305aa011180f3230323631"
+    "3031353030303030305a300a06082a8648ce3d04030203480030450220136f53"
+    "45e2fa242c1839e63922abe468ef026a1442a020ccfe647be7c5f5aff3022100"
+    "a406e2270caaeec7ca3a07bb0b8a230beb2427b397fdd3c511329879edb12667";
+static const char revocation_ocsp_unknown_hex[] =
+    "308201040a0100a081fe3081fb06092b06010505073001010481ed3081ea3081"
+    "90a21604146c4da71146594dba1e533ecb9555740aca994533180f3230323631"
+    "3030393139333532385a30653063303b300906052b0e03021a0500041419b089"
+    "c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb95"
+    "55740aca994533020210018200180f32303236313030383030303030305aa011"
+    "180f32303236313031353030303030305a300a06082a8648ce3d040302034900"
+    "3046022100aa38c8130eb748af8d14d71a19a29b9b1296512b1d788096cf7b8d"
+    "4ea5e8d68c022100c9aa555771c4ee8e578f1567e6ac821a1ca70523338b9e98"
+    "0f8bea10afd917e1";
+static const char revocation_ocsp_no_next_hex[] =
+    "3081ef0a0100a081e93081e606092b06010505073001010481d83081d5307da2"
+    "1604146c4da71146594dba1e533ecb9555740aca994533180f32303236313030"
+    "393139333532385a30523050303b300906052b0e03021a0500041419b089c1c3"
+    "6bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb955574"
+    "0aca994533020210018000180f32303236313030383030303030305a300a0608"
+    "2a8648ce3d0403020348003045022100f2dbbcc8cd6b88eeffeef4bed47ef72e"
+    "2294f9a4c06906aae909d5aedde6fa2a022067d1359576eb4f1e455ae2d17152"
+    "02cbf1aaeb162fc2c37d8bc288ee13f29b8e";
+static const char revocation_ocsp_delegated_hex[] =
+    "3082028d0a0100a08202863082028206092b0601050507300101048202733082"
+    "026f30819ba121301f311d301b06035504030c147265766f636174696f6e2072"
+    "6573706f6e646572180f32303236313030393139333532385a30653063303b30"
+    "0906052b0e03021a0500041419b089c1c36bd6d78c8b60fc6735c905046fee25"
+    "04146c4da71146594dba1e533ecb9555740aca994533020210018000180f3230"
+    "3236313030383030303030305aa011180f32303236313031353030303030305a"
+    "300a06082a8648ce3d0403020349003046022100b978e2ede4fbfcd05a44925a"
+    "cef1d373955a125354663948baba851c50518938022100a1eea423b16a35856c"
+    "8e665e24a26ebabcb77deca069c87442bd717f51db0beaa08201763082017230"
+    "82016e30820115a00302010202022001300a06082a8648ce3d04030230183116"
+    "301406035504030c0d7265766f636174696f6e206361301e170d323630313031"
+    "3030303030305a170d3237303130313030303030305a301f311d301b06035504"
+    "030c147265766f636174696f6e20726573706f6e6465723059301306072a8648"
+    "ce3d020106082a8648ce3d030107034200042e72b66f019e8efcd2a2957f5d6f"
+    "0d2c5b02306a0eb6075779bbfc7219e86a04eb96ef9f756cc7c143cfd8a00f74"
+    "7ff2cf300d11a6fc38881533a7e7a8cf3fdea3483046301f0603551d23041830"
+    "1680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f0101"
+    "ff04040302078030130603551d25040c300a06082b06010505070309300a0608"
+    "2a8648ce3d04030203470030440220214863f73994453df9bae81ffb6846dfbd"
+    "071e62982f0406d453137eefd16ae102204edf434e7f670a454e92ff175f6b86"
+    "f4004dc5c14db06e00f1259cd918361612";
+static const char revocation_ocsp_delegated_by_key_hex[] =
+    "308202810a0100a082027a3082027606092b0601050507300101048202673082"
+    "0263308190a216041443142b4895f604cba5de36bd60d0ac3084551c68180f32"
+    "303236313030393139333532385a30653063303b300906052b0e03021a050004"
+    "1419b089c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e"
+    "533ecb9555740aca994533020210018000180f32303236313030383030303030"
+    "305aa011180f32303236313031353030303030305a300a06082a8648ce3d0403"
+    "020348003045022049090334ba5885d5b2dc86168ee35c6b2abd834c5d593b1f"
+    "33193ed6606a70c8022100a8a11da76617bba2e74423e72a33198c53248b2595"
+    "3ef25b08675f3ec71f47f1a0820176308201723082016e30820115a003020102"
+    "02022001300a06082a8648ce3d04030230183116301406035504030c0d726576"
+    "6f636174696f6e206361301e170d3236303130313030303030305a170d323730"
+    "3130313030303030305a301f311d301b06035504030c147265766f636174696f"
+    "6e20726573706f6e6465723059301306072a8648ce3d020106082a8648ce3d03"
+    "0107034200042e72b66f019e8efcd2a2957f5d6f0d2c5b02306a0eb6075779bb"
+    "fc7219e86a04eb96ef9f756cc7c143cfd8a00f747ff2cf300d11a6fc38881533"
+    "a7e7a8cf3fdea3483046301f0603551d230418301680146c4da71146594dba1e"
+    "533ecb9555740aca994533300e0603551d0f0101ff0404030207803013060355"
+    "1d25040c300a06082b06010505070309300a06082a8648ce3d04030203470030"
+    "440220214863f73994453df9bae81ffb6846dfbd071e62982f0406d453137eef"
+    "d16ae102204edf434e7f670a454e92ff175f6b86f4004dc5c14db06e00f1259c"
+    "d918361612";
+static const char revocation_ocsp_pretender_hex[] =
+    "3082028d0a0100a08202863082028206092b0601050507300101048202733082"
+    "026f30819ba121301f311d301b06035504030c147265766f636174696f6e2070"
+    "726574656e646572180f32303236313030393139333532385a30653063303b30"
+    "0906052b0e03021a0500041419b089c1c36bd6d78c8b60fc6735c905046fee25"
+    "04146c4da71146594dba1e533ecb9555740aca994533020210018000180f3230"
+    "3236313030383030303030305aa011180f32303236313031353030303030305a"
+    "300a06082a8648ce3d0403020349003046022100eb829cfe4123030034dbcdc9"
+    "928635ebd2c443a0194536f17178b911bfb3c063022100849c953d9206491ec9"
+    "7ffdb26f5e691a46f232280006aa0b5a359b7a8381a0b2a08201763082017230"
+    "82016e30820115a00302010202022002300a06082a8648ce3d04030230183116"
+    "301406035504030c0d7265766f636174696f6e206361301e170d323630313031"
+    "3030303030305a170d3237303130313030303030305a301f311d301b06035504"
+    "030c147265766f636174696f6e2070726574656e6465723059301306072a8648"
+    "ce3d020106082a8648ce3d03010703420004af6f4ca508c11a13df7432389e94"
+    "69ab39c04e718fcb4569822fde49149ea23ffcdd3281f7a25e1ca65740d36bb3"
+    "a0c5f83438e2bc44ee84bab8394700a1fd59a3483046301f0603551d23041830"
+    "1680146c4da71146594dba1e533ecb9555740aca994533300e0603551d0f0101"
+    "ff04040302078030130603551d25040c300a06082b06010505070301300a0608"
+    "2a8648ce3d040302034700304402207443a88dd2d5e863fd309efa01713f9654"
+    "68b9852641d64468ddad5988babb1a0220571033d981309b0229729e81d34bb9"
+    "e7b749335d3a16d66a45a09b174005a7dd";
+static const char revocation_ocsp_staple_hex[] =
+    "308201030a0100a081fd3081fa06092b06010505073001010481ec3081e93081"
+    "90a21604146c4da71146594dba1e533ecb9555740aca994533180f3230323631"
+    "3030393139333532385a30653063303b300906052b0e03021a0500041419b089"
+    "c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba1e533ecb95"
+    "55740aca994533020210028000180f32303236313030383030303030305aa011"
+    "180f32303236313031353030303030305a300a06082a8648ce3d040302034800"
+    "304502202139a15822e9ea50b87c0cd7f8e7b562e2856eca5b99b08ba2973e14"
+    "2575b1d502210095c121b30898513309bb28ba8525f320070c1582dc54755592"
+    "db21fb7c5db292";
+static const char revocation_ocsp_other_key_hex[] =
+    "308201080a0100a08201013081fe06092b06010505073001010481f03081ed30"
+    "8194a11a30183116301406035504030c0d7265766f636174696f6e206361180f"
+    "32303236313030393139333532385a30653063303b300906052b0e03021a0500"
+    "041419b089c1c36bd6d78c8b60fc6735c905046fee2504146c4da71146594dba"
+    "1e533ecb9555740aca994533020210018000180f323032363130303830303030"
+    "30305aa011180f32303236313031353030303030305a300a06082a8648ce3d04"
+    "0302034800304502201148354542f3d93d803dea8fda1b47f82478ac7de5dd32"
+    "f5521e165ef0aaf13a022100dcfccf06327a3dd0068b5f1fdca50e2077121000"
+    "3b8df4f2655b5734cce36954";
+static const char revocation_crl_empty_hex[] =
+    "3081d03078020101300a06082a8648ce3d04030230183116301406035504030c"
+    "0d7265766f636174696f6e206361170d3236313030383030303030305a170d32"
+    "36313031353030303030305aa02f302d301f0603551d230418301680146c4da7"
+    "1146594dba1e533ecb9555740aca994533300a0603551d140403020107300a06"
+    "082a8648ce3d0403020348003045022100a09b46416912ad584f70da18caf55b"
+    "b7f6479841b468d1a2c96c3e51708315b502201bc3793e799ec4403725c4b7a5"
+    "619dee09b3d3f5e2d61f7ff9f0fb593ce33c9b";
+static const char revocation_crl_listed_hex[] =
+    "308201183081c0020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3046302102021005170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101302102021001170d3236313030"
+    "313030303030305a300c300a0603551d1504030a0101a02f302d301f0603551d"
+    "230418301680146c4da71146594dba1e533ecb9555740aca994533300a060355"
+    "1d140403020107300a06082a8648ce3d040302034700304402201369e70528ed"
+    "f6ed207036c9725982071c1c1dff5ab845b12cc1ea2b0116f305022018dc717b"
+    "b0bd262c0ad2ec25a97139db46e43acc190b364858ea60f86b55eb4c";
+static const char revocation_crl_part_hex[] =
+    "308201263081cc020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3023302102021005170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101a05e305c301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300a0603551d1404"
+    "03020107302d0603551d1c0101ff04233021a01ca01a8618687474703a2f2f63"
+    "726c2e6578616d706c652f372e63726c8101ff300a06082a8648ce3d04030203"
+    "49003046022100a34890ea83cdca2a3fb6283be6875d1162bea325363eb97a24"
+    "84e089e0e681f1022100f94971384ee413aa39ccb99fea3e8624fcde70dbabfc"
+    "9ce8398e431a50eebef0";
+static const char revocation_crl_part_listed_hex[] =
+    "308201243081cc020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3023302102021004170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101a05e305c301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300a0603551d1404"
+    "03020107302d0603551d1c0101ff04233021a01ca01a8618687474703a2f2f63"
+    "726c2e6578616d706c652f372e63726c8101ff300a06082a8648ce3d04030203"
+    "47003044022074baefdbd2930805725fa6fc92ca271ace88d8685223036812e9"
+    "a53ad162274d02206441bb254d1819aca57cd2cdd1f2164cd60bce10dfc343e3"
+    "afe46e7aa7236737";
+static const char revocation_crl_part_other_hex[] =
+    "308201253081cc020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305a3023302102021004170d3236313030313030"
+    "303030305a300c300a0603551d1504030a0101a05e305c301f0603551d230418"
+    "301680146c4da71146594dba1e533ecb9555740aca994533300a0603551d1404"
+    "03020107302d0603551d1c0101ff04233021a01ca01a8618687474703a2f2f63"
+    "726c2e6578616d706c652f382e63726c8101ff300a06082a8648ce3d04030203"
+    "48003045022100abd0a78daa2b655bc528da018b2ac58fc920a3352bc8335e3f"
+    "a4beb10162d65602203ff4d3403bc8b29f3023f2d10066cd4dff18e6df0e70d3"
+    "d6a8120fa1b4a83494";
+static const char revocation_crl_ca_only_hex[] =
+    "308201023081a8020101300a06082a8648ce3d04030230183116301406035504"
+    "030c0d7265766f636174696f6e206361170d3236313030383030303030305a17"
+    "0d3236313031353030303030305aa05f305d301f0603551d230418301680146c"
+    "4da71146594dba1e533ecb9555740aca994533300a0603551d14040302010730"
+    "2e0603551d1c0101ff04243022a01da01b8619687474703a2f2f63726c2e6578"
+    "616d706c652f63612e63726c8201ff300a06082a8648ce3d0403020349003046"
+    "022100b80a799a11c6e505163260a26be0f82b991ba104f0f0d197d732410324"
+    "60d1d0022100fe107f3715520e70b3fe390b259d601eff4be9efefde45455cb0"
+    "285d2cd99343";
+static const char revocation_crl_other_key_hex[] =
+    "3081d03078020101300a06082a8648ce3d04030230183116301406035504030c"
+    "0d7265766f636174696f6e206361170d3236313030383030303030305a170d32"
+    "36313031353030303030305aa02f302d301f0603551d230418301680141415a7"
+    "0f9930ddbb1c9b6f8b95c1060b21bb7c8a300a0603551d140403020107300a06"
+    "082a8648ce3d0403020348003045022100811a31168ccf5907c7077e6c12e902"
+    "03f3087455009b5d02c2c33f34535f85a7022006e19f7b5b4825ca2ea806994a"
+    "1d39ad6d918b31955e3ba98cab5b108f2536cc";
+
+#define REVOCATION_NOW 20261010000000ull
+
+typedef struct
+{
+        p8 der[1024];
+        positive length;
+        tls_cert cert;
+} revocation_held_cert;
+
+static revocation_held_cert revocation_ca, revocation_leaf, revocation_staple,
+    revocation_bare, revocation_part, revocation_responder, revocation_pretender,
+    revocation_rsa;
+static tls_conn revocation_conn;
+
+static bool revocation_load(revocation_held_cert address_to held,
+                            string_address hex)
+{
+        held->length = crypto_hex_into(held->der, sizeof held->der, hex);
+        return held->length &&
+               !tls_parse_cert(held->der, held->length, address_of held->cert, null);
+}
+
+static fn revocation_forget(void)
+{
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+                if (tls_crl_cache[k].used)
+                        tls_crl_drop(tls_crl_cache + k);
+}
+
+/* A CRL held as tls_crl_get leaves one fetched from url at the date given,
+   or with no hex a fetch that failed. */
+static bool revocation_hold(string_address url, string_address hex, p64 when)
+{
+        tls_crl_held address_to slot = null;
+        positive length = hex ? string_length(hex) / 2 : 0;
+
+        for (positive k = 0; k < TLS_CRL_HELD && !slot; k++)
+                if (!tls_crl_cache[k].used)
+                        slot = tls_crl_cache + k;
+        if (!slot || (length && !byte_store_reserve(address_of slot->crl, length, 4096)))
+                return false;
+        if (length)
+                slot->crl.used = crypto_hex_into(slot->crl.bytes, slot->crl.room, hex);
+        crypto_sha256_of((p8 address_to)url, string_length(url), slot->name);
+        slot->fetched = tls_date_seconds(when);
+        slot->age = ++tls_crl_clock;
+        slot->used = true;
+        slot->failed = !length;
+        return true;
+}
+
+static p8 revocation_ocsp(revocation_held_cert address_to leaf,
+                          revocation_held_cert address_to issuer,
+                          string_address hex, p64 now, positive flip)
+{
+        static p8 bytes[4096];
+        positive length = crypto_hex_into(bytes, sizeof bytes, hex);
+
+        if (!length)
+                return 0xff;
+        if (flip)
+                bytes[length - flip] ^= 1;
+        return tls_ocsp_answer(address_of leaf->cert, address_of issuer->cert, bytes,
+                               length, now);
+}
+
+static p8 revocation_crl(revocation_held_cert address_to cert,
+                         revocation_held_cert address_to issuer, string_address hex,
+                         p64 now)
+{
+        revocation_forget();
+        if (hex && !revocation_hold((string_address) "http://crl.example/ca.crl", hex,
+                                    REVOCATION_NOW))
+                return 0xff;
+        if (hex && !revocation_hold((string_address) "http://crl.example/7.crl", hex,
+                                    REVOCATION_NOW))
+                return 0xff;
+        return tls_crl_answer(address_of cert->cert, address_of issuer->cert, now, null);
+}
+
+static fn tls_revocation_parsing(void)
+{
+        bool loaded = revocation_load(address_of revocation_ca, revocation_ca_hex) &&
+                      revocation_load(address_of revocation_leaf, revocation_leaf_hex) &&
+                      revocation_load(address_of revocation_staple, revocation_staple_hex) &&
+                      revocation_load(address_of revocation_bare, revocation_bare_hex) &&
+                      revocation_load(address_of revocation_part, revocation_part_hex) &&
+                      revocation_load(address_of revocation_responder,
+                                      revocation_responder_hex) &&
+                      revocation_load(address_of revocation_pretender,
+                                      revocation_pretender_hex) &&
+                      revocation_load(address_of revocation_rsa, revocation_rsa_hex);
+        tls_cert address_to leaf = address_of revocation_leaf.cert;
+        static const p8 serial[] = {0x10, 0x01};
+
+        check("the revocation fixtures parse", loaded);
+        if (!loaded)
+                return;
+        check("a certificate's first http: distribution point is kept with its names",
+              leaf->crl_url_length == 25 &&
+                  !memory_compare(leaf->crl_url, "http://crl.example/ca.crl", 25) &&
+                  leaf->crl_names && leaf->crl_names_length == 27);
+        check("a certificate keeps its serial's contents and authority key identifier",
+              leaf->serial_length == 2 && !memory_compare(leaf->serial, serial, 2) &&
+                  leaf->authority_key_length == 20);
+        check("TLS Feature status_request is must-staple",
+              revocation_staple.cert.must_staple && !leaf->must_staple);
+        check("a certificate without cRLDistributionPoints names no CRL",
+              !revocation_bare.cert.crl_url && !revocation_bare.cert.crl_names);
+        check("id-kp-OCSPSigning is read from extendedKeyUsage",
+              revocation_responder.cert.ocsp_signing &&
+                  !revocation_pretender.cert.ocsp_signing && !leaf->ocsp_signing);
+        check("keyUsage cRLSign is read", revocation_ca.cert.crl_sign &&
+                                              !leaf->crl_sign);
+
+        /* An anchor carries no SubjectPublicKey bytes; the key rebuilt from
+           its parts has to be the bytes a certificate of it would carry. */
+        for (positive k = 0; k < 2; k++)
+        {
+                tls_cert copy = k ? revocation_rsa.cert : revocation_ca.cert;
+                p8 rebuilt[32 + CRYPTO_RSA_BYTES];
+                positive length;
+                bool same;
+
+                copy.key_bits = null;
+                length = tls_key_bits(address_of copy, rebuilt, sizeof rebuilt);
+                same = length == copy.key_bits_length && length &&
+                       !memory_compare(rebuilt, k ? revocation_rsa.cert.key_bits
+                                                  : revocation_ca.cert.key_bits,
+                                       length);
+                if (k)
+                        check("an RSA key rebuilt from modulus and exponent is its DER",
+                              same);
+                else
+                        check("a P-256 key rebuilt from its point is its BIT STRING", same);
+                check("a key that does not fit the room is refused",
+                      !tls_key_bits(address_of copy, rebuilt, length - 1));
+        }
+
+        /* A cRLDistributionPoints whose only point names a cRLIssuer, or
+           only reasons, or no http: URI: the first is valid but not this
+           CA's, the second is refused, the third names nothing to fetch. */
+        {
+                static const p8 delegated[] = {
+                    0x30, 0x0c, 0x30, 0x0a, 0xa2, 0x08, 0x86, 0x06,
+                    'h', 't', 't', 'p', ':', '/'};
+                static const p8 reasons[] = {0x30, 0x06, 0x30, 0x04, 0x81, 0x02,
+                                             0x07, 0x80};
+                static const p8 ldap[] = {
+                    0x30, 0x0e, 0x30, 0x0c, 0xa0, 0x0a, 0xa0, 0x08, 0x86, 0x06,
+                    'l', 'd', 'a', 'p', ':', '/'};
+                tls_cert cert = {0};
+
+                check("a distribution point of another CRL issuer is not fetched",
+                      tls_parse_crl_points((p8 address_to)delegated, sizeof delegated,
+                                           address_of cert) == TLS_OK &&
+                          !cert.crl_url);
+                check("a distribution point of reasons alone is refused",
+                      tls_parse_crl_points((p8 address_to)reasons, sizeof reasons,
+                                           address_of cert) == TLS_FAIL);
+                check("a distribution point with no http: URI names nothing",
+                      tls_parse_crl_points((p8 address_to)ldap, sizeof ldap,
+                                           address_of cert) == TLS_OK &&
+                          !cert.crl_url);
+        }
+}
+
+static fn tls_revocation_answers(void)
+{
+        revocation_held_cert address_to ca = address_of revocation_ca;
+        revocation_held_cert address_to leaf = address_of revocation_leaf;
+        const p64 stale = 20261016000000ull;
+
+        if (!revocation_ca.length)
+                return;
+        check("a good OCSP answer the issuer signed is good",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_GOOD);
+        check("a good OCSP answer naming its issuer by SHA-256 is good",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good256_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_GOOD);
+        check("a revoked OCSP answer is revoked",
+              revocation_ocsp(leaf, ca, revocation_ocsp_revoked_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_REVOKED);
+        check("an unknown OCSP answer is no answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_unknown_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer with no nextUpdate is no answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_no_next_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("a delegated responder with id-kp-OCSPSigning, named by name, answers",
+              revocation_ocsp(leaf, ca, revocation_ocsp_delegated_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_GOOD);
+        check("a delegated responder named by its key's hash answers",
+              revocation_ocsp(leaf, ca, revocation_ocsp_delegated_by_key_hex,
+                              REVOCATION_NOW, 0) == TLS_ANSWER_GOOD);
+        check("a delegated responder without id-kp-OCSPSigning does not answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_pretender_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer about another certificate is no answer",
+              revocation_ocsp(leaf, ca, revocation_ocsp_staple_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer signed by another key under the issuer's name is none",
+              revocation_ocsp(leaf, ca, revocation_ocsp_other_key_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer with one signature bit flipped is none",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good_hex, REVOCATION_NOW, 1) ==
+                  TLS_ANSWER_NONE);
+        check("an OCSP answer asked of the wrong issuer is none",
+              revocation_ocsp(leaf, address_of revocation_responder,
+                              revocation_ocsp_good_hex, REVOCATION_NOW, 0) ==
+                  TLS_ANSWER_NONE);
+        check("a good OCSP answer past its nextUpdate is none",
+              revocation_ocsp(leaf, ca, revocation_ocsp_good_hex, stale, 0) ==
+                  TLS_ANSWER_NONE);
+        check("a revoked OCSP answer past its nextUpdate is still revoked",
+              revocation_ocsp(leaf, ca, revocation_ocsp_revoked_hex, stale, 0) ==
+                  TLS_ANSWER_REVOKED);
+
+        /* The five minutes of skew either way, to the second. */
+        check("an answer holds five minutes past its nextUpdate and not a second more",
+              tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                   20261015000500ull) &&
+                  !tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                        20261015000501ull));
+        check("an answer holds five minutes before its thisUpdate and not a second more",
+              tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                   20261007235500ull) &&
+                  !tls_revocation_fresh(20261008000000ull, 20261015000000ull,
+                                        20261007235459ull));
+        check("an answer with no nextUpdate, or one before its thisUpdate, never holds",
+              !tls_revocation_fresh(20261008000000ull, 0, REVOCATION_NOW) &&
+                  !tls_revocation_fresh(20261015000000ull, 20261008000000ull,
+                                        REVOCATION_NOW));
+        check("seconds count across a leap day and a year",
+              tls_date_seconds(20280301000000ull) - tls_date_seconds(20280228000000ull) ==
+                      2 * 86400 &&
+                  tls_date_seconds(20270101000000ull) -
+                          tls_date_seconds(20261231235959ull) == 1);
+
+        check("an empty CRL its issuer signed is good",
+              revocation_crl(leaf, ca, revocation_crl_empty_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_GOOD);
+        {
+                p8 key[32 + CRYPTO_RSA_BYTES];
+                p8 signer[32];
+                positive length = tls_key_bits(address_of ca->cert, key, sizeof key);
+                tls_crl_held address_to held = null;
+
+                crypto_sha256_of(key, length, signer);
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                        if (tls_crl_cache[k].used &&
+                            !memory_compare(tls_crl_cache[k].signer, signer, 32))
+                                held = tls_crl_cache + k;
+                check("a CRL that verified is held with its signer and nextUpdate",
+                      held && held->next_update == 20261015000000ull);
+        }
+        check("a CRL listing the certificate is revoked",
+              revocation_crl(leaf, ca, revocation_crl_listed_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_REVOKED);
+        check("a CRL past its nextUpdate is none",
+              revocation_crl(leaf, ca, revocation_crl_empty_hex, stale) == TLS_ANSWER_NONE);
+        check("a CRL past its nextUpdate that lists the certificate is revoked",
+              revocation_crl(leaf, ca, revocation_crl_listed_hex, stale) ==
+                  TLS_ANSWER_REVOKED);
+        check("a partitioned CRL that names the point is good",
+              revocation_crl(address_of revocation_part, ca, revocation_crl_part_hex,
+                             REVOCATION_NOW) == TLS_ANSWER_GOOD);
+        check("a partitioned CRL that names the point and lists it is revoked",
+              revocation_crl(address_of revocation_part, ca,
+                             revocation_crl_part_listed_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_REVOKED);
+        check("another partition's CRL at the point is none, whatever it lists",
+              revocation_crl(address_of revocation_part, ca,
+                             revocation_crl_part_other_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_NONE);
+        check("a CRL of CA certificates only does not answer for an end entity",
+              revocation_crl(leaf, ca, revocation_crl_ca_only_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_NONE);
+        check("a CRL under the issuer's name that another key signed is none",
+              revocation_crl(leaf, ca, revocation_crl_other_key_hex, REVOCATION_NOW) ==
+                  TLS_ANSWER_NONE);
+        {
+                revocation_held_cert limited = revocation_ca;
+
+                limited.cert.key_usage = true;
+                limited.cert.crl_sign = false;
+                check("a CRL from an issuer whose key may not sign CRLs is none",
+                      revocation_crl(leaf, address_of limited, revocation_crl_empty_hex,
+                                     REVOCATION_NOW) == TLS_ANSWER_NONE);
+        }
+        {
+                revocation_held_cert renamed = revocation_leaf;
+
+                renamed.cert.issuer = revocation_responder.cert.subject;
+                renamed.cert.issuer_length = revocation_responder.cert.subject_length;
+                check("a CRL under another issuer's name is none",
+                      revocation_crl(address_of renamed, ca, revocation_crl_empty_hex,
+                                     REVOCATION_NOW) == TLS_ANSWER_NONE);
+        }
+        revocation_forget();
+        check("a CRL fetch that failed is none until it is tried again",
+              revocation_hold((string_address) "http://crl.example/ca.crl", null,
+                              REVOCATION_NOW) &&
+                  tls_crl_answer(address_of leaf->cert, address_of ca->cert,
+                                 REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+        {
+                /* A distribution point of two mirrors, the first refusing. */
+                static p8 mirrors[54];
+                revocation_held_cert mirrored = revocation_leaf;
+
+                mirrors[0] = mirrors[27] = 0x86;
+                mirrors[1] = mirrors[28] = 25;
+                memory_copy(mirrors + 2, "http://dead.example/x.crl", 25);
+                memory_copy(mirrors + 29, "http://crl.example/ca.crl", 25);
+                mirrored.cert.crl_url = mirrors + 2;
+                mirrored.cert.crl_url_length = 25;
+                mirrored.cert.crl_names = mirrors;
+                mirrored.cert.crl_names_length = sizeof mirrors;
+                revocation_forget();
+                check("a CRL the second mirror serves answers when the first refuses",
+                      revocation_hold((string_address) "http://dead.example/x.crl", null,
+                                      REVOCATION_NOW) &&
+                          revocation_hold((string_address) "http://crl.example/ca.crl",
+                                          revocation_crl_empty_hex, REVOCATION_NOW) &&
+                          tls_crl_answer(address_of mirrored.cert, address_of ca->cert,
+                                         REVOCATION_NOW, null) == TLS_ANSWER_GOOD);
+                revocation_forget();
+                check("the first mirror that answers is the answer",
+                      revocation_hold((string_address) "http://dead.example/x.crl",
+                                      revocation_crl_listed_hex, REVOCATION_NOW) &&
+                          revocation_hold((string_address) "http://crl.example/ca.crl",
+                                          revocation_crl_empty_hex, REVOCATION_NOW) &&
+                          tls_crl_answer(address_of mirrored.cert, address_of ca->cert,
+                                         REVOCATION_NOW, null) == TLS_ANSWER_REVOKED);
+                revocation_forget();
+                check("no mirror answering is none",
+                      revocation_hold((string_address) "http://dead.example/x.crl", null,
+                                      REVOCATION_NOW) &&
+                          revocation_hold((string_address) "http://crl.example/ca.crl", null,
+                                          REVOCATION_NOW) &&
+                          tls_crl_answer(address_of mirrored.cert, address_of ca->cert,
+                                         REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+                revocation_forget();
+        }
+        check("a certificate that names no CRL has no answer to give",
+              tls_crl_answer(address_of revocation_bare.cert, address_of ca->cert,
+                             REVOCATION_NOW, null) == TLS_ANSWER_ABSENT);
+        revocation_forget();
+        check("a CRL not held and not fetched is none",
+              tls_crl_answer(address_of leaf->cert, address_of ca->cert, REVOCATION_NOW,
+                             null) == TLS_ANSWER_NONE);
+        {
+                /* One signature bit flipped in a held CRL. */
+                bool held = revocation_hold((string_address) "http://crl.example/ca.crl",
+                                            revocation_crl_empty_hex, REVOCATION_NOW);
+                tls_crl_held address_to slot = tls_crl_cache;
+
+                for (positive k = 0; k < TLS_CRL_HELD; k++)
+                        if (tls_crl_cache[k].used)
+                                slot = tls_crl_cache + k;
+                slot->crl.bytes[slot->crl.used - 1] ^= 1;
+                check("a CRL with one signature bit flipped is none",
+                      held && tls_crl_answer(address_of leaf->cert, address_of ca->cert,
+                                             REVOCATION_NOW, null) == TLS_ANSWER_NONE);
+        }
+        revocation_forget();
+}
+
+/* A CRL reached with the revocation budget already spent is not tried: no
+   fetch, and no slot left failed for TLS_CRL_RETRY seconds, which would
+   answer none for five minutes to a CRL nothing ever asked of. */
+static fn tls_crl_spent_budget(void)
+{
+        network_deadline spent;
+        positive used = 0;
+        bool held;
+
+        revocation_forget();
+        spent.began = 1;
+        spent.budget = 1;
+        held = tls_crl_get((const p8 address_to)"http://8.8.8.8/ca.crl", 22, REVOCATION_NOW,
+                           address_of spent) != null;
+        for (positive k = 0; k < TLS_CRL_HELD; k++)
+                used += tls_crl_cache[k].used;
+        check("a CRL reached with its budget spent is not tried, nor held as failed",
+              !held && !used);
+        revocation_forget();
+}
+
+/* The tiers: tls_revocation_holds over the leaf and its CA, the staple and
+   the CRL each made to answer one way. */
+static bool revocation_tier(revocation_held_cert address_to leaf,
+                            string_address staple, string_address crl, bool failed)
+{
+        static p8 bytes[4096];
+        tls_cert chain[2] = {leaf->cert, revocation_ca.cert};
+        positive path[1] = {0};
+        positive length = staple ? crypto_hex_into(bytes, sizeof bytes, staple) : 0;
+
+        revocation_forget();
+        if (crl || failed)
+                (void)revocation_hold((string_address) "http://crl.example/ca.crl", crl,
+                                      REVOCATION_NOW);
+        memory_fill(address_of revocation_conn, 0, TLS_CONN_HEAD);
+        return tls_revocation_holds(address_of revocation_conn, chain, path, 0,
+                                    chain + 1, length ? bytes : null, length,
+                                    REVOCATION_NOW);
+}
+
+static fn tls_revocation_tiers(void)
+{
+        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+        p8 address_to fault = address_of revocation_conn.fault;
+        revocation_held_cert address_to leaf = address_of revocation_leaf;
+        revocation_held_cert address_to staple = address_of revocation_staple;
+
+        if (!revocation_ca.length)
+                return;
+        check("a good staple holds in every tier",
+              revocation_tier(leaf, revocation_ocsp_good_hex, null, false));
+        check("a revoked staple refuses in every tier, as revoked",
+              !revocation_tier(leaf, revocation_ocsp_revoked_hex, null, false) &&
+                  *fault == TLS_FAULT_REVOKED);
+        check("an unknown staple falls to the CRL at the default tier and refuses at the tight one",
+              revocation_tier(leaf, revocation_ocsp_unknown_hex, revocation_crl_empty_hex,
+                              false) == !tight &&
+                  (!tight || *fault == TLS_FAULT_UNCHECKED));
+        check("an unknown staple and a CRL that lists the leaf refuse as revoked",
+              tight ? !revocation_tier(leaf, revocation_ocsp_unknown_hex,
+                                       revocation_crl_listed_hex, false)
+                    : !revocation_tier(leaf, revocation_ocsp_unknown_hex,
+                                       revocation_crl_listed_hex, false) &&
+                          *fault == TLS_FAULT_REVOKED);
+        check("a good CRL holds in every tier",
+              revocation_tier(leaf, null, revocation_crl_empty_hex, false));
+        check("a CRL that lists the leaf refuses in every tier, as revoked",
+              !revocation_tier(leaf, null, revocation_crl_listed_hex, false) &&
+                  *fault == TLS_FAULT_REVOKED);
+        check("an unreachable CRL passes at the default tier and refuses at the tight one",
+              revocation_tier(leaf, null, null, true) == !tight &&
+                  (!tight || *fault == TLS_FAULT_UNCHECKED));
+        check("a must-staple leaf without a staple refuses in every tier, unchecked",
+              !revocation_tier(staple, null, revocation_crl_empty_hex, false) &&
+                  *fault == TLS_FAULT_UNCHECKED);
+        check("a must-staple leaf with an unknown staple refuses in every tier",
+              !revocation_tier(staple, revocation_ocsp_unknown_hex,
+                               revocation_crl_empty_hex, false) &&
+                  *fault == TLS_FAULT_UNCHECKED);
+        check("a must-staple leaf with a good staple holds",
+              revocation_tier(staple, revocation_ocsp_staple_hex, null, false));
+        check("a leaf that names no source holds in every tier",
+              revocation_tier(address_of revocation_bare, null, null, false));
+        revocation_forget();
+}
+
+/* tls_entry_status, the CertificateEntry extensions a staple rides in. */
+static fn tls_revocation_entries(void)
+{
+        static const struct
+        {
+                string_address name;
+                string_address hex;
+                bool asked;
+                bool accept;
+                positive response;
+        } rows[] = {
+            {"no extensions", "", false, true, 0},
+            {"a staple when asked", "000500080100000430020500", true, true, 4},
+            {"a staple when not asked", "000500080100000430020500", false, false, 0},
+            {"a status of another type", "000500080200000430020500", true, false, 0},
+            {"an empty response", "0005000401000000", true, false, 0},
+            {"a response longer than its extension", "000500080100000530020500", true,
+             false, 0},
+            {"a byte after the response", "00050009010000043002050000", true, false, 0},
+            {"two extensions", "0005000801000004300205000012000400020000", true, false, 0},
+            {"an SCT list", "001200040002aabb", true, false, 0},
+        };
+        bool all = true;
+
+        for (positive row = 0; row < array_count(rows); row++)
+        {
+                p8 bytes[64];
+                positive length = crypto_hex_into(bytes, sizeof bytes, rows[row].hex);
+                const p8 address_to response = (const p8 address_to)bytes;
+                positive response_length = 99;
+                bool accepted = tls_entry_status(bytes, length, rows[row].asked,
+                                                 address_of response,
+                                                 address_of response_length);
+
+                if (accepted != rows[row].accept ||
+                    (accepted && response_length != rows[row].response) ||
+                    (accepted && rows[row].response && response != bytes + 8) ||
+                    (accepted && !rows[row].response && response))
+                {
+                        all = false;
+                        string_format(log, "  entry status row: %s\n", rows[row].name);
+                }
+        }
+        check("each CertificateEntry extensions row answers its verdict", all);
+}
+
+/* The TLS 1.2 wire: status_request offered only when the chain is checked,
+   an echo taken only when offered and empty, CertificateStatus after the
+   Certificate only, and the staple relaid into the leaf's entry. */
+static fn tls_revocation_handshake(void)
+{
+        static p8 scratch[5 + TLS_PLAINTEXT_MAX];
+        tls_conn address_to tls = address_of revocation_conn;
+        p8 hello[512];
+        positive used = 0;
+        positive at = 0;
+        positive size = 0;
+
+        for (positive checked = 0; checked < 2; checked++)
+        {
+                tls_conn client = {.host = "revocation.example", .check_cert = checked};
+                bool offered = tls_client_hello(address_of client, hello, sizeof hello,
+                                                address_of used, null, 0) == TLS_OK &&
+                               client.status_requested == checked &&
+                               tls_hello_extension(hello, used, 5, address_of at,
+                                                   address_of size) == checked &&
+                               (!checked ||
+                                (size == 5 && !memory_compare(hello + at,
+                                                              "\1\0\0\0\0", 5)));
+
+                if (checked)
+                        check("a checked ClientHello offers status_request for OCSP",
+                              offered);
+                else
+                        check("an unchecked ClientHello offers no status_request",
+                              offered);
+                crypto_forget(client.scalar, sizeof client.scalar);
+        }
+
+        {
+                static const struct
+                {
+                        string_address name;
+                        string_address extensions;
+                        p16 suite;
+                        bool asked;
+                        bool accept;
+                } rows[] = {
+                    {"a TLS 1.2 echo of status_request", "00170000ff01000100" "00050000",
+                     0xc02b, true, true},
+                    {"a TLS 1.2 echo nothing asked for", "00170000ff01000100" "00050000",
+                     0xc02b, false, false},
+                    {"a TLS 1.2 echo with a body", "00170000ff01000100" "0005000100",
+                     0xc02b, true, false},
+                    {"two TLS 1.2 echoes", "00170000ff01000100" "00050000" "00050000",
+                     0xc02b, true, false},
+                    {"a TLS 1.3 ServerHello echoing status_request",
+                     "002b00020304" "00330024001d0020" "4242424242424242424242424242424242424242424242424242424242424242"
+                     "00050000", 0x1301, true, false},
+                };
+                bool all = true;
+
+                for (positive row = 0; row < array_count(rows); row++)
+                {
+                        p8 message[160] = {TLS_HS_SERVER_HELLO, 0, 0, 0, 3, 3};
+                        p8 peer[97];
+                        positive share = 0;
+                        positive group = 0;
+                        const p8 address_to cookie = null;
+                        positive cookie_length = 0;
+                        positive length;
+                        bool accepted;
+
+                        memory_fill(tls, 0, TLS_CONN_HEAD);
+                        tls->group = 0x1d;
+                        tls->status_requested = rows[row].asked;
+                        memory_fill(message + 6, 0x42, 32);
+                        at = 38;
+                        message[at++] = 0;
+                        network_store_16(message + at, rows[row].suite);
+                        at += 3;
+                        length = crypto_hex_into(message + at + 2, sizeof message - at - 2,
+                                                 rows[row].extensions);
+                        network_store_16(message + at, (p16)length);
+                        at += 2 + length;
+                        message[3] = (p8)(at - 4);
+                        accepted = tls_server_hello_keys(message, at, tls, peer,
+                                                         sizeof peer, &share, &group,
+                                                         &cookie, &cookie_length) ==
+                                       TLS_OK &&
+                                   tls->tls12 && tls->status_echoed;
+                        if (accepted != rows[row].accept)
+                        {
+                                all = false;
+                                string_format(log, "  status echo row: %s\n",
+                                              rows[row].name);
+                        }
+                }
+                check("each ServerHello status_request row answers its verdict", all);
+        }
+
+        {
+                p8 state = TLS12_FLIGHT_CERTIFICATE;
+
+                check("TLS 1.2 takes a CertificateStatus after the Certificate",
+                      tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_CERTIFICATE_STATUS) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_SERVER_KEY_EXCHANGE));
+                state = TLS12_FLIGHT_CERTIFICATE;
+                check("TLS 1.2 refuses a CertificateStatus before the Certificate",
+                      !tls_server_flight_step(address_of state,
+                                              TLS_HS_CERTIFICATE_STATUS));
+                check("TLS 1.2 refuses a second CertificateStatus",
+                      tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE) &&
+                          tls_server_flight_step(address_of state,
+                                                 TLS_HS_CERTIFICATE_STATUS) &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_CERTIFICATE_STATUS));
+                state = TLS_SERVER_FLIGHT_CERTIFICATE;
+                check("TLS 1.3 has no CertificateStatus message",
+                      tls_server_flight_step(address_of state, TLS_HS_CERTIFICATE) &&
+                          !tls_server_flight_step(address_of state,
+                                                  TLS_HS_CERTIFICATE_STATUS));
+        }
+
+        /* The relay: the leaf in a TLS 1.2 list, its check waiting, then a
+           CertificateStatus that lands as the leaf entry's extension. */
+        if (revocation_leaf.length)
+        {
+                static p8 body[3 + 3 + 1024];
+                static p8 status[4 + 4 + 4096];
+                positive cert = revocation_leaf.length;
+                positive response = crypto_hex_into(status + 4, sizeof status - 4,
+                                                    revocation_ocsp_good_hex);
+                positive list = 3 + cert;
+
+                body[0] = (p8)(list >> 16);
+                network_store_16(body + 1, (p16)list);
+                body[3] = 0;
+                network_store_16(body + 4, (p16)cert);
+                memory_copy(body + 6, revocation_leaf.der, cert);
+                memory_fill(tls, 0, TLS_CONN_HEAD);
+                tls->tls12 = true;
+                tls->suite = 0xc02b;
+                tls->host = "revocation.example";
+                tls->status_requested = tls->status_echoed = true;
+                check("a TLS 1.2 Certificate after a status_request echo waits for its staple",
+                      tls12_certificate(tls, body, 3 + list, scratch) &&
+                          tls->chain_pending && !tls->leaf_curve);
+                status[0] = 1;
+                status[1] = (p8)(response >> 16);
+                network_store_16(status + 2, (p16)response);
+                check("a CertificateStatus of another type is refused and the check still waits",
+                      (status[0] = 2, !tls12_certificate_status(tls, status, 4 + response,
+                                                                scratch)) &&
+                          tls->chain_pending);
+                status[0] = 1;
+                check("a CertificateStatus lands as the leaf entry's status_request",
+                      tls12_certificate_status(tls, status, 4 + response, scratch) &&
+                          !tls->chain_pending && tls->leaf_curve == 1 &&
+                          tls_load_24(scratch + 1) == 3 + cert + 2 + 8 + response &&
+                          network_load_16(scratch + 7 + cert) == 8 + response &&
+                          network_load_16(scratch + 9 + cert) == 5 &&
+                          scratch[13 + cert] == 1 &&
+                          !memory_compare(scratch + 17 + cert, status + 4, response));
+                check("a CertificateStatus nothing waits for is refused",
+                      !tls12_certificate_status(tls, status, 4 + response, scratch));
+                /* Two certificates: the staple's extension opens a gap
+                   after the leaf, so the certificate behind it moves
+                   right over itself and must arrive byte for byte. */
+                {
+                        static p8 pair[3 + 2 * (3 + 1024)];
+                        static p8 two[5 + TLS_PLAINTEXT_MAX];
+                        positive second = revocation_ca.length;
+                        positive list = 6 + cert + second;
+                        positive at = 17 + cert + response;
+
+                        pair[0] = (p8)(list >> 16);
+                        network_store_16(pair + 1, (p16)list);
+                        pair[3] = 0;
+                        network_store_16(pair + 4, (p16)cert);
+                        memory_copy(pair + 6, revocation_leaf.der, cert);
+                        pair[6 + cert] = 0;
+                        network_store_16(pair + 7 + cert, (p16)second);
+                        memory_copy(pair + 9 + cert, revocation_ca.der, second);
+                        memory_fill(tls, 0, TLS_CONN_HEAD);
+                        tls->tls12 = true;
+                        tls->suite = 0xc02b;
+                        tls->host = "revocation.example";
+                        tls->status_requested = tls->status_echoed = true;
+                        check("two certificates in a TLS 1.2 list wait for one staple",
+                              tls12_certificate(tls, pair, 9 + cert + second, two) &&
+                                  tls->chain_pending);
+                        (void)tls12_certificate_status(tls, status, 4 + response, two);
+                        check("a staple between two certificates keeps the leaf and the one behind it whole",
+                              tls_load_24(two + 1) == 18 + cert + second + response &&
+                                  !memory_compare(two + 7, revocation_leaf.der, cert) &&
+                                  network_load_16(two + 7 + cert) == 8 + response &&
+                                  tls_load_24(two + at) == second &&
+                                  !memory_compare(two + at + 3, revocation_ca.der, second) &&
+                                  network_load_16(two + at + 3 + second) == 0);
+                }
+        }
+}
+
+/* A DER value of tag around the length bytes at the front of bytes, moved
+   up behind its header: the whole length. */
+static positive revocation_wrap(p8 address_to bytes, positive length, p8 tag)
+{
+        positive head = tls_der_header_size(length);
+
+        memory_copy(bytes + head, bytes, length);
+        tls_der_header(bytes, tag, length);
+        return head + length;
+}
+
+static positive revocation_put(p8 address_to out, positive at, string_address hex)
+{
+        return at + crypto_hex_into(out + at, 1 << 20, hex);
+}
+
+static positive revocation_fill(p8 address_to out, positive at, p8 byte,
+                                positive count)
+{
+        memory_fill(out + at, byte, count);
+        return at + count;
+}
+
+/* One SingleResponse: a SHA-1 CertID of made-up hashes for serial 1001,
+   good, thisUpdate and nextUpdate. */
+static positive revocation_single(p8 address_to out, positive at)
+{
+        positive start = at;
+
+        at = revocation_put(out, at, "300906052b0e03021a05000414");
+        at = revocation_fill(out, at, 0x11, 20);
+        at = revocation_put(out, at, "0414");
+        at = revocation_fill(out, at, 0x22, 20);
+        at = revocation_put(out, at, "02021001");
+        at = start + revocation_wrap(out + start, at - start, 0x30);
+        at = revocation_put(out, at, "8000180f32303236313030383030303030305a"
+                                     "a011180f32303236313031353030303030305a");
+        return start + revocation_wrap(out + start, at - start, 0x30);
+}
+
+/* An OCSP response of singles SingleResponses, certs certificates (empty
+   SEQUENCEs: the parser only counts them), extensions unknown response
+   extensions and one more of pad bytes when pad is not 0. */
+static positive revocation_ocsp_shape(p8 address_to out, positive singles,
+                                      positive certs, positive extensions,
+                                      positive pad)
+{
+        static p8 part[24576];
+        positive at = 0;
+        positive length;
+
+        for (positive k = 0; k < singles; k++)
+                at = revocation_single(part, at);
+        length = revocation_wrap(part, at, 0x30);
+        at = revocation_put(out, 0, "a2160414");
+        at = revocation_fill(out, at, 0x33, 20);
+        at = revocation_put(out, at, "180f32303236313030383030303030305a");
+        memory_copy(out + at, part, length);
+        at += length;
+        if (extensions || pad)
+        {
+                positive list = 0;
+
+                for (positive k = 0; k < extensions; k++)
+                {
+                        part[list++] = 0x30;
+                        part[list++] = 7;
+                        part[list++] = 6;
+                        part[list++] = 2;
+                        part[list++] = 0x2a;
+                        part[list++] = (p8)k;
+                        part[list++] = 4;
+                        part[list++] = 1;
+                        part[list++] = 0;
+                }
+                if (pad)
+                {
+                        positive value;
+
+                        memory_fill(part + list, 0, pad);
+                        value = revocation_wrap(part + list, pad, 0x04);
+                        memory_copy(part + list + 4, part + list, value);
+                        part[list + 0] = 6;
+                        part[list + 1] = 2;
+                        part[list + 2] = 0x2a;
+                        part[list + 3] = 0x7f;
+                        list += revocation_wrap(part + list, 4 + value, 0x30);
+                }
+                length = revocation_wrap(part, list, 0x30);
+                length = revocation_wrap(part, length, 0xa1);
+                memory_copy(out + at, part, length);
+                at += length;
+        }
+        at = revocation_wrap(out, at, 0x30);
+        at = revocation_put(out, at, "300a06082a8648ce3d040302" "0309003006020101020101");
+        if (certs)
+        {
+                positive list = 0;
+
+                for (positive k = 0; k < certs; k++)
+                        list = revocation_put(part, list, "3000");
+                length = revocation_wrap(part, list, 0x30);
+                length = revocation_wrap(part, length, 0xa0);
+                memory_copy(out + at, part, length);
+                at += length;
+        }
+        at = revocation_wrap(out, at, 0x30);
+        at = revocation_wrap(out, at, 0x04);
+        memory_copy(out + 11, out, at);
+        crypto_hex_into(out, 11, "06092b0601050507300101");
+        at = revocation_wrap(out, 11 + at, 0x30);
+        at = revocation_wrap(out, at, 0xa0);
+        memory_copy(out + 3, out, at);
+        crypto_hex_into(out, 3, "0a0100");
+        return revocation_wrap(out, 3 + at, 0x30);
+}
+
+/* A CRL of entries entries and extensions unknown CRL extensions, into a
+   store. */
+static positive revocation_crl_shape(byte_store address_to into, positive entries,
+                                     positive extensions)
+{
+        static const p8 entry[] = {0x30, 0x14, 0x02, 0x03, 0x01, 0x02, 0x03, 0x17, 0x0d,
+                                   '2', '6', '1', '0', '0', '1', '0', '0', '0', '0',
+                                   '0', '0', 'Z'};
+        positive at;
+        positive revoked;
+
+        into->used = 0;
+        if (!byte_store_reserve(into, entries * sizeof entry + 4096, 1 << 20))
+                return 0;
+        for (positive k = 0; k < entries; k++)
+                memory_copy(into->bytes + k * sizeof entry, entry, sizeof entry);
+        revoked = revocation_wrap(into->bytes, entries * sizeof entry, 0x30);
+        at = 0;
+        {
+                static p8 head[256];
+                positive size = revocation_put(head, 0,
+                                               "020101300a06082a8648ce3d040302"
+                                               "300f310d300b06035504030c0474657374"
+                                               "170d3236313030383030303030305a"
+                                               "170d3236313031353030303030305a");
+
+                memory_copy(into->bytes + size, into->bytes, revoked);
+                memory_copy(into->bytes, head, size);
+                at = size + revoked;
+        }
+        if (extensions)
+        {
+                positive list = 0;
+                p8 address_to tail = into->bytes + at;
+
+                for (positive k = 0; k < extensions; k++)
+                {
+                        tail[list++] = 0x30;
+                        tail[list++] = 7;
+                        tail[list++] = 6;
+                        tail[list++] = 2;
+                        tail[list++] = 0x2a;
+                        tail[list++] = (p8)k;
+                        tail[list++] = 4;
+                        tail[list++] = 1;
+                        tail[list++] = 0;
+                }
+                list = revocation_wrap(tail, list, 0x30);
+                at += revocation_wrap(tail, list, 0xa0);
+        }
+        at = revocation_wrap(into->bytes, at, 0x30);
+        at = revocation_put(into->bytes, at, "300a06082a8648ce3d040302" "0309003006020101020101");
+        into->used = revocation_wrap(into->bytes, at, 0x30);
+        return into->used;
+}
+
+static fn tls_revocation_ceilings(void)
+{
+        static p8 response[TLS_OCSP_MAX + 64];
+        static const p8 serial[] = {0x01, 0x02, 0x03};
+        tls_ocsp ocsp;
+        tls_crl crl;
+        byte_store store = {null, 0, 0};
+        positive pad;
+        positive length;
+
+        check("an OCSP response of TLS_OCSP_RESPONSES SingleResponses parses",
+              (length = revocation_ocsp_shape(response, TLS_OCSP_RESPONSES, 0, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_OK);
+        check("an OCSP response of one SingleResponse more is refused",
+              (length = revocation_ocsp_shape(response, TLS_OCSP_RESPONSES + 1, 0, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_FAIL);
+        check("an OCSP response carrying TLS_OCSP_CERTS certificates parses",
+              (length = revocation_ocsp_shape(response, 1, TLS_OCSP_CERTS, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_OK);
+        check("an OCSP response carrying one certificate more is refused",
+              (length = revocation_ocsp_shape(response, 1, TLS_OCSP_CERTS + 1, 0, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_FAIL);
+        check("an OCSP response of TLS_LIST_EXTENSIONS extensions parses",
+              (length = revocation_ocsp_shape(response, 1, 0, TLS_LIST_EXTENSIONS, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_OK);
+        check("an OCSP response of one extension more is refused",
+              (length = revocation_ocsp_shape(response, 1, 0, TLS_LIST_EXTENSIONS + 1, 0)) &&
+                  tls_parse_ocsp(response, length, address_of ocsp) == TLS_FAIL);
+        for (pad = 15000; pad < TLS_OCSP_MAX; pad++)
+                if (revocation_ocsp_shape(response, 1, 0, 0, pad) == TLS_OCSP_MAX)
+                        break;
+        check("an OCSP response of exactly TLS_OCSP_MAX bytes parses",
+              pad < TLS_OCSP_MAX &&
+                  tls_parse_ocsp(response, TLS_OCSP_MAX, address_of ocsp) == TLS_OK);
+        check("an OCSP response one byte past TLS_OCSP_MAX is refused",
+              revocation_ocsp_shape(response, 1, 0, 0, pad + 1) == TLS_OCSP_MAX + 1 &&
+                  tls_parse_ocsp(response, TLS_OCSP_MAX + 1, address_of ocsp) == TLS_FAIL);
+
+        check("a CRL of TLS_LIST_EXTENSIONS extensions parses",
+              revocation_crl_shape(address_of store, 1, TLS_LIST_EXTENSIONS) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_OK &&
+                  crl.listed && crl.entries == 1);
+        check("a CRL of one extension more is refused",
+              revocation_crl_shape(address_of store, 1, TLS_LIST_EXTENSIONS + 1) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_FAIL);
+        check("a CRL of TLS_CRL_ENTRIES revoked certificates parses",
+              revocation_crl_shape(address_of store, TLS_CRL_ENTRIES, 0) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_OK &&
+                  crl.entries == TLS_CRL_ENTRIES && crl.listed);
+        check("a CRL of one revoked certificate more is refused",
+              revocation_crl_shape(address_of store, TLS_CRL_ENTRIES + 1, 0) &&
+                  tls_parse_crl(store.bytes, store.used, serial, sizeof serial,
+                                address_of crl) == TLS_FAIL);
+        byte_store_release(address_of store);
+}
+
 typedef fn (*net_group_body)(void);
+
+/* `--only NAME` (any number of them) runs those groups and no other: what a
+   guest of another machine runs where a whole CHECK_net would take an hour
+   of emulation. */
+static bool net_group_wanted(string_address name)
+{
+        bool any = false;
+
+        for (positive at = 1; at + 1 < program_argument_count(); at++)
+                if (!string_compare(program_argument(at), (string_address) "--only"))
+                {
+                        any = true;
+                        if (!string_compare(program_argument(at + 1), name))
+                                return true;
+                }
+        return !any;
+}
 
 static fn net_group(string_address name, net_group_body body)
 {
-        positive before = net_descriptors_open();
+        positive before;
 
+        if (!net_group_wanted(name))
+                return;
+        before = net_descriptors_open();
         body();
         checks++;
         if (net_descriptors_open() > before)
@@ -70633,14 +77076,24 @@ b32 main(void)
         net_group(attribute_growth);
         net_group(userspace_source_progress);
         net_group(error_frames);
+        net_group(netlink_reply_matching);
+        net_group(netlink_each_stops);
         net_group(netlink_multipart_identity);
         net_group(netlink_nonblocking_retries);
+        net_group(netlink_decision_edges);
+        net_group(tls_decision_edges);
+        net_group(http_decision_edges);
+        net_group(network_wait_edges);
         net_group(link_candidates);
+        net_group(link_choice);
+        net_group(wired_listing);
+        net_group(lease_stamps);
         net_group(talking);
         net_group(resolving);
         net_group(resolving_edges);
         net_group(dns_shared_pointer_work);
         net_group(resolving_truncated);
+        net_group(resolving_decision_edges);
         net_group(resolving_policy);
         net_group(resolving_walk);
         net_group(resolving_servers);
@@ -70713,17 +77166,69 @@ b32 main(void)
         net_group(tls_name_constraint_rules);
         net_group(tls_ca_issuers_rules);
         net_group(tls_trust_anchor_chains);
+        net_group(nts_ke_pieces);
+        net_group(dns_tls_pieces);
         net_group(tls12_pieces);
+        net_group(tls_revocation_parsing);
+        net_group(tls_revocation_answers);
+        net_group(tls_revocation_tiers);
+        net_group(tls_revocation_entries);
+        net_group(tls_revocation_handshake);
+        net_group(tls_revocation_ceilings);
         net_group(redirect_urls);
         net_group(fetching_for_real);
+        net_group(http_chain_deadline);
+        net_group(http_run_edges);
         net_group(leasing);
         net_group(dhcp_confinement);
+        net_group(dhcp_sockets_in_namespace);
+        net_group(dhcp_frames_judged);
+        net_group(tls_ct_real);
+        net_group(dhcp_frames_on_loopback);
+        net_group(net_apart_filter_decisions);
+        net_group(net_apart_confinement);
+        net_group(net_apart_edges);
+        net_group(net_apart_fetching);
         net_group(dhcp_reacquisition_state_matrix);
         net_group(dhcp_ack_lease_integrity);
         net_group(dhcp_ack_invalid_then_valid);
         net_group(dhcp_mixed_discard_budget);
         net_group(leasing_datagrams);
         net_group(dhcp_transaction_randomness);
+        //      fold netlink: new groups below this line
+        net_group(dump_restart_frames);
+        //
+        //      fold dns: new groups below this line
+        //
+        //      fold crypto: new groups below this line
+        //
+        //      fold tls-core: new groups below this line
+        //
+        //      fold x509: new groups below this line
+        //
+        //      fold revoke-ct: new groups below this line
+        net_group(tls_crl_spent_budget);
+        //
+        //      fold http: new groups below this line
+        //
+        net_group(http_mixed_line_ends);
+        //
+        //      fold nts: new groups below this line
+        //
+        //      fold apart: new groups below this line
+        net_group(net_apart_nts);
+        //
+        //      fold dhcp: new groups below this line
+        //
+        //      fold shnet: new groups below this line
+        //
+        //      fold wifi: new groups below this line
+        //
+        //      fold host-net: new groups below this line
+        //
+        //      fold waterlink: new groups below this line
+        //
+        //      Last: it leaves this process in a network namespace of its own.
         net_group(userspace_route_source_in_namespace);
 
         return test_report(null);
@@ -70920,6 +77425,91 @@ static bool crypto_vector_run(p8 address_to kind, positive kind_length,
                         if (work[i])
                                 return false;
                 return true;
+        }
+        if (KIND("siv"))
+        {
+                static crypto_siv_key key;
+                const p8 address_to parts[4];
+                positive lengths[4];
+                positive count = 0;
+                positive at = 0;
+
+                if (CL(0) != 32 || CL(4) != 16 || CL(2) != CL(3))
+                        return false;
+                while (at < CL(1))
+                {
+                        positive size;
+
+                        if (count == 4 || CL(1) - at < 2)
+                                return false;
+                        size = (positive)CV(1)[at] << 8 | CV(1)[at + 1];
+                        at += 2;
+                        if (size > CL(1) - at)
+                                return false;
+                        parts[count] = CV(1) + at;
+                        lengths[count++] = size;
+                        at += size;
+                }
+                crypto_siv_prepare(address_of key, CV(0));
+                if (expect)
+                {
+                        p8 tag[16];
+
+                        memory_copy(work, CV(2), CL(2));
+                        crypto_siv_seal(address_of key, parts, lengths, count,
+                                        work, CL(2), tag);
+                        if (!crypto_vector_is(work, 3) ||
+                            memory_compare(tag, CV(4), 16) != 0)
+                                return false;
+                }
+                memory_copy(work, CV(3), CL(3));
+                if (crypto_siv_open(address_of key, parts, lengths, count,
+                                    work, CL(3), CV(4)) != expect)
+                        return false;
+                if (expect)
+                        return crypto_vector_is(work, 2);
+                for (positive i = 0; i < CL(3); i++)
+                        if (work[i])
+                                return false;
+                return true;
+        }
+        if (KIND("ntsreply"))
+        {
+                static nts_state state;
+                nts_exchange exchange;
+                bipolar verdict;
+                bool good;
+                positive at = 0;
+                positive seen = 0;
+
+                if (CL(0) != 32 || CL(1) != 32 || CL(2) > NTS_PACKET_ROOM)
+                        return false;
+                memory_fill(&state, 0, sizeof state);
+                memory_fill(&exchange, 0, sizeof exchange);
+                nts_exchange_open(&exchange, &state);
+                crypto_siv_prepare(&exchange.s2c, CV(0));
+                memory_copy(exchange.uid, CV(1), 32);
+                memory_copy(work, CV(2), CL(2));
+                verdict = nts_reply(&exchange, work, CL(2));
+                good = (verdict == NTS_REPLY_OK) == expect;
+                if (expect && good)
+                {
+                        while (at < CL(3))
+                        {
+                                positive size = (positive)CV(3)[at] << 8 | CV(3)[at + 1];
+
+                                at += 2;
+                                good = good && seen < state.count &&
+                                       state.length[seen] == size &&
+                                       !memory_compare(state.cookie[seen], CV(3) + at, size);
+                                at += size;
+                                seen++;
+                        }
+                        good = good && seen == state.count;
+                }
+                else if (good)
+                        good = state.count == 0;
+                return good;
         }
         if (KIND("x25519"))
         {
@@ -80770,6 +87360,504 @@ static fn wpa_key(void)
                       !memory_compare(pmk, this_is, 32));
 }
 
+/*
+        WPA3 and the key frames of descriptor version 3, against values made
+        by a reference written from the standard in Python (every SAE
+        step, from the hunt for the password element to the confirm) and, for
+        the CMAC, against RFC 4493's own. The password element is found for
+        each password, the commit taken in gives the KCK, the PMK, the PMKID
+        and the confirms, and a commit built here must satisfy
+        scalar * PWE + element = rand * PWE. The malformed commits, out of
+        range or off the curve or our own sent back, are refused.
+*/
+static const p8 sae0_pwe[64] = {0x6b, 0x79, 0x1a, 0x30, 0xa9, 0xdc, 0xb6, 0xc3, 0x98, 0x79, 0x52, 0xf8, 0xfc, 0xdb, 0xd6, 0xcc, 0xf8, 0xfe, 0x5d, 0xf5, 0xe3, 0x70, 0xd7, 0x0d, 0x65, 0xfb, 0x0d, 0x98, 0xf9, 0x7f, 0xe8, 0x18, 0x63, 0x1b, 0xac, 0xff, 0x14, 0xf7, 0x0e, 0x78, 0x74, 0x99, 0xc2, 0x7c, 0x0a, 0x74, 0x1e, 0x36, 0x58, 0xf3, 0xf6, 0xb2, 0xf2, 0x74, 0x5a, 0xd1, 0xc1, 0xac, 0x14, 0xa1, 0xbf, 0xf9, 0x10, 0x6c};
+static const p8 sae0_rand[32] = {0xf7, 0xc9, 0xe2, 0xb3, 0x4f, 0xb9, 0x24, 0x28, 0xd4, 0x94, 0xae, 0xb1, 0x51, 0x86, 0xe1, 0xf4, 0x58, 0xa9, 0x2d, 0xa4, 0x8c, 0xf7, 0x10, 0x60, 0x27, 0xda, 0x8b, 0x52, 0x8c, 0x74, 0x09, 0x90};
+static const p8 sae0_scalar[32] = {0xb7, 0xff, 0x4e, 0xa3, 0xfa, 0xdb, 0x69, 0x40, 0x2e, 0x73, 0x44, 0x50, 0xfb, 0x1f, 0x0d, 0xcb, 0x7a, 0x0a, 0xfe, 0x67, 0xcc, 0x78, 0x27, 0x01, 0x33, 0xee, 0xb1, 0x58, 0xbf, 0x68, 0x1a, 0xaf};
+static const p8 sae0_element[64] = {0xb5, 0xeb, 0x84, 0x93, 0x2b, 0x12, 0x5b, 0xb1, 0x73, 0x91, 0x68, 0x42, 0xa3, 0x28, 0xe5, 0xe6, 0x78, 0x5f, 0x8b, 0xc6, 0xd4, 0x4b, 0x20, 0x2d, 0xfb, 0x42, 0xa8, 0x71, 0xca, 0xbd, 0xb0, 0x28, 0x69, 0x53, 0xa6, 0x8e, 0x29, 0x54, 0x70, 0xde, 0xa2, 0x4a, 0xe1, 0x1e, 0x15, 0x35, 0x00, 0x1f, 0xe4, 0x5b, 0x99, 0x98, 0xd3, 0xab, 0x78, 0x3e, 0x96, 0x19, 0xd6, 0x6c, 0xd6, 0x2a, 0xde, 0x73};
+static const p8 sae0_peer_scalar[32] = {0xb8, 0x30, 0xa1, 0x9e, 0x54, 0x8e, 0x1d, 0x28, 0xfc, 0x5b, 0xe0, 0xf6, 0xce, 0x53, 0x70, 0xe0, 0x5b, 0xba, 0x84, 0x1d, 0x95, 0xd7, 0xd0, 0x51, 0xd0, 0xfd, 0xbc, 0x3d, 0xb0, 0xc7, 0x2f, 0x11};
+static const p8 sae0_peer_element[64] = {0x30, 0x6f, 0xd9, 0x47, 0xa5, 0x80, 0xca, 0x60, 0x7c, 0xf9, 0x47, 0x85, 0xc5, 0xe7, 0x95, 0x90, 0xbe, 0x6f, 0x75, 0x1d, 0x53, 0x37, 0xbb, 0x38, 0xeb, 0xc1, 0xbf, 0x56, 0xf4, 0xc2, 0x38, 0x5e, 0x19, 0x62, 0x13, 0x85, 0xa5, 0x84, 0xb0, 0x20, 0xfa, 0x97, 0x87, 0x9c, 0x00, 0xe1, 0x82, 0xb9, 0x9b, 0xe2, 0xea, 0x02, 0x32, 0xb9, 0x25, 0x4a, 0x9d, 0x27, 0x97, 0xf3, 0x4e, 0x8b, 0x73, 0x44};
+static const p8 sae0_kck[32] = {0x8a, 0x72, 0x79, 0xfd, 0x98, 0x2d, 0xcc, 0x65, 0xdc, 0xca, 0xb4, 0x60, 0x52, 0xc3, 0x0b, 0xb4, 0xe9, 0xb0, 0xd6, 0x09, 0x60, 0x56, 0x09, 0x45, 0x31, 0x86, 0x5b, 0x01, 0xf3, 0xb4, 0x95, 0x86};
+static const p8 sae0_pmk[32] = {0xff, 0xe0, 0x94, 0x47, 0xc7, 0x2c, 0x92, 0x39, 0xba, 0xa7, 0x88, 0x2b, 0x82, 0xef, 0x5d, 0x1f, 0x7b, 0x52, 0xc2, 0xfd, 0x93, 0x8b, 0x27, 0xa4, 0x4e, 0x2b, 0x62, 0x8c, 0xb5, 0x93, 0xa8, 0x3a};
+static const p8 sae0_pmkid[16] = {0x70, 0x2f, 0xf0, 0x43, 0x4f, 0x69, 0x86, 0x68, 0x2a, 0xcf, 0x25, 0x47, 0xc9, 0x72, 0x7e, 0xac};
+static const p8 sae0_confirm[32] = {0x5b, 0x7b, 0x31, 0x79, 0x99, 0x3f, 0xe3, 0x8e, 0x01, 0x87, 0x46, 0x99, 0xef, 0x13, 0x66, 0x7e, 0x46, 0xff, 0x60, 0xde, 0xd0, 0x33, 0x99, 0x53, 0xaf, 0xde, 0x07, 0xd5, 0x0a, 0x35, 0x03, 0x9b};
+static const p8 sae0_peer_confirm[32] = {0x7c, 0x3b, 0xea, 0x76, 0x1a, 0xb1, 0x1b, 0xa2, 0x5a, 0x14, 0xd9, 0x1f, 0xa8, 0x06, 0x2b, 0x80, 0xf0, 0xc2, 0x18, 0x71, 0x09, 0xce, 0x69, 0x74, 0xf5, 0xa5, 0xa3, 0x7c, 0x87, 0x62, 0x05, 0x11};
+static const p8 sae1_pwe[64] = {0x33, 0xcb, 0x00, 0x39, 0x98, 0x8a, 0xf7, 0xb2, 0xc4, 0x51, 0xd5, 0x83, 0x03, 0x12, 0x09, 0xfa, 0xa4, 0x2f, 0x3d, 0xc8, 0x54, 0xd0, 0xb0, 0x7d, 0x19, 0x38, 0xe8, 0x0a, 0xeb, 0x45, 0x08, 0x49, 0xa9, 0x36, 0x11, 0x26, 0x28, 0x36, 0xa9, 0xea, 0xe0, 0xee, 0xca, 0xe6, 0x1b, 0x76, 0xb5, 0x9b, 0xfd, 0x5f, 0xa6, 0xaf, 0xda, 0xe1, 0x8e, 0xdd, 0xd7, 0x1f, 0x87, 0x55, 0x7f, 0xae, 0x61, 0x07};
+static const p8 sae1_rand[32] = {0xe9, 0x7b, 0xda, 0x0b, 0x84, 0x04, 0x5d, 0x1f, 0x80, 0xa7, 0x24, 0x5c, 0x28, 0x59, 0x2a, 0xb6, 0x82, 0x64, 0xe4, 0x6b, 0x8b, 0x13, 0xc6, 0x0a, 0x7c, 0x28, 0x63, 0x81, 0xfc, 0xdc, 0x1f, 0x54};
+static const p8 sae1_scalar[32] = {0xde, 0x19, 0xc2, 0x8c, 0x0b, 0x03, 0x30, 0x93, 0x08, 0x47, 0x44, 0x8b, 0x79, 0xb3, 0x0c, 0x75, 0x19, 0x5d, 0xb9, 0xd1, 0xd1, 0x01, 0xcd, 0xdd, 0x4e, 0x7f, 0x30, 0x4e, 0x0d, 0x5b, 0x0b, 0x62};
+static const p8 sae1_element[64] = {0x6a, 0x80, 0x5a, 0xee, 0x75, 0xed, 0x03, 0x66, 0x28, 0xdd, 0x4a, 0x2b, 0x1a, 0xc1, 0x5c, 0xf8, 0x68, 0xeb, 0xb8, 0x3d, 0x0c, 0x15, 0xa0, 0x11, 0xa1, 0x7c, 0x6e, 0xd6, 0xc7, 0x1b, 0x31, 0xc5, 0xe7, 0xb1, 0x87, 0x8f, 0x12, 0x60, 0xf8, 0xf6, 0x47, 0x20, 0x99, 0xc6, 0xbf, 0x85, 0x8c, 0x74, 0xb8, 0x25, 0x52, 0x26, 0xdd, 0xc6, 0xfc, 0xe9, 0x7b, 0x5c, 0x61, 0x35, 0x2e, 0x78, 0xf1, 0xb0};
+static const p8 sae1_peer_scalar[32] = {0x55, 0xb6, 0x00, 0x3e, 0x5e, 0x8f, 0x8d, 0x3f, 0xdf, 0xa5, 0xd8, 0x48, 0x04, 0x26, 0x97, 0x46, 0x95, 0xbf, 0x02, 0xf3, 0xea, 0xa1, 0xe3, 0x81, 0xf1, 0x92, 0xb3, 0x62, 0x53, 0x0a, 0xae, 0xb4};
+static const p8 sae1_peer_element[64] = {0xb2, 0xcf, 0x72, 0xb0, 0xbc, 0x05, 0xdb, 0xf9, 0xea, 0x28, 0x92, 0xdc, 0xff, 0x40, 0xcc, 0xc9, 0xba, 0x3b, 0x2b, 0x20, 0x32, 0xd7, 0xab, 0x57, 0x1a, 0x8b, 0xa8, 0xac, 0x2a, 0x54, 0xff, 0x1a, 0xa9, 0x3d, 0xcd, 0x3f, 0xba, 0x73, 0x51, 0xdf, 0x9c, 0x31, 0xd5, 0xf2, 0xbe, 0xe1, 0xb7, 0xaa, 0xd3, 0xf1, 0x22, 0xa3, 0xb6, 0xa2, 0xd3, 0x2c, 0x2d, 0x4f, 0x55, 0xf8, 0x01, 0x65, 0x62, 0x8e};
+static const p8 sae1_kck[32] = {0x14, 0x55, 0xfa, 0x30, 0xd0, 0xfa, 0xfc, 0x3f, 0xca, 0x12, 0xa2, 0xa6, 0x76, 0xc6, 0xf5, 0x1f, 0xc1, 0x4e, 0x07, 0x48, 0x6d, 0xad, 0xd4, 0xf0, 0x8f, 0xbf, 0x80, 0x37, 0x19, 0xd7, 0xc4, 0x3a};
+static const p8 sae1_pmk[32] = {0xce, 0x92, 0x8d, 0x71, 0x70, 0x50, 0x32, 0x23, 0xa9, 0x7a, 0x2d, 0xa1, 0xb5, 0x20, 0x43, 0xcb, 0xb7, 0x16, 0xd3, 0x6a, 0x3a, 0x6f, 0x15, 0x7f, 0x3d, 0xfb, 0x77, 0x2e, 0x7e, 0xa3, 0x96, 0x06};
+static const p8 sae1_pmkid[16] = {0x33, 0xcf, 0xc2, 0xcb, 0x69, 0x92, 0xbd, 0xd1, 0xe7, 0xed, 0x1c, 0xd3, 0x7d, 0xd9, 0xa3, 0xbb};
+static const p8 sae1_confirm[32] = {0x8c, 0xd0, 0x01, 0xc6, 0xf7, 0x7c, 0x88, 0xab, 0xf2, 0x4f, 0x11, 0x34, 0x37, 0xdf, 0x81, 0xec, 0x5d, 0x71, 0x60, 0x48, 0xc0, 0x85, 0x53, 0xb2, 0x1f, 0x94, 0x6d, 0xa4, 0x49, 0x7d, 0xfc, 0xec};
+static const p8 sae1_peer_confirm[32] = {0xc4, 0x4d, 0xc5, 0xfe, 0x7f, 0xc8, 0xf1, 0xab, 0x56, 0xa1, 0xf4, 0xe3, 0x6e, 0x1c, 0x44, 0x93, 0x99, 0x65, 0x4f, 0x36, 0x86, 0x9d, 0x38, 0x0c, 0x97, 0xa2, 0x76, 0x98, 0x4f, 0x5e, 0xdb, 0xe9};
+static const p8 sae2_pwe[64] = {0xc2, 0x8f, 0xac, 0xcf, 0x97, 0x5a, 0x8e, 0x0c, 0x91, 0x11, 0x23, 0xf1, 0x4d, 0x3f, 0x65, 0xb6, 0x58, 0xec, 0x84, 0x7a, 0x57, 0x3e, 0xb0, 0xce, 0x39, 0x7c, 0xf3, 0x75, 0x0c, 0x33, 0x95, 0x19, 0x42, 0x54, 0x71, 0x97, 0xe6, 0x98, 0xe5, 0xa0, 0xce, 0x5d, 0x5b, 0x2f, 0xfe, 0x31, 0xa9, 0xa8, 0x31, 0xea, 0xd2, 0x88, 0x8f, 0xbc, 0xb6, 0xec, 0xbc, 0x6e, 0x48, 0xd6, 0x96, 0x30, 0x66, 0x4c};
+static const p8 sae2_rand[32] = {0x79, 0x4a, 0xb1, 0xa1, 0xb0, 0xf3, 0xdd, 0x97, 0xcf, 0x4d, 0x81, 0x41, 0x06, 0x0a, 0x1b, 0x5b, 0x5f, 0x70, 0xb9, 0xe3, 0x8b, 0x45, 0x62, 0xe8, 0x0d, 0x20, 0x39, 0x97, 0x70, 0xf7, 0xd3, 0x3b};
+static const p8 sae2_scalar[32] = {0x7c, 0x93, 0x46, 0xa2, 0x3a, 0xdb, 0x06, 0xa9, 0x3f, 0x27, 0x00, 0x49, 0x62, 0xd9, 0xfa, 0xf1, 0xa8, 0x65, 0x8b, 0x24, 0xf8, 0x21, 0xdf, 0x50, 0x21, 0x0a, 0xd0, 0x57, 0x7e, 0x67, 0x24, 0x52};
+static const p8 sae2_element[64] = {0x9a, 0xee, 0x1f, 0xea, 0x01, 0x2d, 0x8a, 0x5e, 0x9a, 0xf8, 0x89, 0x04, 0xc8, 0x12, 0x6d, 0x76, 0x88, 0xbb, 0xf0, 0x11, 0x9d, 0xa9, 0x20, 0x9b, 0xbe, 0xf3, 0xf5, 0xae, 0xbb, 0x03, 0x14, 0xf0, 0x86, 0xac, 0xeb, 0x86, 0xf4, 0x7e, 0x8e, 0x3b, 0xe6, 0x72, 0xdc, 0xb4, 0x51, 0x76, 0x83, 0xe6, 0xb5, 0x83, 0xfc, 0xf4, 0x96, 0x18, 0x9e, 0x9f, 0x06, 0xc2, 0xee, 0x1f, 0x2a, 0x87, 0x3e, 0x4c};
+static const p8 sae2_peer_scalar[32] = {0x80, 0x90, 0x5d, 0x81, 0x94, 0x9d, 0x9b, 0x8a, 0x8f, 0x3e, 0xc3, 0x30, 0x1a, 0x83, 0x2b, 0xa5, 0xaf, 0x88, 0xa7, 0x09, 0xe9, 0xde, 0xfa, 0x85, 0x98, 0x2b, 0x11, 0x2a, 0x0a, 0x20, 0xd1, 0xbc};
+static const p8 sae2_peer_element[64] = {0x53, 0xba, 0xe1, 0xc2, 0xb8, 0xf7, 0x20, 0xf2, 0xe0, 0x71, 0x49, 0xb3, 0xa1, 0x02, 0xf0, 0x90, 0x80, 0xe7, 0xbd, 0xf2, 0x3e, 0xc3, 0x02, 0x4f, 0x9a, 0x8c, 0xb2, 0xa0, 0x0e, 0x16, 0x62, 0x3b, 0x2f, 0x15, 0xd9, 0x77, 0x1c, 0x0b, 0xd7, 0x5e, 0x3e, 0xe0, 0xac, 0x12, 0x23, 0x75, 0xbd, 0x86, 0x83, 0x23, 0xec, 0x48, 0x35, 0x30, 0x5e, 0x8d, 0x7e, 0x80, 0x94, 0x78, 0xf8, 0x66, 0x0a, 0x55};
+static const p8 sae2_kck[32] = {0x05, 0xbf, 0xef, 0xbb, 0xa9, 0xf1, 0xb1, 0x51, 0x1a, 0x6c, 0xc7, 0x17, 0x97, 0xa1, 0x92, 0x11, 0x5a, 0xba, 0x05, 0x78, 0x73, 0x5b, 0xbb, 0xb5, 0xb1, 0xcf, 0x99, 0x40, 0x5e, 0xf4, 0xf9, 0x94};
+static const p8 sae2_pmk[32] = {0xfd, 0xe3, 0x80, 0x5c, 0x91, 0xd9, 0x1c, 0xc7, 0xcb, 0x06, 0x58, 0x9a, 0x9c, 0x41, 0x5a, 0x45, 0x64, 0x87, 0x8b, 0x86, 0x66, 0x58, 0x81, 0x7b, 0xd4, 0x1e, 0x4a, 0xd7, 0xd3, 0xf3, 0x06, 0x88};
+static const p8 sae2_pmkid[16] = {0xfd, 0x23, 0xa4, 0x23, 0xcf, 0x78, 0xa2, 0x33, 0xce, 0x65, 0xc3, 0x79, 0x7d, 0x5d, 0x26, 0x97};
+static const p8 sae2_confirm[32] = {0x78, 0x43, 0x83, 0x70, 0x28, 0xff, 0x91, 0x36, 0xe6, 0x58, 0xdf, 0xcb, 0x9b, 0x03, 0x39, 0x8c, 0x1c, 0x59, 0x69, 0x85, 0xe4, 0x6a, 0x6b, 0x4a, 0xd9, 0x80, 0xc8, 0x44, 0x1e, 0xec, 0x04, 0xbe};
+static const p8 sae2_peer_confirm[32] = {0x05, 0x48, 0x9b, 0x4f, 0x43, 0xd7, 0x20, 0xf4, 0x1f, 0xb0, 0x0e, 0xe3, 0x06, 0xe8, 0xf1, 0x5d, 0x01, 0x9e, 0x27, 0x6b, 0xff, 0x67, 0x13, 0x9e, 0xc1, 0xd7, 0x00, 0x95, 0x72, 0x19, 0xbd, 0x42};
+static const p8 sae3_pwe[64] = {0x66, 0x72, 0x57, 0xe7, 0x41, 0x35, 0xd8, 0xf7, 0x91, 0x57, 0xf8, 0x15, 0x79, 0x69, 0x4d, 0xc2, 0x23, 0xb6, 0xd8, 0x1d, 0x23, 0xfb, 0xf8, 0x52, 0xcd, 0xf9, 0xb4, 0x15, 0xb9, 0x21, 0x41, 0xc6, 0x3e, 0xf6, 0x35, 0x04, 0x13, 0x32, 0xef, 0xd0, 0xc8, 0xf1, 0xb1, 0xa9, 0x61, 0x53, 0xf9, 0x8c, 0x7b, 0xf2, 0x9c, 0xf3, 0xde, 0xb8, 0x41, 0xa4, 0x5e, 0x4a, 0xd9, 0x68, 0x0e, 0x3c, 0xb4, 0x80};
+static const p8 sae3_rand[32] = {0x11, 0xc0, 0xac, 0xa2, 0xb8, 0x48, 0x6b, 0x24, 0xbf, 0x53, 0x34, 0x80, 0xc3, 0x31, 0x22, 0xf4, 0x7b, 0x5f, 0x25, 0x46, 0xe8, 0x40, 0x29, 0x92, 0x17, 0x88, 0xac, 0xd2, 0xe3, 0x90, 0xb6, 0xa2};
+static const p8 sae3_scalar[32] = {0xc6, 0x51, 0xf1, 0x64, 0x70, 0x4c, 0x0b, 0x8f, 0xfc, 0x04, 0x7c, 0xb7, 0x1b, 0xda, 0x66, 0x6a, 0xb3, 0xb7, 0x30, 0xd9, 0x5f, 0x27, 0x63, 0x3d, 0x85, 0x70, 0x97, 0x29, 0x2f, 0x3f, 0xf1, 0x1e};
+static const p8 sae3_element[64] = {0x7e, 0x2c, 0x21, 0x6d, 0x0a, 0xae, 0x76, 0x07, 0x25, 0x35, 0xb7, 0x66, 0xc2, 0x7a, 0x50, 0xf6, 0x79, 0x6c, 0x3e, 0x4f, 0x3c, 0x93, 0x35, 0x3c, 0xaa, 0x0a, 0x34, 0x0c, 0x59, 0xce, 0x3e, 0x19, 0x46, 0xbc, 0xd9, 0x60, 0x21, 0x61, 0xdd, 0x2f, 0xc4, 0x4f, 0xab, 0xa5, 0x4e, 0x7a, 0x61, 0xb6, 0x7a, 0x00, 0x99, 0x7c, 0x7d, 0x90, 0x6a, 0x42, 0xfb, 0x50, 0xef, 0x09, 0x19, 0x90, 0xd3, 0xbe};
+static const p8 sae3_peer_scalar[32] = {0x16, 0x91, 0x16, 0xf8, 0xc9, 0xd5, 0x05, 0x8a, 0x53, 0xda, 0x85, 0x80, 0xa0, 0x5f, 0xd4, 0x0e, 0x0c, 0xa0, 0x63, 0xf5, 0x5c, 0x04, 0x29, 0xb2, 0x5b, 0x0d, 0xa0, 0x5a, 0x3a, 0x95, 0x17, 0x90};
+static const p8 sae3_peer_element[64] = {0x21, 0x28, 0x3c, 0x73, 0xc2, 0xf7, 0xdd, 0xfb, 0xda, 0x7a, 0x4e, 0xf0, 0x14, 0xff, 0xbf, 0x80, 0xc0, 0x9b, 0x15, 0x27, 0x22, 0x03, 0xba, 0xf0, 0xbd, 0x65, 0x79, 0x26, 0xd5, 0x7e, 0x34, 0xef, 0xec, 0x09, 0xee, 0x02, 0x77, 0x69, 0xc9, 0x7d, 0x0f, 0xb9, 0x5a, 0x30, 0x3f, 0x58, 0x8d, 0x02, 0xde, 0x95, 0x7a, 0xfa, 0xfc, 0x81, 0xad, 0x00, 0xd3, 0xfb, 0xb4, 0xf9, 0x9a, 0x07, 0x08, 0xdc};
+static const p8 sae3_kck[32] = {0xad, 0xf1, 0x4e, 0xfd, 0xe4, 0x4c, 0xd8, 0xb7, 0x3b, 0xa8, 0x2c, 0xfa, 0x30, 0xfa, 0x6d, 0x2c, 0x8a, 0x41, 0x33, 0x51, 0x4b, 0x1e, 0x5a, 0xc5, 0xf6, 0x57, 0x0f, 0xf9, 0x22, 0x4f, 0x80, 0x98};
+static const p8 sae3_pmk[32] = {0x2e, 0x95, 0x53, 0xca, 0xc7, 0x33, 0x28, 0x1e, 0x0c, 0x78, 0x37, 0xca, 0xa3, 0x22, 0x5f, 0x40, 0x38, 0xa7, 0x35, 0x6c, 0x61, 0x34, 0xea, 0x00, 0x95, 0x0a, 0x88, 0xfb, 0xcc, 0x66, 0xe6, 0x7c};
+static const p8 sae3_pmkid[16] = {0xdc, 0xe3, 0x08, 0x5d, 0x3a, 0x21, 0x11, 0x1a, 0x4f, 0xdf, 0x02, 0x37, 0xbc, 0x3a, 0x3a, 0x78};
+static const p8 sae3_confirm[32] = {0x6b, 0x28, 0x79, 0x77, 0x8c, 0x3c, 0xbf, 0xc4, 0x94, 0x86, 0xf4, 0x35, 0x9d, 0x87, 0xc7, 0x50, 0x2c, 0x47, 0x47, 0x80, 0xbd, 0x02, 0x43, 0x97, 0xe5, 0xb7, 0x30, 0x3b, 0x30, 0x97, 0x67, 0x43};
+static const p8 sae3_peer_confirm[32] = {0x89, 0x1e, 0x90, 0x02, 0x2b, 0xff, 0xce, 0xee, 0x6a, 0x29, 0x7a, 0xb4, 0x97, 0xe2, 0x3f, 0x53, 0x79, 0xe0, 0xde, 0xfb, 0x80, 0xce, 0x15, 0x98, 0xf5, 0x01, 0xa1, 0xd2, 0xc7, 0x5a, 0x13, 0x9a};
+static const p8 kdf_pmk[32] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+static const p8 kdf_anonce[32] = {0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83};
+static const p8 kdf_snonce[32] = {0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7};
+static const p8 kdf_ptk[48] = {0xf9, 0xf1, 0xe7, 0x2f, 0x64, 0x83, 0xe3, 0x04, 0xe1, 0x07, 0x17, 0xe1, 0x85, 0xad, 0x39, 0xbe, 0x33, 0x50, 0xf0, 0xc0, 0x45, 0xa1, 0xca, 0x99, 0xd4, 0xfc, 0x43, 0x3f, 0xc6, 0xfb, 0x84, 0x98, 0x5c, 0x8c, 0x5e, 0x99, 0x96, 0x0f, 0xde, 0x49, 0x50, 0x01, 0xbd, 0x5a, 0x87, 0xfa, 0x58, 0xb0};
+
+static bool wls_same(const p8 address_to a, const p8 address_to b, positive n)
+{
+        return !memory_compare(a, b, n);
+}
+
+static fn wifi_key_checks(void)
+{
+        static const p8 key[16] = {0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                                   0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c};
+        static const p8 message[64] = {
+            0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+            0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+            0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11, 0xe5, 0xfb, 0xc1, 0x19, 0x1a, 0x0a, 0x52, 0xef,
+            0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17, 0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10};
+        static const p8 tag0[16] = {0xbb, 0x1d, 0x69, 0x29, 0xe9, 0x59, 0x37, 0x28,
+                                    0x7f, 0xa3, 0x7d, 0x12, 0x9b, 0x75, 0x67, 0x46};
+        static const p8 tag16[16] = {0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d, 0x41, 0x44,
+                                     0xf7, 0x9b, 0xdd, 0x9d, 0xd0, 0x4a, 0x28, 0x7c};
+        static const p8 tag40[16] = {0xdf, 0xa6, 0x67, 0x47, 0xde, 0x9a, 0xe6, 0x30,
+                                     0x30, 0xca, 0x32, 0x61, 0x14, 0x97, 0xc8, 0x27};
+        static const p8 tag64[16] = {0x51, 0xf0, 0xbe, 0xbf, 0x7e, 0x3b, 0x9d, 0x92,
+                                     0xfc, 0x49, 0x74, 0x17, 0x79, 0x36, 0x3c, 0xfe};
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 station[6] = {2, 0, 0, 0, 2, 0};
+        p8 mac[16];
+        p8 ptk[64];
+        p8 rsn[48];
+        static const p8 rsn_pmf[28] = {0x30, 0x1a, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+                                       0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02,
+                                       0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xac, 0x06};
+        static const p8 rsn_plain[22] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+                                         0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
+                                         0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
+
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 0, mac);
+        check("AES-CMAC of nothing (RFC 4493)", wls_same(mac, tag0, 16));
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 16, mac);
+        check("AES-CMAC of one block (RFC 4493)", wls_same(mac, tag16, 16));
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 40, mac);
+        check("AES-CMAC of forty bytes (RFC 4493)", wls_same(mac, tag40, 16));
+        crypto_aes_cmac((p8 address_to)key, (p8 address_to)message, 64, mac);
+        check("AES-CMAC of four blocks (RFC 4493)", wls_same(mac, tag64, 16));
+
+        memory_fill(ptk, 0, sizeof(ptk));
+        wifi_ptk((p8 address_to)kdf_pmk, (p8 address_to)access, (p8 address_to)station,
+                 (p8 address_to)kdf_anonce, (p8 address_to)kdf_snonce, ptk, 6);
+        check("the PTK of PSK-SHA256 by the KDF of 802.11-2016", wls_same(ptk, kdf_ptk, 48));
+        //      SAE's PTK is the same KDF, which a key descriptor version of 0 must not turn
+        //      back into the HMAC-SHA1 of PSK.
+        memory_fill(ptk, 0, sizeof(ptk));
+        wifi_ptk((p8 address_to)kdf_pmk, (p8 address_to)access, (p8 address_to)station,
+                 (p8 address_to)kdf_anonce, (p8 address_to)kdf_snonce, ptk, 8);
+        check("and the PTK of SAE is that one too", wls_same(ptk, kdf_ptk, 48));
+        check("the key descriptor version is 2 for PSK, 3 for PSK-SHA256 and 0 (as the suite defines) for SAE",
+              wifi_key_version(2) == 2 && wifi_key_version(6) == 3 && wifi_key_version(8) == 0);
+
+        check("the RSN element without protection is what it always was",
+              wifi_rsn_build(rsn, 2, 0, null) == 22 && wls_same(rsn, rsn_plain, 22));
+        check("the RSN element with protection capable and required is wpa_supplicant's",
+              wifi_rsn_build(rsn, 2, 3, null) == 28 && wls_same(rsn, rsn_pmf, 28));
+}
+
+/*
+        Hash-to-element against the same Python reference: the simplified SWU map
+        of six values of u (zero, where m is zero, among them), and PT and the
+        element of two stations for four names and passwords.
+*/
+static const p8 h2e0_pt[64] = {0x14, 0x15, 0x5e, 0x65, 0x7b, 0xd5, 0xa6, 0x00, 0xa5, 0x21, 0x64, 0xe2, 0xe5, 0xd7, 0x39, 0xde, 0xd8, 0x17, 0xee, 0x75, 0xc5, 0x29, 0x23, 0xd9, 0x82, 0x8d, 0x50, 0x7c, 0xa7, 0x32, 0xa9, 0xe2, 0xcc, 0xee, 0x48, 0x04, 0xfa, 0x6e, 0x05, 0x1e, 0x21, 0x38, 0x3a, 0xb8, 0xb0, 0xb8, 0x8d, 0x61, 0x4a, 0x60, 0x04, 0xc5, 0x67, 0xde, 0xd4, 0xef, 0x68, 0xca, 0xf4, 0xed, 0x53, 0xba, 0x50, 0x5c};
+static const p8 h2e0_pwe[64] = {0x65, 0x23, 0x5c, 0x01, 0x83, 0xc1, 0xf9, 0x44, 0xb0, 0x5d, 0xae, 0x89, 0x99, 0x3f, 0x38, 0x9e, 0x70, 0x16, 0x8c, 0x0d, 0xa5, 0x97, 0xe7, 0x8c, 0xc1, 0x42, 0x95, 0xd6, 0x15, 0x6c, 0x00, 0x11, 0xf9, 0x6b, 0x6b, 0x7c, 0x1b, 0x5a, 0x2d, 0x09, 0x47, 0x17, 0x66, 0x2e, 0x88, 0x52, 0x7c, 0x96, 0x69, 0xca, 0xf4, 0x42, 0x92, 0x80, 0x4c, 0x25, 0x4e, 0x7f, 0xed, 0x05, 0x38, 0x38, 0x59, 0x0e};
+static const p8 h2e1_pt[64] = {0xf7, 0x56, 0x1a, 0xfa, 0x28, 0x1c, 0x05, 0xbe, 0x91, 0x02, 0x4b, 0x77, 0x86, 0xa8, 0xae, 0x72, 0xca, 0x02, 0xc0, 0x54, 0x7e, 0x72, 0xb2, 0x91, 0x10, 0x49, 0x76, 0x3f, 0x6d, 0x20, 0x5f, 0x0b, 0x32, 0x6c, 0x75, 0xde, 0x96, 0xf3, 0xce, 0xb3, 0xd1, 0x96, 0xd8, 0x91, 0x50, 0x53, 0x5b, 0x28, 0x4e, 0x5f, 0xbe, 0xe3, 0x47, 0xe1, 0x7a, 0x46, 0xa6, 0xe6, 0xef, 0x59, 0x85, 0x0e, 0x8a, 0x64};
+static const p8 h2e1_pwe[64] = {0xb9, 0x5b, 0x64, 0x57, 0x14, 0xf1, 0x93, 0xa7, 0xca, 0x61, 0x25, 0x39, 0x9f, 0xed, 0x3e, 0xb0, 0xed, 0xce, 0xa3, 0xc9, 0xbb, 0x86, 0x3d, 0x64, 0x09, 0xbb, 0x56, 0x1a, 0x53, 0x3f, 0xea, 0xed, 0x83, 0x6c, 0x46, 0x93, 0xc2, 0x97, 0x87, 0x12, 0xfd, 0xaa, 0x21, 0xee, 0x31, 0x10, 0x8a, 0x7a, 0x18, 0x73, 0x43, 0xe7, 0x80, 0xa3, 0x6d, 0xae, 0xe1, 0x9f, 0x96, 0xb4, 0xcf, 0x7f, 0x94, 0x1e};
+static const p8 h2e2_pt[64] = {0xac, 0x0d, 0xa4, 0x15, 0x7e, 0xa3, 0xe1, 0xd8, 0x5d, 0x4a, 0xce, 0xcb, 0x43, 0x58, 0x84, 0x63, 0xa1, 0x90, 0x9d, 0x43, 0x98, 0xac, 0x65, 0x53, 0xa4, 0xbe, 0x7c, 0x8f, 0x51, 0xdd, 0x02, 0x96, 0xb1, 0xab, 0x62, 0x38, 0x8a, 0x35, 0x6c, 0x22, 0xf1, 0x91, 0x72, 0xfc, 0x64, 0xb5, 0x84, 0xe3, 0xfa, 0x51, 0x52, 0x27, 0x1f, 0x16, 0x7c, 0x60, 0xf2, 0x1e, 0xd9, 0x72, 0x16, 0x63, 0xdf, 0x9f};
+static const p8 h2e2_pwe[64] = {0x29, 0x5e, 0x14, 0x2b, 0xa3, 0x10, 0xdd, 0x00, 0x47, 0xda, 0xf7, 0x8c, 0xbf, 0xaa, 0x64, 0x19, 0xd2, 0x2a, 0x48, 0xd2, 0x35, 0xda, 0x93, 0x27, 0x57, 0x90, 0x6e, 0xb5, 0x02, 0x79, 0x6d, 0x51, 0x75, 0x9d, 0x9d, 0x73, 0x88, 0x32, 0x0c, 0xcb, 0xa2, 0xf1, 0x72, 0xea, 0x74, 0x33, 0xc6, 0xf5, 0x83, 0x47, 0xe3, 0xd5, 0x4b, 0xaf, 0x3c, 0x7a, 0x49, 0x3f, 0x5b, 0x15, 0x50, 0x55, 0x69, 0xa6};
+static const p8 h2e3_pt[64] = {0xdf, 0xaa, 0xaa, 0xca, 0xed, 0x6b, 0xad, 0x8f, 0x02, 0x16, 0x28, 0x05, 0x8b, 0xaa, 0x46, 0x84, 0x64, 0x23, 0x6b, 0x08, 0xb1, 0xcf, 0x3c, 0xfc, 0x86, 0x3e, 0xd6, 0xeb, 0x25, 0x71, 0xd8, 0x12, 0xd6, 0xd1, 0xc1, 0x4b, 0x78, 0x68, 0x1e, 0x78, 0x65, 0x05, 0x2d, 0xbf, 0xe9, 0xab, 0x15, 0xaa, 0x74, 0xb1, 0xad, 0x30, 0xb0, 0x25, 0x20, 0xaa, 0x97, 0x7b, 0xa9, 0xd5, 0x91, 0x0a, 0x71, 0x81};
+static const p8 h2e3_pwe[64] = {0x30, 0x44, 0x18, 0x71, 0x65, 0xaa, 0x8b, 0x75, 0xd9, 0x82, 0x4d, 0x4a, 0x5f, 0xd6, 0xc2, 0x31, 0x4f, 0xab, 0xa3, 0x75, 0x20, 0xc0, 0x43, 0xed, 0xa4, 0x08, 0x47, 0x8c, 0x89, 0x17, 0xe6, 0x46, 0x68, 0x6c, 0x91, 0x30, 0xdb, 0x81, 0x2c, 0x69, 0x2e, 0xe1, 0x37, 0xf3, 0xb9, 0x72, 0x30, 0x96, 0xa6, 0x14, 0xde, 0x33, 0x27, 0x55, 0xd6, 0x4a, 0x97, 0xc4, 0x83, 0x5e, 0xf1, 0x79, 0xbf, 0x06};
+static const p8 sswu0_u[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const p8 sswu0_p[64] = {0xa5, 0x28, 0xbd, 0x86, 0x96, 0xbd, 0xaf, 0x99, 0x6c, 0x65, 0xb9, 0x82, 0xd9, 0x49, 0x59, 0xd3, 0x14, 0x6f, 0xe6, 0xa0, 0x20, 0x69, 0x30, 0x90, 0xbd, 0xba, 0x13, 0x13, 0x23, 0x75, 0xf2, 0x24, 0x0e, 0x5f, 0xb7, 0x3d, 0x16, 0x79, 0x1c, 0xe3, 0x58, 0xfb, 0x5a, 0xdb, 0x2d, 0x33, 0x66, 0x8a, 0x3b, 0x24, 0x09, 0x9f, 0xd8, 0xd4, 0x01, 0xf6, 0x68, 0x5e, 0x0e, 0x99, 0x4f, 0xb4, 0xd7, 0x56};
+static const p8 sswu1_u[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+static const p8 sswu1_p[64] = {0xdb, 0x46, 0x98, 0xc8, 0x49, 0x7d, 0xef, 0x7b, 0x64, 0x76, 0x53, 0xb9, 0x3f, 0xac, 0xc5, 0x1d, 0x5c, 0xdd, 0x38, 0x4d, 0x64, 0x27, 0x95, 0xb7, 0x7e, 0x59, 0x6b, 0x88, 0x9f, 0x6f, 0xac, 0xc7, 0x27, 0xe8, 0x6f, 0x68, 0x7c, 0xa9, 0x4e, 0x26, 0xb6, 0x55, 0x50, 0x8b, 0x3b, 0xfe, 0xc3, 0x6e, 0x3e, 0x73, 0xa4, 0x74, 0xc9, 0xf7, 0x91, 0x49, 0x31, 0xf0, 0x9c, 0x6e, 0x91, 0xd3, 0xfa, 0x5b};
+static const p8 sswu2_u[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+static const p8 sswu2_p[64] = {0xea, 0xcd, 0xd1, 0x85, 0x01, 0xea, 0x13, 0x40, 0x3e, 0x4f, 0x3b, 0x60, 0x9b, 0xcb, 0xed, 0x7c, 0xde, 0x8d, 0xac, 0xbc, 0xc1, 0x08, 0xe1, 0x0a, 0xcc, 0xf2, 0x3e, 0xde, 0xaf, 0xf6, 0x78, 0x9f, 0x99, 0x9c, 0xba, 0xc0, 0xbc, 0x3d, 0x06, 0x75, 0x57, 0x49, 0x3e, 0xdb, 0x9b, 0x22, 0xfe, 0xb1, 0x62, 0x3c, 0x7a, 0x64, 0xcb, 0x69, 0x25, 0x58, 0x01, 0xba, 0x63, 0x4d, 0xbb, 0xe7, 0x95, 0x5a};
+static const p8 sswu3_u[32] = {0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe};
+static const p8 sswu3_p[64] = {0xdb, 0x46, 0x98, 0xc8, 0x49, 0x7d, 0xef, 0x7b, 0x64, 0x76, 0x53, 0xb9, 0x3f, 0xac, 0xc5, 0x1d, 0x5c, 0xdd, 0x38, 0x4d, 0x64, 0x27, 0x95, 0xb7, 0x7e, 0x59, 0x6b, 0x88, 0x9f, 0x6f, 0xac, 0xc7, 0xd8, 0x17, 0x90, 0x96, 0x83, 0x56, 0xb1, 0xda, 0x49, 0xaa, 0xaf, 0x74, 0xc4, 0x01, 0x3c, 0x91, 0xc1, 0x8c, 0x5b, 0x8c, 0x36, 0x08, 0x6e, 0xb6, 0xce, 0x0f, 0x63, 0x91, 0x6e, 0x2c, 0x05, 0xa4};
+static const p8 sswu4_u[32] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+static const p8 sswu4_p[64] = {0xc9, 0x8a, 0x04, 0x68, 0xfd, 0x11, 0x62, 0xee, 0xad, 0xef, 0x0d, 0x18, 0xe5, 0x04, 0x71, 0xf1, 0xe6, 0xfc, 0xd0, 0xb8, 0x1b, 0x5f, 0x09, 0xe2, 0xa7, 0xef, 0x8b, 0x79, 0xc1, 0xb5, 0xf2, 0xe3, 0x02, 0x52, 0x2e, 0x18, 0x42, 0xcd, 0x0e, 0xb8, 0xef, 0xce, 0x62, 0x9e, 0x89, 0x9c, 0x9e, 0x81, 0xbc, 0x8b, 0xd5, 0x45, 0x05, 0xdc, 0x35, 0xdf, 0x41, 0x30, 0x2f, 0x03, 0x92, 0x1b, 0xcf, 0x09};
+static const p8 sswu5_u[32] = {0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+static const p8 sswu5_p[64] = {0x91, 0xf5, 0xe3, 0x9a, 0x5a, 0x89, 0x47, 0x6f, 0xec, 0xc0, 0x0d, 0x7b, 0x1f, 0x42, 0x8e, 0x39, 0x23, 0x7d, 0xce, 0x46, 0x52, 0xfc, 0xfe, 0x18, 0x87, 0xfb, 0xa3, 0xf7, 0x47, 0xbe, 0x61, 0x77, 0x09, 0x2b, 0xaf, 0x09, 0x59, 0x63, 0x30, 0x89, 0xb1, 0xfb, 0xa8, 0x12, 0x3f, 0xb5, 0x3d, 0x0e, 0x12, 0x94, 0x17, 0xa3, 0x89, 0x9a, 0x29, 0x03, 0x3e, 0xd6, 0x18, 0x4c, 0x91, 0x95, 0xc3, 0x3f};
+
+static fn wifi_h2e_checks(void)
+{
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 station[6] = {2, 0, 0, 0, 2, 0};
+        static const struct
+        {
+                string_address ssid;
+                positive ssid_length;
+                string_address password;
+                const p8 *pt, *pwe;
+        } h2e[] = {
+            {"saeh2", 5, "hostapd-sae-2", h2e0_pt, h2e0_pwe},
+            {"Example", 7, "password1", h2e1_pt, h2e1_pwe},
+            {"a", 1, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", h2e2_pt, h2e2_pwe},
+            {"\xe6\x97\xa5\xe6\x9c\xac-", 7, "p\xc3\xa4ssw\xc3\xb6rd", h2e3_pt, h2e3_pwe},
+        };
+        static const p8 *const sswu_u[6] = {sswu0_u, sswu1_u, sswu2_u, sswu3_u, sswu4_u, sswu5_u};
+        static const p8 *const sswu_p[6] = {sswu0_p, sswu1_p, sswu2_p, sswu3_p, sswu4_p, sswu5_p};
+        p64 u[CRYPTO_FE_MAX], x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+        p8 point[64];
+        p8 element[64];
+        p8 got[64];
+
+        for (positive at = 0; at < 6; at++)
+        {
+                crypto_fe_load_be(u, (p8 address_to)sswu_u[at], 4);
+                wifi_sae_sswu(x, y, u);
+                crypto_fe_store_be(got, x, 4);
+                crypto_fe_store_be(got + 32, y, 4);
+                check("the simplified SWU map of a value of u", wls_same(got, sswu_p[at], 64));
+        }
+        for (positive at = 0; at < sizeof(h2e) / sizeof(h2e[0]); at++)
+        {
+                check("PT of a network's name and password",
+                      wifi_sae_pt((p8 address_to)h2e[at].ssid, h2e[at].ssid_length,
+                                  (p8 address_to)h2e[at].password, string_length(h2e[at].password),
+                                  point) &&
+                              wls_same(point, h2e[at].pt, 64));
+                check("the element of two stations from PT",
+                      wifi_sae_pwe_from_pt((p8 address_to)h2e[at].pt, (p8 address_to)station,
+                                           (p8 address_to)access, element) &&
+                              wls_same(element, h2e[at].pwe, 64));
+                check("and it does not depend on which address is ours",
+                      wifi_sae_pwe_from_pt((p8 address_to)h2e[at].pt, (p8 address_to)access,
+                                           (p8 address_to)station, element) &&
+                              wls_same(element, h2e[at].pwe, 64));
+        }
+}
+
+static fn wifi_sae_checks(void)
+{
+        static const struct
+        {
+                string_address password;
+                const p8 *pwe, *rand, *scalar, *element, *peer_scalar, *peer_element, *kck, *pmk,
+                    *pmkid, *confirm, *peer_confirm;
+        } sae[] = {
+            {"abcdefgh12345678", sae0_pwe, sae0_rand, sae0_scalar, sae0_element, sae0_peer_scalar,
+             sae0_peer_element, sae0_kck, sae0_pmk, sae0_pmkid, sae0_confirm, sae0_peer_confirm},
+            {"mekmitasdigoat", sae1_pwe, sae1_rand, sae1_scalar, sae1_element, sae1_peer_scalar,
+             sae1_peer_element, sae1_kck, sae1_pmk, sae1_pmkid, sae1_confirm, sae1_peer_confirm},
+            {"password1", sae2_pwe, sae2_rand, sae2_scalar, sae2_element, sae2_peer_scalar,
+             sae2_peer_element, sae2_kck, sae2_pmk, sae2_pmkid, sae2_confirm, sae2_peer_confirm},
+            {"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", sae3_pwe, sae3_rand, sae3_scalar,
+             sae3_element, sae3_peer_scalar, sae3_peer_element, sae3_kck, sae3_pmk, sae3_pmkid,
+             sae3_confirm, sae3_peer_confirm},
+        };
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 station[6] = {2, 0, 0, 0, 2, 0};
+        p8 rsn[48];
+        bool parity = true;
+
+        check("the RSN element of SAE carries the PMKID and BIP-CMAC-128",
+              wifi_rsn_build(rsn, 8, 3, (p8 address_to)sae0_pmkid) == 44 && rsn[1] == 42 &&
+                      rsn[19] == 8 && rsn[20] == 0xc0 && rsn[22] == 1 &&
+                      wls_same(rsn + 24, sae0_pmkid, 16) && rsn[43] == 6);
+
+        for (positive at = 0; at < sizeof(sae) / sizeof(sae[0]); at++)
+        {
+                wifi_sae side;
+                wifi_sae other;
+                p8 sum[64];
+                p8 want[32];
+                p8 bad[64];
+                p8 zeros[32];
+                p8 one[32];
+
+                memory_fill(address_of side, 0, sizeof(side));
+                memory_fill(zeros, 0, 32);
+                memory_fill(one, 0, 32);
+                one[31] = 1;
+                check("the password element of a password, by hunting and pecking",
+                      wifi_sae_pwe((p8 address_to)sae[at].password,
+                                   string_length(sae[at].password), (p8 address_to)station,
+                                   (p8 address_to)access, side.pwe) &&
+                              wls_same(side.pwe, sae[at].pwe, 64));
+                //      The same element whichever address is named first.
+                memory_fill(address_of other, 0, sizeof(other));
+                check("and it does not depend on which address is ours",
+                      wifi_sae_pwe((p8 address_to)sae[at].password,
+                                   string_length(sae[at].password), (p8 address_to)access,
+                                   (p8 address_to)station, other.pwe) &&
+                              wls_same(other.pwe, sae[at].pwe, 64));
+                memory_copy(side.rand, sae[at].rand, 32);
+                memory_copy(side.scalar, sae[at].scalar, 32);
+                memory_copy(side.element, sae[at].element, 64);
+                check("the commit of the access point is taken in",
+                      wifi_sae_commit_good(address_of side, sae[at].peer_scalar,
+                                           sae[at].peer_element) &&
+                          wifi_sae_take(address_of side, (p8 address_to)sae[at].peer_scalar,
+                                        (p8 address_to)sae[at].peer_element));
+                check("and it gives the KCK, the PMK and the PMKID",
+                      wls_same(side.kck, sae[at].kck, 32) && wls_same(side.pmk, sae[at].pmk, 32) &&
+                              wls_same(side.pmkid, sae[at].pmkid, 16));
+                sum[0] = 1, sum[1] = 0;
+                wifi_sae_confirm(side.kck, sum, side.scalar, side.element, side.peer_scalar,
+                                 side.peer_element, want);
+                check("our confirm", wls_same(want, sae[at].confirm, 32));
+                sum[0] = 7;
+                wifi_sae_confirm(side.kck, sum, side.peer_scalar, side.peer_element, side.scalar,
+                                 side.element, want);
+                check("and the one the access point sends, with its own counter",
+                      wls_same(want, sae[at].peer_confirm, 32));
+
+                //      A commit made here: scalar * PWE + element = rand * PWE.
+                memory_fill(address_of other, 0, sizeof(other));
+                memory_copy(other.pwe, sae[at].pwe, 64);
+                parity = wifi_sae_commit(address_of other) &&
+                         wifi_sae_multiply(sum, other.scalar, other.pwe) &&
+                         wifi_sae_multiply(bad, other.rand, other.pwe);
+                if (parity)
+                {
+                        crypto_point one_point, two_point, total;
+                        p64 x[CRYPTO_FE_MAX], y[CRYPTO_FE_MAX];
+
+                        crypto_fe_load_be(x, sum, 4);
+                        crypto_fe_load_be(y, sum + 32, 4);
+                        crypto_point_set_xy(address_of one_point, x, y, address_of crypto_p256_field);
+                        crypto_fe_load_be(x, other.element, 4);
+                        crypto_fe_load_be(y, other.element + 32, 4);
+                        crypto_point_set_xy(address_of two_point, x, y, address_of crypto_p256_field);
+                        crypto_point_add(address_of total, address_of one_point, address_of two_point);
+                        crypto_point_affine(address_of total);
+                        crypto_fe_store_be(want, total.x, 4);
+                        parity = wls_same(want, bad, 32);
+                }
+                check("a commit made here is scalar * PWE + element = rand * PWE", parity);
+
+                //      Malformed commits are refused, before any of the
+                //      multiplications a commit taken in costs.
+                check("a commit whose scalar is zero is refused",
+                      !wifi_sae_commit_good(address_of side, zeros, sae[at].peer_element));
+                check("one whose scalar is one is refused",
+                      !wifi_sae_commit_good(address_of side, one, sae[at].peer_element));
+                memory_copy(bad, sae[at].peer_element, 64);
+                bad[63] ^= 1;
+                check("one whose element is off the curve is refused",
+                      !wifi_sae_commit_good(address_of side, sae[at].peer_scalar, bad));
+                memory_copy(bad, sae[at].peer_element, 64);
+                memory_fill(bad, 0xff, 5);
+                check("one whose element's x is not under p is refused",
+                      !wifi_sae_commit_good(address_of side, sae[at].peer_scalar, bad));
+                check("one that is our own sent back is refused",
+                      !wifi_sae_commit_good(address_of side, side.scalar, side.element));
+                check("our scalar with another element, or our element with another scalar, "
+                      "is no reflection",
+                      wifi_sae_commit_good(address_of side, side.scalar, sae[at].peer_element) &&
+                          wifi_sae_commit_good(address_of side, sae[at].peer_scalar, side.element));
+        }
+        {
+                //      The order itself, and above it, are not scalars.
+                static const p8 order[32] = {
+                    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17,
+                    0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51};
+                wifi_sae side;
+
+                memory_fill(address_of side, 0, sizeof(side));
+                memory_copy(side.pwe, sae0_pwe, 64);
+                memory_copy(side.rand, sae0_rand, 32);
+                memory_copy(side.scalar, sae0_scalar, 32);
+                memory_copy(side.element, sae0_element, 64);
+                check("a commit whose scalar is the group order is refused",
+                      !wifi_sae_commit_good(address_of side, order, sae0_peer_element));
+        }
+}
+
+/*
+        The access point's authentication frames as the exchange reads them
+        (wifi_sae_frame_read), to SECURITY.md's list for a new parser: empty
+        and shortest, every byte cut, every transaction and the statuses
+        that mean something, another sender or network, a protected frame,
+        another algorithm or group, a token of one byte, of the most and one
+        over, in a container and not, and what may and may not follow; and
+        the association response's status (wifi_assoc_status_read).
+*/
+static positive wifi_auth_frame(p8 address_to into, const p8 address_to from, p16 transaction,
+                                p16 status, const p8 address_to body, positive length)
+{
+        memory_fill(into, 0, 30);
+        into[0] = 0xb0;
+        memory_copy(into + 4, "\x02\x00\x00\x00\x02\x00", 6);
+        memory_copy(into + 10, from, 6);
+        memory_copy(into + 16, from, 6);
+        into[24] = 3;
+        into[26] = (p8)transaction;
+        into[27] = (p8)(transaction >> 8);
+        into[28] = (p8)status;
+        into[29] = (p8)(status >> 8);
+        if (length)
+                memory_copy(into + 30, body, length);
+        return 30 + length;
+}
+
+static fn wifi_sae_frame_checks(void)
+{
+        static const p8 access[6] = {2, 0, 0, 0, 1, 0};
+        static const p8 other[6] = {2, 0, 0, 0, 3, 0};
+        p8 frame[30 + 2 + WIFI_SAE_TOKEN_MOST + 96 + 8];
+        p8 body[2 + WIFI_SAE_TOKEN_MOST + 96 + 8];
+        wifi_sae_frame read;
+        positive size;
+        positive at;
+        bool all;
+        p16 status;
+
+        check("nothing at all is no frame", !wifi_sae_frame_read(frame, 0, access, false, address_of read));
+        //      A commit: group 19, scalar, element.
+        body[0] = WIFI_SAE_GROUP, body[1] = 0;
+        memory_copy(body + 2, sae0_peer_scalar, 32);
+        memory_copy(body + 34, sae0_peer_element, 64);
+        size = wifi_auth_frame(frame, access, 1, 0, body, 98);
+        check("a commit is read: group, scalar and element, where they are in the frame",
+              wifi_sae_frame_read(frame, size, access, false, address_of read) &&
+                  read.transaction == 1 && !read.status && read.group == WIFI_SAE_GROUP &&
+                  read.scalar == frame + 32 && read.element == frame + 64);
+        all = true;
+        for (at = 0; at < size; at++)
+                all &= !wifi_sae_frame_read(frame, at, access, false, address_of read);
+        check("a commit cut at any byte is refused", all);
+        frame[size] = 221, frame[size + 1] = 2, frame[size + 2] = 1, frame[size + 3] = 2;
+        check("with a whole element after it, it is still read",
+              wifi_sae_frame_read(frame, size + 4, access, false, address_of read) &&
+                  read.scalar == frame + 32);
+        check("with an element cut short after it, it is not",
+              !wifi_sae_frame_read(frame, size + 3, access, false, address_of read) &&
+                  !wifi_sae_frame_read(frame, size + 1, access, false, address_of read));
+        size = wifi_auth_frame(frame, access, 1, WIFI_SAE_H2E_STATUS, body, 98);
+        check("a hash-to-element commit is read the same",
+              wifi_sae_frame_read(frame, size, access, true, address_of read) &&
+                  read.status == WIFI_SAE_H2E_STATUS && read.scalar == frame + 32);
+        body[0] = 20;
+        size = wifi_auth_frame(frame, access, 1, 0, body, 2 + 48 + 96);
+        check("a commit of another group is read for its group alone",
+              wifi_sae_frame_read(frame, size, access, false, address_of read) &&
+                  read.group == 20 && !read.scalar && !read.element);
+        body[0] = WIFI_SAE_GROUP;
+        size = wifi_auth_frame(frame, other, 1, 0, body, 98);
+        check("one from another address is no frame of the access point's",
+              !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        size = wifi_auth_frame(frame, access, 1, 0, body, 98);
+        memory_copy(frame + 16, other, 6);
+        check("nor is one in another network",
+              !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        size = wifi_auth_frame(frame, access, 1, 0, body, 98);
+        frame[1] = 0x40;
+        check("nor a protected one", !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        frame[1] = 0;
+        frame[0] = 0x10;
+        check("nor one that is no authentication frame",
+              !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        frame[0] = 0xb0;
+        frame[24] = 0;
+        check("nor one of another algorithm", !wifi_sae_frame_read(frame, size, access, false, address_of read));
+        frame[24] = 3;
+        for (p16 transaction = 0; transaction < 5; transaction++)
+        {
+                size = wifi_auth_frame(frame, access, transaction, 1, body, 0);
+                check("a refusal is read for its status in transactions 1 and 2, and nothing else is",
+                      wifi_sae_frame_read(frame, size, access, false, address_of read) ==
+                          (transaction == 1 || transaction == 2) &&
+                          (!(transaction == 1 || transaction == 2) || read.status == 1));
+        }
+
+        //      A confirm: send-confirm and 32 bytes, and nothing after them.
+        body[0] = 7, body[1] = 0;
+        memory_copy(body + 2, sae0_peer_confirm, 32);
+        size = wifi_auth_frame(frame, access, 2, 0, body, 34);
+        check("a confirm is read",
+              wifi_sae_frame_read(frame, size, access, false, address_of read) &&
+                  read.transaction == 2 && read.send_confirm == 7 && read.confirm == frame + 32);
+        all = true;
+        for (at = 0; at < size; at++)
+                all &= !wifi_sae_frame_read(frame, at, access, false, address_of read);
+        check("a confirm cut at any byte is refused", all);
+        frame[size] = 0;
+        check("and one with a byte after it", !wifi_sae_frame_read(frame, size + 1, access, false, address_of read));
+
+        //      A token asked for: the rest of the frame, or a container.
+        body[0] = WIFI_SAE_GROUP, body[1] = 0;
+        for (positive length = 0; length <= WIFI_SAE_TOKEN_MOST + 1; length++)
+        {
+                memory_fill(body + 2, (p8)length, length);
+                size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 2 + length);
+                check("a token of one byte to the most is taken, and none and one over are not",
+                      wifi_sae_frame_read(frame, size, access, false, address_of read) ==
+                          (length && length <= WIFI_SAE_TOKEN_MOST) &&
+                          (!length || length > WIFI_SAE_TOKEN_MOST ||
+                           (read.token == frame + 32 && read.token_length == length)));
+                body[2] = 255, body[3] = (p8)(1 + length), body[4] = WIFI_SAE_TOKEN_EXTENSION;
+                memory_fill(body + 5, (p8)length, length);
+                size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 5 + length);
+                check("and for hash-to-element in its container the same",
+                      wifi_sae_frame_read(frame, size, access, true, address_of read) ==
+                          (length && length <= WIFI_SAE_TOKEN_MOST) &&
+                          (!length || length > WIFI_SAE_TOKEN_MOST ||
+                           (read.token == frame + 35 && read.token_length == length)));
+        }
+        body[2] = 255, body[3] = 9, body[4] = WIFI_SAE_TOKEN_EXTENSION;
+        size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 5 + 8);
+        check("a container cut short, or with a byte after it, or of another kind, is refused",
+              !wifi_sae_frame_read(frame, size - 1, access, true, address_of read) &&
+                  !wifi_sae_frame_read(frame, size + 1, access, true, address_of read) &&
+                  (frame[34] = 92, !wifi_sae_frame_read(frame, size, access, true, address_of read)));
+        size = wifi_auth_frame(frame, access, 1, WIFI_SAE_TOKEN_STATUS, body, 2 + 8);
+        frame[32] = 1;
+        check("and a hash-to-element exchange takes no token out of its container",
+              !wifi_sae_frame_read(frame, size, access, true, address_of read));
+
+        //      The association response: capabilities, then the status.
+        memory_fill(frame, 0, sizeof(frame));
+        frame[0] = 0x10;
+        memory_copy(frame + 10, access, 6);
+        frame[26] = 17;
+        check("an association response's status is read",
+              wifi_assoc_status_read(frame, 30, access, address_of status) && status == 17);
+        frame[0] = 0x30;
+        check("and a reassociation response's", wifi_assoc_status_read(frame, 28, access, address_of status) &&
+                                                    status == 17);
+        all = true;
+        for (at = 0; at < 28; at++)
+                all &= !wifi_assoc_status_read(frame, at, access, address_of status);
+        check("one cut before its status is refused", all);
+        frame[0] = 0xb0;
+        check("and an authentication frame is none",
+              !wifi_assoc_status_read(frame, 30, access, address_of status));
+        frame[0] = 0x10;
+        check("and one from another address is none",
+              !wifi_assoc_status_read(frame, 30, other, address_of status));
+}
+
 //      AES-128's inverse and RFC 3394's unwrap, which hold the key data of
 //      every group key and every rekey. FIPS-197 C.1 is the cipher's own
 //      vector; RFC 3394 4.1 is the wrap's, 128 bits of key data under a
@@ -80867,20 +87955,21 @@ static fn wifi_ptk_checks(void)
         p8 other[64];
 
         wifi_ptk((p8 address_to)pmk, (p8 address_to)ap, (p8 address_to)sta,
-                 (p8 address_to)anonce, (p8 address_to)snonce, ptk);
+                 (p8 address_to)anonce, (p8 address_to)snonce, ptk, 2);
         check("the pairwise key of an access point and a station past 0x7f is 802.11i's",
               !memory_compare(ptk, expect, 64));
         wifi_ptk((p8 address_to)pmk, (p8 address_to)sta, (p8 address_to)ap,
-                 (p8 address_to)snonce, (p8 address_to)anonce, other);
+                 (p8 address_to)snonce, (p8 address_to)anonce, other, 2);
         check("and the same from either side of the handshake",
               !memory_compare(other, expect, 64));
 }
 
 //      What an access point's RSN element asks of a station, and whether the
-//      join can answer it: key management 2, CCMP both ways, no demand for
-//      protected management frames. Anything else that asks for WPA2 is a
-//      class of its own, named for what it asks, and ranks behind a plain
-//      WPA2 twin of the same name however loud.
+//      join can answer it: key management 2, 6 or 8, CCMP both ways, with
+//      protected management frames or without. Anything else is a class of
+//      its own, named for what it asks, and ranks behind a twin of the same
+//      name that the join can answer however loud. And what it offers a join,
+//      counted here the long way.
 static positive wifi_rsn_element(p8 address_to into, p32 group, const p32 address_to pairwise,
                                  positive pairs, const p32 address_to keys, positive count,
                                  b32 capabilities)
@@ -80922,48 +88011,76 @@ static fn wifi_rsn_checks(void)
         static const p32 ft_sae[] = {0x000fac04, 0x000fac08};
         static const p32 owe[] = {0x000fac12};
         static const p32 eap[] = {0x000fac01};
+        static const p32 sae_ext[] = {0x000fac18};
+        static const p32 vendor[] = {0x00506f01};
         p8 element[128];
         positive size;
+        wifi_rsn_caps caps;
 
-#define RSN_CASE(name, group, pairwise, pairs, keys, count, capabilities, class)   \
-        size = wifi_rsn_element(element, group, pairwise, pairs, keys, count,       \
-                                capabilities);                                    \
-        check(name, radio_rsn_security(element, size) == (class))
+#define RSN_A_PSK WIFI_AKM_PSK
+#define RSN_A_256 WIFI_AKM_PSK_SHA256
+#define RSN_A_SAE WIFI_AKM_SAE
+#define RSN_A_ANY WIFI_AKM_OTHER
+#define RSN_CASE(name, group_suite, pairwise_suites, pairs, keys, count, capabilities, class, \
+                 want_akms, want_pmf, want_group, want_pairwise)                          \
+        size = wifi_rsn_element(element, group_suite, pairwise_suites, pairs, keys, count, \
+                                capabilities);                                           \
+        check(name, radio_rsn_security(element, size, address_of caps) == (class) &&        \
+                        caps.akms == (want_akms) && caps.pmf == (want_pmf) &&               \
+                        caps.group == (want_group) && caps.pairwise == (want_pairwise) &&   \
+                        !caps.h2e)
 
-        RSN_CASE("WPA2 as an ordinary network has it", 0x000fac04, ccmp, 1, psk, 1, 0x000c, RADIO_WPA2);
-        RSN_CASE("WPA2 with no capabilities field", 0x000fac04, ccmp, 1, psk, 1, (b32)-1, RADIO_WPA2);
-        RSN_CASE("WPA2 that is capable of PMF", 0x000fac04, ccmp, 1, psk, 1, 0x0080, RADIO_WPA2);
-        RSN_CASE("WPA2 that requires PMF", 0x000fac04, ccmp, 1, psk, 1, 0x00c0, RADIO_PMF);
-        RSN_CASE("WPA2 that requires PMF and is not capable", 0x000fac04, ccmp, 1, psk, 1, 0x0040, RADIO_PMF);
-        RSN_CASE("WPA2 with a TKIP group", 0x000fac02, ccmp, 1, psk, 1, 0x000c, RADIO_TKIP);
-        RSN_CASE("WPA2 with TKIP alone pairwise", 0x000fac04, tkip, 1, psk, 1, 0x000c, RADIO_TKIP);
-        RSN_CASE("WPA2 with TKIP and CCMP pairwise and a CCMP group", 0x000fac04, both, 2, psk, 1, 0x000c, RADIO_WPA2);
-        RSN_CASE("FT-PSK alone", 0x000fac04, ccmp, 1, ft, 1, 0x000c, RADIO_FT256);
-        RSN_CASE("PSK-SHA256 alone", 0x000fac04, ccmp, 1, sha, 1, 0x000c, RADIO_FT256);
-        RSN_CASE("PSK and FT-PSK", 0x000fac04, ccmp, 1, psk_ft, 2, 0x000c, RADIO_WPA2);
-        RSN_CASE("PSK-SHA256 and PSK", 0x000fac04, ccmp, 1, psk_sha, 2, 0x000c, RADIO_WPA2);
-        RSN_CASE("PSK and SAE", 0x000fac04, ccmp, 1, psk_sae, 2, 0x0080, RADIO_WPA23);
-        RSN_CASE("PSK and SAE that requires PMF", 0x000fac04, ccmp, 1, psk_sae, 2, 0x00c0, RADIO_PMF);
-        RSN_CASE("PSK and SAE with a TKIP group", 0x000fac02, ccmp, 1, psk_sae, 2, 0x0080, RADIO_TKIP);
-        RSN_CASE("SAE alone", 0x000fac04, ccmp, 1, sae, 1, 0x00c0, RADIO_WPA3);
-        RSN_CASE("FT-PSK and SAE", 0x000fac04, ccmp, 1, ft_sae, 2, 0x00c0, RADIO_WPA3);
-        RSN_CASE("OWE", 0x000fac04, ccmp, 1, owe, 1, 0x000c, RADIO_OWE);
-        RSN_CASE("802.1X", 0x000fac04, ccmp, 1, eap, 1, 0x000c, RADIO_EAP);
-        RSN_CASE("no key management at all", 0x000fac04, ccmp, 1, psk, 0, 0x000c, RADIO_WPA2);
+        RSN_CASE("WPA2 as an ordinary network has it", 0x000fac04, ccmp, 1, psk, 1, 0x000c, RADIO_WPA2, RSN_A_PSK, 0, 1, 1);
+        RSN_CASE("WPA2 with no capabilities field", 0x000fac04, ccmp, 1, psk, 1, (b32)-1, RADIO_WPA2, RSN_A_PSK, 0, 1, 1);
+        RSN_CASE("WPA2 that is capable of PMF", 0x000fac04, ccmp, 1, psk, 1, 0x0080, RADIO_WPA2, RSN_A_PSK, WIFI_PMF_CAPABLE, 1, 1);
+        RSN_CASE("WPA2 that requires PMF", 0x000fac04, ccmp, 1, psk, 1, 0x00c0, RADIO_PMF, RSN_A_PSK, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("WPA2 that requires PMF and is not capable", 0x000fac04, ccmp, 1, psk, 1, 0x0040, RADIO_PMF, RSN_A_PSK, WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("WPA2 with a TKIP group", 0x000fac02, ccmp, 1, psk, 1, 0x000c, RADIO_TKIP, RSN_A_PSK, 0, 2, 1);
+        RSN_CASE("WPA2 with TKIP alone pairwise", 0x000fac04, tkip, 1, psk, 1, 0x000c, RADIO_TKIP, RSN_A_PSK, 0, 1, 2);
+        RSN_CASE("WPA2 with TKIP and CCMP pairwise and a CCMP group", 0x000fac04, both, 2, psk, 1, 0x000c, RADIO_WPA2, RSN_A_PSK, 0, 1, 3);
+        RSN_CASE("FT-PSK alone", 0x000fac04, ccmp, 1, ft, 1, 0x000c, RADIO_FT, RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("PSK-SHA256 alone", 0x000fac04, ccmp, 1, sha, 1, 0x000c, RADIO_WPA2, RSN_A_256, 0, 1, 1);
+        RSN_CASE("PSK-SHA256 that requires PMF", 0x000fac04, ccmp, 1, sha, 1, 0x00c0, RADIO_PMF, RSN_A_256, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("PSK and FT-PSK", 0x000fac04, ccmp, 1, psk_ft, 2, 0x000c, RADIO_WPA2, RSN_A_PSK | RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("PSK-SHA256 and PSK", 0x000fac04, ccmp, 1, psk_sha, 2, 0x000c, RADIO_WPA2, RSN_A_PSK | RSN_A_256, 0, 1, 1);
+        RSN_CASE("PSK and SAE", 0x000fac04, ccmp, 1, psk_sae, 2, 0x0080, RADIO_WPA23, RSN_A_PSK | RSN_A_SAE, WIFI_PMF_CAPABLE, 1, 1);
+        RSN_CASE("PSK and SAE that requires PMF", 0x000fac04, ccmp, 1, psk_sae, 2, 0x00c0, RADIO_PMF, RSN_A_PSK | RSN_A_SAE, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("PSK and SAE with a TKIP group", 0x000fac02, ccmp, 1, psk_sae, 2, 0x0080, RADIO_TKIP, RSN_A_PSK | RSN_A_SAE, WIFI_PMF_CAPABLE, 2, 1);
+        RSN_CASE("SAE alone", 0x000fac04, ccmp, 1, sae, 1, 0x00c0, RADIO_WPA3, RSN_A_SAE, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("SAE alone with a TKIP group", 0x000fac02, ccmp, 1, sae, 1, 0x00c0, RADIO_TKIP, RSN_A_SAE, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 2, 1);
+        RSN_CASE("FT-PSK and SAE", 0x000fac04, ccmp, 1, ft_sae, 2, 0x00c0, RADIO_WPA3, RSN_A_SAE | RSN_A_ANY, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("SAE's extended-key suite alone", 0x000fac04, ccmp, 1, sae_ext, 1, 0x00c0, RADIO_FT, RSN_A_ANY, WIFI_PMF_CAPABLE | WIFI_PMF_REQUIRED, 1, 1);
+        RSN_CASE("OWE", 0x000fac04, ccmp, 1, owe, 1, 0x000c, RADIO_OWE, RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("802.1X", 0x000fac04, ccmp, 1, eap, 1, 0x000c, RADIO_EAP, RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("a vendor's key management alone, taken as WPA2", 0x000fac04, ccmp, 1, vendor, 1, 0x000c, RADIO_WPA2, RSN_A_PSK | RSN_A_ANY, 0, 1, 1);
+        RSN_CASE("no key management at all", 0x000fac04, ccmp, 1, psk, 0, 0x000c, RADIO_WPA2, RSN_A_PSK, 0, 1, 1);
+        RSN_CASE("no key management and a TKIP group", 0x000fac02, ccmp, 1, psk, 0, 0x000c, RADIO_TKIP, RSN_A_PSK, 0, 2, 1);
 #undef RSN_CASE
 
         size = wifi_rsn_element(element, 0x000fac04, ccmp, 1, psk, 1, 0x00c0);
-        check("a capabilities field cut to one byte says nothing: WPA2",
-              radio_rsn_security(element, size - 1) == RADIO_WPA2);
-        check("an element cut inside its suites is WPA2, as one with none",
-              radio_rsn_security(element, 9) == RADIO_WPA2 &&
-                  radio_rsn_security(element, 3) == RADIO_WPA2);
-        check("what the join can answer is open, WPA2 and WPA2/3, and no class of "
-              "WPA2 that asks for more",
+        check("a capabilities field cut to one byte says nothing: WPA2 with no protection",
+              radio_rsn_security(element, size - 1, address_of caps) == RADIO_WPA2 &&
+                  caps.pmf == 0 && caps.akms == RSN_A_PSK);
+        size = wifi_rsn_element(element, 0x000fac02, tkip, 1, psk, 1, 0x00c0);
+        check("an element cut inside its suites is WPA2 with CCMP and PSK, as one with none, "
+              "whatever cipher it had begun to name",
+              radio_rsn_security(element, 9, address_of caps) == RADIO_WPA2 &&
+                  caps.akms == RSN_A_PSK && caps.group == WIFI_CIPHER_CCMP &&
+                  caps.pairwise == WIFI_CIPHER_CCMP && !caps.pmf &&
+                  radio_rsn_security(element, 3, address_of caps) == RADIO_WPA2 &&
+                  caps.akms == RSN_A_PSK && caps.group == WIFI_CIPHER_CCMP);
+#undef RSN_A_PSK
+#undef RSN_A_256
+#undef RSN_A_SAE
+#undef RSN_A_ANY
+        check("what the join can answer is open, WPA2, WPA3, both, and any of them with "
+              "protection required, and no class that asks for more",
               radio_security_joinable(RADIO_OPEN) && radio_security_joinable(RADIO_WPA2) &&
                   radio_security_joinable(RADIO_WPA23) && !radio_security_joinable(RADIO_TKIP) &&
-                  !radio_security_joinable(RADIO_PMF) && !radio_security_joinable(RADIO_FT256) &&
-                  !radio_security_joinable(RADIO_WPA3) && !radio_security_joinable(RADIO_EAP));
+                  radio_security_joinable(RADIO_PMF) && !radio_security_joinable(RADIO_FT) &&
+                  radio_security_joinable(RADIO_WPA3) && !radio_security_joinable(RADIO_EAP) &&
+                  !radio_security_joinable(RADIO_OWE) && !radio_security_joinable(RADIO_WPA) &&
+                  !radio_security_joinable(RADIO_WEP));
         //      The row of a name is its strongest access point, and says a
         //      name can be joined when any by that name can: a louder twin
         //      that asks for more must not make `wifi add` refuse the real
@@ -80977,10 +88094,10 @@ static fn wifi_rsn_checks(void)
                 memory_copy(one.ssid, "net", 3);
                 one.ssid_length = 3;
                 one.mbm = -3000;
-                one.security = RADIO_PMF;
-                one.beacon_security = RADIO_PMF;
+                one.security = RADIO_FT;
+                one.beacon_security = RADIO_FT;
                 radio_air_keep(address_of air, address_of one);
-                check("a name of one access point that asks for PMF is not joinable",
+                check("a name of one access point that asks for FT alone is not joinable",
                       air.count == 1 && !air.heard[0].joinable);
                 one.mbm = -7000;
                 one.security = RADIO_WPA2;
@@ -80989,7 +88106,7 @@ static fn wifi_rsn_checks(void)
                 radio_air_keep(address_of air, address_of one);
                 check("a quieter twin of plain WPA2 makes it joinable, the row staying the louder",
                       air.count == 1 && air.heard[0].joinable &&
-                          air.heard[0].security == RADIO_PMF && air.heard[0].mbm == -3000);
+                          air.heard[0].security == RADIO_FT && air.heard[0].mbm == -3000);
                 memory_zero(address_of air, sizeof air);
                 radio_air_keep(address_of air, address_of one);
                 one.mbm = -1000;
@@ -81001,10 +88118,12 @@ static fn wifi_rsn_checks(void)
                       air.count == 1 && air.heard[0].joinable &&
                           air.heard[0].security == RADIO_TKIP);
         }
-        check("a saved network with a password is satisfied by WPA2 and WPA2/3 only",
+        check("a saved network with a password is satisfied by WPA2, WPA3, both and either "
+              "with protection required, and nothing else",
               radio_security_fits(true, RADIO_WPA2) && radio_security_fits(true, RADIO_WPA23) &&
-                  !radio_security_fits(true, RADIO_TKIP) && !radio_security_fits(true, RADIO_PMF) &&
-                  !radio_security_fits(true, RADIO_FT256) &&
+                  !radio_security_fits(true, RADIO_TKIP) && radio_security_fits(true, RADIO_PMF) &&
+                  !radio_security_fits(true, RADIO_FT) && radio_security_fits(true, RADIO_WPA3) &&
+                  !radio_security_fits(true, RADIO_OPEN) && !radio_security_fits(true, RADIO_WPA) &&
                   !radio_security_fits(false, RADIO_WPA2) && radio_security_fits(false, RADIO_OPEN));
 }
 
@@ -82672,6 +89791,86 @@ static fn epochs_generated(void)
                   malformed > 0 && taken > 1000);
 }
 
+/*
+        The listener's mDNS reader, apart (link_mdns_read_apart in
+        src/waterlink/nearby.c): its filter in the classic-BPF interpreter, what
+        the listener believes of an answer, and a real announcement and noise
+        read through the confined reader, in this check's user namespace,
+        against the reading the parser makes in place.
+*/
+#define SHARED_filter_run
+#include "checks.c"
+#undef SHARED_filter_run
+
+static fn mdns_apart(void)
+{
+        static const struct
+        {
+                string_address name;
+                p32 number;
+                bool allowed;
+        } rows[] = {
+            {"recvfrom", syscall(recvfrom), true}, {"sendto", syscall(sendto), true},
+            {"ppoll", syscall(ppoll), true},       {"exit_group", syscall(exit_group), true},
+            {"openat", syscall(openat), false},    {"socket", syscall(socket), false},
+            {"execve", syscall(execve), false},    {"ptrace", syscall(ptrace), false},
+            {"mmap", syscall(mmap), false},        {"write", syscall(write), false},
+            {"read", syscall(read), false},        {"kill", syscall(kill), false},
+        };
+        static const p64 none[6] = {0};
+        net_filter filter;
+        bool all = true;
+        p8 instance[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        p8 host[6] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab};
+        p8 packet[WATERLINK_MDNS_MAX];
+        positive length;
+        struct waterlink_found here;
+        struct waterlink_found apart;
+        bool read_here;
+        bool read_apart;
+
+        link_mdns_filter_build(address_of filter);
+        for (positive at = 0; at < array_count(rows); at++)
+                all = all && net_filter_run(address_of filter, NET_APART_ARCH, rows[at].number,
+                                            none) ==
+                                 (rows[at].allowed ? SECCOMP_RET_ALLOW
+                                                   : SECCOMP_RET_KILL_PROCESS);
+        check("the mDNS reader's filter allows its pipe's calls and kills the rest", all);
+        check("the mDNS reader's filter kills a call from another architecture",
+              net_filter_run(address_of filter, NET_APART_ARCH ^ 1, syscall(recvfrom), none) ==
+                  SECCOMP_RET_KILL_PROCESS);
+
+        memory_zero(address_of here, sizeof here);
+        here.count = WATERLINK_FOUND_MAX;
+        check("the listener believes a reading with every count in its array",
+              link_mdns_believed(address_of here));
+        here.count = WATERLINK_FOUND_MAX + 1;
+        check("and not one more", !link_mdns_believed(address_of here));
+        here.count = 1;
+        here.instance[0].label_length = sizeof(here.instance[0].label) + 1;
+        check("nor a label longer than its room", !link_mdns_believed(address_of here));
+        here.instance[0].label_length = 0;
+        here.question_length = sizeof(here.question) + 1;
+        check("nor a question longer than its room", !link_mdns_believed(address_of here));
+
+        length = waterlink_mdns_announce(packet, sizeof packet, instance, host, 22348,
+                                         0x7f000001u, 120, 0, null, 0);
+        memory_zero(address_of here, sizeof here);
+        read_here = waterlink_mdns_read(packet, length, address_of here);
+        read_apart = link_mdns_read_apart(packet, length, address_of apart);
+        check("an announcement read apart is the reading made in place",
+              length && read_here && read_apart && apart.count == here.count &&
+                  !memory_compare(address_of apart, address_of here, sizeof here));
+        check("the reader is a process of its own, still there for the next packet",
+              link_mdns.pid > 0 && link_mdns.channel >= 0 && !link_mdns.refused);
+        memory_fill(packet, 0xc0, 64);
+        check("noise read apart is no reading",
+              !link_mdns_read_apart(packet, 64, address_of apart) && !apart.count);
+        read_apart = link_mdns_read_apart(packet, length, address_of apart);
+        link_mdns_end();
+        check("and the reader is let go", link_mdns.pid < 0 && link_mdns.channel < 0);
+}
+
 b32 main(void)
 {
         bipolar listener;
@@ -82700,6 +89899,7 @@ b32 main(void)
         }
 
         authorization_files();
+        mdns_apart();
         identity_creation_races();
         staging();
         publication();
@@ -82746,6 +89946,10 @@ b32 main(void)
         machine_names();
         labels();
         wpa_key();
+        wifi_key_checks();
+        wifi_sae_checks();
+        wifi_h2e_checks();
+        wifi_sae_frame_checks();
         wifi_unwrap_checks();
         wifi_ptk_checks();
         wifi_rsn_checks();
@@ -82952,6 +90156,18 @@ static bool kernel_settings_read_only(string_address path)
                (facts.flags & MS_RDONLY) != 0;
 }
 
+/* The same of a setting only some kernels have (/proc/sysrq-trigger needs
+   CONFIG_MAGIC_SYSRQ): read-only where it is there, as the seal leaves it,
+   and nothing to bind where it is not. */
+static bool kernel_settings_read_only_if_there(string_address path)
+{
+        file_mount_facts facts;
+        bipolar asked = system_call_2(syscall(statfs), (positive)path,
+                                      (positive)address_of facts);
+
+        return asked == -ENOENT || (asked >= 0 && (facts.flags & MS_RDONLY) != 0);
+}
+
 /*
         The host kernel's settings stay the host's: sysfs is mounted read-only
         and /proc/sys, with the rest of its list, is bound read-only over
@@ -83040,7 +90256,8 @@ static fn kernel_settings(void)
                                 exit(1);
 
                         b32 wrong = kernel_settings_read_only("/proc/sys/kernel") &&
-                                            kernel_settings_read_only("/proc/sysrq-trigger") &&
+                                            kernel_settings_read_only_if_there(
+                                                "/proc/sysrq-trigger") &&
                                             kernel_settings_read_only("/sys/kernel") &&
                                             !kernel_settings_read_only("/proc/self")
                                         ? 0
@@ -84745,6 +91962,522 @@ static fn boot_links(void)
         check("An external disk is asked about at the tight tier", !host_lone_taken(true, true));
 }
 
+/*
+        What a Wi-Fi join asks of an access point (wifi_join_plan), at every
+        tier in this one build: named networks with what each tier must do
+        with them, then every combination of what an access point can offer,
+        the rules a saved network can carry and the two kinds of secret, held
+        to what the tiers promise. Last, the plan the join itself makes, at
+        this build's MOONWATER_STRICT_NET, which the tight build of this
+        check (sh test/run net) holds to the tight tier.
+*/
+typedef struct
+{
+        string_address name;
+        p8 akms;
+        p8 pmf;
+        p8 group;
+        p8 pairwise;
+        p8 rules;
+        bool key_only;
+        //      What the safe tier and the tight one do: the suite and its
+        //      fallback, or the refusal.
+        bipolar safe;
+        p8 safe_fallback;
+        bipolar tight;
+        p8 tight_fallback;
+} wifi_plan_case;
+
+static fn wifi_plans(void)
+{
+        enum
+        {
+                C = WIFI_CIPHER_CCMP,
+                T = WIFI_CIPHER_TKIP,
+                OTHER_CIPHER = WIFI_CIPHER_OTHER,
+                PSK = WIFI_AKM_PSK,
+                S256 = WIFI_AKM_PSK_SHA256,
+                SAE = WIFI_AKM_SAE,
+                ANY = WIFI_AKM_OTHER,
+                CAP = WIFI_PMF_CAPABLE,
+                REQ = WIFI_PMF_REQUIRED,
+        };
+        static const wifi_plan_case cases[] = {
+            {"WPA2 with no protection", PSK, 0, C, C, 0, false, 2, 0, WIFI_REFUSE_NO_PMF, 0},
+            {"WPA2 with no protection saved with wpa2", PSK, 0, C, C, WIFI_RULE_WPA2, false, 2, 0,
+             WIFI_REFUSE_NO_PMF, 0},
+            {"WPA2 with protection", PSK, CAP, C, C, 0, false, 2, 0, WIFI_REFUSE_WPA2, 0},
+            {"WPA2 with protection saved with wpa2", PSK, CAP, C, C, WIFI_RULE_WPA2, false, 2, 0, 2, 0},
+            {"WPA2 that requires protection", PSK, CAP | REQ, C, C, WIFI_RULE_WPA2, false, 2, 0, 2, 0},
+            {"PSK-SHA256 beside PSK with protection", PSK | S256, CAP, C, C, WIFI_RULE_WPA2, false, 6, 0,
+             6, 0},
+            {"PSK-SHA256 beside PSK without it", PSK | S256, 0, C, C, 0, false, 2, 0, WIFI_REFUSE_NO_PMF,
+             0},
+            {"PSK-SHA256 alone without protection", S256, 0, C, C, 0, false, 6, 0, WIFI_REFUSE_NO_PMF, 0},
+            {"WPA3", SAE, CAP | REQ, C, C, 0, false, 8, 0, 8, 0},
+            {"WPA3 with a key of hex digits", SAE, CAP | REQ, C, C, 0, true, WIFI_REFUSE_KEY_ONLY, 0,
+             WIFI_REFUSE_KEY_ONLY, 0},
+            {"WPA2 and WPA3", PSK | SAE, CAP, C, C, 0, false, 8, 2, 8, 0},
+            {"WPA2 and WPA3 saved with wpa2", PSK | SAE, CAP, C, C, WIFI_RULE_WPA2, false, 8, 2, 8, 2},
+            {"WPA2 and WPA3 with a key of hex digits", PSK | SAE, CAP, C, C, 0, true, 2, 0,
+             WIFI_REFUSE_WPA2, 0},
+            {"WPA2 and WPA3, joined with WPA3 before", PSK | SAE, CAP, C, C, WIFI_RULE_SAE, false, 8, 0, 8,
+             0},
+            {"WPA2 alone by a name once joined with WPA3", PSK, CAP, C, C, WIFI_RULE_SAE, false,
+             WIFI_REFUSE_SAE_GONE, 0, WIFI_REFUSE_SAE_GONE, 0},
+            {"no protection by a name that offered it", PSK, 0, C, C, WIFI_RULE_PMF, false,
+             WIFI_REFUSE_PMF_GONE, 0, WIFI_REFUSE_PMF_GONE, 0},
+            {"protection by a name that offered it", PSK, CAP, C, C, WIFI_RULE_PMF, false, 2, 0,
+             WIFI_REFUSE_WPA2, 0},
+            {"a TKIP group", PSK, 0, T, C, 0, false, WIFI_REFUSE_TKIP, 0, WIFI_REFUSE_TKIP, 0},
+            {"TKIP alone pairwise", PSK, 0, C, T, 0, false, WIFI_REFUSE_TKIP, 0, WIFI_REFUSE_TKIP, 0},
+            {"TKIP beside CCMP pairwise", PSK, CAP, C, C | T, WIFI_RULE_WPA2, false, 2, 0, 2, 0},
+            {"another group cipher", PSK, CAP, OTHER_CIPHER, C, 0, false, WIFI_REFUSE_CIPHER, 0,
+             WIFI_REFUSE_CIPHER, 0},
+            {"two group ciphers between two frames", PSK, CAP, C | T, C, 0, false, WIFI_REFUSE_TKIP, 0,
+             WIFI_REFUSE_TKIP, 0},
+            {"FT alone", ANY, CAP, C, C, 0, false, WIFI_REFUSE_SUITE, 0, WIFI_REFUSE_SUITE, 0},
+            {"nothing at all", 0, 0, C, C, 0, false, WIFI_REFUSE_SUITE, 0, WIFI_REFUSE_SUITE, 0},
+        };
+        wifi_plan plan;
+        positive plans = 0;
+        positive refusals = 0;
+        bool held = true;
+
+        for (positive at = 0; at < array_count(cases); at++)
+        {
+                const wifi_plan_case address_to one = cases + at;
+                wifi_rsn_caps caps = {.akms = one->akms, .pmf = one->pmf, .group = one->group,
+                                      .pairwise = one->pairwise};
+
+                for (positive tier = STRICT_REFERENCE; tier <= STRICT_LOCKED; tier++)
+                {
+                        bipolar want = tier >= STRICT_TIGHT ? one->tight : one->safe;
+                        p8 fallback = tier >= STRICT_TIGHT ? one->tight_fallback : one->safe_fallback;
+                        bipolar got = wifi_join_plan(tier, address_of caps, one->rules, one->key_only,
+                                                     address_of plan);
+                        bool right = want < 0 ? got == want
+                                              : !got && plan.akm == want &&
+                                                    plan.fallback == fallback &&
+                                                    plan.pmf == (want == 8 || one->pmf ? (CAP | REQ) : 0);
+
+                        if (!right)
+                                string_format(log, "  wifi plan: %s at tier %p gave %b\n",
+                                              one->name, tier, got);
+                        held &= right;
+                }
+        }
+        check("each named network is planned as each tier says", held);
+        held = true;
+
+        //      Every offer, rule and secret, at every tier.
+        for (positive tier = STRICT_REFERENCE; tier <= STRICT_LOCKED; tier++)
+        for (p8 akms = 0; akms < 16; akms++)
+        for (p8 pmf = 0; pmf < 4; pmf++)
+        for (p8 group = 1; group < 8; group++)
+        for (p8 pairwise = 0; pairwise < 8; pairwise++)
+        for (p8 rules = 0; rules < 8; rules++)
+        for (p8 key_only = 0; key_only < 2; key_only++)
+        {
+                wifi_rsn_caps caps = {.akms = akms, .pmf = pmf, .group = group, .pairwise = pairwise};
+                bool tight = tier >= STRICT_TIGHT;
+                bipolar got = wifi_join_plan(tier, address_of caps, rules, key_only, address_of plan);
+                wifi_plan other;
+                bipolar beside = wifi_join_plan(tight ? STRICT_SAFE : STRICT_TIGHT, address_of caps,
+                                                rules, key_only, address_of other);
+
+                if (got)
+                {
+                        refusals++;
+                        held &= got >= WIFI_REFUSE_FIRST && got <= WIFI_REFUSE_LAST &&
+                                !plan.akm && !plan.pmf && !plan.fallback;
+                        //      What the default tier refuses, the tight one does.
+                        held &= tight || beside != 0;
+                        continue;
+                }
+                plans++;
+                //      Only CCMP, only a suite offered, never WPA3 from a key.
+                held &= group == C && (pairwise & C);
+                held &= plan.akm == 8 ? (akms & SAE) && !key_only
+                        : plan.akm == 6 ? (akms & S256) != 0
+                                        : plan.akm == 2 && (akms & PSK);
+                held &= !plan.fallback || (plan.akm == 8 && (plan.fallback == 2 || plan.fallback == 6) &&
+                                           (akms & (plan.fallback == 2 ? PSK : S256)));
+                //      Protection: always with WPA3, with WPA2 exactly when
+                //      offered, and asked as required.
+                held &= plan.pmf == (plan.akm == 8 || pmf ? (CAP | REQ) : 0);
+                //      What the network taught is never given up.
+                held &= !(rules & WIFI_RULE_PMF) || pmf;
+                held &= !(rules & WIFI_RULE_SAE) || (plan.akm == 8 && !plan.fallback);
+                //      WPA3 whenever it can be had.
+                held &= plan.akm == 8 || !(akms & SAE) || key_only;
+                //      The tight tier: protection, and WPA2 only for a network
+                //      saved with wpa2, as the plan and as the fallback.
+                held &= !tight || ((plan.pmf & REQ) && (plan.akm == 8 || (rules & WIFI_RULE_WPA2)) &&
+                                   (!plan.fallback || ((rules & WIFI_RULE_WPA2) && pmf)));
+                //      Below it, the owner's word changes nothing.
+                if (!tight)
+                {
+                        wifi_plan without;
+
+                        held &= !wifi_join_plan(tier, address_of caps, rules & ~WIFI_RULE_WPA2,
+                                                key_only, address_of without) &&
+                                !memory_compare(address_of without, address_of plan, sizeof(plan));
+                }
+        }
+        check("every offer, rule and secret at every tier keeps what the tiers promise", held);
+        check("and both answers come up", plans > 1000 && refusals > 1000);
+
+        //      The join's own: this build's tier.
+        {
+                wifi_rsn_caps plain = {.akms = PSK, .pmf = 0, .group = C, .pairwise = C};
+                wifi_rsn_caps guarded = {.akms = PSK, .pmf = CAP, .group = C, .pairwise = C};
+
+                check("the join asks this build's tier: WPA2 with no protection",
+                      wifi_join_plan(MOONWATER_STRICT_NET, address_of plain, 0, false, address_of plan) ==
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ? WIFI_REFUSE_NO_PMF : 0));
+                check("and WPA2 with protection, not saved with wpa2",
+                      wifi_join_plan(MOONWATER_STRICT_NET, address_of guarded, 0, false,
+                                     address_of plan) ==
+                          (MOONWATER_STRICT_NET >= STRICT_TIGHT ? WIFI_REFUSE_WPA2 : 0));
+        }
+}
+
+/*
+        The Wi-Fi station apart (radio_station_run in src/sh/host.c). Its filter
+        in the classic-BPF interpreter over the calls a join and its keeper make
+        and the ones they must not; the statuses its broker believes of a join;
+        and natively, the station confined in a user namespace of its own, where
+        its netlink and EAPOL sockets are its to ask for and anything else kills
+        it. Under qemu-user, which cannot filter itself, the confinement is
+        refused, which is what the station then does: it joins nothing.
+*/
+#define SHARED_filter_run
+#include "checks.c"
+#undef SHARED_filter_run
+
+//      check() with a name made at run time.
+static fn station_check(string_address name, bool passed)
+{
+        checks++;
+        if (!passed)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", name);
+        }
+}
+
+static bool station_emulated(void)
+{
+        return program_argument_count() > 1 &&
+               !string_compare(program_argument(1), (string_address)"--emulated");
+}
+
+static fn station_filter(void)
+{
+        const p32 eapol = (p32)network_order_16(ETH_P_PAE);
+        const struct
+        {
+                string_address name;
+                p32 number;
+                p64 arguments[6];
+                bool allowed;
+        } rows[] = {
+            {"recvfrom", syscall(recvfrom), {0}, true},
+            {"sendto", syscall(sendto), {0}, true},
+            {"ppoll", syscall(ppoll), {0}, true},
+            {"clock_gettime", syscall(clock_gettime), {0}, true},
+            {"getrandom", syscall(getrandom), {0}, true},
+            {"close", syscall(close), {0}, true},
+            {"bind", syscall(bind), {0}, true},
+            {"getsockname", syscall(getsockname), {0}, true},
+            {"nanosleep", syscall(nanosleep), {0}, true},
+            {"exit_group", syscall(exit_group), {0}, true},
+            {"a generic netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_GENERIC}, true},
+            {"a route netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE}, true},
+            {"the EAPOL packet socket", syscall(socket),
+             {AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC, eapol}, true},
+            {"an audit netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, 9}, false},
+            {"a raw netlink socket", syscall(socket),
+             {AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC}, false},
+            {"a raw packet socket", syscall(socket), {AF_PACKET, SOCK_RAW, eapol}, false},
+            {"a packet socket of every ethertype", syscall(socket),
+             {AF_PACKET, SOCK_DGRAM, network_order_16(3)}, false},
+            {"an IPv4 socket", syscall(socket), {AF_INET, SOCK_DGRAM, 0}, false},
+            {"a unix socket", syscall(socket), {AF_UNIX, SOCK_STREAM, 0}, false},
+            {"an IPv6 socket", syscall(socket), {AF_INET6, SOCK_DGRAM, 0}, false},
+            {"a netlink group joined", syscall(setsockopt),
+             {3, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP}, true},
+            {"a netlink group left", syscall(setsockopt),
+             {3, SOL_NETLINK, RADIO_NETLINK_DROP_MEMBERSHIP}, true},
+            {"netlink extended acks", syscall(setsockopt), {3, SOL_NETLINK, NETLINK_EXT_ACK},
+             true},
+            {"another netlink option", syscall(setsockopt), {3, SOL_NETLINK, 3}, false},
+            {"SO_BINDTODEVICE", syscall(setsockopt), {3, SOL_SOCKET, SO_BINDTODEVICE}, false},
+            {"a packet socket option", syscall(setsockopt), {3, 263, 1}, false},
+            {"memory to read and write", syscall(mmap), {0, 4096, 3, 0x22}, true},
+            {"executable memory", syscall(mmap), {0, 4096, 5, 0x22}, false},
+            {"openat", syscall(openat), {0}, false},
+            {"execve", syscall(execve), {0}, false},
+            {"ptrace", syscall(ptrace), {0}, false},
+            {"kill", syscall(kill), {0}, false},
+            {"ioctl", syscall(ioctl), {0}, false},
+            {"prctl", syscall(prctl), {0}, false},
+            {"mprotect", syscall(mprotect), {0}, false},
+            {"seccomp", syscall(seccomp), {0}, false},
+            {"capset", syscall(capset), {0}, false},
+            {"setresuid", syscall(setresuid), {0}, false},
+            {"unshare", syscall(unshare), {0}, false},
+            {"read", syscall(read), {0}, false},
+            {"write", syscall(write), {0}, false},
+            {"connect", syscall(connect), {0}, false},
+            {"sendmsg", syscall(sendmsg), {0}, false},
+            {"recvmsg", syscall(recvmsg), {0}, false},
+            {"socketpair", syscall(socketpair), {0}, false},
+            {"x32's recvfrom", syscall(recvfrom) | 0x40000000u, {0}, false},
+        };
+        static const p64 none[6] = {0};
+        net_filter filter;
+        bool landed = true;
+
+        radio_filter_build(address_of filter);
+        check("the station's filter fits its program",
+              filter.used > 8 && filter.used <= NET_FILTER_STEPS);
+        if (filter.used > NET_FILTER_STEPS)
+                return;
+        for (positive at = 0; at < filter.used; at++)
+        {
+                net_filter_step step = filter.steps[at];
+
+                if (step.code == NET_FILTER_EQUAL || step.code == NET_FILTER_ANY_BIT)
+                        landed = landed && at + 1 + step.jump_true < filter.used &&
+                                 at + 1 + step.jump_false < filter.used;
+                else if (step.code == NET_FILTER_ALWAYS)
+                        landed = landed && at + 1 + step.value < filter.used;
+        }
+        check("every jump of the station's filter lands inside it", landed);
+        check("the station's filter ends in an answer",
+              filter.steps[filter.used - 1].code == NET_FILTER_RETURN);
+        for (positive at = 0; at < array_count(rows); at++)
+        {
+                p8 name[128];
+                p32 answer = net_filter_run(address_of filter, NET_APART_ARCH,
+                                            rows[at].number, rows[at].arguments);
+
+                string_copy_max_end(
+                    string_copy_end(name, rows[at].allowed
+                                              ? (string_address) "the station's filter allows "
+                                              : (string_address) "the station's filter kills "),
+                    rows[at].name, 80);
+                station_check((string_address)name,
+                              answer == (rows[at].allowed ? SECCOMP_RET_ALLOW
+                                                          : SECCOMP_RET_KILL_PROCESS));
+        }
+        check("the station's filter kills a call from another architecture",
+              net_filter_run(address_of filter, NET_APART_ARCH ^ 1, syscall(recvfrom), none) ==
+                  SECCOMP_RET_KILL_PROCESS);
+}
+
+static fn station_statuses(void)
+{
+        static const struct
+        {
+                b64 status;
+                bool believed;
+        } rows[] = {
+            {0, true},
+            {-13, true},
+            {-113, true},
+            {-4095, true},
+            {-1001, true},
+            {-1000 - 65535, true},
+            {WIFI_REFUSE_TKIP, true},
+            {WIFI_REFUSE_ELEMENTS, true},
+            {WIFI_REFUSE_CONFINE, true},
+            {1, false},
+            {-1000 - 65536, false},
+            {WIFI_REFUSE_TKIP + 1, false},
+            {WIFI_REFUSE_ELEMENTS - 1, false},
+            {WIFI_REFUSE_APART, false},
+            {-(b64)1 << 40, false},
+        };
+        bool all = true;
+
+        for (positive at = 0; at < array_count(rows); at++)
+                all = all && radio_join_status(rows[at].status) == rows[at].believed;
+        check("the broker believes a join's status only as one the join returns", all);
+}
+
+#define STATION_PROBES 9
+
+/* One probe, in a child: a user namespace of its own (its maps written by
+   the parent, as unshare -r does: this kernel lets no process write its
+   own), the station's confinement, then the one thing the probe is. Exit 0
+   when the call came back (whatever it answered), 3 when the confinement
+   was refused, 4 when there was no namespace to be had. */
+static DEAD_END fn station_probe(positive which, b32 said, b32 go)
+{
+        p8 byte = 0;
+
+        byte = system_call_1(syscall(unshare), 0x10000000 /* CLONE_NEWUSER */) == 0;
+        if (system_write_all((positive)said, address_of byte, 1) != 1 || !byte ||
+            system_read_retry((positive)go, address_of byte, 1) != 1 || !byte)
+                system_call_1(syscall(exit_group), 4);
+        system_close(said);
+        system_close(go);
+        if (!radio_station_confine())
+                system_call_1(syscall(exit_group), 3);
+        switch (which)
+        {
+        case 0:
+                (void)socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_GENERIC);
+                break;
+        case 1:
+                (void)socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE);
+                break;
+        case 2:
+                (void)socket_new(AF_PACKET, SOCK_DGRAM | SOCK_CLOEXEC,
+                                 (b32)network_order_16(ETH_P_PAE));
+                break;
+        case 3:
+                (void)system_open_at(AT_FDCWD, "/", FILE_READ | O_CLOEXEC);
+                break;
+        case 4:
+                (void)socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+                break;
+        case 5:
+                (void)system_call_3(syscall(execve), (positive) "/bin/true", 0, 0);
+                break;
+        case 6:
+                (void)system_call_4(syscall(ptrace), 0, 0, 0, 0);
+                break;
+        case 7:
+                (void)socket_new(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC,
+                                 (b32)network_order_16(ETH_P_PAE));
+                break;
+        case 8:
+                (void)system_call_5(syscall(prctl), 8 /* PR_SET_KEEPCAPS */, 1, 0, 0, 0);
+                break;
+        }
+        system_call_1(syscall(exit_group), 0);
+        __builtin_unreachable();
+}
+
+//      One of a child's maps, written from here: "0 ID 1", or the word.
+static bool station_map(bipolar child, string_address file, string_address text)
+{
+        p8 path[64];
+        p8 address_to put = string_copy_end(path, (string_address) "/proc/");
+        bipolar handle;
+        positive length = string_length(text);
+        bool wrote;
+
+        put += positive_into(put, (positive)child);
+        string_copy_end(string_copy_end(put, (string_address) "/"), file);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_WRITE | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+        wrote = system_write_all((positive)handle, text, length) == (bipolar)length;
+        system_close(handle);
+        return wrote;
+}
+
+static fn station_confinement(void)
+{
+        static const string_address names[STATION_PROBES] = {
+            "opens a generic netlink socket", "opens a route netlink socket",
+            "asks for the EAPOL packet socket", "dies of openat", "dies of an IPv4 socket",
+            "dies of execve", "dies of ptrace", "dies of a raw packet socket", "dies of prctl"};
+        bool emulated = station_emulated();
+        bool unprivileged = false;
+
+        //      qemu-user cannot filter itself: the confinement is refused
+        //      there, before any namespace, which is what the station does.
+        if (emulated)
+        {
+                bipolar child = system_fork();
+                positive raw = 0;
+
+                if (!child)
+                        system_call_1(syscall(exit_group), radio_station_confine() ? 0 : 3);
+                check("under qemu-user the station refuses rather than run unfiltered",
+                      child > 0 && system_wait4_retry(child, address_of raw, 0, null) == child &&
+                          (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 3);
+                log_direct(str("bowl: the station's confinement NOT RUN -- qemu-user (the refusal is checked)\n"));
+                return;
+        }
+        for (positive at = 0; at < STATION_PROBES; at++)
+        {
+                b32 up[2];
+                b32 down[2];
+                bipolar child;
+                positive raw = 0;
+                p8 name[96];
+                p8 byte = 0;
+                p8 uid_line[32];
+                p8 gid_line[32];
+                p8 address_to put;
+
+                put = string_copy_end(uid_line, (string_address) "0 ");
+                put += positive_into_string(put, (positive)system_call(syscall(getuid)));
+                string_copy_end(put, (string_address) " 1");
+                put = string_copy_end(gid_line, (string_address) "0 ");
+                put += positive_into_string(put, (positive)system_call(syscall(getgid)));
+                string_copy_end(put, (string_address) " 1");
+                if (system_call_2(syscall(pipe2), (positive)up, O_CLOEXEC) < 0 ||
+                    system_call_2(syscall(pipe2), (positive)down, O_CLOEXEC) < 0)
+                {
+                        check("the station probe's pipes open", false);
+                        return;
+                }
+                child = system_fork();
+                if (!child)
+                {
+                        system_close(up[0]);
+                        system_close(down[1]);
+                        station_probe(at, up[1], down[0]);
+                }
+                system_close(up[1]);
+                system_close(down[0]);
+                //      The child waits for this byte only once it has said it
+                //      has a namespace; otherwise it is gone, and a write to its
+                //      pipe would be a SIGPIPE here.
+                if (child > 0 && system_read_retry((positive)up[0], address_of byte, 1) == 1 &&
+                    byte)
+                {
+                        byte = station_map(child, (string_address) "uid_map",
+                                           (string_address)uid_line) &&
+                               station_map(child, (string_address) "setgroups",
+                                           (string_address) "deny") &&
+                               station_map(child, (string_address) "gid_map",
+                                           (string_address)gid_line);
+                        (void)system_write_all((positive)down[1], address_of byte, 1);
+                }
+                system_close(up[0]);
+                system_close(down[1]);
+                if (child < 0 || system_wait4_retry(child, address_of raw, 0, null) != child)
+                {
+                        check("the station probe forks", false);
+                        return;
+                }
+                if ((raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 4)
+                {
+                        unprivileged = true;
+                        break;
+                }
+                string_copy_max_end(string_copy_end(name, (string_address) "the confined station "),
+                                    names[at], 64);
+                station_check((string_address)name,
+                              at < 3 ? (raw & 0x7f) == 0 && ((raw >> 8) & 0xff) == 0
+                                     : (raw & 0x7f) == SIGSYS);
+        }
+        if (unprivileged)
+                log_direct(str("bowl: the station's confinement NOT RUN -- no unprivileged user namespaces\n"));
+}
+
 b32 main(void)
 {
         names();
@@ -84766,6 +92499,10 @@ b32 main(void)
         secret_arguments();
 #endif
         boot_links();
+        wifi_plans();
+        station_filter();
+        station_statuses();
+        station_confinement();
         json();
         oci();
         nix();
@@ -93534,6 +101271,14 @@ static fn storage_test_wget_304(string_address target)
                 string_address address_to saved_words = program_words;
                 b32 saved_count = program_words_count;
                 positive raw = 0;
+                //      qemu-user arches get --emulated from test/run. wget's
+                //      network half runs in a confined child (net_apart),
+                //      which qemu-user cannot filter, so there wget refuses
+                //      to fetch at all and the server is never asked.
+                bool emulated = program_argument_count() > 1 &&
+                                !string_compare(program_argument(1),
+                                                (string_address) "--emulated");
+                b32 said;
 
                 memory_copy(url, "http://127.0.0.1:", used);
                 used += positive_into(url + used,
@@ -93543,16 +101288,27 @@ static fn storage_test_wget_304(string_address target)
                 string_address words[] = {
                     "wget", "-q", "-O", target, url, null};
                 program_arguments_use(words, 5);
-                check("wget refuses a terminal 304",
-                      net_wget() == 8);
+                said = net_wget();
                 if (saved_words)
                         program_arguments_use(saved_words, saved_count);
                 else
                         program_arguments_own();
-                check("304 preservation server completes",
-                      system_wait4_retry((b32)child, address_of raw, 0,
-                                         null) == child &&
-                          wait_status_code(raw) == 0);
+                if (emulated)
+                {
+                        check("under qemu-user wget refuses to fetch unconfined",
+                              said == 1);
+                        system_call_2(syscall(kill), (positive)child, SIGKILL);
+                        system_wait4_retry((b32)child, null, 0, null);
+                        log_direct(str("storage: wget 304 refusal NOT RUN -- qemu-user cannot confine wget\n"));
+                }
+                else
+                {
+                        check("wget refuses a terminal 304", said == 8);
+                        check("304 preservation server completes",
+                              system_wait4_retry((b32)child, address_of raw, 0,
+                                                 null) == child &&
+                                  wait_status_code(raw) == 0);
+                }
         }
 }
 
@@ -94967,14 +102723,17 @@ static fn settings_commands(void)
                                      address_of setting) &&
                   setting.entry.id == 1);
         check("init add takes them quoted",
-              settings_run("init", "add", "pacman -Syu", null) == HOST_SETTINGS_CHANGED &&
+              settings_run("init", "add", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
                   host_settings_find(slot, SPARK_SETTINGS_INIT, "2", address_of setting) &&
-                  setting.entry.length == 11);
+                  setting.entry.length == 23);
+        check("init add of a line it has is the entry it has, and not another",
+              settings_run("init", "add", "pacman -Syu", null) == HOST_SETTINGS_SHOWN &&
+                  settings_listed(SPARK_SETTINGS_INIT, 0) == 2);
         check("init remove takes an id",
               settings_run("init", "remove", "1", null) == HOST_SETTINGS_CHANGED &&
                   !host_settings_find(slot, SPARK_SETTINGS_INIT, "1", address_of setting));
         check("init remove takes the words",
-              settings_run("init", "remove", "pacman -Syu", null) == HOST_SETTINGS_CHANGED &&
+              settings_run("init", "remove", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
                   !settings_listed(SPARK_SETTINGS_INIT, 0));
         check("init remove of no such entry is refused",
               settings_run("init", "remove", "9", null) == HOST_SETTINGS_REFUSED);
@@ -94999,12 +102758,17 @@ static fn settings_commands(void)
         check("a switch belongs to its own command",
               settings_run("exit", "mount", "off", null) == HOST_SETTINGS_USAGE);
 
-        //      Nothing reads these yet, so no command takes them: a setting
-        //      accepted and then ignored is one nobody can tell is unsupported.
+        //      Canvas at boot is a switch as the mount is. Nothing reads the
+        //      startup list yet, so no command takes it: a setting accepted and
+        //      then ignored is one nobody can tell is unsupported.
         host_settings_empty(slot);
-        check("neither Canvas at boot nor the startup list is taken yet",
-              settings_run("init", "canvas", "off", null) == HOST_SETTINGS_USAGE &&
-                  settings_run("startup", null, null, null) == HOST_SETTINGS_USAGE &&
+        check("Canvas at boot is a switch as the mount is",
+              settings_run("init", "canvas", "off", null) == HOST_SETTINGS_CHANGED &&
+                  slot->flags & SPARK_SETTINGS_CANVAS_OFF &&
+                  settings_run("init", "canvas", "on", null) == HOST_SETTINGS_CHANGED &&
+                  !(slot->flags & SPARK_SETTINGS_CANVAS_OFF));
+        check("the startup list is not taken yet",
+              settings_run("startup", null, null, null) == HOST_SETTINGS_USAGE &&
                   settings_run("startup", "shell", null, null) == HOST_SETTINGS_USAGE &&
                   settings_run("startup", "add", "btop", null) == HOST_SETTINGS_USAGE &&
                   !slot->flags && !slot->length);
@@ -95858,7 +103622,7 @@ static fn sntp_test_random_child(positive which)
         {
                 ok = !sntp_put_stamp(field) &&
                      sntp_exchange(0, address_of deadline, false,
-                                   address_of sequence,
+                                   address_of sequence, null,
                                    address_of sample) == SNTP_NO_REPLY &&
                      !sample.ok;
                 for (positive at = 0; at < sizeof field; at++)
@@ -96165,6 +103929,802 @@ static fn machine_ntp_heard(void)
                   !locale_ntp_heard(row, 2, 0x0a000003));
 }
 
+#define SNTP_TEST_NOW \
+        ((bipolar)1800000000 * (bipolar)SNTP_NANOSECONDS)
+//      2035-12-31, 2036-01-01 (where the window used to end), 2036-02-07
+//      06:28:16 (the wrap), 2040-01-01 and 2100-01-01, in nanoseconds.
+#define SNTP_TEST_DATE_1 ((bipolar)2082672000 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_2 ((bipolar)2082758400 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_3 ((bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_4 ((bipolar)2208988800 * (bipolar)SNTP_NANOSECONDS)
+#define SNTP_TEST_DATE_5 ((bipolar)4102444800 * (bipolar)SNTP_NANOSECONDS)
+
+//      A control message laid out by hand for sntp_math_ok: the header,
+//      then a timespec where the payload starts.
+static COLD fn sntp_test_message(p8 address_to at, positive size, b32 level,
+                                 b32 type, p64 seconds, p64 nanoseconds)
+{
+        address_to(positive address_to)at = size;
+        address_to(b32 address_to)(at + sizeof(positive)) = level;
+        address_to(b32 address_to)(at + sizeof(positive) + 4) = type;
+        address_to(p64 address_to)(at + SNTP_CONTROL_DATA) = seconds;
+        address_to(p64 address_to)(at + SNTP_CONTROL_DATA + sizeof(p64)) =
+            nanoseconds;
+}
+
+//      A stamp, as the wire has it, for any time the window holds: the cast to
+//      32 bits is the era, as it is on the wire.
+static COLD fn sntp_test_stamp(p8 address_to at, bipolar ns)
+{
+        network_store_32(at, (p32)(ns / (bipolar)SNTP_NANOSECONDS + SNTP_UNIX));
+        network_store_32(at + 4,
+                         (p32)((p64)(ns % (bipolar)SNTP_NANOSECONDS) *
+                               4294967296ull / SNTP_NANOSECONDS));
+}
+
+static COLD bool sntp_math_ok(void)
+{
+        bipolar offset = 0;
+        bipolar delay = 0;
+        bipolar target = 0;
+        bipolar two_days = (bipolar)2 * 86400 * (bipolar)SNTP_NANOSECONDS;
+        positive at;
+        p8 request[SNTP_PACKET];
+        p8 reply[SNTP_PACKET];
+        positive words[12];
+        p8 address_to control = (p8 address_to)words;
+        p64 arrived[2];
+        p32 sequence;
+        static const struct
+        {
+                positive claimed; /* what the message says its length is */
+                b32 level;
+                b32 kind;
+                positive held;    /* what the buffer actually holds */
+                bool want;
+        } control_case[] = {
+            /* the message the kernel really sends */
+            {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS,
+             SNTP_CONTROL_DATA + 16, true},
+            /* some other control message, of which there are many */
+            {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS + 1,
+             SNTP_CONTROL_DATA + 16, false},
+            {SNTP_CONTROL_DATA + 16, 0, SNTP_TIMESTAMPNS,
+             SNTP_CONTROL_DATA + 16, false},
+            /* a length word smaller than the header it heads */
+            {SNTP_CONTROL_DATA - 8, SOL_SOCKET, SNTP_TIMESTAMPNS,
+             SNTP_CONTROL_DATA + 16, false},
+            /* a length word reaching past the end of the buffer */
+            {SNTP_CONTROL_DATA + 64, SOL_SOCKET, SNTP_TIMESTAMPNS,
+             SNTP_CONTROL_DATA + 16, false},
+            /* the right message with too little room for a timespec */
+            {SNTP_CONTROL_DATA + 8, SOL_SOCKET, SNTP_TIMESTAMPNS,
+             SNTP_CONTROL_DATA + 8, false},
+            /* nothing at all, which is what a kernel without the option
+               sends, and the case the caller falls back on */
+            {SNTP_CONTROL_DATA + 16, SOL_SOCKET, SNTP_TIMESTAMPNS, 0, false},
+        };
+        static const struct
+        {
+                p8 first;
+                p8 stratum;
+                p32 root_delay;
+                p32 root_dispersion;
+                p32 reference_id;
+                bool echoed;
+                bipolar want;
+        } reply_case[] = {
+            /* a stratum 2 server answering the question we asked */
+            {0x24, 2, 0, 0, 0, true, SNTP_OK},
+            /* the same packet with the origin stamp not echoed: a forgery,
+               and the one check standing between us and an off-path lie */
+            {0x24, 2, 0, 0, 0, false, SNTP_NO_REPLY},
+            /* mode 3 is a request, not a reply */
+            {0x23, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
+            /* version 0 and version 7 are no version NTP has had */
+            {0x04, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
+            {0x3c, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
+            /* stratum 0 carries a kiss code in the reference id */
+            {0x24, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
+            {0x24, 0, 0, 0, SNTP_KISS_DENY, true, SNTP_DENIED},
+            {0x24, 0, 0, 0, SNTP_KISS_RSTR, true, SNTP_DENIED},
+            {0x24, 0, 0, 0, 0, true, SNTP_BAD_SERVER},
+            /* and a kiss that is none of the three tells us nothing */
+            {0x24, 0, 0, 0, 0x58595a5au, true, SNTP_BAD_SERVER},
+            /* RATE is still RATE when the alarm bit is set with it */
+            {0xe4, 0, 0, 0, SNTP_KISS_RATE, true, SNTP_RATE_LIMITED},
+            /* stratum 16 is unsynchronised, and the alarm says so too */
+            {0x24, 16, 0, 0, 0, true, SNTP_BAD_SERVER},
+            {0xe4, 2, 0, 0, 0, true, SNTP_BAD_SERVER},
+            /* a second of root delay is the most we trust, and the sign
+               bit of the fixed-point short is never legitimately set */
+            {0x24, 2, SNTP_SHORT_SECOND, SNTP_SHORT_SECOND, 0, true, SNTP_OK},
+            {0x24, 2, SNTP_SHORT_SECOND + 1, 0, 0, true, SNTP_BAD_SERVER},
+            {0x24, 2, 0, SNTP_SHORT_SECOND + 1, 0, true, SNTP_BAD_SERVER},
+            {0x24, 2, 0x80000000u, 0, 0, true, SNTP_BAD_SERVER},
+            {0x24, 2, 0, 0x80000000u, 0, true, SNTP_BAD_SERVER},
+        };
+        sntp_sample row[5] = {
+            {10000000, 20000000, 0, true}, {8000000, 80000000, 0, true},
+            {2000000, 15000000, 0, true},  {4000000, 40000000, 0, true},
+            {50000000, 200000000, 0, true},
+        };
+        static const bipolar delay_case[][6] = {
+            {0, 1000000000, 1000000000, 2000000000, 0, 2000000000},
+            {0, 1050000000, 1050000000, 2000000000, 50000000, 2000000000},
+            {0, 100000000, 100000000, 1100000000, -450000000, 1100000000},
+        };
+        static const struct
+        {
+                p32 seconds;
+                p32 fraction;
+                bipolar want;
+        } stamp_case[] = {
+            /* era 0, the high bit set: 1968 through February 2036 */
+            {SNTP_UNIX, 0, 0},
+            {SNTP_UNIX + 1, 0, (bipolar)SNTP_NANOSECONDS},
+            {SNTP_UNIX, 0x80000000u, 500000000},
+            /* era 1, the high bit clear: February 2036 onward */
+            {0, 0, (bipolar)2085978496 * (bipolar)SNTP_NANOSECONDS},
+            {1, 0, (bipolar)2085978497 * (bipolar)SNTP_NANOSECONDS},
+            /* 2040-01-01, and the last second there is a stamp for */
+            {123010304u, 0, (bipolar)2208988800 * (bipolar)SNTP_NANOSECONDS},
+            {0x7fffffffu, 0, (bipolar)4233462143ll * (bipolar)SNTP_NANOSECONDS},
+        };
+        static const struct
+        {
+                bipolar t1;
+                bipolar t2;
+                bipolar t3;
+                bipolar t4;
+                bipolar off;
+                bipolar del;
+                bipolar most;
+                bool want;
+        } sane_case[] = {
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
+             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
+             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 2000000000, 0,
+             2000000000, SNTP_OFFSET_SYNCED_NS, true},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
+             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 3000000001, 0,
+             3000000001, SNTP_OFFSET_MOST_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 1000000000,
+             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 500000000, 0,
+             -500000000, SNTP_OFFSET_MOST_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 3000000000,
+             SNTP_TEST_NOW + 3000000000, SNTP_TEST_NOW + 50000000, 2975000000,
+             50000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2000000000,
+             SNTP_TEST_NOW + 1000000000, SNTP_TEST_NOW + 50000000, 0, 50000000,
+             SNTP_OFFSET_MOST_NS, false},
+            /* a clock that is 2.5 s out is stepped by an unsynchronised
+               clock and by a hand, and left to a synchronised one */
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
+             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
+             2000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 2500000000,
+             SNTP_TEST_NOW + 2500000000, SNTP_TEST_NOW + 2000000, 2499000000,
+             2000000, SNTP_OFFSET_MOST_NS, true},
+            /* a clock set from the network on either side of 2036-01-01, of
+               the era's wrap on 2036-02-07 and in 2040 and 2100 is stepped
+               like any other: the window ended on the first of those */
+            {SNTP_TEST_DATE_1, SNTP_TEST_DATE_1 + 1000000000,
+             SNTP_TEST_DATE_1 + 1000000000, SNTP_TEST_DATE_1 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_DATE_2, SNTP_TEST_DATE_2 + 1000000000,
+             SNTP_TEST_DATE_2 + 1000000000, SNTP_TEST_DATE_2 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_DATE_3, SNTP_TEST_DATE_3 + 1000000000,
+             SNTP_TEST_DATE_3 + 1000000000, SNTP_TEST_DATE_3 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_SYNCED_NS, true},
+            {SNTP_TEST_DATE_4, SNTP_TEST_DATE_4 + 1000000000,
+             SNTP_TEST_DATE_4 + 1000000000, SNTP_TEST_DATE_4 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            {SNTP_TEST_DATE_5, SNTP_TEST_DATE_5 + 1000000000,
+             SNTP_TEST_DATE_5 + 1000000000, SNTP_TEST_DATE_5 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, true},
+            /* a server that answers with a time past the window's end is
+               refused, and so is one that says it is 1970 */
+            {SNTP_TEST_DATE_5, SNTP_WALL_MOST_NS + 1000000000,
+             SNTP_WALL_MOST_NS + 1000000000, SNTP_TEST_DATE_5 + 2000000000, 0,
+             2000000000, SNTP_OFFSET_MOST_NS, false},
+            /* and one 25 h out only by a hand, which the window bounds */
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_MOST_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_SYNCED_NS, false},
+            {SNTP_TEST_NOW, SNTP_TEST_NOW + 90000000000000,
+             SNTP_TEST_NOW + 90000000000000, SNTP_TEST_NOW + 2000000,
+             89999999000000, 2000000, SNTP_OFFSET_ANY_NS, true},
+        };
+
+        for (at = 0; at < array_count(delay_case); at++)
+        {
+                sntp_offset_delay(delay_case[at][0], delay_case[at][1],
+                                  delay_case[at][2], delay_case[at][3],
+                                  address_of offset, address_of delay);
+                if (offset != delay_case[at][4] || delay != delay_case[at][5])
+                        return false;
+        }
+
+        for (at = 0; at < array_count(sane_case); at++)
+                if (sntp_sample_sane(sane_case[at].t1, sane_case[at].t2,
+                                     sane_case[at].t3, sane_case[at].t4,
+                                     sane_case[at].off, sane_case[at].del,
+                                     sane_case[at].most) != sane_case[at].want)
+                        return false;
+
+        sntp_offset_delay(0, SNTP_TEST_NOW + 1000000000,
+                          SNTP_TEST_NOW + 1000000000, 100000000,
+                          address_of offset, address_of delay);
+        if (!sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
+                              SNTP_TEST_NOW + 1000000000, 100000000, offset,
+                              delay, SNTP_OFFSET_MOST_NS) ||
+            sntp_sample_sane(0, SNTP_TEST_NOW + 1000000000,
+                             SNTP_TEST_NOW + 1000000000, 100000000, offset,
+                             delay, SNTP_OFFSET_SYNCED_NS) ||
+            !sntp_target_ok(0, offset, address_of target) ||
+            target < SNTP_TEST_NOW || target > SNTP_TEST_NOW + 1000000000)
+                return false;
+
+        sntp_offset_delay(SNTP_TEST_NOW, SNTP_TEST_NOW + two_days,
+                          SNTP_TEST_NOW + two_days,
+                          SNTP_TEST_NOW + 50000000, address_of offset,
+                          address_of delay);
+        if (sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + two_days,
+                             SNTP_TEST_NOW + two_days,
+                             SNTP_TEST_NOW + 50000000, offset, delay,
+                             SNTP_OFFSET_MOST_NS))
+                return false;
+
+        /* An authenticated (NTS) answer is asked with the whole window as its
+           reach (sntp_query_nts): a month out and two years out, from a clock
+           that is synchronised or not, where the same offset from the pool is
+           refused; but not one outside the window, or whose order is wrong. */
+        {
+                bipolar month = (bipolar)30 * 86400 * (bipolar)SNTP_NANOSECONDS;
+                bipolar years = (bipolar)700 * 86400 * (bipolar)SNTP_NANOSECONDS;
+
+                if (!sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + month,
+                                      SNTP_TEST_NOW + month, SNTP_TEST_NOW + 10000000,
+                                      month, 10000000, SNTP_OFFSET_ANY_NS) ||
+                    !sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + years,
+                                      SNTP_TEST_NOW + years, SNTP_TEST_NOW + 10000000,
+                                      years, 10000000, SNTP_OFFSET_ANY_NS) ||
+                    sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + month,
+                                     SNTP_TEST_NOW + month, SNTP_TEST_NOW + 10000000,
+                                     month, 10000000, SNTP_OFFSET_SYNCED_NS) ||
+                    sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + month,
+                                     SNTP_TEST_NOW + month, SNTP_TEST_NOW + 10000000,
+                                     month, 10000000, SNTP_OFFSET_MOST_NS) ||
+                    sntp_sample_sane(SNTP_TEST_NOW, SNTP_WALL_MOST_NS + 1,
+                                     SNTP_WALL_MOST_NS + 1, SNTP_TEST_NOW + 10000000,
+                                     1, 10000000, SNTP_OFFSET_ANY_NS) ||
+                    sntp_sample_sane(SNTP_TEST_NOW, SNTP_TEST_NOW + 5, SNTP_TEST_NOW + 4,
+                                     SNTP_TEST_NOW + 10000000, 0, 10000000,
+                                     SNTP_OFFSET_ANY_NS))
+                        return false;
+        }
+
+        if (!sntp_short_ok(0) || !sntp_short_ok(SNTP_SHORT_SECOND) ||
+            sntp_short_ok(SNTP_SHORT_SECOND + 1) ||
+            sntp_short_ok(0x80000000u))
+                return false;
+
+        /*
+                The seconds bound is the one that has to hold exactly: a
+                whole second short of it, with the largest fraction, is
+                still a number, and one second past it is not.
+        */
+        if (sntp_timespec_ns(SNTP_TIMESPEC_SECONDS_MOST,
+                             SNTP_NANOSECONDS - 1) < 0 ||
+            sntp_timespec_ns(SNTP_TIMESPEC_SECONDS_MOST + 1, 0) >= 0 ||
+            sntp_timespec_ns(0, SNTP_NANOSECONDS) >= 0)
+                return false;
+
+        if (!sntp_local_ok(0) || !sntp_local_ok(SNTP_WALL_MOST_NS) ||
+            sntp_local_ok(SNTP_WALL_MOST_NS + 1) || sntp_local_ok(-1))
+                return false;
+
+        //      The window holds every date from this source's to the end of the
+        //      era 1 stamps, and a step that would land outside it is refused
+        //      on either side.
+        if (!sntp_wall_ok(SNTP_TEST_DATE_1) || !sntp_wall_ok(SNTP_TEST_DATE_2) ||
+            !sntp_wall_ok(SNTP_TEST_DATE_3) || !sntp_wall_ok(SNTP_TEST_DATE_4) ||
+            !sntp_wall_ok(SNTP_TEST_DATE_5) ||
+            !sntp_wall_ok(SNTP_WALL_MOST_NS) ||
+            sntp_wall_ok(SNTP_WALL_MOST_NS + 1) ||
+            sntp_wall_ok(SNTP_WALL_LEAST_NS - 1) ||
+            !sntp_target_ok(SNTP_TEST_DATE_2, 1000000000, address_of target) ||
+            target != SNTP_TEST_DATE_2 + 1000000000 ||
+            !sntp_target_ok(SNTP_TEST_DATE_4, -1000000000, address_of target) ||
+            target != SNTP_TEST_DATE_4 - 1000000000 ||
+            sntp_target_ok(SNTP_WALL_MOST_NS, 1, address_of target))
+                return false;
+
+        for (at = 0; at < array_count(stamp_case); at++)
+        {
+                p8 field[8];
+
+                network_store_32(field, stamp_case[at].seconds);
+                network_store_32(field + 4, stamp_case[at].fraction);
+                if (sntp_load_stamp(field) != stamp_case[at].want)
+                        return false;
+        }
+
+        memory_fill(request, 0, sizeof(request));
+        request[0] = SNTP_LI_VN_MODE;
+        network_store_32(request + 40, 0xc0ffee00u);
+        network_store_32(request + 44, 0x0badf00du);
+        for (at = 0; at < array_count(reply_case); at++)
+        {
+                memory_fill(reply, 0, sizeof(reply));
+                reply[0] = reply_case[at].first;
+                reply[1] = reply_case[at].stratum;
+                network_store_32(reply + 4, reply_case[at].root_delay);
+                network_store_32(reply + 8, reply_case[at].root_dispersion);
+                network_store_32(reply + 12, reply_case[at].reference_id);
+                if (reply_case[at].echoed)
+                        memory_copy(reply + 24, request + 40, 8);
+                if (sntp_reply_ok(reply, request) != reply_case[at].want)
+                        return false;
+        }
+
+        /*
+                The reference stamp: all zeros is a server that does not
+                say, and is the same server for all that; one that says is
+                held to the window and to what the server sent.
+        */
+        {
+                static const struct
+                {
+                        bipolar reference; /* unix seconds; -1 for all zeros */
+                        bipolar want;
+                } reference_case[] = {
+                    {-1, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS - 10, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 1, SNTP_OK},
+                    {SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS + 5,
+                     SNTP_BAD_SERVER},
+                    {SNTP_WALL_LEAST - 1, SNTP_BAD_SERVER},
+                    {1, SNTP_BAD_SERVER},
+                };
+                sntp_sample taken;
+
+                for (at = 0; at < array_count(reference_case); at++)
+                {
+                        memory_fill(reply, 0, sizeof(reply));
+                        reply[0] = 0x24;
+                        reply[1] = 2;
+                        memory_copy(reply + 24, request + 40, 8);
+                        sntp_test_stamp(reply + 32, SNTP_TEST_NOW + 1000000);
+                        sntp_test_stamp(reply + 40, SNTP_TEST_NOW + 1000000);
+                        if (reference_case[at].reference >= 0)
+                                sntp_test_stamp(reply + 16,
+                                                reference_case[at].reference *
+                                                    (bipolar)SNTP_NANOSECONDS);
+                        memory_zero(address_of taken, sizeof(taken));
+                        if (sntp_reply_sample(reply, request, SNTP_TEST_NOW,
+                                              SNTP_TEST_NOW + 2000000,
+                                              SNTP_OFFSET_MOST_NS,
+                                              address_of taken) !=
+                            reference_case[at].want)
+                                return false;
+                }
+        }
+
+        /*
+                A control buffer the kernel says it filled short is read
+                for nothing, the error queue's own flag is not that, and
+                the buffer takes the arrival stamp, the departure stamp and
+                the error header with the address behind it at once.
+        */
+        if (sntp_control_held(0, 144) != 144 ||
+            sntp_control_held(SNTP_MSG_CTRUNC, 144) ||
+            sntp_control_held(SNTP_MSG_CTRUNC | SNTP_ERRQUEUE, 128) ||
+            sntp_control_held(SNTP_ERRQUEUE, 96) != 96 ||
+            SNTP_CONTROL_WORDS * sizeof(positive) < 32 + 64 + 48)
+                return false;
+
+        for (at = 0; at < array_count(control_case); at++)
+        {
+                memory_zero(words, sizeof(words));
+                sntp_test_message(control, control_case[at].claimed,
+                                  control_case[at].level, control_case[at].kind,
+                                  1700000000ull, 250000000ull);
+                arrived[0] = 0;
+                arrived[1] = 0;
+                if (sntp_control_stamp(control, control_case[at].held,
+                                       SNTP_TIMESTAMPNS,
+                                       arrived) != control_case[at].want)
+                        return false;
+                if (control_case[at].want &&
+                    (arrived[0] != 1700000000ull || arrived[1] != 250000000ull))
+                        return false;
+        }
+
+        /*
+                The kernel puts its messages in the order it likes, so the
+                one we want is not always first. A message of another kind
+                in front of it must be stepped over, not stopped at.
+        */
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA, SOL_SOCKET,
+                          SNTP_TIMESTAMPNS + 7, 0, 0);
+        sntp_test_message(control + SNTP_CONTROL_DATA, SNTP_CONTROL_DATA + 16,
+                          SOL_SOCKET, SNTP_TIMESTAMPNS, 1700000001ull,
+                          750000000ull);
+        arrived[0] = 0;
+        arrived[1] = 0;
+        if (!sntp_control_stamp(control, 2 * SNTP_CONTROL_DATA + 16,
+                                SNTP_TIMESTAMPNS, arrived) ||
+            arrived[0] != 1700000001ull || arrived[1] != 750000000ull)
+                return false;
+
+        /*
+                The departure stamp comes back under a different type and
+                in a longer payload -- three timespecs, of which the
+                software one is first -- so the walk has to take its two
+                words from the front and let the rest alone, and has to
+                tell the two types apart rather than taking whichever
+                timestamp it meets first.
+        */
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA + 48, SOL_SOCKET,
+                          SNTP_TIMESTAMPING, 1700000002ull, 125000000ull);
+        arrived[0] = 0;
+        arrived[1] = 0;
+        if (!sntp_control_stamp(control, SNTP_CONTROL_DATA + 48,
+                                SNTP_TIMESTAMPING, arrived) ||
+            arrived[0] != 1700000002ull || arrived[1] != 125000000ull)
+                return false;
+        if (sntp_control_stamp(control, SNTP_CONTROL_DATA + 48,
+                               SNTP_TIMESTAMPNS, arrived))
+                return false;
+
+        /*
+                The transmit stamp's number rides in the error header
+                beside it, not in the stamp, and the same header says
+                whether the entry is a timestamp at all. A real ICMP
+                error carries a different origin and must not be read as
+                a sequence number, or a refused port would start
+                claiming to be the answer to a send.
+        */
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA + SNTP_ERROR_BYTES,
+                          SNTP_SOL_IP, SNTP_IP_RECVERR, 0, 0);
+        control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] =
+            SNTP_ERROR_TIMESTAMPING;
+        address_to(p32 address_to)(control + SNTP_CONTROL_DATA +
+                                   SNTP_ERROR_SEQUENCE) = 4u;
+        sequence = 0;
+        if (!sntp_control_sequence(control, SNTP_CONTROL_DATA +
+                                                SNTP_ERROR_BYTES,
+                                   address_of sequence) ||
+            sequence != 4u)
+                return false;
+
+        /* the same entry as an ICMP error rather than a timestamp */
+        control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] = 2; /* ICMP */
+        sequence = 0;
+        if (sntp_control_sequence(control, SNTP_CONTROL_DATA +
+                                               SNTP_ERROR_BYTES,
+                                  address_of sequence))
+                return false;
+
+        /* a header cut short of the field the number sits in */
+        control[SNTP_CONTROL_DATA + SNTP_ERROR_ORIGIN] =
+            SNTP_ERROR_TIMESTAMPING;
+        address_to(positive address_to)control = SNTP_CONTROL_DATA + 8;
+        sequence = 0;
+        if (sntp_control_sequence(control, SNTP_CONTROL_DATA + 8,
+                                  address_of sequence))
+                return false;
+
+        /* and no error header at all, which is the fallback case */
+        memory_zero(words, sizeof(words));
+        sntp_test_message(control, SNTP_CONTROL_DATA + 48, SOL_SOCKET,
+                          SNTP_TIMESTAMPING, 0, 0);
+        sequence = 0;
+        if (sntp_control_sequence(control, SNTP_CONTROL_DATA + 48,
+                                  address_of sequence))
+                return false;
+
+        /*
+                One bit of the echoed stamp flipped is still a forgery.
+        */
+        memory_fill(reply, 0, sizeof(reply));
+        reply[0] = 0x24;
+        reply[1] = 2;
+        memory_copy(reply + 24, request + 40, 8);
+        /* Every bit of the full random nonce is reply identity. A parser
+           that compares only the old random low half recreates the weak
+           predictable-clock authenticator this test is meant to prevent. */
+        for (positive byte = 0; byte < 8; byte++)
+                for (p8 bit = 1; bit; bit <<= 1)
+                {
+                        reply[24 + byte] ^= bit;
+                        if (sntp_reply_ok(reply, request) != SNTP_NO_REPLY)
+                                return false;
+                        reply[24 + byte] ^= bit;
+                }
+        {
+                p8 later[SNTP_PACKET];
+
+                memory_copy(later, request, sizeof later);
+                later[40] ^= 1;
+                /* A valid reply to the preceding exchange is a replay, not a
+                   reply to this one, even when every server field is valid. */
+                if (sntp_reply_ok(reply, later) != SNTP_NO_REPLY)
+                        return false;
+        }
+
+        /*
+                The root distance: half of a 20 ms round trip, half of a
+                half-second root delay and a 1/64 s root dispersion.
+        */
+        if (sntp_distance_ns(20000000, 0x8000u, 0x400u) !=
+            10000000 + 250000000 + 15625000)
+                return false;
+
+        /*
+                Choosing among servers. The one with the least distance is a
+                falseticker when neither other interval meets its own, and
+                the next best is believed; two that disagree, or three that
+                all do, cannot name the wrong one, so the least distance
+                stands; and one answer is the answer.
+        */
+        {
+                sntp_sample three[SNTP_SERVERS] = {
+                    {0, 0, 5000000, true},
+                    {1000000, 0, 2000000, true},
+                    {50000000, 0, 1000000, true},
+                };
+                sntp_sample apart[SNTP_SERVERS] = {
+                    {0, 0, 1000000, true},
+                    {10000000, 0, 2000000, true},
+                    {20000000, 0, 500000, true},
+                };
+
+                /* an answer 2 h out claiming half a millisecond, against
+                   an honest 10 ms one: its own word is not enough, alone
+                   or against that one, and two that agree are */
+                sntp_sample far[2] = {
+                    {(bipolar)7200 * 1000000000, 0, 500000, true},
+                    {0, 0, 10000000, true},
+                };
+
+                for (positive server = 0; server < SNTP_SERVERS; server++)
+                {
+                        three[server].address = (p32)(server + 1);
+                        apart[server].address = (p32)(server + 1);
+                }
+                far[0].address = 1;
+                far[1].address = 2;
+                if (sntp_choose(three, 3) != 1 || sntp_choose(three + 1, 2) != 1 ||
+                    sntp_choose(three + 2, 1) != 0 || sntp_choose(apart, 3) != 2)
+                        return false;
+                three[1].ok = false;
+                if (sntp_choose(three, 3) != 2)
+                        return false;
+                if (sntp_choose(far, 2) != 1 || sntp_choose(far, 1) != -1)
+                        return false;
+                far[1].offset_ns = far[0].offset_ns + 1000000;
+                if (sntp_choose(far, 2) != 0)
+                        return false;
+                /* one server under three names is one answer: three that agree
+                   from one address are not a majority, a second server that
+                   agrees with them is, and a step within 2 s needs no word */
+                sntp_sample same[3] = {
+                    {(bipolar)7200 * 1000000000, 0, 500000, true, 9},
+                    {(bipolar)7200 * 1000000000, 0, 600000, true, 9},
+                    {(bipolar)7200 * 1000000000, 0, 700000, true, 9},
+                };
+
+                if (sntp_choose(same, 3) != -1)
+                        return false;
+                same[2].address = 10;
+                if (sntp_choose(same, 3) != 0)
+                        return false;
+                same[0].offset_ns = same[1].offset_ns = same[2].offset_ns = 1000000;
+                same[2].address = 9;
+                if (sntp_choose(same, 3) != 0)
+                        return false;
+        }
+
+        return sntp_pick(row, 5) == 2 && row[2].offset_ns == 2000000;
+}
+
+/*
+        Nothing unprivileged can ask the kernel which mode a bit means,
+        and a wrong one returns success, so the decision is checked here
+        instead: what goes in the request for a given offset, rather than
+        what the kernel does with it.
+*/
+static COLD bool locale_discipline_ok(void)
+{
+        positive words[LOGGER_TIMEX_WORDS];
+        positive at;
+        static const struct
+        {
+                bipolar offset_ns;
+                bool step;
+                bipolar sec; /* what a step carries, floored */
+                bipolar nsec;
+        } discipline_case[] = {
+            {0, false, 0, 0},
+            {1000000, false, 0, 0},
+            {-1000000, false, 0, 0},
+            {LOCALE_NTP_STEP_NS - 1, false, 0, 0},
+            {-(LOCALE_NTP_STEP_NS - 1), false, 0, 0},
+            {LOCALE_NTP_STEP_NS, true, 0, LOCALE_NTP_STEP_NS},
+            {-LOCALE_NTP_STEP_NS, true, -1,
+             (bipolar)SNTP_NANOSECONDS - LOCALE_NTP_STEP_NS},
+            {1500000000, true, 1, 500000000},
+            {-1500000000, true, -2, 500000000},
+            {(bipolar)86400 * 1000000000, true, 86400, 0},
+            {-(bipolar)86400 * 1000000000, true, -86400, 0},
+            {(bipolar)3 * 86400 * 1000000000 + 1, true, 259200, 1},
+            {-((bipolar)3 * 86400 * 1000000000 + 1), true, -259201,
+             (bipolar)SNTP_NANOSECONDS - 1},
+        };
+
+        for (at = 0; at < array_count(discipline_case); at++)
+        {
+                bipolar offset = discipline_case[at].offset_ns;
+
+                /* a 20 ms round trip to a server at the root of its
+                   tree is a 10 ms root distance */
+                locale_ntp_discipline_words(offset,
+                                            locale_ntp_error_us(
+                                                sntp_distance_ns(20000000, 0, 0)),
+                                            words);
+
+                if (locale_ntp_wants_step(offset) != discipline_case[at].step)
+                        return false;
+                /* the loop is enabled either way, and the clock counts as
+                   set either way, so STA_UNSYNC never survives a reply */
+                if (words[LOGGER_TIMEX_STATUS] != (STA_PLL | STA_FREQHOLD))
+                        return false;
+                if (words[0] & ADJ_STATUS ? false : true)
+                        return false;
+                /* and it carries an error bound, or the kernel takes the
+                   synchronisation back at the next second */
+                if (!(words[0] & ADJ_MAXERROR) || !(words[0] & ADJ_ESTERROR) ||
+                    words[LOGGER_TIMEX_MAXERROR] != 10001 ||
+                    words[LOCALE_TIMEX_ESTERROR] != 10001)
+                        return false;
+                if (discipline_case[at].step)
+                {
+                        /* a step carries the time, cancels any slew, and
+                           has no business setting a loop time constant */
+                        if (!(words[0] & ADJ_SETOFFSET) ||
+                            words[0] & ADJ_TIMECONST ||
+                            words[LOCALE_TIMEX_OFFSET] != 0 ||
+                            (bipolar)words[LOGGER_TIMEX_TIME_SEC] !=
+                                discipline_case[at].sec ||
+                            (bipolar)words[LOGGER_TIMEX_TIME_NSEC] !=
+                                discipline_case[at].nsec)
+                                return false;
+                }
+                else
+                {
+                        /* a slew hands the offset to the loop and never
+                           steps, so time does not go backwards */
+                        if (words[0] & ADJ_SETOFFSET ||
+                            !(words[0] & ADJ_TIMECONST) ||
+                            (bipolar)words[LOCALE_TIMEX_OFFSET] != offset ||
+                            words[LOCALE_TIMEX_CONSTANT] !=
+                                LOCALE_NTP_TIMECONST ||
+                            words[LOGGER_TIMEX_TIME_SEC] ||
+                            words[LOGGER_TIMEX_TIME_NSEC])
+                                return false;
+                }
+                if (!(words[0] & ADJ_NANO) || !(words[0] & ADJ_OFFSET))
+                        return false;
+        }
+        /* the first answer after boot steps from a millisecond out, and a
+           later one only from 128 ms */
+        locale_ntp_first = true;
+        if (!locale_ntp_wants_step(1000000) || !locale_ntp_wants_step(-1000000) ||
+            locale_ntp_wants_step(999999) || locale_ntp_wants_step(-999999))
+                return false;
+        locale_ntp_first = false;
+        if (locale_ntp_wants_step(1000000) || locale_ntp_wants_step(-86000000))
+                return false;
+        /* a poll learns offset over elapsed, trusted as far as the offset
+           stands above the noise: 144 ms slow after half an hour is -80
+           ppm, nearly all of it learned; 150 us after 256 s is under a
+           quarter of its 0.58 ppm; held within the kernel's 500, and under
+           a minute, or past 1000 ppm, learns nothing */
+        if (locale_ntp_learned(-144000000, (bipolar)1800 * 1000000000, 0) !=
+                -5224738 ||
+            locale_ntp_learned(36000000, (bipolar)1800 * 1000000000,
+                               (bipolar)7 << 16) != 1751516 ||
+            locale_ntp_learned(150000, (bipolar)256 * 1000000000, 0) !=
+                (bipolar)150000 * 65536 / 256000 * 150000 / 650000 ||
+            locale_ntp_learned(-144000000, (bipolar)1800 * 1000000000,
+                               -((bipolar)490 << 16)) != -LOCALE_NTP_FREQ_MOST ||
+            locale_ntp_learned(-144000000, (bipolar)30 * 1000000000, 5) != 5 ||
+            locale_ntp_learned(-5000000000, (bipolar)1800 * 1000000000, 5) != 5 ||
+            locale_ntp_learned((bipolar)199 * 1000000000,
+                               (bipolar)200000 * 1000000000, 0) !=
+                LOCALE_NTP_FREQ_MOST)
+                return false;
+        /* A plain answer against the NTS time of this boot: five seconds and
+           a thousandth of the time since (an hour of uptime allows 8.6 s, a
+           minute 5.06 s); nothing known allows everything. */
+        {
+                bipolar noon = (bipolar)SNTP_TEST_NOW;
+                p64 known = (p64)(SNTP_TEST_NOW / (bipolar)SNTP_NANOSECONDS);
+
+                if (locale_plain_apart(noon, 0, known, 0) ||
+                    locale_plain_apart(noon, 4900000000, known, 0) ||
+                    !locale_plain_apart(noon, 5100000000, known, 0) ||
+                    !locale_plain_apart(noon, -5100000000, known, 0) ||
+                    locale_plain_apart(noon, 8000000000, known, 3600) ||
+                    !locale_plain_apart(noon, 9000000000, known, 3600) ||
+                    !locale_plain_apart(noon, 3600000000000, known, 60) ||
+                    locale_plain_apart(noon, 3600000000000, 0, 0) ||
+                    locale_plain_apart(-1, 1, known, 0))
+                        return false;
+        }
+        /* a 10 ms distance is 10 ms, rounded up a microsecond; a negative
+           or absurd one still gives a bound the kernel accepts */
+        return locale_ntp_error_us((bipolar)10 * 1000000) == 10001 &&
+               locale_ntp_error_us(0) == 1 && locale_ntp_error_us(-5) == 1 &&
+               locale_ntp_error_us((bipolar)60 * 1000000000) ==
+                   LOCALE_NTP_ERROR_MOST_US;
+}
+
+/*
+        The NTS servers file, line by line: a line is a server when it is a
+        valid entry once its trailing blanks are gone and it is shorter than
+        the room a server gets, never cut to fit; and a file that filled the
+        buffer it was read into has no last line, since that one may be cut.
+*/
+static fn machine_nts_lines(void)
+{
+        static const char two[] = "time.example.org\r\nnts.example.net:4460  \n";
+        static const char five[] = "a.example\nb.example\nc.example\nd.example\ne.example\n";
+        static const char tail[] = "a.example\nb.example.org";
+        p8 into[LOCALE_NTS_SERVERS_MOST * LOCALE_NTS_ENTRY_ROOM];
+        p8 long_line[80];
+        positive count;
+
+        memory_zero(into, sizeof(into));
+        count = locale_nts_lines((const p8 address_to)two, sizeof(two) - 1, true,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("two servers are read from a file, CRLF and blanks trimmed",
+              count == 2 && string_equals(into, "time.example.org") &&
+                  string_equals(into + LOCALE_NTS_ENTRY_ROOM, "nts.example.net:4460"));
+        count = locale_nts_lines((const p8 address_to)five, sizeof(five) - 1, true,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("four servers at most are taken from a file",
+              count == LOCALE_NTS_SERVERS_MOST);
+        /* a name, then blanks and an x: 80 bytes, of which the first 79 are
+           the name and blanks. A line too long for its room is refused, not
+           taken by its first bytes */
+        memory_fill(long_line, ' ', sizeof(long_line));
+        memory_copy(long_line, "a.b", 3);
+        long_line[79] = 'x';
+        count = locale_nts_lines((const p8 address_to)long_line, sizeof(long_line),
+                                 true, into, LOCALE_NTS_ENTRY_ROOM);
+        check("a line too long for its room is no server, not its first bytes",
+              count == 0);
+        count = locale_nts_lines((const p8 address_to)tail, sizeof(tail) - 1, false,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("a last line the buffer cut short is no server", count == 1);
+        count = locale_nts_lines((const p8 address_to)tail, sizeof(tail) - 1, true,
+                                 into, LOCALE_NTS_ENTRY_ROOM);
+        check("a last line that ends the file is a server", count == 2);
+}
+
 static fn machine_sntp(void)
 {
         check("RFC 5905 offset, min-delay pick and poison guards hold",
@@ -96176,6 +104736,7 @@ static fn machine_sntp(void)
         machine_ntp_child();
         machine_ntp_no_child();
         machine_ntp_heard();
+        machine_nts_lines();
 
         /* Case 0 refuses blocking getrandom: the stamp fails untouched and
            the exchange returns before any send. Case 1 refuses only
@@ -96299,6 +104860,79 @@ static fn machine_auto(void)
                           string_equals(answer.zone, "Asia/Tokyo") &&
                           !locale_auto_from_trace((p8 address_to)none,
                                                   sizeof(none) - 1, address_of answer));
+        }
+        //      The question runs in a confined child (locale_auto_ask_apart),
+        //      and what it says back is a status and two words that root
+        //      believes only as the zone table spells them.
+        {
+                static const struct
+                {
+                        b64 status;
+                        char zone[64];
+                        char mode[32];
+                        b64 believed;
+                        char want_zone[40];
+                        char want_mode[24];
+                } said[] = {
+                        {0, "Europe/Stockholm", "auto cloudflare", 0,
+                         "Europe/Stockholm", "auto cloudflare"},
+                        {0, "Pacific/Auckland", "auto country NZ", 0,
+                         "Pacific/Auckland", "auto country NZ"},
+                        //      the code is what decides, not the zone beside it
+                        {0, "Europe/Stockholm", "auto country JP", 0,
+                         "Asia/Tokyo", "auto country JP"},
+                        //      only the table's own spelling of a zone
+                        {0, "Asia/Calcutta", "auto cloudflare", HTTP_MALFORMED, "", ""},
+                        {0, "europe/stockholm", "auto cloudflare", HTTP_MALFORMED, "", ""},
+                        {0, "Mars/Olympus", "auto cloudflare", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm\x1b]0;x\x07", "auto cloudflare",
+                         HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "auto country XX", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "auto country SEX", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "auto manual", HTTP_MALFORMED, "", ""},
+                        {0, "Europe/Stockholm", "", HTTP_MALFORMED, "", ""},
+                        //      a status http_run can return is passed on; any
+                        //      other is a child that cannot be believed
+                        {HTTP_NO_HOST, "", "", HTTP_NO_HOST, "", ""},
+                        {HTTP_MISMATCH, "Europe/Stockholm", "auto cloudflare",
+                         HTTP_MISMATCH, "", ""},
+                        {-6, "", "", HTTP_APART, "", ""},
+                        {1, "Europe/Stockholm", "auto cloudflare", HTTP_APART, "", ""},
+                        {-1000, "", "", HTTP_APART, "", ""},
+                };
+                bool all = true;
+
+                for (positive at = 0; at < array_count(said); at++)
+                {
+                        locale_auto_said one;
+                        bipolar believed;
+
+                        memory_zero(address_of one, sizeof one);
+                        one.status = said[at].status;
+                        memory_copy(one.answer.zone, said[at].zone,
+                                    sizeof(one.answer.zone));
+                        memory_copy(one.answer.mode, said[at].mode,
+                                    sizeof(one.answer.mode));
+                        believed = locale_auto_believe(address_of one,
+                                                       address_of answer);
+                        if (believed != said[at].believed ||
+                            !string_equals(answer.zone, said[at].want_zone) ||
+                            !string_equals(answer.mode, said[at].want_mode))
+                                all = false;
+                }
+                check("a confined zone question is believed only as the table spells it",
+                      all);
+        }
+        {
+                locale_auto_said one;
+
+                //      Every byte set and no terminator anywhere.
+                memory_fill(address_of one, 'A', sizeof one);
+                one.status = 0;
+                check("and an answer with no terminator is refused, not read past",
+                      locale_auto_believe(address_of one, address_of answer) ==
+                              HTTP_MALFORMED &&
+                          !answer.zone[0] && !answer.mode[0]);
         }
 }
 
@@ -125277,6 +133911,12 @@ void probe_fill_32(void *d)
             hwsim_radio in PID CMD...   run CMD inside it
             hwsim_radio dhcp IF SECONDS a DHCP server in raw frames on IF: one
                                         address, 192.168.77.100, leased for SECONDS
+            hwsim_radio inject IF MHZ KIND TO FROM BSSID REASON TIMES
+                                        IF becomes a monitor on that channel and sends
+                                        TIMES unprotected management frames of KIND
+                                        (deauth or disassoc) from the address FROM to
+                                        TO in BSSID's network: the spoof a radio in
+                                        range can send, as it heard no key
 
         The access points live in a namespace of their own so that the
         station's machine sees only its station, and the DHCP server, with
@@ -125556,6 +134196,81 @@ static int hwsim_dhcp(const char *name, unsigned lease)
         }
 }
 
+static int hwsim_mac(const char *text, unsigned char *mac)
+{
+        unsigned v[6];
+
+        if (sscanf(text, "%x:%x:%x:%x:%x:%x", v, v + 1, v + 2, v + 3, v + 4, v + 5) != 6)
+                return -1;
+        for (int i = 0; i < 6; i++)
+                mac[i] = (unsigned char)v[i];
+        return 0;
+}
+
+/* The monitor and the frames of `inject`. The radio is an ordinary station
+   interface until this makes it a monitor, which mac80211 lets send what
+   it is handed behind a radiotap header. */
+static int hwsim_inject(int handle, char **words)
+{
+        unsigned index = if_nametoindex(words[2]);
+        unsigned monitor = NL80211_IFTYPE_MONITOR;
+        unsigned frequency = (unsigned)atoi(words[3]);
+        unsigned reason = (unsigned)atoi(words[8]);
+        unsigned times = (unsigned)atoi(words[9]);
+        unsigned char frame[8 + 26];
+        char attributes[64];
+        struct ifreq request;
+        struct sockaddr_ll self;
+        int family, answer, length, raw;
+        int disassoc = !strcmp(words[4], "disassoc");
+
+        if (!index || (!disassoc && strcmp(words[4], "deauth")))
+                return fprintf(stderr, "hwsim_radio: inject: no %s or kind %s\n", words[2],
+                               words[4]), 1;
+        family = hwsim_family(handle, "nl80211");
+        if (family < 0)
+                return fprintf(stderr, "hwsim_radio: no nl80211\n"), 1;
+        length = hwsim_put(attributes, 0, NL80211_ATTR_IFINDEX, &index, 4);
+        length = hwsim_put(attributes, length, NL80211_ATTR_IFTYPE, &monitor, 4);
+        answer = hwsim_ask(handle, family, NL80211_CMD_SET_INTERFACE, attributes, length, 0);
+        if (answer < 0)
+                return fprintf(stderr, "hwsim_radio: monitor: %s\n", strerror(-answer)), 1;
+        memset(&request, 0, sizeof request);
+        strncpy(request.ifr_name, words[2], IFNAMSIZ - 1);
+        raw = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+        if (raw < 0 || ioctl(raw, SIOCGIFFLAGS, &request) < 0)
+                return perror("hwsim_radio: inject"), 1;
+        request.ifr_flags |= IFF_UP;
+        if (ioctl(raw, SIOCSIFFLAGS, &request) < 0)
+                return perror("hwsim_radio: up"), 1;
+        length = hwsim_put(attributes, 0, NL80211_ATTR_IFINDEX, &index, 4);
+        length = hwsim_put(attributes, length, NL80211_ATTR_WIPHY_FREQ, &frequency, 4);
+        answer = hwsim_ask(handle, family, NL80211_CMD_SET_CHANNEL, attributes, length, 0);
+        if (answer < 0)
+                return fprintf(stderr, "hwsim_radio: channel: %s\n", strerror(-answer)), 1;
+
+        memset(frame, 0, sizeof frame);
+        frame[2] = 8;                      // radiotap: version 0, length 8, no fields
+        frame[8] = disassoc ? 0xa0 : 0xc0; // management: disassociation or deauthentication
+        if (hwsim_mac(words[5], frame + 8 + 4) || hwsim_mac(words[6], frame + 8 + 10) ||
+            hwsim_mac(words[7], frame + 8 + 16))
+                return fprintf(stderr, "hwsim_radio: inject: a bad address\n"), 1;
+        frame[8 + 24] = (unsigned char)reason;
+        memset(&self, 0, sizeof self);
+        self.sll_family = AF_PACKET;
+        self.sll_protocol = htons(ETH_P_ALL);
+        self.sll_ifindex = (int)index;
+        if (bind(raw, (struct sockaddr *)&self, sizeof self) < 0)
+                return perror("hwsim_radio: inject bind"), 1;
+        for (unsigned at = 0; at < times; at++)
+        {
+                if (send(raw, frame, sizeof frame, 0) != (ssize_t)sizeof frame)
+                        return perror("hwsim_radio: inject send"), 1;
+                usleep(50000);
+        }
+        return 0;
+}
+
 int main(int count, char **words)
 {
         int handle = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
@@ -125624,6 +134339,8 @@ int main(int count, char **words)
         }
         if (count == 4 && !strcmp(words[1], "dhcp"))
                 return hwsim_dhcp(words[2], (unsigned)atoi(words[3]));
+        if (count == 10 && !strcmp(words[1], "inject"))
+                return hwsim_inject(handle, words);
         if (count == 2 && !strcmp(words[1], "new"))
         {
                 family = hwsim_family(handle, "MAC80211_HWSIM");
@@ -125670,7 +134387,8 @@ int main(int count, char **words)
                 return 0;
         }
         fprintf(stderr, "usage: hwsim_radio new | power IF DBM | hold | move PID IF |"
-                        " in PID CMD... | dhcp IF SECONDS\n");
+                        " in PID CMD... | dhcp IF SECONDS | inject IF MHZ KIND TO FROM BSSID"
+                        " REASON TIMES\n");
         return 2;
 }
 #endif /* CHECK_hwsim_radio */
