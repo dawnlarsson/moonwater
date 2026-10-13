@@ -10943,11 +10943,11 @@ static bool dump_od_number_refuse(string_address option, string_address value,
                 string_format(writer_stderr, "od: invalid suffix in %s argument '%w'\n",
                               option, writer_terminal_quoted_name, value);
         else if (kind == DUMP_OD_NUMBER_LARGE)
-                string_format(writer_stderr, "od: %s argument '%s' too large\n",
-                              option, value);
+                string_format(writer_stderr, "od: %s argument '%w' too large\n",
+                              option, writer_terminal_quoted_name, value);
         else
-                string_format(writer_stderr, "od: invalid %s argument '%s'\n",
-                              option, value);
+                string_format(writer_stderr, "od: invalid %s argument '%w'\n",
+                              option, writer_terminal_quoted_name, value);
 
         return false;
 }
@@ -31956,6 +31956,7 @@ static const p8 tools_help_env[] =
     "\n"
     "  -a, --argv0=ARG             give COMMAND ARG as its argument zero\n"
     "  -i, --ignore-environment    start from an empty environment (also -)\n"
+    "      --env0-from=FILE        read NUL-ended NAME=VALUE entries from FILE\n"
     "  -0, --null                  end each printed variable with NUL\n"
     "  -u, --unset=NAME            remove NAME from the environment\n"
     "  -C, --chdir=DIR             change to DIR first\n"
@@ -32428,6 +32429,7 @@ static const p8 tools_help_uname[] =
     "Print system information; without options, as -s.\n"
     "\n"
     "  -a, --all               print everything, leaving out unknown -p and -i\n"
+    "  -A, --all-labeled       the same, one labeled field to a line\n"
     "  -s, --kernel-name       the kernel name\n"
     "  -n, --nodename          the network node name\n"
     "  -r, --kernel-release    the kernel release\n"

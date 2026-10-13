@@ -360,7 +360,7 @@ static bool text_write_error_worded()
         static const char address_to const names[] = {
             "tr", "cut", "paste", "nl", "fold", "expand", "unexpand", "od",
             "base64", "base32", "basenc", "uniq", "comm", "join", "tac", "wc",
-            "pr", "fmt", "ptx",
+            "pr", "fmt", "ptx", "sum",
         };
 
         return array_any(i, sizeof(names) / sizeof(names[0]),
@@ -1704,10 +1704,15 @@ static fn text_banner_named(string_address name)
 
         text_banner_written = true;
 
+        //      The name is written the shell-escape way, as GNU 9.12 writes
+        //      it: 'standard input', 'a b', 'new'$'\n''line', and a plain
+        //      name as it is.
+        string_address shown = name && !string_equals(name, "-")
+                                   ? name
+                                   : (string_address)"standard input";
+
         text_put_string("==> ");
-        text_put_string(name && !string_equals(name, "-")
-                            ? name
-                            : (string_address)"standard input");
+        ls_quote_shell(text_put, shown, string_length(shown), false, true);
         text_put_string(" <==\n");
 }
 
@@ -4305,21 +4310,6 @@ static b32 text_comm()
 
         bool failed = sides[0].reader.failed || sides[1].reader.failed;
         bool order_failed = order.warned[0] || order.warned[1];
-
-        /*
-                GNU closes the one stdin once for each side, and the second
-                close fails: "comm: -", status 1, before any total or the
-                closing word on disorder.
-        */
-        if (comm_shared && !failed && !comm_stop)
-        {
-                text_record_close(sides + 2);
-                for (positive s = 0; s < 2; s++)
-                        for (positive k = 0; k < 2; k++)
-                                byte_store_release(comm_copies[s] + k);
-                text_complain("%s: -\n", text_name);
-                return text_done(1);
-        }
 
         if ((taking.flags & FILE_FLAG('T')) && !failed && !comm_stop)
         {
@@ -14190,14 +14180,14 @@ static fn pr_number_fatal(p8 error, bool pages, string_address argument)
 
         text_flush();
         if (error == PR_NUMBER_INVALID)
-                string_format(writer_stderr, "%s: invalid %s argument '%s'\n",
-                              text_name, option, argument);
+                string_format(writer_stderr, "%s: invalid %s argument '%w'\n",
+                              text_name, option, writer_terminal_quoted_name, argument);
         else if (error == PR_NUMBER_OVERFLOW)
-                string_format(writer_stderr, "%s: %s argument '%s' too large\n",
-                              text_name, option, argument);
+                string_format(writer_stderr, "%s: %s argument '%w' too large\n",
+                              text_name, option, writer_terminal_quoted_name, argument);
         else
-                string_format(writer_stderr, "%s: invalid suffix in %s argument '%s'\n",
-                              text_name, option, argument);
+                string_format(writer_stderr, "%s: invalid suffix in %s argument '%w'\n",
+                              text_name, option, writer_terminal_quoted_name, argument);
         exit(text_done(1));
 }
 
@@ -41503,8 +41493,8 @@ static bool sort_key_seen(p8 letter, string_address value)
 
         if (letter == 'S' && !sort_size_valid(value))
         {
-                return text_complain("%s: invalid -S argument '%s'\n",
-                              text_name, value);
+                return text_complain("%s: invalid -S argument '%w'\n",
+                              text_name, writer_terminal_quoted_name, value);
         }
 
         if (letter == 'S')
@@ -41553,30 +41543,30 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (!byte_is_digit(at[0]))
                 {
-                        return text_complain("%s: invalid --batch-size argument '%s'\n",
-                                             text_name, value);
+                        return text_complain("%s: invalid --batch-size argument '%w'\n",
+                                             text_name, writer_terminal_quoted_name, value);
                 }
 
                 number = string_decimal_saturated(address_of at, positive_max, address_of over);
 
                 if (at[0])
                 {
-                        return text_complain("%s: invalid suffix in --batch-size argument '%s'\n",
-                                             text_name, value);
+                        return text_complain("%s: invalid suffix in --batch-size argument '%w'\n",
+                                             text_name, writer_terminal_quoted_name, value);
                 }
 
                 if (!over && number < 2)
                 {
-                        return text_complain("%s: invalid --batch-size argument '%s'\n"
+                        return text_complain("%s: invalid --batch-size argument '%w'\n"
                                       "%s: minimum --batch-size argument is '2'\n",
-                                      text_name, value, text_name);
+                                      text_name, writer_terminal_quoted_name, value, text_name);
                 }
 
                 if (over || number > (positive)most)
                 {
-                        return text_complain("%s: --batch-size argument '%s' too large\n"
+                        return text_complain("%s: --batch-size argument '%w' too large\n"
                                              "%s: maximum --batch-size argument with current rlimit is %p\n",
-                                             text_name, value, text_name, (positive)most);
+                                             text_name, writer_terminal_quoted_name, value, text_name, (positive)most);
                 }
 
                 sort_batch = number;
@@ -41588,8 +41578,8 @@ static bool sort_key_seen(p8 letter, string_address value)
 
                 if (!text_unsigned_option(value, false, address_of number))
                 {
-                        return text_complain("%s: invalid --parallel argument '%s'\n",
-                                      text_name, value);
+                        return text_complain("%s: invalid --parallel argument '%w'\n",
+                                      text_name, writer_terminal_quoted_name, value);
                 }
 
                 if (!number)

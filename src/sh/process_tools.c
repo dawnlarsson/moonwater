@@ -296,9 +296,17 @@ static b32 stdbuf_target_kind(string_address path)
         return answer;
 }
 
+// xstrtol_fatal's three sentences, which GNU 9.12 says of an option's value:
+// no number, a suffix that is not one, and a number that does not fit.
+enum { STDBUF_NO_NUMBER, STDBUF_NO_SUFFIX, STDBUF_TOO_LARGE };
+
 static bool stdbuf_mode(string_address text, bool input,
                         p8 letter, p8 address_to assignment)
 {
+        positive fault = STDBUF_NO_NUMBER;
+        //      The formatter has no %c: the option's letter is said as a string.
+        p8 option[2] = {(p8)(letter | 0x20), 0};
+
         memory_copy_apart(assignment, (address_any) "_STDBUF_I=", 10);
         assignment[8] = letter;
 
@@ -326,7 +334,14 @@ static bool stdbuf_mode(string_address text, bool input,
             (string_get(at) == 'k' || size_suffix_power(string_get(at), false)))
                 ;
         else if (!string_digits_checked(address_of at, 10, address_of value))
+        {
+                //      A first byte that is a digit is a number that did not
+                //      fit; anything else was never one.
+                fault = byte_is_digit(string_get(text)) || string_is(text, '+')
+                            ? STDBUF_TOO_LARGE
+                            : STDBUF_NO_NUMBER;
                 goto invalid;
+        }
 
         positive power = 0;
         positive base = 1024;
@@ -338,7 +353,12 @@ static bool stdbuf_mode(string_address text, bool input,
                                       : size_suffix_power(suffix, false);
 
                 if (!power || (suffix >= 'a' && suffix != 'k'))
+                {
+                        fault = at == text || (at == text + 1 && string_is(text, '+'))
+                                    ? STDBUF_NO_NUMBER
+                                    : STDBUF_NO_SUFFIX;
                         goto invalid;
+                }
 
                 at++;
 
@@ -351,24 +371,37 @@ static bool stdbuf_mode(string_address text, bool input,
                          !string_get(at + 2))
                         at += 2;
                 else if (string_get(at))
+                {
+                        fault = STDBUF_NO_SUFFIX;
                         goto invalid;
+                }
         }
 
         if (string_get(at))
+        {
+                fault = STDBUF_NO_SUFFIX;
                 goto invalid;
+        }
 
         p64 scaled;
         if (!size_scale_power_checked(
                 value, base, (p8)power, (p64)positive_max,
                 address_of scaled))
+        {
+                fault = STDBUF_TOO_LARGE;
                 goto invalid;
+        }
         value = (positive)scaled;
 
         positive_into_string(assignment + 10, value);
         return true;
 
 invalid:
-        return string_report(log_error, false, "stdbuf: invalid mode '%w'\n", writer_terminal_quoted_name, text);
+        return string_report(log_error, false,
+                             fault == STDBUF_TOO_LARGE ? "stdbuf: -%s argument '%w' too large\n"
+                             : fault == STDBUF_NO_SUFFIX ? "stdbuf: invalid suffix in -%s argument '%w'\n"
+                                                         : "stdbuf: invalid -%s argument '%w'\n",
+                             option, writer_terminal_quoted_name, text);
 }
 
 static bool stdbuf_preload(string_address library)

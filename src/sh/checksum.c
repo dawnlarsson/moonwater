@@ -163,25 +163,21 @@ static bool checksum_digest_read(string_address text, positive length,
 
 /*
         A standard output that refused the sums: coreutils says write error,
-        with the kernel's reason -- except for cksum's own CRC, BSD and SysV
-        lines on a device that took the bytes and refused them at the flush,
-        where the reason is lost by the time close_stdout asks and it says
-        write error alone. A descriptor that was never open keeps its
-        reason either way.
+        with the kernel's reason. GNU 9.11 said write error alone for
+        cksum's own CRC, BSD and SysV lines on a device that took the bytes
+        and refused them at the flush; 9.12 keeps the reason there too.
 */
 static b32 checksum_done(b32 code, bool plain)
 {
+        (void)plain;
         text_flush();
         if (!text_out_failed || (text_out_error && text_out_error_handle != 1))
                 return text_done(code);
 
         bipolar reason = text_out_error ? text_out_error : -ERROR_INPUT_OUTPUT;
 
-        if (plain && reason != -ERROR_BAD_DESCRIPTOR)
-                string_diagnostic(&text_diagnostic, 0, null, "write error");
-        else
-                string_diagnostic(&text_diagnostic, 0, (string_address) "write error",
-                                  file_reason(reason));
+        string_diagnostic(&text_diagnostic, 0, (string_address) "write error",
+                          file_reason(reason));
         return 1;
 }
 

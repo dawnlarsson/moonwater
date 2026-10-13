@@ -520,7 +520,7 @@ fn file_mode_letters(p8 address_to into, positive mode)
 static bool file_mode_clauses(string_address specification, positive current,
                               bool directory, positive unnamed,
                               bool copies_original, positive address_to result,
-                              positive address_to touched)
+                              positive address_to touched, bool comma_ends)
 {
         positive mode = current & 07777;
         positive kept = directory ? 06000 : 0;
@@ -674,11 +674,12 @@ static bool file_mode_clauses(string_address specification, positive current,
                 }
 
                 //      A comma joins two clauses; one with nothing after
-                //      it is no clause, as gnulib's mode_compile has it.
+                //      it is no clause, as gnulib's mode_compile has it --
+                //      and dash's umask, which reads the comma and stops.
                 if (string_is(step, ','))
                 {
                         step++;
-                        if (!string_get(step))
+                        if (!string_get(step) && !comma_ends)
                                 return false;
                 }
                 else if (string_get(step))
@@ -694,17 +695,18 @@ static bool file_mode_clauses(string_address specification, positive current,
 
 static bool file_mode_adjust(string_address specification, positive current,
                              bool directory, positive unnamed,
-                             bool copies_original, positive address_to result)
+                             bool copies_original, positive address_to result,
+                             bool comma_ends)
 {
         return file_mode_clauses(specification, current, directory, unnamed,
-                                 copies_original, result, null);
+                                 copies_original, result, null, comma_ends);
 }
 
 bool file_mode_of(string_address specification, positive current, bool directory,
                   positive address_to result)
 {
         return file_mode_adjust(specification, current, directory, 07777,
-                                false, result);
+                                false, result, false);
 }
 
 // The process umask, read without changing it.  Asked once per command and
@@ -731,7 +733,7 @@ static bool file_mode_masked(string_address specification, positive current,
 {
         return file_mode_clauses(specification, current, directory,
                                  07000 | (0777 & ~mask), false, result,
-                                 touched);
+                                 touched, false);
 }
 
 // Looking at files ------------------------------------------
@@ -5781,8 +5783,26 @@ static HOT bool file_take_from(file_taking address_to taking, positive index)
                                               taking->program, shown);
                         else
                         {
+                                //      env spells the blank it was given as a
+                                //      shebang line's one word the way a C string
+                                //      does, as GNU's does: '\t', not a tab.
+                                string_address letter = named + 1;
+                                p8 spelled[3] = {'\\', 0, end};
+                                p8 blank = string_get(named + 1);
+                                p8 escape = blank == '\t'   ? 't'
+                                            : blank == '\n' ? 'n'
+                                            : blank == '\v' ? 'v'
+                                            : blank == '\f' ? 'f'
+                                            : blank == '\r' ? 'r'
+                                                            : 0;
+
+                                if (escape && string_equals(taking->program, "env"))
+                                {
+                                        spelled[1] = escape;
+                                        letter = spelled;
+                                }
                                 string_format(log_error, "%s: invalid option -- '%s'\n",
-                                              taking->program, named + 1);
+                                              taking->program, letter);
                                 //      A blank where env wants an option letter
                                 //      is a shebang line that wrote "-i cmd"
                                 //      as one word; GNU says how to mean it.
@@ -7189,6 +7209,10 @@ static p8 address_to file_transfer_buffer(void)
 static p8 file_debug_offload;
 static p8 file_debug_sparse;
 static bool file_debug;
+//      The errno the kernel gave the copy that did not offload, and the one a
+//      FICLONE would give: GNU 9.12 says each in the words of strerror.
+static bipolar file_debug_offload_error = -ERROR_NOT_SUPPORTED;
+static bipolar file_debug_reflink_error = -ERROR_NOT_SUPPORTED;
 
 static bool file_copy_range_fallback(bipolar result)
 {
@@ -7254,7 +7278,10 @@ static inline bool file_copy_stream(
                         }
 
                         if (!stage)
+                        {
                                 file_debug_offload = 'u';
+                                file_debug_offload_error = copied;
+                        }
                         *enabled = false;
                 }
         }
@@ -7491,11 +7518,29 @@ static bipolar file_copy_zero_holes(bipolar in, bipolar out)
 
 static p8 cp_sparse_policy;
 
+/* What a FICLONE from this source into whatever the handle names would
+   answer on a file system that does not clone, which is every one this
+   image does not try: a refusal on the same device, and EXDEV across two.
+   Only --debug and --reflink=always say it. */
+static bipolar file_clone_refusal(file_facts address_to source, bipolar handle)
+{
+        file_facts into;
+
+        if (file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of into) < 0)
+                return -ERROR_NOT_SUPPORTED;
+        return source->device_major != into.device_major ||
+                       source->device_minor != into.device_minor
+                   ? -ERROR_CROSS_DEVICE
+                   : -ERROR_NOT_SUPPORTED;
+}
+
 static bool file_copy_handles_known(bipolar in, bipolar out,
                                     file_facts address_to facts)
 {
         file_debug_offload = '?';
         file_debug_sparse = 'n';
+        if (file_debug)
+                file_debug_reflink_error = file_clone_refusal(facts, out);
         bipolar sparse = cp_sparse_policy == 'n' ? 0
                          : cp_sparse_policy == 'A' ? file_copy_zero_holes(in, out)
                                                    : file_copy_sparse(in, out, facts);
@@ -9448,6 +9493,10 @@ static string_address ls_time_format_recent;
 static p8 ls_quoting;     // L literal, s shell, S shell-always, e shell-escape,
                           // E shell-escape-always, c C, b escape, o locale
 static bool ls_hide_controls;
+// Nothing was said about control characters and the output is not a
+// terminal: GNU 9.12 still shows a newline in a name as ?, because it would
+// end the line the name is in, and leaves the other controls as they are.
+static bool ls_hide_newlines;
 static p8 ls_indicator;   // 0 none, / slash, f file-type, F classify
 static p8 ls_dereference; // N never, D command-line links to directories, H command line, L always
 static bool ls_hidden;
@@ -9934,8 +9983,58 @@ static fn writer_shell_name(writer output, string_address value)
 // quote or a heading's colon, and not for a backslash alone, which quotearg
 // leaves bare while it may still elide the quotes -- and escapes once it
 // quotes for something else.
+/* The bytes a name could be mistaken for the indicator after it by, which
+   GNU 9.12 puts a backslash before in the styles that spell one, and quotes
+   a name for in c-maybe: = > @ | beside --classify, and * as well beside
+   --file-type, which ends a name in none of them. */
+static bool ls_indicator_byte(p8 byte)
+{
+        return (ls_indicator == 'F' || ls_indicator == 'f') &&
+               (byte == '=' || byte == '>' || byte == '@' || byte == '|' ||
+                (ls_indicator == 'f' && byte == '*'));
+}
+
+static bool ls_has_indicator_byte(string_address name, positive length)
+{
+        if (ls_indicator != 'F' && ls_indicator != 'f')
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (ls_indicator_byte(string_get(name + at)))
+                        return true;
+        return false;
+}
+
+// A run of ASCII through the table, with the indicator bytes backslashed.
+static fn ls_write_c_run(writer write, p64 address_to table, string_address at,
+                         positive length, bool backslash)
+{
+        if (!backslash || !ls_has_indicator_byte(at, length))
+        {
+                writer_spelled(write, at, length, table);
+                return;
+        }
+        for (positive from = 0; from < length;)
+        {
+                positive to = from;
+
+                while (to < length && !ls_indicator_byte(string_get(at + to)))
+                        to++;
+                if (to > from)
+                        writer_spelled(write, at + from, to - from, table);
+                if (to < length)
+                {
+                        write("\\", 1);
+                        write(at + to, 1);
+                        to++;
+                }
+                from = to;
+        }
+}
+
 static bool ls_c_needs_escape(string_address name, positive length)
 {
+        if (ls_has_indicator_byte(name, length))
+                return true;
         ls_plain_ready();
         for (positive at = 0;
              (at += string_span_max(name + at, length - at, ls_plain_c[ls_quote_heading])) < length;)
@@ -9996,7 +10095,7 @@ static fn ls_quote_c(writer write, string_address name, positive length, p8 styl
 
                 if (plain)
                 {
-                        writer_spelled(write, name + at, plain, table);
+                        ls_write_c_run(write, table, name + at, plain, style != 'm');
                         at += plain;
                         continue;
                 }
@@ -10065,10 +10164,38 @@ static fn ls_write_shown(writer write, string_address name, positive length)
         }
 }
 
+static writer ls_newline_writer;
+
+static fn ls_write_newline_hidden(address_any text, positive length)
+{
+        string_address at = (string_address)text;
+
+        if (!length)
+                length = string_length(at);
+        while (length)
+        {
+                string_address mark = memory_first_of(at, '\n', length);
+                positive run = mark ? (positive)(mark - at) : length;
+
+                if (run)
+                        ls_newline_writer(at, run);
+                if (!mark)
+                        return;
+                ls_newline_writer("?", 1);
+                at += run + 1;
+                length -= run + 1;
+        }
+}
+
 static fn ls_quote_literal(writer write, string_address name, positive length)
 {
         if (!ls_hide_controls)
         {
+                if (ls_hide_newlines && memory_first_of(name, '\n', length))
+                {
+                        ls_newline_writer = write;
+                        write = ls_write_newline_hidden;
+                }
                 write(name, length);
                 return;
         }
@@ -10100,6 +10227,12 @@ static fn ls_quote(writer write, string_address name)
         {
                 ls_hidden_writer = write;
                 write = ls_write_hidden;
+        }
+        else if ((ls_quoting == 's' || ls_quoting == 'S') && ls_hide_newlines &&
+                 memory_first_of(name, '\n', length))
+        {
+                ls_newline_writer = write;
+                write = ls_write_newline_hidden;
         }
 
         switch (ls_quoting)
@@ -10282,11 +10415,36 @@ static fn ls_human_1000(writer write, p64 value)
         write(text, length);
 }
 
+// The library spells a value that rounds up to 1024 in its own unit, as
+// util-linux's tools do; the reference carries it into the next, so
+// 1048575 is 1.0M as 1048576 is.
+static fn ls_human_1024(writer write, p64 value)
+{
+        p8 text[8];
+        positive length = positive_into_human_1024_string(text, value);
+
+        if (length == 5 && text[0] == '1' && text[1] == '0' && text[2] == '2' && text[3] == '4')
+        {
+                static const p8 units[] = "KMGTPE";
+                positive unit = 0;
+
+                while (units[unit] != text[4])
+                        unit++;
+
+                text[1] = '.';
+                text[2] = '0';
+                text[3] = units[unit + 1];
+                length = 4;
+        }
+
+        write(text, length);
+}
+
 static fn ls_scaled(writer write, p64 value, positive unit, bool human, bool si,
                     string_address suffix)
 {
         if (human)
-                return si ? ls_human_1000(write, value) : positive_to_human_1024(write, value);
+                return si ? ls_human_1000(write, value) : ls_human_1024(write, value);
 
         positive_to_string(write, unit > 1 ? value / unit + (value % unit != 0) : value);
 
@@ -10462,10 +10620,10 @@ static fn ls_block_size_refused(string_address program, string_address option,
                                 string_address given)
 {
         string_format(log_error,
-                      ls_block_size_why == 'l' ? "%s: %s argument '%s' too large\n"
-                      : ls_block_size_why == 's' ? "%s: invalid suffix in %s argument '%s'\n"
-                                                 : "%s: invalid %s argument '%s'\n",
-                      program, option, given);
+                      ls_block_size_why == 'l' ? "%s: %s argument '%w' too large\n"
+                      : ls_block_size_why == 's' ? "%s: invalid suffix in %s argument '%w'\n"
+                                                 : "%s: invalid %s argument '%w'\n",
+                      program, option, writer_terminal_quoted_name, given);
 }
 
 // ---- Order ---------------------------------------------------------------
@@ -11841,7 +11999,13 @@ static fn ls_frills_before(ls_entry address_to entry)
 static fn ls_mark_after(string_address directory, ls_entry address_to entry, string_address name,
                         positive target_column)
 {
-        bool link = entry->known && (entry->mode & MODE_FORMAT) == MODE_LINK;
+        bool link = (entry->mode & MODE_FORMAT) == MODE_LINK;
+
+        //      A link the directory said was one and -L could not follow has
+        //      no target to show and no mark either: the long listing marks
+        //      only what it read.
+        if (ls_format == 'l' && link && !entry->known)
+                return;
 
         if (!(ls_format == 'l' && link))
         {
@@ -12207,7 +12371,7 @@ static fn ls_print_columns(string_address directory, bool across)
                         {
                                 line += real - ls_column_widths[column];
                                 ls_column_widths[column] = real;
-                                fits = line < width_limit;
+                                fits = line <= width_limit;
                         }
                 }
 
@@ -12290,7 +12454,15 @@ static fn ls_print_commas(string_address directory)
                 {
                         p8 separator = ls_format == 'm' ? ',' : ' ';
 
-                        if (ls_width && position + width + 2 >= ls_width)
+                        //      A name no column count can be told of is as wide as
+                        //      a word can say, and a sum that outgrows the word
+                        //      does not fit however wide the line. A name with
+                        //      another after it needs room for the comma that
+                        //      follows it as well; the last one does not.
+                        positive taken = position + width;
+                        positive needed = taken + 2 + (index + 1 < ls_count);
+
+                        if (ls_width && (taken < position || needed < taken || needed > ls_width))
                         {
                                 ls_out(address_of separator, 1);
                                 ls_out(address_of ls_eol, 1);
@@ -13657,6 +13829,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
 
         ls_hide_controls = ls_selected.control ? ls_selected.control == 'q'
                                              : ls_terminal && !(flags & FILE_FLAG('6'));
+        ls_hide_newlines = !ls_selected.control && !ls_hide_controls && !ls_dired;
 
         // The letter after a name.
         ls_indicator = 0;
@@ -13763,6 +13936,10 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                              (ls_when_active(ls_color_when) && (flags & FILE_FLAG('K')));
 
         ls_width = ls_width_said ? ls_width_option : ls_width_used ? ls_column_limit() : 80;
+        //      Names in columns with no width to fit them are written as
+        //      they are, a newline in one included.
+        if (!ls_width && (ls_format == 'C' || ls_format == 'x' || ls_format == 'm'))
+                ls_hide_newlines = false;
         ls_tabsize = 8;
         if (ls_tabsize_said)
                 ls_tabsize = ls_tabsize_option;
@@ -18637,8 +18814,8 @@ static fn stat_out_stamp(string_address prefix, positive length, b64 seconds,
         stat_out_gathered(prefix, length);
 }
 
-/* %N quotes as QUOTING_STYLE says, shell-escape-always when it says nothing;
-   the default layout's name is written as it stands. */
+/* %N quotes as QUOTING_STYLE says, shell-escape when it says nothing, and the
+   default layouts' names are written that way too. */
 static fn stat_out_quoted(string_address prefix, positive length,
                           string_address name)
 {
@@ -18722,6 +18899,13 @@ static bool stat_out_context(string_address prefix, positive length,
         return false;
 }
 
+/* The default file-system layout writes its name the shell-escape way, as
+   the file layout does, and %n of a format of the user's as it stands. */
+static bool statfs_name_quoted;
+/* The terse layout's %n is written the shell-escape way too, and without the
+   target of a link, which %N would add. */
+static bool stat_terse_quoted;
+
 static bool statfs_directive(string_address prefix, positive length, p8 letter,
                              p8 modifier, string_address path, address_any given)
 {
@@ -18734,7 +18918,10 @@ static bool statfs_directive(string_address prefix, positive length, p8 letter,
         switch (letter)
         {
         case 'n':
-                stat_out_string(prefix, length, path);
+                if (statfs_name_quoted)
+                        stat_out_quoted(prefix, length, path);
+                else
+                        stat_out_string(prefix, length, path);
                 break;
         case 'i':
                 stat_out_unsigned(prefix, length, 'x', statfs_identity(facts));
@@ -18789,7 +18976,10 @@ static bool stat_directive(string_address prefix, positive length, p8 letter,
         switch (letter)
         {
         case 'n':
-                stat_out_string(prefix, length, path);
+                if (stat_terse_quoted)
+                        stat_out_quoted(prefix, length, path);
+                else
+                        stat_out_string(prefix, length, path);
                 break;
         case 'N':
                 stat_out_quoted(prefix, length, path);
@@ -19059,7 +19249,7 @@ static b32 stat_walk(string_address format, string_address path, address_any fac
 
 /* The layouts coreutils writes when no format is given. */
 static const p8 stat_layout_file_system[] =
-    "  File: \"%n\"\n"
+    "  File: %n\n"
     "    ID: %-8i Namelen: %-7l Type: %T\n"
     "Block size: %-10s Fundamental block size: %S\n"
     "Blocks: Total: %-10b Free: %-10f Available: %a\n"
@@ -19137,11 +19327,14 @@ static b32 file_stat()
 
         /*
                 A format of the user's that names a file with %N quotes it as
-                QUOTING_STYLE says, shell-escape-always when it says nothing;
-                the layouts below write the name as it stands.
+                QUOTING_STYLE says, shell-escape when it says nothing, which
+                is GNU 9.12's: a plain name is written as it stands and one
+                that needs it is quoted. The layouts below say it that way.
         */
-        ls_quoting = 'L';
+        ls_quoting = 'e';
         ls_hide_controls = false;
+        statfs_name_quoted = !format;
+        stat_terse_quoted = !format && terse;
         if (format)
         {
                 for (string_address at = format; (at = string_first_of(at, '%'));
@@ -19152,7 +19345,7 @@ static b32 file_stat()
 
                         string_address style = file_environment((string_address) "QUOTING_STYLE");
 
-                        ls_quoting = 'E';
+                        ls_quoting = 'e';
                         if (style)
                         {
                                 positive word = 0;
@@ -19399,7 +19592,7 @@ static fn du_report(p64 bytes, du_moment stamp, string_address path)
         if (du_human && du_si)
                 ls_human_1000(log, bytes);
         else if (du_human)
-                positive_to_human_1024(log, bytes);
+                ls_human_1024(log, bytes);
         else
         {
                 positive unit = du_inodes ? 1 : du_unit;
@@ -20175,13 +20368,15 @@ static bool du_threshold_read(string_address value)
 
         if (!digits)
         {
-                refuse_if(!known, false, "du: invalid %s argument '%s'\n", option, value);
+                refuse_if(!known, false, "du: invalid %s argument '%w'\n", option,
+                          writer_terminal_quoted_name, value);
                 magnitude = 1;
         }
 
         if (letter)
         {
-                refuse_if(!known, false, "du: invalid suffix in %s argument '%s'\n", option, value);
+                refuse_if(!known, false, "du: invalid suffix in %s argument '%w'\n", option,
+                          writer_terminal_quoted_name, value);
 
                 p64 scale = 1024;
                 positive skip = 1;
@@ -20202,13 +20397,13 @@ static bool du_threshold_read(string_address value)
                 }
                 if (string_get(at + skip))
                         return string_report(log_error, false,
-                                             "du: invalid suffix in %s argument '%s'\n", option,
-                                             value);
+                                             "du: invalid suffix in %s argument '%w'\n", option,
+                                             writer_terminal_quoted_name, value);
         }
 
         if (overflow || magnitude > (p64)bipolar_max + negative)
-                return string_report(log_error, false, "du: %s argument '%s' too large\n", option,
-                                     value);
+                return string_report(log_error, false, "du: %s argument '%w' too large\n", option,
+                                     writer_terminal_quoted_name, value);
         refuse_if(!magnitude && negative, false, "du: invalid --threshold argument '-0'\n");
 
         du_threshold = negative ? (b64)((p64)0 - magnitude) : (b64)magnitude;
@@ -20268,11 +20463,12 @@ static bool du_exclude_seen(p8 letter, string_address value)
                 bool overflow = false;
 
                 //      xstrtoimax in base 0, and the size of a size_t at most;
-                //      a negative one is the same as none below the operand.
+                //      a negative one is refused, as GNU 9.12 refuses it
+                //      (-0 is the number nought).
                 if (!value ||
                     !file_number_c(value, address_of stop, address_of negative,
                                    address_of maximum, address_of overflow) ||
-                    string_get(stop) || overflow ||
+                    string_get(stop) || overflow || (negative && maximum) ||
                     maximum > (p64)bipolar_max + negative)
                 {
                         string_format(log_error, "du: invalid maximum depth '%w'\n",
@@ -20542,8 +20738,8 @@ static b32 file_du()
                                         address_of si, suffix))
                         return string_report(
                             log_error, 1,
-                            "du: invalid --block-size argument '%s'\n",
-                            given ? given : (string_address) "");
+                            "du: invalid --block-size argument '%w'\n",
+                            writer_terminal_quoted_name, given ? given : (string_address) "");
 
                 block_unit = unit;
                 block_human = human;
@@ -21444,8 +21640,8 @@ static b32 file_df()
                 if (!ls_block_size_read(given, address_of unit, address_of human,
                                         address_of si, df_suffix))
                         return string_report(log_error, 1,
-                                             "df: invalid -B argument '%s'\n",
-                                             given);
+                                             "df: invalid -B argument '%w'\n",
+                                             writer_terminal_quoted_name, given);
                 df_human = human;
                 df_si = si;
                 df_unit = unit;
@@ -25540,6 +25736,24 @@ static bool realpath_named(string_address path, p8 policy, bool logical,
             !file_resolve_as(source, answer, !written_name, policy))
         {
                 looked = file_look_code(AT_FDCWD, path, 0, address_of facts);
+
+                //      The kernel gives up on the forty-first link and GNU's
+                //      walk goes on until a link comes round to where it was,
+                //      so a long chain that ends at a name that is not a
+                //      directory, with a slash after it, is a name that is
+                //      not a directory and not a loop.
+                if (looked == -ERROR_LOOP && !written_name && !logical)
+                {
+                        p8 bare[FILE_PATH_MAX];
+                        p8 ends[FILE_PATH_MAX];
+                        positive size = string_length(path);
+
+                        memory_copy_apart(bare, path, size + 1);
+                        while (size > 1 && string_get(bare + size - 1) == '/')
+                                bare[--size] = end;
+                        if (size < string_length(path) && file_resolve_as(bare, ends, false, policy))
+                                looked = -ERROR_NOT_DIRECTORY;
+                }
 
                 *why = looked < 0 ? file_reason(looked)
                                   : (string_address) "No such file or directory";
@@ -35529,11 +35743,11 @@ static fn file_copy_debug_said(void)
                 sparse = sparse == 'S' ? 'B' : 'z';
         string_format(log, "copy offload: %s, reflink: %s, sparse detection: %s\n",
                       offload == 'y'   ? (string_address) "yes"
-                      : offload == 'u' ? (string_address) "unsupported"
+                      : offload == 'u' ? file_reason(file_debug_offload_error)
                       : offload == 'a' ? (string_address) "avoided"
                                        : (string_address) "unknown",
                       no_reflink ? (string_address) "no"
-                                 : (string_address) "unsupported",
+                                 : file_reason(file_debug_reflink_error),
                       sparse == 'S'   ? (string_address) "SEEK_HOLE"
                       : sparse == 'B' ? (string_address) "SEEK_HOLE + zeros"
                       : sparse == 'z' ? (string_address) "zeros"
@@ -37504,16 +37718,21 @@ static bool file_copy_one(bipolar source_directory, string_address source,
         {
                 /* This image has no FICLONE. GNU --reflink=always fails
                    closed; auto/never still copy. */
-                if (!moving && cp_reflink_policy == 'A' && kind == MODE_FILE &&
-                    file_debug)
-                        string_format(log, "copy offload: unknown, reflink: unsupported, sparse detection: unknown\n");
                 if (!moving && cp_reflink_policy == 'A' && kind == MODE_FILE)
+                {
+                        bipolar refusal = file_clone_refusal(address_of facts,
+                                                             destination_directory);
+
+                        if (file_debug)
+                                string_format(log, "copy offload: unknown, reflink: %s, sparse detection: unknown\n",
+                                              file_reason(refusal));
                         return string_report(
                             log_error, false,
                             "cp: failed to clone %w from %w: %s\n",
                             writer_shell_quoted_name, destination_shown,
                             writer_shell_quoted_name, source_shown,
-                            file_reason(-ERROR_NOT_SUPPORTED));
+                            file_reason(refusal));
+                }
 
                 positive source_flags = FILE_READ |
                                         (follow ? 0 : O_NOFOLLOW);
@@ -39456,7 +39675,7 @@ static COLD fn install_pair(string_address source, string_address destination)
         bool destination_exists = to_looked >= 0;
         if (to_looked < 0 && to_looked != -ERROR_NO_ENTRY)
         {
-                file_path_failed("install", "cannot inspect", writer_shell_quoted_name, destination,
+                file_path_failed("install", "cannot stat", writer_shell_quoted_name, destination,
                                  to_looked, 0);
                 install_status = 1;
                 return;
@@ -39794,7 +40013,7 @@ static b32 file_install()
                 if (mode &&
                     !file_mode_clauses(mode, 0, true, 07777, false,
                                        address_of install_mode,
-                                       address_of install_mode_bits))
+                                       address_of install_mode_bits, false))
                         return string_report(log_error, 1,
                                              "install: invalid mode '%w'\n",
                                              writer_terminal_quoted_name,
@@ -45317,6 +45536,7 @@ static b32 file_yes()
 static const argument_option env_options[] = {
     {"argv0", 'a', ARGUMENT_REQUIRED},
     {"ignore-environment", 'i'},
+    {"env0-from", 'e', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"null", '0'},
     {"unset", 'u', ARGUMENT_REQUIRED},
     {"chdir", 'C', ARGUMENT_REQUIRED},
@@ -45445,6 +45665,46 @@ static p64 env_signal_blocked;
 static p64 env_signal_unblocked;
 static bool env_signal_listed;
 static bool env_loud;
+
+/*
+        --env0-from=FILE: the entries of a file of NUL-ended NAME=VALUE
+        strings, put in after what -i left and before what -u takes away, as
+        GNU's 9.12 does; - is the standard input. The last one given is the
+        one read. A file that does not end in NUL is refused whole, and an
+        entry is kept as it is, with or without an =. The trace names each
+        only when -i did not clear the environment it goes into.
+*/
+static byte_store env_file;
+
+static b32 env_load_file(string_address name, bool announce)
+{
+        bipolar handle = string_equals(name, "-")
+                             ? 0
+                             : system_open_at(AT_FDCWD, name, FILE_READ | O_CLOEXEC);
+        bipolar failed = handle < 0 ? handle : file_store_read((positive)handle, address_of env_file);
+
+        if (handle > 0)
+                system_close((positive)handle);
+        if (failed < 0)
+                return string_report(log_error, 125, "env: cannot read %w: %s\n",
+                                     writer_shell_quoted_name, name, file_reason(failed));
+        if (env_file.used && env_file.bytes[env_file.used - 1])
+                return string_report(log_error, 125, "env: %w: file must end with a NUL byte\n",
+                                     writer_shell_name, name);
+
+        for (positive at = 0; at < env_file.used;)
+        {
+                string_address entry = (string_address)(env_file.bytes + at);
+
+                if (announce && env_loud)
+                        string_format(log_error, "setting:   '%w'\n",
+                                      writer_terminal_quoted_name, entry);
+                if (!env_put(entry))
+                        return 125;
+                at += string_length(entry) + 1;
+        }
+        return 0;
+}
 
 static bipolar env_signal_of(string_address word);
 
@@ -45893,7 +46153,7 @@ static bool env_split(string_address text, positive address_to have, bool loud)
                                                       (string_address)varname,
                                                       writer_terminal_quoted_name, value);
                                 else if (loud)
-                                        string_format(log_error, "replacing ${%s} with null string\n",
+                                        string_format(log_error, "replacing ${%s} with empty string\n",
                                                       (string_address)varname);
 
                                 //      An unset name makes no word; a set one,
@@ -46031,8 +46291,8 @@ static b32 file_env()
                                       writer_terminal_quoted_name, split);
                         for (positive word = 1; word < have; word++)
                                 string_format(log_error, "%s'%w'\n",
-                                              word == 1 ? (string_address) " into:    "
-                                                        : (string_address) "     &    ",
+                                              word == 1 ? (string_address) " into:     "
+                                                        : (string_address) "     &     ",
                                               writer_terminal_quoted_name, env_words[word]);
                 }
 
@@ -46073,7 +46333,7 @@ static b32 file_env()
         }
 
         if (empty && env_loud)
-                log_error("cleaning environ\n", 0);
+                log_error("clearing environment\n", 0);
         if (!empty)
         {
                 string_address address_to process = file_environment_all();
@@ -46083,16 +46343,28 @@ static b32 file_env()
                                 return 125;
         }
 
+        string_address from_file = file_option_value(address_of taking, 'e');
+
+        if (from_file)
+        {
+                b32 refused = env_load_file(from_file, !empty);
+
+                if (refused)
+                        return refused;
+        }
+
         //      -i leaves nothing to unset, and GNU does not look at the
-        //      names at all then, not even to refuse one it could not unset.
-        for (positive i = 0; !empty && i < env_drops; i++)
+        //      names at all then, not even to refuse one it could not unset,
+        //      unless a file put something there.
+        for (positive i = 0; (!empty || from_file) && i < env_drops; i++)
         {
                 string_address name = env_dropped[i] ? env_dropped[i]
                                                      : (string_address) "";
 
                 //      Said before it is tried, as GNU's trace does.
                 if (env_loud)
-                        string_format(log_error, "unset:    %s\n", name);
+                        string_format(log_error, "unsetting: '%w'\n",
+                                      writer_terminal_quoted_name, name);
                 if (!string_get(name))
                         return string_report(log_error, 125,
                                             "env: cannot unset '': %s\n",
@@ -46120,7 +46392,8 @@ static b32 file_env()
         while (at < have && string_first_of(env_words[at], '='))
         {
                 if (env_loud)
-                        string_format(log_error, "setenv:   %s\n", env_words[at]);
+                        string_format(log_error, "setting:   '%w'\n",
+                                      writer_terminal_quoted_name, env_words[at]);
                 if (!env_put(env_words[at++]))
                         return 125;
         }
@@ -46167,7 +46440,7 @@ static b32 file_env()
         if (where)
         {
                 if (env_loud)
-                        string_format(log_error, "chdir:    %w\n",
+                        string_format(log_error, "change dir: %w\n",
                                       writer_shell_quoted_name, where);
 
                 bipolar changed = system_change_directory(where);
@@ -46193,7 +46466,8 @@ static b32 file_env()
         }
         if (env_loud)
         {
-                string_format(log_error, "executing: %s\n", name);
+                string_format(log_error, "executing: '%w'\n",
+                              writer_terminal_quoted_name, name);
                 for (positive word = 0; arguments[word]; word++)
                         string_format(log_error, "   arg[%p]= '%w'\n", word,
                                       writer_terminal_quoted_name, arguments[word]);
@@ -46919,7 +47193,11 @@ static b32 file_hostname()
 
 // uname ------------------------------------------------------------
 /*
-        uname [-asnrvmpio]
+        uname [-aAsnrvmpio]
+
+        -A is -a one labeled field to a line, as GNU 9.12 writes it: Kernel
+        name, Node name, Kernel release, Kernel version, Machine and, when
+        asked for beside it, Processor, Hardware platform and Operating system.
 
         -a is every field the kernel actually keeps. The system's own uname
         adds a compiled in operating system name after them, which is not in
@@ -46932,6 +47210,7 @@ static b32 file_hostname()
 */
 static const argument_option uname_options[] = {
     {"all", 'a'},
+    {"all-labeled", 'A'},
     {"kernel-name", 's'},
     {"nodename", 'n'},
     {"kernel-release", 'r'},
@@ -46979,18 +47258,20 @@ static b32 file_uname()
                 string_address text;
                 bool part_of_all;
                 bool beside_all;
+                string_address label;
         } fields[] = {
-            {'s', facts.system, true, true},
-            {'n', facts.node, true, true},
-            {'r', facts.release, true, true},
-            {'v', facts.version, true, true},
-            {'m', facts.machine, true, true},
-            {'p', (string_address) "unknown", false, false},
-            {'i', (string_address) "unknown", false, false},
-            {'o', (string_address) "Moonwater", false, true},
+            {'s', facts.system, true, true, (string_address) "Kernel name"},
+            {'n', facts.node, true, true, (string_address) "Node name"},
+            {'r', facts.release, true, true, (string_address) "Kernel release"},
+            {'v', facts.version, true, true, (string_address) "Kernel version"},
+            {'m', facts.machine, true, true, (string_address) "Machine"},
+            {'p', (string_address) "unknown", false, false, (string_address) "Processor"},
+            {'i', (string_address) "unknown", false, false, (string_address) "Hardware platform"},
+            {'o', (string_address) "Moonwater", false, true, (string_address) "Operating system"},
         };
 
-        bool all = (flags & FILE_FLAG('a')) != 0;
+        bool labeled = (flags & FILE_FLAG('A')) != 0;
+        bool all = labeled || (flags & FILE_FLAG('a')) != 0;
         positive written = 0;
 
         // Nothing asked for at all is the kernel name, which is the first
@@ -47008,13 +47289,20 @@ static b32 file_uname()
                 if (!wanted)
                         continue;
 
+                if (labeled)
+                {
+                        string_format(log, "%s: %s\n", fields[i].label, fields[i].text);
+                        continue;
+                }
+
                 if (written++)
                         log(" ", 1);
 
                 log(fields[i].text, 0);
         }
 
-        log("\n", 1);
+        if (!labeled)
+                log("\n", 1);
         log_flush();
 
         return 0;
