@@ -140,6 +140,8 @@ static struct
         int wheel_remainder;
         unsigned int asked_w, asked_h; // the newest size the compositor asked for
         b32 focused;
+        int group;                      // the pty's foreground process group the title was taken from
+        char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
 } terminal = {.shown = -1, .view = TERMINAL_LIVE};
 
 static unsigned int terminal_colour[256];
@@ -1482,6 +1484,53 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         return true;
 }
 
+/*
+        The window's title, which its tab shows: the program in front on the
+        pty -- btop while btop runs -- and "shell" back at the prompt, and a
+        title a program sets (OSC 0 or 2) when it sets one. Looked at as the
+        far end is read, which is when either can change, and said to the
+        compositor only when it has.
+*/
+static void terminal_title_set(const char address_to title)
+{
+        struct windows address_to table = terminal.own.table;
+        unsigned int at = 0;
+
+        for (; title[at] && title[at] != '\n' && at < WINDOWS_TITLE - 1; at++)
+                table->title[terminal.own.row][at] = title[at];
+        table->title[terminal.own.row][at] = 0;
+        windows_knock(&terminal.own);
+}
+
+static void terminal_title(b32 master, bipolar shell)
+{
+        int group = 0;
+
+        if (compositor_call(syscall(ioctl), (positive)master, 0x540f, (positive)&group, 0, 0, 0) == 0 &&
+            group != terminal.group)
+        {
+                p8 path[32] = "/proc/", name[WINDOWS_TITLE] = {0};
+                bipolar handle;
+
+                terminal.group = group;
+                path[6 + positive_into_string(path + 6, (positive)group)] = 0;
+                string_copy((string_address)path + string_length((string_address)path), (string_address) "/comm");
+                handle = group == (int)shell ? -1 : system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+                if (handle >= 0)
+                {
+                        system_read_once((b32)handle, name, sizeof(name) - 1);
+                        system_close(handle);
+                }
+                terminal_title_set(name[0] ? (const char address_to)name : "shell");
+        }
+
+        if (window->title[0] && memory_compare(window->title, terminal.named, WINDOW_TITLE_MAX))
+        {
+                memory_copy(terminal.named, window->title, WINDOW_TITLE_MAX);
+                terminal_title_set(terminal.named);
+        }
+}
+
 // A line in the machine's log about this program, at its start and its end: its own standard output is nowhere.
 static void terminal_said(b32 reading, string_address what)
 {
@@ -1717,6 +1766,8 @@ static b32 terminal_run(b32 reading)
                         gone = true;
 
                 changed = reading ? klog_drain(master, &gone, TERMINAL_BUDGET) : term_drain(master, &gone, TERMINAL_BUDGET);
+                if (!reading && changed && !gone)
+                        terminal_title(master, child);
 
                 if (!gone && !term_send(master))
                         gone = true;
