@@ -108750,6 +108750,22 @@ static int settings_row_named(const char address_to label)
         return 0;
 }
 
+// One key as the window sends it: a character as its code point, in b.
+static b32 settings_type_code(unsigned int code)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, (int)code};
+
+        return settings_key(&event);
+}
+
+// One key as the window sends it: a key in a, none in b.
+static b32 settings_press(int key)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, key, 0};
+
+        return settings_key(&event);
+}
+
 static positive settings_lit(const unsigned int address_to pixels, positive count)
 {
         positive lit = 0;
@@ -108768,7 +108784,7 @@ static fn check_settings(string_address regular, string_address bold)
             clock = settings_row_named("Clock (Enter sets it now)"), wifi = settings_row_named("Wi-Fi"),
             prefer = settings_row_named("The internet prefers"), tls = settings_row_named("Names over TLS"),
             power = settings_row_named("Power profile"), bright = settings_row_named("Brightness"),
-            boost = settings_row_named("Boost");
+            boost = settings_row_named("Boost"), bluetooth = settings_row_named("Bluetooth");
         positive count;
 
         check("settings: a verb's word after its label and its escapes",
@@ -108825,6 +108841,37 @@ static fn check_settings(string_address regular, string_address bold)
               settings_parsed(wifi, "[Moonwater] wifi off  \n", value) == SETTINGS_READ &&
                   string_equals((string_address)value, (string_address) "off"));
 
+        // Changes made through the rows, with a verb running: each waits for it, and no verb is started (child is a stand-in).
+        settings.child = 1;
+        settings.queued = 0;
+        settings.editing = -1;
+        settings.job = clock;
+        settings.job_sets = false;
+        settings.state[wifi] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[wifi], (string_address) "busy", SETTINGS_VALUE);
+        settings_activate(wifi, -2);
+        check("settings: Left throws a switch off, whatever its value said",
+              settings.queued == 1 && settings.queue[0].row == wifi && string_equals((string_address)settings.queue[0].value, (string_address) "off"));
+        settings.queued = 0;
+        settings.job = clock;
+        settings.job_sets = true;
+        settings.state[clock] = SETTINGS_READ;
+        settings_activate(clock, 1);
+        check("settings: a clock set that is running is not asked for again", settings.queued == 0);
+        settings.job_sets = false;
+        settings.state[bluetooth] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[bluetooth], (string_address) "off", SETTINGS_VALUE);
+        settings_activate(wifi, 1);
+        settings_activate(bluetooth, 1);
+        check("settings: a change made while another waits is not lost",
+              settings.queued == 2 && settings.queue[0].row == wifi && settings.queue[1].row == bluetooth &&
+                  string_equals((string_address)settings.queue[1].value, (string_address) "on"));
+        settings_activate(wifi, -2);
+        check("settings: and a change to a row waiting replaces its change", settings.queued == 2 &&
+                  string_equals((string_address)settings.queue[0].value, (string_address) "off"));
+        settings.child = 0;
+        settings.queued = 0;
+
         settings_next(&settings_rows[ntp], "on", 1, next, sizeof(next));
         check("settings: a switch on goes off", string_equals((string_address)next, (string_address) "off"));
         settings_next(&settings_rows[keyboard], "us", 1, next, sizeof(next));
@@ -108875,6 +108922,7 @@ static fn check_settings(string_address regular, string_address bold)
                 ui.scratch = scratch;
                 ui.scratch_width = 400;
                 ui_inks(&ui, 0x101012u);
+
 
                 for (int size_at = 0; size_at < 3; size_at++)
                         for (int face = 0; face < 2; face++)

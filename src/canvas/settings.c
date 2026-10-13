@@ -65,6 +65,7 @@
 #define SETTINGS_GAP 10     // under a card
 #define SETTINGS_FOOT 40    // the line that says what happened
 #define SETTINGS_FIELD_W 220
+#define SETTINGS_QUEUE 8 // changes that may wait for the verb running
 
 #define SETTINGS_KEY_ESCAPE 1
 #define SETTINGS_KEY_BACKSPACE 14
@@ -81,6 +82,12 @@
 #define SETTINGS_KEY_PAGE_DOWN 109
 #define SETTINGS_KEY_ENTER_PAD 96
 #define SETTINGS_BUTTON_LEFT 0x110
+
+struct settings_change
+{
+        int row;
+        char value[SETTINGS_VALUE];
+};
 
 struct settings_row
 {
@@ -279,10 +286,11 @@ static fn settings_next(const struct settings_row address_to row, const char add
         into[0] = 0;
         if (row->kind == SETTINGS_SWITCH)
         {
-                string_copy_bounded((string_address)into,
-                                    (string_address)(way ? (string_equals((string_address)value, (string_address) "on") ? "off" : "on")
-                                                         : value),
-                                    room);
+                // Right throws it on and Left off, whatever it said; an Enter or a press turns it over.
+                const char address_to to = way > 1 ? "on" : way < -1 ? "off"
+                                           : string_equals((string_address)value, (string_address) "on") ? "off" : "on";
+
+                string_copy_bounded((string_address)into, (string_address)to, room);
                 return;
         }
         if (row->kind == SETTINGS_STEP)
@@ -356,8 +364,8 @@ static struct
         b32 job_sets;
         char job_value[SETTINGS_VALUE];
         positive unread;  // rows to ask, a bit each
-        int pending;      // a row to change once the verb running is done, or -1
-        char pending_value[SETTINGS_VALUE];
+        struct settings_change queue[SETTINGS_QUEUE]; // changes to make once the verb running is done, in order
+        positive queued;
         b32 told;         // the first reading is said in the machine's log
 } settings;
 
@@ -476,12 +484,13 @@ static fn settings_next_job(void)
 
         while (settings.child <= 0)
         {
-                if (settings.pending >= 0)
+                if (settings.queued)
                 {
-                        settings.job = settings.pending;
+                        settings.job = settings.queue[0].row;
                         settings.job_sets = true;
-                        memory_copy(settings.job_value, settings.pending_value, sizeof(settings.job_value));
-                        settings.pending = -1;
+                        memory_copy(settings.job_value, settings.queue[0].value, sizeof(settings.job_value));
+                        settings.queued--;
+                        memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
                 }
                 else if (settings.unread)
                 {
@@ -511,11 +520,32 @@ static fn settings_ask_all(void)
         settings.unread = ((positive)1 << SETTINGS_ROWS) - 1;
 }
 
-// A row changed to value, now or once the verb running has finished.
+// Where a change to row waits in the queue, or queued when it has none.
+static positive settings_slot(int row)
+{
+        positive at = 0;
+
+        while (at < settings.queued && settings.queue[at].row != row)
+                at++;
+        return at;
+}
+
+// A row changed to value, now or once the verb running has finished: a change to a row already waiting replaces it.
 static fn settings_change(int row, const char address_to value)
 {
-        settings.pending = row;
-        string_copy_bounded((string_address)settings.pending_value, (string_address)value, sizeof(settings.pending_value));
+        positive at = settings_slot(row);
+
+        if (at == settings.queued)
+        {
+                if (settings.queued == SETTINGS_QUEUE)
+                {
+                        settings_say((string_address) "moonwater is busy: the changes before this one are not done");
+                        return;
+                }
+                settings.queue[at].row = row;
+                settings.queued++;
+        }
+        string_copy_bounded((string_address)settings.queue[at].value, (string_address)value, sizeof(settings.queue[at].value));
         settings_say((string_address) "...");
         settings_next_job();
 }
@@ -560,7 +590,7 @@ static fn settings_finished(b32 killed)
         settings_next_job();
 
         // The first reading of every row, said once where the machine's log is: how many said nothing.
-        if (!settings.told && !settings.unread && settings.child <= 0 && settings.pending < 0)
+        if (!settings.told && !settings.unread && settings.child <= 0 && !settings.queued)
         {
                 positive failed = 0;
 
@@ -618,21 +648,15 @@ static fn settings_activate(int row, int way)
                 settings.dirty = true;
                 return;
         case SETTINGS_ACTION:
+                // A set asked for while one is running or waiting is that set: the clock is set once for it.
+                if (settings_slot(row) < settings.queued || (settings.child > 0 && settings.job == row && settings.job_sets))
+                        return;
                 settings_change(row, "");
                 return;
-        case SETTINGS_SWITCH:
-                if (way > 1 || way < -1)
-                {
-                        // Right is on and Left off, whatever it was.
-                        if (string_equals((string_address)settings.value[row], (string_address)(way > 0 ? "on" : "off")))
-                                return;
-                        way = 1;
-                }
-                break;
         }
 
         settings_next(which, settings.value[row], way, next, sizeof(next));
-        if (next[0])
+        if (next[0] && !string_equals((string_address)next, (string_address)settings.value[row]))
                 settings_change(row, next);
 }
 
@@ -1021,7 +1045,7 @@ static b32 settings_main()
         claim_standard_descriptors();
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
-        settings.editing = settings.pending = -1;
+        settings.editing = -1;
         settings.shown = -1;
         settings.output = -1;
 
