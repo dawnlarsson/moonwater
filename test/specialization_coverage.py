@@ -282,6 +282,14 @@ cover('folds_already', 'distance', 'memory_average_ahead',
       'the compositor hands it the glass it composed: the count is the glass, '
       'and the distances a pixel and a row at the scale and output width, all '
       'decided at run time, so no reachable call site passes a literal')
+cover('folds_already', 'width', 'memory_halve_u32 memory_double_u32',
+      'the compositor hands them the glass under a window: widths, heights and '
+      'pitches come from the window and the change at run time, so no '
+      'reachable call site passes a literal')
+cover('folds_already', 'count', 'memory_glass_over_u32',
+      'the compositor hands it a row of the window the change reaches; its '
+      'width comes from the change at run time, so no reachable call site '
+      'passes a literal')
 cover('folds_already', 'width', 'memory_blend_u32_rect',
       'the text engine hands it a glyph clipped to its target; widths and '
       'heights come from the glyph at run time, so no reachable call site '

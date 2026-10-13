@@ -264,6 +264,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_blend_rect', 'memory_blend_u32_re
 cover('direct_benchmark', 'test/checks.c#BENCH_average_ahead', 'memory_average_ahead',
       'paired former-C/assembly timing over the compositor glass, a pass across '
       'at a pixel and its doubles and down at a row and its doubles, all three x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_glass', 'memory_halve_u32 memory_double_u32 memory_glass_over_u32',
+      'paired former-C/assembly timing over a 640 by 400 glass window: a level '
+      'halved, the small picture doubled and the picture laid over its ground, '
+      'both x86-64 bodies')
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')

@@ -107424,6 +107424,206 @@ static fn check_average_ahead()
 }
 
 /*
+        The glass's three routines against the byte loops they are: halving
+        (into apart from from and in place), doubling a pixel round what it
+        names, and a premultiplied picture over a ground with its grain;
+        widths to 40 and heights to 5 at pitches past them, against a page
+        that faults after the last thing each reads or writes; the x86_64
+        bodies with AVX2 and without, and riscv64 with V and without.
+*/
+static p32 glass_mean(p32 a, p32 b)
+{
+        p32 out = 0;
+
+        for (p32 shift = 0; shift < 32; shift += 8)
+                out |= (((a >> shift & 255) + (b >> shift & 255) + 1) >> 1) << shift;
+        return out;
+}
+
+static fn glass_halve_reference(p32 address_to into, positive into_pitch, const p32 address_to from, positive from_pitch,
+                                positive width, positive height)
+{
+        for (positive y = 0; y < height; y++)
+                for (positive x = 0; x < width; x++)
+                {
+                        const p32 address_to at = from + 2 * y * from_pitch + 2 * x;
+
+                        into[y * into_pitch + x] = glass_mean(glass_mean(at[0], at[from_pitch]), glass_mean(at[1], at[from_pitch + 1]));
+                }
+}
+
+static fn glass_double_reference(p32 address_to into, positive into_pitch, const p32 address_to from, positive from_pitch,
+                                 positive width, positive height)
+{
+        for (positive y = 0; y < height; y++)
+                for (positive side = 0; side < 2; side++)
+                {
+                        const p32 address_to c = from + y * from_pitch;
+                        const p32 address_to n = side ? c + from_pitch : c - from_pitch;
+                        p32 address_to out = into + (2 * y + side) * into_pitch;
+
+                        for (positive x = 0; x < width; x++)
+                        {
+                                p32 v = glass_mean(c[x], glass_mean(c[x], n[x]));
+                                p32 l = glass_mean(c[x - 1], glass_mean(c[x - 1], n[x - 1]));
+                                p32 r = glass_mean(c[x + 1], glass_mean(c[x + 1], n[x + 1]));
+
+                                out[2 * x] = glass_mean(v, glass_mean(v, l));
+                                out[2 * x + 1] = glass_mean(v, glass_mean(v, r));
+                        }
+                }
+}
+
+static fn glass_over_reference(p32 address_to into, const p32 address_to picture, const p32 address_to ground, positive count,
+                               const p32 address_to grain)
+{
+        for (positive i = 0; i < count; i++)
+        {
+                p32 p = picture[i], rest = 255 - (p >> 24), out = 0;
+
+                for (p32 shift = 0; shift < 32; shift += 8)
+                {
+                        b32 c = (b32)(ground[i] >> shift & 255) + (b32)(grain[i & 15] >> shift & 255);
+
+                        c = c > 255 ? 255 : c;
+                        c -= (b32)(grain[64 + (i & 15)] >> shift & 255);
+                        c = c < 0 ? 0 : c;
+                        p32 t = (p32)c * rest + 128, v = (p >> shift & 255) + ((t + (t >> 8)) >> 8);
+
+                        out |= (v > 255 ? 255 : v) << shift;
+                }
+                into[i] = out;
+        }
+}
+
+static fn check_glass_routines()
+{
+        static p32 want[4096], grain[128];
+        // What is read ends on the guard at word 4096, what is written on the one at word 12288.
+        p32 address_to base = (p32 address_to)memory(16 * 4096);
+        p32 address_to target = base + 10240;
+        p64 state = 0x452821e638d01377ull;
+        bool guarded = base && system_call_3(syscall(mprotect), (positive)(base + 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)(base + 12288), 4096, 0) == 0;
+
+        check("glass routines: a guard page", guarded);
+        if (!guarded)
+                return;
+        for (positive i = 0; i < 128; i++)
+        {
+                XORSHIFT64(state);
+                grain[i] = (p32)(state >> 20) & 0x03030303u;
+        }
+#if RISCV64
+        p8 vector = cpu_has_vector;
+        cpu_has_vector = 0;
+        {
+                p32 two[8] = {0x10203040, 0x50607080, 0, 0, 0x10203040, 0x50607080, 0, 0}, one = 0;
+
+                memory_halve_u32(&one, 1, two, 4, 1, 1);
+                check("glass routines: the first call asks for V and keeps its arguments",
+                      one == glass_mean(glass_mean(two[0], two[4]), glass_mean(two[1], two[5])) && cpu_has_vector != 0);
+        }
+        vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#endif
+#if X64
+        p8 wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier ? 0 : wide256;
+#endif
+                bool halved = true, doubled = true, laid = true, in_place = true;
+
+                for (positive width = 0; width <= 40; width++)
+                        for (positive height = 0; height <= 5; height++)
+                        {
+                                positive pitch = 2 * width + 3, into_pitch = width + 1;
+                                p32 address_to from = base + 4096 - 2 * height * pitch - 2;
+                                p32 address_to into;
+
+                                // Halving: from ends on the guard, into apart from it.
+                                for (positive i = 0; i < 2 * height * pitch + 2; i++)
+                                {
+                                        XORSHIFT64(state);
+                                        from[i] = (p32)(state >> 16);
+                                }
+                                into = target + 2048 - height * into_pitch;
+                                memory_fill(want, 0x5a, sizeof(want));
+                                memory_fill(into, 0x5a, height * into_pitch * 4);
+                                glass_halve_reference(want, into_pitch, from, pitch, width, height);
+                                memory_halve_u32(into, into_pitch, from, pitch, width, height);
+                                halved = halved && !memory_compare(into, want, height * into_pitch * 4);
+
+                                // In place, at the same pitch.
+                                memory_copy(want, from, (2 * height * pitch + 2) * 4);
+                                glass_halve_reference(want, pitch, want, pitch, width, height);
+                                memory_halve_u32(from, pitch, from, pitch, width, height);
+                                in_place = in_place && !memory_compare(from, want, (2 * height * pitch + 2) * 4);
+
+                                // Doubling: a pixel round what it names, the row below the last against the guard.
+                                {
+                                        positive dpitch = width + 2, dinto = 2 * width + 1;
+                                        p32 address_to whole = base + 4096 - (height + 2) * dpitch;
+                                        p32 address_to named = whole + dpitch + 1;
+
+                                        for (positive i = 0; i < (height + 2) * dpitch; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                whole[i] = (p32)(state >> 8);
+                                        }
+                                        if (2 * height * dinto <= 2048)
+                                        {
+                                                into = target + 2048 - 2 * height * dinto;
+                                                memory_fill(want, 0x5a, sizeof(want));
+                                                memory_fill(into, 0x5a, 2 * height * dinto * 4);
+                                                glass_double_reference(want, dinto, named, dpitch, width, height);
+                                                memory_double_u32(into, dinto, named, dpitch, width, height);
+                                                doubled = doubled && !memory_compare(into, want, 2 * height * dinto * 4);
+                                        }
+                                }
+
+                                // A picture over a ground: count = width * height + width, from every start in the grain.
+                                {
+                                        positive count = width * height + width;
+                                        p32 address_to picture = base + 4096 - count, address_to ground = base + 8192 - count;
+                                        positive start = (width + height) & 15;
+
+                                        for (positive i = 0; i < count; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                picture[i] = (p32)(state >> 32);
+                                                // Premultiplied: no colour past its alpha, and some clear, some opaque.
+                                                p32 alpha = (i % 5 == 0) ? 0 : (i % 7 == 0) ? 255 : picture[i] >> 24;
+                                                p32 made = alpha << 24;
+                                                for (p32 shift = 0; shift < 24; shift += 8)
+                                                        made |= (((picture[i] >> shift & 255) * alpha) / 255) << shift;
+                                                picture[i] = made;
+                                                ground[i] = (p32)(state >> 8) & 0xffffffu;
+                                        }
+                                        into = target + 2048 - count;
+                                        glass_over_reference(want, picture, ground, count, grain + start);
+                                        memory_glass_over_u32(into, picture, ground, count, grain + start);
+                                        laid = laid && !memory_compare(into, want, count * 4);
+                                }
+                        }
+                check("glass routines: halving is the mean of each two by two, rows first, nothing past it touched", halved);
+                check("glass routines: halving in place at the same pitch is halving apart", in_place);
+                check("glass routines: doubling is three quarters of a pixel and a quarter of its neighbour each way", doubled);
+                check("glass routines: a premultiplied picture over a ground with its grain, every colour rounded", laid);
+#if X64
+        }
+        cpu_has_avx2 = wide256;
+#endif
+#if RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+}
+
+/*
         memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
         heights to 6, two strides, the last row against a page that faults,
         the words between rows and before the first held to a canary; with
@@ -107779,6 +107979,7 @@ b32 main()
         check_translate();
         check_blend();
         check_average_ahead();
+        check_glass_routines();
         check_fill_rect();
         check_sweep();
         check_edges(&one, &two);
@@ -108269,7 +108470,7 @@ static fn check_take(void)
         from nothing makes. A change of the window's own picture, or of a
         window over it, blurs nothing again.
 */
-#define GLASS_SIDE 160
+#define GLASS_SIDE 256
 
 static unsigned int address_to glass_table_map(void)
 {
@@ -108309,9 +108510,31 @@ static unsigned int glass_at(int x, int y)
         return compositor.scanout[y * GLASS_SIDE + x] & 0xffffffu;
 }
 
+// A premultiplied pixel over an opaque one, each colour rounded to the nearest: what memory_glass_over_u32 gives.
+static unsigned int glass_over(unsigned int pixel, unsigned int under)
+{
+        unsigned int rest = 255 - (pixel >> 24), out = 0;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int product = (under >> shift & 255) * rest + 128, channel = (pixel >> shift & 255) + ((product + (product >> 8)) >> 8);
+
+                out |= (channel > 255 ? 255 : channel) << shift;
+        }
+        return out;
+}
+
+// A clear pixel of glass with its grain taken off again, which never took it past a byte's end.
+static unsigned int glass_ungrained(unsigned int pixel, unsigned int side, int x, int y)
+{
+        const unsigned int address_to grain = compositor_grain_row(side, x, y);
+
+        return pixel - grain[0] + grain[64];
+}
+
 static fn check_glass(void)
 {
-        static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[80 * 80], shown[80 * 80];
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
         struct windows address_to table;
         unsigned int side, mismatched = 0, bounded = 1, kept = 1, distinct = 0, previous = 0, falling = 1;
         positive blurred, recomposed;
@@ -108331,53 +108554,53 @@ static fn check_glass(void)
         }
         table = compositor.table;
 
-        // Under: red on the left, green on the right, from 10 to 150 each way.
+        // Under: red on the left, green on the right, from 10 to 250 each way.
         table->x[1] = table->y[1] = 10;
-        table->width[1] = table->height[1] = 140;
-        glass_paint(1, 0, 0, 70, 140, 0xff0000u, true);
-        glass_paint(1, 70, 0, 70, 140, 0x00ff00u, true);
+        table->width[1] = table->height[1] = 240;
+        glass_paint(1, 0, 0, 120, 240, 0xff0000u, true);
+        glass_paint(1, 120, 0, 120, 240, 0x00ff00u, true);
 
-        // The glass over it, 40 to 120: clear, but for an opaque square and a half white one.
+        // The glass over it, 40 to 200: clear, but for an opaque square and a half white one.
         table->x[2] = table->y[2] = 40;
-        table->width[2] = table->height[2] = 80;
+        table->width[2] = table->height[2] = 160;
         table->glass[2] = WINDOW_GLASS;
-        glass_paint(2, 0, 0, 80, 80, 0, true);
+        glass_paint(2, 0, 0, 160, 160, 0, true);
         glass_paint(2, 5, 5, 10, 10, 0xff123456u, true);
-        glass_paint(2, 20, 5, 10, 10, 0x80808080u, true);
+        glass_paint(2, 15, 30, 15, 10, 0x80808080u, true);
         compositor_present();
         side = compositor.glass_side[2];
 
         check("glass: an opaque pixel of the picture is its own colour", glass_at(50, 50) == 0x123456u);
         check("glass: a clear one far from any edge under it is the tint of the colour under it, with its grain",
-              glass_at(50, 72) == compositor_grained(compositor_glass_tint(0xff0000u, side), side, 50, 72));
+              glass_at(62, 110) == compositor_grained(compositor_glass_tint(0xff0000u, side), side, 62, 110));
         check("glass: a half one is the picture over that",
-              glass_at(62, 48) == compositor_over(0x80808080u, compositor_grained(compositor_glass_tint(0xff0000u, side), side, 62, 48)));
-        // A block at a time across the edge, the grain taken off: the steps of a blur, not one step.
-        for (int x = 60; x < 104; x += compositor_frost_block())
+              glass_at(62, 72) == glass_over(0x80808080u, compositor_grained(compositor_glass_tint(0xff0000u, side), side, 62, 72)));
+        // Across the edge, the grain taken off: a ramp of a blur, not one step.
+        for (int x = 90; x < 170; x += 2)
         {
-                unsigned int grain = compositor_grain(x, 100), pixel = glass_at(x, 100);
-                unsigned int red = (side ? pixel + grain * 0x010101u : pixel - grain * 0x010101u) >> 16 & 255;
+                unsigned int red = glass_ungrained(glass_at(x, 150), side, x, 150) >> 16 & 255;
 
-                distinct += x == 60 || red != previous;
-                falling &= x == 60 || red <= previous;
+                distinct += x == 90 || red != previous;
+                falling &= x == 90 || red <= previous;
                 previous = red;
         }
-        check("glass: the edge between red and green under it comes through blurred, not as a step", distinct >= 6 && falling);
-        for (int y = 40; y < 120; y++)
-                for (int x = 40; x < 120; x++)
+        check("glass: the edge between red and green under it comes through smooth, many levels and no step back", distinct >= 12 && falling);
+        for (int y = 40; y < 200; y++)
+                for (int x = 40; x < 200; x++)
                 {
-                        unsigned int grain = compositor_grain(x, y) * 0x010101u;
-                        unsigned int pixel = side ? glass_at(x, y) + grain : glass_at(x, y) - grain;
+                        unsigned int pixel = glass_ungrained(glass_at(x, y), side, x, y);
                         unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
 
-                        if ((x - 40 >= 5 && x - 40 < 30 && y - 40 >= 5 && y - 40 < 15) ||
+                        if ((x - 40 >= 5 && x - 40 < 15 && y - 40 >= 5 && y - 40 < 15) ||
+                            (x - 40 >= 15 && x - 40 < 30 && y - 40 >= 30 && y - 40 < 40) ||
                             (x - 40 < COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
-                            (x - 40 >= 80 - COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
-                            (x - 40 < COMPOSITOR_RADIUS && y - 40 >= 80 - COMPOSITOR_RADIUS) ||
-                            (x - 40 >= 80 - COMPOSITOR_RADIUS && y - 40 >= 80 - COMPOSITOR_RADIUS) || (x >= 100 && y < 60))
+                            (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
+                            (x - 40 < COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) ||
+                            (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) || (x >= 180 && y < 60))
                                 continue;
                         kept &= side ? (r >= COMPOSITOR_GLASS_LIGHTEST && g >= COMPOSITOR_GLASS_LIGHTEST && b >= COMPOSITOR_GLASS_LIGHTEST)
-                                     : (r <= COMPOSITOR_GLASS_DARKEST && g <= COMPOSITOR_GLASS_DARKEST && b <= COMPOSITOR_GLASS_DARKEST);
+                                     : (r <= COMPOSITOR_GLASS_DARKEST + 3 && g <= COMPOSITOR_GLASS_DARKEST + 3 &&
+                                        b <= COMPOSITOR_GLASS_DARKEST + 3);
                 }
         check("glass: every clear pixel is kept on its side of lightness, so an ink that stands out from the ground does everywhere", kept);
         check("glass: its program is told the ground, and knocked", table->ground[2] && (compositor.woken & 4u));
@@ -108391,8 +108614,8 @@ static fn check_glass(void)
               compositor.blurred == blurred && compositor.recomposed == recomposed + 24 && glass_at(102, 102) == 0);
 
         // A window over it changes: nothing of the glass under it is made again.
-        table->x[3] = 90;
-        table->y[3] = 90;
+        table->x[3] = 150;
+        table->y[3] = 150;
         table->width[3] = table->height[3] = 40;
         glass_paint(3, 0, 0, 40, 40, 0x0000ffu, true);
         compositor_present();
@@ -108408,26 +108631,30 @@ static fn check_glass(void)
 
         // The scene under it changes at random: blurred again within the reach of each change, and the same as
         // blurring all of it again from nothing.
-        for (int round = 0; round < 24; round++)
+        for (int round = 0; round < 40; round++)
         {
-                int x = (int)render_next(130), y = (int)render_next(130), width = 1 + (int)render_next(10),
-                    height = 1 + (int)render_next(10), reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
-                positive most = (positive)(width + 2 * reach) * (positive)(height + 2 * reach);
+                // Every other one just outside it, where only the blur's reach brings it in.
+                int x = round & 1 ? 201 + (int)render_next(24) : (int)render_next(225), y = (int)render_next(225),
+                    width = 1 + (int)render_next(14),
+                    height = 1 + (int)render_next(10), reach = 2 * COMPOSITOR_GLASS_SPREAD + 2;
+                positive most = (positive)(width / COMPOSITOR_GLASS_BLOCK + reach) * (positive)(height / COMPOSITOR_GLASS_BLOCK + reach);
+                positive cells;
 
                 blurred = compositor.blurred;
                 glass_paint(1, x, y, width, height, render_next(0x1000000), false);
                 compositor_present();
                 bounded &= compositor.blurred - blurred <= most;
-                memory_copy(made, compositor.backdrop[2], sizeof(made) / 16);
+                cells = (positive)compositor.glass_blocks[2][2] * (positive)compositor.glass_blocks[2][3];
+                memory_copy(made, compositor.backdrop[2], cells * 4);
                 memory_copy(shown, compositor.composed[2], sizeof(shown));
 
                 compositor.glass_made[2][2] = 0;
                 compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
                 compositor_present();
-                mismatched += memory_compare(made, compositor.backdrop[2], sizeof(made) / 16) != 0 ||
+                mismatched += memory_compare(made, compositor.backdrop[2], cells * 4) != 0 ||
                               memory_compare(shown, compositor.composed[2], sizeof(shown)) != 0;
         }
-        check("glass: a change under it is blurred again no further than the blur reaches from it", bounded);
+        check("glass: a change under it is blurred again in no more blocks than the blur reaches from it", bounded);
         check("glass: what is frosted again in part is what frosting all of it from nothing makes", !mismatched);
 
         // Lifted: the window under rises and takes the keys.
@@ -118446,6 +118673,154 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_average_ahead */
+
+#ifdef BENCH_glass
+/* The glass's three routines against the byte loops they are, over a glass
+   window of 640 by 400 (in cache): a level halved, the small picture
+   doubled, and the picture laid over its ground with its grain; on x86_64
+   with AVX2 and without. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define GW 640
+#define GH 400
+
+static p32 scene[(GW + 2) * (GH + 2)], into_asm[GW * GH], into_c[GW * GH], picture[GW * GH], grain[128];
+
+static p32 bench_mean(p32 a, p32 b)
+{
+        p32 out = 0;
+
+        for (p32 shift = 0; shift < 32; shift += 8)
+                out |= (((a >> shift & 255) + (b >> shift & 255) + 1) >> 1) << shift;
+        return out;
+}
+
+__attribute__((noinline, noclone)) static fn former_halve(p32 address_to into)
+{
+        for (positive y = 0; y < GH / 2; y++)
+                for (positive x = 0; x < GW / 2; x++)
+                {
+                        const p32 address_to at = scene + 2 * y * GW + 2 * x;
+
+                        into[y * (GW / 2) + x] = bench_mean(bench_mean(at[0], at[GW]), bench_mean(at[1], at[GW + 1]));
+                }
+}
+
+__attribute__((noinline, noclone)) static fn former_double(p32 address_to into)
+{
+        positive pitch = GW / 2 + 2;
+        const p32 address_to from = scene + pitch + 1;
+
+        for (positive y = 0; y < GH / 2; y++)
+                for (positive side = 0; side < 2; side++)
+                {
+                        const p32 address_to c = from + y * pitch, address_to n = side ? c + pitch : c - pitch;
+                        p32 address_to out = into + (2 * y + side) * GW;
+
+                        for (positive x = 0; x < GW / 2; x++)
+                        {
+                                p32 v = bench_mean(c[x], bench_mean(c[x], n[x]));
+                                p32 l = bench_mean(c[x - 1], bench_mean(c[x - 1], n[x - 1]));
+                                p32 r = bench_mean(c[x + 1], bench_mean(c[x + 1], n[x + 1]));
+
+                                out[2 * x] = bench_mean(v, bench_mean(v, l));
+                                out[2 * x + 1] = bench_mean(v, bench_mean(v, r));
+                        }
+                }
+}
+
+__attribute__((noinline, noclone)) static fn former_over(p32 address_to into)
+{
+        for (positive i = 0; i < GW * GH; i++)
+        {
+                p32 p = picture[i], rest = 255 - (p >> 24), out = 0;
+
+                for (p32 shift = 0; shift < 32; shift += 8)
+                {
+                        b32 c = (b32)(scene[i] >> shift & 255) + (b32)(grain[i & 15] >> shift & 255);
+
+                        c = c > 255 ? 255 : c;
+                        c -= (b32)(grain[64 + (i & 15)] >> shift & 255);
+                        c = c < 0 ? 0 : c;
+                        p32 t = (p32)c * rest + 128, v = (p >> shift & 255) + ((t + (t >> 8)) >> 8);
+
+                        out |= (v > 255 ? 255 : v) << shift;
+                }
+                into[i] = out;
+        }
+}
+
+static p64 run(bool assembly, positive which, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                if (which == 0)
+                        assembly ? memory_halve_u32(into_asm, GW / 2, scene, GW, GW / 2, GH / 2) : former_halve(into_c);
+                else if (which == 1)
+                        assembly ? memory_double_u32(into_asm, GW, scene + GW / 2 + 3, GW / 2 + 2, GW / 2, GH / 2)
+                                 : former_double(into_c);
+                else
+                        assembly ? memory_glass_over_u32(into_asm, picture, scene, GW * GH, grain) : former_over(into_c);
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const char address_to names[3] = {"memory_halve_u32", "memory_double_u32", "memory_glass_over_u32"};
+        p64 seed = 0x13198a2e03707344ULL;
+
+        for (positive i = 0; i < sizeof(scene) / 4; i++)
+        {
+                XORSHIFT64(seed);
+                scene[i] = (p32)(seed >> 32);
+        }
+        for (positive i = 0; i < GW * GH; i++)
+        {
+                XORSHIFT64(seed);
+                picture[i] = (p32)(seed >> 40) & 0x3f3f3f3fu;
+        }
+        for (positive i = 0; i < 128; i++)
+                grain[i] = (p32)(i * 0x01010101u) & 0x03030303u;
+#if X64
+        p8 wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier ? 0 : wide256;
+                if (tier == 0 && !wide256)
+                        continue;
+#endif
+                for (positive which = 0; which < 3; which++)
+                {
+                        positive ratios[TRIES];
+
+                        run(true, which, 1);
+                        run(false, which, 1);
+                        if (memory_compare(into_asm, into_c, which ? sizeof(into_c) : sizeof(into_c) / 4))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, which, 20);
+                        string_format(log, "%s%s: paired median ASM/C %p.", (string_address)names[which],
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx2 = wide256;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_glass */
 
 #ifdef BENCH_blend_rect
 /* memory_blend_u32_rect against the loop it replaced in font_blend: glyphs
