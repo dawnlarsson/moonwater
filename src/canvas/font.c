@@ -1275,7 +1275,7 @@ static p32 font_fit(font_engine address_to e, const font_face address_to face, p
         short edges moves no further than they are long, so a thin detail
         thickens without turning inside out.
 */
-static fn font_embolden(font_engine address_to e, f32 strength)
+static fn font_embolden(font_engine address_to e, f32 strength, bool across)
 {
         f64 area = 0;
         p32 first = 0;
@@ -1322,7 +1322,7 @@ static fn font_embolden(font_engine address_to e, f32 strength)
                                 }
                         }
                         e->points[i].x = here.x + (b64)(sx < 0 ? sx - 0.5f : sx + 0.5f);
-                        e->points[i].y = here.y + (b64)(sy < 0 ? sy - 0.5f : sy + 0.5f);
+                        e->points[i].y = here.y + (across ? 0 : (b64)(sy < 0 ? sy - 0.5f : sy + 0.5f));
                         before = here;
                         here = after;
                 }
@@ -1853,6 +1853,12 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
 //      so a round letter's sides are black columns as a straight one's are.
 #ifndef FONT_ROUND_RUN
 #define FONT_ROUND_RUN 6
+#endif
+
+//      What a stem under three quarters of a pixel is thickened across to: just past the three quarters that
+//      snap whole, so the stems are a pixel and the diagonals and bowls gain as little as that takes.
+#ifndef FONT_THIN_TO
+#define FONT_THIN_TO (FONT_ONE * 13 / 16)
 #endif
 
 //      Vertical stems, for a cell's whole-pixel pen. heavier is what a
@@ -3053,13 +3059,13 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                              : pixels >= until ? 0
                              : (b32)e->darken * (until - pixels) / (until - 12);
                 if (amount > 0)
-                        font_embolden(e, (f32)(FONT_ONE / 64) * amount);
+                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, false);
         }
         b64 heavier = style & 16 ? (b64)size * (FONT_ONE / 64) / 24 : 0;
         if (heavier)
                 //      Synthetic bold, for a face that has no bold: a 24th of
                 //      the size, half each side, the weight a bold face adds.
-                font_embolden(e, (f32)heavier);
+                font_embolden(e, (f32)heavier, false);
         if (style & 8)
         {
                 //      Synthetic italic: a 12 degree slant about half the
@@ -3076,8 +3082,19 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                         e->points[i].x += (b64)(lean < 0 ? lean - 0.5 : lean + 0.5);
                 }
         }
+        //      Stems under three quarters of a pixel (Plex Mono at 8 and 9 px) are thickened across to a whole
+        //      pixel and snapped whole: grown in both directions the bars and the lines would move, and snapped
+        //      whole at their own width the diagonal between two black stems, N's, faded to nothing.
+        b64 thin = 0;
         if (standard && !(style & 8))
-                font_snap(e, face, size, standard, heavier);
+        {
+                b64 normal = font_divide((b64)standard * size * (FONT_ONE / 64), (b64)face->units << FONT_EXACT) + heavier;
+
+                thin = normal >= FONT_ONE / 2 && normal < FONT_ONE * 3 / 4 && FONT_THIN_TO > normal ? FONT_THIN_TO - normal : 0;
+                if (thin > 0)
+                        font_embolden(e, (f32)thin, true);
+                font_snap(e, face, size, standard, heavier + thin);
+        }
         if (fixes && zones[3])
                 font_bars(e, face, size, zones[3], lines, fixes, heavier);
 
