@@ -72,7 +72,9 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 #define TERMINAL_SIZE_DIR "/root/terminal"
 #define TERMINAL_SIZE_FILE "/root/terminal/size"
 #define TERMINAL_SIZE_TEMP "/root/terminal/size.tmp"
-#define TERMINAL_ATLAS 512
+// The glyph atlas's side: a screen of code at 64 px, bold with it, is a few hundred cells of 39 by 84, more
+// than 512 square holds without emptying mid-frame. Only the pages drawn into are ever resident.
+#define TERMINAL_ATLAS 2048
 // A ring is cut for the widest display there is, or this, as the kernel's was.
 #define TERMINAL_CEILING 3840
 // Bytes taken from the pty in one go before a frame is looked at.
@@ -107,9 +109,10 @@ static struct
         font_engine *engine;
         font_metrics grid;
         unsigned int size; // in 26.6, which is what font.c takes
-        // The paper round the grid, the same on every side: at the left (pad), at the right (bar), where the
-        // scroll bar is, and above and below (pad_y).
-        unsigned int cell_w, cell_h, bar, pad, pad_y;
+        // The paper round the grid: margin at least on every side, at the left (pad), at the right (bar),
+        // where the scroll bar is, and above and below (pad_y), which also takes half of what is left of the
+        // window's height under its whole rows, so the grid sits in the middle of it.
+        unsigned int cell_w, cell_h, bar, pad, pad_y, margin;
         unsigned int width, height; // the window, in pixels
         unsigned int pitch;         // pixels a row of a buffer, which is the output's width
 
@@ -168,12 +171,18 @@ static unsigned int terminal_line_rows(unsigned int index)
         return length ? (length + COLUMNS - 1) / COLUMNS : 1;
 }
 
-// The oldest line still held, never fewer than a screenful before the end.
+/*
+        The oldest line the view may go back to: the screen and the scrollback
+        the emulator counts behind it, and none behind the alternate screen,
+        whose lines behind it are the primary screen's. Counting every line in
+        the ring let the wheel scroll into the shell behind less or nano, and
+        through the blank lines a clear had dropped.
+*/
 static unsigned int terminal_oldest(void)
 {
-        unsigned int filled = window->head - window->history;
+        unsigned int filled = ROWS + (alternate ? 0 : history_lines);
 
-        filled = filled < ROWS ? ROWS : filled > window->history ? window->history : filled;
+        filled = filled > window->history ? window->history : filled;
         return window->head - filled;
 }
 
@@ -323,6 +332,22 @@ static unsigned int terminal_track(void)
         return ROWS * terminal.cell_h;
 }
 
+// The thumb's height, never under a cell, and where its top is: the rows above the view over the rows it
+// can start at, across the span the thumb travels.
+static unsigned int terminal_thumb(unsigned int shown, unsigned int total)
+{
+        unsigned int thumb = (unsigned int)((unsigned long)terminal_track() * shown / total);
+
+        return thumb < terminal.cell_h ? terminal.cell_h : thumb > terminal_track() ? terminal_track() : thumb;
+}
+
+static unsigned int terminal_thumb_top(unsigned int first, unsigned int shown, unsigned int total)
+{
+        unsigned int span = terminal_track() - terminal_thumb(shown, total);
+
+        return total > shown ? (unsigned int)((unsigned long)span * first / (total - shown)) : 0;
+}
+
 // The bar put under the hand: where the pointer is in it, as a place in the rows.
 static b32 terminal_bar_move(int y)
 {
@@ -333,13 +358,14 @@ static b32 terminal_bar_move(int y)
         if (!terminal_extent(&first, &shown, &total) || !track)
                 return false;
 
-        thumb = (unsigned int)((unsigned long)track * shown / total);
-        thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
+        thumb = terminal_thumb(shown, total);
         span = track > thumb ? track - thumb : 0;
         top = y - terminal.bar_grab;
         top = top < 0 ? 0 : (unsigned int)top > span ? (int)span : top;
 
-        return terminal_view_set((unsigned int)((unsigned long)top * total / track));
+        // The thumb's top over the span it travels is the view over the rows it can start at, so the
+        // bottom of the track is the live end even when the thumb was made taller than its share.
+        return terminal_view_set(span ? (unsigned int)((unsigned long)top * (total - shown) / span) : 0);
 }
 
 /* ---- the frame: what is on the screen, as cells ---- */
@@ -827,6 +853,9 @@ static b32 terminal_frame(void)
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
         b32 bar, bar_told, any, right = false;
 
+        // A frame forced past a picture the compositor never took is measured against nothing it shows.
+        b32 untaken = terminal.shown >= 0 && !windows_ready(&terminal.own);
+
         if (slot < 0)
                 return false;
 
@@ -878,7 +907,10 @@ static b32 terminal_frame(void)
 
         // Nothing differs from the buffer or from the screen: nothing is made or said.
         if (!any)
+        {
+                terminal.forced = false;
                 return true;
+        }
 
         // A row's last cell is the paper right of it, which the bar is drawn on.
         if (bar || right)
@@ -893,7 +925,7 @@ static b32 terminal_frame(void)
         // What the compositor reads again: one rectangle round the rows and the bar that differ from what
         // it shows. With nothing on the screen to differ from, all of it (a width of 0); with nothing
         // differing, none (a height of 0).
-        if (screen && ROWS <= 1024)
+        if (screen && ROWS <= 1024 && !untaken)
         {
                 for (unsigned int row = 0; row < ROWS; row++)
                         if (row_x1[row] > row_x0[row])
@@ -950,10 +982,13 @@ static void terminal_margins(void)
 {
         unsigned int margin = terminal.cell_h / 3 ? terminal.cell_h / 3 : 1;
 
+        terminal.margin = margin;
         terminal.pad = margin;
         terminal.bar = margin;
         terminal.pad_y = margin;
 }
+
+static void terminal_said(b32 reading, string_address what);
 
 /*
         The faces, loaded from the files named. A font is the caller's bytes
@@ -979,10 +1014,16 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
                 if (!path)
                         continue;
 
+                // Said where the machine's log is, with the file: this program's own output goes nowhere.
                 if (!bytes || font_load(&terminal.face[faces], (const p8 address_to)bytes, length, 0) != 0)
                 {
-                        string_format(log, "terminal: cannot use the font %s\n", path);
-                        log_flush();
+                        static p8 said[128] = " cannot use the font ";
+                        positive at = 21;
+
+                        for (positive from = 0; path[from] && at < sizeof(said) - 1; from++)
+                                said[at++] = (p8)path[from];
+                        said[at] = 0;
+                        terminal_said(false, (string_address)said);
                         return false;
                 }
 
@@ -1014,7 +1055,7 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
 // The window size a grid needs, the paper round it included.
 static unsigned int terminal_pixels(unsigned int columns, unsigned int rows, unsigned int address_to height)
 {
-        address_to height = rows * terminal.cell_h + 2 * terminal.pad_y;
+        address_to height = rows * terminal.cell_h + 2 * terminal.margin;
         return columns * terminal.cell_w + terminal.pad + terminal.bar;
 }
 
@@ -1028,7 +1069,7 @@ static unsigned int terminal_columns(unsigned int width)
 
 static unsigned int terminal_rows(unsigned int height)
 {
-        return height > 2 * terminal.pad_y ? (height - 2 * terminal.pad_y) / terminal.cell_h : 1;
+        return height > 2 * terminal.margin ? (height - 2 * terminal.margin) / terminal.cell_h : 1;
 }
 
 /*
@@ -1101,6 +1142,9 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
         pixels_h = height > pixels_h ? height : pixels_h;
         pixels_w = pixels_w < table->output_width ? pixels_w : table->output_width;
         pixels_h = pixels_h < table->output_height ? pixels_h : table->output_height;
+        terminal.pad_y = terminal.margin + (pixels_h > rows * terminal.cell_h + 2 * terminal.margin
+                                                ? (pixels_h - rows * terminal.cell_h - 2 * terminal.margin) / 2
+                                                : 0);
 
         // The same size: nothing to draw. The cells have to be the same too: a new text size can keep the
         // pixels and cut the grid another way.
@@ -1126,8 +1170,6 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
         does not say a step of the ladder, is the default; and the file is replaced by a rename, so a reader sees
         the old size or the new one, never a part.
 */
-static void terminal_said(b32 reading, string_address what);
-
 static unsigned int terminal_size_read(void)
 {
         p8 text[8] = {0};
@@ -1205,6 +1247,8 @@ static void terminal_text_set(b32 master, unsigned int size)
         terminal_margins();
         term_cell_w = terminal.cell_w;
         term_cell_h = terminal.cell_h;
+        // Every glyph is another size: neither buffer holds a cell that can be kept, even where the grid is.
+        terminal.valid[0] = terminal.valid[1] = 0;
         terminal_configure(master, terminal.width, terminal.height);
 }
 
@@ -1307,6 +1351,13 @@ static long terminal_wait(long other, long nanoseconds)
 }
 
 // A key from the compositor, as the window's key ring would have had it.
+// Control, Shift, Alt, AltGr, the Super keys and Caps Lock, by their evdev codes: keys that type nothing.
+static b32 terminal_modifier_key(int code)
+{
+        return code == 29 || code == 97 || code == 42 || code == 54 || code == 56 || code == 100 || code == 125 ||
+               code == 126 || code == 58;
+}
+
 static void terminal_key(const struct window_event address_to event, struct window_key address_to key)
 {
         unsigned int flags = event->flags;
@@ -1363,9 +1414,10 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         case WINDOW_EVENT_KEY:
                 terminal.modifiers = event->flags;
                 terminal_key(event, &key);
-                if (key.flags & WINDOW_KEY_DOWN)
+                // Typing is a reason to look at what is being typed; a modifier alone is not typing, and
+                // Control held for a zoom or a copy keeps the place the view was scrolled back to.
+                if ((key.flags & WINDOW_KEY_DOWN) && !terminal_modifier_key(event->a))
                 {
-                        // Typing is a reason to look at what is being typed.
                         if (terminal_view_live())
                                 address_to dirty = true;
                         cursor_hide();
@@ -1403,10 +1455,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 if (event->a == 0x110 && down && terminal.bar_level &&
                     terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) && terminal_extent(&first, &shown, &total))
                 {
-                        unsigned int thumb = (unsigned int)((unsigned long)terminal_track() * shown / total);
-                        unsigned int top = (unsigned int)((unsigned long)terminal_track() * first / total);
+                        unsigned int thumb = terminal_thumb(shown, total), top = terminal_thumb_top(first, shown, total);
 
-                        thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
                         terminal.bar_grab = (unsigned int)terminal.pointer_y >= top &&
                                                     (unsigned int)terminal.pointer_y < top + thumb
                                                 ? terminal.pointer_y - (int)top
@@ -1443,6 +1493,18 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 {
                         terminal_pointer_key(lines < 0 ? 65u : 64u, WINDOW_KEY_DOWN, &key);
                         return term_input(master, &key);
+                }
+
+                // A pager or an editor on the alternate screen has no scrollback here: the wheel is its
+                // arrows, a line a step, as the cursor keys' mode spells them.
+                if (alternate)
+                {
+                        string_address arrow = lines > 0 ? (application_keys ? "\033OA" : "\033[A")
+                                                         : (application_keys ? "\033OB" : "\033[B");
+
+                        for (int at = lines < 0 ? -lines : lines; at > 0; at--)
+                                emit_bytes((address_any)arrow, string_length(arrow));
+                        return term_send(master);
                 }
 
                 if (terminal_view_scroll(lines))
@@ -1530,7 +1592,6 @@ static b32 terminal_run(b32 reading)
         b32 master, gone = false, dirty = true, closing = false, held = false, paced;
         positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0, settle_since = 0;
         bipolar child = 0;
-        b32 lost = false;
         struct windows address_to table;
         unsigned int own;
 
@@ -1565,7 +1626,7 @@ static b32 terminal_run(b32 reading)
         // -s is the size asked for here; without it, the step the last zoom left, and the default.
         size = size ? size : terminal_size_read();
         size = size ? size : TERMINAL_SIZE;
-        size = size < 6 ? 6 : size > 200 ? 200 : size;
+        size = size < terminal_steps[0] ? terminal_steps[0] : size > terminal_steps[TERMINAL_STEPS - 1] ? terminal_steps[TERMINAL_STEPS - 1] : size;
 
         if (!terminal_fonts(paths, count, bold, size))
         {
@@ -1646,7 +1707,6 @@ static b32 terminal_run(b32 reading)
         terminal_frame();
         last_frame = clock_monotonic_nanoseconds();
 
-        terminal_said(reading, " is on the screen");
         terminal_text_said(reading);
 
         // The first picture is committed: whoever is starting windows in an order may start the next.
@@ -1872,7 +1932,6 @@ static b32 terminal_run(b32 reading)
                                         hung = 1;
                                 }
                                 closing = true;
-                                lost = true;
                                 break;
                         }
 
@@ -1883,10 +1942,6 @@ static b32 terminal_run(b32 reading)
                 }
         }
 
-        // Said where the machine's log is, because nothing else is: this program's own output goes to
-        // wherever the machine script put it, which is nowhere.
-        terminal_said(reading, lost ? " ended: the compositor went away" : closing ? " ended: its window was closed"
-                                                                         : " ended: its far end is over");
 
         if (reading)
                 system_close(master);

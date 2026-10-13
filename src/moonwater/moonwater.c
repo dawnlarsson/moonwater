@@ -1042,16 +1042,14 @@ static void bind_run(struct bind_row *row)
         strscpy(spawn.event, name, sizeof(spawn.event));
         atomic_set(&row->busy, 1);
 
-        if (!spawn.command[0]) {
-                pr_info("[moonwater] %s: ignored\n", name);
+        if (!spawn.command[0])
                 goto done;
-        }
 
         poweroff = !strcmp(spawn.command, "poweroff");
         reboot = !strcmp(spawn.command, "reboot");
-        //      %*pE: the line is somebody's text, and a log is not a terminal.
+        //      %*pE: the line is somebody's text, and a log is not a terminal. It is said only when it fails:
+        //      a press that did what it is bound to is not news.
         shown = (int)strlen(spawn.command);
-        pr_info("[moonwater] %s: %*pE\n", name, shown, spawn.command);
 
         kernel_sigaction(SIGCHLD, SIG_DFL);
         pid = user_mode_thread(bind_spawn_enter, &spawn, SIGCHLD);

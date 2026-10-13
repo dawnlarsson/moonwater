@@ -40,9 +40,10 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
+# The kernel's own log window only when the compositor's desktop is not starting, or it is drawn for a moment
+# before the compositor takes the card.
 function moonwater_canvas_on {
-  moonwater canvas log
-  desktop_start || moonwater canvas terminal
+  desktop_start || { moonwater canvas log; moonwater canvas terminal; }
   moonwater desktop boot
 }
 
@@ -160,18 +161,19 @@ function desktop_session {
   desktop_compositor=$!
   echo $desktop_compositor > /run/moonwater/compositor.pid
   desktop_wait_for /run/moonwater/windows $desktop_compositor
-  if [ -e /run/moonwater/windows ]; then
-    echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
-  else
-    echo "desktop: the compositor (pid $desktop_compositor) made no window table" > /dev/kmsg
-  fi
+  [ -e /run/moonwater/windows ] || echo "desktop: the compositor (pid $desktop_compositor) made no window table" > /dev/kmsg
   : > /run/moonwater/desktop.kids
   desktop_keys_answer &
   echo $! >> /run/moonwater/desktop.kids
   desktop_log
   desktop_terminal
   wait $desktop_compositor
-  echo "desktop: the compositor (pid $desktop_compositor) ended, status $?" > /dev/kmsg
+  desktop_status=$?
+  if [ $desktop_status -gt 128 ]; then
+    echo "desktop: the compositor (pid $desktop_compositor) was killed by signal $((desktop_status - 128))" > /dev/kmsg
+  else
+    echo "desktop: the compositor (pid $desktop_compositor) ended, status $desktop_status" > /dev/kmsg
+  fi
   kill $(cat /run/moonwater/desktop.kids) 2> /dev/null
   rm -f /run/moonwater/compositor.pid /run/moonwater/desktop.kids
 }

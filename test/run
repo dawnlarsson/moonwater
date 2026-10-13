@@ -20306,21 +20306,22 @@ print("r1 memory (kB): " + " | ".join("%s %s" % (name, " ".join(status_of(name).
 handback, restart = [], []
 last = first
 for _ in range(2):
+    killed = time.monotonic()
     shell.run("echo r1-mark > /dev/kmsg; kill -9 %s" % last)
-    again, _ = until(lambda: newer(last), 15)
+    # Up again is a new compositor that has made its window table, which nothing logs: timed from here.
+    again, _ = until(lambda: newer(last) if shell.run("test -e /run/moonwater/windows && echo made", 10)[0].strip() == "made" else None, 15)
+    if again:
+        restart.append(time.monotonic() - killed)
     time.sleep(1.5)
     log = shell.run("dmesg")[0]
     marks = stamps(log, r"r1-mark$")
     cards = stamps(log, r"the card is Canvas's again")
-    ups = stamps(log, r"the compositor \(pid %s\) is up" % (again or "0"))
     if marks and cards and cards[-1] >= marks[-1]:
         handback.append(cards[-1] - marks[-1])
-    if marks and ups:
-        restart.append(ups[-1] - marks[-1])
     last = again or last
 out.append(("R1.2 a killed compositor is started again, and the card comes back to Canvas first",
             "%s %s" % ("restarted" if last != first else "not restarted", len(handback)), "restarted 2"))
-print("r1 killed compositor: card back to Canvas %s ms, compositor up again %s ms (printk times from the kill)" % (
+print("r1 killed compositor: card back to Canvas %s ms (printk times from the kill), compositor up again %s ms (polled from the host)" % (
     " ".join("%.0f" % (t * 1000) for t in handback), " ".join("%.0f" % (t * 1000) for t in restart)), file=sys.stderr)
 out.append(("and both inside a second (the first restart is at once, the second after half a second)",
             "yes" if handback and restart and max(handback) < 1.0 and max(restart) < 2.0 else "%s %s" % (handback, restart),
@@ -20414,8 +20415,10 @@ print("r1 klog memory %s" % shell.run("grep -E '^(VmRSS|RssAnon|RssFile|RssShmem
 first = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
 time.sleep(5)
 second = shell.number("grep voluntary_ctxt_switches /proc/%s/status | tr -dc '0-9\\n' | head -1" % pid, 20)
-ended = shell.run("dmesg | awk '/the compositor [(]pid [0-9]+[)] is up/ {bad=\"\"} /(terminal|klog|panel) pid [0-9]+ ended/ {bad=$0} END {print bad}'", 20)[0]
-out.append(("R1.2l nothing the desktop started has ended since the compositor came up, as the machine's log would say", "yes" if not ended else ended[-80:], "yes"))
+# Nothing says a program ended in the log any more: the ones the desktop started are asked for by pid.
+alive = log_pids and pids("klog") == log_pids and len(pids("terminal")) >= 1
+out.append(("R1.2l nothing the desktop started has ended: the kernel log is the same program, and a terminal is up",
+            "yes" if alive else "klog %s, terminals %s" % (pids("klog"), pids("terminal")), "yes"))
 out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "yes" if first and first == second else "%s %s" % (first, second), "yes"))
 
 #   The text size. Each terminal logs the size it draws at and the cell it measured when it starts, and says
@@ -21551,10 +21554,7 @@ out.append((label + ": the screen is off while it sleeps", ink("during") != "1e1
 key("shift")
 out.append((label + ": a key wakes it", "yes" if wait_for("awake again", 40) else "no", "yes"))
 time.sleep(4)
-asked("dmesg | grep -c 'compositor: the machine slept for'", "SLEPT")
-counted = re.findall(rb"\r?\n(\d+)\r?\nSLEPT-END", bytes(transcript))
-out.append((label + ": the compositor finds it slept and says so in the log, once",
-            counted[-1].decode() if counted else "no answer", "1"))
+# The compositor finds it slept and draws again, which the next row sees; it says nothing in the log.
 time.sleep(3)
 shot("after", 1)
 out.append((label + ": its desktop and panel are on the screen again", ink("after"), "1e1e1e tabs"))

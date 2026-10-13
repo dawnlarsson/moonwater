@@ -113,8 +113,8 @@
         Asking, because it cannot do more: the pages are the program's and the
         task is the kernel's, and a compositor that could end either would be a
         compositor that can be told to end any of them. The X in the kernel
-        desktop's titlebar, or Alt-F4 or a middle press on the window's button
-        in the compositor's panel, sets this and wakes the program; what
+        desktop's titlebar, or the compositor's close button, Alt-F4 or a middle
+        press on the window's tab, sets this and wakes the program; what
         happens next is the program's,
         and one that ignores it keeps its window.
 */

@@ -56,13 +56,13 @@
 
 /* ---- backend: the look on the CPU ---- */
 
-// The palette, neutral greys and no hue: the desktop, the panel's tabs (black, lighter while their window
-// has the keys, a little off black while it is put away) and their text, and the black line round a window.
+// The palette, neutral greys and no hue: the desktop, the tabs drawn without a font (black, lighter while
+// their window has the keys, a little off black while it is put away), and the black line round a window.
+// With a font the tabs are glass, inked from what is under them.
 #define COMPOSITOR_INK_DESKTOP 0x1e1e1eu
 #define COMPOSITOR_INK_PANEL 0x141416u
 #define COMPOSITOR_INK_BUTTON 0x000000u
 #define COMPOSITOR_INK_BUTTON_LIT 0x38383cu
-#define COMPOSITOR_INK_TEXT 0xe4e4e4u
 #define COMPOSITOR_INK_LINE 0x000000u
 // The line of the window with the keys: white at 30%.
 #define COMPOSITOR_INK_LINE_LIT 0x4d4d4du
@@ -1654,6 +1654,7 @@ static struct
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
         positive press_ns; // when the last press on a window's top was
         int drag_x, drag_y;
+        int drag_moved; // the window being moved has moved: only then is where it is let go an arrangement
         // The window being resized, how large it was and where the hand took hold.
         int resize_w, resize_h, press_x, press_y;
         int pointer_x, pointer_y;
@@ -2033,8 +2034,8 @@ static unsigned int compositor_vivid(unsigned int pixel)
 
 /*
         One tab of glass, its rectangle x, y, width, height in the band, from
-        the glass gw wide whose column 0 is the band's x0: made vivid, tinted
-        and lit along its inner edge. Answers what it came to in its middle,
+        the glass gw wide whose column 0 is the band's x0: made vivid and
+        tinted toward its own side of lightness. Answers what it came to in its middle,
         which its title stands out from.
 */
 static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y, int width, int height, int top,
@@ -2577,8 +2578,6 @@ static void compositor_wake_check(positive now)
 
         if (asleep > compositor.asleep + COMPOSITOR_SLEPT_NS)
         {
-                compositor_kmsg((string_address) "compositor: the machine slept for ",
-                                (asleep - compositor.asleep) / 1000000ull, (string_address) " ms, the screen is drawn again");
                 compositor_resume(0);
                 compositor.wake_stage = 1;
                 compositor.wake_at = now + COMPOSITOR_WAKE_FIRST_NS;
@@ -2940,6 +2939,15 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
 
         edges |= x < compositor.x[row] + in ? COMPOSITOR_EDGE_LEFT : x >= x2 - in ? COMPOSITOR_EDGE_RIGHT : 0;
         edges |= y < compositor.y[row] + in ? COMPOSITOR_EDGE_TOP : y >= y2 - in ? COMPOSITOR_EDGE_BOTTOM : 0;
+
+        // A window that fills the output or half of it has no edge on the output's own: the pointer is held
+        // there, and flung to the top to take the window it would start a resize instead.
+        if (compositor.arranged[row] != COMPOSITOR_FLOATING)
+        {
+                edges &= ~(unsigned int)(COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_BOTTOM);
+                edges &= compositor.x[row] <= 0 ? ~(unsigned int)COMPOSITOR_EDGE_LEFT : ~0u;
+                edges &= x2 >= compositor.width ? ~(unsigned int)COMPOSITOR_EDGE_RIGHT : ~0u;
+        }
         return edges;
 }
 
@@ -3003,8 +3011,12 @@ static void compositor_want(int row, int width, int height)
 {
         int x = compositor.x[row], y = compositor.y[row];
 
-        width = width < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : width > compositor.width ? compositor.width : width;
-        height = height < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : height > compositor.height ? compositor.height : height;
+        width = width < WINDOW_MIN_WIDTH * compositor.scale ? WINDOW_MIN_WIDTH * compositor.scale
+                : width > compositor.width                  ? compositor.width
+                                                            : width;
+        height = height < WINDOW_MIN_HEIGHT * compositor.scale ? WINDOW_MIN_HEIGHT * compositor.scale
+                 : height > compositor.height                  ? compositor.height
+                                                               : height;
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
         compositor.woken |= 1u << row;
@@ -3117,8 +3129,9 @@ static void compositor_float(int row)
 */
 static void compositor_float_for_drag(int row)
 {
-        int width = (int)compositor.saved_w[row] < WINDOW_MIN_WIDTH ? WINDOW_MIN_WIDTH : (int)compositor.saved_w[row];
-        int height = (int)compositor.saved_h[row] < WINDOW_MIN_HEIGHT ? WINDOW_MIN_HEIGHT : (int)compositor.saved_h[row];
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
+        int width = (int)compositor.saved_w[row] < least_w ? least_w : (int)compositor.saved_w[row];
+        int height = (int)compositor.saved_h[row] < least_h ? least_h : (int)compositor.saved_h[row];
         int grab = (int)((long)(compositor.pointer_x - compositor.x[row]) * width /
                          (compositor.w[row] ? (int)compositor.w[row] : 1));
         int at = (int)((long)(compositor.pointer_y - compositor.y[row]) * height /
@@ -3303,6 +3316,8 @@ static void compositor_leave(int row)
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
         compositor.resize = compositor.resize == row ? COMPOSITOR_NONE : compositor.resize;
+        // The stack is one shorter: an Alt-Tab under way would count past its end.
+        compositor.cycle = 0;
 
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
@@ -3581,10 +3596,15 @@ static void compositor_keys_read(void)
                         word = stop + 1;
                 }
 
+                // Named by the function, which is what the script's author looks for: there is no chord in it.
                 if (bad || !code || close - start >= sizeof(compositor_keys.chord[0]))
                 {
-                        compositor_kmsg((string_address) "compositor: a line of /run/moonwater/keys is no chord, line ",
-                                        (positive)compositor_keys.count + 1, (string_address) "");
+                        p8 name[48];
+                        positive length = close - start < sizeof(name) - 1 ? close - start : sizeof(name) - 1;
+
+                        memory_copy(name, text + start, length);
+                        name[length] = 0;
+                        compositor_kmsg((string_address) "compositor: no chord in the machine script's ", 0, (string_address)name);
                         continue;
                 }
 
@@ -3797,6 +3817,7 @@ static void compositor_motion(void)
                 }
 
                 // Kept on the output as it is moved, as when it was placed.
+                compositor.drag_moved = 1;
                 compositor_damage_row(row);
                 compositor_place(row, compositor.pointer_x - compositor.drag_x, compositor.pointer_y - compositor.drag_y);
                 compositor_damage_row(row);
@@ -3834,7 +3855,10 @@ static void compositor_release(unsigned int code, int snap)
         compositor.grab = COMPOSITOR_NONE;
         compositor.resize = COMPOSITOR_NONE;
         compositor_post(grab, WINDOW_EVENT_BUTTON, 0, (int)code, 0);
-        if (dragged >= 0 && snap && compositor_snap(compositor.pointer_x, compositor.pointer_y) != COMPOSITOR_FLOATING)
+        // A press and a release with no motion between is a click on the window's top, which only raises it:
+        // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
+        if (dragged >= 0 && snap && compositor.drag_moved &&
+            compositor_snap(compositor.pointer_x, compositor.pointer_y) != COMPOSITOR_FLOATING)
                 compositor_arrange(dragged, compositor_snap(compositor.pointer_x, compositor.pointer_y));
 }
 
@@ -3941,6 +3965,7 @@ static void compositor_button(unsigned int code, int down)
                                 return;
                         }
                         compositor.drag = under;
+                        compositor.drag_moved = 0;
                         compositor.drag_x = compositor.pointer_x - compositor.x[under];
                         compositor.drag_y = compositor.pointer_y - compositor.y[under];
                         return;

@@ -240,8 +240,8 @@ _Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_CANVAS) == sizeof(struct canvas_cont
 #define SPARK_BIND_CANVAS_OFF 13u
 #define SPARK_BIND_CANVAS_ON_NAME "canvas on"
 #define SPARK_BIND_CANVAS_OFF_NAME "canvas off"
-// What the desktop's chord for a terminal asks the machine script for, and the kernel's own desktop has the
-// event first: spark.c's table, its id.
+// What the kernel's own desktop's Control-Shift-T asks the machine script for (the compositor's chords are the
+// script's key_ functions): spark.c's table, its id.
 #define SPARK_BIND_DESKTOP_TERMINAL 23u
 
 // In the boot settings' flags, whose other bits are spark.c's.
