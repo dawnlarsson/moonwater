@@ -955,3 +955,4 @@ energy. Much of this project is unproven and experimental, so the name fits.
 Apache-2.0
 
 Everything in /kernel is strictly same license as the Linux Kernel: GPL-2.0
+Everything in /font is up to the respective owners of the font files. see fonts/license (SIL Open Font License 1.1)
