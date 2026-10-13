@@ -1973,8 +1973,10 @@ static b32 terminal_run(b32 reading)
                         to see it out.
                 */
                 {
-                        b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
-                                    terminal.valid[1 - terminal.shown];
+                        // A spare is one the compositor has taken the last picture from: until it has, the other buffer is the
+                // one it reads, and nothing is to be discarded.
+                b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
+                                    terminal.valid[1 - terminal.shown] && windows_ready(&terminal.own);
                         b32 stalled = dirty && !synchronized_output && terminal.shown >= 0 && !windows_ready(&terminal.own);
                         long ready = terminal_wait(master, spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
                                                           : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
