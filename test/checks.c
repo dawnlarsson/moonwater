@@ -108188,15 +108188,28 @@ static fn render_apply(const p32 address_to buffer)
 
         if (table->damage_width[0] <= 0)
         {
-                memory_copy(render_screen, buffer, (positive)terminal.width * terminal.height * 4);
+                for (long y = 0; y < (long)terminal.height; y++)
+                        memory_copy(render_screen + y * terminal.pitch, buffer + y * terminal.pitch,
+                                    (positive)terminal.width * 4);
                 return;
         }
 
         x2 = x2 > (long)terminal.width ? (long)terminal.width : x2;
         y2 = y2 > (long)terminal.height ? (long)terminal.height : y2;
         for (long y = y1; y < y2 && x1 < x2; y++)
-                memory_copy(render_screen + y * terminal.width + x1, buffer + y * terminal.width + x1,
+                memory_copy(render_screen + y * terminal.pitch + x1, buffer + y * terminal.pitch + x1,
                             (positive)(x2 - x1) * 4);
+}
+
+// Whether two pictures of the window differ anywhere in it: rows are terminal.pitch apart, and the part past
+// the window's width is not the window's.
+static b32 render_differs(const p32 address_to a, const p32 address_to b)
+{
+        for (unsigned int y = 0; y < terminal.height; y++)
+                if (memory_compare(a + (positive)y * terminal.pitch, b + (positive)y * terminal.pitch,
+                                   (positive)terminal.width * 4))
+                        return true;
+        return false;
 }
 
 // The picture of the cells in the frame just drawn, every one of them, from nothing.
@@ -108204,7 +108217,8 @@ static fn render_reference(p32 address_to into, const struct window_cell address
 {
         unsigned int first, shown, total;
 
-        memory_fill_u32(into, (positive)terminal.width * terminal.height, 0x123456);
+        for (unsigned int y = 0; y < terminal.height; y++)
+                memory_fill_u32(into + (positive)y * terminal.pitch, terminal.width, 0x123456);
         for (unsigned int row = 0; row < ROWS; row++)
         {
                 terminal_row(terminal_grid(into), row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
@@ -108224,7 +108238,8 @@ static fn render_surface(void)
 
         if (!table)
         {
-                reserved = ((unsigned long)60 * 40 * 16 * 40 * 4 + 4095) & ~4095ul;
+                // A window of the largest grid the steps make: 50 by 14 cells at the largest text, 39 by 84 px a cell.
+                reserved = ((unsigned long)2048 * 1280 * 4 + 4095) & ~4095ul;
                 header = (sizeof(struct windows) + 4095) & ~4095ul;
                 table = (struct windows address_to)system_call_6(syscall(mmap), 0, header + reserved * 2, 3, 0x22,
                                                                  (positive)-1, 0);
@@ -108239,11 +108254,11 @@ static fn render_surface(void)
         terminal.own = (struct window_row){table, 0, -1, -1, header + reserved * 2};
         terminal.width = pixels_w;
         terminal.height = pixels_h;
-        terminal.pitch = pixels_w;
-        table->stride = pixels_w;
+        terminal.pitch = 2048;
+        table->stride = 2048;
         terminal.shown = -1;
         terminal_frames();
-        memory_fill_u32(render_screen, (positive)pixels_w * pixels_h, 0xdeadbe);
+        memory_fill_u32(render_screen, (positive)2048 * pixels_h, 0xdeadbe);
 }
 
 static b32 render_step(positive address_to compared, positive address_to wrong, positive step)
@@ -108295,8 +108310,18 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
                         terminal_discard();
                         if (!terminal.valid[spare])
                                 memory_fill_u32(windows_buffer(terminal.own.table, 0, spare),
-                                                (positive)terminal.width * terminal.height, 0xbad000);
+                                                (positive)terminal.pitch * terminal.height, 0xbad000);
                 }
+                return true;
+        }
+
+        if (what < 73)
+        {
+                // A text size: the metrics are taken again and the cells cut again to the window, which keeps its
+                // pixels, from a window of any size, short ones and a view scrolled back included.
+                cursor_hide();
+                terminal_text_set(-1, terminal_steps[render_next(TERMINAL_STEPS)]);
+                cursor_show();
                 return true;
         }
 
@@ -108318,26 +108343,29 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
                         static p32 address_to reference;
 
                         if (!reference)
-                                reference = render_map((positive)60 * 40 * 16 * 40 * 4);
+                                reference = render_map((positive)2048 * 1280 * 4);
 
                         render_apply(buffer);
                         render_reference(reference, terminal.frame[terminal.shown]);
                         address_to compared += 1;
-                        if (memory_compare(render_screen, reference, (positive)terminal.width * terminal.height * 4) ||
-                            memory_compare(buffer, reference, (positive)terminal.width * terminal.height * 4))
+                        if (render_differs(render_screen, reference) || render_differs(buffer, reference))
                         {
                                 address_to wrong += 1;
                                 if (address_to wrong < 4)
                                 {
-                                        positive pixels = (positive)terminal.width * terminal.height, at = 0;
+                                        positive x = 0, y = 0;
 
                                         string_format(log, "  frame %p: the screen or the buffer is not the full draw\n", step);
-                                        while (at < pixels && render_screen[at] == reference[at] && buffer[at] == reference[at])
-                                                at++;
+                                        while (y < terminal.height && render_screen[y * terminal.pitch + x] == reference[y * terminal.pitch + x] &&
+                                               buffer[y * terminal.pitch + x] == reference[y * terminal.pitch + x])
+                                        {
+                                                if (++x == terminal.width)
+                                                        x = 0, y++;
+                                        }
                                         string_format(log, "    first pixel %p,%p (cell %p,%p of %p by %p): screen %p buffer %p full %p, damage %p, shown %b\n",
-                                                      at % terminal.width, at / terminal.width, at % terminal.width / terminal.cell_w,
-                                                      at / terminal.width / terminal.cell_h, (positive)COLUMNS, (positive)ROWS,
-                                                      (positive)render_screen[at], (positive)buffer[at], (positive)reference[at],
+                                                      x, y, x / terminal.cell_w, y / terminal.cell_h, (positive)COLUMNS, (positive)ROWS,
+                                                      (positive)render_screen[y * terminal.pitch + x], (positive)buffer[y * terminal.pitch + x],
+                                                      (positive)reference[y * terminal.pitch + x],
                                                       (positive)terminal.own.table->damage_width[0], (bipolar)terminal.shown);
                                 }
                         }
@@ -109187,8 +109215,8 @@ static bool render_drawn(const p32 address_to pixels, p32 paper, p32 row, p32 co
         for (p32 y = 0; y < terminal.cell_h; y++)
                 for (p32 x = 0; x < terminal.cell_w; x++)
                 {
-                        p32 at = (row * terminal.cell_h + y) * terminal.width + column * terminal.cell_w + x;
-                        p32 gone = (7 * terminal.cell_h + y) * terminal.width + 20 * terminal.cell_w + x;
+                        p32 at = (row * terminal.cell_h + y) * terminal.pitch + column * terminal.cell_w + x;
+                        p32 gone = (7 * terminal.cell_h + y) * terminal.pitch + 20 * terminal.cell_w + x;
 
                         lit = lit || pixels[at] != paper;
                         missing = missing && pixels[at] == pixels[gone];
