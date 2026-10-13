@@ -108542,6 +108542,87 @@ static unsigned int glass_ungrained(unsigned int pixel, unsigned int side, int x
         return pixel - grain[0] + grain[64];
 }
 
+/*
+        Partial is whole. A present of only what changed is the same screen as a
+        present of the whole output: the windows and their corners, the close
+        buttons (whose X is the mean under its box, so a change anywhere in the
+        box changes all of it), the glass under them, and the band of tabs, whose
+        glass reaches a little past its own rows. Steps paint, move, raise and
+        change the corners of the windows at random, each followed by a present
+        of its damage and then of the whole output, and the two screens must agree.
+*/
+static void check_compositor_partial(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE], band[GLASS_SIDE * GLASS_SIDE], made[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int seed = 7, mismatched = 0, steps = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = made;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    compositor.band = band;
+    if (!glass_table_map())
+    {
+        check("partial: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    for (int row = 1; row <= 3; row++)
+    {
+        table->x[row] = 10 + 40 * row;
+        table->y[row] = 6 + 20 * row;
+        table->width[row] = 150;
+        table->height[row] = 120;
+        table->glass[row] = row == 2 ? WINDOW_GLASS : 0;
+        glass_paint(row, 0, 0, 150, 120, row == 1 ? 0x2060c0u : row == 2 ? 0xc04020u : 0x20c060u, true);
+    }
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+
+    for (int step = 0; step < 300; step++)
+    {
+        int row;
+        unsigned int op;
+
+        seed = seed * 1664525u + 1013904223u;
+        row = 1 + (int)((seed >> 16) % 3);
+        op = (seed >> 8) % 5;
+        if (op == 0)
+                glass_paint(row, (int)((seed >> 4) % 100), (int)((seed >> 12) % 90), 1 + (int)((seed >> 20) % 40),
+                            1 + (int)((seed >> 24) % 30), seed * 2654435761u, false);
+        else if (op == 1)
+        {
+                // The close button's box, from its corner in: a change in part of it.
+                glass_paint(row, 120 + (int)((seed >> 4) % 20), 3 + (int)((seed >> 12) % 14), 1 + (int)((seed >> 16) % 6),
+                            1 + (int)((seed >> 20) % 6), seed * 2246822519u, false);
+        }
+        else if (op == 2)
+        {
+                compositor_damage_row(row);
+                compositor_place(row, 6 + (int)((seed >> 4) % 120), 4 + (int)((seed >> 12) % 100));
+                compositor_damage_row(row);
+        }
+        else if (op == 3)
+                compositor_raise(row);
+        else
+                compositor_focus(row);
+        compositor_present();
+        memory_copy(screen, made, sizeof(screen));
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        steps++;
+        if (memory_compare(made, screen, sizeof(screen)))
+                mismatched++;
+    }
+    compositor.band = 0;
+    check("partial: every change presented alone is the screen the whole output makes", mismatched == 0 && steps == 300);
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
@@ -109241,6 +109322,7 @@ b32 main()
         check_pointer();
         check_take();
         check_glass();
+        check_compositor_partial();
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
 

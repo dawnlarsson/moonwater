@@ -1839,6 +1839,48 @@ static void compositor_glass_touch(const int *rectangle)
         }
 }
 
+static int compositor_visible(int row);
+static void compositor_frame_of(int row, struct compositor_frame *frame);
+
+/*
+        A change that touches a window's close button touches all of it: the X
+        is the mean under the box, so a change to part of the box changes the
+        ink of the rest, and a box drawn in part would be half old. The change
+        grows to take the whole box in, as often as another box is touched by
+        the growing.
+*/
+static void compositor_close_join(int *rectangle)
+{
+        int grown = 1;
+
+        while (grown)
+        {
+                grown = 0;
+                for (unsigned int at = 0; at < compositor.stacked; at++)
+                {
+                        struct compositor_frame frame;
+                        int row = compositor.stack[at], box[4], bx, by, side, meet[4];
+
+                        if (!compositor_visible(row))
+                                continue;
+                        compositor_frame_of(row, &frame);
+                        if (!compositor_close_box(&frame, &bx, &by, &side))
+                                continue;
+                        box[0] = bx < 0 ? 0 : bx, box[1] = by < 0 ? 0 : by;
+                        box[2] = bx + side > compositor.width ? compositor.width : bx + side;
+                        box[3] = by + side > compositor.height ? compositor.height : by + side;
+                        memory_copy(meet, rectangle, sizeof(meet));
+                        compositor_meet(meet, box);
+                        if (meet[2] > meet[0] && meet[3] > meet[1] && (rectangle[0] > box[0] || rectangle[1] > box[1] ||
+                                                                      rectangle[2] < box[2] || rectangle[3] < box[3]))
+                        {
+                                compositor_union(rectangle, box);
+                                grown = 1;
+                        }
+                }
+        }
+}
+
 static void compositor_damage(int x, int y, int width, int height)
 {
         int rectangle[4] = {x < 0 ? 0 : x, y < 0 ? 0 : y,
@@ -1850,6 +1892,7 @@ static void compositor_damage(int x, int y, int width, int height)
         if (rectangle[2] <= rectangle[0] || rectangle[3] <= rectangle[1])
                 return;
 
+        compositor_close_join(rectangle);
         compositor_glass_touch(rectangle);
 
         while (at < compositor.damages)
