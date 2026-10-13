@@ -39679,7 +39679,7 @@ static fn error_test_contract(void)
         check("errno is an lvalue through the accessor",
               address_of errno == __errno_location());
 
-        for (number = 0; number <= 133; number++)
+        for (number = 0; number <= 134; number++)
         {
                 if (number == 41 || number == 58)
                         continue;
@@ -39696,7 +39696,7 @@ static fn error_test_contract(void)
         check("41 is a hole", is_null(system_error_message(41)));
         check("58 is a hole", is_null(system_error_message(58)));
 
-        static const bipolar outside[] = {-1, -133, 134, 4095,
+        static const bipolar outside[] = {-1, -134, 135, 4095,
                                           bipolar_min, bipolar_max};
         for (positive i = 0; i < array_count(outside); i++)
                 check("unknown message has no table address",
@@ -39785,7 +39785,7 @@ static fn error_test_contract(void)
 
         //      Nothing in the table may outgrow the buffer perror builds its
         //      line in, which is the assumption that would fail silently.
-        for (number = 0; number <= 133; number++)
+        for (number = 0; number <= 134; number++)
         {
                 if (is_null(system_error_message(number)))
                         continue;

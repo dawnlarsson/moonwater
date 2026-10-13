@@ -5159,6 +5159,9 @@ STACK_FRAME_NOTICE=32768
 #       functions are parallel_tree callbacks, called once per directory on
 #       a pool thread's 8 MB stack. They are the size of their buffers, not
 #       of a walk, so a ceiling at today's size is the whole of the risk.
+#       From dns_query_tls down the pins were drawn on 2026-10-13 over frames
+#       that had landed unpinned (the network code's, the bowl's accounts, the
+#       machine's lists); each runs once per command in the same way.
 stack_frame_pins()
 {
         cat <<'PINS'
@@ -5168,21 +5171,32 @@ tools_factor 67000
 tools_dmesg_follow 4096
 text_tail_start 4096
 awk_option_seen 4096
-http_run 312640
+http_run 313472
 locale_auto_get 283648
 bowl_write_pacman 266280
 bowl_write_mirror 266248
-host_settings_save 70648
+host_settings_save 70664
 tls_handshake 43368
-find_tree_enter 37256
-du_tree_enter 37256
+find_tree_enter 37272
+du_tree_enter 37272
 host_update 33464
 grep_tree_enter 33384
 rm_tree_enter 33336
-chown_tree_enter 33112
+chown_tree_enter 37448
 chmod_tree_enter 33112
-cp_tree_enter 33080
+cp_tree_enter 35144
 host_settings_image 32776
+dns_query_tls 292544
+nts_ke 288448
+bowl_accounts_prepare 65720
+tar_diff_bytes 65592
+shell_bind 42888
+zstd_cli_train 34872
+host_update_locked 33472
+host_files_alike 33304
+host_bind_told 33128
+cut_pieces_emit 32920
+host_image_is 32768
 PINS
 }
 

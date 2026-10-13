@@ -4272,6 +4272,7 @@ static inline PURE string_address system_error_message(bipolar code)
                 "State not recoverable",
                 "Operation not possible due to RF-kill",
                 "Memory page has hardware error",
+                "Inappropriate file type or format",
         };
         return (positive)code < array_count(messages) ? (string_address)messages[code] : null;
 }
@@ -12124,6 +12125,9 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
 #endif
 #ifndef EHWPOISON
 #define EHWPOISON 133
+#endif
+#ifndef EFTYPE
+#define EFTYPE 134
 #endif
 
 //      The three pairs that are one number under two names. A program may
