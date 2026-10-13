@@ -35,8 +35,9 @@
         What the kernel desktop did for a hand and a keyboard it does here:
         keys are the characters of the layout `moonwater keyboard` set (every
         layout the kernel had, AltGr as the third level, dead accents and
-        Caps Lock besides), Alt-Tab, Alt-F4, Alt-F9 and Control-Shift-T are
-        the compositor's, the pointer is gained by the speed of the hand and
+        Caps Lock besides), Alt-Tab, Alt-F4 and Alt-F9 are the compositor's
+        and the machine script's key_ functions its chords (key_ctrl_shift_t, a
+        terminal), the pointer is gained by the speed of the hand and
         wears a shape for the edge it is over, a window is arranged to fill
         the output or half of it by a double click on its top or with Alt
         held, or by a drag to an edge, Alt and the right button resize it
@@ -808,7 +809,6 @@ static void compositor_scene(const struct compositor_target *t,
 #define CK_KEY_TAB 15
 #define CK_KEY_F4 62
 #define CK_KEY_F9 67
-#define CK_KEY_T 20
 #define CK_ACUTE 0xB4u
 #define CK_GRAVE '`'
 #define CK_DIAERESIS 0xA8u
@@ -3478,20 +3478,140 @@ static void compositor_hold_drop(positive now)
 }
 
 /*
-        Control-Shift-T: a new terminal, which is a request and not a start. Everything on the desktop is
-        started by the machine script and by nothing else, so the compositor raises the event the script
-        answers with moonwater_desktop_terminal (main.moonwater.sh), which finds the font and starts the
-        program; this process forks and executes nothing on a person's behalf. A machine whose script does
-        not answer it starts nothing, and says so.
+        The desktop's keys, which are the machine script's: a function there
+        named key_ and a chord -- modifiers and a key joined by _, as
+        key_ctrl_shift_t -- is run when the chord is pressed. The script
+        writes its key_ functions' names to /run/moonwater/keys, a line each,
+        before it starts this program; a chord pressed is no window's key, and
+        its name is written, a line, to the FIFO /run/moonwater/keys.fire,
+        which the script reads and runs. Everything on the desktop is started
+        by the machine script and by nothing else; this process forks nothing.
+        The keys are the physical ones, so a chord is the same key whatever
+        the layout; the modifiers are ctrl (or control), shift, alt and super.
 */
-static void compositor_terminal(void)
-{
-        struct bind_control control;
-        bipolar failed = host_bind_request(SPARK_BIND_FIRE, SPARK_BIND_DESKTOP_TERMINAL, null, &control);
+#define COMPOSITOR_KEYS 32
+#define COMPOSITOR_KEYS_FILE "/run/moonwater/keys"
+#define COMPOSITOR_KEYS_FIRE "/run/moonwater/keys.fire"
 
-        if (failed < 0)
-                compositor_kmsg((string_address) "compositor: cannot ask the machine for a terminal, error ", (positive)-failed,
+static const struct
+{
+        const char *name;
+        unsigned char code;
+} compositor_key_names[] = {
+    {"escape", 1}, {"1", 2}, {"2", 3}, {"3", 4}, {"4", 5}, {"5", 6}, {"6", 7}, {"7", 8}, {"8", 9}, {"9", 10},
+    {"0", 11}, {"minus", 12}, {"equal", 13}, {"backspace", 14}, {"tab", 15}, {"q", 16}, {"w", 17}, {"e", 18},
+    {"r", 19}, {"t", 20}, {"y", 21}, {"u", 22}, {"i", 23}, {"o", 24}, {"p", 25}, {"leftbrace", 26},
+    {"rightbrace", 27}, {"enter", 28}, {"a", 30}, {"s", 31}, {"d", 32}, {"f", 33}, {"g", 34}, {"h", 35},
+    {"j", 36}, {"k", 37}, {"l", 38}, {"semicolon", 39}, {"apostrophe", 40}, {"grave", 41}, {"backslash", 43},
+    {"z", 44}, {"x", 45}, {"c", 46}, {"v", 47}, {"b", 48}, {"n", 49}, {"m", 50}, {"comma", 51}, {"dot", 52},
+    {"slash", 53}, {"space", 57}, {"f1", 59}, {"f2", 60}, {"f3", 61}, {"f4", 62}, {"f5", 63}, {"f6", 64},
+    {"f7", 65}, {"f8", 66}, {"f9", 67}, {"f10", 68}, {"f11", 87}, {"f12", 88}, {"home", 102}, {"up", 103},
+    {"pageup", 104}, {"left", 105}, {"right", 106}, {"end", 107}, {"down", 108}, {"pagedown", 109},
+    {"insert", 110}, {"delete", 111},
+};
+
+static struct
+{
+        unsigned int count;
+        unsigned short modifiers[COMPOSITOR_KEYS];
+        unsigned char code[COMPOSITOR_KEYS];
+        char chord[COMPOSITOR_KEYS][32];
+} compositor_keys;
+
+// One word of a chord, as a modifier's flag (and *code untouched) or a key's code (and 0); ~0u for neither.
+static unsigned int compositor_key_word(const char *word, unsigned int length, unsigned int *code)
+{
+        static const struct { const char *name; unsigned int flag; } modifiers[] = {
+            {"control", WINDOW_KEY_CONTROL}, {"ctrl", WINDOW_KEY_CONTROL}, {"shift", WINDOW_KEY_SHIFT},
+            {"alt", WINDOW_KEY_ALT}, {"super", WINDOW_KEY_SUPER}};
+
+        for (unsigned int at = 0; at < sizeof(modifiers) / sizeof(modifiers[0]); at++)
+                if (string_length((string_address)modifiers[at].name) == length &&
+                    !memory_compare(modifiers[at].name, word, length))
+                        return modifiers[at].flag;
+        for (unsigned int at = 0; at < sizeof(compositor_key_names) / sizeof(compositor_key_names[0]); at++)
+                if (string_length((string_address)compositor_key_names[at].name) == length &&
+                    !memory_compare(compositor_key_names[at].name, word, length))
+                {
+                        *code = compositor_key_names[at].code;
+                        return 0;
+                }
+        return ~0u;
+}
+
+// The chords the script bound, read once at the start: a line that is not one is left out, and said.
+static void compositor_keys_read(void)
+{
+        static char text[4096];
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FILE, FILE_READ | O_CLOEXEC);
+        bipolar got = handle < 0 ? 0 : system_read_once(handle, text, sizeof(text) - 1);
+        unsigned int at = 0;
+
+        if (handle >= 0)
+                system_close(handle);
+        text[got > 0 ? got : 0] = 0;
+
+        while (text[at] && compositor_keys.count < COMPOSITOR_KEYS)
+        {
+                unsigned int start = at, close, modifiers = 0, code = 0, bad = 0;
+
+                while (text[at] && text[at] != '\n')
+                        at++;
+                close = at;
+                if (text[at])
+                        at++;
+                while (start < close && (text[start] == ' ' || text[start] == '\t'))
+                        start++;
+                while (close > start && (text[close - 1] == ' ' || text[close - 1] == '\t' || text[close - 1] == '\r'))
+                        close--;
+                if (close == start)
+                        continue;
+
+                // key_, then the words.
+                bad = close - start < 5 || memory_compare(text + start, "key_", 4);
+                for (unsigned int word = start + 4; word < close && !bad;)
+                {
+                        unsigned int stop = word, flag;
+
+                        while (stop < close && text[stop] != '_')
+                                stop++;
+                        flag = compositor_key_word(text + word, stop - word, &code);
+                        bad = flag == ~0u;
+                        modifiers |= bad ? 0 : flag;
+                        word = stop + 1;
+                }
+
+                if (bad || !code || close - start >= sizeof(compositor_keys.chord[0]))
+                {
+                        compositor_kmsg((string_address) "compositor: a line of /run/moonwater/keys is no chord, line ",
+                                        (positive)compositor_keys.count + 1, (string_address) "");
+                        continue;
+                }
+
+                memory_copy(compositor_keys.chord[compositor_keys.count], text + start, close - start);
+                compositor_keys.chord[compositor_keys.count][close - start] = 0;
+                compositor_keys.code[compositor_keys.count] = (unsigned char)code;
+                compositor_keys.modifiers[compositor_keys.count++] = (unsigned short)modifiers;
+        }
+}
+
+// A chord pressed: said to the script, which runs what it is bound to; a script that does not listen hears nothing.
+static void compositor_key_fire(unsigned int which)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FIRE, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+        char line[34];
+        positive length = string_length((string_address)compositor_keys.chord[which]);
+
+        if (handle < 0)
+        {
+                compositor_kmsg((string_address) "compositor: nothing reads /run/moonwater/keys.fire, error ", (positive)-handle,
                                 (string_address) "");
+                return;
+        }
+        memory_copy(line, compositor_keys.chord[which], length);
+        line[length] = '\n';
+        system_write_once(handle, line, length + 1);
+        system_close(handle);
 }
 
 // What is held on every keyboard, as the flags a key event carries.
@@ -3512,7 +3632,7 @@ static unsigned int compositor_modifiers(void)
         and then, with the keys moved on by Alt-Tab, Alt going up would hold a
         modifier that never was), Alt-Tab and Alt-F9 with both edges of the
         key and whatever repeats, any other key typed while an Alt-Tab is under
-        way, Control-Shift-T, and Control-Alt-Backspace and the same with Shift,
+        way, the chords of the script's key_ functions, and Control-Alt-Backspace and the same with Shift,
         which Canvas hears for itself and acts on. The rest make characters, one event each, for the window that has
         the keys; with none, a key gives them to the topmost.
 */
@@ -3560,13 +3680,17 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 return;
         }
 
-        // A new terminal; a press and not a repeat, so a key held down does not fill the desktop with shells.
-        if (chord == (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL) && code == CK_KEY_T)
-        {
-                if (value == 1)
-                        compositor_terminal();
-                return;
-        }
+        // A chord the script bound is its own and no window's; a press says so, and not a repeat, so a key held
+        // down does not fill the desktop with what it starts.
+        for (unsigned int at = 0; at < compositor_keys.count; at++)
+                if (code == compositor_keys.code[at] &&
+                    (modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) ==
+                        compositor_keys.modifiers[at])
+                {
+                        if (value == 1)
+                                compositor_key_fire(at);
+                        return;
+                }
 
         if (((chord & ~WINDOW_KEY_SHIFT) == (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||
             ((modifiers & WINDOW_KEY_ALT) && compositor.cycle))
@@ -4297,6 +4421,7 @@ static b32 compositor_main()
                                                     FILE_READ | O_CLOEXEC | O_NONBLOCK);
         }
 
+        compositor_keys_read();
         if (compositor.scale < 1 || compositor.scale > SPARK_CANVAS_SCALE_MOST)
                 compositor.scale = headless ? 1 : compositor_scale_read();
         if (!headless && !compositor.layout_given)

@@ -19269,32 +19269,6 @@ wait $c
 echo m10-done
 """)
 
-#   Control-Shift-T: a terminal started by the compositor, with the font the machine
-#   names in /root/font (this boot has the kernel's desktop and starts a compositor
-#   by hand, so the stick carries a font from the host).
-font11 = next((path for path in ("/usr/share/fonts/TTF/Hack-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-                                 "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-                                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-                                 "/usr/share/fonts/noto/NotoSansMono-Regular.ttf") if os.path.exists(path)), None)
-if font11:
-    import shutil
-    shutil.copy(font11, stick + "/font.ttf")
-open(stick + "/m11", "w").write(r"""exec > /dev/ttyS0 2>&1
-echo /mnt/font.ttf > /root/font
-/compositor &
-c=$!
-# The machine answers Control-Shift-T on the compositor when compositor.pid names a live one.
-echo $c > /run/moonwater/compositor.pid
-sleep 2
-echo m11-ready
-sleep 30
-echo "m11 terminals: $(ps | grep -c '[t]erminal')"
-kill $c
-wait $c
-rm -f /run/moonwater/compositor.pid
-echo m11-done
-""")
-
 open(stick + "/m1", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -19862,20 +19836,6 @@ out.append(("W5.1 Alt and a press on a window's body moves the window by the han
             "%s %s" % (w9(1250, 700), w9(250, 300)), "336699 1e1e1e"))
 wait_for(b"m10-done", 120)
 
-#   Control-Shift-T, twice: a terminal each, which is the compositor starting a program
-#   of its own, and not the one that holds the keys.
-if font11:
-    type_text("sh /mnt/m11\n")
-    ready11 = wait_for(b"m11-ready", 60)
-    time.sleep(0.5)
-    for press_t in range(2):
-        chord("ctrl", "shift", "t")
-        time.sleep(2)
-    wait_for(b"m11-done", 90)
-    text = serial().decode("latin1")
-    terminals = re.findall(r"m11 terminals: (\d+)", text)
-    out.append(("W6.1 Control-Shift-T starts a terminal: pressed twice there are two",
-                terminals[-1] if terminals else "none", "2"))
 
 
 

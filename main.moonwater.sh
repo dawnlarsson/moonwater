@@ -92,9 +92,21 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
-# A terminal, asked for at the keyboard (Control-Shift-T), by the compositor or
-# by the kernel's own desktop: on the compositor when there is one, and on the
-# kernel's desktop when there is not. It has to come back, as moonwater_init does.
+# The desktop's keys. A function named key_ and a chord -- modifiers and a key
+# joined by _, as key_ctrl_shift_t -- is run when that chord is pressed on the
+# compositor's desktop: the compositor hears it, says which, and this file runs
+# it. The modifiers are ctrl (or control), shift, alt and super; the key is a
+# letter, a digit, f1 to f12, or one of enter space tab escape backspace delete
+# insert home end pageup pagedown up down left right minus equal comma dot
+# slash semicolon apostrophe grave backslash leftbrace rightbrace. This one is
+# the default: change it, or add your own beside it.
+function key_ctrl_shift_t {
+  desktop_terminal
+}
+
+# A terminal, asked for by the kernel's own desktop at its Control-Shift-T: on
+# the compositor when there is one, and on the kernel's desktop when there is
+# not. It has to come back, as moonwater_init does.
 function moonwater_desktop_terminal {
   if [ -e /run/moonwater/windows ] && [ -s /run/moonwater/compositor.pid ] && kill -0 $(cat /run/moonwater/compositor.pid) 2> /dev/null; then
     desktop_terminal
@@ -168,15 +180,13 @@ function desktop_font {
 }
 
 # Everything on the desktop is started here and by nothing else: the compositor
-# holds the card and draws, and forks nothing on a person's behalf. A program it
-# is asked for (Control-Shift-T) is the event moonwater_desktop_terminal, which
-# the compositor raises and the machine answers by this file, as it answers the
-# power button; and the kernel's own desktop raises the same event before it
-# starts a terminal of its own. The pids are kept so that the end of a session
-# ends what it started.
+# holds the card and draws, and forks nothing on a person's behalf -- a chord
+# is a key_ function above, which it says and this file runs. Started from a
+# subshell that ends at once, so the program is not this long-lived shell's
+# child and nothing here has to wait for it; its pid is kept so that the end of
+# a session ends what it started.
 function desktop_run {
-  "$@" &
-  echo $! >> /run/moonwater/desktop.kids
+  ("$@" & echo $! >> /run/moonwater/desktop.kids)
 }
 
 # The kernel log, as a window on the compositor: started first, so that it sits
@@ -190,10 +200,36 @@ function desktop_log {
   fi
   rm -f /run/moonwater/klog.up
   desktop_run /klog -f "$desktop_face" ${desktop_bold:+-b "$desktop_bold"} -w /run/moonwater/klog.up
+  desktop_klog=$(tail -n 1 /run/moonwater/desktop.kids)
   desktop_wait=0
-  until [ -e /run/moonwater/klog.up ] || ! kill -0 $! 2> /dev/null || [ $desktop_wait -ge 100 ]; do
+  until [ -e /run/moonwater/klog.up ] || ! kill -0 $desktop_klog 2> /dev/null || [ $desktop_wait -ge 100 ]; do
     sleep 0.05
     desktop_wait=$((desktop_wait + 1))
+  done
+}
+
+# The key_ functions of this file, a line each, for the compositor to listen
+# for, and the FIFO it says a chord on.
+function desktop_keys_list {
+  rm -f /run/moonwater/keys /run/moonwater/keys.fire
+  declare -F | while read -r desktop_word desktop_flag desktop_name; do
+    case $desktop_name in
+    key_*) echo "$desktop_name" ;;
+    esac
+  done > /run/moonwater/keys
+  mkfifo -m 600 /run/moonwater/keys.fire
+}
+
+# What the compositor says when a chord is pressed: the name of its key_
+# function, a line each, which is run here. The FIFO is opened again whenever
+# the compositor has closed it.
+function desktop_keys_answer {
+  while :; do
+    while IFS= read -r desktop_pressed; do
+      case $desktop_pressed in
+      key_*) declare -F "$desktop_pressed" > /dev/null && "$desktop_pressed" ;;
+      esac
+    done < /run/moonwater/keys.fire
   done
 }
 
@@ -211,6 +247,7 @@ function desktop_terminal {
 function desktop_session {
   rm -f /run/moonwater/windows
   desktop_font
+  desktop_keys_list
   setsid /compositor ${desktop_text:+-f "$desktop_text"} &
   desktop_compositor=$!
   echo $desktop_compositor > /run/moonwater/compositor.pid
@@ -225,6 +262,8 @@ function desktop_session {
     echo "desktop: the compositor (pid $desktop_compositor) made no window table" > /dev/kmsg
   fi
   : > /run/moonwater/desktop.kids
+  desktop_keys_answer &
+  echo $! >> /run/moonwater/desktop.kids
   desktop_log
   desktop_terminal
   wait $desktop_compositor
@@ -339,7 +378,7 @@ function moonwater_event {
   # rfkill
   # tablet / headphone / dock  ($2 is on or off)
   # resume
-  # desktop terminal  (a request: Control-Shift-T, answered by moonwater_desktop_terminal)
+  # desktop terminal  (the kernel's own desktop's Control-Shift-T)
   # recover  (last event did not finish; not a bind row)
 }
 
