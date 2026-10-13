@@ -2761,8 +2761,7 @@ static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_
         font_sort(s->events, events);
         e->used[3] = events > e->used[3] ? events : e->used[3];
 
-        for (b32 c = 0; c <= width + 1; c++)
-                s->cover[c] = 0;
+        memory_zero(s->cover, (positive)(width + 2) * sizeof(s->cover[0]));
 
         //      A sweep up the row: the chains spanning each slab, in order
         //      along it, and each run of nonzero winding between two of them
@@ -3516,9 +3515,7 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
 
                         if (across <= 3)
                         {
-                                for (b32 y = top < 0 ? 0 : top; y < top + across && y < height; y++)
-                                        for (b32 x = left < 0 ? 0 : left; x < left + across && x < width; x++)
-                                                out[(positive)y * stride + (positive)x] = 255;
+                                font_fill(out, stride, width, height, left, top, left + across, top + across, 255);
                                 continue;
                         }
 
