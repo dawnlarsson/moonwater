@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        402 routines (379 public, 23 local), 392 of them on all three and 10 local to one.
+        403 routines (380 public, 23 local), 393 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -207,6 +207,7 @@
           md5_blocks                     public  yes     yes     yes
           memory                         public  yes     yes     yes
           memory_ascii_span              public  yes     yes     yes
+          memory_average_ahead           public  yes     yes     yes
           memory_blend_u32_rect          public  yes     yes     yes
           memory_checksum_bsd16          public  yes     yes     yes
           memory_common_prefix           public  yes     yes     yes
@@ -12551,6 +12552,58 @@ __asm__(
 
 #ifndef KERNEL_MODE
     //
+    //       memory_average_ahead -- rdi data, rsi count, rdx distance: each
+    //       of the count bytes from data becomes the mean of itself and the
+    //       byte distance after it, rounded up, first to last and in place.
+    //       A byte is only ever averaged with one that has not been yet, so
+    //       the pass is the same whatever width a body takes it in, and no
+    //       load ever meets a byte a store has written: nothing waits on a
+    //       store to be forwarded. pavgb is the whole of the work, one
+    //       instruction for as many bytes as a register holds: four
+    //       registers a turn with AVX-512, AVX2 or SSE2, the last part under
+    //       a mask with AVX-512 and a byte at a time without. A blur is a
+    //       few passes of it across a frame and down it (the compositor's
+    //       glass).
+    //
+    ASM_FUNC(memory_average_ahead)
+    "test %rsi, %rsi\n   jz 9f\n   add %rdi, %rdx\n"
+    ASM_WIDER("cpu_has_avx512", "5f")
+    ASM_WIDER("cpu_has_avx2", "3f")
+    "cmp $64, %rsi\n   jb 2f\n"
+    "1:  movdqu (%rdi), %xmm0\n   movdqu (%rdx), %xmm4\n   movdqu 16(%rdi), %xmm1\n   movdqu 16(%rdx), %xmm5\n"
+    "movdqu 32(%rdi), %xmm2\n   movdqu 32(%rdx), %xmm6\n   movdqu 48(%rdi), %xmm3\n   movdqu 48(%rdx), %xmm7\n"
+    "pavgb %xmm4, %xmm0\n   pavgb %xmm5, %xmm1\n   pavgb %xmm6, %xmm2\n   pavgb %xmm7, %xmm3\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
+    "add $64, %rdi\n   add $64, %rdx\n   sub $64, %rsi\n   cmp $64, %rsi\n   jae 1b\n"
+    "2:  cmp $16, %rsi\n   jb 8f\n   movdqu (%rdi), %xmm0\n   movdqu (%rdx), %xmm4\n   pavgb %xmm4, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rdx\n   sub $16, %rsi\n   jmp 2b\n"
+    "8:  test %rsi, %rsi\n   jz 9f\n"
+    "7:  movzbl (%rdi), %eax\n   movzbl (%rdx), %ecx\n   lea 1(%rax,%rcx), %eax\n   shr %eax\n   mov %al, (%rdi)\n"
+    "inc %rdi\n   inc %rdx\n   dec %rsi\n   jnz 7b\n"
+    "9:  " ASM_RET
+    "3:  cmp $128, %rsi\n   jb 4f\n"
+    "vmovdqu (%rdi), %ymm0\n   vmovdqu 32(%rdi), %ymm1\n   vmovdqu 64(%rdi), %ymm2\n   vmovdqu 96(%rdi), %ymm3\n"
+    "vpavgb (%rdx), %ymm0, %ymm0\n   vpavgb 32(%rdx), %ymm1, %ymm1\n   vpavgb 64(%rdx), %ymm2, %ymm2\n   vpavgb 96(%rdx), %ymm3, %ymm3\n"
+    "vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n   vmovdqu %ymm2, 64(%rdi)\n   vmovdqu %ymm3, 96(%rdi)\n"
+    "add $128, %rdi\n   add $128, %rdx\n   sub $128, %rsi\n   jmp 3b\n"
+    "4:  cmp $32, %rsi\n   jb 6f\n   vmovdqu (%rdi), %ymm0\n   vpavgb (%rdx), %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rdx\n   sub $32, %rsi\n   jmp 4b\n"
+    "6:  vzeroupper\n   jmp 2b\n"
+    "5:  cmp $256, %rsi\n   jb 10f\n"
+    "vmovdqu64 (%rdi), %zmm0\n   vmovdqu64 64(%rdi), %zmm1\n   vmovdqu64 128(%rdi), %zmm2\n   vmovdqu64 192(%rdi), %zmm3\n"
+    "vpavgb (%rdx), %zmm0, %zmm0\n   vpavgb 64(%rdx), %zmm1, %zmm1\n   vpavgb 128(%rdx), %zmm2, %zmm2\n   vpavgb 192(%rdx), %zmm3, %zmm3\n"
+    "vmovdqu64 %zmm0, (%rdi)\n   vmovdqu64 %zmm1, 64(%rdi)\n   vmovdqu64 %zmm2, 128(%rdi)\n   vmovdqu64 %zmm3, 192(%rdi)\n"
+    "add $256, %rdi\n   add $256, %rdx\n   sub $256, %rsi\n   jmp 5b\n"
+    "10: cmp $64, %rsi\n   jb 11f\n   vmovdqu64 (%rdi), %zmm0\n   vpavgb (%rdx), %zmm0, %zmm0\n   vmovdqu64 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   add $64, %rdx\n   sub $64, %rsi\n   jmp 10b\n"
+    "11: test %rsi, %rsi\n   jz 12f\n   mov $-1, %rax\n   bzhi %rsi, %rax, %rax\n   kmovq %rax, %k1\n"
+    "vmovdqu8 (%rdi), %zmm0{%k1}{z}\n   vmovdqu8 (%rdx), %zmm1{%k1}{z}\n   vpavgb %zmm1, %zmm0, %zmm0\n   vmovdqu8 %zmm0, (%rdi){%k1}\n"
+    "12: vzeroupper\n" ASM_RET
+    ASM_END(memory_average_ahead)
+#endif
+
+#ifndef KERNEL_MODE
+    //
     //       memory_translate_u32_rect -- a rectangle of bytes made words
     //       through a table: rdi into, rsi into_stride in words, rdx from,
     //       rcx from_stride, r8 width, r9 height, the table on the stack.
@@ -22025,6 +22078,25 @@ __asm__(
     ASM_END(memory_translate)
 
 #ifndef KERNEL_MODE
+    //       memory_average_ahead: urhadd is the whole of the work, 64 bytes
+    //       a turn in four registers by ldp and stp, sixteen at a time after
+    //       and a byte at a time for the rest. The x86_64 block carries the
+    //       contract.
+    ASM_FUNC(memory_average_ahead)
+    "cbz x1, 9f\n   add x2, x0, x2\n   cmp x1, #64\n   b.lo 2f\n"
+    "1:  ldp q0, q1, [x0]\n   ldp q2, q3, [x0, #32]\n   ldp q4, q5, [x2]\n   ldp q6, q7, [x2, #32]\n"
+    "urhadd v0.16b, v0.16b, v4.16b\n   urhadd v1.16b, v1.16b, v5.16b\n   urhadd v2.16b, v2.16b, v6.16b\n   urhadd v3.16b, v3.16b, v7.16b\n"
+    "stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   add x0, x0, #64\n   add x2, x2, #64\n   sub x1, x1, #64\n   cmp x1, #64\n   b.hs 1b\n"
+    "2:  cmp x1, #16\n   b.lo 3f\n   ldr q0, [x0]\n   ldr q4, [x2], #16\n   urhadd v0.16b, v0.16b, v4.16b\n   str q0, [x0], #16\n"
+    "sub x1, x1, #16\n   b 2b\n"
+    "3:  cbz x1, 9f\n"
+    "4:  ldrb w3, [x0]\n   ldrb w4, [x2], #1\n   add w3, w3, w4\n   add w3, w3, #1\n   lsr w3, w3, #1\n   strb w3, [x0], #1\n"
+    "subs x1, x1, #1\n   b.ne 4b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_average_ahead)
+#endif
+
+#ifndef KERNEL_MODE
     //       memory_translate_u32_rect: eight words a turn. The eight bytes are
     //       one load and eight ubfx, the words eight loads, paired with orr
     //       and stored by two stp; the tail a word at a time. NEON has no
@@ -30343,6 +30415,41 @@ __asm__(
     ASM_END(memory_translate)
 
 #ifndef KERNEL_MODE
+    //       memory_average_ahead: with V, as many bytes as eight registers
+    //       hold, vaaddu with the rounding set to up; without it eight bytes
+    //       a turn in a register when both pointers are on eight, four when
+    //       on four -- the mean rounded up is a|b less (a^b)>>1 with each
+    //       byte's top bit cleared, which never borrows across bytes -- and
+    //       a byte at a time otherwise. The x86_64 block carries the
+    //       contract.
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(memory_average_ahead)
+    "beqz a1, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    //  The detect keeps a0-a4 and a7.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_average_ahead\n"
+#endif
+    "1:  add a2, a0, a2\n   or t0, a0, a2\n   andi t1, t0, 7\n   bnez t1, 2f\n   li t5, 0x7f7f7f7f7f7f7f7f\n   li t6, 8\n"
+    "10: bltu a1, t6, 4f\n   ld t0, 0(a0)\n   ld t1, 0(a2)\n   or t2, t0, t1\n   xor t0, t0, t1\n   srli t0, t0, 1\n   and t0, t0, t5\n"
+    "sub t2, t2, t0\n   sd t2, 0(a0)\n   addi a0, a0, 8\n   addi a2, a2, 8\n   addi a1, a1, -8\n   j 10b\n"
+    "2:  andi t1, t0, 3\n   bnez t1, 4f\n   li t5, 0x7f7f7f7f\n   li t6, 4\n"
+    "11: bltu a1, t6, 4f\n   lwu t0, 0(a0)\n   lwu t1, 0(a2)\n   or t2, t0, t1\n   xor t0, t0, t1\n   srli t0, t0, 1\n   and t0, t0, t5\n"
+    "sub t2, t2, t0\n   sw t2, 0(a0)\n   addi a0, a0, 4\n   addi a2, a2, 4\n   addi a1, a1, -4\n   j 11b\n"
+    "4:  beqz a1, 9f\n"
+    "12: lbu t0, 0(a0)\n   lbu t1, 0(a2)\n   add t0, t0, t1\n   addi t0, t0, 1\n   srli t0, t0, 1\n   sb t0, 0(a0)\n"
+    "addi a0, a0, 1\n   addi a2, a2, 1\n   addi a1, a1, -1\n   bnez a1, 12b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  add a2, a0, a2\n   csrwi vxrm, 0\n"
+    "6:  vsetvli t0, a1, e8, m8, ta, ma\n   vle8.v v0, (a0)\n   vle8.v v8, (a2)\n   vaaddu.vv v0, v0, v8\n   vse8.v v0, (a0)\n"
+    "add a0, a0, t0\n   add a2, a2, t0\n   sub a1, a1, t0\n   bnez a1, 6b\n" ASM_RET
+#endif
+    ASM_END(memory_average_ahead)
+    ".option pop\n"
+#endif
+
+#ifndef KERNEL_MODE
     //       memory_translate_u32_rect: with V, as many bytes as a register
     //       holds, widened four times by vzext, made offsets and gathered by
     //       vluxei32 from the words, stored; without it four words a turn.
@@ -37403,6 +37510,11 @@ positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
                                const p8 address_to from, positive from_stride,
                                positive width, positive height,
                                const p32 address_to table);
+// Each of count bytes from data becomes the mean of itself and the byte distance after it, rounded up, first to
+// last and in place: a byte is averaged only with one that has not been yet, so the pass is the same however wide
+// the body takes it. Reads count + distance bytes. A blur is passes of it across a frame (a pixel's four bytes and
+// their doubles) and down it (a row's bytes and their doubles); a zero count touches nothing.
+fn memory_average_ahead(p8 address_to data, positive count, positive distance);
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);

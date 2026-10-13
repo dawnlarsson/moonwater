@@ -98717,6 +98717,76 @@ static fn check_blend()
 }
 
 /*
+        memory_average_ahead against the byte loop it is: every count to 300
+        and a few long ones, distances of a byte to a glass row's three and
+        a half pages, the last byte it reads against a page that faults and
+        the distance's bytes after the count left as they were; the three
+        x86_64 bodies, and riscv64 with V, without it and the first call,
+        which asks for it.
+*/
+static fn check_average_ahead()
+{
+        static const positive distances[] = {1, 2, 3, 4, 5, 7, 8, 9, 16, 32, 63, 64, 65, 2560, 10240};
+        static const positive longs[] = {511, 512, 513, 1000, 4095};
+        static p8 want[3 * 4096];
+        p8 address_to base = memory(4 * 4096);
+        p64 state = 0x6a09e667f3bcc908ull;
+        bool guarded = base && system_call_3(syscall(mprotect), (positive)(base + 3 * 4096), 4096, 0) == 0;
+
+        check("average: a guard page", guarded);
+        if (!guarded)
+                return;
+#if RISCV64
+        cpu_has_vector = 0;
+        base[0] = 10, base[1] = 20, base[2] = 31;
+        memory_average_ahead(base, 2, 1);
+        check("average: the first call asks for V and keeps its arguments",
+              base[0] == 15 && base[1] == 26 && base[2] == 31 && cpu_has_vector != 0);
+        p8 vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#endif
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+#endif
+                bool fine = true;
+                for (positive d = 0; d < sizeof(distances) / sizeof(distances[0]); d++)
+                        for (positive n = 0; n < 301 + sizeof(longs) / sizeof(longs[0]); n++)
+                        {
+                                positive count = n <= 300 ? n : longs[n - 301], distance = distances[d];
+                                positive span = count + distance;
+                                p8 address_to data = base + 3 * 4096 - span;
+
+                                if (span > 3 * 4096)
+                                        continue;
+                                for (positive i = 0; i < span; i++)
+                                {
+                                        XORSHIFT64(state);
+                                        data[i] = want[i] = (p8)(state >> 24);
+                                }
+                                for (positive i = 0; i < count; i++)
+                                        want[i] = (p8)((want[i] + want[i + distance] + 1) >> 1);
+                                memory_average_ahead(data, count, distance);
+                                fine = fine && !memory_compare(data, want, span);
+                        }
+                check("average: each byte the mean rounded up with the one ahead, first to last, nothing after touched", fine);
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#endif
+#if RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+}
+
+/*
         memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
         heights to 6, two strides, the last row against a page that faults,
         the words between rows and before the first held to a canary; with
@@ -99071,6 +99141,7 @@ b32 main()
         check_cells(&small_engine, &two);
         check_translate();
         check_blend();
+        check_average_ahead();
         check_fill_rect();
         check_sweep();
         check_edges(&one, &two);
@@ -109293,6 +109364,88 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_translate_rect */
+
+#ifdef BENCH_average_ahead
+/* memory_average_ahead against the byte loop it is, over the compositor's
+   glass: 640 pixels by 40 rows of four bytes, in cache, a pass across at a
+   pixel and its doubles and down at a row and its doubles; on x86_64 the
+   three bodies. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define GLASS (640 * 4 * 40)
+
+static p8 glass[GLASS + 4 * 2560], glass_c[GLASS + 4 * 2560];
+
+__attribute__((noinline, noclone)) static fn former_average(p8 address_to data, positive count, positive distance)
+{
+        for (positive i = 0; i < count; i++)
+                data[i] = (p8)((data[i] + data[i + distance] + 1) >> 1);
+}
+
+static p64 run(bool assembly, positive distance, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                if (assembly)
+                        memory_average_ahead(glass, GLASS, distance);
+                else
+                        former_average(glass_c, GLASS, distance);
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive distances[] = {4, 8, 16, 32, 2560, 5120, 10240};
+        p64 seed = 0x243f6a8885a308d3ULL;
+
+        for (positive i = 0; i < sizeof(glass); i++)
+        {
+                XORSHIFT64(seed);
+                glass[i] = glass_c[i] = (p8)(seed >> 32);
+        }
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+                if ((tier == 0 && !wide512) || (tier == 1 && !wide256))
+                        continue;
+#endif
+                for (positive row = 0; row < sizeof(distances) / sizeof(distances[0]); row++)
+                {
+                        positive ratios[TRIES];
+
+                        memory_average_ahead(glass, GLASS, distances[row]);
+                        former_average(glass_c, GLASS, distances[row]);
+                        if (memory_compare(glass, glass_c, sizeof(glass)))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, distances[row], 200);
+                        string_format(log, "memory_average_ahead %p bytes ahead%s: paired median ASM/C %p.", distances[row],
+#if X64
+                                      cpu_has_avx512 ? (string_address) " avx512" : cpu_has_avx2 ? (string_address) " avx2"
+                                                                                                    : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_average_ahead */
 
 #ifdef BENCH_blend_rect
 /* memory_blend_u32_rect against the loop it replaced in font_blend: glyphs
