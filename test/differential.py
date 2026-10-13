@@ -45270,6 +45270,7 @@ def harness_moonwater_cli(argv):
                 "canvas bogus", "canvas scale", "canvas scale 2", "canvas scale auto", "canvas scale 9",
                 "canvas scale 2 3", "canvas modes", "canvas modes preferred", "canvas modes sideways",
                 "canvas modes largest preferred",
+                "settings", "settings extra",
                 "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
                 "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
@@ -45380,6 +45381,7 @@ def harness_moonwater_cli(argv):
             'canvas off',
             'canvas scale 9',
             'canvas modes sideways',
+            'settings',
             'bind',
             'bind bogus',
             'wifi remove nobody',
@@ -45487,6 +45489,7 @@ def harness_moonwater_cli(argv):
             'link group ok allow',
             'link log',
             'link push nobody',
+            'settings extra',
         ]:
             walk_classes[vector] = 2
         # State the mode rules act on: neither file, then a zone with no mode.

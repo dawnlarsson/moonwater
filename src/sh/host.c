@@ -19306,6 +19306,7 @@ static const host_row host_rows[] = {
     {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
     {null, "desktop [canvas|off|PROFILE]", "what the machine starts as its desktop [canvas]", 'b'},
     {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
+    {null, "settings", "the settings window, on the compositor's desktop", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "airplane [on|off]", "every radio at once", 'b'},
     {null, "brightness [N%|+N|-N]", "the screen backlight", 'b'},
@@ -19902,6 +19903,87 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
 }
 
 /*
+        moonwater settings: the settings window (src/canvas/settings.c) on
+        the compositor's desktop, which is a front end to this command. Up is
+        what the machine script means by it: the window table there, and the
+        process compositor.pid names alive. The window is started in a
+        session of its own, as /settings with the face the compositor writes
+        its tabs in (its -f) and that face's bold beside it, and this returns
+        at once; a window already up is lifted by the second one, which then
+        ends, so there is only ever one.
+*/
+#define HOST_SETTINGS_FACE "/usr/share/fonts/inter/Inter-Regular.ttf"
+
+static b32 host_settings_window(string_address address_to arguments, positive count)
+{
+        p8 word[32], path[48] = "/proc/", line[512], face[256], bold[272];
+        string_address words[8];
+        positive pid = 0, length, at = 0, used = 0;
+        bipolar handle, got = 0;
+
+        (void)arguments;
+        return_if(count != 2, host_usage());
+
+        host_read_word(HOST_STATE "/compositor.pid", word, sizeof(word));
+        for (positive digit = 0; word[digit] >= '0' && word[digit] <= '9' && digit < 10; digit++)
+                pid = pid * 10 + (positive)(word[digit] - '0');
+        return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
+                      system_access_at(AT_FDCWD, (string_address) "/run/moonwater/windows", 0) != 0,
+                  host_refuse("the compositor's desktop is not up, and the settings window is one of its "
+                              "windows: moonwater canvas on starts it\n"));
+
+        // Its -f, from its command line, words a zero apart.
+        string_copy(face, (string_address)HOST_SETTINGS_FACE);
+        length = positive_into_string(path + 6, pid) + 6;
+        string_copy(path + length, (string_address) "/cmdline");
+        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+        if (handle >= 0)
+        {
+                got = system_read_once((b32)handle, line, sizeof(line) - 1);
+                system_close(handle);
+        }
+        line[got > 0 ? got : 0] = end;
+        while (got > 0 && at < (positive)got)
+        {
+                positive size = string_length(line + at);
+
+                if (string_equals(line + at, "-f") && at + size + 1 < (positive)got)
+                {
+                        string_copy_bounded(face, line + at + size + 1, sizeof(face));
+                        break;
+                }
+                at += size + 1;
+        }
+
+        // Its bold, where a face named Regular has one beside it.
+        string_copy_bounded(bold, face, sizeof(bold));
+        length = string_length(bold);
+        for (positive from = 0; from + 7 <= length; from++)
+                if (!memory_compare(bold + from, "Regular", 7) && length + 1 < sizeof(bold))
+                {
+                        string_copy_bounded(bold + from, (string_address) "Bold", sizeof(bold) - from);
+                        string_copy_bounded(bold + from + 4, face + from + 7, sizeof(bold) - from - 4);
+                        break;
+                }
+
+        words[used++] = (string_address) "/settings";
+        words[used++] = (string_address) "-f";
+        words[used++] = face;
+        if (string_compare(bold, face) && system_access_at(AT_FDCWD, bold, 4) == 0)
+        {
+                words[used++] = (string_address) "-b";
+                words[used++] = bold;
+        }
+        words[used] = null;
+
+        if (!host_detach(descriptors_none, descriptors_none))
+                return 0;
+        (void)shell_exec_file(words[0], words, used, file_environment_all());
+        system_call_1(syscall(exit), 127);
+        return 1;
+}
+
+/*
         Every word the command answers to, and who answers. A verb that says
         what it does and nothing else (quiet) has its output set aside from
         its answer: standard output closed or full or a pipe whose reader has
@@ -19928,6 +20010,7 @@ static b32 host_main()
             {"bind", host_bind, false},
             {"canvas", host_canvas, false},
             {"desktop", host_desktop, false},
+            {"settings", host_settings_window, false},
             {"latency", host_latency, false},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false},

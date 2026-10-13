@@ -46,6 +46,7 @@ moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas [on|off]              the desktop, and on which screens [on]
 moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
+moonwater settings                     the settings window, on the compositor's desktop
 moonwater airplane [on|off]            every radio at once
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
