@@ -393,21 +393,39 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
 }
 
 /*
-        The close button over a window's pixels: a dark disc, the window's
-        own pixel darkened by most of the way to black, and an X across it
-        in the text's ink, each pixel the share of its sixteen sample points
-        inside the disc and inside the X's two strokes. What is under it is
-        read from the window's buffer, which is known, and not from the
-        target. Drawn last, after the round corners, through the target's
-        clip, so the scene's pieces and its corners' scratch both have it.
+        The close button over a window's pixels: an X and nothing round it.
+        Its strokes are the ink that stands out on what is under the button
+        (window_contrast of the mean of the window's pixels there), and a
+        halo a pixel and a half wider round them takes the window's own
+        pixels further to the side of lightness they are on, as the tabs'
+        glass does, so the X reads on a busy picture as on a plain ground;
+        each pixel is the share of its sixteen sample points inside the
+        strokes and inside the halo. What is under it is read from the
+        window's buffer, which is known, and not from the target. Drawn last,
+        after the round corners, through the target's clip, so the scene's
+        pieces and its corners' scratch both have it.
 */
 static void compositor_close_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
         int bx, by, side;
+        unsigned long sum[3] = {0, 0, 0};
 
         if (!compositor_close_box(frame, &bx, &by, &side))
                 return;
 
+        for (int py = by; py < by + side; py++)
+                for (int px = bx; px < bx + side; px++)
+                {
+                        unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
+
+                        sum[0] += under >> 16 & 255;
+                        sum[1] += under >> 8 & 255;
+                        sum[2] += under & 255;
+                }
+
+        unsigned long count = (unsigned long)side * (unsigned long)side;
+        unsigned int mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
+        unsigned int ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : 0x000000u;
         int x1 = bx > t->x1 ? bx : t->x1, y1 = by > t->y1 ? by : t->y1;
         int x2 = bx + side < t->x2 ? bx + side : t->x2, y2 = by + side < t->y2 ? by + side : t->y2;
         int arm = side * 2 / 7, half = frame->scale; // the X's reach from the middle, and half its stroke
@@ -415,7 +433,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
         for (int py = y1; py < y2; py++)
                 for (int px = x1; px < x2; px++)
                 {
-                        unsigned int disc = 0, cross = 0;
+                        unsigned int halo = 0, cross = 0;
 
                         // In eighths of a pixel from the button's middle, sample centres odd.
                         for (int sy = 0; sy < 4; sy++)
@@ -425,18 +443,20 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                                         int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
                                         int d1 = dx - dy, d2 = dx + dy;
 
-                                        disc += dx * dx + dy * dy <= 16 * side * side;
-                                        cross += ax <= 8 * arm && ay <= 8 * arm &&
-                                                 ((d1 < 0 ? -d1 : d1) <= 11 * half || (d2 < 0 ? -d2 : d2) <= 11 * half);
+                                        d1 = d1 < 0 ? -d1 : d1;
+                                        d2 = d2 < 0 ? -d2 : d2;
+                                        cross += ax <= 8 * arm && ay <= 8 * arm && (d1 <= 11 * half || d2 <= 11 * half);
+                                        halo += ax <= 8 * arm + 12 * half && ay <= 8 * arm + 12 * half &&
+                                                (d1 <= 28 * half || d2 <= 28 * half);
                                 }
-                        if (!disc)
+                        if (!halo)
                                 continue;
 
                         unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
-                        unsigned int pixel = compositor_mix(under, compositor_mix(under, 0x000000, 170), disc * 255 / 16);
+                        unsigned int pixel = compositor_mix(under, window_mix(under, tone, 140), halo * 255 / 16);
 
                         if (cross)
-                                pixel = compositor_mix(pixel, COMPOSITOR_INK_TEXT, cross * 255 / 16);
+                                pixel = compositor_mix(pixel, ink, cross * 255 / 16);
                         t->pixels[(unsigned long)(py - t->oy) * t->pitch + (unsigned long)(px - t->ox)] = pixel;
                 }
 }
