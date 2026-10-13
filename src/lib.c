@@ -12611,32 +12611,38 @@ __asm__(
     //       from_pitch (pitches in words), r8 width, r9 height: each of the
     //       width by height pixels of into becomes the mean of the two by two
     //       of from under it, a byte at a time: the two rows rounded up, then
-    //       the two columns, so four pixels a turn are two pavgb and a
-    //       shuffle of the even and the odd pixels apart (shufps, and vshufps
-    //       and vpermq eight at a time with AVX2). into may be from at the
+    //       the two columns rounded down, so a picture halved again and again
+    //       does not grow lighter. Four pixels a turn are two pavgb, a shuffle
+    //       of the even and the odd pixels apart (shufps, and vshufps and
+    //       vpermq eight at a time with AVX2) and a pavgb of the complements,
+    //       which is the mean rounded down. into may be from at the
     //       same pitch: a turn reads before it writes, and only ever what is
     //       ahead of where it writes. The compositor's glass halves the
     //       scene under it three times with it.
     //
     ASM_FUNC(memory_halve_u32)
     "test %r8, %r8\n   jz 9f\n   test %r9, %r9\n   jz 9f\n   push %rbx\n   shl $2, %rsi\n   shl $2, %rcx\n"
+    "pcmpeqd %xmm7, %xmm7\n"
     "1:  mov %rdx, %r10\n   lea (%rdx,%rcx), %r11\n   mov %rdi, %rax\n   mov %r8, %rbx\n"
     ASM_WIDER("cpu_has_avx2", "5f")
     "2:  cmp $4, %rbx\n   jb 3f\n"
     "movdqu (%r10), %xmm0\n   movdqu 16(%r10), %xmm1\n   movdqu (%r11), %xmm2\n   movdqu 16(%r11), %xmm3\n"
     "pavgb %xmm2, %xmm0\n   pavgb %xmm3, %xmm1\n   movaps %xmm0, %xmm2\n   shufps $0x88, %xmm1, %xmm2\n   shufps $0xdd, %xmm1, %xmm0\n"
-    "pavgb %xmm2, %xmm0\n   movdqu %xmm0, (%rax)\n"
+    "pxor %xmm7, %xmm2\n   pxor %xmm7, %xmm0\n   pavgb %xmm2, %xmm0\n   pxor %xmm7, %xmm0\n   movdqu %xmm0, (%rax)\n"
     "add $32, %r10\n   add $32, %r11\n   add $16, %rax\n   sub $4, %rbx\n   jmp 2b\n"
     "3:  test %rbx, %rbx\n   jz 4f\n"
-    "movq (%r10), %xmm0\n   movq (%r11), %xmm2\n   pavgb %xmm2, %xmm0\n   pshufd $0x55, %xmm0, %xmm1\n   pavgb %xmm1, %xmm0\n   movd %xmm0, (%rax)\n"
+    "movq (%r10), %xmm0\n   movq (%r11), %xmm2\n   pavgb %xmm2, %xmm0\n   pshufd $0x55, %xmm0, %xmm1\n   pxor %xmm7, %xmm0\n   pxor %xmm7, %xmm1\n"
+    "pavgb %xmm1, %xmm0\n   pxor %xmm7, %xmm0\n   movd %xmm0, (%rax)\n"
     "add $8, %r10\n   add $8, %r11\n   add $4, %rax\n   dec %rbx\n   jmp 3b\n"
     "4:  add %rsi, %rdi\n   lea (%rdx,%rcx,2), %rdx\n   dec %r9\n   jnz 1b\n   pop %rbx\n"
     "9:  " ASM_RET
-    "5:  cmp $8, %rbx\n   jb 6f\n"
+    "5:  vpcmpeqd %ymm7, %ymm7, %ymm7\n"
+    "11: cmp $8, %rbx\n   jb 6f\n"
     "vmovdqu (%r10), %ymm0\n   vmovdqu 32(%r10), %ymm1\n   vpavgb (%r11), %ymm0, %ymm0\n   vpavgb 32(%r11), %ymm1, %ymm1\n"
-    "vshufps $0x88, %ymm1, %ymm0, %ymm2\n   vshufps $0xdd, %ymm1, %ymm0, %ymm3\n   vpavgb %ymm3, %ymm2, %ymm2\n"
+    "vshufps $0x88, %ymm1, %ymm0, %ymm2\n   vshufps $0xdd, %ymm1, %ymm0, %ymm3\n   vpxor %ymm7, %ymm2, %ymm2\n   vpxor %ymm7, %ymm3, %ymm3\n"
+    "vpavgb %ymm3, %ymm2, %ymm2\n   vpxor %ymm7, %ymm2, %ymm2\n"
     "vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %ymm2, (%rax)\n"
-    "add $64, %r10\n   add $64, %r11\n   add $32, %rax\n   sub $8, %rbx\n   jmp 5b\n"
+    "add $64, %r10\n   add $64, %r11\n   add $32, %rax\n   sub $8, %rbx\n   jmp 11b\n"
     "6:  vzeroupper\n   jmp 2b\n"
     ASM_END(memory_halve_u32)
 
@@ -12645,10 +12651,12 @@ __asm__(
     //       from_pitch (in words), r8 width, r9 height: from's width by height
     //       pixels made twice as many each way, each a bilinear three
     //       quarters of the pixel it is in and a quarter of the neighbour on
-    //       its side, across and down: the row above or below first, as
-    //       pavgb(c, pavgb(c, n)), then the column left or right the same way
-    //       -- byte means rounded up, so the rise of a blurred picture costs
-    //       no multiply. from is read a pixel round what it names, which the
+    //       its side, across and down: the row above or below first, as the
+    //       mean rounded down of c and the mean rounded up of c and n, then
+    //       the column left or right the same way -- byte means, the one up
+    //       and the other down so a rise neither lightens nor darkens, and
+    //       the rise of a blurred picture costs no multiply (a mean rounded
+    //       down is the complement of pavgb of the complements). from is read a pixel round what it names, which the
     //       caller holds: the row above the first, the row below the last,
     //       the column before and the column after. Four pixels of from a
     //       turn, eight with AVX2, interleaved into their two columns by
@@ -12656,7 +12664,7 @@ __asm__(
     //
     ASM_FUNC(memory_double_u32)
     "test %r8, %r8\n   jz 9f\n   test %r9, %r9\n   jz 9f\n   push %rbx\n   push %r12\n   push %r13\n   push %r14\n"
-    "shl $2, %rsi\n   shl $2, %rcx\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n   pcmpeqd %xmm7, %xmm7\n"
     "1:  mov %rdx, %r10\n   mov %rdx, %r11\n   sub %rcx, %r11\n   lea (%rdx,%rcx), %r12\n   mov %rdi, %rax\n   lea (%rdi,%rsi), %rbx\n"
     "mov %r8, %r13\n"
     ASM_WIDER("cpu_has_avx2", "5f")
@@ -12669,26 +12677,36 @@ __asm__(
     "pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
     "9:  " ASM_RET
     //  Four pixels of row r10 toward row r14, risen into xmm0 (the first four) and xmm3 (the last four).
-    "7:  movdqu -4(%r10), %xmm0\n   movdqu -4(%r14), %xmm3\n   pavgb %xmm0, %xmm3\n   pavgb %xmm3, %xmm0\n"
-    "movdqu (%r10), %xmm1\n   movdqu (%r14), %xmm4\n   pavgb %xmm1, %xmm4\n   pavgb %xmm4, %xmm1\n"
-    "movdqu 4(%r10), %xmm2\n   movdqu 4(%r14), %xmm5\n   pavgb %xmm2, %xmm5\n   pavgb %xmm5, %xmm2\n"
-    "pavgb %xmm1, %xmm0\n   pavgb %xmm1, %xmm0\n   pavgb %xmm1, %xmm2\n   pavgb %xmm1, %xmm2\n"
-    "movdqa %xmm0, %xmm3\n   punpckldq %xmm2, %xmm0\n   punpckhdq %xmm2, %xmm3\n" ASM_RET
+    "7:  movdqu -4(%r10), %xmm0\n   movdqu -4(%r14), %xmm3\n   movdqu (%r10), %xmm1\n   movdqu (%r14), %xmm4\n"
+    "movdqu 4(%r10), %xmm2\n   movdqu 4(%r14), %xmm5\n   jmp 12f\n"
     //  One pixel, into the low two words of xmm0.
-    "8:  movd -4(%r10), %xmm0\n   movd -4(%r14), %xmm3\n   pavgb %xmm0, %xmm3\n   pavgb %xmm3, %xmm0\n"
-    "movd (%r10), %xmm1\n   movd (%r14), %xmm4\n   pavgb %xmm1, %xmm4\n   pavgb %xmm4, %xmm1\n"
-    "movd 4(%r10), %xmm2\n   movd 4(%r14), %xmm5\n   pavgb %xmm2, %xmm5\n   pavgb %xmm5, %xmm2\n"
-    "pavgb %xmm1, %xmm0\n   pavgb %xmm1, %xmm0\n   pavgb %xmm1, %xmm2\n   pavgb %xmm1, %xmm2\n"
-    "punpckldq %xmm2, %xmm0\n" ASM_RET
-    "5:  cmp $8, %r13\n   jb 6f\n"
+    "8:  movd -4(%r10), %xmm0\n   movd -4(%r14), %xmm3\n   movd (%r10), %xmm1\n   movd (%r14), %xmm4\n"
+    "movd 4(%r10), %xmm2\n   movd 4(%r14), %xmm5\n"
+    //  c left, middle and right in xmm0-2 and n in xmm3-5: v = down(c, up(c, n)) in xmm3-5, then
+    //  down(v, up(v, its neighbour)) to the left in xmm0 and to the right in xmm2, interleaved into xmm0 and xmm3.
+    "12: pavgb %xmm0, %xmm3\n   pavgb %xmm1, %xmm4\n   pavgb %xmm2, %xmm5\n"
+    "pxor %xmm7, %xmm0\n   pxor %xmm7, %xmm1\n   pxor %xmm7, %xmm2\n   pxor %xmm7, %xmm3\n   pxor %xmm7, %xmm4\n   pxor %xmm7, %xmm5\n"
+    "pavgb %xmm0, %xmm3\n   pavgb %xmm1, %xmm4\n   pavgb %xmm2, %xmm5\n"
+    "pxor %xmm7, %xmm3\n   pxor %xmm7, %xmm4\n   pxor %xmm7, %xmm5\n"
+    "movdqa %xmm4, %xmm0\n   pavgb %xmm3, %xmm0\n   movdqa %xmm4, %xmm2\n   pavgb %xmm5, %xmm2\n   movdqa %xmm4, %xmm8\n   pxor %xmm7, %xmm8\n"
+    "pxor %xmm7, %xmm0\n   pxor %xmm7, %xmm2\n   pavgb %xmm8, %xmm0\n   pavgb %xmm8, %xmm2\n   pxor %xmm7, %xmm0\n   pxor %xmm7, %xmm2\n"
+    "movdqa %xmm0, %xmm3\n   punpckldq %xmm2, %xmm0\n   punpckhdq %xmm2, %xmm3\n" ASM_RET
+    "5:  vpcmpeqd %ymm7, %ymm7, %ymm7\n"
+    "13: cmp $8, %r13\n   jb 6f\n"
     "mov %r11, %r14\n   call 10f\n   vmovdqu %ymm0, (%rax)\n   vmovdqu %ymm3, 32(%rax)\n"
     "mov %r12, %r14\n   call 10f\n   vmovdqu %ymm0, (%rbx)\n   vmovdqu %ymm3, 32(%rbx)\n"
-    "add $32, %r10\n   add $32, %r11\n   add $32, %r12\n   add $64, %rax\n   add $64, %rbx\n   sub $8, %r13\n   jmp 5b\n"
+    "add $32, %r10\n   add $32, %r11\n   add $32, %r12\n   add $64, %rax\n   add $64, %rbx\n   sub $8, %r13\n   jmp 13b\n"
     "6:  vzeroupper\n   jmp 2b\n"
-    "10: vmovdqu -4(%r10), %ymm0\n   vpavgb -4(%r14), %ymm0, %ymm3\n   vpavgb %ymm3, %ymm0, %ymm0\n"
-    "vmovdqu (%r10), %ymm1\n   vpavgb (%r14), %ymm1, %ymm4\n   vpavgb %ymm4, %ymm1, %ymm1\n"
-    "vmovdqu 4(%r10), %ymm2\n   vpavgb 4(%r14), %ymm2, %ymm5\n   vpavgb %ymm5, %ymm2, %ymm2\n"
-    "vpavgb %ymm1, %ymm0, %ymm0\n   vpavgb %ymm1, %ymm0, %ymm0\n   vpavgb %ymm1, %ymm2, %ymm2\n   vpavgb %ymm1, %ymm2, %ymm2\n"
+    "10: vmovdqu -4(%r10), %ymm0\n   vpavgb -4(%r14), %ymm0, %ymm3\n   vmovdqu (%r10), %ymm1\n   vpavgb (%r14), %ymm1, %ymm4\n"
+    "vmovdqu 4(%r10), %ymm2\n   vpavgb 4(%r14), %ymm2, %ymm5\n"
+    "vpxor %ymm7, %ymm0, %ymm0\n   vpxor %ymm7, %ymm1, %ymm1\n   vpxor %ymm7, %ymm2, %ymm2\n"
+    "vpxor %ymm7, %ymm3, %ymm3\n   vpxor %ymm7, %ymm4, %ymm4\n   vpxor %ymm7, %ymm5, %ymm5\n"
+    "vpavgb %ymm0, %ymm3, %ymm3\n   vpavgb %ymm1, %ymm4, %ymm4\n   vpavgb %ymm2, %ymm5, %ymm5\n"
+    //  v in ymm3-5 again, from its complement.
+    "vpxor %ymm7, %ymm3, %ymm3\n   vpxor %ymm7, %ymm4, %ymm4\n   vpxor %ymm7, %ymm5, %ymm5\n"
+    "vpavgb %ymm3, %ymm4, %ymm0\n   vpavgb %ymm5, %ymm4, %ymm2\n   vpxor %ymm7, %ymm4, %ymm8\n"
+    "vpxor %ymm7, %ymm0, %ymm0\n   vpxor %ymm7, %ymm2, %ymm2\n   vpavgb %ymm8, %ymm0, %ymm0\n   vpavgb %ymm8, %ymm2, %ymm2\n"
+    "vpxor %ymm7, %ymm0, %ymm0\n   vpxor %ymm7, %ymm2, %ymm2\n"
     "vpunpckldq %ymm2, %ymm0, %ymm4\n   vpunpckhdq %ymm2, %ymm0, %ymm5\n"
     "vperm2i128 $0x20, %ymm5, %ymm4, %ymm0\n   vperm2i128 $0x31, %ymm5, %ymm4, %ymm3\n" ASM_RET
     ASM_END(memory_double_u32)
@@ -22238,24 +22256,26 @@ __asm__(
 
 #ifndef KERNEL_MODE
     //       memory_halve_u32: ld2 takes four pixels of a row apart into the
-    //       even and the odd, so a turn is two loads a row, three urhadd and
-    //       a store; a pixel at a time after. The x86_64 block carries the
+    //       even and the odd, so a turn is two loads a row, two urhadd (the
+    //       rows, rounded up), a uhadd (the columns, rounded down) and a
+    //       store; a pixel at a time after. The x86_64 block carries the
     //       contract.
     ASM_FUNC(memory_halve_u32)
     "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n   lsl x3, x3, #2\n"
     "1:  mov x6, x2\n   add x7, x2, x3\n   mov x8, x0\n   mov x9, x4\n"
     "2:  cmp x9, #4\n   b.lo 3f\n   ld2 {v0.4s, v1.4s}, [x6], #32\n   ld2 {v2.4s, v3.4s}, [x7], #32\n"
-    "urhadd v0.16b, v0.16b, v2.16b\n   urhadd v1.16b, v1.16b, v3.16b\n   urhadd v0.16b, v0.16b, v1.16b\n   str q0, [x8], #16\n"
+    "urhadd v0.16b, v0.16b, v2.16b\n   urhadd v1.16b, v1.16b, v3.16b\n   uhadd v0.16b, v0.16b, v1.16b\n   str q0, [x8], #16\n"
     "sub x9, x9, #4\n   b 2b\n"
     "3:  cbz x9, 4f\n   ld2 {v0.s, v1.s}[0], [x6], #8\n   ld2 {v2.s, v3.s}[0], [x7], #8\n"
-    "urhadd v0.8b, v0.8b, v2.8b\n   urhadd v1.8b, v1.8b, v3.8b\n   urhadd v0.8b, v0.8b, v1.8b\n   str s0, [x8], #4\n"
+    "urhadd v0.8b, v0.8b, v2.8b\n   urhadd v1.8b, v1.8b, v3.8b\n   uhadd v0.8b, v0.8b, v1.8b\n   str s0, [x8], #4\n"
     "sub x9, x9, #1\n   b 3b\n"
     "4:  add x0, x0, x1\n   add x2, x2, x3, lsl #1\n   subs x5, x5, #1\n   b.ne 1b\n"
     "9:  " ASM_RET
     ASM_END(memory_halve_u32)
 
-    //       memory_double_u32: four pixels of from a turn, the two columns
-    //       they rise into stored interleaved by st2; a pixel at a time after.
+    //       memory_double_u32: four pixels of from a turn, urhadd for the
+    //       means rounded up and uhadd for those rounded down, the two
+    //       columns they rise into stored interleaved by st2; a pixel at a time after.
     //       The x86_64 block carries the contract.
     ASM_FUNC(memory_double_u32)
     "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n   lsl x3, x3, #2\n"
@@ -22263,25 +22283,25 @@ __asm__(
     "2:  cmp x11, #4\n   b.lo 3f\n"
     "ldur q0, [x6, #-4]\n   ldr q1, [x6]\n   ldur q2, [x6, #4]\n   ldur q3, [x7, #-4]\n   ldr q4, [x7]\n   ldur q5, [x7, #4]\n"
     "urhadd v3.16b, v0.16b, v3.16b\n   urhadd v4.16b, v1.16b, v4.16b\n   urhadd v5.16b, v2.16b, v5.16b\n"
-    "urhadd v3.16b, v0.16b, v3.16b\n   urhadd v4.16b, v1.16b, v4.16b\n   urhadd v5.16b, v2.16b, v5.16b\n"
-    "urhadd v16.16b, v4.16b, v3.16b\n   urhadd v16.16b, v4.16b, v16.16b\n   urhadd v17.16b, v4.16b, v5.16b\n   urhadd v17.16b, v4.16b, v17.16b\n"
+    "uhadd v3.16b, v0.16b, v3.16b\n   uhadd v4.16b, v1.16b, v4.16b\n   uhadd v5.16b, v2.16b, v5.16b\n"
+    "urhadd v16.16b, v4.16b, v3.16b\n   uhadd v16.16b, v4.16b, v16.16b\n   urhadd v17.16b, v4.16b, v5.16b\n   uhadd v17.16b, v4.16b, v17.16b\n"
     "st2 {v16.4s, v17.4s}, [x9], #32\n"
     "ldur q3, [x8, #-4]\n   ldr q4, [x8]\n   ldur q5, [x8, #4]\n"
     "urhadd v3.16b, v0.16b, v3.16b\n   urhadd v4.16b, v1.16b, v4.16b\n   urhadd v5.16b, v2.16b, v5.16b\n"
-    "urhadd v3.16b, v0.16b, v3.16b\n   urhadd v4.16b, v1.16b, v4.16b\n   urhadd v5.16b, v2.16b, v5.16b\n"
-    "urhadd v16.16b, v4.16b, v3.16b\n   urhadd v16.16b, v4.16b, v16.16b\n   urhadd v17.16b, v4.16b, v5.16b\n   urhadd v17.16b, v4.16b, v17.16b\n"
+    "uhadd v3.16b, v0.16b, v3.16b\n   uhadd v4.16b, v1.16b, v4.16b\n   uhadd v5.16b, v2.16b, v5.16b\n"
+    "urhadd v16.16b, v4.16b, v3.16b\n   uhadd v16.16b, v4.16b, v16.16b\n   urhadd v17.16b, v4.16b, v5.16b\n   uhadd v17.16b, v4.16b, v17.16b\n"
     "st2 {v16.4s, v17.4s}, [x10], #32\n"
     "add x6, x6, #16\n   add x7, x7, #16\n   add x8, x8, #16\n   sub x11, x11, #4\n   b 2b\n"
     "3:  cbz x11, 4f\n"
     "ldur s0, [x6, #-4]\n   ldr s1, [x6]\n   ldur s2, [x6, #4]\n   ldur s3, [x7, #-4]\n   ldr s4, [x7]\n   ldur s5, [x7, #4]\n"
     "urhadd v3.8b, v0.8b, v3.8b\n   urhadd v4.8b, v1.8b, v4.8b\n   urhadd v5.8b, v2.8b, v5.8b\n"
-    "urhadd v3.8b, v0.8b, v3.8b\n   urhadd v4.8b, v1.8b, v4.8b\n   urhadd v5.8b, v2.8b, v5.8b\n"
-    "urhadd v16.8b, v4.8b, v3.8b\n   urhadd v16.8b, v4.8b, v16.8b\n   urhadd v17.8b, v4.8b, v5.8b\n   urhadd v17.8b, v4.8b, v17.8b\n"
+    "uhadd v3.8b, v0.8b, v3.8b\n   uhadd v4.8b, v1.8b, v4.8b\n   uhadd v5.8b, v2.8b, v5.8b\n"
+    "urhadd v16.8b, v4.8b, v3.8b\n   uhadd v16.8b, v4.8b, v16.8b\n   urhadd v17.8b, v4.8b, v5.8b\n   uhadd v17.8b, v4.8b, v17.8b\n"
     "st2 {v16.s, v17.s}[0], [x9], #8\n"
     "ldur s3, [x8, #-4]\n   ldr s4, [x8]\n   ldur s5, [x8, #4]\n"
     "urhadd v3.8b, v0.8b, v3.8b\n   urhadd v4.8b, v1.8b, v4.8b\n   urhadd v5.8b, v2.8b, v5.8b\n"
-    "urhadd v3.8b, v0.8b, v3.8b\n   urhadd v4.8b, v1.8b, v4.8b\n   urhadd v5.8b, v2.8b, v5.8b\n"
-    "urhadd v16.8b, v4.8b, v3.8b\n   urhadd v16.8b, v4.8b, v16.8b\n   urhadd v17.8b, v4.8b, v5.8b\n   urhadd v17.8b, v4.8b, v17.8b\n"
+    "uhadd v3.8b, v0.8b, v3.8b\n   uhadd v4.8b, v1.8b, v4.8b\n   uhadd v5.8b, v2.8b, v5.8b\n"
+    "urhadd v16.8b, v4.8b, v3.8b\n   uhadd v16.8b, v4.8b, v16.8b\n   urhadd v17.8b, v4.8b, v5.8b\n   uhadd v17.8b, v4.8b, v17.8b\n"
     "st2 {v16.s, v17.s}[0], [x10], #8\n"
     "add x6, x6, #4\n   add x7, x7, #4\n   add x8, x8, #4\n   sub x11, x11, #1\n   b 3b\n"
     "4:  add x0, x0, x1, lsl #1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 1b\n"
@@ -30664,10 +30684,11 @@ __asm__(
 
 #ifndef KERNEL_MODE
     //       memory_halve_u32: with V, vlseg2e32 takes a row's pixels apart
-    //       into the even and the odd and vaaddu, rounding up, is the mean;
-    //       without it a pixel at a time, the mean of two words' bytes as
+    //       into the even and the odd and vaaddu is the mean, rounding up for
+    //       the rows and down (vxrm) for the columns; without it a pixel at a
+    //       time, the mean of two words' bytes rounded up as
     //       memory_average_ahead takes it, a|b less (a^b)>>1 with each byte's
-    //       top bit cleared. The x86_64 block carries the contract.
+    //       top bit cleared, and rounded down, a&b plus the same. The x86_64 block carries the contract.
     ".option push\n   .option arch, +v\n"
     ASM_FUNC(memory_halve_u32)
     "beqz a4, 9f\n   beqz a5, 9f\n"
@@ -30680,7 +30701,7 @@ __asm__(
     "2:  mv t0, a2\n   add t1, a2, a3\n   mv t2, a0\n   mv a6, a4\n"
     "3:  lwu t3, 0(t0)\n   lwu t4, 0(t1)\n   or t5, t3, t4\n   xor t3, t3, t4\n   srli t3, t3, 1\n   and t3, t3, t6\n   sub a7, t5, t3\n"
     "lwu t3, 4(t0)\n   lwu t4, 4(t1)\n   or t5, t3, t4\n   xor t3, t3, t4\n   srli t3, t3, 1\n   and t3, t3, t6\n   sub t5, t5, t3\n"
-    "or t3, a7, t5\n   xor t4, a7, t5\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t3, t3, t4\n   sw t3, 0(t2)\n"
+    "and t3, a7, t5\n   xor t4, a7, t5\n   srli t4, t4, 1\n   and t4, t4, t6\n   add t3, t3, t4\n   sw t3, 0(t2)\n"
     "addi t0, t0, 8\n   addi t1, t1, 8\n   addi t2, t2, 4\n   addi a6, a6, -1\n   bnez a6, 3b\n"
     "add a0, a0, a1\n   slli t3, a3, 1\n   add a2, a2, t3\n   addi a5, a5, -1\n   bnez a5, 2b\n"
     "9:  " ASM_RET
@@ -30688,7 +30709,7 @@ __asm__(
     "5:  csrwi vxrm, 0\n   slli a1, a1, 2\n   slli a3, a3, 2\n"
     "6:  mv t1, a2\n   add t2, a2, a3\n   mv t3, a0\n   mv t4, a4\n"
     "7:  vsetvli t0, t4, e32, m1, ta, ma\n   vlseg2e32.v v0, (t1)\n   vlseg2e32.v v2, (t2)\n   slli t5, t0, 2\n"
-    "vsetvli zero, t5, e8, m1, ta, ma\n   vaaddu.vv v0, v0, v2\n   vaaddu.vv v1, v1, v3\n   vaaddu.vv v0, v0, v1\n"
+    "vsetvli zero, t5, e8, m1, ta, ma\n   vaaddu.vv v0, v0, v2\n   vaaddu.vv v1, v1, v3\n   csrwi vxrm, 2\n   vaaddu.vv v0, v0, v1\n   csrwi vxrm, 0\n"
     "vsetvli zero, t0, e32, m1, ta, ma\n   vse32.v v0, (t3)\n"
     "slli t5, t0, 3\n   add t1, t1, t5\n   add t2, t2, t5\n   slli t5, t0, 2\n   add t3, t3, t5\n   sub t4, t4, t0\n   bnez t4, 7b\n"
     "add a0, a0, a1\n   slli t5, a3, 1\n   add a2, a2, t5\n   addi a5, a5, -1\n   bnez a5, 6b\n" ASM_RET
@@ -30696,9 +30717,9 @@ __asm__(
     ASM_END(memory_halve_u32)
 
     //       memory_double_u32: with V, as many pixels of from as a register
-    //       holds, the two columns they rise into stored interleaved by
-    //       vsseg2e32; without it a pixel at a time, the means as in
-    //       memory_halve_u32. The x86_64 block carries the contract.
+    //       holds, vaaddu rounding up and then down (vxrm), the two columns
+    //       they rise into stored interleaved by vsseg2e32; without it a
+    //       pixel at a time, the means as in memory_halve_u32. The x86_64 block carries the contract.
     ASM_FUNC(memory_double_u32)
     "beqz a4, 9f\n   beqz a5, 9f\n"
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
@@ -30712,20 +30733,20 @@ __asm__(
     "3:  li s0, 0\n"
     "4:  lwu t1, -4(t0)\n   add t5, s2, s0\n   lwu t2, -4(t5)\n"
     "or t3, t1, t2\n   xor t4, t1, t2\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t3, t3, t4\n"
-    "or t2, t1, t3\n   xor t4, t1, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub a7, t2, t4\n"
+    "and t2, t1, t3\n   xor t4, t1, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   add a7, t2, t4\n"
     "lwu t1, 0(t0)\n   lwu t2, 0(t5)\n"
     "or t3, t1, t2\n   xor t4, t1, t2\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t3, t3, t4\n"
-    "or t2, t1, t3\n   xor t4, t1, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t2, t2, t4\n"
+    "and t2, t1, t3\n   xor t4, t1, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   add t2, t2, t4\n"
     "addi sp, sp, -16\n   sd t2, 0(sp)\n"
     "lwu t1, 4(t0)\n   lwu t2, 4(t5)\n"
     "or t3, t1, t2\n   xor t4, t1, t2\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t3, t3, t4\n"
-    "or t2, t1, t3\n   xor t4, t1, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t1, t2, t4\n"
+    "and t2, t1, t3\n   xor t4, t1, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   add t1, t2, t4\n"
     "ld t2, 0(sp)\n   addi sp, sp, 16\n"
     //  t2 the middle, a7 the left, t1 the right.
     "or t3, t2, a7\n   xor t4, t2, a7\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t3, t3, t4\n"
-    "or t5, t2, t3\n   xor t4, t2, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t5, t5, t4\n   sw t5, 0(a6)\n"
+    "and t5, t2, t3\n   xor t4, t2, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   add t5, t5, t4\n   sw t5, 0(a6)\n"
     "or t3, t2, t1\n   xor t4, t2, t1\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t3, t3, t4\n"
-    "or t5, t2, t3\n   xor t4, t2, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   sub t5, t5, t4\n   sw t5, 4(a6)\n"
+    "and t5, t2, t3\n   xor t4, t2, t3\n   srli t4, t4, 1\n   and t4, t4, t6\n   add t5, t5, t4\n   sw t5, 4(a6)\n"
     "addi t0, t0, 4\n   addi s0, s0, 4\n   addi a6, a6, 8\n   addi s3, s3, -1\n   bnez s3, 4b\n"
     //  The second row: back to the row's start, toward the row below.
     "bnez s1, 8f\n   li s1, 1\n   slli t3, a4, 2\n   sub t0, t0, t3\n   add s2, t0, a3\n   slli t3, a4, 3\n   sub a6, a6, t3\n   add a6, a6, a1\n"
@@ -30739,13 +30760,15 @@ __asm__(
     "7:  vsetvli t0, t4, e32, m1, ta, ma\n   addi t5, t1, -4\n   vle32.v v0, (t5)\n   vle32.v v1, (t1)\n   addi t5, t1, 4\n   vle32.v v2, (t5)\n"
     "addi t5, t2, -4\n   vle32.v v3, (t5)\n   vle32.v v4, (t2)\n   addi t5, t2, 4\n   vle32.v v5, (t5)\n   slli t6, t0, 2\n"
     "vsetvli zero, t6, e8, m1, ta, ma\n"
-    "vaaddu.vv v3, v0, v3\n   vaaddu.vv v3, v0, v3\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v5, v2, v5\n   vaaddu.vv v5, v2, v5\n"
-    "vaaddu.vv v8, v4, v3\n   vaaddu.vv v8, v4, v8\n   vaaddu.vv v9, v4, v5\n   vaaddu.vv v9, v4, v9\n"
+    "vaaddu.vv v3, v0, v3\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v5, v2, v5\n   csrwi vxrm, 2\n"
+    "vaaddu.vv v3, v0, v3\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v5, v2, v5\n   csrwi vxrm, 0\n"
+    "vaaddu.vv v8, v4, v3\n   vaaddu.vv v9, v4, v5\n   csrwi vxrm, 2\n   vaaddu.vv v8, v4, v8\n   vaaddu.vv v9, v4, v9\n   csrwi vxrm, 0\n"
     "vsetvli zero, t0, e32, m1, ta, ma\n   vsseg2e32.v v8, (a6)\n"
     "addi t5, t3, -4\n   vle32.v v3, (t5)\n   vle32.v v4, (t3)\n   addi t5, t3, 4\n   vle32.v v5, (t5)\n"
     "vsetvli zero, t6, e8, m1, ta, ma\n"
-    "vaaddu.vv v3, v0, v3\n   vaaddu.vv v3, v0, v3\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v5, v2, v5\n   vaaddu.vv v5, v2, v5\n"
-    "vaaddu.vv v8, v4, v3\n   vaaddu.vv v8, v4, v8\n   vaaddu.vv v9, v4, v5\n   vaaddu.vv v9, v4, v9\n"
+    "vaaddu.vv v3, v0, v3\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v5, v2, v5\n   csrwi vxrm, 2\n"
+    "vaaddu.vv v3, v0, v3\n   vaaddu.vv v4, v1, v4\n   vaaddu.vv v5, v2, v5\n   csrwi vxrm, 0\n"
+    "vaaddu.vv v8, v4, v3\n   vaaddu.vv v9, v4, v5\n   csrwi vxrm, 2\n   vaaddu.vv v8, v4, v8\n   vaaddu.vv v9, v4, v9\n   csrwi vxrm, 0\n"
     "vsetvli zero, t0, e32, m1, ta, ma\n   vsseg2e32.v v8, (a7)\n"
     "slli t5, t0, 2\n   add t1, t1, t5\n   add t2, t2, t5\n   add t3, t3, t5\n   slli t5, t0, 3\n   add a6, a6, t5\n   add a7, a7, t5\n"
     "sub t4, t4, t0\n   bnez t4, 7b\n"
@@ -37859,11 +37882,12 @@ positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
 // their doubles) and down it (a row's bytes and their doubles); a zero count touches nothing.
 fn memory_average_ahead(p8 address_to data, positive count, positive distance);
 // width by height pixels of into, into_pitch words a row, each the mean of the two by two of from (from_pitch words a
-// row) under it: the two rows' bytes rounded up, then the two columns'. into may be from at the same pitch.
+// row) under it: the two rows' bytes rounded up, then the two columns' rounded down. into may be from at the same pitch.
 fn memory_halve_u32(p32 address_to into, positive into_pitch, const p32 address_to from, positive from_pitch,
                     positive width, positive height);
 // from's width by height pixels risen to twice as many each way into into: each three quarters of its own pixel and
-// a quarter of the neighbour on its side, across and down, as rounded byte means. Reads a pixel round what it names.
+// a quarter of the neighbour on its side, across and down, as byte means (the mean rounded down of the pixel and the
+// mean rounded up of it and the neighbour). Reads a pixel round what it names.
 fn memory_double_u32(p32 address_to into, positive into_pitch, const p32 address_to from, positive from_pitch,
                      positive width, positive height);
 // count premultiplied pixels of picture over the opaque ground, its bytes with grain[i] added and grain[64 + i] taken

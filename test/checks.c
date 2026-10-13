@@ -107440,6 +107440,16 @@ static p32 glass_mean(p32 a, p32 b)
         return out;
 }
 
+// The mean rounded down.
+static p32 glass_low(p32 a, p32 b)
+{
+        p32 out = 0;
+
+        for (p32 shift = 0; shift < 32; shift += 8)
+                out |= (((a >> shift & 255) + (b >> shift & 255)) >> 1) << shift;
+        return out;
+}
+
 static fn glass_halve_reference(p32 address_to into, positive into_pitch, const p32 address_to from, positive from_pitch,
                                 positive width, positive height)
 {
@@ -107448,7 +107458,7 @@ static fn glass_halve_reference(p32 address_to into, positive into_pitch, const 
                 {
                         const p32 address_to at = from + 2 * y * from_pitch + 2 * x;
 
-                        into[y * into_pitch + x] = glass_mean(glass_mean(at[0], at[from_pitch]), glass_mean(at[1], at[from_pitch + 1]));
+                        into[y * into_pitch + x] = glass_low(glass_mean(at[0], at[from_pitch]), glass_mean(at[1], at[from_pitch + 1]));
                 }
 }
 
@@ -107464,12 +107474,12 @@ static fn glass_double_reference(p32 address_to into, positive into_pitch, const
 
                         for (positive x = 0; x < width; x++)
                         {
-                                p32 v = glass_mean(c[x], glass_mean(c[x], n[x]));
-                                p32 l = glass_mean(c[x - 1], glass_mean(c[x - 1], n[x - 1]));
-                                p32 r = glass_mean(c[x + 1], glass_mean(c[x + 1], n[x + 1]));
+                                p32 v = glass_low(c[x], glass_mean(c[x], n[x]));
+                                p32 l = glass_low(c[x - 1], glass_mean(c[x - 1], n[x - 1]));
+                                p32 r = glass_low(c[x + 1], glass_mean(c[x + 1], n[x + 1]));
 
-                                out[2 * x] = glass_mean(v, glass_mean(v, l));
-                                out[2 * x + 1] = glass_mean(v, glass_mean(v, r));
+                                out[2 * x] = glass_low(v, glass_mean(v, l));
+                                out[2 * x + 1] = glass_low(v, glass_mean(v, r));
                         }
                 }
 }
@@ -107522,7 +107532,7 @@ static fn check_glass_routines()
 
                 memory_halve_u32(&one, 1, two, 4, 1, 1);
                 check("glass routines: the first call asks for V and keeps its arguments",
-                      one == glass_mean(glass_mean(two[0], two[4]), glass_mean(two[1], two[5])) && cpu_has_vector != 0);
+                      one == glass_low(glass_mean(two[0], two[4]), glass_mean(two[1], two[5])) && cpu_has_vector != 0);
         }
         vector = cpu_has_vector;
         for (p32 tier = 0; tier < 2; tier++)
@@ -107609,9 +107619,9 @@ static fn check_glass_routines()
                                         laid = laid && !memory_compare(into, want, count * 4);
                                 }
                         }
-                check("glass routines: halving is the mean of each two by two, rows first, nothing past it touched", halved);
+                check("glass routines: halving is the mean of each two by two, rows rounded up and columns down, nothing past it touched", halved);
                 check("glass routines: halving in place at the same pitch is halving apart", in_place);
-                check("glass routines: doubling is three quarters of a pixel and a quarter of its neighbour each way", doubled);
+                check("glass routines: doubling is three quarters of a pixel and a quarter of its neighbour each way, rounded up and down", doubled);
                 check("glass routines: a premultiplied picture over a ground with its grain, every colour rounded", laid);
 #if X64
         }
@@ -118699,6 +118709,15 @@ static p32 bench_mean(p32 a, p32 b)
         return out;
 }
 
+static p32 bench_low(p32 a, p32 b)
+{
+        p32 out = 0;
+
+        for (p32 shift = 0; shift < 32; shift += 8)
+                out |= (((a >> shift & 255) + (b >> shift & 255)) >> 1) << shift;
+        return out;
+}
+
 __attribute__((noinline, noclone)) static fn former_halve(p32 address_to into)
 {
         for (positive y = 0; y < GH / 2; y++)
@@ -118706,7 +118725,7 @@ __attribute__((noinline, noclone)) static fn former_halve(p32 address_to into)
                 {
                         const p32 address_to at = scene + 2 * y * GW + 2 * x;
 
-                        into[y * (GW / 2) + x] = bench_mean(bench_mean(at[0], at[GW]), bench_mean(at[1], at[GW + 1]));
+                        into[y * (GW / 2) + x] = bench_low(bench_mean(at[0], at[GW]), bench_mean(at[1], at[GW + 1]));
                 }
 }
 
@@ -118723,12 +118742,12 @@ __attribute__((noinline, noclone)) static fn former_double(p32 address_to into)
 
                         for (positive x = 0; x < GW / 2; x++)
                         {
-                                p32 v = bench_mean(c[x], bench_mean(c[x], n[x]));
-                                p32 l = bench_mean(c[x - 1], bench_mean(c[x - 1], n[x - 1]));
-                                p32 r = bench_mean(c[x + 1], bench_mean(c[x + 1], n[x + 1]));
+                                p32 v = bench_low(c[x], bench_mean(c[x], n[x]));
+                                p32 l = bench_low(c[x - 1], bench_mean(c[x - 1], n[x - 1]));
+                                p32 r = bench_low(c[x + 1], bench_mean(c[x + 1], n[x + 1]));
 
-                                out[2 * x] = bench_mean(v, bench_mean(v, l));
-                                out[2 * x + 1] = bench_mean(v, bench_mean(v, r));
+                                out[2 * x] = bench_low(v, bench_mean(v, l));
+                                out[2 * x + 1] = bench_low(v, bench_mean(v, r));
                         }
                 }
 }

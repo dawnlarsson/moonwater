@@ -1662,8 +1662,8 @@ static struct
         unsigned long glass_cut[WINDOWS];
         int glass_made[WINDOWS][4], stale[WINDOWS][4], dirty[WINDOWS][4];
         unsigned int glass_side[WINDOWS], glass_told[WINDOWS], lifted[WINDOWS];
-        unsigned int *blur, *frost, *rise, *risen; // scratch: the tabs' small picture, the scene halved, the levels risen, the ground
-        unsigned long blur_bytes, frost_bytes, rise_bytes, risen_bytes;
+        unsigned int *blur, *frost, *rise; // scratch: the tabs' small picture, a band of the scene halved, the levels risen
+        unsigned long blur_bytes, frost_bytes, rise_bytes;
         positive blurred, recomposed; // pixels blurred again and composed again, all frames
         int damage_by; // what is being damaged: 0 the scene, a row and one its own picture, COMPOSITOR_OVER what lies over all
         unsigned int minute;
@@ -2207,9 +2207,13 @@ static unsigned int compositor_grained(unsigned int ground, unsigned int light, 
 /*
         The blurred small picture of the scene, the small pixels from sx, sy
         (in blocks of the output) sw by sh, into into (pitch words a row):
-        each the tent round its block of the halved scene. False when there
-        is no memory for it.
+        each the tent round its block of the halved scene. The scene is
+        composed and halved a band of COMPOSITOR_GLASS_BAND rows at a time,
+        so what is made at full size is only ever that band, in the cache,
+        and never all of it. False when there is no memory for it.
 */
+#define COMPOSITOR_GLASS_BAND 64 // full-size rows composed and halved at once: a multiple of the block
+
 static int compositor_frost(const struct compositor_frame *frames, unsigned int count, int sx, int sy, int sw, int sh,
                             unsigned int *into, unsigned long pitch)
 {
@@ -2217,59 +2221,72 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         int tw = sw + 2 * spread, th = sh + 2 * spread, ax = (sx - spread) * block, ay = (sy - spread) * block;
         int aw = tw * block, ah = th * block;
         int cx0 = ax < 0 ? 0 : ax, cx1 = ax + aw > compositor.width ? compositor.width : ax + aw;
-        int cy0 = ay < 0 ? 0 : ay, cy1 = ay + ah > compositor.height ? compositor.height : ay + ah;
-        unsigned int *scene = compositor_scratch(&compositor.frost, &compositor.frost_bytes,
-                                                 ((unsigned long)aw * (unsigned long)ah + (unsigned long)tw * th) * 4);
+        int cy0 = 0, cy1 = compositor.height;
+        unsigned int *strip = compositor_scratch(&compositor.frost, &compositor.frost_bytes,
+                                                 ((unsigned long)aw * COMPOSITOR_GLASS_BAND + (unsigned long)tw * th) * 4);
         unsigned int *small;
         unsigned long bytes;
-        struct compositor_target under;
 
-        if (!scene || sw <= 0 || sh <= 0)
+        if (!strip || sw <= 0 || sh <= 0)
                 return 0;
-        small = scene + (unsigned long)aw * (unsigned long)ah;
+        small = strip + (unsigned long)aw * COMPOSITOR_GLASS_BAND;
 
-        if (cx1 > cx0 && cy1 > cy0)
+        // Wholly left or right of the output: its nearest column.
+        if (cx1 <= cx0)
+                cx0 = ax + aw <= 0 ? 0 : compositor.width - 1, cx1 = cx0 + 1;
+
+        for (int top = 0; top < ah; top += COMPOSITOR_GLASS_BAND)
         {
-                under = (struct compositor_target){scene, (unsigned long)aw, compositor.width, compositor.height,
-                                                   cx0, cy0, cx1, cy1, ax, ay};
+                int rows = ah - top < COMPOSITOR_GLASS_BAND ? ah - top : COMPOSITOR_GLASS_BAND;
+                int y0 = ay + top, vy0 = y0 > cy0 ? y0 : cy0, vy1 = y0 + rows < cy1 ? y0 + rows : cy1, first, last;
+                struct compositor_target under;
+
+                // Rows past the output's edges are its first or last row again: a band wholly past them makes that one row.
+                if (vy1 <= vy0)
+                        vy0 = y0 + rows <= cy0 ? cy0 : cy1 - 1, vy1 = vy0 + 1;
+                under = (struct compositor_target){strip, (unsigned long)aw, compositor.width, compositor.height,
+                                                   cx0, vy0, cx1, vy1, ax, vy0 < y0 || vy0 >= y0 + rows ? vy0 : y0};
                 compositor_scene(&under, frames, count);
+                first = under.oy == y0 ? vy0 - y0 : 0;
+                last = under.oy == y0 ? vy1 - y0 : 1;
+
+                for (int row = 0; row < rows; row++)
+                {
+                        unsigned int *line = strip + (long)row * aw;
+                        int from = row < first ? first : row >= last ? last - 1 : row;
+
+                        if (from != row)
+                                continue;
+                        if (cx0 > ax)
+                                memory_fill_u32(line, (positive)(cx0 - ax), line[cx0 - ax]);
+                        if (cx1 < ax + aw)
+                                memory_fill_u32(line + (cx1 - ax), (positive)(ax + aw - cx1), line[cx1 - ax - 1]);
+                }
+                // Back to front, so a row is copied before it is written over.
+                for (int row = rows; row-- > 0;)
+                {
+                        int from = row < first ? first : row >= last ? last - 1 : row;
+
+                        if (from != row)
+                                memory_copy(strip + (long)row * aw, strip + (long)from * aw, (positive)aw * 4);
+                }
+
+                // Halved a level at a time, in place, and the band's small rows taken out to their own.
+                for (int level = 1; level <= COMPOSITOR_GLASS_LEVELS; level++)
+                        memory_halve_u32(strip, (positive)aw, strip, (positive)aw, (positive)(aw >> level),
+                                         (positive)(rows >> level));
+                for (int row = 0; row < rows / block; row++)
+                        memory_copy(small + (long)(top / block + row) * tw, strip + (long)row * aw, (positive)tw * 4);
         }
-        else
-        {
-                // Wholly off the output: its nearest corner.
-                cx0 = ax + aw <= 0 ? 0 : compositor.width - 1, cy0 = ay + ah <= 0 ? 0 : compositor.height - 1;
-                cx1 = cx0 + 1, cy1 = cy0 + 1;
-                under = (struct compositor_target){scene, (unsigned long)aw, compositor.width, compositor.height,
-                                                   cx0, cy0, cx1, cy1, cx0, cy0};
-                compositor_scene(&under, frames, count);
-                for (int row = 0; row < ah; row++)
-                        memory_fill_u32(scene + (long)row * aw, (positive)aw, scene[0]);
-                cx0 = ax, cx1 = ax + aw, cy0 = ay, cy1 = ay + ah;
-        }
 
-        // Past the output's edges, its last row and column again.
-        for (int row = 0; row < ah; row++)
-        {
-                unsigned int *line = scene + (long)row * aw;
-                int from = ay + row < cy0 ? cy0 - ay : ay + row >= cy1 ? cy1 - 1 - ay : row;
-
-                if (from != row)
-                        memory_copy(line, scene + (long)from * aw, (positive)aw * 4);
-                if (cx0 > ax)
-                        memory_fill_u32(line, (positive)(cx0 - ax), line[cx0 - ax]);
-                if (cx1 < ax + aw)
-                        memory_fill_u32(line + (cx1 - ax), (positive)(ax + aw - cx1), line[cx1 - ax - 1]);
-        }
-
-        // Halved a level at a time, in place, and the smallest taken out to rows of its own.
-        for (int level = 1; level <= COMPOSITOR_GLASS_LEVELS; level++)
-                memory_halve_u32(scene, (positive)aw, scene, (positive)aw, (positive)(aw >> level), (positive)(ah >> level));
-        for (int row = 0; row < th; row++)
-                memory_copy(small + (long)row * tw, scene + (long)row * aw, (positive)tw * 4);
-
+        // The tent: a box of four across and down twice, the second over the complements, which rounds down
+        // where the first rounded up.
         bytes = (unsigned long)tw * (unsigned long)th * 4;
         for (int round = 0; round < 2; round++)
         {
+                if (round)
+                        for (unsigned long at = 0; at < (unsigned long)tw * th; at++)
+                                small[at] = ~small[at];
                 for (int step = 1; step <= 2; step *= 2)
                         memory_average_ahead((p8 address_to)small, bytes - (unsigned long)step * 4, (positive)step * 4);
                 for (int step = 1; step <= 2; step *= 2)
@@ -2278,20 +2295,26 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
 
         // The tent round small pixel s is the one spread before it.
         for (int row = 0; row < sh; row++)
-                memory_copy(into + (unsigned long)row * pitch, small + (long)row * tw, (positive)sw * 4);
+        {
+                unsigned int *line = into + (unsigned long)row * pitch;
+                const unsigned int *from = small + (long)row * tw;
+
+                for (int column = 0; column < sw; column++)
+                        line[column] = ~from[column];
+        }
         return 1;
 }
 
 /*
         The small picture risen to full size over the rectangle x0, y0 to x1,
-        y1 of the output, into out (x1 - x0 words a row): top is the small
-        picture, top_pitch words a row, whose first pixel is the block tx, ty.
-        Each level is doubled from the one over it, only as much of it as
-        the rectangle needs and a pixel round that. False when there is no
-        memory for it.
+        y1 of the output: top is the small picture, top_pitch words a row,
+        whose first pixel is the block tx, ty. Each level is doubled from the
+        one over it, only as much of it as the rectangle needs and a pixel
+        round that. Answers where the rectangle's first pixel is in the
+        level made, pitch words a row, or null when there is no memory for it.
 */
-static int compositor_rise(const unsigned int *top, unsigned long top_pitch, int tx, int ty, int x0, int y0, int x1,
-                           int y1, unsigned int *out)
+static const unsigned int *compositor_rise(const unsigned int *top, unsigned long top_pitch, int tx, int ty, int x0,
+                                           int y0, int x1, int y1, unsigned long *pitch)
 {
         int lo_x[COMPOSITOR_GLASS_LEVELS + 1], lo_y[COMPOSITOR_GLASS_LEVELS + 1];
         int hi_x[COMPOSITOR_GLASS_LEVELS + 1], hi_y[COMPOSITOR_GLASS_LEVELS + 1];
@@ -2319,7 +2342,7 @@ static int compositor_rise(const unsigned int *top, unsigned long top_pitch, int
         need += (unsigned long)(2 * (hi_x[1] - lo_x[1] - 2)) * (unsigned long)(2 * (hi_y[1] - lo_y[1] - 2));
         room = compositor_scratch(&compositor.rise, &compositor.rise_bytes, need * 4);
         if (!room)
-                return 0;
+                return null;
 
         for (int level = COMPOSITOR_GLASS_LEVELS; level >= 1; level--)
         {
@@ -2343,16 +2366,9 @@ static int compositor_rise(const unsigned int *top, unsigned long top_pitch, int
                 memory_double_u32(into, into_pitch, from, from_pitch, (positive)w, (positive)h);
         }
 
-        // Level 0 made from 2 (lo_x[1] + 1) on: the rectangle out of it.
-        {
-                unsigned long pitch = (unsigned long)(2 * (hi_x[1] - lo_x[1] - 2));
-                const unsigned int *made = room + at[0] + (unsigned long)(y0 - 2 * (lo_y[1] + 1)) * pitch +
-                                           (unsigned long)(x0 - 2 * (lo_x[1] + 1));
-
-                for (int row = 0; row < y1 - y0; row++)
-                        memory_copy(out + (long)row * (x1 - x0), made + (unsigned long)row * pitch, (positive)(x1 - x0) * 4);
-        }
-        return 1;
+        // Level 0 made from 2 (lo_x[1] + 1) on.
+        *pitch = (unsigned long)(2 * (hi_x[1] - lo_x[1] - 2));
+        return room + at[0] + (unsigned long)(y0 - 2 * (lo_y[1] + 1)) * *pitch + (unsigned long)(x0 - 2 * (lo_x[1] + 1));
 }
 
 /*
@@ -2375,13 +2391,13 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
         for (int row = 0; row < gh; row++)
                 memory_zero(into + (long)row * gw, (positive)gw * 4);
         {
-                unsigned int *made = compositor_scratch(&compositor.risen, &compositor.risen_bytes,
-                                                        (unsigned long)(x1 - x0) * (unsigned long)(y1 - y0) * 4);
+                unsigned long pitch;
+                const unsigned int *made = compositor_rise(top, (unsigned long)sw, sx, sy, x0, y0, x1, y1, &pitch);
 
-                if (!made || !compositor_rise(top, (unsigned long)sw, sx, sy, x0, y0, x1, y1, made))
+                if (!made)
                         return 0;
                 for (int row = 0; row < y1 - y0; row++)
-                        memory_copy(into + (long)row * gw, made + (long)row * (x1 - x0), (positive)(x1 - x0) * 4);
+                        memory_copy(into + (long)row * gw, made + (unsigned long)row * pitch, (positive)(x1 - x0) * 4);
         }
         return 1;
 }
@@ -2553,24 +2569,30 @@ static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int sid
         return r << 16 | g << 8 | b;
 }
 
-// The picture over the risen, tinted glass and its grain, inside c (x1, y1, x2, y2 on the output, inside the window).
+// The picture over the risen, tinted glass and its grain, inside c (x1, y1, x2, y2 on the output, inside the window):
+// risen and laid a band of rows at a time, so the risen glass is in the cache when it is laid.
 static int compositor_glass_compose(int row, const int *c)
 {
         const unsigned int *picture = compositor_pixels(row);
         int *blocks = compositor.glass_blocks[row], width = c[2] - c[0];
-        unsigned int *ground = compositor_scratch(&compositor.risen, &compositor.risen_bytes,
-                                                  (unsigned long)width * (unsigned long)(c[3] - c[1]) * 4);
 
-        if (!ground || !compositor_rise(compositor.tinted[row], (unsigned long)blocks[2], blocks[0], blocks[1], c[0], c[1],
-                                        c[2], c[3], ground))
-                return 0;
-        for (int y = c[1]; y < c[3]; y++)
-                memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor.w[row] +
-                                          (unsigned long)(c[0] - compositor.x[row]),
-                                      picture + (unsigned long)(y - compositor.y[row]) * (unsigned long)compositor.width +
-                                          (unsigned long)(c[0] - compositor.x[row]),
-                                      ground + (long)(y - c[1]) * width, (positive)width,
-                                      compositor_grain_row(compositor.glass_side[row], c[0], y));
+        for (int y0 = c[1]; y0 < c[3]; y0 += COMPOSITOR_GLASS_BAND)
+        {
+                int y1 = y0 + COMPOSITOR_GLASS_BAND < c[3] ? y0 + COMPOSITOR_GLASS_BAND : c[3];
+                unsigned long pitch;
+                const unsigned int *ground = compositor_rise(compositor.tinted[row], (unsigned long)blocks[2], blocks[0],
+                                                             blocks[1], c[0], y0, c[2], y1, &pitch);
+
+                if (!ground)
+                        return 0;
+                for (int y = y0; y < y1; y++)
+                        memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor.w[row] +
+                                                  (unsigned long)(c[0] - compositor.x[row]),
+                                              picture + (unsigned long)(y - compositor.y[row]) * (unsigned long)compositor.width +
+                                                  (unsigned long)(c[0] - compositor.x[row]),
+                                              ground + (unsigned long)(y - y0) * pitch, (positive)width,
+                                              compositor_grain_row(compositor.glass_side[row], c[0], y));
+        }
         compositor.recomposed += (positive)width * (positive)(c[3] - c[1]);
         return 1;
 }
