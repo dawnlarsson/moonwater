@@ -22,12 +22,58 @@ Profiles in `kernel/profile/` compose the kernel configuration and the security
 tiers (`sec_default`, `sec_hardened`, `sec_locked`; see
 [.github/SECURITY.md](.github/SECURITY.md)).
 
-## Use
+## The `moonwater` command
 
-`moonwater help` lists the system's own command: what runs at boot and at
-poweroff, installing and updating, the network, `link`, Canvas. `bowl` runs
-other distributions' programs, `bowl profile desktop` installs KDE.
-`main.moonwater.sh` is the machine script that sets a machine up at boot.
+`moonwater` manages the system itself: where it lives, what runs at boot, and
+what the machine's events do. A selection:
+
+```sh
+moonwater status                       this session as one page
+moonwater help [VERB]                  these commands, or one command's
+moonwater setup                        where this session runs, and the installs found
+moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it
+                                       removable takes a disk that says it is; yes
+                                       is for a script, which cannot be asked
+moonwater setup update [DISK]          write this build over an install, keeping its data
+moonwater setup use [DISK]             run this build with an install's data
+moonwater setup live                   leave the disks alone this session
+moonwater wipe [yes]                   forget /home and /root, keep the machine; yes
+                                       is for a script, which cannot be asked
+moonwater bind                         the machine's events, and what each runs
+moonwater bind EVENT [COMMAND]         one event; empty puts the default back
+moonwater bind init                    what runs at every boot, with ids
+moonwater bind init add "command"      run a command at boot, once disks settle
+moonwater bind init remove ID|"command"  stop running one at boot
+moonwater canvas [on|off]              the desktop, and on which screens [on]
+moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
+moonwater airplane [on|off]            every radio at once
+moonwater brightness [N%|+N|-N]        the screen backlight
+moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
+moonwater sleep | hibernate            suspend to RAM or to disk
+moonwater wired [on|off]               the wired links; off keeps them down
+moonwater wifi [on|off]                the radio, saved networks and those in range
+moonwater wifi remove SSID             forget a saved network, and leave it
+moonwater bluetooth [on|off]           the radio and the remembered devices
+moonwater time [sync]                  the clock; sync sets it and the zone now
+moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
+moonwater ntp [on|off]                 set the clock from the network [on]
+moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
+moonwater name [NEW|random]            what this machine is called, like space-wizard
+moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network's [auto]
+moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
+moonwater link                         who this machine is linked with, and what each may do
+moonwater link pair [NAME]             a code, and wait for the other machine to use it
+moonwater link NAME CODE               link to the machine called NAME, which waits
+moonwater link push NAME FILE PATH     a file here to PATH there, whole or not at all
+moonwater link on|off                  the listener, kept across boots [off]
+```
+
+`moonwater` alone prints every command and `moonwater help VERB` one command's.
+A verb with no word after it says where its switch stands, to anybody; with one
+it changes it and needs root, and a word it does not take is a usage page
+(exit 2) and not a refusal (exit 1). `bowl` runs other distributions' programs
+(`bowl profile desktop` installs KDE), and `main.moonwater.sh` is the machine
+script that sets a machine up at boot.
 
 ## Layout
 

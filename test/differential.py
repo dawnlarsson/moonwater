@@ -47147,6 +47147,8 @@ while True:
         # page and `help VERB`, and a lane holds them to the dispatcher: every
         # verb it answers to (bar init's own, boot ask and machine) has a page
         # of its own, and the rows of the pages name those verbs and no other.
+        # The README shows some of the rows, and each is a row of the pages,
+        # word for word.
         host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
         verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
         dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)\}', verb_table)
@@ -47178,6 +47180,18 @@ while True:
                       for command, _ in rows),
                   f"help {verb} is that verb's page", repr(got)[:300])
             on_pages.update(rows)
+        rows_readme = []
+        for fenced in (HARNESS_ROOT / "README.md").read_text().split("```sh\n")[1:]:
+            for line in fenced.split("```", 1)[0].splitlines():
+                if line.startswith("moonwater "):
+                    found = re.match(r"^moonwater (\S.*?)(?:  +(\S.*))?$", line)
+                    rows_readme.append([found.group(1), found.group(2) or ""])
+                elif line.startswith(" " * 39) and rows_readme:
+                    rows_readme[-1][1] += " " + line.strip()
+        in_readme = {(command, " ".join(text.split())) for command, text in rows_readme}
+        check(in_readme and in_readme <= on_pages,
+              "the README's rows are rows of the pages, word for word",
+              "only in the README: %r" % sorted(in_readme - on_pages)[:4])
         first_words = {command.split()[0] for command, _ in on_pages}
         check(first_words <= set(dispatched) and {v for v in public if v != "hibernate"} <= first_words,
               "the pages name every verb the dispatcher answers to, and no other",
