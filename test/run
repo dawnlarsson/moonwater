@@ -8987,6 +8987,22 @@ same 'clamped'      '4,19'                       20 5 in '\e[99;99H' cursor
 #       position that overwrites existing text.
 same 'huge column clamps' '[abc    Z]'             8 2 in 'abc\e[4294967297GZ' row 0
 same 'huge move clamps'   '[a      Z]'             8 2 in 'a\e[4294967297CZ' row 0
+#       A count past the edge does what the edge does, however many digits it
+#       has: every counted verb run at 4294967295 and at 99999999999 leaves the
+#       page and the cursor a count of 99 leaves, on a page this small. A wrap
+#       to a small count would show as a different page.
+saturated_prefix='abcdefgh\r\nijklmnop\r\nqrs\e[2;3H'
+for verb in X @ P L M S T b I Z A B C D E F G a e d; do
+        want=$(term 8 3 in "$saturated_prefix\e[99$verb" dump cursor)
+        for n in 4294967295 99999999999; do
+                got=$(term 8 3 in "$saturated_prefix\e[$n$verb" dump cursor)
+                if [ "$got" = "$want" ]; then
+                        won
+                else
+                        lost "count $n for $verb is the edge" "want [$want] got [$got]"
+                fi
+        done
+done
 #       CHA and VPA, which move on one axis and leave the other alone.
 same 'cha'          '2,6'                        20 5 in '\e[3;3H\e[7G' cursor
 same 'vpa'          '3,2'                        20 5 in '\e[3;3H\e[4d' cursor
