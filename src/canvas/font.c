@@ -3891,8 +3891,9 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
         at every one of those sizes; k = 1 left it 16 percent light), falling
         to nothing as the text's lightness rises to three quarters; and light
         text moves, as its lightness rises from a half to three quarters, to
-        the plain mix of the sRGB bytes (white on black then reads within 16
-        percent; a contrast curve bent the other way, k = -0.45, took the
+        halfway between linear light and the plain mix of the sRGB bytes (all
+        the way, white on black read within 16 percent but its diagonals were
+        smudges; a contrast curve bent the other way, k = -0.45, took the
         worst of it only from 1.41 to 1.23).
 
         The two tables are the program's, made once: 256 bytes into 16-bit
@@ -4009,7 +4010,13 @@ static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 st
         f32 share = dark <= 0 ? 0 : dark * dark / 0.81f;
         f32 k = strength / 64.0f * (share > 1 ? 1 : share);
 
-        e->plain = (p32)(64 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
+        //      Light text takes at most half the plain mix and half linear
+        //      light: all of the plain mix kept white on black within 16
+        //      percent of its weight at 48 px, but a half-covered pixel of
+        //      it is sRGB 128, a fifth of the light, and the diagonals of m,
+        //      w, M, W and # at 8 to 14 px were grey smudges. Half and half
+        //      reads a little heavier and draws them as strokes.
+        e->plain = (p32)(32 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
         for (p32 a = 0; a < 256; a++)
         {
                 f32 x = a / 255.0f;

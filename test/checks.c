@@ -106573,7 +106573,9 @@ static fn check_light()
         font_ramp(&engine, 0, 0xffffff, engine.contrast);
         check("blend: half of black over white is half the light", font_mix(&engine, 0xffffff, 0, 127) == 0xbcbcbc);
         font_ramp(&engine, 0xffffff, 0, engine.contrast);
-        check("blend: half of white over black is the bytes' mix", font_mix(&engine, 0, 0xffffff, 128) == 0x808080);
+        //      Light text is halfway between half the light (bc) and the bytes' mix (80).
+        check("blend: half of white over black is halfway between half the light and the bytes' mix",
+              font_mix(&engine, 0, 0xffffff, 128) == 0x9e9e9e);
 
         const p32 address_to tones = font_tones(&engine, 0xdfe7ef, 0x101820, engine.contrast);
         check("tones: the ends of a pair are its two colours", tones[0] == 0x101820 && tones[255] == 0xdfe7ef);
@@ -106598,7 +106600,7 @@ static fn check_light()
               font_strength(&engine, 8 * 64, 0) == c && font_strength(&engine, 20 * 64, FONT_UNHINTED) == c);
 
         font_ramp(&engine, 0x4ec94e, 0, c);
-        check("ramp: green on black is the plain mix and no curve", engine.plain == 64 && engine.ramp[128] == 128);
+        check("ramp: green on black is half the plain mix and no curve", engine.plain == 32 && engine.ramp[128] == 128);
         font_ramp(&engine, 0, 0xffffff, c);
         check("ramp: black on white is the whole curve and no plain mix", engine.plain == 0 && engine.ramp[128] == 192);
         font_ramp(&engine, 0x606060, 0xffffff, c);
