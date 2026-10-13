@@ -108613,14 +108613,14 @@ static void check_compositor_partial(void)
         return;
     }
     table = compositor.table;
-    for (int row = 1; row <= 3; row++)
+    for (int row = 1; row <= 4; row++)
     {
-        table->x[row] = 10 + 40 * row;
-        table->y[row] = 6 + 20 * row;
-        table->width[row] = 150;
-        table->height[row] = 120;
+        table->x[row] = row == 4 ? 130 : 10 + 40 * row;
+        table->y[row] = row == 4 ? 100 : 6 + 20 * row;
+        table->width[row] = row == 4 ? 120 : 150;
+        table->height[row] = row == 4 ? 120 : 120;
         table->glass[row] = row == 2 ? WINDOW_GLASS : 0;
-        glass_paint(row, 0, 0, 150, 120, row == 1 ? 0x2060c0u : row == 2 ? 0xc04020u : 0x20c060u, true);
+        glass_paint(row, 0, 0, table->width[row], table->height[row], row == 1 ? 0x2060c0u : row == 2 ? 0xc04020u : row == 3 ? 0x20c060u : 0xa0a0a0u, true);
     }
     compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
     compositor_present();
@@ -108632,8 +108632,15 @@ static void check_compositor_partial(void)
 
         seed = seed * 1664525u + 1013904223u;
         row = 1 + (int)((seed >> 16) % 3);
-        op = (seed >> 8) % 5;
-        if (op == 0)
+        op = (seed >> 8) % 6;
+        if (op == 5)
+        {
+                // The bottom of the window that stands nearest the band, where the band's glass reaches up to.
+                row = 4;
+                glass_paint(row, (int)((seed >> 4) % 100), 100 + (int)((seed >> 12) % 20), 1 + (int)((seed >> 20) % 40),
+                            1 + (int)((seed >> 24) % 4), seed * 40503u, false);
+        }
+        else if (op == 0)
                 glass_paint(row, (int)((seed >> 4) % 100), (int)((seed >> 12) % 90), 1 + (int)((seed >> 20) % 40),
                             1 + (int)((seed >> 24) % 30), seed * 2654435761u, false);
         else if (op == 1)

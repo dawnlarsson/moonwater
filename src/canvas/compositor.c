@@ -1775,6 +1775,8 @@ static void compositor_meet(int *into, const int *other)
 #define COMPOSITOR_GLASS_LEVELS 3
 #define COMPOSITOR_GLASS_BLOCK (1 << COMPOSITOR_GLASS_LEVELS)
 #define COMPOSITOR_GLASS_SPREAD 3 // the small blur's reach, in small pixels: two rounds of a box of four
+// How far a change reaches through the blur and the rise, in device pixels: the tent's blocks and the rise's one more.
+#define COMPOSITOR_GLASS_REACH ((COMPOSITOR_GLASS_SPREAD + 3) * COMPOSITOR_GLASS_BLOCK)
 
 // The rectangle of a window's contents, x1, y1, x2, y2, on the output and in it.
 static void compositor_contents_box(int row, int *box)
@@ -1808,8 +1810,7 @@ static int compositor_stack_place(int row)
 */
 static void compositor_glass_touch(const int *rectangle)
 {
-        // How far a change reaches through the blur and the rise: the tent's blocks, and the rise's.
-        int reach = (COMPOSITOR_GLASS_SPREAD + 3) * COMPOSITOR_GLASS_BLOCK;
+        int reach = COMPOSITOR_GLASS_REACH;
         int by = compositor.damage_by > 0 ? compositor.damage_by - 1 : COMPOSITOR_NONE;
         int lowest = by >= 0 ? compositor_stack_place(by) : -1;
 
@@ -2503,6 +2504,21 @@ static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y
         the scene has them, blurred, each tab made glass, each window's title
         on its own and the time in the tray.
 */
+/*
+        The span of the band's glass: from the first tab (or the tray, with no
+        window tabs) to the end of the tray. Answers 0 when there is no tray.
+*/
+static int compositor_band_span(const struct compositor_frame *band, int *first, int *last)
+{
+        int x, y, width, height;
+
+        if (!compositor_panel_slot(band, -2, &x, &y, &width, &height))
+                return 0;
+        *last = x + width;
+        *first = band->mark_count && compositor_panel_slot(band, 0, &x, &y, &width, &height) ? x : *last - width;
+        return 1;
+}
+
 static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count)
 {
         struct compositor_frame band;
@@ -2518,13 +2534,11 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
         compositor_band_frame(&band);
         band.x = band.y = 0;
         {
-                int first, last, x, y, width, height;
+                int first, last;
 
                 // The span of the tabs, which is all the glass is made under.
-                if (!compositor_panel_slot(&band, -2, &x, &y, &width, &height))
+                if (!compositor_band_span(&band, &first, &last))
                         return;
-                last = x + width;
-                first = band.mark_count && compositor_panel_slot(&band, 0, &x, &y, &width, &height) ? x : last - width;
                 compositor_band_frame(&band);
                 glass_width = compositor_glass_make(windows, count, first, last, &band);
                 glass_left = first;
@@ -2910,6 +2924,7 @@ static void compositor_present(void)
         struct compositor_frame band;
         unsigned char rows[WINDOWS];
         unsigned int count = 0, windows;
+        int band_first, band_last;
 
         if (!compositor.damages)
                 return;
@@ -2923,10 +2938,23 @@ static void compositor_present(void)
         windows = count;
         compositor_glass_pass(frames, rows, windows);
 
-        // What is under the tabs changed, or what they say: the glass is made again over it, and shown.
+        // What is under the tabs changed, or what they say: the glass is made again over it, and shown. The glass
+        // is made from the scene over the tabs' span and the blur's reach round it, so only a change there is one.
         compositor_band_frame(&band);
-        for (unsigned int at = 0; at < compositor.damages && compositor.band; at++)
-                compositor.band_stale |= compositor.damage[at][1] < band.y + band.height && compositor.damage[at][3] > band.y;
+        if (compositor.band && compositor_band_span(&band, &band_first, &band_last))
+        {
+                int reach[4] = {band_first - COMPOSITOR_GLASS_REACH, band.y - COMPOSITOR_GLASS_REACH,
+                                band_last + COMPOSITOR_GLASS_REACH, band.y + band.height + COMPOSITOR_GLASS_REACH};
+
+                for (unsigned int at = 0; at < compositor.damages; at++)
+                {
+                        int meet[4];
+
+                        memory_copy(meet, compositor.damage[at], sizeof(meet));
+                        compositor_meet(meet, reach);
+                        compositor.band_stale |= meet[2] > meet[0] && meet[3] > meet[1];
+                }
+        }
         if (compositor.band_stale)
         {
                 compositor_band_draw(frames, windows);
