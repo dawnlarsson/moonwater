@@ -2544,7 +2544,15 @@ def self_test():
             #      x509_corpus is another: it fetches real server chains over
             #      the network and puts tls_verify_chain's verdicts beside
             #      openssl verify's, which no lane may depend on.
-            BY_HAND = {"https_bench", "tls_verify_fuzz", "x509_corpus"}
+            #
+            #      bowl_matrix needs a booted guest and a disk of five bowl
+            #      distributions it provisions; hot_order rewrites the order
+            #      in src/build/spark.ld from a profiled shell; and
+            #      network_campaign and network_integration write their
+            #      reports and corpora into a directory they are given.
+            BY_HAND = {"https_bench", "tls_verify_fuzz", "x509_corpus",
+                       "bowl_matrix", "hot_order", "network_campaign",
+                       "network_integration"}
 
             unrun = sorted(set(registered) - asked - BY_HAND)
             self.assertEqual(unrun, [],
