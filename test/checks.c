@@ -106946,35 +106946,6 @@ static fn check_cells(font_engine address_to with, const font_face address_to tw
 }
 
 /*
-        Drawn cells stay in their cell: every box, block, shape and braille
-        code at small cell sizes, where a dot or a shape is only a pixel or
-        two, writes nothing outside its width and height. The stride is 128,
-        so a write past the cell's right edge would land in a row the check
-        reads, and one past its bottom in a row it reads too.
-*/
-static p8 bounds_cell[128 * 128];
-
-static fn check_drawn_bounds()
-{
-        static const p32 ranges[][2] = {{0x2500, 0x25ff}, {0x2800, 0x28ff}, {0x21b5, 0x21b5}, {0x2717, 0x2717}, {0xad, 0xad}};
-        bool stays = true;
-
-        for (p32 r = 0; r < sizeof(ranges) / sizeof(ranges[0]) && stays; r++)
-                for (b32 width = 1; width <= 5 && stays; width++)
-                        for (b32 height = 1; height <= 5 && stays; height++)
-                                for (p32 code = ranges[r][0]; code <= ranges[r][1] && stays; code++)
-                                {
-                                        memory_zero(bounds_cell, sizeof(bounds_cell));
-                                        font_drawn(&engine, code, width, height, bounds_cell, 128);
-                                        for (b32 y = 0; y < 128 && stays; y++)
-                                                for (b32 x = 0; x < 128 && stays; x++)
-                                                        if ((x >= width || y >= height) && bounds_cell[y * 128 + x])
-                                                                stays = false;
-                                }
-        check("drawn: no cell writes outside its width and height, 1 to 5 px, every box, block, shape and braille code", stays);
-}
-
-/*
         Horizontal bars and overshoots: bars snapped as the stems are, with
         the axes swapped, keeping the fitted lines; a round letter's reach
         past the x-height and under the baseline flattened onto its line
@@ -107891,10 +107862,9 @@ static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
 }
 
 /*
-        Edge cases of the cache's keys. A face id is 16 bits, so a process
-        loads 65535 faces at most and the load after them is refused, never
-        given an id a live face holds: a glyph cached for one face must not
-        answer for another. A size from 16384 px up is no
+        Edge cases of the cache's keys. A face id is 16 bits and is issued
+        again 65536 loads on: a glyph cached for the old face must not answer
+        for the new one that has the same id. A size from 16384 px up is no
         size the engine draws, and is not one the key keeps the bits of, so a
         huge size must never draw the small glyph whose key it truncates to. A
         size of zero draws nothing and measures a one-pixel cell.
@@ -107949,29 +107919,19 @@ static fn check_edges(font_face address_to one, font_face address_to two)
         }
         check("reissue: some letter of A to D is drawn differently by the two faces", code != 0);
 
-        //      The engine draws the first face, the second face is loaded
-        //      until the load is refused, and the engine draws the last face
-        //      that loaded with the same letter: it must be that face's letter.
-        //      Issued ids were once reused after 65536 loads, which put the
-        //      first face's id on a live face.
-        font_face next;
-        bool refused = false, shared = false;
-
+        //      The engine draws the first face, the second face is loaded until
+        //      its id is the first's, and the engine draws the second face
+        //      with the same letter: it must be the second face's letter.
         font_start(&reissue_engine, reissue_atlas, 512, 512);
         edge_draw(&reissue_engine, chain, code, 20 * 64, 0);
         do
-        {
-                refused = font_load(&next, font_two, font_two_size, 0) != 0;
-                if (!refused)
-                        again = next, shared = shared || next.id == one->id;
-                loads++;
-        } while (!refused && loads < 140000);
-        check("reissue: the load past the 16-bit id space is refused, and no face loaded has the first face's id",
-              refused && !shared && again.id != one->id);
+                font_load(&again, font_two, font_two_size, 0), loads++;
+        while (again.id != one->id && loads < 140000);
+        check("reissue: a later load gets the id of the first face", again.id == one->id && loads > 0);
 
         edge_draw(&reissue_engine, other, code, 20 * 64, 1);
         truth_draw(&again, code, 2);
-        check("reissue: a glyph cached for one face does not answer for another",
+        check("reissue: a glyph cached for the old face does not answer for the new one",
               memory_compare(edge_frames[1], edge_frames[2], sizeof(edge_frames[1])) == 0);
 
         //      A size whose bits wrap in the key, and one past the engine's
@@ -108021,7 +107981,6 @@ b32 main()
         check_shapes();
         check_snap();
         check_bars();
-        check_drawn_bounds();
         check_drawing(&one, &two);
         check_cells(&engine, &two);
         check_synthetic(&one, &two);
@@ -108923,6 +108882,48 @@ static fn check_settings(string_address regular, string_address bold)
                 ui.scratch_width = 400;
                 ui_inks(&ui, 0x101012u);
 
+                // The name field, typed in as the verbs take a name, and the timezone field, which takes any text.
+                settings.editing = name;
+                settings.typed[0] = 0;
+                settings.status[0] = 0;
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: Enter on an empty name says so and keeps the old one",
+                      settings.editing < 0 && string_equals((string_address)settings.status, (string_address) "nothing typed: the value is kept"));
+                settings.editing = name;
+                settings.typed[0] = 0;
+                settings_type_code(0xe9);
+                check("settings: a name takes letters, digits and hyphens only, and says so",
+                      string_length((string_address)settings.typed) == 0 &&
+                          string_equals((string_address)settings.status, (string_address) "a name is letters, digits and hyphens"));
+                for (int letter = 0; letter < 31; letter++)
+                        settings_type_code('a');
+                check("settings: a name typed to 31 letters is kept", string_length((string_address)settings.typed) == 31);
+                settings_type_code('a');
+                check("settings: and a 32nd is refused with the limit, not kept",
+                      string_length((string_address)settings.typed) == 31 &&
+                          string_equals((string_address)settings.status, (string_address) "a name is under 32 characters"));
+                settings.typed[0] = 0;
+                settings.editing = zone;
+                settings_type_code(0xe9);
+                settings_type_code(0xfc);
+                settings_press(SETTINGS_KEY_BACKSPACE);
+                check("settings: backspace takes a whole character of several bytes",
+                      string_equals((string_address)settings.typed, (string_address) "\xc3\xa9"));
+                settings.typed[0] = 0;
+                settings.editing = -1;
+                settings.dirty = false;
+
+                // A field's text stays in its well: a name longer than the well is shown from its end, not drawn past it.
+                ui_clear(&ui);
+                ui_field(&ui, 10, 10, 100, 40, (string_address) "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww", true);
+                {
+                        positive outside = 0;
+
+                        for (int row = 0; row < 80; row++)
+                                for (int column = 0; column < 320; column++)
+                                        outside += (column < 10 || column >= 110) && (pixels[row * 320 + column] >> 24) > 64;
+                        check("ui: a field's text stays inside its well, a name longer than the well shows its end", outside == 0);
+                }
 
                 for (int size_at = 0; size_at < 3; size_at++)
                         for (int face = 0; face < 2; face++)

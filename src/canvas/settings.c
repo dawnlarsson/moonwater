@@ -66,6 +66,8 @@
 #define SETTINGS_FOOT 40    // the line that says what happened
 #define SETTINGS_FIELD_W 220
 #define SETTINGS_QUEUE 8 // changes that may wait for the verb running
+#define SETTINGS_NAME_ROW 0 // the machine's name, the first row: a name is letters, digits and hyphens, under 32
+#define SETTINGS_NAME_MOST 31
 
 #define SETTINGS_KEY_ESCAPE 1
 #define SETTINGS_KEY_BACKSPACE 14
@@ -684,6 +686,8 @@ static fn settings_type(const struct window_event address_to event)
         case SETTINGS_KEY_ENTER_PAD:
                 if (length)
                         settings_change(settings.editing, settings.typed);
+                else
+                        settings_say((string_address) "nothing typed: the value is kept");
                 settings.editing = -1;
                 break;
         case SETTINGS_KEY_ESCAPE:
@@ -698,20 +702,25 @@ static fn settings_type(const struct window_event address_to event)
         {
                 unsigned int c = (unsigned int)event->b;
                 p8 bytes[4];
-                positive size = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+                positive size;
+                b32 name = settings.editing == SETTINGS_NAME_ROW;
 
-                if (c < ' ' || c == 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) ||
-                    length + size >= sizeof(settings.typed))
+                if (c < ' ' || c == 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
                         return;
-                if (size == 1)
-                        bytes[0] = (p8)c;
-                else if (size == 2)
-                        bytes[0] = (p8)(0xc0 | c >> 6), bytes[1] = (p8)(0x80 | (c & 63));
-                else if (size == 3)
-                        bytes[0] = (p8)(0xe0 | c >> 12), bytes[1] = (p8)(0x80 | (c >> 6 & 63)), bytes[2] = (p8)(0x80 | (c & 63));
-                else
-                        bytes[0] = (p8)(0xf0 | c >> 18), bytes[1] = (p8)(0x80 | (c >> 12 & 63)),
-                        bytes[2] = (p8)(0x80 | (c >> 6 & 63)), bytes[3] = (p8)(0x80 | (c & 63));
+                // What the verb takes a name for, and says so when it is not: a name is typed in, not cut short.
+                if (name && !((c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '-'))
+                {
+                        settings_say((string_address) "a name is letters, digits and hyphens");
+                        return;
+                }
+                if (name && length >= SETTINGS_NAME_MOST)
+                {
+                        settings_say((string_address) "a name is under 32 characters");
+                        return;
+                }
+                size = memory_utf8_encode(bytes, sizeof(bytes), c);
+                if (!size || length + size >= sizeof(settings.typed))
+                        return;
                 memory_copy(settings.typed + length, bytes, size);
                 settings.typed[length + size] = 0;
         }

@@ -221,12 +221,13 @@ static fn ui_outline(struct ui address_to ui, int x, int y, int width, int heigh
 }
 
 /*
-        A run of text: its width in pixels when into is null, and otherwise
-        drawn with its pen at x on the baseline in colour (alpha 255 is
-        opaque ink, less a fainter one), and its width all the same.
+        A run of text drawn with its pen at x on the baseline in colour (alpha
+        255 is opaque ink, less a fainter one), and its width answered. Only
+        the columns from low to high are drawn: a field's text is cut at its
+        well, and the rest of the run is not.
 */
-static int ui_text(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
-                   unsigned int colour, unsigned int alpha)
+static int ui_run(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
+                  unsigned int colour, unsigned int alpha, int low, int high)
 {
         const font_face address_to faces[2] = {bold && ui->bold ? ui->bold : ui->regular, ui->regular};
         p32 em = (p32)(size * ui->scale) << 6;
@@ -261,11 +262,19 @@ static int ui_text(struct ui address_to ui, int x, int baseline, string_address 
                 {
                         unsigned int value = ui->scratch[(unsigned long)row * (unsigned long)wide + (unsigned long)column] >> 8 & 255;
                         unsigned int cover = light ? value : 255 - value;
+                        int at = x - left + column;
 
-                        if (cover)
-                                ui_dot(ui, x - left + column, baseline - above + row, ui_tone(colour, cover * alpha / 255));
+                        if (cover && at >= low && at < high)
+                                ui_dot(ui, at, baseline - above + row, ui_tone(colour, cover * alpha / 255));
                 }
         return width;
+}
+
+// A run of text, whole: its width in pixels when into is null, and otherwise drawn as ui_run draws it.
+static int ui_text(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
+                   unsigned int colour, unsigned int alpha)
+{
+        return ui_run(ui, x, baseline, text, size, bold, colour, alpha, 0, ui->width);
 }
 
 // A run's width, measured.
@@ -375,17 +384,24 @@ static fn ui_field(struct ui address_to ui, int x, int y, int width, int height,
 {
         int radius = (UI_RADIUS - 2) * ui->scale, pad = 8 * ui->scale;
         int baseline = ui_baseline(ui, y, height, UI_TEXT);
-        int drawn;
+        int left = x + pad, right = x + width - pad, shift = 0, drawn;
 
         ui_round(ui, x, y, width, height, radius, ui_tone(ui->ink, typing ? 30 : 18));
         if (typing)
                 ui_outline(ui, x, y, width, height, radius, UI_RING * ui->scale, ui->ring);
-        drawn = ui_text(ui, x + pad, baseline, text, UI_TEXT, false, ui->ink, 255);
+        // Typed in, a text wider than the well shows its end, the caret after it: the start is cut off at the well's edge.
+        if (typing)
+        {
+                int measured = ui_measure(ui, text, UI_TEXT, false) + 2 * ui->scale;
+
+                shift = measured > right - left ? measured - (right - left) : 0;
+        }
+        drawn = ui_run(ui, left - shift, baseline, text, UI_TEXT, false, ui->ink, 255, left, right);
         if (typing)
         {
                 int capital = ui_capital(ui, UI_TEXT);
 
-                ui_fill(ui, x + pad + drawn + ui->scale, baseline - capital - 2 * ui->scale, ui->scale,
+                ui_fill(ui, left - shift + drawn + ui->scale, baseline - capital - 2 * ui->scale, ui->scale,
                         capital + 4 * ui->scale, ui_tone(ui->ink, 255));
         }
 }
