@@ -25,28 +25,28 @@ tiers (`sec_default`, `sec_hardened`, `sec_locked`; see
 ## The `moonwater` command
 
 `moonwater` manages the system itself: where it lives, what runs at boot, and
-what the machine's events do. A selection:
+what the events of the machine do. A selection:
 
 ```sh
 moonwater status                       this session as one page
-moonwater help [VERB]                  these commands, or one command's
+moonwater help [VERB]                  these commands, or the page of one
 moonwater setup                        where this session runs, and the installs found
 moonwater setup install DISK [removable] [yes]  erase DISK and put Moonwater on it
                                        removable takes a disk that says it is; yes
                                        is for a script, which cannot be asked
 moonwater setup update [DISK]          write this build over an install, keeping its data
-moonwater setup use [DISK]             run this build with an install's data
+moonwater setup use [DISK]             run this build with the data of an install
 moonwater setup live                   leave the disks alone this session
 moonwater wipe [yes]                   forget /home and /root, keep the machine; yes
                                        is for a script, which cannot be asked
-moonwater bind                         the machine's events, and what each runs
+moonwater bind                         the events of the machine, and what each runs
 moonwater bind EVENT [COMMAND]         one event; empty puts the default back
 moonwater bind init                    what runs at every boot, with ids
 moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas [on|off]              the desktop, and on which screens [on]
 moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
-moonwater settings                     the settings window, on the compositor's desktop
+moonwater settings                     the settings window, on the desktop of the compositor
 moonwater airplane [on|off]            every radio at once
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
@@ -60,7 +60,7 @@ moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
-moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network's [auto]
+moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network gives them [auto]
 moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
@@ -69,7 +69,7 @@ moonwater link push NAME FILE PATH     a file here to PATH there, whole or not a
 moonwater link on|off                  the listener, kept across boots [off]
 ```
 
-`moonwater` alone prints every command and `moonwater help VERB` one command's.
+`moonwater` alone prints every command and `moonwater help VERB` the page of one.
 A verb with no word after it says where its switch stands, to anybody; with one
 it changes it and needs root, and a word it does not take is a usage page
 (exit 2) and not a refusal (exit 1). `bowl` runs other distributions' programs
