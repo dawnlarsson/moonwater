@@ -46,7 +46,7 @@
 # cannot be taken back takes the word yes (moonwater wipe yes), a verb that
 # is said twice leaves the machine as it was after the first, and a 1 from
 # one that may not have its hardware or its network yet is `|| true`'s to
-# ignore. The README's machine script section says what each may wait for.
+# ignore.
 # function moonwater_init {
 #   case $1 in
 #   live|disk*)

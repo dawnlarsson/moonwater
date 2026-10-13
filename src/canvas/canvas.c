@@ -750,8 +750,7 @@ void canvas_glyph_wide(u32 *at, unsigned long pitch, const u8 *bits,
         with the mapping in hand.
 
         moonwater.simd=0 turns it off, for a machine where it misbehaves and
-        for timing one against the other. A diagnosis switch, not a setting:
-        the README lists it with the other kernel parameters.
+        for timing one against the other. A diagnosis switch, not a setting.
 */
 static bool canvas_simd = true;
 module_param_named(simd, canvas_simd, bool, 0644);

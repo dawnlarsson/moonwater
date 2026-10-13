@@ -8,8 +8,8 @@
 # private stage and publishes it whole, chown -R -L follows no link below the
 # operand, and a security.* attribute in an archive is not applied. The
 # fs.protected_fifos and fs.protected_regular switches are 2: group-writable
-# sticky directories too. The README lists each refusal and the check that
-# holds it.
+# sticky directories too. The Security tiers section of .github/SECURITY.md lists
+# each refusal and the check that holds it.
 #
 # And what find may do to the tree it walks: it cannot delete (-delete) and
 # cannot write a file it was told to name (-fprint, -fprint0, -fprintf), the

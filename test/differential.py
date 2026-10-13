@@ -47139,10 +47139,9 @@ while True:
               "status does not make the settings up for a caller who cannot read them", page[:600])
 
         # The pages. One table of rows draws the main page, a wrong word's
-        # page, `help VERB` and the README, and a lane holds them to each
-        # other: every verb the dispatcher answers to (bar init's own, boot ask
-        # and machine) has a page of its own, and the rows of all of them are
-        # the README's rows, word for word, and nothing else is in either.
+        # page and `help VERB`, and a lane holds them to the dispatcher: every
+        # verb it answers to (bar init's own, boot ask and machine) has a page
+        # of its own, and the rows of the pages name those verbs and no other.
         host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
         verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
         dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)\}', verb_table)
@@ -47174,23 +47173,9 @@ while True:
                       for command, _ in rows),
                   f"help {verb} is that verb's page", repr(got)[:300])
             on_pages.update(rows)
-        readme_text = (HARNESS_ROOT / "README.md").read_text()
-        readme_block = readme_text.split("```sh\n", 1)[1].split("```", 1)[0]
-        rows_readme = []
-        for line in readme_block.splitlines():
-            if line.startswith("moonwater "):
-                found = re.match(r"^moonwater (\S.*?)(?:  +(\S.*))?$", line)
-                rows_readme.append([found.group(1), found.group(2) or ""])
-            elif line.startswith(" " * 39) and rows_readme:
-                rows_readme[-1][1] += " " + line.strip()
-        in_readme = {(command, " ".join(text.split())) for command, text in rows_readme}
-        check(on_pages == in_readme,
-              "the README's rows are the rows of the pages, word for word",
-              "only on a page: %r; only in the README: %r" % (sorted(on_pages - in_readme)[:4],
-                                                             sorted(in_readme - on_pages)[:4]))
-        first_words = {command.split()[0] for command, _ in in_readme}
+        first_words = {command.split()[0] for command, _ in on_pages}
         check(first_words <= set(dispatched) and {v for v in public if v != "hibernate"} <= first_words,
-              "the README names every verb the dispatcher answers to, and no other",
+              "the pages name every verb the dispatcher answers to, and no other",
               repr((sorted(first_words - set(dispatched)), sorted(set(public) - first_words))))
 
         check(seen["help wifi extra"]["status"] == 2 and page_rows(seen["help wifi extra"]["out"]) ==

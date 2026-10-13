@@ -291,7 +291,7 @@ menu "Moonwater"
           attributes an archive carries, and the fs.protected_* switches.
           At 2 mkdir, cp, install and every output open refuse the shapes
           a planted link or a directory anyone can write turn into a write
-          somewhere else; see the table in README.md.
+          somewhere else; see Security tiers in .github/SECURITY.md.
 
     config MOONWATER_STRICT_TEXT
         int "TEXT: what a tool writes to a terminal that another party chose"

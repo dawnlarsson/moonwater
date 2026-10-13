@@ -234,7 +234,7 @@ never a pass.
   baseline; the hardened and locked tiers add five kernel regions (`sec_mem`,
   `sec_cpu`, `sec_surface`, `sec_dma`, `sec_lockdown`), each a profile of its
   own at each level, and five userspace regions that set
-  `MOONWATER_STRICT_<REGION>`. The README lists what each region does. The
+  `MOONWATER_STRICT_<REGION>`. The Security tiers section below lists what each region does. The
   gate for a region is `sh test/run switches` (what composes, what a region
   names) and a boot of the tier's image; `build verify-config` reports an
   option a tier asked for and did not get, and the build says so for every
@@ -464,6 +464,133 @@ never a pass.
   reader that dies or answers what cannot be believed is ended and started
   again. **It fails closed:** a reader that cannot be confined reads nothing,
   and the listener hears no machine nearby (the link without discovery).
+
+## Security tiers
+
+Five profiles in `kernel/profile/` choose how the build leans where safety and
+the reference disagree, and how hard the kernel under it is:
+
+| Profile | Tools and builtins | `MOONWATER_STRICT` | The kernel |
+| --- | --- | --- | --- |
+| `sec_reference` | all | 0: the reference exactly, holes and all | the baseline |
+| `sec_default` | all | 1: sanitise only what hostile input made dangerous | the baseline |
+| `sec_workstation` | all | 1 | hardened in every region that costs a program nothing it expects: not lockdown, not the 32-bit ABI |
+| `sec_hardened` | all | 2: refuse where the default sanitises | every region hardened |
+| `sec_locked` | a kiosk's allow list | 3: and what init can shut until the next boot | every region locked |
+
+`sec_default` is in the default profile list, and it is the only tier that
+promises bash, dash and GNU behaviour for anything a script does. The others
+are choices, and what they refuse is refused on purpose. All of them turn on
+Yama, which Floodlight's restricted launches need. To pick one, name it last
+after the rest of the default list:
+
+```sh
+sh build.sh debug_none limbo desktop wifi serial sec_hardened
+```
+
+**The baseline.** The kernel is built from `allnoconfig`, where an option
+nobody names is off whatever Kconfig says its default is. Until `sec_baseline`
+existed the shipped kernel had no stack protector, no usercopy bounds check, no
+`FORTIFY_SOURCE`, no slab freelist hardening, no CPU vulnerability mitigations
+on x86-64 (`CPU_MITIGATIONS` is a prompt that `allnoconfig` turns off, and
+every mitigation under it goes with it), no `W^X` on riscv64 and a null-page
+floor of 4 KiB. Every tier composes `sec_baseline` and its architecture's file
+(`sec_baseline.x64`, `.arm`, `.riscv`); it costs close to nothing on the paths
+this project measures, and the mitigations are chosen at boot from what the
+processor says it is vulnerable to. A profile names its parts with
+`#> includes NAME...` and an architecture's own lines sit in `NAME.ARCH`
+beside it, which is how a region asks for x86's indirect branch tracking
+without every other build reporting it dropped.
+
+**The regions.** A tier is every region at one level; a region is a part of the
+hardening that can move alone. Name its profile after the tier to take that one
+further (`sh build.sh ... sec_default sec_net_locked sec_mem_hardened`), or keep
+one at a gentler level than the tier around it by composing its profile first.
+Each region has a hardened and a locked level, and the locked one is the
+hardened one and more, so name one or the other. The files are
+`sec_<region>_hardened` and `sec_<region>_locked`; `sec_exec` and `sec_build`
+have only `sec_exec_hardened` and `sec_build_hardened`.
+
+| Region | Hardened | Locked adds |
+| --- | --- | --- |
+| `sec_mem` (kernel) | heap zeroed on allocation, locals zeroed, caches never merged, typed buckets, shuffled free lists, random stack offset per syscall, checked lists, W+X mappings warned about at boot | zeroed on free and every call-used register cleared at return, partitioned kmalloc caches, corruption and an oops panic (and reboot after 5 s), KFENCE |
+| `sec_cpu` (kernel) | indirect branch tracking, call depth tracking, straight-line speculation barriers, user shadow stacks, TSX off; arm64 memory tagging | `mitigations=auto,nosmt pti=on` |
+| `sec_surface` (kernel) | no ACPI table or SSDT replacement from userspace, no MSR/cpuid devices, no ioperm/iopl, no vsyscall | no 32-bit or x32 ABI, no LDT, no FUSE, no binfmt_misc, no watch queue, no POSIX message queues, no io_uring or file handle calls |
+| `sec_dma` (kernel) | VT-d, AMD-Vi and SMMU, strict translated DMA, no passthrough, firmware PCI DMA off | no PCI hotplug, USB4, FireWire or PC card |
+| `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
+| `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
+| `sec_text` | `STRICT_TEXT` 2 | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise; a public certificate has to be logged (Certificate Transparency) | 3 |
+| `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
+| `sec_bowl` | `STRICT_BOWL` 2 | 3 |
+| `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
+| `sec_build` | the image's own programs built with zeroed locals, probed stack frames, cleared call-used registers and the stack protector (+5.7% on a shell start, inside the noise on a compute loop) | (none) |
+
+The userspace regions are what `MOONWATER_STRICT_FILES`, `_TEXT`, `_NET`, `_HOST`
+and `_BOWL` set (`-1` follows the whole build's level, so a region left alone
+changes nothing), and a tool names its region and never the whole level. The
+sysctls init writes before it starts anything are the FILES and HOST regions'
+(`fs.protected_*`, `kptr_restrict`, `dmesg_restrict`, `io_uring_disabled`,
+`randomize_va_space`, at the tight level Yama and mmap's randomisation, at
+the locked level Yama 3 and `modules_disabled`); they used to be written by the network
+watcher a moment after boot, and not at all where it never started.
+`/proc` and `/sys` are mounted `nosuid,nodev,noexec` and `/dev`
+`nosuid,noexec` by the kernel module, at every tier.
+
+What a tier's image is expected to say once it has booted is a table in
+`lane_tier` (`test/run`), and `MOONWATER_IMAGE=dist/bootx64.efi
+MOONWATER_TIER=hardened sh test/run tier` reads it back from a guest: the
+sysctls init wrote, the mount flags, the lockdown line, the W+X page-table
+check and the IOMMU's strict mode. `sh test/run switches` is the composition
+half (what each tier and region names, and that a region keeps to its own
+level).
+
+What `sec_hardened` (`STRICT_TIGHT`) refuses where the default does what GNU
+coreutils does:
+
+| Tool | Default (GNU) | `sec_hardened` |
+| --- | --- | --- |
+| `mkdir`, `mkfifo`, `mknod`, `install`, `cp` | make an entry in a world-writable directory without the sticky bit | refuse it (`Permission denied`) |
+| `cp` | writes through a destination that is a link; under `POSIXLY_CORRECT` makes the file a dangling link names | replaces the link itself, never touching what it points at, and always refuses a dangling one |
+| `split`, `csplit`, and any output opened for writing (`tar -f`, `wget -O`) | write through an output name that is a link | replace the link with the new file |
+| `chown -R -L`, `chgrp -R -L` | follow the links met in the tree | follow none below the operand |
+| `cp -r` | makes the new directory where it goes and fills it | builds it in a private stage and publishes it whole |
+| `install` | leaves the copy in place, mode 0600, when the owner asked for is refused | takes the copy away and says it was not published |
+| `pinky -l` | copies each user's `~/.project` and `~/.plan` to the terminal as they are | leaves them out |
+| `wget`, `fetch` and every other HTTP client in the tree | accept a `204` that declares `Content-Length` or `Transfer-Encoding` (its body is never read; the connection closes after the one response), read a `205`'s content like any other body, and take a `Content-Length` that repeats one number (twice, or `3, 3`), a folded line after an ordinary field and any byte but NUL and a bare CR in the reason phrase, as wget and curl do | refuse a `204` that declares any body framing, a `205` with a non-zero length, chunked or close-delimited content (RFC 9110 15.3.5, 15.3.6, RFC 9112 6.1), a repeated or listed `Content-Length`, any folded line and a control byte in the reason phrase |
+
+Every row but the HTTP one has a check in `floodlight_hardened` (`test/run`),
+run against a shell built from `kernel/profile/sec_hardened`'s configuration;
+the default half is the differential engine's, against GNU. The HTTP row's
+tight half is `CHECK_net` built with `MOONWATER_STRICT` 2 (the `net-tight`
+tally of `sh test/run net`) and the framing harness's second tier; its default
+half is held against GNU wget and curl by `wget_mutation`.
+
+Two differences are not tier choices. `kill` is util-linux's, not
+coreutils' (`kill -l` takes several names, `-s0` is a signal), because
+coreutils 9.11 does not build `kill` by default. `install` invoked as
+`ginstall` reports itself as `install`.
+
+Locales are read from the machine, not compiled in. Where `/usr/lib/locale`
+(or its `locale-archive`) has a locale's files, `sort`, `ls`, `join`, `comm`,
+`expr` and the shell's globs and `[[ a < b ]]` order text by that locale's
+`LC_COLLATE` exactly as the C library's `strcoll` does, `sort -n -h -g` read the
+locale's decimal point and thousands separator, and `date`, `numfmt` and friends
+read `LC_TIME` and `LC_NUMERIC`. The image ships no locale data, so there every
+locale is C and orders by byte; the C locale never pays for any of this. `uname`
+answers `Moonwater` for `-o` and ends `-a` at the machine: Moonwater is not GNU
+and does not say it is.
+
+To take a single tool or builtin out, add a line to a profile of your own, or
+use menuconfig:
+
+```sh
+# CONFIG_MOONWATER_TOOL_WGET is not set
+# CONFIG_MOONWATER_BUILTIN_HISTORY is not set
+```
+
+`./build config-header <profile> <header>` shows what a profile turns off, and
+`./build surface <profile>` lists the names it would link.
 
 ## Evidence
 

@@ -5254,9 +5254,9 @@ static b32 host_canvas(string_address address_to arguments, positive count)
         cursor and takes the keys while it has the display and says nothing
         while another program has it (a desktop of a bowl), and the machine's
         key watch, which fires the bound events. The stages after the kernel
-        (the compositor, the screen) are not the machine's to see; the README
-        says what to run for them. reset zeroes the counts, so a minute of
-        moving a mouse is a reset, the minute and a bare read.
+        (the compositor, the screen) are not the machine's to see. reset
+        zeroes the counts, so a minute of moving a mouse is a reset, the
+        minute and a bare read.
 */
 static fn latency_cost_say(string_address name, const struct latency_cost address_to cost,
                            positive elapsed_ms)
@@ -19258,8 +19258,7 @@ static fn host_title(writer out)
         The pages, one row to a command as it is typed and what it does.
 
         The whole page, a wrong argument's page and `help VERB` are drawn from
-        this one table, so the picture and the usage read as the same page,
-        and so does the README, which a lane holds to it row for row. A row
+        this one table, so the picture and the usage read as the same page. A row
         belongs to the verb its command starts with, or to every word of
         verbs where one row serves two. A row with no command is the line
         after the one above it. Most are on the main page and on their
