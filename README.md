@@ -863,8 +863,7 @@ sh test/run bench --list        what there is to measure
 ```
 
 The whole suite is hours of a machine, so a command line naming nothing is
-refused (CI, which sets `CI`, still runs it whole) and `--all` asks again on a
-terminal. Every lane is in one seam and every file in the tree is in one, and
+refused and `--all` asks again on a terminal. Every lane is in one seam and every file in the tree is in one, and
 the suite's own three files select none: name the seams they are meant for
 beside `--changed`. Builds are kept under `~/.cache/moonwater-test`, keyed by
 the compiler, the command line and the preprocessed text, so a run builds only

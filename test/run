@@ -12,8 +12,6 @@
 #                                       for on purpose; a terminal asks again)
 #
 #       An empty command line is refused: it is every lane, which is hours.
-#       CI is the exception (CI or GITHUB_ACTIONS set), where it has always
-#       meant the whole suite.
 #
 #           sh test/run bench           every benchmark
 #           sh test/run bench floor     only the benchmarks named
@@ -20275,7 +20273,7 @@ def said(row):
 first = compositor()
 width, height, plain = picture("r1-plain")
 out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its panel, a process of its own",
-            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) in ("000000", "38383c", "090909", "393939") for x in range(0, W, 4)) else "no tabs",
+            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) in ("000000", "38383c", "090909", "0e0e0e") for x in range(0, W, 4)) else "no tabs",
                           "alive" if alive(first) else "gone"),
             "1e1e1e tabs alive"))
 out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
@@ -21534,7 +21532,7 @@ def ink(name):
     # The desktop's ink at the top left and the panel's tabs along the bottom: the compositor's own picture.
     w, h, px = load(name)
     at = lambda x, y: "%02x%02x%02x" % tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
-    tabs = any(at(x, h - 6) in ("000000", "38383c", "090909", "393939") for x in range(0, w, 4))
+    tabs = any(at(x, h - 6) in ("000000", "38383c", "090909", "0e0e0e") for x in range(0, w, 4))
     return "%s %s" % (at(10, 10), "tabs" if tabs else at(w // 2, h - 6))
 
 def asked(command, marker, seconds=20):
@@ -23197,8 +23195,7 @@ alone_lanes="text files misc util_linux shell builtins awk term edit differentia
 
 #       What to run: lanes by name, a seam's lanes (--seam), the seams the
 #       tree has changed (--changed), or every lane (--all). An empty command
-#       line is none of these and is refused, except under CI, which has
-#       always meant the whole suite by it and is the one place that does.
+#       line is none of these and is refused.
 everything=0
 requested=""
 changed=0
@@ -23293,10 +23290,7 @@ elif [ -z "$requested" ]; then
                 echo "run: no lane covers what changed"
                 exit 0
         fi
-        if [ -n "${CI:-}${GITHUB_ACTIONS:-}" ]; then
-                requested=$lanes
-        else
-                cat >&2 <<'TEXT'
+        cat >&2 <<'TEXT'
 run: an empty command line is every lane of every seam, which is hours. Say what changed:
 
     sh test/run -j 8 --changed        the seams this tree has changed from main
@@ -23304,8 +23298,7 @@ run: an empty command line is every lane of every seam, which is hours. Say what
     sh test/run net machine           lanes by name (sh test/run --list)
     sh test/run --all                 every lane, asked for on purpose
 TEXT
-                exit 2
-        fi
+        exit 2
 fi
 
 #       Each lane once, in the order it was asked for.

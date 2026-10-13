@@ -102,7 +102,7 @@ static fn gzip_fixed_init(void);
         same cells. CRC runs once per slab and once per member end.
 */
 
-/* The span kernel contract; test/codec_floor extracts from here to its end.
+/* The span kernel contract, to the end marker below.
    Cells are one u32 each:
      literal   GZIP_CELL_LITERAL | byte << 8 | codeword bits
      length    length << 16 | (codeword + extra bits)
