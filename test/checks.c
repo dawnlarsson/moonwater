@@ -108255,6 +108255,191 @@ static fn check_take(void)
                   table.focus == WINDOWS);
 }
 
+/*
+        Glass. A window that asks for it is what is under it, blurred and
+        tinted, with its premultiplied picture over that: an opaque pixel
+        is its own colour, a clear one the tint of the blur, and one between
+        the two mixed. The backdrop is blurred again only where the scene
+        under the window changed, as far as the blur reaches from the change
+        -- and what that leaves is, byte for byte, what blurring all of it
+        from nothing makes. A change of the window's own picture, or of a
+        window over it, blurs nothing again.
+*/
+#define GLASS_SIDE 160
+
+static unsigned int address_to glass_table_map(void)
+{
+        unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+        unsigned long buffer = ((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul;
+        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+
+        if (mapped < 0 && mapped > -4096)
+                return null;
+        compositor.table = (struct windows address_to)mapped;
+        compositor.pixels = compositor.table->pixels = header;
+        compositor.buffer = compositor.table->buffer = buffer;
+        compositor.table->stride = compositor.table->output_width = compositor.table->output_height = GLASS_SIDE;
+        return (unsigned int address_to)mapped;
+}
+
+// A rectangle of a row's buffer 0 in one colour, shown as the row's next picture with that as its damage.
+static fn glass_paint(int row, int x, int y, int width, int height, unsigned int colour, b32 whole)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int address_to pixels = windows_buffer(table, row, 0);
+
+        for (int line = y; line < y + height; line++)
+                for (int column = x; column < x + width; column++)
+                        pixels[line * GLASS_SIDE + column] = colour;
+        table->buffer_index[row] = 0;
+        table->damage_x[row] = x;
+        table->damage_y[row] = y;
+        table->damage_width[row] = whole ? 0 : width;
+        table->damage_height[row] = height;
+        table->frame[row]++;
+        compositor_take(row);
+}
+
+static unsigned int glass_at(int x, int y)
+{
+        return compositor.scanout[y * GLASS_SIDE + x] & 0xffffffu;
+}
+
+static fn check_glass(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[80 * 80], shown[80 * 80];
+        struct windows address_to table;
+        unsigned int side, mismatched = 0, bounded = 1, kept = 1, distinct = 0, previous = 0, falling = 1;
+        positive blurred, recomposed;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("glass: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+
+        // Under: red on the left, green on the right, from 10 to 150 each way.
+        table->x[1] = table->y[1] = 10;
+        table->width[1] = table->height[1] = 140;
+        glass_paint(1, 0, 0, 70, 140, 0xff0000u, true);
+        glass_paint(1, 70, 0, 70, 140, 0x00ff00u, true);
+
+        // The glass over it, 40 to 120: clear, but for an opaque square and a half white one.
+        table->x[2] = table->y[2] = 40;
+        table->width[2] = table->height[2] = 80;
+        table->glass[2] = WINDOW_GLASS;
+        glass_paint(2, 0, 0, 80, 80, 0, true);
+        glass_paint(2, 5, 5, 10, 10, 0xff123456u, true);
+        glass_paint(2, 20, 5, 10, 10, 0x80808080u, true);
+        compositor_present();
+        side = compositor.glass_side[2];
+
+        check("glass: an opaque pixel of the picture is its own colour", glass_at(50, 50) == 0x123456u);
+        check("glass: a clear one far from any edge under it is the tint of the colour under it",
+              glass_at(50, 72) == compositor_glass_tint(0xff0000u, side));
+        check("glass: a half one is the picture over that tint", glass_at(62, 48) == compositor_over(0x80808080u,
+                                                                                                   compositor_glass_tint(0xff0000u, side)));
+        for (int x = 60; x < 100; x++)
+        {
+                unsigned int red = glass_at(x, 100) >> 16 & 255;
+
+                distinct += x == 60 || red != previous;
+                falling &= x == 60 || red <= previous;
+                previous = red;
+        }
+        check("glass: the edge between red and green under it comes through blurred, not as a step", distinct >= 8 && falling);
+        for (int y = 40; y < 120; y++)
+                for (int x = 40; x < 120; x++)
+                {
+                        unsigned int pixel = glass_at(x, y), r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
+
+                        if ((x - 40 >= 5 && x - 40 < 30 && y - 40 >= 5 && y - 40 < 15) ||
+                            (x - 40 < COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
+                            (x - 40 >= 80 - COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
+                            (x - 40 < COMPOSITOR_RADIUS && y - 40 >= 80 - COMPOSITOR_RADIUS) ||
+                            (x - 40 >= 80 - COMPOSITOR_RADIUS && y - 40 >= 80 - COMPOSITOR_RADIUS) || (x >= 100 && y < 60))
+                                continue;
+                        kept &= side ? (r >= COMPOSITOR_GLASS_LIGHTEST && g >= COMPOSITOR_GLASS_LIGHTEST && b >= COMPOSITOR_GLASS_LIGHTEST)
+                                     : (r <= COMPOSITOR_GLASS_DARKEST && g <= COMPOSITOR_GLASS_DARKEST && b <= COMPOSITOR_GLASS_DARKEST);
+                }
+        check("glass: every clear pixel is kept on its side of lightness, so an ink that stands out from the ground does everywhere", kept);
+        check("glass: its program is told the ground, and knocked", table->ground[2] && (compositor.woken & 4u));
+
+        // Its own picture changed: composed again where it changed, and nothing blurred.
+        blurred = compositor.blurred;
+        recomposed = compositor.recomposed;
+        glass_paint(2, 60, 60, 6, 4, 0xff000000u, false);
+        compositor_present();
+        check("glass: a change to its own picture blurs nothing again and composes only the change",
+              compositor.blurred == blurred && compositor.recomposed == recomposed + 24 && glass_at(102, 102) == 0);
+
+        // A window over it changes: nothing of the glass under it is made again.
+        table->x[3] = 90;
+        table->y[3] = 90;
+        table->width[3] = table->height[3] = 40;
+        glass_paint(3, 0, 0, 40, 40, 0x0000ffu, true);
+        compositor_present();
+        blurred = compositor.blurred;
+        recomposed = compositor.recomposed;
+        glass_paint(3, 4, 4, 8, 8, 0xffff00u, false);
+        compositor_present();
+        check("glass: a change to a window over it blurs nothing under it again",
+              compositor.blurred == blurred && compositor.recomposed == recomposed);
+        table->pid[3] = 3;
+        compositor_leave(3);
+        compositor_present();
+
+        // The scene under it changes at random: blurred again within the reach of each change, and the same as
+        // blurring all of it again from nothing.
+        for (int round = 0; round < 24; round++)
+        {
+                int x = (int)render_next(130), y = (int)render_next(130), width = 1 + (int)render_next(10),
+                    height = 1 + (int)render_next(10), reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
+                positive most = (positive)(width + 2 * reach) * (positive)(height + 2 * reach);
+
+                blurred = compositor.blurred;
+                glass_paint(1, x, y, width, height, render_next(0x1000000), false);
+                compositor_present();
+                bounded &= compositor.blurred - blurred <= most;
+                memory_copy(made, compositor.backdrop[2], sizeof(made));
+                memory_copy(shown, compositor.composed[2], sizeof(shown));
+
+                compositor.glass_made[2][2] = 0;
+                compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+                compositor_present();
+                mismatched += memory_compare(made, compositor.backdrop[2], sizeof(made)) != 0 ||
+                              memory_compare(shown, compositor.composed[2], sizeof(shown)) != 0;
+        }
+        check("glass: a change under it is blurred again no further than the blur reaches from it", bounded);
+        check("glass: what is blurred again in part is what blurring all of it from nothing makes", !mismatched);
+
+        // Lifted: the window under rises and takes the keys.
+        table->lift[1]++;
+        compositor_take(1);
+        check("glass: a lift raises a window and gives it the keys",
+              compositor.stack[compositor.stacked - 1] == 1 && compositor.focus == 1);
+
+        table->pid[1] = 1;
+        table->pid[2] = 2;
+        compositor_leave(2);
+        compositor_leave(1);
+        check("glass: a glass window gone gives its pictures back", !compositor.backdrop[2] && !compositor.glassy[2]);
+        compositor_call(syscall(munmap), (positive)compositor.table,
+                        compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        if (compositor.blur)
+                compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
+        memory_zero(&compositor, sizeof(compositor));
+}
+
 // A code point as UTF-8, into bytes; the count of bytes it takes.
 static positive render_glyph(p8 address_to bytes, p32 code)
 {
@@ -108439,6 +108624,7 @@ b32 main()
         check_keys();
         check_pointer();
         check_take();
+        check_glass();
 
         // What the terminal says its paper and ink are is what it paints them with.
         {

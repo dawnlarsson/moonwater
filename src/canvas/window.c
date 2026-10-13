@@ -546,6 +546,20 @@ static inline int window_key(struct window *window, struct window_key *key)
         and every row of every buffer is stride pixels long, the output's
         width, so a window is any size up to the output's and nothing is
         made again when it changes.
+
+        A window that writes WINDOW_GLASS into its glass column before its
+        first picture is glass: what is under it shows through, blurred, and
+        its buffer is ARGB, 0xaarrggbb premultiplied, so a pixel of 0 is the
+        glass alone and one of alpha 255 the program's colour alone. The
+        glass is tinted toward its own side of lightness, and the compositor
+        writes the colour it came to, on average, into ground and knocks
+        when that changes enough to matter: the colour an ink has to stand
+        out from (window_contrast).
+
+        lift is a count anyone holding the table may add one to and knock
+        for: the window is brought back if it was put away, raised over the
+        others and given the keys, as its tab would. It is how a second
+        start of a program that keeps one window finds the first.
 */
 #define WINDOWS_TABLE "/run/moonwater/windows"
 #define WINDOWS_DOOR "/run/moonwater/window."
@@ -559,6 +573,9 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_EVENT_MOTION 2u
 #define WINDOW_EVENT_BUTTON 3u
 #define WINDOW_EVENT_WHEEL 4u
+
+// glass: the window is frosted glass, its buffer premultiplied ARGB over it.
+#define WINDOW_GLASS 1u
 
 struct windows
 {
@@ -580,6 +597,9 @@ struct windows
         // What the last picture changed: a width of 0 is all of it, and a height of 0 none.
         int damage_x[WINDOWS], damage_y[WINDOWS], damage_width[WINDOWS], damage_height[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
+        unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, read with the first picture
+        unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
+        unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
 
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
@@ -1103,6 +1123,7 @@ static long windows_take(struct window_row *own)
         table->buffer_index[own->row] = 0;
         table->damage_width[own->row] = 0;
         table->title[own->row][0] = 0;
+        table->glass[own->row] = 0;
         table->event_tail[own->row] = __atomic_load_n(&table->event_head[own->row], __ATOMIC_ACQUIRE);
         table->shown[own->row] = 0;
         __atomic_store_n(&table->frame[own->row], 0, __ATOMIC_RELEASE);

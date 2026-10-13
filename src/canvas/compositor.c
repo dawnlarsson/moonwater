@@ -1593,6 +1593,7 @@ struct compositor_poll
 #define COMPOSITOR_CLOEXEC 0x80000
 // No row: no window has the keys, is under the pointer, is held.
 #define COMPOSITOR_NONE (-1)
+#define COMPOSITOR_OVER (-1) // damage_by: the pointer or the tabs, over every window and under none
 
 static struct
 {
@@ -1647,6 +1648,23 @@ static struct
         unsigned int *glass; // what is under the tabs, blurred: as wide as the band and its margins, as high
         unsigned long glass_bytes;
         int band_stale;
+
+        /*
+                The windows that are glass (compositor_glass_pass): what is under each, blurred and not yet tinted,
+                and its picture over that, each cut at the window's own size; the size and place the backdrop was
+                made for (a width of 0: never); what of it is to be blurred again and what composed again,
+                x1, y1, x2, y2 on the output and empty when x2 is not past x1; which side of lightness its tint
+                goes to, and the ground it told its program. The scratch the blur is made in is shared.
+        */
+        unsigned int glassy[WINDOWS];
+        unsigned int *backdrop[WINDOWS], *composed[WINDOWS];
+        unsigned long glass_cut[WINDOWS];
+        int glass_made[WINDOWS][4], stale[WINDOWS][4], dirty[WINDOWS][4];
+        unsigned int glass_side[WINDOWS], glass_told[WINDOWS], lifted[WINDOWS];
+        unsigned int *blur;
+        unsigned long blur_bytes;
+        positive blurred, recomposed; // pixels blurred again and composed again, all frames
+        int damage_by; // what is being damaged: 0 the scene, a row and one its own picture, COMPOSITOR_OVER what lies over all
         unsigned int minute;
         font_face face;
         font_engine *engine;
@@ -1730,6 +1748,96 @@ static long compositor_joined(const int *a, const int *b, int *into)
         return compositor_area(into);
 }
 
+// A rectangle, x1, y1, x2, y2, grown to take in another; one with x2 not past x1 is none.
+static void compositor_union(int *into, const int *other)
+{
+        if (other[2] <= other[0] || other[3] <= other[1])
+                return;
+        if (into[2] <= into[0] || into[3] <= into[1])
+        {
+                memory_copy(into, other, 4 * sizeof(int));
+                return;
+        }
+        compositor_joined(into, other, into);
+}
+
+// A rectangle cut to another; none when they do not meet.
+static void compositor_meet(int *into, const int *other)
+{
+        into[0] = into[0] > other[0] ? into[0] : other[0];
+        into[1] = into[1] > other[1] ? into[1] : other[1];
+        into[2] = into[2] < other[2] ? into[2] : other[2];
+        into[3] = into[3] < other[3] ? into[3] : other[3];
+        if (into[2] <= into[0] || into[3] <= into[1])
+                into[0] = into[1] = into[2] = into[3] = 0;
+}
+
+static int compositor_glass_reach(int logical);
+
+// How far a glass window's blur reaches each way, in logical pixels: a box of twice that.
+#define COMPOSITOR_GLASS_WINDOW 16
+
+// The rectangle of a window's contents, x1, y1, x2, y2, on the output and in it.
+static void compositor_contents_box(int row, int *box)
+{
+        int output[4] = {0, 0, compositor.width, compositor.height};
+
+        box[0] = compositor.x[row];
+        box[1] = compositor.y[row];
+        box[2] = compositor.x[row] + (int)compositor.w[row];
+        box[3] = compositor.y[row] + (int)compositor.h[row];
+        compositor_meet(box, output);
+}
+
+// Where a row is in the stack, from 0 at the bottom; -1 when it is not in it.
+static int compositor_stack_place(int row)
+{
+        for (unsigned int at = 0; at < compositor.stacked; at++)
+                if (compositor.stack[at] == row)
+                        return (int)at;
+        return -1;
+}
+
+/*
+        What a change does to the glass windows. A window's own picture is
+        composed over its backdrop again where it changed; anything else in
+        the scene -- the desktop, a window moved, raised or gone, or the
+        picture of a window under it -- is blurred again under it as far as
+        the blur reaches from the change, and only that. A window's picture
+        changes nothing of the glass below it, and what lies over every
+        window (the pointer drawn in software, the tabs) nothing of any.
+*/
+static void compositor_glass_touch(const int *rectangle)
+{
+        int reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
+        int by = compositor.damage_by > 0 ? compositor.damage_by - 1 : COMPOSITOR_NONE;
+        int lowest = by >= 0 ? compositor_stack_place(by) : -1;
+
+        if (compositor.damage_by == COMPOSITOR_OVER)
+                return;
+
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                int box[4], grown[4] = {rectangle[0] - reach, rectangle[1] - reach, rectangle[2] + reach,
+                                        rectangle[3] + reach};
+
+                if (!compositor.glassy[row] || !compositor.showing[row])
+                        continue;
+                compositor_contents_box(row, box);
+                if (row == by)
+                {
+                        memory_copy(grown, rectangle, sizeof(grown));
+                        compositor_meet(grown, box);
+                        compositor_union(compositor.dirty[row], grown);
+                        continue;
+                }
+                if (by >= 0 && compositor_stack_place(row) < lowest)
+                        continue;
+                compositor_meet(grown, box);
+                compositor_union(compositor.stale[row], grown);
+        }
+}
+
 static void compositor_damage(int x, int y, int width, int height)
 {
         int rectangle[4] = {x < 0 ? 0 : x, y < 0 ? 0 : y,
@@ -1740,6 +1848,8 @@ static void compositor_damage(int x, int y, int width, int height)
 
         if (rectangle[2] <= rectangle[0] || rectangle[3] <= rectangle[1])
                 return;
+
+        compositor_glass_touch(rectangle);
 
         while (at < compositor.damages)
         {
@@ -1839,6 +1949,13 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
                                            row == compositor.focus ? COMPOSITOR_INK_LINE_LIT : COMPOSITOR_INK_LINE};
         frame->close = 1;
+        // Glass is shown as its picture over its backdrop, composed at its own width.
+        if (compositor.glassy[row] && compositor.composed[row] && compositor.glass_made[row][2] == (int)compositor.w[row] &&
+            compositor.glass_made[row][3] == (int)compositor.h[row])
+        {
+                frame->pixels = compositor.composed[row];
+                frame->pitch = compositor.w[row];
+        }
 }
 
 static void compositor_damage_row(int row)
@@ -1908,7 +2025,9 @@ static void compositor_tabs_changed(void)
         compositor.band_stale = 1;
         compositor_band(compositor.width, compositor.height, compositor.scale, compositor.bottom, &x, &y, &width,
                         &height);
+        compositor.damage_by = COMPOSITOR_OVER;
         compositor_damage(x, y, width, height);
+        compositor.damage_by = 0;
 }
 
 // One line of text in the middle of a tab, in the tab's own colour for ground, cut off at its edge.
@@ -1976,44 +2095,62 @@ static int compositor_glass_reach(int logical)
         return reach;
 }
 
-// The glass: the scene under the span x0 to x1 of the band composed into it and blurred. Answers its width.
-static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x0, int x1,
-                                 const struct compositor_frame *band)
+/*
+        The scene under a rectangle gx, gy, gw by gh of the output, which may
+        run past its edges, composed into into (gw pixels a row) as the
+        frames have it, the output's last row and column again past its
+        edges, and blurred: a box across reach wide each side and down reach
+        high, each a power of two, read from back where it reaches, so the
+        pixel at x, y of the output is into's at x - across - gx, y - down - gy.
+        Every glass is made by this one routine, the tabs' and the windows'.
+        False, and into untouched, when none of it is on the output.
+*/
+static int compositor_blur(unsigned int *into, const struct compositor_frame *frames, unsigned int count, int gx,
+                           int gy, int gw, int gh, int across, int down)
 {
-        int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
-        int gx = x0 - across, gy = band->y - down, gw = x1 - x0 + 2 * across, gh = band->height + 2 * down;
         int cx0 = gx < 0 ? 0 : gx, cx1 = gx + gw > compositor.width ? compositor.width : gx + gw;
         int cy0 = gy < 0 ? 0 : gy, cy1 = gy + gh > compositor.height ? compositor.height : gy + gh;
-        unsigned long need = (unsigned long)gw * (unsigned long)gh * 4, bytes;
+        unsigned long bytes = (unsigned long)gw * (unsigned long)gh * 4;
         struct compositor_target under;
 
-        if (need > compositor.glass_bytes || cx1 <= cx0 || cy1 <= cy0)
+        if (cx1 <= cx0 || cy1 <= cy0)
                 return 0;
 
-        under = (struct compositor_target){compositor.glass, (unsigned long)gw, compositor.width, compositor.height,
+        under = (struct compositor_target){into, (unsigned long)gw, compositor.width, compositor.height,
                                            cx0, cy0, cx1, cy1, gx, gy};
-        compositor_scene(&under, windows, count);
+        compositor_scene(&under, frames, count);
 
         // Past the output's edges, its last row and column again.
         for (int row = 0; row < gh; row++)
         {
-                unsigned int *line = compositor.glass + (long)row * gw;
+                unsigned int *line = into + (long)row * gw;
                 int from = gy + row < cy0 ? cy0 - gy : gy + row >= cy1 ? cy1 - 1 - gy : row;
 
                 if (from != row)
-                        memory_copy(line, compositor.glass + (long)from * gw, (positive)gw * 4);
+                        memory_copy(line, into + (long)from * gw, (positive)gw * 4);
                 for (int column = 0; column < cx0 - gx; column++)
                         line[column] = line[cx0 - gx];
                 for (int column = cx1 - gx; column < gw; column++)
                         line[column] = line[cx1 - gx - 1];
         }
 
-        bytes = (unsigned long)gw * (unsigned long)gh * 4;
         for (int step = 1; step <= across; step *= 2)
-                memory_average_ahead((p8 address_to)compositor.glass, bytes - (unsigned long)step * 4, (positive)step * 4);
+                memory_average_ahead((p8 address_to)into, bytes - (unsigned long)step * 4, (positive)step * 4);
         for (int step = 1; step <= down; step *= 2)
-                memory_average_ahead((p8 address_to)compositor.glass, bytes - (unsigned long)step * gw * 4,
-                                     (positive)step * gw * 4);
+                memory_average_ahead((p8 address_to)into, bytes - (unsigned long)step * gw * 4, (positive)step * gw * 4);
+        return 1;
+}
+
+// The glass: the scene under the span x0 to x1 of the band composed into it and blurred. Answers its width.
+static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x0, int x1,
+                                 const struct compositor_frame *band)
+{
+        int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
+        int gw = x1 - x0 + 2 * across, gh = band->height + 2 * down;
+
+        if ((unsigned long)gw * (unsigned long)gh * 4 > compositor.glass_bytes ||
+            !compositor_blur(compositor.glass, windows, count, x0 - across, band->y - down, gw, gh, across, down))
+                return 0;
         return gw;
 }
 
@@ -2121,6 +2258,263 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 }
 
 /*
+        Glass windows: a window whose program asked for it (WINDOW_GLASS) is
+        what is under it, blurred by compositor_blur as the tabs' glass is
+        but further (a box of COMPOSITOR_GLASS_WINDOW each way), made more
+        vivid, and tinted toward one side of lightness for the whole window
+        -- the side its mean is on, held until the mean is well over on the
+        other, so a backdrop near the middle does not flicker -- and every
+        pixel kept on that side, so an ink that stands out from the ground
+        the program is told stands out everywhere. The program's picture,
+        premultiplied ARGB, lies over that.
+
+        Kept, not made again each frame: the backdrop is blurred again only
+        where the scene under it changed and as far as the blur reaches from
+        the change, or whole when the window moved, changed size or its side
+        changed; the picture over it is composed again only where either
+        changed. Both are cut at the window's own size. Bottom first, so a
+        glass window over another sees it as it is now, and before the tabs'
+        glass, which sees them both.
+*/
+#define COMPOSITOR_GLASS_TINT 96      // how far toward its side a glass window's tint goes, in 256ths
+#define COMPOSITOR_GLASS_DARKEST 0x5c // dark glass: no colour of a pixel brighter
+#define COMPOSITOR_GLASS_LIGHTEST 0xb4 // light glass: none dimmer
+#define COMPOSITOR_GLASS_SIDE 116394750u // window_light's line between the sides
+#define COMPOSITOR_GLASS_UNSIDED 2u
+
+static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int side)
+{
+        unsigned int pixel = window_mix(compositor_vivid(blurred), side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT);
+        unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
+        unsigned int most = r > g ? r : g, least = r < g ? r : g;
+
+        most = most > b ? most : b;
+        least = least < b ? least : b;
+        if (!side && most > COMPOSITOR_GLASS_DARKEST)
+        {
+                r = r * COMPOSITOR_GLASS_DARKEST / most;
+                g = g * COMPOSITOR_GLASS_DARKEST / most;
+                b = b * COMPOSITOR_GLASS_DARKEST / most;
+        }
+        else if (side && least < COMPOSITOR_GLASS_LIGHTEST)
+        {
+                r = 255 - (255 - r) * (255 - COMPOSITOR_GLASS_LIGHTEST) / (255 - least);
+                g = 255 - (255 - g) * (255 - COMPOSITOR_GLASS_LIGHTEST) / (255 - least);
+                b = 255 - (255 - b) * (255 - COMPOSITOR_GLASS_LIGHTEST) / (255 - least);
+        }
+        return r << 16 | g << 8 | b;
+}
+
+// A premultiplied pixel over an opaque one.
+static unsigned int compositor_over(unsigned int pixel, unsigned int under)
+{
+        unsigned int rest = 255 - (pixel >> 24), out = 0;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int channel = (pixel >> shift & 255) + ((under >> shift & 255) * rest + 127) / 255;
+
+                out |= (channel > 255 ? 255 : channel) << shift;
+        }
+        return out;
+}
+
+// The picture over the tinted backdrop, inside c (x1, y1, x2, y2 on the output, inside the window).
+static void compositor_glass_compose(int row, const int *c)
+{
+        const unsigned int *picture = compositor_pixels(row);
+        unsigned int width = compositor.w[row], side = compositor.glass_side[row];
+        int x0 = compositor.x[row], y0 = compositor.y[row];
+
+        for (int y = c[1]; y < c[3]; y++)
+        {
+                const unsigned int *from = picture + (unsigned long)(y - y0) * (unsigned long)compositor.width + (c[0] - x0);
+                const unsigned int *under = compositor.backdrop[row] + (unsigned long)(y - y0) * width + (c[0] - x0);
+                unsigned int *into = compositor.composed[row] + (unsigned long)(y - y0) * width + (c[0] - x0);
+
+                for (int x = 0; x < c[2] - c[0]; x++)
+                {
+                        unsigned int pixel = from[x], alpha = pixel >> 24;
+
+                        into[x] = alpha == 255 ? pixel & 0xffffffu
+                                  : alpha      ? compositor_over(pixel, compositor_glass_tint(under[x], side))
+                                               : compositor_glass_tint(under[x], side);
+                }
+        }
+        compositor.recomposed += (positive)(c[2] - c[0]) * (positive)(c[3] - c[1]);
+}
+
+/*
+        The side a glass window's tint goes to, from the mean of its backdrop
+        (a pixel in eight each way), and the ground that comes to: what its
+        program's inks stand out from. Answers whether the side changed.
+*/
+static int compositor_glass_side(int row, const int *box)
+{
+        unsigned long sum[3] = {0, 0, 0}, count = 0;
+        unsigned int width = compositor.w[row], was = compositor.glass_side[row], mean, light, ground;
+        int step = 8 * compositor.scale;
+
+        for (int y = box[1] + step / 2; y < box[3]; y += step)
+                for (int x = box[0] + step / 2; x < box[2]; x += step)
+                {
+                        unsigned int pixel = compositor_vivid(
+                            compositor.backdrop[row][(unsigned long)(y - compositor.y[row]) * width + (unsigned long)(x - compositor.x[row])]);
+
+                        sum[0] += pixel >> 16 & 255;
+                        sum[1] += pixel >> 8 & 255;
+                        sum[2] += pixel & 255;
+                        count++;
+                }
+        if (!count)
+                return 0;
+
+        mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
+        {
+                unsigned int r = mean >> 16 & 255, g = mean >> 8 & 255, b = mean & 255;
+
+                light = 2126u * r * r + 7152u * g * g + 722u * b * b;
+        }
+        compositor.glass_side[row] = was == COMPOSITOR_GLASS_UNSIDED ? light > COMPOSITOR_GLASS_SIDE
+                                     : was                           ? light > COMPOSITOR_GLASS_SIDE / 3 * 2
+                                                                     : light > COMPOSITOR_GLASS_SIDE / 2 * 3;
+        ground = compositor_glass_tint(mean, compositor.glass_side[row]);
+
+        // Told when the side changes, and when it has moved far enough for an ink to be worth drawing again.
+        {
+                unsigned int told = compositor.glass_told[row], moved = 0;
+
+                for (unsigned int shift = 0; shift < 24; shift += 8)
+                {
+                        int d = (int)(ground >> shift & 255) - (int)(told >> shift & 255);
+
+                        moved += (unsigned int)(d < 0 ? -d : d);
+                }
+                if (compositor.glass_side[row] != was || moved > 24)
+                {
+                        compositor.glass_told[row] = ground;
+                        compositor.table->ground[row] = ground;
+                        compositor.woken |= 1u << row;
+                }
+        }
+        return compositor.glass_side[row] != was;
+}
+
+// A glass window's two pictures given back, and it is none.
+static void compositor_glass_drop(int row)
+{
+        if (compositor.backdrop[row])
+                compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
+        compositor.backdrop[row] = compositor.composed[row] = null;
+        compositor.glass_cut[row] = 0;
+        compositor.glassy[row] = 0;
+        memory_zero(compositor.glass_made[row], sizeof(compositor.glass_made[row]));
+        memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
+        memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
+}
+
+// Room for both pictures at the window's size, and the blur's scratch for the largest it is asked for.
+static int compositor_glass_room(int row, unsigned long scratch)
+{
+        unsigned long pixels = (unsigned long)compositor.w[row] * compositor.h[row];
+        unsigned long need = (pixels * 8 + 4095) & ~4095ul;
+        long mapped;
+
+        if (need > compositor.glass_cut[row])
+        {
+                if (compositor.backdrop[row])
+                        compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
+                mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
+                compositor.backdrop[row] = compositor.composed[row] = null;
+                compositor.glass_cut[row] = 0;
+                if (mapped < 0 && mapped > -4096)
+                        return 0;
+                compositor.backdrop[row] = (unsigned int *)mapped;
+                compositor.glass_cut[row] = need;
+        }
+        compositor.composed[row] = compositor.backdrop[row] + pixels;
+
+        scratch = (scratch * 4 + 4095) & ~4095ul;
+        if (scratch > compositor.blur_bytes)
+        {
+                if (compositor.blur)
+                        compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
+                mapped = compositor_call(syscall(mmap), 0, scratch, 3, 0x22, (positive)-1, 0);
+                compositor.blur = null;
+                compositor.blur_bytes = 0;
+                if (mapped < 0 && mapped > -4096)
+                        return 0;
+                compositor.blur = (unsigned int *)mapped;
+                compositor.blur_bytes = scratch;
+        }
+        return 1;
+}
+
+static void compositor_glass_pass(struct compositor_frame *frames, const unsigned char *rows, unsigned int count)
+{
+        int reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int row = rows[at], box[4], blur[4], *made = compositor.glass_made[row];
+                int place[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
+                if (!compositor.glassy[row])
+                        continue;
+
+                compositor_contents_box(row, box);
+                if (memory_compare(made, place, sizeof(place)))
+                {
+                        memory_copy(made, place, sizeof(place));
+                        memory_copy(compositor.stale[row], box, sizeof(box));
+                }
+                memory_copy(blur, compositor.stale[row], sizeof(blur));
+                compositor_meet(blur, box);
+
+                if (!compositor_glass_room(row, blur[2] > blur[0] ? (unsigned long)(blur[2] - blur[0] + 2 * reach) *
+                                                                       (unsigned long)(blur[3] - blur[1] + 2 * reach)
+                                                                 : 0))
+                {
+                        // No memory for it: the window is shown as it is drawn, and no longer glass.
+                        compositor_glass_drop(row);
+                        continue;
+                }
+
+                if (blur[2] > blur[0])
+                {
+                        int gw = blur[2] - blur[0] + 2 * reach, gh = blur[3] - blur[1] + 2 * reach;
+
+                        compositor_blur(compositor.blur, frames, at, blur[0] - reach, blur[1] - reach, gw, gh, reach, reach);
+                        for (int y = blur[1]; y < blur[3]; y++)
+                                memory_copy(compositor.backdrop[row] + (unsigned long)(y - place[1]) * (unsigned long)place[2] +
+                                                (blur[0] - place[0]),
+                                            compositor.blur + (unsigned long)(y - blur[1]) * (unsigned long)gw,
+                                            (positive)(blur[2] - blur[0]) * 4);
+                        compositor.blurred += (positive)(blur[2] - blur[0]) * (positive)(blur[3] - blur[1]);
+                        compositor_union(compositor.dirty[row], blur);
+                        if (compositor_glass_side(row, box))
+                                memory_copy(compositor.dirty[row], box, sizeof(box));
+                }
+
+                compositor_meet(compositor.dirty[row], box);
+                if (compositor.dirty[row][2] > compositor.dirty[row][0])
+                {
+                        int *c = compositor.dirty[row];
+
+                        compositor_glass_compose(row, c);
+                        // What changed of it is shown, and blurred again under any glass over it.
+                        compositor.damage_by = row + 1;
+                        compositor_damage(c[0], c[1], c[2] - c[0], c[3] - c[1]);
+                        compositor.damage_by = 0;
+                }
+                memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
+                memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
+                frames[at].pixels = compositor.composed[row];
+                frames[at].pitch = (unsigned long)place[2];
+        }
+}
+
+/*
         The damage, composed straight onto the scanout and then announced.
         The scanout is a mapping of the card's memory, so it is only ever
         written: every pixel of the damage once, by the stores of
@@ -2138,6 +2532,7 @@ static void compositor_present(void)
         unsigned short clip[COMPOSITOR_DAMAGE][4];
         struct compositor_dirty dirty = {compositor.fb, 0, 0, 0, (unsigned long)clip};
         struct compositor_frame band;
+        unsigned char rows[WINDOWS];
         unsigned int count = 0, windows;
 
         if (!compositor.damages)
@@ -2145,8 +2540,12 @@ static void compositor_present(void)
 
         for (unsigned int at = 0; at < compositor.stacked; at++)
                 if (compositor_visible(compositor.stack[at]))
+                {
+                        rows[count] = compositor.stack[at];
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
+                }
         windows = count;
+        compositor_glass_pass(frames, rows, windows);
 
         // What is under the tabs changed, or what they say: the glass is made again over it, and shown.
         compositor_band_frame(&band);
@@ -2155,7 +2554,9 @@ static void compositor_present(void)
         if (compositor.band_stale)
         {
                 compositor_band_draw(frames, windows);
+                compositor.damage_by = COMPOSITOR_OVER;
                 compositor_damage(band.x, band.y, band.width, band.height);
+                compositor.damage_by = 0;
         }
 
         compositor_band_frame(&band);
@@ -2354,7 +2755,9 @@ static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int 
         int left, top;
 
         compositor_cursor_cell(&left, &top, x, y, shape, scale);
+        compositor.damage_by = COMPOSITOR_OVER;
         compositor_damage(left, top, CP_CURSOR_W * scale, CP_CURSOR_H * scale);
+        compositor.damage_by = 0;
 }
 
 // Whether this card's cursor plane is worth using: the driver's name and the setting Canvas was started with.
@@ -3178,6 +3581,8 @@ static void compositor_first_place(int row, int *x, int *y)
         }
 }
 
+static void compositor_reveal(int row);
+
 /*
         A knock: what the row says now, read once into the compositor's own
         columns and clamped there. A new title goes to its tab. A new picture
@@ -3202,6 +3607,13 @@ static void compositor_take(int row)
                 memory_copy(compositor.title[row], title, WINDOWS_TITLE);
                 if (compositor.showing[row])
                         compositor_tabs_changed();
+        }
+
+        // Lifted: brought back, raised and given the keys, as its tab would.
+        if (compositor.showing[row] && table->lift[row] != compositor.lifted[row])
+        {
+                compositor.lifted[row] = table->lift[row];
+                compositor_reveal(row);
         }
 
         if (frame == compositor.seen[row])
@@ -3229,6 +3641,9 @@ static void compositor_take(int row)
                 table->state[row] = compositor.state[row];
                 compositor.arranged[row] = COMPOSITOR_FLOATING;
                 compositor.edges[row] = 0;
+                compositor.lifted[row] = table->lift[row];
+                compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
+                compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
                 compositor_first_place(row, &x, &y);
@@ -3283,11 +3698,13 @@ static void compositor_take(int row)
 
                 x2 = x2 > (long)width ? (long)width : x2;
                 y2 = y2 > (long)height ? (long)height : y2;
+                compositor.damage_by = row + 1;
                 if (damage[2] <= 0)
                         compositor_damage_row(row);
                 else if (x2 > x1 && y2 > y1)
                         compositor_damage(compositor.x[row] + (int)x1, compositor.y[row] + (int)y1, (int)(x2 - x1),
                                           (int)(y2 - y1));
+                compositor.damage_by = 0;
         }
 }
 
@@ -3324,6 +3741,9 @@ static void compositor_leave(int row)
         compositor.picture_w[row] = compositor.picture_h[row] = compositor.asking[row] = 0;
         compositor.arranged[row] = COMPOSITOR_FLOATING;
         compositor.title[row][0] = 0;
+        compositor_glass_drop(row);
+        compositor.glass_side[row] = compositor.glass_told[row] = 0;
+        table->ground[row] = 0;
         table->state[row] = 0;
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
@@ -4619,6 +5039,8 @@ static b32 compositor_main()
                       (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,
                       (positive)compositor.cursor.refused);
         string_format(log, "compositor: the processor was held %p times\n", (positive)(compositor.holds == ~0ul ? 0 : compositor.holds));
+        string_format(log, "compositor: glass blurred again %p pixels and composed again %p\n", compositor.blurred,
+                      compositor.recomposed);
         for (unsigned int which = 0; which < 3; which++)
                 string_format(log, "compositor: %s: %p, on average %p us, worst %p us\n",
                               which == 0 ? "pointer to the plane" : which == 1 ? "pointer to the frame" : "key to the window",
@@ -4636,8 +5058,8 @@ static b32 compositor_main()
 // surface ----------------------------------------------------------
 /*
         A test client: surface [-x X] [-y Y] [-w WIDTH] [-h HEIGHT] [-c RRGGBB]
-        [-T TITLE] [-p] [-m] [-R] [-n] [-F PICTURES] [-f FONT.ttf] [-t TEXT]
-        [-s SECONDS].
+        [-T TITLE] [-p] [-m] [-R] [-n] [-G] [-a ALPHA] [-F PICTURES]
+        [-f FONT.ttf] [-t TEXT] [-s SECONDS].
 
         A window of one colour at X, Y, a line of TEXT drawn with font.c on it
         when FONT is given, and a line on standard output for everything it is
@@ -4645,8 +5067,9 @@ static b32 compositor_main()
         coming and going, a close asked for, and with -p the pointer's
         motions. -m puts it away as it opens, -R draws the size it is asked
         for, -n never shows a picture, and -F shows PICTURES more, as fast as
-        it can. It lives until it is asked to close, the compositor goes, or
-        SECONDS.
+        it can. -G makes it glass, its colour laid over the glass at ALPHA
+        (0, the default, is the glass alone, 255 the colour alone). It lives
+        until it is asked to close, the compositor goes, or SECONDS.
 */
 static void surface_draw(const struct window_row *own, unsigned int which, unsigned int width, unsigned int height,
                          unsigned int colour, string_address font, string_address text)
@@ -4657,7 +5080,8 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
         for (unsigned int line = 0; line < height; line++)
                 memory_fill_u32(pixels + (unsigned long)line * table->stride, width, colour);
 
-        if (font)
+        // Glass has no ground to draw text on.
+        if (font && !table->glass[own->row])
         {
                 positive size = 0;
                 positive bytes = compositor_map_file(font, address_of size);
@@ -4693,8 +5117,8 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
 
 static b32 surface_main()
 {
-        bipolar x = 0, y = 0, width = 320, height = 200, colour = 0x3366aa, seconds = -1, flood = 0;
-        b32 pointer = 0, never = 0, away = 0, sized = 0, focused = 0;
+        bipolar x = 0, y = 0, width = 320, height = 200, colour = 0x3366aa, seconds = -1, flood = 0, alpha = 0;
+        b32 pointer = 0, never = 0, away = 0, sized = 0, focused = 0, glass = 0;
         string_address title = null, font = null, text = (string_address) "Moonwater";
         struct window_row own;
         struct windows *table;
@@ -4711,8 +5135,9 @@ static b32 surface_main()
 
                 if (option[0] != '-' || !option[1] || option[2])
                         continue;
-                if (option[1] == 'p' || option[1] == 'n' || option[1] == 'm' || option[1] == 'R')
+                if (option[1] == 'p' || option[1] == 'n' || option[1] == 'm' || option[1] == 'R' || option[1] == 'G')
                 {
+                        glass |= option[1] == 'G';
                         pointer |= option[1] == 'p';
                         sized |= option[1] == 'R';
                         never |= option[1] == 'n';
@@ -4731,6 +5156,7 @@ static b32 surface_main()
                 case 'c': colour = compositor_number(value, 1); break;
                 case 's': seconds = compositor_number(value, 0); break;
                 case 'F': flood = compositor_number(value, 0); break;
+                case 'a': alpha = compositor_number(value, 0); break;
                 case 'T': title = value; break;
                 case 'f': font = value; break;
                 case 't': text = value; break;
@@ -4749,6 +5175,14 @@ static b32 surface_main()
         width = width < 1 ? 1 : width > (bipolar)table->output_width ? (bipolar)table->output_width : width;
         height = height < 1 ? 1 : height > (bipolar)table->output_height ? (bipolar)table->output_height : height;
         colour &= 0xffffff;
+        if (glass)
+        {
+                // Premultiplied: each colour scaled by the alpha, which is the top byte.
+                alpha = alpha < 0 ? 0 : alpha > 255 ? 255 : alpha;
+                colour = (bipolar)window_mix(0, (unsigned int)colour, (unsigned int)(alpha + (alpha >> 7))) |
+                         (bipolar)((unsigned int)alpha << 24);
+                table->glass[own.row] = WINDOW_GLASS;
+        }
         table->x[own.row] = (int)x;
         table->y[own.row] = (int)y;
         table->state[own.row] = away ? WINDOW_MINIMIZED : 0;
