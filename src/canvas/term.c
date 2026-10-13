@@ -691,6 +691,11 @@ static _Bool term_simd;
 /*
         The queue's fixed buffer. TERM_FIXED_QUEUE gives a userspace build the
         same buffer, so the test harness runs ring 0's limits too.
+
+        Ring 0 has no reader for it: the drain that writes it to a pty is
+        screen.c, and screen.c is included by the userspace shell only. In the
+        kernel the buffer fills once, and what it then holds is whole answers
+        and nothing else; nothing is sent from it.
 */
 #if defined(KERNEL_MODE) || defined(TERM_FIXED_QUEUE)
 #define TO_SHELL_MAX 2048
