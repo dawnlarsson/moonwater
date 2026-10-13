@@ -1817,6 +1817,15 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         }
 }
 
+//      An edge of a vertical stem is a run of the outline at one x a sixth
+//      of the x-height tall: the sides of o, c, e, O and 0, where a curve is
+//      vertical for a short way, are edges too (Plex Mono's o is 123 units
+//      against the third, 172, that the bars and the standard still take),
+//      so a round letter's sides are black columns as a straight one's are.
+#ifndef FONT_ROUND_RUN
+#define FONT_ROUND_RUN 6
+#endif
+
 //      Vertical stems, for a cell's whole-pixel pen. heavier is what a
 //      synthetic bold added to every stem, so the standard grows with it.
 static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier)
@@ -1825,7 +1834,7 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
         b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
-        font_snap_axis(e, normal, x_height / 3, scale / 4, null, 0, FONT_ONE * 3 / 4);
+        font_snap_axis(e, normal, x_height / FONT_ROUND_RUN, scale / 4, null, 0, FONT_ONE * 3 / 4);
 }
 
 //      Horizontal bars, for any fitted text: its baseline is a whole pixel.
