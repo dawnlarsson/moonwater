@@ -53825,345 +53825,78 @@ static fn sockets(void)
 #endif
 
 /*
-        The client of Canvas's surface protocol (src/canvas/window.c), on
-        the three machines' real syscalls: the compositor's end of the
-        connection is the other half of a socketpair, so what is checked is
-        what surface_wait does to a SOCK_SEQPACKET with wakes on it. recvmmsg
-        is syscall 299 on x86-64 and 243 on arm64 and riscv64, and a wrong
-        number would be a different call, not a failure to compile.
+        The client of the compositor's window table (src/canvas/window.c), on
+        the three machines' real syscalls: a row's events read out of its
+        columns in order, a picture counted and knocked for, whether the
+        compositor has taken it, the doors' names, and the wake -- a pipe
+        here -- drained by windows_wait and read as the compositor gone once
+        its writing end has closed. read, write and ppoll are different
+        numbers on x86-64 and on arm64 and riscv64, and a wrong one would be a
+        different call, not a failure to compile.
 */
 #ifdef LINUX
-static fn surface_interrupt(b32 number) { (void)number; }
-
-static fn surfaces(void)
+static fn windows_client(void)
 {
-        static struct surface page;
-        static const struct { unsigned int width, height; } sizes[] = {
-                {1, 1}, {64, 32}, {96, 48}, {320, 200}, {1023, 1}, {1024, 768}, {1920, 1080},
-                {3840, 2160}, {4096, 4096}, {16384, 16384}, {1, 16384}, {16384, 1}};
-        struct surface_message wake = {SURFACE_WAKE, 0, {0}}, taken;
-        b32 pair[2] = {-1, -1}, gate[2] = {-1, -1};
-        b32 round = 0;
-        long got;
+        static struct windows table;
+        struct window_row own = {&table, 3, -1, -1, 0};
+        struct window_event event;
+        b32 wake[2] = {-1, -1}, door[2] = {-1, -1};
+        char name[48], byte;
+        unsigned int read_back = 0, in_order = 1;
 
-        /*
-                Where a slot is, found from the size and not from the page:
-                the program can write buffer_offset after the compositor has
-                answered, and 0x7ffff000 there once sent the blit out of the
-                compositor's mapping. surface_slot is what the compositor
-                finds a slot with; it has to say what the create laid out.
-        */
-        for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
+        windows_door_name(name, 3, 0);
+        check("row 3's door", string_compare((string_address)name, (string_address) "/run/moonwater/window.3") == 0);
+        windows_door_name(name, 17, 1);
+        check("row 17's wake",
+              string_compare((string_address)name, (string_address) "/run/moonwater/window.17.wake") == 0);
+
+        check("an empty ring has no event", !windows_event(&own, &event));
+        for (unsigned int at = 0; at < WINDOWS_EVENTS; at++)
         {
-                positive width = sizes[at].width, height = sizes[at].height;
-                positive first = SURFACE_PAGE_ROUND(width * height * 4);
-
-                page.buffer_offset[0] = (unsigned int)WINDOW_PIXELS;
-                page.buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + first);
-                check("surface_slot 0 is the first page after the header",
-                      (char *)surface_slot(&page, 0, width, height) == (char *)&page + WINDOW_PIXELS);
-                check("surface_slot 1 is a page-rounded slot further",
-                      (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
-                check("surface_slot agrees with the offsets the create wrote",
-                      surface_slot(&page, 0, width, height) == surface_buffer(&page, 0) &&
-                      surface_slot(&page, 1, width, height) == surface_buffer(&page, 1));
-                check("a slot number is taken modulo two",
-                      surface_slot(&page, 2, width, height) == surface_slot(&page, 0, width, height) &&
-                      surface_slot(&page, 3, width, height) == surface_slot(&page, 1, width, height));
-
-                page.buffer_offset[0] = 0x7ffff000u;
-                page.buffer_offset[1] = 0xffffffffu;
-                check("surface_slot does not read the page's offsets",
-                      (char *)surface_slot(&page, 0, width, height) == (char *)&page + WINDOW_PIXELS &&
-                      (char *)surface_slot(&page, 1, width, height) == (char *)&page + WINDOW_PIXELS + first);
+                table.event_type[3][at] = WINDOW_EVENT_KEY;
+                table.event_flags[3][at] = WINDOW_KEY_DOWN;
+                table.event_a[3][at] = (int)at;
+                table.event_b[3][at] = -(int)at;
         }
-
-        /*
-                The window list a panel is sent: past the header and before
-                the first buffer, read whole and with every title ended,
-                whatever the page holds. The message kinds and the events
-                are numbers programs were built with.
-        */
+        table.event_tail[3] = 0xfffffff0u;
+        table.event_head[3] = 0xfffffff0u + WINDOWS_EVENTS;
+        while (windows_event(&own, &event))
         {
-                static union { struct surface page; char bytes[WINDOW_PIXELS]; } shown;
-                struct surface_listing *listing = window_at(&shown.page, struct surface_listing, SURFACE_HEADER);
-                struct surface_listing copy;
+                unsigned int at = (0xfffffff0u + read_back) % WINDOWS_EVENTS;
 
-                listing->count = 3;
-                for (unsigned int at = 0; at < 3; at++)
-                {
-                        listing->entry[at].id = 10 + at;
-                        listing->entry[at].state = at;
-                        for (unsigned int letter = 0; letter < SURFACE_LISTING_TITLE; letter++)
-                                listing->entry[at].title[letter] = 'a' + (char)at;
-                }
-                listing->generation = 6;
-                check("the window list is read with its generation",
-                      surface_listing_read(&shown.page, &copy) == 6 && copy.count == 3 &&
-                      copy.entry[2].id == 12 && copy.entry[1].state == 1);
-                check("a title the page did not end is ended",
-                      copy.entry[0].title[SURFACE_LISTING_TITLE - 1] == 0 && copy.entry[0].title[0] == 'a');
-                listing->count = 0xffffffffu;
-                surface_listing_read(&shown.page, &copy);
-                check("a count past the list is the list", copy.count == SURFACE_LISTING_MAX);
-                check("the window list ends below the first buffer",
-                      (char *)(listing + 1) <= shown.bytes + WINDOW_PIXELS &&
-                      (char *)listing == shown.bytes + SURFACE_HEADER);
-                check("the message kinds and the events keep their numbers",
-                      SURFACE_CREATE == 1 && SURFACE_COMMIT == 2 && SURFACE_CREATED == 3 && SURFACE_WAKE == 4 &&
-                      SURFACE_ACTIVATE == 5 && SURFACE_GRANT == 6 && SURFACE_GRANTED == 7 &&
-                      SURFACE_EVENT_STYLE == 12 && SURFACE_EVENT_LIST == 13 && SURFACE_EVENT_REFUSED == 14);
+                in_order &= event.type == WINDOW_EVENT_KEY && event.flags == WINDOW_KEY_DOWN &&
+                            event.a == (int)at && event.b == -(int)at;
+                read_back++;
         }
+        check("a full ring is read whole, in order, across the counter's wrap",
+              read_back == WINDOWS_EVENTS && in_order && table.event_tail[3] == table.event_head[3]);
 
-        check("the header sits below the first buffer", SURFACE_HEADER <= WINDOW_PIXELS);
+        check("a pipe for the wake", system_call_2(syscall(pipe2), (positive)wake, O_NONBLOCK) == 0);
+        check("a pipe for the door", system_call_2(syscall(pipe2), (positive)door, O_NONBLOCK) == 0);
+        own.wake = wake[0];
+        own.door = door[1];
 
-        //      A slot given back reads as zeros, the other slot and the header are
-        //      as they were, and a page whose numbers are out of the mapping is left alone.
-        {
-                static const unsigned long slot = 8192, bytes = 4096 + 2 * 8192;
-                long file = window_call(WINDOW_SYS_MEMFD_CREATE, (long) "surface",
-                                        SURFACE_MFD_CLOEXEC | SURFACE_MFD_ALLOW_SEALING, 0, 0, 0, 0);
-                long mapped = file < 0 ? file : window_call(WINDOW_SYS_FTRUNCATE, file, (long)bytes, 0, 0, 0, 0);
-                unsigned char *map;
+        table.frame[3] = table.shown[3] = 7;
+        check("a picture taken leaves the other buffer free", windows_ready(&own));
+        windows_show(&own, 1);
+        check("a picture is counted and named", table.frame[3] == 8 && table.buffer_index[3] == 1);
+        check("and knocked for", system_read_once(door[0], &byte, 1) == 1);
+        check("not free until the compositor has taken it", !windows_ready(&own));
+        table.shown[3] = 8;
+        check("free once it has", windows_ready(&own));
 
-                if (mapped >= 0)
-                        mapped = window_call(WINDOW_SYS_FCNTL, file, SURFACE_F_ADD_SEALS, SURFACE_SEAL_FIXED, 0, 0, 0);
-                if (mapped >= 0)
-                        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)bytes, 3, 1, file, 0);
-                check("a sealed memfd for a page", mapped > 0);
-                if (mapped > 0)
-                {
-                        struct surface *shared = (struct surface *)mapped;
-                        int whole = 1, kept = 1, header = 1;
+        check("no knock: the wait times out", windows_wait(&own, -1, 0) == 0);
+        byte = 0;
+        system_write_once(wake[1], &byte, 1);
+        system_write_once(wake[1], &byte, 1);
+        check("a knock wakes it", windows_wait(&own, -1, 1000000) == 1);
+        check("and is drained", system_read_once(wake[0], &byte, 1) == -11);
+        system_close(wake[1]);
+        check("the compositor gone is -1", windows_wait(&own, -1, 1000000) == -1);
 
-                        map = (unsigned char *)mapped;
-                        memory_fill(map, 0x5a, bytes);
-                        shared->window.mapping = (unsigned int)bytes;
-                        shared->buffer_size = 64 * 32 * 4;
-                        shared->buffer_offset[0] = WINDOW_PIXELS;
-                        shared->buffer_offset[1] = (unsigned int)(WINDOW_PIXELS + slot);
-                        surface_discard(shared, 1);
-                        for (unsigned long at = 0; at < bytes; at++)
-                        {
-                                if (at >= WINDOW_PIXELS + slot && map[at])
-                                        whole = 0;
-                                if (at >= WINDOW_PIXELS && at < WINDOW_PIXELS + slot && map[at] != 0x5a)
-                                        kept = 0;
-                        }
-                        header = map[0] == 0x5a && map[WINDOW_PIXELS - 1] == 0x5a;
-                        //      qemu-user answers madvise success and drops the advice.
-                        if (program_argument_count() > 1 &&
-                            !string_compare(program_argument(1), (string_address) "--emulated"))
-                                log_direct(str("surface_discard: the pages-returned rows NOT RUN under emulation\n"));
-                        else
-                        {
-                                check("surface_discard gives the slot's pages back, zeroed", whole);
-                                check("and leaves the other slot and the header as they were", kept && header);
-                        }
-
-                        memory_fill(map, 0x5a, bytes);
-                        shared->window.mapping = (unsigned int)bytes;
-                        shared->buffer_size = 64 * 32 * 4;
-                        shared->buffer_offset[1] = (unsigned int)(bytes - 4096); // runs past the mapping
-                        surface_discard(shared, 1);
-                        shared->buffer_offset[1] = 100; // in the header, not on a page
-                        surface_discard(shared, 1);
-                        shared->buffer_offset[1] = 0xfffff000u; // far outside
-                        surface_discard(shared, 1);
-                        whole = 1;
-                        for (unsigned long at = 0; at < bytes; at++)
-                                if (at >= 4096 && map[at] != 0x5a)
-                                        whole = 0;
-                        check("a slot outside the mapping or off a page is not touched", whole);
-                        window_call(WINDOW_SYS_MUNMAP, mapped, (long)bytes, 0, 0, 0, 0);
-                }
-                if (file >= 0)
-                        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-        }
-
-        check("socketpair", system_call_4(syscall(socketpair), SURFACE_AF_UNIX,
-                                          SURFACE_SOCK_SEQPACKET | SURFACE_SOCK_CLOEXEC, 0,
-                                          (positive)pair) == 0);
-        if (pair[0] < 0)
-                return;
-        page.window.handle = (unsigned int)pair[0];
-
-        //      A wake ends the sleep and is taken: nothing is left on the socket.
-        check("surface_send of a wake", surface_send(pair[1], &wake, -1) == (long)sizeof(wake));
-        check("surface_wait ends on a wake", surface_wait(&page, -1, -1) == 1);
-        got = surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT);
-        check("and the wake is gone", got == -11);
-
-        //      Five wakes: every one is taken, however many a call takes at once.
-        for (round = 0; round < 5; round++)
-                surface_send(pair[1], &wake, -1);
-        for (round = 0; round < 8 && surface_wait(&page, -1, 0) > 0; round++)
-                ;
-        got = surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT);
-        check("five wakes are all taken", got == -11 && round < 8);
-
-        for (round = 0; round < 5; round++)
-                surface_send(pair[1], &wake, -1);
-        for (round = 0; round < 8; round++)
-                if (surface_wait(&page, -1, -1) < 0)
-                        break;
-                else if (surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11)
-                        break;
-        check("sleeping waits drain them too", round < 8 &&
-              surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11);
-
-        //      The time being up is not the compositor going.
-        check("a wait with nothing to hear times out at zero", surface_wait(&page, -1, 20000000) == 0);
-
-        //      Another descriptor ending the sleep takes nothing off the connection.
-        check("a pipe for the other descriptor", system_pipe(gate, 0) == 0);
-        if (gate[0] >= 0)
-        {
-                check("the other descriptor alone ends the wait",
-                      system_call_3(syscall(write), (positive)gate[1], (positive) "x", 1) == 1 &&
-                      surface_wait(&page, gate[0], 1000000000) == 1);
-                surface_send(pair[1], &wake, -1);
-                check("the wake it left alone is still there",
-                      surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == (long)sizeof(taken) &&
-                      taken.kind == SURFACE_WAKE);
-                surface_send(pair[1], &wake, -1);
-                check("both ready is two and the wake is taken",
-                      surface_wait(&page, gate[0], 1000000000) == 2 &&
-                      surface_receive(pair[0], &taken, SURFACE_MSG_DONTWAIT) == -11);
-        }
-
-        //      A signal ends a sleep with nothing: the compositor has not gone.
-        {
-                signal_action wanted = {.handler = surface_interrupt}, previous;
-                p64 timer[4] = {0, 20000, 0, 20000};
-
-                check("a handler without SA_RESTART", sigaction(SIGALRM, &wanted, &previous) == 0);
-                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
-                check("a signal in the sleep on the connection is zero", surface_wait(&page, -1, -1) == 0);
-                check("a signal in the sleep with a time is zero", surface_wait(&page, -1, 2000000000) == 0);
-                memory_fill(timer, 0, sizeof(timer));
-                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
-                sigaction(SIGALRM, &previous, 0);
-        }
-
-        //      And a signal does not end the create's wait for its answer: the
-        //      receive is retried, so it comes back with the message.
-        {
-                signal_action wanted = {.handler = surface_interrupt}, previous;
-                p64 timer[4] = {0, 20000, 0, 20000}, nap[2] = {0, 150000000};
-                bipolar child;
-
-                sigaction(SIGALRM, &wanted, &previous);
-                child = system_fork();
-                if (child == 0)
-                {
-                        system_call_2(syscall(nanosleep), (positive)nap, 0);
-                        surface_send(pair[1], &wake, -1);
-                        system_call_1(syscall(exit_group), 0);
-                }
-                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
-                memory_fill(&taken, 0, sizeof(taken));
-                got = surface_receive(pair[0], &taken, 0);
-                check("a signal in a blocking receive does not end it",
-                      got == (long)sizeof(taken) && taken.kind == SURFACE_WAKE);
-                memory_fill(timer, 0, sizeof(timer));
-                system_call_3(syscall(setitimer), 0, (positive)timer, 0);
-                sigaction(SIGALRM, &previous, 0);
-                system_call_4(syscall(wait4), (positive)child, 0, 0, 0);
-        }
-
-        //      A message is one whole struct: a short one and a cut one are not answers.
-        {
-                struct surface_message whole = {SURFACE_CREATED, 0, {0}};
-                char shorty[16] = {0}, long_one[128] = {0};
-
-                system_call_6(syscall(sendto), (positive)pair[1], (positive)shorty, 16,
-                              SURFACE_MSG_NOSIGNAL, 0, 0);
-                check("a short message is refused", surface_receive(pair[0], &taken, 0) == -71);
-                system_call_6(syscall(sendto), (positive)pair[1], (positive)long_one, 128,
-                              SURFACE_MSG_NOSIGNAL, 0, 0);
-                check("an oversized one is refused, not cut to fit", surface_receive(pair[0], &taken, 0) == -71);
-                surface_send(pair[1], &whole, -1);
-                check("a whole one is taken", surface_receive(pair[0], &taken, 0) == (long)sizeof(taken));
-        }
-
-        //      The answer to a create or a resize: wakes ahead of it are skipped,
-        //      and it is refused unless it is CREATED with protocol 2, the size
-        //      the program asked for, and a page the compositor wrote.
-        {
-                static struct surface answered;
-                struct surface_message answer = {SURFACE_CREATED, 0, {0}}, wake = {SURFACE_WAKE, 0, {0}};
-                unsigned long bytes = WINDOW_PIXELS + SURFACE_PAGE_ROUND(64u * 32 * 4) * 2;
-
-                answer.request.protocol = SURFACE_PROTOCOL;
-                answer.request.bytes = (unsigned int)bytes;
-                answered.magic = SURFACE_MAGIC;
-                answered.protocol = SURFACE_PROTOCOL;
-
-                surface_send(pair[1], &wake, -1);
-                surface_send(pair[1], &answer, -1);
-                check("a wake ahead of the answer is skipped", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == 0);
-
-                answer.request.protocol = 0;
-                surface_send(pair[1], &answer, -1);
-                check("an answer that is not protocol 2 is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
-
-                answer.request.protocol = SURFACE_PROTOCOL;
-                answer.request.bytes = (unsigned int)bytes + 4096;
-                surface_send(pair[1], &answer, -1);
-                check("an answer for another size is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
-
-                answer.request.bytes = (unsigned int)bytes;
-                answered.magic = 0;
-                surface_send(pair[1], &answer, -1);
-                check("a page the compositor did not write is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -93);
-                answered.magic = SURFACE_MAGIC;
-
-                answer.kind = SURFACE_RESIZED;
-                surface_send(pair[1], &answer, -1);
-                check("the wrong kind is refused", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == -71);
-
-                answer.kind = SURFACE_CREATED;
-                answer.status = SURFACE_ESIZE;
-                surface_send(pair[1], &answer, -1);
-                check("a refusal's status is the answer", surface_answer(pair[0], &taken, SURFACE_CREATED, &answered, bytes) == SURFACE_ESIZE);
-        }
-
-        //      Slots other than one or two, and a grid with no history or a mapping past 4 GiB, are refused.
-        {
-                struct window *grid;
-                static struct surface one_slot;
-
-                surface_open_slots(64, 32, SURFACE_ROLE_APP, 0);
-                check("zero slots is EINVAL before anything is made", surface_refused == -22);
-                surface_open_slots(64, 32, SURFACE_ROLE_APP, 3);
-                check("three slots is EINVAL before anything is made", surface_refused == -22);
-
-                grid = window_grid_open(80, 24, 80, 0);
-                check("a grid with no history is refused", grid == 0);
-                if (grid)
-                        window_close(grid);
-                grid = window_grid_open(80, 24, 4096, 131073);
-                check("a grid whose mapping is past 4 GiB is refused", grid == 0);
-                if (grid)
-                        window_close(grid);
-                grid = window_grid_open(80, 24, 40, 100);
-                check("a grid is cut no wider than its ring", grid && grid->columns == 40 && grid->stride == 40);
-                if (grid)
-                        window_close(grid);
-
-                one_slot.buffer_slots = 1;
-                one_slot.buffer_offset[0] = WINDOW_PIXELS;
-                one_slot.buffer_offset[1] = WINDOW_PIXELS + 8192;
-                check("a one-slot page draws slot 1 in slot 0", (char *)surface_buffer(&one_slot, 1) == (char *)&one_slot + WINDOW_PIXELS);
-        }
-
-        //      The far end closing is the one thing that is -1, whichever way the sleep goes.
-        socket_close(pair[1]);
-        check("a closed connection ends the sleep with -1", surface_wait(&page, -1, -1) == -1);
-        check("and ends a timed one", surface_wait(&page, -1, 1000000000) == -1);
-        check("and one with another descriptor", surface_wait(&page, gate[0], 1000000000) == -1);
-        socket_close(pair[0]);
+        system_close(wake[0]);
+        system_close(door[0]);
+        system_close(door[1]);
 }
 #endif
 
@@ -54173,7 +53906,7 @@ b32 main(void)
         addresses();
 #ifdef LINUX
         sockets();
-        surfaces();
+        windows_client();
 #endif
         return test_report(null);
 }
@@ -99479,34 +99212,29 @@ static const char address_to render_pieces[] = {
 
 /*
         The compositor, as far as the terminal can tell: a screen it copies
-        the committed buffer's damage into, as compositor_commit and
-        compositor_scene would.
+        the shown buffer's damage into, as compositor_take and
+        compositor_scene would. A width of 0 is all of it, a height of 0
+        none.
 */
 static p32 address_to render_screen;
 
 static fn render_apply(const p32 address_to buffer)
 {
-        struct surface address_to surface = terminal.surface;
-        positive count = surface->damage_count;
+        struct windows address_to table = terminal.own.table;
+        long x1 = table->damage_x[0] < 0 ? 0 : table->damage_x[0], y1 = table->damage_y[0] < 0 ? 0 : table->damage_y[0];
+        long x2 = (long)table->damage_x[0] + table->damage_width[0], y2 = (long)table->damage_y[0] + table->damage_height[0];
 
-        if (!count || count > SURFACE_DAMAGE_MAX)
+        if (table->damage_width[0] <= 0)
         {
                 memory_copy(render_screen, buffer, (positive)terminal.width * terminal.height * 4);
                 return;
         }
 
-        for (positive at = 0; at < count; at++)
-        {
-                struct surface_damage rectangle = surface->damage[at];
-                long x1 = rectangle.x < 0 ? 0 : rectangle.x, y1 = rectangle.y < 0 ? 0 : rectangle.y;
-                long x2 = (long)rectangle.x + rectangle.width, y2 = (long)rectangle.y + rectangle.height;
-
-                x2 = x2 > (long)terminal.width ? (long)terminal.width : x2;
-                y2 = y2 > (long)terminal.height ? (long)terminal.height : y2;
-                for (long y = y1; y < y2 && x1 < x2; y++)
-                        memory_copy(render_screen + y * terminal.width + x1, buffer + y * terminal.width + x1,
-                                    (positive)(x2 - x1) * 4);
-        }
+        x2 = x2 > (long)terminal.width ? (long)terminal.width : x2;
+        y2 = y2 > (long)terminal.height ? (long)terminal.height : y2;
+        for (long y = y1; y < y2 && x1 < x2; y++)
+                memory_copy(render_screen + y * terminal.width + x1, buffer + y * terminal.width + x1,
+                            (positive)(x2 - x1) * 4);
 }
 
 // The picture of the cells in the frame just drawn, every one of them, from nothing.
@@ -99515,41 +99243,45 @@ static fn render_reference(p32 address_to into, const struct window_cell address
         unsigned int first, shown, total;
 
         memory_fill_u32(into, (positive)terminal.width * terminal.height, 0x123456);
-        terminal_paper_round(into);
         for (unsigned int row = 0; row < ROWS; row++)
+        {
                 terminal_row(terminal_grid(into), row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+                terminal_margin(into, cells, row, 0, COLUMNS);
+        }
         terminal_extent(&first, &shown, &total);
-        terminal_bar(terminal_grid(into), first, shown, total);
+        terminal_bar(into, cells, first, shown, total);
 }
 
-// A new surface of the size the grid needs, and nothing on any screen yet. The
-// mappings are made once, for the largest grid the steps below ask for.
+// A window of the size the grid needs in a table of its own, its rows as long as it is wide, and nothing on
+// any screen yet. The mappings are made once, for the largest grid the steps below ask for.
 static fn render_surface(void)
 {
-        static unsigned long reserved;
-        static struct surface address_to page;
+        static unsigned long reserved, header;
+        static struct windows address_to table;
         unsigned int pixels_h, pixels_w = terminal_pixels(COLUMNS, ROWS, &pixels_h);
-        unsigned long slot = SURFACE_PAGE_ROUND((unsigned long)pixels_w * pixels_h * 4);
 
-        if (!page)
+        if (!table)
         {
-                reserved = SURFACE_PAGE_ROUND((unsigned long)60 * 40 * 16 * 40 * 4);
-                page = (struct surface address_to)system_call_6(syscall(mmap), 0, WINDOW_PIXELS + reserved * 2, 3, 0x22,
-                                                                (positive)-1, 0);
+                reserved = ((unsigned long)60 * 40 * 16 * 40 * 4 + 4095) & ~4095ul;
+                header = (sizeof(struct windows) + 4095) & ~4095ul;
+                table = (struct windows address_to)system_call_6(syscall(mmap), 0, header + reserved * 2, 3, 0x22,
+                                                                 (positive)-1, 0);
                 render_screen = render_map(reserved);
         }
 
-        memory_zero(page, WINDOW_PIXELS);
-        terminal.surface = page;
-        // A connection that is not one: the commit's message goes nowhere.
-        terminal.surface->window.handle = 0xffffffffu;
+        memory_zero(table, header);
+        table->pixels = header;
+        table->buffer = reserved;
+        table->output_width = table->output_height = 1u << 14;
+        // No door: the knock goes nowhere.
+        terminal.own = (struct window_row){table, 0, -1, -1, header + reserved * 2};
         terminal.width = pixels_w;
         terminal.height = pixels_h;
+        terminal.pitch = pixels_w;
+        table->stride = pixels_w;
         terminal.shown = -1;
-        terminal.committed[0] = terminal.committed[1] = 0;
         terminal_frames();
         memory_fill_u32(render_screen, (positive)pixels_w * pixels_h, 0xdeadbe);
-        (void)slot;
 }
 
 static b32 render_step(positive address_to compared, positive address_to wrong, positive step)
@@ -99578,7 +99310,7 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
 
         if (what < 68)
         {
-                // Another size: the emulator regrids, a new surface is made, nothing is on the screen.
+                // Another size: the emulator regrids, a new window is made, nothing is on the screen.
                 window->columns = 1 + render_next(50);
                 window->rows = 1 + render_next(14);
                 cursor_hide();
@@ -99597,35 +99329,30 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
 
                 if (spare >= 0)
                 {
-                        terminal.surface->release_serial = terminal.committed[spare];
+                        terminal.own.table->shown[0] = terminal.own.table->frame[0];
                         terminal_discard();
                         if (!terminal.valid[spare])
-                                memory_fill_u32(surface_slot(terminal.surface, (unsigned int)spare, terminal.width,
-                                                             terminal.height),
+                                memory_fill_u32(windows_buffer(terminal.own.table, 0, spare),
                                                 (positive)terminal.width * terminal.height, 0xbad000);
                 }
                 return true;
         }
 
         {
-                // A frame: the buffer not on the screen is released, or it is not.
-                int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
+                // A frame: the last picture is taken, so the buffer not on the screen is free, or it is not.
+                struct windows address_to table = terminal.own.table;
 
-                if (render_next(3))
-                        terminal.surface->release_serial = terminal.committed[slot];
-                else
-                        terminal.surface->release_serial = terminal.committed[slot] - 1;
+                table->shown[0] = render_next(3) ? table->frame[0] : table->frame[0] - 1;
 
                 if (!terminal_frame())
                 {
-                        // Only a buffer that was not released may be refused.
+                        // Only a window whose last picture was not taken may be refused.
                         (void)step;
-                        return terminal.committed[slot] && (int)(terminal.surface->release_serial - terminal.committed[slot]) < 0;
+                        return terminal.shown >= 0 && table->shown[0] != table->frame[0];
                 }
 
                 {
-                        p32 address_to buffer = surface_slot(terminal.surface, (unsigned int)terminal.shown,
-                                                            terminal.width, terminal.height);
+                        p32 address_to buffer = windows_buffer(table, 0, terminal.shown);
                         static p32 address_to reference;
 
                         if (!reference)
@@ -99649,7 +99376,7 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
                                                       at % terminal.width, at / terminal.width, at % terminal.width / terminal.cell_w,
                                                       at / terminal.width / terminal.cell_h, (positive)COLUMNS, (positive)ROWS,
                                                       (positive)render_screen[at], (positive)buffer[at], (positive)reference[at],
-                                                      (positive)terminal.surface->damage_count, (bipolar)terminal.shown);
+                                                      (positive)terminal.own.table->damage_width[0], (bipolar)terminal.shown);
                                 }
                         }
                 }
@@ -99675,41 +99402,40 @@ static fn check_keys(void)
                 const char address_to sent;
                 positive length;
         } keys[] = {
-            {30, 'a', SURFACE_KEY_DOWN, "a", 1},
-            {30, 'A', SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "A", 1},
-            {46, 'c', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x03", 1},
-            {32, 'd', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x04", 1},
-            {38, 'l', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL | SURFACE_KEY_REPEAT, "\x0c", 1},
-            {28, '\r', SURFACE_KEY_DOWN, "\r", 1},
-            {28, '\n', SURFACE_KEY_DOWN, "\r", 1},
-            {14, '\b', SURFACE_KEY_DOWN, "\x7f", 1},
-            {14, 127, SURFACE_KEY_DOWN, "\x7f", 1},
-            {15, '\t', SURFACE_KEY_DOWN, "\t", 1},
-            {15, '\t', SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "\x1b[Z", 3},
-            {1, 27, SURFACE_KEY_DOWN, "\x1b", 1},
-            {103, 0, SURFACE_KEY_DOWN, "\x1b[A", 3},
-            {108, 0, SURFACE_KEY_DOWN, "\x1b[B", 3},
-            {103, 0, SURFACE_KEY_DOWN | SURFACE_KEY_SHIFT, "\x1b[1;2A", 6},
-            {106, 0, SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x1b[1;5C", 6},
-            {45, 'x', SURFACE_KEY_DOWN | SURFACE_KEY_ALT, "\x1bx", 2},
-            {111, 0, SURFACE_KEY_DOWN, "\x1b[3~", 4},
-            {104, 0, SURFACE_KEY_DOWN, "\x1b[5~", 4},
-            {59, 0, SURFACE_KEY_DOWN, "\x1bOP", 3},
-            {57, ' ', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\0", 1},
-            {26, '[', SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "\x1b", 1},
+            {30, 'a', WINDOW_KEY_DOWN, "a", 1},
+            {30, 'A', WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT, "A", 1},
+            {46, 'c', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, "\x03", 1},
+            {32, 'd', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, "\x04", 1},
+            {38, 'l', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL | WINDOW_KEY_REPEAT, "\x0c", 1},
+            {28, '\r', WINDOW_KEY_DOWN, "\r", 1},
+            {28, '\n', WINDOW_KEY_DOWN, "\r", 1},
+            {14, '\b', WINDOW_KEY_DOWN, "\x7f", 1},
+            {14, 127, WINDOW_KEY_DOWN, "\x7f", 1},
+            {15, '\t', WINDOW_KEY_DOWN, "\t", 1},
+            {15, '\t', WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT, "\x1b[Z", 3},
+            {1, 27, WINDOW_KEY_DOWN, "\x1b", 1},
+            {103, 0, WINDOW_KEY_DOWN, "\x1b[A", 3},
+            {108, 0, WINDOW_KEY_DOWN, "\x1b[B", 3},
+            {103, 0, WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT, "\x1b[1;2A", 6},
+            {106, 0, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, "\x1b[1;5C", 6},
+            {45, 'x', WINDOW_KEY_DOWN | WINDOW_KEY_ALT, "\x1bx", 2},
+            {111, 0, WINDOW_KEY_DOWN, "\x1b[3~", 4},
+            {104, 0, WINDOW_KEY_DOWN, "\x1b[5~", 4},
+            {59, 0, WINDOW_KEY_DOWN, "\x1bOP", 3},
+            {57, ' ', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, "\0", 1},
+            {26, '[', WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, "\x1b", 1},
             {30, 'a', 0, "", 0},
-            {29, 0, SURFACE_KEY_DOWN | SURFACE_KEY_CONTROL, "", 0},
+            {29, 0, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, "", 0},
         };
 
         for (positive at = 0; at < array_count(keys); at++)
         {
-                struct surface_event event = {SURFACE_EVENT_KEY, (unsigned short)keys[at].flags, 0,
-                                              (int)keys[at].code, (int)keys[at].character};
-                b32 dirty = false, closing = false;
-                unsigned int resize[3] = {0, 0, 0};
+                struct window_event event = {WINDOW_EVENT_KEY, keys[at].flags, (int)keys[at].code,
+                                             (int)keys[at].character};
+                b32 dirty = false;
 
                 to_shell_length = 0;
-                terminal_receive(-1, &event, &dirty, &closing, resize);
+                terminal_receive(-1, &event, &dirty);
                 check("keys: the shell is sent the bytes the kernel's window sent",
                       to_shell_length == keys[at].length &&
                           !memory_compare(to_shell, keys[at].sent, keys[at].length));
@@ -99720,7 +99446,7 @@ static fn check_keys(void)
 /*
         The pointer, when a program has asked for it: where it is in cells
         from where it is in pixels, the button it pressed and let go of, and
-        the wheel as the buttons after the last. Pixels are the surface's, so
+        the wheel as the buttons after the last. Pixels are the window's, so
         the cell is whole cells of this font's size from the grid's top left,
         past the paper round it.
 */
@@ -99729,46 +99455,45 @@ static fn check_pointer(void)
         unsigned int column = 3, row = 4;
         int x = (int)(terminal.pad + (column - 1) * terminal.cell_w + terminal.cell_w / 2);
         int y = (int)(terminal.pad_y + (row - 1) * terminal.cell_h + terminal.cell_h / 2);
-        struct surface_event motion = {SURFACE_EVENT_POINTER_MOTION, 0, 0, x, y};
-        struct surface_event press = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x110, 0};
-        struct surface_event release = {SURFACE_EVENT_POINTER_BUTTON, 0, 0, 0x110, 0};
-        struct surface_event right = {SURFACE_EVENT_POINTER_BUTTON, SURFACE_KEY_DOWN, 0, 0x111, 0};
-        struct surface_event wheel = {SURFACE_EVENT_POINTER_WHEEL, 0, 0, 120, 0};
-        b32 dirty = false, closing = false;
-        unsigned int resize[3] = {0, 0, 0};
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, x, y};
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+        struct window_event right = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x111, 0};
+        struct window_event wheel = {WINDOW_EVENT_WHEEL, 0, 120, 0};
+        b32 dirty = false;
         char expect[16];
 
         mouse_mode = 1000;
         mouse_sgr = false;
         terminal.modifiers = 0;
         to_shell_length = 0;
-        terminal_receive(-1, &motion, &dirty, &closing, resize);
+        terminal_receive(-1, &motion, &dirty);
         check("pointer: a motion is nothing to a program that asked for clicks", !to_shell_length);
 
-        terminal_receive(-1, &press, &dirty, &closing, resize);
+        terminal_receive(-1, &press, &dirty);
         expect[0] = 27, expect[1] = '[', expect[2] = 'M', expect[3] = 32, expect[4] = (char)(32 + column),
         expect[5] = (char)(32 + row);
         check("pointer: a press is the button and the cell", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
 
         to_shell_length = 0;
-        terminal_receive(-1, &release, &dirty, &closing, resize);
+        terminal_receive(-1, &release, &dirty);
         expect[3] = 32 + 3;
         check("pointer: a release is button 3", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
 
         to_shell_length = 0;
-        terminal_receive(-1, &wheel, &dirty, &closing, resize);
+        terminal_receive(-1, &wheel, &dirty);
         expect[3] = 32 + 64;
         check("pointer: the wheel is button 64", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
 
         mouse_sgr = true;
         to_shell_length = 0;
-        terminal_receive(-1, &press, &dirty, &closing, resize);
+        terminal_receive(-1, &press, &dirty);
         check("pointer: SGR press", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4M", 9));
         to_shell_length = 0;
-        terminal_receive(-1, &right, &dirty, &closing, resize);
+        terminal_receive(-1, &right, &dirty);
         check("pointer: the right button is 2", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<2;3;4M", 9));
         to_shell_length = 0;
-        terminal_receive(-1, &release, &dirty, &closing, resize);
+        terminal_receive(-1, &release, &dirty);
         check("pointer: SGR release", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4m", 9));
 
         mouse_mode = 0;
@@ -99777,46 +99502,51 @@ static fn check_pointer(void)
 }
 
 /*
-        A program that commits twice before the compositor has looked at
-        either has its first buffer back all the same. The compositor reads
-        the page when it gets the message, so it finds the second commit's
-        sequence and slot and has never shown the first buffer: what it owes
-        the program is the release of every commit before this one, or the
-        program waits for one that never comes and draws nothing again.
+        A program that shows twice before the compositor has looked at either
+        has its other buffer back all the same. The compositor reads the row
+        when it is knocked on, so it finds the second picture and has never
+        shown the first: shown is the last frame, or the program waits for a
+        buffer that never comes back and draws nothing again.
 */
-static fn check_release(void)
+static fn check_take(void)
 {
-        static struct compositor_client client;
-        struct surface address_to page = (struct surface address_to)system_call_6(
-            syscall(mmap), 0, WINDOW_PIXELS + 2 * 4096 * 4, 3, 0x22, (positive)-1, 0);
+        static struct windows table;
 
-        memory_zero(&client, sizeof(client));
-        client.handle = -1;
-        client.page = page;
-        client.width = client.height = 16;
-        client.slots = 2;
-        client.role = SURFACE_ROLE_APP;
-        client.lock = SURFACE_LOCK_MOVABLE | SURFACE_LOCK_RESIZABLE;
-        client.active = 1;
-        client.style = WINDOW_FRAME;
-        page->window.sequence = 2;
-        page->buffer_index = 1;
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.table = &table;
+        compositor.width = compositor.height = 256;
+        compositor.scale = 1;
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        table.width[2] = table.height[2] = 16;
+        table.x[2] = table.y[2] = 40;
+        table.frame[2] = 2;
+        table.buffer_index[2] = 1;
+        string_copy((string_address)table.title[2], (string_address) "two");
 
-        compositor_commit(&client);
-        check("compositor: a commit that finds two released the first buffer it never showed",
-              page->release_serial == 1 && client.slot == 1);
+        compositor_take(2);
+        check("compositor: a window that showed twice before it was looked at has the other buffer back",
+              table.shown[2] == 2 && compositor.front[2] == 1 && compositor.showing[2]);
+        check("compositor: a window that shows is put where it asked, on top, with the keys and a tab",
+              compositor.x[2] == 40 && compositor.y[2] == 40 && compositor.stacked == 1 && compositor.stack[0] == 2 &&
+                  table.focus == 2 && compositor_windows() == 1 && compositor.listed[0] == 2);
 
-        // And the ordinary case, a buffer at a time: showing 2 on slot 1, then 3 on slot 0.
-        page->window.sequence = 3;
-        page->buffer_index = 0;
-        compositor_commit(&client);
-        check("compositor: a commit on the other buffer releases the one before it",
-              page->release_serial == 2 && client.slot == 0);
+        // And the ordinary case, a buffer at a time; a title changed with no picture is taken on the knock.
+        table.frame[2] = 3;
+        table.buffer_index[2] = 0;
+        compositor_take(2);
+        check("compositor: the next picture is taken from the buffer it names", table.shown[2] == 3 && compositor.front[2] == 0);
+        string_copy((string_address)table.title[2], (string_address) "renamed");
+        compositor_take(2);
+        check("compositor: a title with no picture is taken", !memory_compare(compositor.title[2], "renamed", 8) &&
+                                                                   table.shown[2] == 3);
 
-        // The same buffer again releases nothing.
-        page->window.sequence = 4;
-        compositor_commit(&client);
-        check("compositor: a commit on the same buffer releases nothing", page->release_serial == 2);
+        // Its door closed: gone from the screen and the tabs, and the row free.
+        table.pid[2] = 77;
+        compositor_leave(2);
+        check("compositor: a window whose program has gone is off the screen and its row is free",
+              !compositor.showing[2] && !compositor.stacked && compositor.focus == COMPOSITOR_NONE && !table.pid[2] &&
+                  table.focus == WINDOWS);
 }
 
 // A code point as UTF-8, into bytes; the count of bytes it takes.
@@ -99861,10 +99591,11 @@ static p32 address_to render_frame(void)
 {
         int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
 
-        terminal.surface->release_serial = terminal.committed[slot];
+        (void)slot;
+        terminal.own.table->shown[0] = terminal.own.table->frame[0];
         if (!terminal_frame())
                 return null;
-        return surface_slot(terminal.surface, (unsigned int)terminal.shown, terminal.width, terminal.height);
+        return windows_buffer(terminal.own.table, 0, terminal.shown);
 }
 
 b32 main()
@@ -99891,7 +99622,7 @@ b32 main()
                 {
                         font_face other;
                         positive length = 0;
-                        positive bytes = surface_map_file(program_argument(at), &length);
+                        positive bytes = compositor_map_file(program_argument(at), &length);
 
                         wanted++;
                         if (bytes && font_load(&other, (const p8 address_to)bytes, length, 0) == 0 && font_glyph(&other, 'A'))
@@ -99999,7 +99730,7 @@ b32 main()
 
         check_keys();
         check_pointer();
-        check_release();
+        check_take();
 
         // What the terminal says its paper and ink are is what it paints them with.
         {
@@ -103138,10 +102869,10 @@ static void text_draw(const struct target *t,int x,int y,int w,int h,
    the kernel's compose path at 16ee8ddb, where canvas.c is byte for byte
    cf9a0bca's; every compositor that draws the classic look must give the
    same four. */
-#define GOLDEN_GS1_1 "07f0a6e39b44e87cd23667a5be9023f612c63dd21d382d251e4036aaaefc9c44"
-#define GOLDEN_GS1_2 "59ccc584601205c08305c86de93bc83d5678e2238039f2a0e2505675256558fc"
-#define GOLDEN_GS1_3 "d79d41aaf3ebec1983fcd399bf434a078c4984e064a72282f79a408d0caa56ba"
-#define GOLDEN_GS1_4 "55f194ecbb9ad8f55bb264bf0d4e92a89f200d8ace1b0ff080c9eaec564787d6"
+#define GOLDEN_GS1_1 "a5d98224eb8139bb46fe1595844b0ff371ce4299493ba3e425eed9e8a68f336b"
+#define GOLDEN_GS1_2 "2496ee40f38ce47b559915da2e624285af14b84c576b69daf3ecfc4a5af287c0"
+#define GOLDEN_GS1_3 "ed7f6cb60cfd4def788b666d6d8f905ce347f7883bee301b315c52b9e0833357"
+#define GOLDEN_GS1_4 "cb48e15aa0ffc4674b6f164c92f4ec3a42b0197db1d534b16262d828f4adc2af"
 static const char *const golden_gs1[4]={GOLDEN_GS1_1,GOLDEN_GS1_2,GOLDEN_GS1_3,GOLDEN_GS1_4};
 static void golden_sha256(const u32 *pixels,size_t count,char out[65]) {
     static const uint32_t k[64]={
@@ -103266,10 +102997,10 @@ static void check_compositor_gs1(void) {
    tabs in the middle, the scene's one window's, which has the keys, and the
    tray, round at their tops and nothing between them.
    Recorded from the backend, and the reference for every later build. */
-#define COMPOSITOR_GS2_1 "a50cd08cf51c65efc3eb6086b8b29d04e7de2dfbd0244934a7b18e88d91df18d"
-#define COMPOSITOR_GS2_2 "8e79fee2e19d76dfbd8d78558502688f90aef52ae8cb3f580c0c13066f2b58a7"
-#define COMPOSITOR_GS2_3 "5ec03134ffab5dffeb5a26e0f88ebda9e9404595dec482ddc07ee3fc2362dce8"
-#define COMPOSITOR_GS2_4 "872e4147873a5fc67380fc464a1a1ff9c1ddaf64e51dd3d619a95958cf94536a"
+#define COMPOSITOR_GS2_1 "1137a402eb675590d1a737f80901e07d1bc12ed5c8f32c8c8abfa7da4282aade"
+#define COMPOSITOR_GS2_2 "bc02b0403c24fa48c1a6b0aa6d8a3bdc7f300aa2c6b2c50b356fe998333a236f"
+#define COMPOSITOR_GS2_3 "95d28ac751cbfff871d1efa7a3a2131657082460782c119326681866f9a98403"
+#define COMPOSITOR_GS2_4 "e971f7f7f141c56710af98666564fe1f867cefc5d9949c535d5cf3ded0cc8a5d"
 static const char *const compositor_gs2[4]={COMPOSITOR_GS2_1,COMPOSITOR_GS2_2,COMPOSITOR_GS2_3,COMPOSITOR_GS2_4};
 static void check_compositor_gs2(void) {
     static u32 body[128*64];
@@ -103278,7 +103009,7 @@ static void check_compositor_gs2(void) {
         int bx,by,bw,bh;
         compositor_band(1024,768,scale,1,&bx,&by,&bw,&bh);
         cc_check(bx==0&&bw==1024&&bh==24*scale&&by==768-24*scale);
-        static const unsigned char marks[1]={SURFACE_LIST_FOCUSED};
+        static const unsigned char marks[1]={COMPOSITOR_TAB_LIT};
         struct compositor_frame frames[4]={
             {80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,COMPOSITOR_INK_LINE}};
         struct compositor_frame band={bx,by,bw,bh,scale,0,0,1,marks,1};
@@ -103304,42 +103035,7 @@ static void check_compositor_gs2(void) {
         cc_check(golden_screen[(unsigned)window->x+(unsigned)window->y*1024]==COMPOSITOR_INK_DESKTOP);
         cc_check(golden_screen[(unsigned)window->x+767u*1024]==COMPOSITOR_INK_BUTTON_LIT);
         cc_check(golden_screen[(unsigned)(by-1)*1024+700]==COMPOSITOR_INK_DESKTOP);
-        /* M2.4: the work area is the whole output, on either edge: a window
-           that fills it lies under the tabs. */
-        for(int bottom=0;bottom<2;bottom++) {
-            struct compositor_area work;
-            compositor_work(1024,768,scale,bottom,&work);
-            cc_check(work.x1==0&&work.x2==1024&&work.y1==0&&work.y2==768);
-        }
     }
-}
-
-/* The roles (canvas spec 02 section 2) as a table: what each is given and what it is
-   not. The panel is the top layer, held to its two sides (the edge is added where it
-   is made), cannot be moved, resized, framed, given focus by a press or given the
-   keys; an application is a framed window that can be moved and resized; the
-   background lies under everything and the menu over it; LOG and LEGACY are the
-   compositor's own and the kernel's, and nobody claims them. */
-static void check_compositor_roles(void) {
-    const struct compositor_role *r=compositor_roles;
-    cc_check(r[SURFACE_ROLE_APP].layer==SURFACE_LAYER_NORMAL&&r[SURFACE_ROLE_APP].lock==35&&
-             r[SURFACE_ROLE_APP].framed&&r[SURFACE_ROLE_APP].held==COMPOSITOR_HELD_ANY);
-    cc_check(r[SURFACE_ROLE_BACKGROUND].layer==SURFACE_LAYER_BACKGROUND&&r[SURFACE_ROLE_BACKGROUND].lock==12&&
-             r[SURFACE_ROLE_BACKGROUND].anchor==15&&r[SURFACE_ROLE_BACKGROUND].fit==COMPOSITOR_FIT_OUTPUT);
-    cc_check(r[SURFACE_ROLE_PANEL].layer==SURFACE_LAYER_TOP&&r[SURFACE_ROLE_PANEL].lock==12&&
-             !r[SURFACE_ROLE_PANEL].framed&&r[SURFACE_ROLE_PANEL].anchor==12&&
-             r[SURFACE_ROLE_PANEL].fit==COMPOSITOR_FIT_BAND&&r[SURFACE_ROLE_PANEL].held==COMPOSITOR_HELD_ONE);
-    cc_check(!(r[SURFACE_ROLE_PANEL].lock&(SURFACE_LOCK_MOVABLE|SURFACE_LOCK_RESIZABLE|SURFACE_LOCK_DECORATED)));
-    cc_check(r[SURFACE_ROLE_LAUNCHER].layer==SURFACE_LAYER_OVERLAY&&r[SURFACE_ROLE_LAUNCHER].lock==0);
-    cc_check(r[SURFACE_ROLE_ICONS].layer==SURFACE_LAYER_BOTTOM&&r[SURFACE_ROLE_ICONS].lock==12&&
-             r[SURFACE_ROLE_ICONS].fit==COMPOSITOR_FIT_WORK);
-    cc_check(r[SURFACE_ROLE_CONTROL].lock==35&&r[SURFACE_ROLE_CONTROL].framed&&
-             r[SURFACE_ROLE_CONTROL].held==COMPOSITOR_HELD_ONE);
-    cc_check(r[SURFACE_ROLE_WINDOW_LIST].held==COMPOSITOR_HELD_NOT_YET&&r[SURFACE_ROLE_TRAY].held==COMPOSITOR_HELD_NOT_YET);
-    cc_check(r[SURFACE_ROLE_LOG].held==COMPOSITOR_HELD_NEVER&&r[SURFACE_ROLE_LEGACY].held==COMPOSITOR_HELD_NEVER);
-    /* The layers lie in the order a stack is kept in. */
-    cc_check(SURFACE_LAYER_BACKGROUND<SURFACE_LAYER_BOTTOM&&SURFACE_LAYER_BOTTOM<SURFACE_LAYER_NORMAL&&
-             SURFACE_LAYER_NORMAL<SURFACE_LAYER_TOP&&SURFACE_LAYER_TOP<SURFACE_LAYER_OVERLAY);
 }
 
 /* The panel's tabs are where they are drawn: every tab is inside the band,
@@ -103367,10 +103063,10 @@ static void check_compositor_panel_fit(void) {
 }
 
 static void check_compositor_panel_slots(void) {
-    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++) {
-        unsigned char marks[COMPOSITOR_CLIENTS]={0};
+    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=WINDOWS;count++) {
+        unsigned char marks[WINDOWS]={0};
         struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
-        int seen[COMPOSITOR_CLIENTS+2][4],n=0;
+        int seen[WINDOWS+2][4],n=0;
         for(int which=-2;which<(int)count;which++) {
             int x,y,w,h;
             if(!compositor_panel_slot(&f,which,&x,&y,&w,&h))continue;
@@ -103398,9 +103094,9 @@ static void check_compositor_panel_slots(void) {
    touched. */
 static void check_compositor_panel_once(void) {
     static u32 screen[1024*768];
-    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=COMPOSITOR_CLIENTS;count++)
+    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=WINDOWS;count++)
     for(unsigned pattern=0;pattern<4;pattern++) {
-        unsigned char marks[COMPOSITOR_CLIENTS];
+        unsigned char marks[WINDOWS];
         for(unsigned i=0;i<count;i++)marks[i]=(unsigned char)((pattern>>(i&1))&1?(i%3==0?2:1):0);
         struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
         struct compositor_target t={screen,1024,1024,768,0,0,1024,768};
@@ -103430,9 +103126,9 @@ static void check_compositor_panel_once(void) {
    tables said. */
 /* cc_check names its argument twice, and these rows have effects: evaluated once. */
 #define ck_ok(x) do{int ok_=!!(x);if(!ok_)fprintf(stderr,"keymap row failed, line %d: %s\n",__LINE__,#x);check(ok_);}while(0)
-#define KEY_ALTGR SURFACE_KEY_ALTGR
-#define KEY_SHIFT SURFACE_KEY_SHIFT
-#define KEY_CTRL SURFACE_KEY_CONTROL
+#define KEY_ALTGR WINDOW_KEY_ALTGR
+#define KEY_SHIFT WINDOW_KEY_SHIFT
+#define KEY_CTRL WINDOW_KEY_CONTROL
 static int ck_press(struct compositor_keymap *map,unsigned code,unsigned mods,unsigned out[2]) {
     unsigned scratch[2]={0,0};
     int n=compositor_keymap_event(map,code,1,mods,out);
@@ -103537,10 +103233,10 @@ static void check_compositor_keymap(void) {
                 ck_ok(c<0x100||c==0x20AC||(c&CK_DEAD&&(c&~CK_DEAD)<0x100));
             }
     /* What is held is a bit a key, and one keyboard letting go of Shift is not another's. */
-    ck_ok(compositor_held_flags(compositor_held_bit(42)|compositor_held_bit(54))==SURFACE_KEY_SHIFT);
-    ck_ok(compositor_held_flags(compositor_held_bit(97))==SURFACE_KEY_CONTROL&&compositor_held_flags(compositor_held_bit(29))==SURFACE_KEY_CONTROL);
-    ck_ok(compositor_held_flags(compositor_held_bit(100))==SURFACE_KEY_ALTGR&&compositor_held_flags(compositor_held_bit(56))==SURFACE_KEY_ALT);
-    ck_ok(compositor_held_flags(compositor_held_bit(125))==SURFACE_KEY_SUPER&&compositor_held_flags(compositor_held_bit(126))==SURFACE_KEY_SUPER);
+    ck_ok(compositor_held_flags(compositor_held_bit(42)|compositor_held_bit(54))==WINDOW_KEY_SHIFT);
+    ck_ok(compositor_held_flags(compositor_held_bit(97))==WINDOW_KEY_CONTROL&&compositor_held_flags(compositor_held_bit(29))==WINDOW_KEY_CONTROL);
+    ck_ok(compositor_held_flags(compositor_held_bit(100))==WINDOW_KEY_ALTGR&&compositor_held_flags(compositor_held_bit(56))==WINDOW_KEY_ALT);
+    ck_ok(compositor_held_flags(compositor_held_bit(125))==WINDOW_KEY_SUPER&&compositor_held_flags(compositor_held_bit(126))==WINDOW_KEY_SUPER);
     ck_ok(compositor_held_bit(30)==0&&compositor_held_flags(0)==0);
 }
 
@@ -103667,14 +103363,14 @@ static void check_compositor_pointer(void) {
    random damage, byte for byte -- the corners' scratch included. */
 static void check_compositor_scene(void) {
     enum { W=200, H=150 };
-    static u32 seen[W*H], want[W*H], body[COMPOSITOR_CLIENTS][96*80];
-    static const unsigned char marks[COMPOSITOR_CLIENTS]={1,0,2,0,1,0,0,2,0,0,1,0};
+    static u32 seen[W*H], want[W*H], body[WINDOWS][96*80];
+    static const unsigned char marks[WINDOWS]={1,0,2,0,1,0,0,2,0,0,1,0};
     u64 seed=0x9e3779b97f4a7c15ull;
     #define RND(n) (seed^=seed<<13,seed^=seed>>7,seed^=seed<<17,(int)(seed%(u64)(n)))
     int equal=1;
     for(int scene=0;scene<4000;scene++) {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
-        unsigned count=scene%61==60?COMPOSITOR_CLIENTS:(unsigned)RND(7);
+        unsigned count=scene%61==60?WINDOWS:(unsigned)RND(7);
         for(unsigned i=0;i<count;i++) {
             int w=1+RND(96),h=1+RND(80);
             for(int p=0;p<w*h;p++)body[i][p]=0x400000u|(u32)(i<<16)|(u32)p;
@@ -103926,8 +103622,8 @@ static void check_character_bounds(int wide) {
 }
 
 int main(void) {
-    const u32 palette[]={0x1b2733,0x2f3f52,0x2b3a4c,0x4c6785,
-                         0x101820,0xdfe7ef,0xffffff,0x000000};
+    const u32 palette[]={0x1e1e1e,0x262628,0x2f2f33,0x4a4a50,
+                         0x121212,0xe4e4e4,0xffffff,0x000000};
     check_pane_focus_policy();
     const int wide=simd_usable();
     if(wide)check_wide_bodies();
@@ -104028,7 +103724,6 @@ int main(void) {
     check_golden_gs1(palette);
     check_compositor_gs1();
     check_compositor_gs2();
-    check_compositor_roles();
     check_compositor_panel_slots();
     check_compositor_panel_fit();
     check_compositor_panel_once();

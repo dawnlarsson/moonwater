@@ -5112,15 +5112,15 @@ static b32 build_kernel_source()
         "echo ok | base64 > /dev/ttyS1\n"
 
 /*
-        The fonts the panel and the terminal on the compositor draw with.
+        The fonts the compositor's tabs and the terminal on it draw with.
 
         fonts/ holds the files of the Inter and IBM Plex Mono releases as the
         projects shipped them, each family with its own OFL.txt, and they go
         into the image as /usr/share/fonts/<family>/, licence beside the
         files, which is where the machine script looks (THIRD-PARTY says what
         they are and under what terms). They are only a font to something
-        that draws text: a build without the compositor, the panel or the
-        terminal ships none, and one that dropped them clears what the last
+        that draws text: a build without the compositor or the terminal
+        ships none, and one that dropped them clears what the last
         build put there, as the firmware does.
 */
 static bool build_tool_named_on(string_address name)
@@ -5144,7 +5144,7 @@ static b32 build_fonts(string_address image)
         if (build_tool("rm", "-rf", where, null))
                 return build_die("clearing the fonts");
 
-        if (!build_tool_named_on("panel") && !build_tool_named_on("terminal"))
+        if (!build_tool_named_on("compositor") && !build_tool_named_on("terminal"))
                 return 0;
 
         if (build_tool("mkdir", "-p", where, null))

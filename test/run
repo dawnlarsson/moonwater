@@ -16041,7 +16041,7 @@ counted
 #       has no relative axes to move along.
 #
 #       The machine script's desktop functions, the supervisor's give-up and canvas off, the
-#       stop, the font the terminal draws with and the no-surface line, run the way the machine
+#       stop, the font the terminal draws with and the no-table line, run the way the machine
 #       runs them: the moonwater shell as bash, which is where the function keyword and $SECONDS
 #       are, against stub programs with the paths they name redirected into a directory of the
 #       lane's own. MOONWATER_DESKTOP_MAIN names another script; the parent's shows the rows fail.
@@ -16063,7 +16063,7 @@ desktop_script_rows()
 #!/bin/sh
 # The desktop functions of the machine script, run as the moonwater shell runs them (the bash
 # personality, which has $SECONDS and the function keyword), against stub compositor, klog,
-# terminal, panel and moonwater programs, with the absolute paths they name redirected into a
+# terminal and moonwater programs, with the absolute paths they name redirected into a
 # case directory. One row per verdict, tab separated: PASS|FAIL, the row, what it got, what it wants.
 #   runner.sh SHELL ROOT SCRIPT
 SH=$1
@@ -16083,16 +16083,13 @@ make_stub()
         echo x > "$d/fonts/A-Mono.ttf"
         echo x > "$d/fonts/Q-Face.ttf"
 
-        for n in klog terminal panel; do
+        for n in klog terminal; do
                 printf '#!/bin/sh\necho "%s $*" >> "$STUB/args"\nexit 0\n' "$n" > "$d/bin/$n"
         done
 
         cat > "$d/bin/compositor" <<'EOF'
 #!/bin/sh
-if [ "$1" = grant ]; then
-        echo "grant $*" >> "$STUB/args"
-        exit 0
-fi
+echo "compositor $*" >> "$STUB/args"
 echo "$$" >> "$STUB/starts"
 if [ -e "$STUB/slow" ]; then
         trap 'sleep 1; echo gone > "$STUB/gone"; exit 0' TERM
@@ -16142,8 +16139,7 @@ redirect()
             -e "s#/usr/share/fonts#\$STUB/fonts#g" \
             -e "s#/compositor\([ &]\)#\$STUB/bin/compositor\1#g" \
             -e "s#/klog\([ ]\)#\$STUB/bin/klog\1#g" \
-            -e "s#/terminal\([ ]\)#\$STUB/bin/terminal\1#g" \
-            -e "s#/panel\([ ]\)#\$STUB/bin/panel\1#g" "$1" > "$STUB/main.sed.sh"
+            -e "s#/terminal\([ ]\)#\$STUB/bin/terminal\1#g" "$1" > "$STUB/main.sed.sh"
 }
 
 # One case: $1 its name. The caller writes lives, root/font, slow and the driver.
@@ -16239,8 +16235,8 @@ EOF
 run_driver
 report "the first line of /root/font is the face of the terminal" "$(grep '^font=' "$STUB/out")" "font=1"
 
-# E: a compositor that makes no surface is not reported as up, and is seen at once.
-begin surface
+# E: a compositor that makes no window table is not reported as up, and is seen at once.
+begin table
 printf '0 off\n' > "$STUB/lives"
 cat > "$STUB/driver.sh" <<'EOF'
 . "$STUB/main.sed.sh"
@@ -16248,11 +16244,11 @@ t0=$(/usr/bin/date +%s%N)
 desktop_start
 wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
 t1=$(/usr/bin/date +%s%N)
-echo "nosurface=$(grep -c 'made no surface' "$STUB/kmsg")"
+echo "notable=$(grep -c 'made no window table' "$STUB/kmsg")"
 echo "quick=$(( (t1 - t0) < 2000000000 ))"
 EOF
 run_driver
-report "no surface is said, not that the compositor is up" "$(grep '^nosurface=' "$STUB/out")" "nosurface=1"
+report "no table is said, not that the compositor is up" "$(grep '^notable=' "$STUB/out")" "notable=1"
 report "a compositor that dies at once is seen at once" "$(grep '^quick=' "$STUB/out")" "quick=1"
 
 # F: a second start while a supervisor lives starts nothing.
@@ -16621,7 +16617,7 @@ if len(runs) >= 1:
     if after_spawn and dropped > 0:
         band = range(new_top + 4, new_top + dropped - 4)
         marks = [x for x in range(new_right, new_left, -1)
-                 for y in band if spixel(x, y) == (223, 231, 239)]
+                 for y in band if spixel(x, y) == (228, 228, 228)]
 
         if marks:
             moveto(marks[0] - 3, new_top + dropped // 2)
@@ -18601,7 +18597,7 @@ sleep 5
 kill -9 $a
 echo m2-killed-a
 sleep 5
-/surface -F 1000000 -W 3 -x 500 -y 300 -w 800 -h 600 -c 663399 -s 90 > /tmp/f.out &
+/surface -F 1000000 -x 500 -y 300 -w 800 -h 600 -c 663399 -s 90 > /tmp/f.out &
 f=$!
 sleep 1
 /surface -x 1500 -y 100 -w 200 -h 100 -c 339966 -s 20 > /tmp/d.out &
@@ -18615,30 +18611,17 @@ kill -0 $c && echo "m2 alive: yes" || echo "m2 alive: no"
 /surface -x 1700 -y 600 -w 100 -h 100 -s 1 > /tmp/e.out
 n=$(grep -c 'surface: [0-9]* at' /tmp/e.out)
 echo "m2 after: new client $n"
-/surface -O 2147479552 -x 1000 -y 700 -w 64 -h 32 -s 3 > /tmp/o.out &
-sleep 1
-/surface -x 1200 -y 700 -w 64 -h 32 -s 1 > /tmp/o2.out
-n=$(grep -c 'surface: [0-9]* at' /tmp/o2.out)
-kill -0 $c && l=yes || l=no
-echo "m2 offset: alive $l next client $n"
-/surface -2 -x 1300 -y 700 -w 100 -h 100 -s 3 > /tmp/t.out
-t1=$(grep -c 'second create answered -16' /tmp/t.out)
-t2=$(grep -c 'compositor has gone' /tmp/t.out)
-echo "m2 twice: $t1 gone $t2"
-k1=$(grep -c 'surface: event 6' /tmp/b.out)
-k2=$(grep -c 'surface: event 6' /tmp/c.out)
+k1=$(grep -c 'surface: key' /tmp/b.out)
+k2=$(grep -c 'surface: key' /tmp/c.out)
 echo "m2 keys: nothing-shown $k1 visible $k2"
 kill $c
 wait $c
 echo m2-done
 """)
 
-#   The panel, the roles and the grants (canvas milestone M2). Three windows
-#   with the panel the compositor draws itself (the third put away), a claim
-#   for the panel role with no grant, then programs that hold it by grant: a
-#   second claim, the holder killed, a locked surface asked to move, a swap
-#   and a holder that hangs. The lane clicks and types between the markers,
-#   and what the programs were told is counted at the end.
+#   The panel (canvas milestone M2). Three windows and the compositor's tabs,
+#   the third put away. The lane clicks and types between the markers, and
+#   what the windows were sent is counted at the end.
 open(stick + "/m3", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18649,61 +18632,9 @@ sleep 1
 sleep 1
 /surface -x 1200 -y 300 -w 200 -h 120 -c 55aa55 -T gamma -m -s 120 > /tmp/wc.out &
 sleep 1
-/surface -r 2 -s 1 > /tmp/p0.out
-echo "m3 no grant: $(grep -c 'refused -1' /tmp/p0.out)"
 echo m3-windows
 sleep 26
-echo "m3 keys: alpha $(grep -c 'surface: event 6' /tmp/wa.out) beta $(grep -c 'surface: event 6' /tmp/wb.out)"
-/compositor grant panel /surface -r 2 -c 445566 -p -s 120 > /tmp/p1.out &
-p1=$!
-sleep 2
-echo m3-held
-/compositor grant panel /surface -r 2 -c 778899 -s 5 > /tmp/p2.out &
-sleep 2
-echo "m3 fields: $(grep 'surface: role' /tmp/p1.out)"
-echo "m3 second claim: busy $(grep -c 'event 10 0 3 -16' /tmp/p2.out) closed $(grep -c 'event 9 0 2 0' /tmp/p2.out)"
-kill -9 $p1
-echo m3-killed
-sleep 3
-/compositor grant panel /surface -r 2 -c 445566 -x 50 -y 50 -z 10 -s 4 > /tmp/p3.out
-echo "m3 locked: move $(grep -c 'event 14 0 1 -1' /tmp/p3.out) resize $(grep -c 'event 14 0 2 -1' /tmp/p3.out)"
-/compositor grant panel /surface -r 2 -c aa0000 -s 120 > /tmp/s1.out &
-s1=$!
-sleep 2
-/compositor grant panel:replace /surface -r 2 -c 00aa00 -s 120 > /tmp/s2.out &
-s2=$!
-sleep 2
-echo m3-swapped
-sleep 2
-echo "m3 swap: holder asked $(grep -c 'event 9 0 1 0' /tmp/s1.out) new active $(grep -c 'event 10 0 2 0' /tmp/s2.out)"
-kill -STOP $s2
-/compositor grant panel:replace /surface -r 2 -c 0000aa -s 120 > /tmp/s3.out &
-s3=$!
-sleep 3
-echo m3-hung
-kill -CONT $s2
-sleep 1
-echo "m3 hung: told $(grep -c 'event 10 0 4 -110' /tmp/s2.out)"
-kill -9 $s1 $s2 $s3
-sleep 1
-/compositor grant background /surface -r 1 -c 112233 -s 120 > /tmp/b1.out &
-b1=$!
-sleep 2
-echo m3-background
-sleep 3
-echo m3-background-late
-sleep 2
-kill -9 $b1
-sleep 2
-echo m3-bgkilled
-sleep 1
-for n in 1 2 3 4 5 6; do /surface -N 6 -w 10 -h 10 -s 20 > /tmp/n$n.out & done
-sleep 3
-for n in 7 8 9; do /surface -N 2 -w 10 -h 10 -s 20 > /tmp/n$n.out & done
-sleep 3
-/surface -x 1500 -y 500 -w 150 -h 100 -c aabbcc -T late -s 4 > /tmp/late.out &
-sleep 2
-echo "m3 slots: each made 4: $(cat /tmp/n1.out /tmp/n2.out /tmp/n3.out /tmp/n4.out /tmp/n5.out /tmp/n6.out | grep -c 'made 4$') late window $(grep -c 'surface: [0-9]* at' /tmp/late.out)"
+echo "m3 keys: alpha $(grep -c 'surface: key' /tmp/wa.out) beta $(grep -c 'surface: key' /tmp/wb.out)"
 kill $c
 wait $c
 echo m3-done
@@ -18754,7 +18685,7 @@ sleep 1
 sleep 1
 echo m6-ready
 sleep 40
-echo "m6 keys: one $(grep -c 'surface: event 6' /tmp/w1.out) two $(grep -c 'surface: event 6' /tmp/w2.out) three $(grep -c 'surface: event 6' /tmp/w3.out)"
+echo "m6 keys: one $(grep -c 'surface: key' /tmp/w1.out) two $(grep -c 'surface: key' /tmp/w2.out) three $(grep -c 'surface: key' /tmp/w3.out)"
 kill $c
 wait $c
 echo m6-done
@@ -18791,7 +18722,7 @@ sleep 1
 ev '\001\000\036\000\002\000\000\000'
 ev '\001\000\036\000\000\000\000\000'
 sleep 2
-echo "m12 keys: two $(grep -c 'surface: event 6 ' /tmp/k2.out) one $(grep -c 'surface: event 6 ' /tmp/k1.out)"
+echo "m12 keys: two $(grep -c 'surface: key ' /tmp/k2.out) one $(grep -c 'surface: key ' /tmp/k1.out)"
 kill $c
 wait $c
 echo m12-done
@@ -18799,15 +18730,15 @@ echo m12-done
 
 #   The hand: how far a mouse moves the pointer at a slow pace and at a fast
 #   one (the compositor's acceleration is the kernel desktop's curve), and the
-#   wheel for a window that asked for the wheel alone. The windows write what
-#   they are sent; the script counts it at the end.
+#   wheel for the window under the pointer. The windows write what they are
+#   sent; the script counts it at the end.
 open(stick + "/m7", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
 sleep 2
 /surface -x 100 -y 100 -w 2300 -h 700 -c 224466 -T hand -p -s 120 > /tmp/h1.out &
 sleep 1
-/surface -x 100 -y 840 -w 600 -h 100 -c 446622 -T wheel -L -s 120 > /tmp/h2.out &
+/surface -x 100 -y 840 -w 600 -h 100 -c 446622 -T wheel -s 120 > /tmp/h2.out &
 sleep 1
 echo m7-ready
 sleep 45
@@ -18858,8 +18789,7 @@ echo m9-done
 
 #   The windows: where a new one goes, the edges and corners they are taken by,
 #   filling the screen and half of it, and moving with Alt held. The windows
-#   (-R) answer the sizes they are asked for with a page of that size and say
-#   what size they are.
+#   (-R) draw the sizes they are asked for and say what size they are.
 open(stick + "/m10", "w").write(r"""exec > /dev/ttyS0 2>&1
 /compositor &
 c=$!
@@ -18894,12 +18824,15 @@ open(stick + "/m11", "w").write(r"""exec > /dev/ttyS0 2>&1
 echo /mnt/font.ttf > /root/font
 /compositor &
 c=$!
+# The machine answers Control-Shift-T on the compositor when compositor.pid names a live one.
+echo $c > /run/moonwater/compositor.pid
 sleep 2
 echo m11-ready
 sleep 30
 echo "m11 terminals: $(ps | grep -c '[t]erminal')"
 kill $c
 wait $c
+rm -f /run/moonwater/compositor.pid
 echo m11-done
 """)
 
@@ -19017,8 +18950,8 @@ out.append(("a click on the first window raises it above the second",
 out.append(("M1.2 and focuses it: its button in the panel lit 38383c, the other's 000000",
             "%s %s" % (clicked(tab_at(tabs_of(clicked), 0), H - band // 2), clicked(tab_at(tabs_of(clicked), 1), H - band // 2)),
             "38383c 000000"))
-said = re.findall(rb"surface: event 3 0 (-?\d+) (-?\d+)\r?\nsurface: event 4 1 272 0", serial())
-out.append(("M1.6 the press reaches the surface as POINTER_BUTTON at buffer pixel (60, 110)",
+said = re.findall(rb"surface: motion (-?\d+) (-?\d+)\r?\nsurface: button 272 1", serial())
+out.append(("M1.6 the press reaches the window as its button at buffer pixel (60, 110)",
             "%s,%s" % (said[-1][0].decode(), said[-1][1].decode()) if said else "no event", "60,110"))
 
 done = wait_for(b"m1-done", 30)
@@ -19051,9 +18984,10 @@ time.sleep(0.5)
 width, height, off = picture("m2-off")
 #   200 by 100, asked for at (99999, 99999), is put with its body at
 #   (W-201, H-101): the work area is the whole output, the panel's tabs over
-#   it, so its line of one pixel ends on the output's last row.
+#   it, so its line of one pixel ends on the output's last row. It is the
+#   newest window, so it has the keys and its line is lit.
 out.append(("M2.1 a window asked for far off the output is put on it, its bottom on the output's edge",
-            "%s %s %s" % (off(W - 100, H - 50), off(W - 100, H - 102), off(W - 100, H - 103)), "996633 000000 1e1e1e"))
+            "%s %s %s" % (off(W - 100, H - 50), off(W - 100, H - 102), off(W - 100, H - 103)), "996633 4d4d4d 1e1e1e"))
 #   Not where the first compositor's click went: a tablet that is told the
 #   place it already has reports nothing, and a pointer that starts in the
 #   middle of the output would press there.
@@ -19073,11 +19007,6 @@ out.append(("M2.3 a client that floods commits does not starve the creation of a
             said(r"m2 flood: second client (\d+)"), "1"))
 out.append(("M2.4 the compositor outlives a client killed mid-flood and serves the next",
             "%s %s" % (said(r"m2 alive: (\w+)"), said(r"m2 after: new client (\d+)")), "yes 1"))
-
-out.append(("M2.5 a buffer offset written over the page's header does not stop the compositor",
-            "%s %s" % (said(r"m2 offset: alive (\w+)"), said(r"m2 offset: alive \w+ next client (\d+)")), "yes 1"))
-out.append(("M2.6 a second create is answered EBUSY and the surface it came on stays",
-            "%s %s" % (said(r"m2 twice: (\d+)"), said(r"m2 twice: \d+ gone (\d+)")), "1 0"))
 
 #   The panel and its roles. The panel the compositor draws is a row of tabs
 #   in the middle of the bottom 24 rows (the guest's scale is 1, which the
@@ -19099,12 +19028,9 @@ out.append(("M2.8 the windows have a tab each, the put-away one dim, and the row
             "%s %s %s %s" % (panel_up(button(0), H - band // 2), panel_up(button(1), H - band // 2),
                              panel_up(button(2), H - band // 2),
                              "middle" if tabs3 and abs((tabs3[0] + tabs3[-1]) // 2 - W // 2) < 40 else "off"),
-            "000000 000000 141416 middle"))
+            "000000 38383c 141416 middle"))
 out.append(("M2.9 a window put away is not on the screen",
             panel_up(1250, 380), "1e1e1e"))
-text = serial().decode("latin1")
-out.append(("M2.10 a panel claimed with no grant is refused",
-            said(r"m3 no grant: (\d+)"), "1"))
 
 #   A device plugged in after the compositor started is heard: a mouse added
 #   to the running guest moves the pointer from one window to another (the
@@ -19137,70 +19063,22 @@ out.append(("M2.13 a click on the panel does not move the keys: the window is st
             after_panel(button(0), H - band // 2), "38383c"))
 click(button(1), H - band // 2)      # beta's button
 width, height, raised = picture("m3-button")
-#   A window with the keys has its tab lit, and its black line is round it: beta's left line is at x 699.
-#   The tab is read beside where it was pressed, which is where the pointer is drawn.
-out.append(("M2.14 a window's tab brings its window up and gives it the keys: its tab lit, the other's not",
+#   A window with the keys has its tab lit, and its line is lit (4d4d4d) round it: beta's left line is at
+#   x 699. The tab is read beside where it was pressed, which is where the pointer is drawn.
+out.append(("M2.14 a window's tab brings its window up and gives it the keys: its tab and its line lit, the other's not",
             "%s %s %s %s" % (raised(button(1) - 8, H - band // 2), raised(button(0), H - band // 2), raised(699, 260),
-                             raised(750, 210)), "38383c 000000 000000 996633"))
+                             raised(750, 210)), "38383c 000000 4d4d4d 996633"))
 click(button(2), H - band // 2)      # gamma's button: put away, and back
 width, height, restored = picture("m3-restore")
 out.append(("M2.15 the button of a window that was put away brings it back",
             restored(1250, 380), "55aa55"))
 type_text("a")
 
-done3 = wait_for(b"m3-held", 90)
-time.sleep(0.3)
-width, height, held = picture("m3-held")
-out.append(("M2.16 a program given the panel role holds it: its colour in the band, the window buttons gone",
-            "%s %s" % (held(button(1), H - band // 2), held(button(0), H - band // 2)), "445566 445566"))
-wait_for(b"m3-killed", 40)
-time.sleep(1)
-width, height, fallback = picture("m3-killed")
-out.append(("M2.17 the holder killed, the compositor's panel is back: its tray, and nothing beside its tabs",
-            "%s %s" % (fallback(button(-1), H - band // 2), fallback(4, H - band // 2)), "000000 1e1e1e"))
-wait_for(b"m3-swapped", 60)
-time.sleep(0.3)
-width, height, swapped = picture("m3-swapped")
-out.append(("M2.18 a program with the right to replace takes the role when the holder closes",
-            swapped(button(0), H - band // 2), "00aa00"))
-wait_for(b"m3-hung", 40)
-time.sleep(0.3)
-width, height, hung = picture("m3-hung")
-out.append(("M2.19 a holder that does not close in time loses the role to the replacement",
-            hung(button(0), H - band // 2), "0000aa"))
-wait_for(b"m3-background", 40)
-time.sleep(0.3)
-width, height, behind = picture("m3-background")
-out.append(("M2.25 a program given the background role fills the output under the windows and the panel's tabs, and between them",
-            "%s %s %s %s" % (behind(1500, 600), behind(400, 260), behind(button(-1), H - band // 2), behind(4, H - band // 2)),
-            "112233 336699 000000 112233"))
-wait_for(b"m3-background-late", 40)
-time.sleep(0.3)
-width, height, later = picture("m3-background-late")
-out.append(("M2.25 and still there some seconds on",
-            later(1500, 600), "112233"))
-wait_for(b"m3-bgkilled", 40)
-time.sleep(0.3)
-width, height, bare = picture("m3-bgkilled")
-out.append(("M2.26 the background holder killed, the desktop's own ink is back",
-            "%s %s" % (bare(1500, 600), bare(400, 260)), "1e1e1e 336699"))
 done4 = wait_for(b"m3-done", 60)
 text = serial().decode("latin1")
 keys3 = re.findall(r"m3 keys: alpha (\d+) beta (\d+)", text)
 out.append(("M2.20 the keys went to the lit window and not to the one the panel's click was beside",
             "%s %s" % (keys3[-1][0], keys3[-1][1]) if keys3 else "no end", "2 0"))
-out.append(("M2.21 a second claim for a held role is told EBUSY and to close",
-            "%s %s" % (said(r"m3 second claim: busy (\d+)"), said(r"m3 second claim: busy \d+ closed (\d+)")), "1 1"))
-out.append(("M2.22 a panel is told a move or a resize it asked for was refused",
-            "%s %s" % (said(r"m3 locked: move (\d+)"), said(r"m3 locked: move \d+ resize (\d+)")), "1 1"))
-out.append(("M2.23 the holder asked to go is told it was replaced, and the hung one that it lost the role",
-            "%s %s %s" % (said(r"m3 swap: holder asked (\d+)"), said(r"m3 swap: holder asked \d+ new active (\d+)"),
-                          said(r"m3 hung: told (\d+)")), "1 1 1"))
-out.append(("M2.27 a program that shows nothing on its surfaces is given four of them, and a window can still be made after 32 such",
-            "%s %s" % (said(r"m3 slots: each made 4: (\d+)"), said(r"m3 slots: each made 4: \d+ late window (\d+)")), "6 1"))
-out.append(("M2.28 the panel is told what its role gives it: the top layer, held to the bottom and both sides, a zone of its height, locked",
-            said(r"m3 fields: surface: (role \d+ state \d+ layer \d+ anchor \d+ zone \d+ lock \d+)"),
-            "role 2 state 2 layer 3 anchor 14 zone 24 lock 12"))
 out.append(("M2.29 the compositor says what scale it draws at",
             "%s" % (scale3[-1] if scale3 else "none"), "1"))
 
@@ -19241,7 +19119,7 @@ def typed(first, last):
     # The characters the window was sent, in order, as code:character.
     found = re.search(first + r"(.*?)" + last, text, re.S)
     got = []
-    for flags, code, char in re.findall(r"surface: event 6 (\d+) (\d+) (\d+)", found.group(1) if found else ""):
+    for code, char, flags in re.findall(r"surface: key (\d+) (\d+) (\d+)", found.group(1) if found else ""):
         if int(flags) & 1 and int(char):
             got.append("%s:%s" % (code, char))
     return " ".join(got)
@@ -19349,7 +19227,7 @@ send([{"type": "btn", "data": {"down": True, "button": "wheel-down"}},
 time.sleep(0.5)
 wait_for(b"m7-done", 90)
 text = serial().decode("latin1")
-moves = [(int(a), int(b)) for a, b in re.findall(r"surface: event 3 0 (-?\d+) (-?\d+)", text.split("m7-reading")[-1])]
+moves = [(int(a), int(b)) for a, b in re.findall(r"surface: motion (-?\d+) (-?\d+)", text.split("m7-reading")[-1])]
 def reach(row):
     # How far the pointer went along a row of the window, from where the tablet put it.
     xs = [x for x, y in moves if abs(y - row) <= 2]
@@ -19360,16 +19238,14 @@ out.append(("P1.1 a mouse moved slowly goes one to one: sixty reports of ten cou
 out.append(("P1.2 and quickly goes farther, by no more than the curve's two and a half",
             "yes" if slow7 > 0 and 600 * 1.4 < fast7 <= 1500 else "slow %s fast %s" % (slow7, fast7), "yes"))
 first7, second7 = text.split("m7-reading")[-1].split("m7-second")[:2] if "m7-second" in text else ("", "")
-wheel7 = re.findall(r"surface: event 5 0 (-?\d+) (\d+)", first7)
-seen7 = re.findall(r"surface: event (\d+) (\d+) (-?\d+) (-?\d+)", first7)
+wheel7 = re.findall(r"surface: wheel (-?\d+) (\d+)", first7)
+seen7 = re.findall(r"surface: (\w+) (-?\d+) (-?\d+)", first7)
 out.append(("P1.3 one detent of the wheel is 120, once, to the window under the pointer",
             " ".join("%s:%s" % w for w in wheel7) or "none of %d events, last %s" % (len(seen7), seen7[-3:]), "120:0"))
-#   A window that asked for the wheel alone is sent the wheel and not the pointer's
-#   motion, which is what lets it sleep while the hand moves.
-types7 = re.findall(r"surface: event (\d+) \d+ (-?\d+) (-?\d+)", second7)
-out.append(("P1.4 a window that asked for the wheel alone is sent it (down, -120) and no motion of the pointer",
-            "%s %d" % (" ".join(a + ":" + b for t, a, b in types7 if t == "5"), sum(t in ("1", "3") for t, a, b in types7)),
-            "-120:0 0"))
+#   The second window, under the pointer when the wheel turns down, is sent it.
+wheel7b = re.findall(r"surface: wheel (-?\d+) (\d+)", second7)
+out.append(("P1.4 the window under the pointer is sent the wheel turned down: -120",
+            " ".join("%s:%s" % w for w in wheel7b) or "none", "-120:0"))
 
 #   What the pointer wears. The guest's kernel draws no cursor of its own with the
 #   plane off, and the compositor's is drawn into the scanout there, so the screen
@@ -19413,13 +19289,12 @@ def wears(name, x, y):
     return cursor_at(at, x, y, height, width, cursor_base[0])
 out.append(("C1.1 the pointer over the desktop is the arrow, drawn by the compositor",
             wears("m8-arrow", 2000, 910), "55 46 11x18 tl"))
-#   The window is 400 by 300 at (600, 300), and its edges are the six pixels just outside it. Two of the
-#   resize arrows' 40 black pixels fall on the window's black line, which is black without them too, so
-#   38 of them are seen.
+#   The window is 400 by 300 at (600, 300), and its edges are the six pixels just outside it. It has the
+#   keys, so its line is lit, and the two of the resize arrows' 40 black pixels that fall on it are seen.
 out.append(("C1.2 just outside a window's right edge it is the arrow across",
-            wears("m8-right", 1002, 460), "25 38 15x9 -"))
+            wears("m8-right", 1002, 460), "25 40 15x9 -"))
 out.append(("C1.3 just below its bottom edge it is the arrow up and down",
-            wears("m8-bottom", 800, 602), "25 38 9x15 -"))
+            wears("m8-bottom", 800, 602), "25 40 9x15 -"))
 out.append(("C1.4 off its bottom right corner it is the one that leans left",
             wears("m8-corner", 1002, 602), "25 48 13x13 tl"))
 out.append(("C1.5 off its top right corner it is the one that leans right",
@@ -19593,7 +19468,7 @@ stop = time.time() + 60
 while b"m9-done" not in serial_plane() and time.time() < stop:
     time.sleep(0.2)
 plane = serial_plane().decode("latin1")
-mode = re.findall(r"pointer (drawn|on the plane|none), listening", plane)
+mode = re.findall(r"pointer (drawn|on the plane|none), windows in", plane)
 given = re.findall(r"the plane was given (\d+) shapes and (\d+) moves and refused (\d+) times", plane)
 out.append(("C1.9 on a card with a cursor plane the pointer is on the plane",
             mode[-1] if mode else "no line", "on the plane"))
@@ -19939,25 +19814,25 @@ def said(row):
 first = compositor()
 width, height, plain = picture("r1-plain")
 out.append(("R1.1 a plain boot reaches the userspace compositor: its ground, its panel, a process of its own",
-            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) in ("000000", "38383c") for x in range(0, W, 4)) else "no tabs",
+            "%s %s %s" % (plain(4, 4), "tabs" if any(plain(x, H - 6) in ("000000", "38383c", "090909", "393939") for x in range(0, W, 4)) else "no tabs",
                           "alive" if alive(first) else "gone"),
             "1e1e1e tabs alive"))
 out.append(("and no tool's start was refused memory by the kernel (the shell's reserve is not counted)",
             shell.number("dmesg | grep -c __vm_enough_memory"), "0"))
-#   The image's fonts start the panel and a terminal with no help: the machine
-#   script finds them under /usr/share/fonts, and says nothing of a missing one.
+#   The image's fonts reach the compositor's tabs and a terminal with no help: the
+#   machine script finds them under /usr/share/fonts, and says nothing of a missing one.
 #   The terminal loads its font while the guest's two processors do everything else.
-until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1", 60)
 
 def command_lines(name):
     return shell.run(r'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case $c in "/%s "*) echo "$c";; esac; done' % name, 15)[0]
 
-out.append(("R1.1b with no font named, the image's fonts start the panel (Inter) and a terminal (IBM Plex Mono, with its bold), and the log is not missing one",
-            "%s %s %s" % ("panel-inter" if "/panel -f /usr/share/fonts/inter/Inter-Regular.ttf" in command_lines("panel") else "panel-other",
+out.append(("R1.1b with no font named, the image's fonts are the tabs' (Inter) and a terminal's (IBM Plex Mono, with its bold), and the log is not missing one",
+            "%s %s %s" % ("tabs-inter" if "/compositor -f /usr/share/fonts/inter/Inter-Regular.ttf" in command_lines("compositor") else "tabs-other",
                           "terminal-plex" if ("/terminal -f /usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf -b "
                                               "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf") in command_lines("terminal") else "terminal-other",
                           "none missing" if "desktop: no font" not in shell.run("dmesg | grep 'desktop:'")[0] else "one missing"),
-            "panel-inter terminal-plex none missing"))
+            "tabs-inter terminal-plex none missing"))
 
 #   Text is pixels. The panel's clock is lit in its tray, at the right end of
 #   the band along the bottom, which has nothing else bright in it, and the
@@ -19991,7 +19866,7 @@ out.append(("and the terminal on it draws its prompt in the first row of its pap
 def status_of(name):
     return shell.run(r'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case $c in "/%s"*) grep -E "^(VmRSS|RssAnon|RssFile|RssShmem):" $p/status; break;; esac; done' % name, 15)[0]
 
-print("r1 memory (kB): " + " | ".join("%s %s" % (name, " ".join(status_of(name).split())) for name in ("compositor", "panel", "terminal")) +
+print("r1 memory (kB): " + " | ".join("%s %s" % (name, " ".join(status_of(name).split())) for name in ("compositor", "terminal")) +
       " | " + " ".join(shell.run(r'grep -E "^(MemFree|Shmem|Cached):" /proc/meminfo', 10)[0].split()), file=sys.stderr)
 
 #   Killed, the card goes back to Canvas and the supervisor starts it again.
@@ -20031,15 +19906,15 @@ until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") 
 shell.run("moonwater canvas on", 15)
 until(lambda: newer(""), 15)
 #   The terminal loads its font while the guest's two processors do everything else.
-until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
-kids = "%s %s" % (shell.number("ps | grep -c '[t]erminal'", 30), shell.number("ps | grep -c '[p]anel'", 30))
-out.append(("R1.2b with a font in /root/font the panel and a terminal are started on the compositor, after canvas off and on",
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1", 60)
+kids = "%s %s" % (shell.number("ps | grep -c '[t]erminal'", 30), shell.number("ps | grep -c '[c]ompositor'", 30))
+out.append(("R1.2b with a font in /root/font the compositor and a terminal are started, after canvas off and on",
             kids, "1 1"))
-terminal_line, panel_line = command_lines("terminal"), command_lines("panel")
+terminal_line, tabs_line = command_lines("terminal"), command_lines("compositor")
 out.append(("and both draw with it, the terminal with no bold of its own",
             "%s %s" % ("terminal-override" if "/terminal -f %s" % override in terminal_line and " -b " not in terminal_line else terminal_line,
-                       "panel-override" if "/panel -f %s" % override in panel_line else panel_line),
-            "terminal-override panel-override"))
+                       "tabs-override" if "/compositor -f %s" % override in tabs_line else tabs_line),
+            "terminal-override tabs-override"))
 said("R1.2b")
 
 #   Back to the image's own fonts: the same restart without /root/font, and then what a plain boot
@@ -20049,7 +19924,7 @@ shell.run("moonwater canvas off", 15)
 until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
 shell.run("moonwater canvas on", 15)
 until(lambda: newer(""), 15)
-until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1" and shell.number("ps | grep -c '[p]anel'", 30) == "1", 60)
+until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1", 60)
 
 #   What is on the screen of a boot with the image's fonts: the panel with its text, the kernel log behind
 #   with the boot's messages in it, and the terminal in front with its prompt, each where its share of
@@ -21198,7 +21073,7 @@ def ink(name):
     # The desktop's ink at the top left and the panel's tabs along the bottom: the compositor's own picture.
     w, h, px = load(name)
     at = lambda x, y: "%02x%02x%02x" % tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
-    tabs = any(at(x, h - 6) in ("000000", "38383c") for x in range(0, w, 4))
+    tabs = any(at(x, h - 6) in ("000000", "38383c", "090909", "393939") for x in range(0, w, 4))
     return "%s %s" % (at(10, 10), "tabs" if tabs else at(w // 2, h - 6))
 
 def asked(command, marker, seconds=20):

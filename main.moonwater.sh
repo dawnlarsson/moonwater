@@ -96,7 +96,7 @@ function moonwater_ctrl_alt_delete {
 # by the kernel's own desktop: on the compositor when there is one, and on the
 # kernel's desktop when there is not. It has to come back, as moonwater_init does.
 function moonwater_desktop_terminal {
-  if [ -S /run/moonwater/surface ] && [ -s /run/moonwater/compositor.pid ] && kill -0 $(cat /run/moonwater/compositor.pid) 2> /dev/null; then
+  if [ -e /run/moonwater/windows ] && [ -s /run/moonwater/compositor.pid ] && kill -0 $(cat /run/moonwater/compositor.pid) 2> /dev/null; then
     desktop_terminal
   else
     moonwater canvas terminal
@@ -104,7 +104,7 @@ function moonwater_desktop_terminal {
 }
 
 # The desktop Canvas starts with: the compositor, which holds the card and
-# draws windows; the panel, the kernel log and a terminal on it; and, under
+# draws windows and their tabs; the kernel log and a terminal on it; and, under
 # them, the kernel's own desktop, which has the card whenever the compositor
 # does not.
 #
@@ -117,10 +117,10 @@ function moonwater_desktop_terminal {
 # Backspace turns Canvas off, to the text console, and the supervisor goes with
 # it. A moonwater canvas on after that starts the desktop again.
 #
-# The panel, the kernel log and the terminal take their text from a font. The
+# The tabs, the kernel log and the terminal take their text from a font. The
 # image carries two families under /usr/share/fonts (fonts/ in the repository,
 # THIRD-PARTY for what they are): the terminal and the log draw with IBM Plex
-# Mono, Regular and Bold, and the panel with Inter. /root/font, whose first line is a path, takes both
+# Mono, Regular and Bold, and the compositor writes the tabs with Inter. /root/font, whose first line is a path, takes both
 # instead, with no bold. A build without those files falls back to the first
 # mono face in /usr/share/fonts for both. With none the compositor is
 # not started: the kernel's desktop keeps the screen, with its log and a
@@ -209,25 +209,22 @@ function desktop_terminal {
 
 # One compositor and what it carries, until the compositor is over.
 function desktop_session {
-  rm -f /run/moonwater/surface
-  setsid /compositor &
+  rm -f /run/moonwater/windows
+  desktop_font
+  setsid /compositor ${desktop_text:+-f "$desktop_text"} &
   desktop_compositor=$!
   echo $desktop_compositor > /run/moonwater/compositor.pid
   desktop_wait=0
-  until [ -S /run/moonwater/surface ] || ! kill -0 $desktop_compositor 2> /dev/null || [ $desktop_wait -ge 100 ]; do
+  until [ -e /run/moonwater/windows ] || ! kill -0 $desktop_compositor 2> /dev/null || [ $desktop_wait -ge 100 ]; do
     sleep 0.05
     desktop_wait=$((desktop_wait + 1))
   done
-  if [ -S /run/moonwater/surface ]; then
+  if [ -e /run/moonwater/windows ]; then
     echo "desktop: the compositor (pid $desktop_compositor) is up" > /dev/kmsg
   else
-    echo "desktop: the compositor (pid $desktop_compositor) made no surface" > /dev/kmsg
+    echo "desktop: the compositor (pid $desktop_compositor) made no window table" > /dev/kmsg
   fi
-  desktop_font
   : > /run/moonwater/desktop.kids
-  if [ -n "$desktop_face" ]; then
-    desktop_run /compositor grant panel /panel -f "$desktop_text"
-  fi
   desktop_log
   desktop_terminal
   wait $desktop_compositor
@@ -277,7 +274,7 @@ function desktop_start {
   *moonwater.desktop=kernel*) return 1 ;;
   esac
   # The text engine has no face of its own, and a compositor without one has
-  # a panel of shapes and no window: the kernel's desktop, which has its log
+  # tabs of shapes and no window: the kernel's desktop, which has its log
   # and a terminal, keeps the screen, and the log says which file was wanted.
   desktop_font
   if [ -z "$desktop_face" ]; then
