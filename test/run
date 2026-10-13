@@ -21099,7 +21099,10 @@ if btop:
     full = lit(at, wide[0] + 2, wide[1], wide[2] - 2, wide[3]) if wide else 0
     strip = lit(at, wide[2] - 120, wide[1], wide[2] - 14, wide[3]) if wide else 0
     out.append(("M5.6 btop redraws at the new size at once: wider by the drag, every panel of it drawn",
-                "yes" if wide and wide[2] > right + 250 and full > 6 * narrow and strip > 150
+                # Four times the lit pixels of its narrow screen, which is text: light text's edges are
+                # brighter since b166aa97 (half linear light), which lifted the narrow count more than the
+                # panels' lines and graphs (5.4 times where it had been over 6). The new strip is the redraw.
+                "yes" if wide and wide[2] > right + 250 and full > 4 * narrow and strip > 150
                 else "%s lit pixels at %s, %d after, %d in the new strip" % (narrow, (left, right), full, strip), "yes"))
     type_text("q")
     time.sleep(1)
