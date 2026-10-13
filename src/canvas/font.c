@@ -3352,6 +3352,14 @@ static bool font_draw_shape(font_engine address_to e, p32 code, b32 width, b32 h
 
                 if (shape == SHAPE_CIRCLE)
                 {
+                        //      In a box of whole pixels, so its edge is the same grey all round.
+                        f32 left = __builtin_roundf(cx - size), right = __builtin_roundf(cx + size);
+                        f32 top = __builtin_roundf(cy - size);
+
+                        size = (right - left) / 2;
+                        cx = left + size;
+                        cy = top + size;
+
                         //      Quarters, the first from each direction to the next; a hollow one's
                         //      inner ring runs back the other way, the quarters in reverse order.
                         static const f32 quarter[4][4] = {{1, 0, 0, 1}, {0, 1, -1, 0}, {-1, 0, 0, -1}, {0, -1, 1, 0}};
@@ -3377,18 +3385,28 @@ static bool font_draw_shape(font_engine address_to e, p32 code, b32 width, b32 h
                         const f32 (*v)[2] = font_drawn_vertex[shape];
                         const f32 *c = font_drawn_centre[shape];
 
+                        //      Every corner on a whole pixel: a square's sides and a triangle's base are
+                        //      edges of black, where at the cell's centre they were grey on every side.
+                        f32 corner[4][2];
+
                         for (p32 k = 0; k < n; k++)
-                                font_put(e, cx + size * v[k][0], cy + size * v[k][1], height, true);
+                        {
+                                corner[k][0] = __builtin_roundf(cx + size * v[k][0]);
+                                corner[k][1] = __builtin_roundf(cy + size * v[k][1]);
+                                font_put(e, corner[k][0], corner[k][1], height, true);
+                        }
                         font_close(e);
                         if (hollow)
                         {
-                                //      Each vertex moved toward the incentre until the edges are t inside.
+                                //      Each corner moved toward the incentre until the edges are t inside, from
+                                //      the corners as drawn, so the hole is inside the shape at any size.
                                 f32 stroke = t < size * c[2] / 2 ? t : size * c[2] / 2;
                                 f32 scale = 1 - stroke / (size * c[2]);
+                                f32 mx = cx + size * c[0], my = cy + size * c[1];
 
                                 for (p32 k = n; k-- > 0;)
-                                        font_put(e, cx + size * (c[0] + (v[k][0] - c[0]) * scale),
-                                                 cy + size * (c[1] + (v[k][1] - c[1]) * scale), height, true);
+                                        font_put(e, mx + (corner[k][0] - mx) * scale, my + (corner[k][1] - my) * scale,
+                                                 height, true);
                                 font_close(e);
                         }
                 }
@@ -3411,18 +3429,37 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
         //      the faces that have one draw (Plex's is empty), and what a face without one must too.
         if (code == 0xad)
                 return true;
+        /*
+                Braille, which btop draws its graphs in: each dot in a box of
+                whole pixels at its place on the 2 by 4 grid, a square of ink
+                while it is three pixels or less across (where a round dot was
+                a blob of grey at any phase) and a circle in the box above
+                that.
+        */
         if (code >= 0x2800 && code <= 0x28ff)
         {
                 f32 radius = (width < height / 2 ? width : height / 2) * 0.15f;
-                radius = radius < 0.6f ? 0.6f : radius;
+                b32 across = (b32)__builtin_roundf(2 * radius);
 
+                across = across < 1 ? 1 : across;
+                radius = (f32)across / 2;
                 for (p32 dot = 0; dot < 8; dot++)
                 {
                         if (!(code & 1u << dot))
                                 continue;
 
                         p32 column = dot >= 3 && dot != 6, row = dot >= 6 ? 3 : dot % 3;
-                        f32 cx = width * (1 + 2 * column) / 4.0f, cy = height * (1 + 2 * row) / 8.0f;
+                        b32 left = (b32)__builtin_roundf(width * (1 + 2 * column) / 4.0f - radius);
+                        b32 top = (b32)__builtin_roundf(height * (1 + 2 * row) / 8.0f - radius);
+                        f32 cx = (f32)left + radius, cy = (f32)top + radius;
+
+                        if (across <= 3)
+                        {
+                                for (b32 y = top < 0 ? 0 : top; y < top + across && y < height; y++)
+                                        for (b32 x = left < 0 ? 0 : left; x < left + across && x < width; x++)
+                                                out[(positive)y * stride + (positive)x] = 255;
+                                continue;
+                        }
 
                         //      Eight controls round an octagon, whose midpoints
                         //      are on the circle: a dot from quadratics alone.
@@ -3437,7 +3474,9 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
                         }
                         font_close(e);
                 }
-                font_raster(e, width, height, out, stride);
+                //      Squares were written straight into the cleared cell; only circles have outlines.
+                if (across > 3)
+                        font_raster(e, width, height, out, stride);
                 return true;
         }
 
