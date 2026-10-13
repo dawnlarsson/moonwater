@@ -108913,6 +108913,15 @@ static fn check_settings(string_address regular, string_address bold)
               settings_parsed(boost, "[Moonwater] cpu: 8 online; boost off; smt on\n", value) == SETTINGS_READ &&
                   string_equals((string_address)value, (string_address) "off") &&
                   settings_parsed(boost, "[Moonwater] cpu: 2 online; smt notsupported\n", value) == SETTINGS_ABSENT);
+        {
+                static const char no_profile[] = "[Moonwater] this machine has no power profile\n";
+
+                check("settings: a verb that did not run is not a machine that has none of the thing",
+                      settings_read(&settings_rows[power], "", 0, value, SETTINGS_VALUE, true) == SETTINGS_FAILED &&
+                          settings_read(&settings_rows[power], "", 0, value, SETTINGS_VALUE, false) == SETTINGS_ABSENT &&
+                          settings_read(&settings_rows[power], no_profile, sizeof(no_profile) - 1, value, SETTINGS_VALUE, true) ==
+                              SETTINGS_ABSENT);
+        }
         check("settings: a verb that says nothing understood is a failure, not a value",
               settings_parsed(keyboard, "moonwater: something else\n", value) == SETTINGS_FAILED && !value[0]);
 

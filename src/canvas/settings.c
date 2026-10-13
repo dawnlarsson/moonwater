@@ -252,6 +252,20 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
         return absent ? SETTINGS_ABSENT : found ? SETTINGS_READ : row->lacks ? SETTINGS_ABSENT : SETTINGS_FAILED;
 }
 
+/*
+        What a row reads as from its verb's output and how the verb ended. A
+        verb that said nothing and failed did not run (no moonwater where it
+        was asked for, or it died before it said anything): that is not a
+        machine that has none of the thing, so a row it lacks is unknown then.
+*/
+static unsigned int settings_read(const struct settings_row address_to row, const char address_to said, positive length,
+                                  char address_to value, positive room, b32 failed)
+{
+        unsigned int state = settings_parse(row, said, length, value, room);
+
+        return state == SETTINGS_ABSENT && failed && !length ? SETTINGS_FAILED : state;
+}
+
 // The word of a list (words a blank apart) at index, into into; false past its end.
 static b32 settings_word(const char address_to words, positive index, char address_to into, positive room)
 {
@@ -584,8 +598,9 @@ static fn settings_finished(b32 killed)
         else
         {
                 settings.state[row] = killed ? SETTINGS_FAILED
-                                             : (unsigned char)settings_parse(&settings_rows[row], settings.said, settings.said_length,
-                                                                             settings.value[row], SETTINGS_VALUE);
+                                             : (unsigned char)settings_read(&settings_rows[row], settings.said, settings.said_length,
+                                                                            settings.value[row], SETTINGS_VALUE,
+                                                                            wait_status_code(status) != 0);
                 settings.dirty = true;
         }
 
