@@ -108771,6 +108771,19 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: a verb that says nothing understood is a failure, not a value",
               settings_parsed(keyboard, "moonwater: something else\n", value) == SETTINGS_FAILED && !value[0]);
 
+        // Spacing the verbs do not mean: more than one blank after a label, a tab for a blank, blanks at the end of a value.
+        check("settings: a value after more than one blank is the word after them",
+              settings_parsed(keyboard, "[Moonwater] keyboard   us\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "us"));
+        check("settings: a tab is a blank", settings_parsed(keyboard, "[Moonwater] keyboard\tus\n", value) == SETTINGS_READ &&
+                                                string_equals((string_address)value, (string_address) "us"));
+        check("settings: blanks at the end of a name are not its name",
+              settings_parsed(name, "patient-cricket   \n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "patient-cricket"));
+        check("settings: and blanks at the end of a switch's word are not its word",
+              settings_parsed(wifi, "[Moonwater] wifi off  \n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "off"));
+
         settings_next(&settings_rows[ntp], "on", 1, next, sizeof(next));
         check("settings: a switch on goes off", string_equals((string_address)next, (string_address) "off"));
         settings_next(&settings_rows[keyboard], "us", 1, next, sizeof(next));

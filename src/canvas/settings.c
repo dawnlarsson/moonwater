@@ -135,6 +135,8 @@ static positive settings_line(const char address_to said, positive length, posit
                 char c = said[address_to at];
 
                 address_to at += 1;
+                if (c == '\t')
+                        c = ' ';
                 // An escape sequence: its introducer, its parameters and its final letter.
                 if (c == 0x1b)
                 {
@@ -221,10 +223,14 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
                         if (where >= size)
                                 continue;
                         start = where + string_length((string_address)key);
+                        while (start < size && line[start] == ' ')
+                                start++;
                         stop = start;
                         while (stop < size && (row->line || (line[stop] != ' ' && line[stop] != ',' && line[stop] != ';' &&
                                                              line[stop] != '(')))
                                 stop++;
+                        while (stop > start && line[stop - 1] == ' ')
+                                stop--;
                         if (stop == start)
                                 continue;
                         stop = stop - start >= room ? start + room - 1 : stop;
