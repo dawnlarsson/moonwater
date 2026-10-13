@@ -28946,11 +28946,11 @@ static void check_machine_events(void) {
     //  No moonwater_init in the shipped script: one that is defined owns the
     //  init row, so `bind init add` would be refused and the stored init list
     //  would never run at boot -- which an empty one did from 17b86355 until
-    //  fc6a81ce. The kiosk version sits in it commented out.
+    //  fc6a81ce. The kiosk version sits in it commented out. No
+    //  moonwater_event either, so only the rows it owns wake the process.
     check(!report_machine_script(&script) &&
-          !(machine_script_overlay.hooks & MOONWATER_HOOK_INIT) &&
-          (machine_script_overlay.hooks & MOONWATER_HOOK_EVENT),
-          "the machine script this build ships names moonwater_event and leaves init to the stored list");
+          !(machine_script_overlay.hooks & (MOONWATER_HOOK_INIT | MOONWATER_HOOK_EVENT)),
+          "the machine script this build ships leaves init to the stored list and names no moonwater_event");
     check(moonwater_bind_line(&machine_script_overlay,SPARK_BIND_POWEROFF) &&
           moonwater_bind_line(&machine_script_overlay,SPARK_BIND_RESET) &&
           moonwater_bind_line(&machine_script_overlay,SPARK_BIND_CTRL_ALT_DELETE),
@@ -29113,6 +29113,11 @@ static void check_machine_owner(void) {
     snprintf(volume->command,sizeof volume->command,"true");
     atomic_set(&volume->bound,1);
     bind_machine.count=0;
+    bind_idle(volume);
+    bind_fire(SPARK_BIND_VOLUME_UP);
+    check(!bind_machine.count,"a row no function owns is not queued while no moonwater_event asks for every event");
+    //  From here a script that names moonwater_event, which is handed every event.
+    WRITE_ONCE(machine_script_hooks,MOONWATER_HOOK_EVENT);
     bind_idle(volume);
     bind_fire(SPARK_BIND_VOLUME_UP);
     check(bind_machine.count==1,"a press is queued for the attached process");
