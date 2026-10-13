@@ -40,10 +40,11 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
-# The kernel's own log window only when the compositor's desktop is not starting, or it is drawn for a moment
-# before the compositor takes the card.
+# The kernel's desktop is started first, with its log: it is what takes the card back and draws when the
+# compositor ends, before the supervisor has started it again.
 function moonwater_canvas_on {
-  desktop_start || { moonwater canvas log; moonwater canvas terminal; }
+  moonwater canvas log
+  desktop_start || moonwater canvas terminal
   moonwater desktop boot
 }
 

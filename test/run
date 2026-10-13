@@ -20316,6 +20316,9 @@ for _ in range(2):
     log = shell.run("dmesg")[0]
     marks = stamps(log, r"r1-mark$")
     cards = stamps(log, r"the card is Canvas's again")
+    if not (marks and cards and cards[-1] >= marks[-1]):
+        print("r1 no handback after the mark: %s" % " | ".join(log.split("r1-mark")[-1].strip().splitlines()[:8])[:600],
+              file=sys.stderr)
     if marks and cards and cards[-1] >= marks[-1]:
         handback.append(cards[-1] - marks[-1])
     last = again or last
@@ -20431,13 +20434,14 @@ def text_size(pid):
     found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid, shell.run("dmesg", 20)[0])
     return found[-1] if found else None
 
-# Rows and columns of the pty the terminal's shell is on.
+# Rows and columns of the pty the terminal's shell is on: the shell is the terminal's child (the fourth field
+# of its stat), and stty takes size alone, from its standard input.
 def grid(pid):
-    child = [c for c in shell.run("grep -l '^PPid:[[:space:]]*%s$' /proc/[0-9]*/status | cut -d/ -f3" % pid, 20)[0].split()]
-    if not child:
+    child = shell.run("for s in /proc/[0-9]*/stat; do read -r a b c d rest < $s; [ \"$d\" = %s ] && echo $a; done" % pid, 20)[0].split()
+    if not child or not child[0].isdigit():
         return None
     tty = shell.run("readlink /proc/%s/fd/0" % child[0], 20)[0].strip()
-    got = shell.run("stty -F %s size" % tty, 20)[0].split() if tty.startswith("/dev/pts/") else []
+    got = shell.run("stty size < %s" % tty, 20)[0].split() if tty.startswith("/dev/pts/") else []
     return (int(got[0]), int(got[1])) if len(got) == 2 and got[0].isdigit() and got[1].isdigit() else None
 
 def grid_is(pid, test):
@@ -20501,8 +20505,10 @@ fallen_start = text_size(fallen)
 out.append(("R1.2q a file that names no step is the default: a terminal started then draws at 14 pixels, and the others keep theirs",
             "yes" if fallen_start and fallen_start[0] == "14" and alone and grid(second) == alone and grid(main_terminal) == start_grid
             else "no (%s, %s, %s)" % (fallen_start, grid(second), grid(main_terminal)), "yes"))
+# Only a terminal that was found: a pid of 0 is kill's own process group, which is the serial shell.
 for pid in (second, later, fallen):
-    shell.run("kill -9 %s" % pid, 10)
+    if pid != "0":
+        shell.run("kill -9 %s" % pid, 10)
 shell.run("rm -f /root/terminal/size", 10)
 until(lambda: len(pids("terminal")) == 1, 10)
 
