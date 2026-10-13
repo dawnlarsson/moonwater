@@ -1636,8 +1636,16 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
         one of them, or on any whole pixel, keeps its place while the other
         edge takes the width.
 */
+//      Bars are whole pixels from a standard of half a pixel: a bar between
+//      two black ones does not fade the way a diagonal between two black
+//      stems does, and at 8 to 10 px Plex Mono's 0.6 to 0.73 px bars were the
+//      grey rows of every E, F, H, T, e, t, f and z.
+#ifndef FONT_BAR_WHOLE
+#define FONT_BAR_WHOLE (FONT_ONE / 2)
+#endif
+
 static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 widest,
-                         const b64 address_to fixed, p32 fixes)
+                         const b64 address_to fixed, p32 fixes, b64 whole_from)
 {
         if (normal <= 0 || normal >= (b64)e->snap_widest * (FONT_ONE / 64))
                 return;
@@ -1661,7 +1669,7 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         //      stems would grow by half and more, and a diagonal between two
         //      black stems, N's, fades to nothing: those keep their width and
         //      put the nearer edge on the grid.
-        bool whole = normal >= FONT_ONE * 3 / 4;
+        bool whole = normal >= whole_from;
         for (p32 s = 0; s < stems; s++)
         {
                 b64 left = stem[2 * s], right = stem[2 * s + 1], width = right - left;
@@ -1817,7 +1825,7 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
         b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
-        font_snap_axis(e, normal, x_height / 3, scale / 4, null, 0);
+        font_snap_axis(e, normal, x_height / 3, scale / 4, null, 0, FONT_ONE * 3 / 4);
 }
 
 //      Horizontal bars, for any fitted text: its baseline is a whole pixel.
@@ -1831,7 +1839,7 @@ static fn font_bars(font_engine address_to e, const font_face address_to face, p
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
         font_swap_axes(e);
-        font_snap_axis(e, normal, x_height / 3, scale / 4, fixed, fixes);
+        font_snap_axis(e, normal, x_height / 3, scale / 4, fixed, fixes, FONT_BAR_WHOLE);
         font_swap_axes(e);
 }
 
