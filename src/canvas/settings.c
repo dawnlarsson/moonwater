@@ -173,9 +173,9 @@ static positive settings_line(const char address_to said, positive length, posit
                         skip = sizeof(label) - 1;
                 while (skip < made && into[skip] == ' ')
                         skip++;
-                // To the left, a byte at a time, which is front to back.
-                for (positive at_byte = 0; skip && at_byte + skip <= made; at_byte++)
-                        into[at_byte] = into[at_byte + skip];
+                // To the left, the rest and its terminator.
+                if (skip)
+                        memory_copy(into, into + skip, made - skip + 1);
                 made -= skip;
         }
         return made;
@@ -271,10 +271,8 @@ static b32 settings_word(const char address_to words, positive index, char addre
 {
         while (words && *words)
         {
-                positive size = 0;
+                positive size = (positive)(string_first_of_or_end((string_address)words, ' ') - (string_address)words);
 
-                while (words[size] && words[size] != ' ')
-                        size++;
                 if (!index--)
                 {
                         size = size >= room ? room - 1 : size;
