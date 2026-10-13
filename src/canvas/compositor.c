@@ -112,6 +112,7 @@ struct compositor_frame
         int top;             // the panel is along the top of the output, its tabs hanging down
         const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
         int close;           // a window with a close button over its top right
+        unsigned int close_mean; // the mean colour under the close button, made once a present (compositor_close_mean)
 };
 
 /*
@@ -306,19 +307,23 @@ static void compositor_panel(const struct compositor_target *t, const struct com
         A window's corners are quarters of a circle: the line's outside at
         the radius, the contents' inside it by the line's width. A mask is
         the top left quarter, each pixel's share of its sixteen sample
-        points inside the circle, made once for a radius and kept, one for
-        the outside (which 0) and one for the inside (which 1); the other
-        three corners read it mirrored.
+        points inside the circle, made once for a radius and kept, the
+        outside's and the inside's alike; the other three corners read it
+        mirrored.
 */
-static unsigned char compositor_corner_masks[2][COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
-static int compositor_corner_radii[2] = {-1, -1};
+// Every radius's mask in one block, radius r at the sum of the squares below it: the masks of every radius up to
+// COMPOSITOR_RADIUS_MOST, 89440 bytes, of which only the first few pages are ever written (a window's radius is
+// eight to its scale, four times at most).
+#define COMPOSITOR_MASKS_BYTES 89440
+static unsigned char compositor_corner_masks[COMPOSITOR_MASKS_BYTES];
+static unsigned char compositor_corner_made[COMPOSITOR_RADIUS_MOST + 1];
 
-static const unsigned char *compositor_corner_mask(int radius, int which)
+static const unsigned char *compositor_corner_mask(int radius)
 {
-        if (compositor_corner_radii[which] != radius)
-        {
-                unsigned char *mask = compositor_corner_masks[which];
+        unsigned char *mask = compositor_corner_masks + (unsigned long)(radius - 1) * radius * (2 * radius - 1) / 6;
 
+        if (!compositor_corner_made[radius])
+        {
                 for (int y = 0; y < radius; y++)
                         for (int x = 0; x < radius; x++)
                         {
@@ -335,9 +340,9 @@ static const unsigned char *compositor_corner_mask(int radius, int which)
                                         }
                                 mask[y * radius + x] = (unsigned char)((inside * 255 + 8) / 16);
                         }
-                compositor_corner_radii[which] = radius;
+                compositor_corner_made[radius] = 1;
         }
-        return compositor_corner_masks[which];
+        return mask;
 }
 
 // The rectangle a frame covers: its contents and the line round them.
@@ -396,39 +401,31 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
 /*
         The close button over a window's pixels: an X and nothing round it.
         Its strokes are the ink that stands out on what is under the button
-        (window_contrast of the mean of the window's pixels there), and a
-        halo a pixel and a half wider round them takes the window's own
-        pixels further to the side of lightness they are on, as the tabs'
-        glass does, so the X reads on a busy picture as on a plain ground;
-        each pixel is the share of its sixteen sample points inside the
-        strokes and inside the halo. What is under it is read from the
-        window's buffer, which is known, and not from the target. Drawn last,
-        after the round corners, through the target's clip, so the scene's
-        pieces and its corners' scratch both have it.
+        (window_contrast of the mean of the window's pixels there, which
+        compositor_close_mean made once for the present), and a halo a pixel
+        and a half wider round them takes the window's own pixels further to
+        the side of lightness they are on, as the tabs' glass does, so the X
+        reads on a busy picture as on a plain ground; each pixel is the share
+        of its sixteen sample points inside the strokes and inside the halo.
+        What is under it is read from the window's pixels, which are known,
+        and not from the target. Drawn last, after the round corners, through
+        the target's clip, so the scene's pieces and its corners' scratch both
+        have it.
 */
 static void compositor_close_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
         int bx, by, side;
-        unsigned long sum[3] = {0, 0, 0};
 
         if (!compositor_close_box(frame, &bx, &by, &side))
                 return;
 
-        for (int py = by; py < by + side; py++)
-                for (int px = bx; px < bx + side; px++)
-                {
-                        unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
-
-                        sum[0] += under >> 16 & 255;
-                        sum[1] += under >> 8 & 255;
-                        sum[2] += under & 255;
-                }
-
-        unsigned long count = (unsigned long)side * (unsigned long)side;
-        unsigned int mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
-        unsigned int ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : 0x000000u;
         int x1 = bx > t->x1 ? bx : t->x1, y1 = by > t->y1 ? by : t->y1;
         int x2 = bx + side < t->x2 ? bx + side : t->x2, y2 = by + side < t->y2 ? by + side : t->y2;
+
+        if (x2 <= x1 || y2 <= y1)
+                return;
+
+        unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : 0x000000u;
         int arm = side * 2 / 7, half = frame->scale; // the X's reach from the middle, and half its stroke
 
         for (int py = y1; py < y2; py++)
@@ -519,7 +516,7 @@ static void compositor_draw(const struct compositor_target *t,
         part = compositor_clipped(t, x + w - ri, y + ri, ri, h - 2 * ri);
         compositor_contents(&part, frame);
 
-        const unsigned char *outer = compositor_corner_mask(r, 0), *inner = ri ? compositor_corner_mask(ri, 1) : 0;
+        const unsigned char *outer = compositor_corner_mask(r), *inner = ri ? compositor_corner_mask(ri) : 0;
         unsigned int tab = frame->builtin ? compositor_tab_ink(frame->slot, frame->slot >= 0 &&
                                                                                     frame->slot < (int)frame->mark_count
                                                                                 ? frame->marks[frame->slot]
@@ -2822,6 +2819,46 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
 
         The windows go bottom to top, and the tabs over all of them.
 */
+// The mean colour under a window's close button, from the pixels the frame is drawn with: made once a present,
+// after the glass, and read by compositor_close_draw for every piece of the window that is drawn.
+static void compositor_close_mean(struct compositor_frame *frame)
+{
+        int bx, by, side;
+        unsigned long sum[3] = {0, 0, 0};
+
+        if (!compositor_close_box(frame, &bx, &by, &side))
+                return;
+
+        // Only where a change has reached the box: nothing is drawn in it otherwise.
+        {
+                int box[4] = {bx, by, bx + side, by + side}, touched = 0;
+
+                for (unsigned int at = 0; at < compositor.damages && !touched; at++)
+                {
+                        int meet[4];
+
+                        memory_copy(meet, compositor.damage[at], sizeof(meet));
+                        compositor_meet(meet, box);
+                        touched = meet[2] > meet[0] && meet[3] > meet[1];
+                }
+                if (!touched)
+                        return;
+        }
+
+        for (int py = by; py < by + side; py++)
+                for (int px = bx; px < bx + side; px++)
+                {
+                        unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
+
+                        sum[0] += under >> 16 & 255;
+                        sum[1] += under >> 8 & 255;
+                        sum[2] += under & 255;
+                }
+
+        unsigned long count = (unsigned long)side * (unsigned long)side;
+        frame->close_mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
+}
+
 static void compositor_present(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -2857,6 +2894,10 @@ static void compositor_present(void)
 
         compositor_band_frame(&band);
         count += compositor_panel_tabs(&band, &frames[count]);
+
+        // The close buttons' means, now the glass and the band are made: where a change reaches a box.
+        for (unsigned int at = 0; at < windows; at++)
+                compositor_close_mean(&frames[at]);
 
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
