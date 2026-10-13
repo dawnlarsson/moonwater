@@ -1334,10 +1334,11 @@ static fn font_embolden(font_engine address_to e, f32 strength, bool across)
         stretched to follow. Unsnapped, a stem 1.4 px wide at a fractional x
         is three grey columns; snapped it is one or two black ones.
 
-        An edge is a run of the outline's points at one x, at least a third
-        of the x-height tall, so serifs and the vertical tangents of curves
-        are left to the stretch. Which side of it the ink is on comes from
-        the glyph's own winding (TrueType's outer contours run clockwise and
+        An edge is a run of the outline's points at one x, at least a sixth
+        of the x-height tall (FONT_ROUND_RUN), so serifs and the vertical
+        tangents of curves are left to the stretch. The standard is measured
+        from stems of a third of the x-height, which are straight ones.
+        Which side of it the ink is on comes from the glyph's own winding (TrueType's outer contours run clockwise and
         put the ink on the right of travel, but a converted font may not). A
         stem is a left edge and the nearest right edge across from it that
         overlaps it by half, no wider than a quarter of the em.
@@ -1667,9 +1668,7 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
 //      two black ones does not fade the way a diagonal between two black
 //      stems does, and at 8 to 10 px Plex Mono's 0.6 to 0.73 px bars were the
 //      grey rows of every E, F, H, T, e, t, f and z.
-#ifndef FONT_BAR_WHOLE
 #define FONT_BAR_WHOLE (FONT_ONE / 2)
-#endif
 
 static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 widest,
                          const b64 address_to fixed, p32 fixes, b64 whole_from)
@@ -1849,15 +1848,11 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
 //      vertical for a short way, are edges too (Plex Mono's o is 123 units
 //      against the third, 172, that the bars and the standard still take),
 //      so a round letter's sides are black columns as a straight one's are.
-#ifndef FONT_ROUND_RUN
 #define FONT_ROUND_RUN 6
-#endif
 
 //      What a stem under three quarters of a pixel is thickened across to: just past the three quarters that
 //      snap whole, so the stems are a pixel and the diagonals and bowls gain as little as that takes.
-#ifndef FONT_THIN_TO
 #define FONT_THIN_TO (FONT_ONE * 13 / 16)
-#endif
 
 //      Vertical stems, for a cell's whole-pixel pen. heavier is what a
 //      synthetic bold added to every stem, so the standard grows with it.
@@ -1873,9 +1868,7 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
 //      And a bar's edge the same: the tops and bottoms of o, e, a, s, g, 3
 //      and 8, where a curve is level for a short way, are rows of ink as a
 //      straight bar's are.
-#ifndef FONT_ROUND_BAR
 #define FONT_ROUND_BAR 6
-#endif
 
 //      Horizontal bars, for any fitted text: its baseline is a whole pixel.
 //      The axes are swapped so the bars are the stems above, and the
