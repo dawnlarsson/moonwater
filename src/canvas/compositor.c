@@ -2431,8 +2431,7 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
 
         if (x1 <= x0 || y1 <= y0 || !top || !compositor_frost(frames, count, sx, sy, sw, sh, top, (unsigned long)sw))
                 return 0;
-        for (int row = 0; row < gh; row++)
-                memory_zero(into + (long)row * gw, (positive)gw * 4);
+        memory_zero(into, (positive)gh * (positive)gw * 4);
         {
                 unsigned long pitch;
                 const unsigned int *made = compositor_rise(top, (unsigned long)sw, sx, sy, x0, y0, x1, y1, &pitch);
