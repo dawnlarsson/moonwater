@@ -107820,6 +107820,8 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/font.c"
 #include "../src/canvas/compositor.c"
 #include "../src/canvas/terminal.c"
+#include "../src/canvas/ui.c"
+#include "../src/canvas/settings.c"
 
 #define SHARED_counted
 #include "checks.c"
@@ -108440,6 +108442,173 @@ static fn check_glass(void)
         memory_zero(&compositor, sizeof(compositor));
 }
 
+/*
+        The settings window's model, which is the moonwater command's words:
+        each row's value read out of what its verb says on a machine (the
+        lines below are a guest's, escapes and all), a row a machine has
+        none of told from one whose verb said something nobody understood,
+        and the command that changes a row made of words and never a line
+        for a shell. And the system's pieces (ui.c) draw: a run of text
+        lights its pixels at each size the window uses, in either face, a
+        switch puts its knob on its side, and a rounded card's corner is
+        covered in part and its middle whole.
+*/
+static unsigned int settings_parsed(unsigned int row, const char address_to said, char address_to value)
+{
+        return settings_parse(&settings_rows[row], said, string_length((string_address)said), value, SETTINGS_VALUE);
+}
+
+static int settings_row_named(const char address_to label)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (string_equals((string_address)settings_rows[at].label, (string_address)label))
+                        return (int)at;
+        return 0;
+}
+
+static positive settings_lit(const unsigned int address_to pixels, positive count)
+{
+        positive lit = 0;
+
+        for (positive at = 0; at < count; at++)
+                lit += pixels[at] >> 24 > 64;
+        return lit;
+}
+
+static fn check_settings(string_address regular, string_address bold)
+{
+        char value[SETTINGS_VALUE], next[SETTINGS_VALUE];
+        string_address words[SETTINGS_WORDS];
+        int name = settings_row_named("Name"), keyboard = settings_row_named("Keyboard"),
+            zone = settings_row_named("Time zone"), ntp = settings_row_named("Set the clock from the network"),
+            clock = settings_row_named("Clock (Enter sets it now)"), wifi = settings_row_named("Wi-Fi"),
+            prefer = settings_row_named("The internet prefers"), tls = settings_row_named("Names over TLS"),
+            power = settings_row_named("Power profile"), bright = settings_row_named("Brightness"),
+            boost = settings_row_named("Boost");
+        positive count;
+
+        check("settings: a verb's word after its label and its escapes",
+              settings_parsed(keyboard, "\x1b[1m[Moonwater]\x1b[0m keyboard us\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "us"));
+        check("settings: a name is the whole of its line", settings_parsed(name, "patient-cricket\n", value) == SETTINGS_READ &&
+                                                               string_equals((string_address)value, (string_address) "patient-cricket"));
+        check("settings: a zone is the word before its comma",
+              settings_parsed(zone, "[Moonwater] timezone Europe/Stockholm, Central European Time (auto, from Cloudflare)\n"
+                                    "  local 2026-10-13 17:55:49 CEST\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "Europe/Stockholm"));
+        check("settings: ntp is on or off, before the server",
+              settings_parsed(ntp, "[Moonwater] ntp on, pool.ntp.org, sampling on, synchronised\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "on"));
+        check("settings: the clock is the rest of its indented line",
+              settings_parsed(clock, "[Moonwater] timezone Europe/Stockholm\n  local 2026-10-13 17:55:49 CEST\n  utc   x\n",
+                              value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "2026-10-13 17:55:49 CEST"));
+        check("settings: a radio the machine has no hardware for is not on this machine",
+              settings_parsed(wifi, "[Moonwater] wifi on\n[Moonwater] wifi: no wireless hardware found\n", value) == SETTINGS_ABSENT);
+        check("settings: and one it has is a switch", settings_parsed(wifi, "[Moonwater] wifi off\n", value) == SETTINGS_READ &&
+                                                          string_equals((string_address)value, (string_address) "off"));
+        check("settings: the link the internet prefers",
+              settings_parsed(prefer, "[Moonwater] internet prefers wired\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "wired"));
+        check("settings: names over TLS", settings_parsed(tls, "[Moonwater] dns tls only\n", value) == SETTINGS_READ &&
+                                              string_equals((string_address)value, (string_address) "only"));
+        check("settings: a machine with no power profile has none",
+              settings_parsed(power, "[Moonwater] this machine has no power profile\n", value) == SETTINGS_ABSENT);
+        check("settings: a profile not set here is the platform's",
+              settings_parsed(power, "[Moonwater] power (not set here); platform profile balanced; governor powersave\n", value) ==
+                      SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "balanced"));
+        check("settings: a brightness is its percent",
+              settings_parsed(bright, "[Moonwater] brightness 50% (50 of 100)\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "50%"));
+        check("settings: boost is after a semicolon, and a machine without one has none",
+              settings_parsed(boost, "[Moonwater] cpu: 8 online; boost off; smt on\n", value) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address) "off") &&
+                  settings_parsed(boost, "[Moonwater] cpu: 2 online; smt notsupported\n", value) == SETTINGS_ABSENT);
+        check("settings: a verb that says nothing understood is a failure, not a value",
+              settings_parsed(keyboard, "moonwater: something else\n", value) == SETTINGS_FAILED && !value[0]);
+
+        settings_next(&settings_rows[ntp], "on", 1, next, sizeof(next));
+        check("settings: a switch on goes off", string_equals((string_address)next, (string_address) "off"));
+        settings_next(&settings_rows[keyboard], "us", 1, next, sizeof(next));
+        check("settings: a choice goes to its next word", string_equals((string_address)next, (string_address) "uk"));
+        settings_next(&settings_rows[keyboard], "it", 1, next, sizeof(next));
+        check("settings: and from its last to its first", string_equals((string_address)next, (string_address) "us"));
+        settings_next(&settings_rows[keyboard], "us", -1, next, sizeof(next));
+        check("settings: and back from its first to its last", string_equals((string_address)next, (string_address) "it"));
+        settings_next(&settings_rows[keyboard], "xx", 1, next, sizeof(next));
+        check("settings: a value that is none of its words goes to the first", string_equals((string_address)next, (string_address) "us"));
+        settings_next(&settings_rows[bright], "50%", -1, next, sizeof(next));
+        check("settings: a step back is its first word", string_equals((string_address)next, (string_address) "-10"));
+
+        count = settings_command(&settings_rows[name], (string_address) "/moonwater", "a b; rm -rf /", words, SETTINGS_WORDS, false);
+        check("settings: a name typed is one word of the command, whatever is in it",
+              count == 3 && string_equals(words[1], (string_address) "name") &&
+                  string_equals(words[2], (string_address) "a b; rm -rf /") && !words[3]);
+        count = settings_command(&settings_rows[prefer], (string_address) "/moonwater", "wifi", words, SETTINGS_WORDS, false);
+        check("settings: a choice's verb, then its word", count == 4 && string_equals(words[1], (string_address) "priority") &&
+                                                             string_equals(words[2], (string_address) "internet") &&
+                                                             string_equals(words[3], (string_address) "wifi"));
+        count = settings_command(&settings_rows[clock], (string_address) "/moonwater", "ignored", words, SETTINGS_WORDS, false);
+        check("settings: an action is its verb alone", count == 3 && string_equals(words[2], (string_address) "sync") && !words[3]);
+        count = settings_command(&settings_rows[tls], (string_address) "/moonwater", "", words, SETTINGS_WORDS, true);
+        check("settings: and what is asked is the verb that shows it", count == 3 && string_equals(words[1], (string_address) "dns") &&
+                                                                           string_equals(words[2], (string_address) "tls"));
+
+        // The pieces, drawn.
+        {
+                static unsigned int pixels[320 * 80], scratch[400 * UI_SCRATCH_ROWS];
+                static font_face faces[2];
+                static p8 atlas[512 * 512];
+                positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0,
+                         bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
+                long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+                struct ui ui = {pixels, 320, 320, 80, 0, 80, 1};
+                b32 drawn = true;
+
+                if (!bytes || (engine < 0 && engine > -4096) || font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
+                {
+                        check("ui: the face loads", false);
+                        return;
+                }
+                ui.engine = (font_engine address_to)engine;
+                font_start(ui.engine, atlas, 512, 512);
+                ui.regular = &faces[0];
+                ui.bold = bold_bytes && font_load(&faces[1], (const p8 address_to)bold_bytes, bold_size, 0) == 0 ? &faces[1] : null;
+                ui.scratch = scratch;
+                ui.scratch_width = 400;
+                ui_inks(&ui, 0x101012u);
+
+                for (int size_at = 0; size_at < 3; size_at++)
+                        for (int face = 0; face < 2; face++)
+                        {
+                                static const int sizes[3] = {UI_SMALL, UI_TEXT, UI_TITLE};
+
+                                ui_clear(&ui);
+                                ui_text(&ui, 10, 40, (string_address) "Settings", sizes[size_at], face, ui.ink, 255);
+                                drawn &= settings_lit(pixels, 320 * 80) > (positive)(sizes[size_at] * 6);
+                        }
+                check("ui: a run of text lights its pixels at every size, in either face", drawn);
+                check("ui: a run's baseline in a band of a row puts its capitals in the band's middle",
+                      ui_baseline(&ui, 100, UI_ROW, UI_TEXT) > 100 + UI_ROW / 2 &&
+                          ui_baseline(&ui, 100, UI_ROW, UI_TEXT) < 100 + UI_ROW * 3 / 4);
+
+                ui_clear(&ui);
+                ui_switch(&ui, 100, 40, true, true);
+                ui_switch(&ui, 200, 40, false, true);
+                check("ui: a switch on has its knob of the ground at the right, one off its ink knob at the left",
+                      (pixels[40 * 320 + 100 - 10] & 0xffffffu) == ui.ground &&
+                          (pixels[40 * 320 + 200 - UI_SWITCH_W + 10] >> 24) > 200 &&
+                          (pixels[40 * 320 + 200 - 10] >> 24) < 100);
+
+                ui_clear(&ui);
+                ui_round(&ui, 10, 10, 100, 50, UI_RADIUS, ui_tone(0xffffffu, 255));
+                check("ui: a card's corner is covered in part, its middle whole",
+                      pixels[10 * 320 + 10] >> 24 < 64 && pixels[30 * 320 + 60] >> 24 == 255 && pixels[10 * 320 + 60] >> 24 == 255);
+                compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
+        }
+}
+
 // A code point as UTF-8, into bytes; the count of bytes it takes.
 static positive render_glyph(p8 address_to bytes, p32 code)
 {
@@ -108625,6 +108794,8 @@ b32 main()
         check_pointer();
         check_take();
         check_glass();
+        check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
+                       program_argument_count() > 4 ? program_argument(4) : null);
 
         // What the terminal says its paper and ink are is what it paints them with.
         {
