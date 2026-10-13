@@ -366,7 +366,7 @@ typedef struct
         p8 address_to atlas;
         p32 atlas_width, atlas_height, shelf_count, shelf_bottom, slot_count;
         bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
-        p32 epoch, pair_turns, generation;
+        p32 pair_turns, generation;
         p32 point_count, contour_count, components;
         b32 left_side;
         b32 band, rows, stride, width, grain, cross, wound, x, y;
@@ -546,11 +546,6 @@ static b32 font_height_of(const font_face address_to face, p32 glyph)
 
 p32 font_glyph(const font_face address_to face, p32 code);
 
-//      Bumped each time a face id is issued again: 65536 loads on, the 16-bit
-//      id of an old face is a new face's, and every engine's cache and memos
-//      keyed by it must be emptied before they answer for the new one.
-static p32 font_epoch;
-
 b32 font_load(font_face address_to face, const p8 address_to bytes, positive size,
               p32 index)
 {
@@ -633,14 +628,17 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
         face->hmtx = at[HMTX];
         face->kern = at[KERN];
         //      The id keys every cache, and engines on several threads may load
-        //      faces at once: it is taken atomically, and never zero.
-        p32 serial;
-        do
-                serial = __atomic_add_fetch(&faces_loaded, 1, __ATOMIC_RELAXED);
-        while (!(serial & 0xffff));
-        face->id = serial & 0xffff;
-        if (serial > 0xffff)
-                __atomic_add_fetch(&font_epoch, 1, __ATOMIC_RELAXED);
+        //      faces at once: it is taken atomically, and never zero. It is
+        //      16 bits, so the ids are 1 to 65535 and a process loads at most
+        //      that many faces: a 65536th would be issued the first face's id,
+        //      and both are live in one engine's cache.
+        p32 serial = __atomic_load_n(&faces_loaded, __ATOMIC_RELAXED);
+        while (serial < 0xffff && !__atomic_compare_exchange_n(&faces_loaded, &serial, serial + 1, false,
+                                                               __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                ;
+        if (serial >= 0xffff)
+                return FONT_BAD;
+        face->id = (p32)(serial + 1);
 
         face->ascent = (b16)font_i16(face, at[HHEA] + 4);
         face->descent = (b16)font_i16(face, at[HHEA] + 6);
@@ -3729,27 +3727,6 @@ static fn font_reset(font_engine address_to e)
         e->generation++;
 }
 
-//      Every cache and memo is emptied when a face id has been issued again.
-//      The test is inline and the emptying is not: a call on every cell had
-//      the compiler spill the cell's arguments around it and read them back
-//      wider than it wrote them, a store that could not be forwarded and the
-//      cell's single largest cost.
-static COLD fn font_resync(font_engine address_to e, p32 epoch)
-{
-        font_reset(e);
-        memory_zero(e->glyph_memo, sizeof(e->glyph_memo));
-        memory_zero(e->kern_memo, sizeof(e->kern_memo));
-        e->epoch = epoch;
-}
-
-static inline fn font_sync(font_engine address_to e)
-{
-        p32 epoch = __atomic_load_n(&font_epoch, __ATOMIC_RELAXED);
-
-        if (e->epoch != epoch)
-                font_resync(e, epoch);
-}
-
 //      A slot made, at the place in the index the lookup ended at.
 static fn font_enter(font_engine address_to e, p32 home, font_slot slot)
 {
@@ -3801,7 +3778,6 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
 
         if (face && size >= FONT_SIZE_LIMIT)
                 return box;
-        font_sync(e);
         if (e->scratched || e->slot_count >= FONT_SLOTS * 3 / 4)
                 font_reset(e);
 
@@ -4230,7 +4206,6 @@ static font_memo address_to font_recall(font_memo address_to memo, p64 key)
 static fn font_find(font_engine address_to e, const font_face address_to const address_to faces,
                     p32 count, p32 code, p32 address_to face, p32 address_to glyph)
 {
-        font_sync(e);
         for (p32 i = 0; i < count; i++)
         {
                 p64 key = (p64)1 << 63 | (p64)faces[i]->id << 32 | code;
@@ -4250,7 +4225,6 @@ static fn font_find(font_engine address_to e, const font_face address_to const a
 
 static b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
 {
-        font_sync(e);
         p64 key = (p64)1 << 63 | (p64)face->id << 32 | left << 16 | right;
         font_memo address_to memo = font_recall(e->kern_memo, key);
 
@@ -4433,8 +4407,7 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
         The cells of a screen are a few dozen codes in one size and style, so
         a cell drawn lately is found again here by one hash of what it is,
         without finding its glyph, its advance (a divide) or its slot again.
-        A reset of the atlas or a face id issued again moves the generation
-        on, and every entry with it; the caller has synced the engine.
+        A reset of the atlas moves the generation on, and every entry with it.
 */
 static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const font_face address_to const address_to faces,
                                                p32 count, p32 code, p32 cells, const font_metrics address_to grid,
@@ -4478,7 +4451,6 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         b16 ink[2];
 
         flags = font_polarity(flags, colour, background);
-        font_sync(e);
         font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
                                         font_cell_base(faces, count, size, flags), font_cell_shape(grid, count, cells),
                                         &dx, &dy, ink);
@@ -4578,7 +4550,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
             x + (b64)across <= target->width && y + height <= target->height && across + 16 <= FONT_STRIP)
                 for (p32 attempt = 0; attempt < 2 && !found; attempt++)
                 {
-                        p32 generation = (font_sync(e), e->generation);
+                        p32 generation = e->generation;
                         p64 base = font_cell_base(faces, count, size, flags), shape = font_cell_shape(grid, count, 1);
 
                         found = true;
