@@ -106822,11 +106822,11 @@ static fn check_snap()
         p32 size = 16 * 64;
         static p8 bits[16 * 16];
 
-        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 256;
+        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 1024;
 
-        //      A stem 1.2 px wide at 1.3 px: within a fifth of a whole pixel,
-        //      so it becomes the pixel nearest its centre, one column of 255
-        //      between two of 0, wound either way.
+        //      A stem 1.2 px wide at 1.3 px: a standard of three quarters of
+        //      a pixel or more is whole pixels, so it becomes the pixel nearest
+        //      its centre, one column of 255 between two of 0, wound either way.
         for (p32 turned = 0; turned < 2; turned++)
         {
                 const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
@@ -106846,15 +106846,16 @@ static fn check_snap()
                         check("snap: a 1.2 px stem is one column of 255", snapped);
         }
 
-        //      1.45 px rounds a third away either way: the width stays and the
-        //      nearer edge, the right one, moves onto the grid.
+        //      1.45 px, which kept its width when whole widths were only for a
+        //      standard within a fifth of one, is whole too: the pixel nearest
+        //      its centre (2.03 px), not a grey column beside a black one.
         {
                 const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
 
                 snap_load(stem, 4, false);
                 font_snap(&engine, &face, size, snap_standard(1485), 0);
-                check("snap: a 1.45 px stem keeps its width and puts its nearer edge on a pixel",
-                      engine.points[0].x == 1587 && engine.points[2].x == 3072);
+                check("snap: a 1.45 px stem is the whole pixel nearest its centre",
+                      engine.points[0].x == 2048 && engine.points[2].x == 3072);
         }
 
         //      A bracket: the stem snaps, the ends of its arms stay where the
@@ -106954,7 +106955,7 @@ static fn check_bars()
         p32 size = 16 * 64;
         static const b64 lines[2] = {0, 7168};
 
-        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 256;
+        engine.snap_widest = engine.snap_widest ? engine.snap_widest : 1024;
         {
                 const b32 bar[] = {0, 3379, 0, 4608, 10240, 4608, 10240, 3379};
 

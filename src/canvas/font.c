@@ -352,11 +352,11 @@ typedef struct
 
 typedef struct
 {
-        p32 hint_until;         // largest size in pixels that is fitted (24)
+        p32 hint_until;         // largest size in pixels that is fitted (64, a terminal's largest)
         p32 darken;             // darkening at small sizes, 1/64 pixel (12)
         p32 darken_until;       // size in pixels where it has faded out (32)
         p32 contrast;           // dark text's contrast boost, 1/64 (128)
-        p32 snap_widest;        // widest standard stem snapped in cells, 1/64 pixel (256)
+        p32 snap_widest;        // widest standard stem snapped in cells, 1/64 pixel (1024)
         bool linear;            // blend in linear light (true)
 
         //      What a glyph being drawn touches first, together, then the
@@ -1345,13 +1345,15 @@ static fn font_embolden(font_engine address_to e, f32 strength)
         close the counter between them to less than a pixel where it was half
         a pixel or more, is dropped, the stem that moved most first.
 
-        Whole widths only where they change the standard stem by a fifth or
-        less; otherwise each stem keeps its width and only its nearer edge
-        moves onto the grid. Points between two edges move by the straight
+        Whole widths from a standard stem of three quarters of a pixel;
+        under that each stem keeps its width and only its nearer edge moves
+        onto the grid. Points between two edges move by the straight
         line between the two moves, and the glyph's own left and right ends
         stay put, so an arm stretches instead of riding into the next cell.
-        Snapping stops where the standard stem is snap_widest, four pixels,
-        and at the fitting's own ceiling, hint_until.
+        Snapping stops where the standard stem is snap_widest, sixteen pixels,
+        and at the fitting's own ceiling, hint_until: both past the largest
+        size a terminal zooms to, which unfitted (28 px up, when the ceiling
+        was 24) was greyer than the size below it.
 */
 #define FONT_STEMS 32
 
@@ -1649,19 +1651,17 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
 
         rounded = rounded < FONT_ONE ? FONT_ONE : rounded;
 
-        //      Whole widths only where they change the standard stem by a
-        //      fifth or less: 1.12 px to 1 is a thin line still, 1.44 px to 1
-        //      or 2 is a third lighter or heavier. Past that each stem keeps
-        //      its width and puts its nearer edge on the grid, one sharp
-        //      edge and the weight unchanged.
-        //      A standard from three quarters of a pixel up to one is a
-        //      pixel: a stroke thinner than a pixel can only ever be grey,
-        //      and at 10 or 11 px it is most of what a letter is. Under three
-        //      quarters (Plex Mono at 8 and 9 px) the stems would grow by
-        //      half and more, and a diagonal between two black stems, N's,
-        //      fades to nothing: those keep their width.
-        bool whole = (normal >= FONT_ONE * 3 / 4 && normal < FONT_ONE) ||
-                     (5 * (rounded - normal) <= normal && 5 * (normal - rounded) <= normal);
+        //      Whole widths from a standard of three quarters of a pixel up:
+        //      a stem a fraction of a pixel off the grid is a grey column on
+        //      every one of them, and that grey was most of the blur of 16 to
+        //      20 px text, where Plex Mono's 1.28, 1.44 and 1.6 px stems kept
+        //      their widths (grey ink share 665, 673 and 635 permille, now
+        //      570, 538 and 429, for ink 7 and 10 percent lighter and 6
+        //      heavier). Under three quarters (Plex Mono at 8 and 9 px) the
+        //      stems would grow by half and more, and a diagonal between two
+        //      black stems, N's, fades to nothing: those keep their width and
+        //      put the nearer edge on the grid.
+        bool whole = normal >= FONT_ONE * 3 / 4;
         for (p32 s = 0; s < stems; s++)
         {
                 b64 left = stem[2 * s], right = stem[2 * s + 1], width = right - left;
@@ -3884,11 +3884,11 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
         if (e->started)
                 memory_zero(e, sizeof(*e));
         e->started = true;
-        e->hint_until = 24;
+        e->hint_until = 64;
         e->darken = 12;
         e->darken_until = 32;
         e->contrast = 128;
-        e->snap_widest = 256;
+        e->snap_widest = 1024;
         e->linear = true;
         e->atlas = atlas;
         e->atlas_width = width > 0xffff ? 0xffff : width;
