@@ -1,8 +1,0 @@
-{
-        "editor.tabSize": 8,
-        "livePreview.serverRoot": ".docs/dist",
-        "liveServer.settings.root": ".docs/dist",
-        "cSpell.words": [
-                "Moonwater"
-        ],
-}

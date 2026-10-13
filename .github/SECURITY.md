@@ -311,7 +311,7 @@ compiler and sanitizer versions, seed counts, budgets and exits (`overall_exit`
 5 s); `MOONWATER_FUZZ_SECONDS` and `MOONWATER_FUZZ_RUNS` lengthen it. Seeds
 come from `tls_fuzz_seeds`, `dns_fuzz_seeds` and `netlink_fuzz_seeds` and are
 written per run, never kept in the tree. Attach `sh test/run msan` and the
-architecture gate above. CI is parked (`workflow_dispatch` only).
+architecture gate above.
 
 ## Open
 
