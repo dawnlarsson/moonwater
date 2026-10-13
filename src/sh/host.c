@@ -19710,6 +19710,9 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LINK_PORT_PATH),
     HOST_WIPE_KEEP(LINK_GROUPS_PATH),
     HOST_WIPE_KEEP(LINK_STAMPS_PATH),
+    //  The text size every terminal follows, which is the module's own
+    //  (TERMINAL_SIZE_DIR in src/canvas/terminal.c) and so named here.
+    "terminal",
     null,
 };
 

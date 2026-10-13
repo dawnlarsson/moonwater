@@ -102990,14 +102990,17 @@ static fn settings_commands(void)
                                      address_of setting) &&
                   setting.entry.id == 1);
         check("init add takes them quoted",
-              settings_run("init", "add", "pacman -Syu", null) == HOST_SETTINGS_CHANGED &&
+              settings_run("init", "add", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
                   host_settings_find(slot, SPARK_SETTINGS_INIT, "2", address_of setting) &&
-                  setting.entry.length == 11);
+                  setting.entry.length == 23);
+        check("init add of a line it has is the entry it has, and not another",
+              settings_run("init", "add", "pacman -Syu", null) == HOST_SETTINGS_SHOWN &&
+                  settings_listed(SPARK_SETTINGS_INIT, 0) == 2);
         check("init remove takes an id",
               settings_run("init", "remove", "1", null) == HOST_SETTINGS_CHANGED &&
                   !host_settings_find(slot, SPARK_SETTINGS_INIT, "1", address_of setting));
         check("init remove takes the words",
-              settings_run("init", "remove", "pacman -Syu", null) == HOST_SETTINGS_CHANGED &&
+              settings_run("init", "remove", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
                   !settings_listed(SPARK_SETTINGS_INIT, 0));
         check("init remove of no such entry is refused",
               settings_run("init", "remove", "9", null) == HOST_SETTINGS_REFUSED);
@@ -103022,12 +103025,17 @@ static fn settings_commands(void)
         check("a switch belongs to its own command",
               settings_run("exit", "mount", "off", null) == HOST_SETTINGS_USAGE);
 
-        //      Nothing reads these yet, so no command takes them: a setting
-        //      accepted and then ignored is one nobody can tell is unsupported.
+        //      Canvas at boot is a switch as the mount is. Nothing reads the
+        //      startup list yet, so no command takes it: a setting accepted and
+        //      then ignored is one nobody can tell is unsupported.
         host_settings_empty(slot);
-        check("neither Canvas at boot nor the startup list is taken yet",
-              settings_run("init", "canvas", "off", null) == HOST_SETTINGS_USAGE &&
-                  settings_run("startup", null, null, null) == HOST_SETTINGS_USAGE &&
+        check("Canvas at boot is a switch as the mount is",
+              settings_run("init", "canvas", "off", null) == HOST_SETTINGS_CHANGED &&
+                  slot->flags & SPARK_SETTINGS_CANVAS_OFF &&
+                  settings_run("init", "canvas", "on", null) == HOST_SETTINGS_CHANGED &&
+                  !(slot->flags & SPARK_SETTINGS_CANVAS_OFF));
+        check("the startup list is not taken yet",
+              settings_run("startup", null, null, null) == HOST_SETTINGS_USAGE &&
                   settings_run("startup", "shell", null, null) == HOST_SETTINGS_USAGE &&
                   settings_run("startup", "add", "btop", null) == HOST_SETTINGS_USAGE &&
                   !slot->flags && !slot->length);
