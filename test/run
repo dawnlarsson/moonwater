@@ -16835,7 +16835,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -20635,6 +20635,135 @@ else
                 same "$name" "$want" "$got"
         done < "$work/r1-answers"
         sed -n 's/^r1 /  canvas       /p' "$work/r1-why"
+fi
+fi
+
+#       The settings window (src/canvas/settings.c) on a plain boot's desktop,
+#       a guest of its own: opened by the command, glass over what is under
+#       it, its name row changed by the keys and read back from the command.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = s1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/s1-answers" 2>"$work/s1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/s1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def pids(name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+def said(row):
+    """A row that did not hold says where the guest was: the programs and the log's end."""
+    if out and out[-1][1] != out[-1][2]:
+        print("s1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -12; dmesg | tail -12", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+#   The desktop is up, with its terminal, before anything is asked of it.
+until(lambda: len(pids("terminal")) == 1, 60)
+time.sleep(2)
+#   The settings window. `moonwater settings` opens it on the compositor's desktop, over a red window whose right
+#   edge is the output's middle: the window is glass, so where it lies over the red the red shows through it,
+#   tinted and not as it is, across the edge it shows a blur and not a step, and with the red gone what shows is
+#   not red. Every row is read from the moonwater command when it opens (it says how many were not, in the
+#   machine's log). The name is changed with the keys and the command says so, and changed back; a second
+#   start lifts the first rather than making another, and Escape closes it.
+had_name = shell.run("moonwater name", 10)[0].strip()
+shell.run("/surface -x 0 -y 200 -w %d -h 700 -c ff2020 -T under -s 300 > /dev/null 2>&1 &" % (W // 2), 10)
+time.sleep(1.5)
+opened = shell.run("moonwater settings; echo status $?", 15)[0]
+read_all, _ = until(lambda: re.search(r"settings: rows unread or not understood when first asked: (\d+)",
+                                      shell.run("dmesg | tail -60", 10)[0]), 20)
+time.sleep(1.5)
+out.append(("S1.1 moonwater settings opens one settings window, and every row is read from the command",
+            "%s %s %s" % ("opened" if "status 0" in opened else opened[-60:], len(pids("settings")),
+                          read_all.group(1) if read_all else "never said"), "opened 1 0"))
+said("S1.1")
+
+
+def reds(data, width, x0, x1, ys):
+    """Of the pixels from x0 to x1 on the rows ys, how many are red, and how many are the red window's own."""
+    red = own = 0
+    for y in ys:
+        for x in range(x0, x1, 3):
+            r, g, b = data[(y * width + x) * 3:(y * width + x) * 3 + 3]
+            red += r > g + 40 and r > b + 40
+            own += (r, g, b) == (0xff, 0x20, 0x20)
+    return red, own
+
+ys = range(300, 820, 9)
+shot("r1-settings", 1)
+width, height, glass = load("r1-settings")
+left_red, left_own = reds(glass, width, W // 2 - 220, W // 2 - 40, ys)
+right_red, _ = reds(glass, width, W // 2 + 40, W // 2 + 220, ys)
+total = len(range(W // 2 - 220, W // 2 - 40, 3)) * len(ys)
+out.append(("S1.2 the window is glass: over the red window it is red, tinted and not the red itself, and beside it not",
+            "yes" if left_red > total * 6 // 10 and left_own < total // 20 and right_red < total // 20
+            else "%d red and %d its own of %d, %d red beside" % (left_red, left_own, total, right_red), "yes"))
+levels = set()
+for x in range(W // 2 - 28, W // 2 + 28, 4):
+    column = sorted(glass[(y * width + x) * 3] for y in ys)
+    levels.add(column[len(column) // 2] // 12)
+out.append(("S1.3 across the red window's edge the glass shows a blur, in steps, and not one step",
+            "yes" if len(levels) >= 4 else "%d levels" % len(levels), "yes"))
+shell.run("kill $(grep -l '^surface$' /proc/[0-9]*/comm | cut -d/ -f3) 2> /dev/null", 10)
+time.sleep(1.5)
+shot("r1-settings-gone", 1)
+width, height, gone = load("r1-settings-gone")
+now_red, _ = reds(gone, width, W // 2 - 220, W // 2 - 40, ys)
+out.append(("S1.4 the red window gone from under it, the glass is frosted again and shows no red",
+            "yes" if now_red < total // 20 else "%d red of %d" % (now_red, total), "yes"))
+
+def rename(old, new):
+    key("ret")
+    for _ in old:
+        key("backspace")
+    type_text(new)
+    key("ret")
+
+rename(had_name, "lane-glass")
+renamed, _ = until(lambda: shell.run("moonwater name", 10)[0].strip() == "lane-glass", 15)
+rename("lane-glass", had_name)
+back, _ = until(lambda: shell.run("moonwater name", 10)[0].strip() == had_name, 15)
+out.append(("S1.5 its name row changed by the keys is the command's name, and back again",
+            "%s %s" % ("changed" if renamed else "not changed", "back" if back else shell.run("moonwater name", 10)[0]),
+            "changed back"))
+said("S1.5")
+shell.run("moonwater settings", 15)
+time.sleep(2)
+out.append(("S1.6 a second moonwater settings lifts the window that is up and makes no other",
+            str(len(pids("settings"))), "1"))
+key("esc")
+closed, _ = until(lambda: not pids("settings"), 10)
+out.append(("S1.7 Escape closes it", "closed" if closed else "open", "closed"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/s1-answers" ]; then
+        same "the settings boot answered" "yes" "no"
+        sed 's/^/    /' "$work/s1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/s1-answers"
+        sed -n 's/^s1 /  canvas       /p' "$work/s1-why"
 fi
 fi
 
