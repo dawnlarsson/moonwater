@@ -339,6 +339,19 @@ typedef struct
         b32 value;
 } font_memo;
 
+//      What a face measures, once a face: its standard stem and its zones
+//      (see font_face_measure), kept per face id in the engine's own table
+//      of FONT_MEASURES, so the glyph memo's churn cannot evict them.
+#define FONT_ZONES 6
+#define FONT_MEASURES 16
+
+typedef struct
+{
+        p32 id;
+        bool stemmed, zoned;
+        b32 standard, zones[FONT_ZONES];
+} font_measure;
+
 //      A cell drawn lately: what it was (face, code, size, flags, width) and
 //      the grid it was drawn on, the atlas generation it was found in, and
 //      the bitmap and its place from the cell's corner.
@@ -387,6 +400,7 @@ typedef struct
         p16 index[FONT_SLOTS];
         font_pairing pairs[FONT_PAIRS];
         font_memo glyph_memo[FONT_MEMO], kern_memo[FONT_MEMO];
+        font_measure measures[FONT_MEASURES];
         font_recent recent[FONT_RECENT];
 
         //      A run of cells on its way to the target: each cell's bitmap,
@@ -1344,7 +1358,7 @@ static fn font_embolden(font_engine address_to e, f32 strength, bool across)
         overlaps it by half, no wider than a quarter of the em.
 
         One standard width a face, the median stem of l n m h i u I H in font
-        units, measured once and kept in the glyph memo, so every stem near
+        units, measured once and kept per face, so every stem near
         it rounds to the same whole pixels and a line of text has one weight:
         rounding each stem alone gives n one pixel and l two. A stem within a
         quarter of the standard takes the standard's rounding, others round on
@@ -1496,13 +1510,21 @@ static p32 font_stems(font_run address_to run, p32 runs, b64 widest, b64 address
 static font_memo address_to font_recall(font_memo address_to memo, p64 key);
 
 //      The face's standard stem in font units times 2^14, or 0 for none.
+static font_measure address_to font_measured(font_engine address_to e, const font_face address_to face)
+{
+        font_measure address_to m = &e->measures[face->id & (FONT_MEASURES - 1)];
+
+        if (m->id != face->id)
+                *m = (font_measure){.id = face->id};
+        return m;
+}
+
 static b32 font_stem_standard(font_engine address_to e, const font_face address_to face)
 {
-        p64 key = (p64)1 << 63 | (p64)face->id << 32 | 0xffffffffu;
-        font_memo address_to memo = font_recall(e->glyph_memo, key);
+        font_measure address_to m = font_measured(e, face);
 
-        if (memo->key == key)
-                return memo->value;
+        if (m->stemmed)
+                return m->standard;
 
         static const char references[] = "lnmhiuIH";
         b64 width[FONT_STEMS], stem[2 * FONT_STEMS];
@@ -1533,7 +1555,7 @@ static b32 font_stem_standard(font_engine address_to e, const font_face address_
                         width[j] = width[j - 1], width[j - 1] = t;
                 }
         b32 standard = found ? (b32)width[found / 2] : 0;
-        *memo = (font_memo){key, standard};
+        m->standard = standard, m->stemmed = true;
         return standard;
 }
 
@@ -1549,35 +1571,24 @@ static fn font_swap_axes(font_engine address_to e)
 
 /*
         What a face's round letters and bars measure, once a face, kept in
-        the glyph memo: how far o reaches over the x-height and under the
+        the engine's measures: how far o reaches over the x-height and under the
         baseline and O over the cap height, in font units, the standard
         bar, the median horizontal stem of H E F T L e in font units times
         2^14, found as the vertical stems are with the axes swapped, and the
         top of d's ascender and the bottom of p's descender, in font units
         (the descender as a depth).
 */
-#define FONT_ZONES 6
-
 static fn font_face_measure(font_engine address_to e, const font_face address_to face, b32 address_to out)
 {
-        p64 base = (p64)1 << 63 | (p64)face->id << 32;
-        font_memo address_to memo[FONT_ZONES];
-        bool known = true;
+        font_measure address_to m = font_measured(e, face);
 
-        for (p32 k = 0; k < FONT_ZONES; k++)
+        if (m->zoned)
         {
-                memo[k] = font_recall(e->glyph_memo, base | (0xfffffffeu - k));
-                known = known && memo[k]->key == (base | (0xfffffffeu - k));
-        }
-        if (known)
-        {
-                for (p32 k = 0; k < FONT_ZONES; k++)
-                        out[k] = memo[k]->value;
+                memory_copy(out, m->zones, sizeof(m->zones));
                 return;
         }
 
-        for (p32 k = 0; k < FONT_ZONES; k++)
-                out[k] = 0;
+        memory_zero(out, sizeof(m->zones));
         for (p32 tall = 0; tall < 2; tall++)
         {
                 p32 glyph = font_glyph(face, tall ? 'p' : 'd');
@@ -1652,8 +1663,8 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
                         width[j] = width[j - 1], width[j - 1] = t;
                 }
         out[3] = found ? (b32)width[found / 2] : 0;
-        for (p32 k = 0; k < FONT_ZONES; k++)
-                *memo[k] = (font_memo){base | (0xfffffffeu - k), out[k]};
+        memory_copy(m->zones, out, sizeof(m->zones));
+        m->zoned = true;
 }
 
 /*
@@ -2761,7 +2772,8 @@ static fn font_union_row(font_engine address_to e, b32 r, b32 width, p8 address_
         font_sort(s->events, events);
         e->used[3] = events > e->used[3] ? events : e->used[3];
 
-        memory_zero(s->cover, (positive)(width + 2) * sizeof(s->cover[0]));
+        for (b32 c = 0; c <= width + 1; c++)
+                s->cover[c] = 0;
 
         //      A sweep up the row: the chains spanning each slab, in order
         //      along it, and each run of nonzero winding between two of them
@@ -3515,7 +3527,9 @@ static bool font_drawn(font_engine address_to e, p32 code, b32 width, b32 height
 
                         if (across <= 3)
                         {
-                                font_fill(out, stride, width, height, left, top, left + across, top + across, 255);
+                                for (b32 y = top < 0 ? 0 : top; y < top + across && y < height; y++)
+                                        for (b32 x = left < 0 ? 0 : left; x < left + across && x < width; x++)
+                                                out[(positive)y * stride + (positive)x] = 255;
                                 continue;
                         }
 
