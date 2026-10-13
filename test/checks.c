@@ -108346,23 +108346,27 @@ static fn check_glass(void)
         side = compositor.glass_side[2];
 
         check("glass: an opaque pixel of the picture is its own colour", glass_at(50, 50) == 0x123456u);
-        check("glass: a clear one far from any edge under it is the tint of the colour under it",
-              glass_at(50, 72) == compositor_glass_tint(0xff0000u, side));
-        check("glass: a half one is the picture over that tint", glass_at(62, 48) == compositor_over(0x80808080u,
-                                                                                                   compositor_glass_tint(0xff0000u, side)));
-        for (int x = 60; x < 100; x++)
+        check("glass: a clear one far from any edge under it is the tint of the colour under it, with its grain",
+              glass_at(50, 72) == compositor_grained(compositor_glass_tint(0xff0000u, side), side, 50, 72));
+        check("glass: a half one is the picture over that",
+              glass_at(62, 48) == compositor_over(0x80808080u, compositor_grained(compositor_glass_tint(0xff0000u, side), side, 62, 48)));
+        // A block at a time across the edge, the grain taken off: the steps of a blur, not one step.
+        for (int x = 60; x < 104; x += compositor_frost_block())
         {
-                unsigned int red = glass_at(x, 100) >> 16 & 255;
+                unsigned int grain = compositor_grain(x, 100), pixel = glass_at(x, 100);
+                unsigned int red = (side ? pixel + grain * 0x010101u : pixel - grain * 0x010101u) >> 16 & 255;
 
                 distinct += x == 60 || red != previous;
                 falling &= x == 60 || red <= previous;
                 previous = red;
         }
-        check("glass: the edge between red and green under it comes through blurred, not as a step", distinct >= 8 && falling);
+        check("glass: the edge between red and green under it comes through blurred, not as a step", distinct >= 6 && falling);
         for (int y = 40; y < 120; y++)
                 for (int x = 40; x < 120; x++)
                 {
-                        unsigned int pixel = glass_at(x, y), r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
+                        unsigned int grain = compositor_grain(x, y) * 0x010101u;
+                        unsigned int pixel = side ? glass_at(x, y) + grain : glass_at(x, y) - grain;
+                        unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
 
                         if ((x - 40 >= 5 && x - 40 < 30 && y - 40 >= 5 && y - 40 < 15) ||
                             (x - 40 < COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
@@ -108412,17 +108416,17 @@ static fn check_glass(void)
                 glass_paint(1, x, y, width, height, render_next(0x1000000), false);
                 compositor_present();
                 bounded &= compositor.blurred - blurred <= most;
-                memory_copy(made, compositor.backdrop[2], sizeof(made));
+                memory_copy(made, compositor.backdrop[2], sizeof(made) / 16);
                 memory_copy(shown, compositor.composed[2], sizeof(shown));
 
                 compositor.glass_made[2][2] = 0;
                 compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
                 compositor_present();
-                mismatched += memory_compare(made, compositor.backdrop[2], sizeof(made)) != 0 ||
+                mismatched += memory_compare(made, compositor.backdrop[2], sizeof(made) / 16) != 0 ||
                               memory_compare(shown, compositor.composed[2], sizeof(shown)) != 0;
         }
         check("glass: a change under it is blurred again no further than the blur reaches from it", bounded);
-        check("glass: what is blurred again in part is what blurring all of it from nothing makes", !mismatched);
+        check("glass: what is frosted again in part is what frosting all of it from nothing makes", !mismatched);
 
         // Lifted: the window under rises and takes the keys.
         table->lift[1]++;

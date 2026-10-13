@@ -1657,12 +1657,13 @@ static struct
                 goes to, and the ground it told its program. The scratch the blur is made in is shared.
         */
         unsigned int glassy[WINDOWS];
-        unsigned int *backdrop[WINDOWS], *composed[WINDOWS];
+        unsigned int *backdrop[WINDOWS], *tinted[WINDOWS], *composed[WINDOWS];
+        int glass_blocks[WINDOWS][4]; // the first block of the frost under it, across and down, and how many each way
         unsigned long glass_cut[WINDOWS];
         int glass_made[WINDOWS][4], stale[WINDOWS][4], dirty[WINDOWS][4];
         unsigned int glass_side[WINDOWS], glass_told[WINDOWS], lifted[WINDOWS];
-        unsigned int *blur;
-        unsigned long blur_bytes;
+        unsigned int *blur, *frost; // the glass windows' blur, and the frost scratch every blur is made in
+        unsigned long blur_bytes, frost_bytes;
         positive blurred, recomposed; // pixels blurred again and composed again, all frames
         int damage_by; // what is being damaged: 0 the scene, a row and one its own picture, COMPOSITOR_OVER what lies over all
         unsigned int minute;
@@ -1809,6 +1810,7 @@ static int compositor_stack_place(int row)
 */
 static void compositor_glass_touch(const int *rectangle)
 {
+        // The blur's reach; the blocks a change reaches are made again whole, which takes in the rest.
         int reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
         int by = compositor.damage_by > 0 ? compositor.damage_by - 1 : COMPOSITOR_NONE;
         int lowest = by >= 0 ? compositor_stack_place(by) : -1;
@@ -2096,48 +2098,181 @@ static int compositor_glass_reach(int logical)
 }
 
 /*
-        The scene under a rectangle gx, gy, gw by gh of the output, which may
-        run past its edges, composed into into (gw pixels a row) as the
-        frames have it, the output's last row and column again past its
-        edges, and blurred: a box across reach wide each side and down reach
-        high, each a power of two, read from back where it reaches, so the
-        pixel at x, y of the output is into's at x - across - gx, y - down - gy.
-        Every glass is made by this one routine, the tabs' and the windows'.
-        False, and into untouched, when none of it is on the output.
+        Frosted glass, cheap. The scene under a rectangle gx, gy, gw by gh of
+        the output, which may run past its edges, is composed as the frames
+        have it (the output's last row and column again past its edges) into
+        the frost scratch, cut on a grid of blocks fixed to the output, a
+        block a power of two near four pixels a side (at the scale). Each
+        block is made its mean by memory_average_ahead (a pass a pixel apart
+        and one two apart, across and down), one pixel a block is taken, and
+        that small picture -- a sixteenth of the pixels -- is blurred by the
+        same passes a block apart up to the reach. What is shown is a block
+        at a time, with a fixed grain of a few levels over it (where the
+        glass is tinted): blocks and grain are the frost, a blur that lets
+        a little of its steps show, for four passes over the scene where
+        there were ten. Both are fixed to the output, so any part of it made
+        again is what making all of it makes.
+
+        Answers the small picture (in the scratch, sw blocks a row) and where
+        its first block is: the block i, j is what a box of across each side
+        and down each way came to round the pixels of the output whose
+        (x - across) and (y - down), divided down by the block, are ax / block
+        + i and ay / block + j. Null when none of it is on the output or there
+        is no memory for it.
+*/
+static int compositor_frost_block(void)
+{
+        int block = 1;
+
+        while (block * 2 <= 4 * compositor.scale)
+                block *= 2;
+        return block;
+}
+
+// Down from x to a multiple of block, for any sign.
+static int compositor_floor_to(int x, int block)
+{
+        return x >= 0 ? x / block * block : -((-x + block - 1) / block * block);
+}
+
+// The grain: 0 to 6 levels at a pixel of the output, from a fixed tile of 64 by 64.
+static unsigned char compositor_grains[64 * 64];
+static int compositor_grains_made;
+
+static unsigned int compositor_grain(int x, int y)
+{
+        if (!compositor_grains_made)
+        {
+                for (unsigned int at = 0; at < 64 * 64; at++)
+                {
+                        unsigned int hash = at * 0x9e3779b1u;
+
+                        hash ^= hash >> 15;
+                        hash *= 0x2c1b3c6du;
+                        hash ^= hash >> 12;
+                        compositor_grains[at] = (unsigned char)(hash % 7);
+                }
+                compositor_grains_made = 1;
+        }
+        return compositor_grains[(y & 63) * 64 + (x & 63)];
+}
+
+// A pixel of tinted glass with its grain: lighter on dark glass, darker on light, which neither side can overflow.
+static unsigned int compositor_grained(unsigned int pixel, unsigned int light, int x, int y)
+{
+        unsigned int grain = compositor_grain(x, y) * 0x010101u;
+
+        return light ? pixel - grain : pixel + grain;
+}
+
+static unsigned int *compositor_frost(const struct compositor_frame *frames, unsigned int count, int gx, int gy, int gw,
+                                      int gh, int across, int down, int *where)
+{
+        int block = compositor_frost_block();
+        int ax = compositor_floor_to(gx, block), ay = compositor_floor_to(gy, block);
+        int aw = compositor_floor_to(gx + gw + block - 1, block) - ax, ah = compositor_floor_to(gy + gh + block - 1, block) - ay;
+        int cx0 = ax < 0 ? 0 : ax, cx1 = ax + aw > compositor.width ? compositor.width : ax + aw;
+        int cy0 = ay < 0 ? 0 : ay, cy1 = ay + ah > compositor.height ? compositor.height : ay + ah;
+        int sw = aw / block, sh = ah / block;
+        unsigned long need = ((unsigned long)aw * (unsigned long)ah + (unsigned long)sw * (unsigned long)sh) * 4, bytes;
+        unsigned int *small;
+        struct compositor_target under;
+
+        if (cx1 <= cx0 || cy1 <= cy0)
+                return null;
+
+        if (need > compositor.frost_bytes)
+        {
+                long mapped;
+
+                need = (need + 4095) & ~4095ul;
+                if (compositor.frost)
+                        compositor_call(syscall(munmap), (positive)compositor.frost, compositor.frost_bytes, 0, 0, 0, 0);
+                mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
+                compositor.frost = null;
+                compositor.frost_bytes = 0;
+                if (mapped < 0 && mapped > -4096)
+                        return null;
+                compositor.frost = (unsigned int *)mapped;
+                compositor.frost_bytes = need;
+        }
+        small = compositor.frost + (unsigned long)aw * (unsigned long)ah;
+
+        under = (struct compositor_target){compositor.frost, (unsigned long)aw, compositor.width, compositor.height,
+                                           cx0, cy0, cx1, cy1, ax, ay};
+        compositor_scene(&under, frames, count);
+
+        // Past the output's edges, its last row and column again.
+        for (int row = 0; row < ah; row++)
+        {
+                unsigned int *line = compositor.frost + (long)row * aw;
+                int from = ay + row < cy0 ? cy0 - ay : ay + row >= cy1 ? cy1 - 1 - ay : row;
+
+                if (from != row)
+                        memory_copy(line, compositor.frost + (long)from * aw, (positive)aw * 4);
+                for (int column = 0; column < cx0 - ax; column++)
+                        line[column] = line[cx0 - ax];
+                for (int column = cx1 - ax; column < aw; column++)
+                        line[column] = line[cx1 - ax - 1];
+        }
+
+        // Each pixel the mean of the block from it, and a pixel a block taken.
+        bytes = (unsigned long)aw * (unsigned long)ah * 4;
+        for (int step = 1; step < block; step *= 2)
+                memory_average_ahead((p8 address_to)compositor.frost, bytes - (unsigned long)step * 4, (positive)step * 4);
+        for (int step = 1; step < block; step *= 2)
+                memory_average_ahead((p8 address_to)compositor.frost, bytes - (unsigned long)step * aw * 4,
+                                     (positive)step * aw * 4);
+        for (int by = 0; by < sh; by++)
+        {
+                const unsigned int *from = compositor.frost + (long)by * block * aw;
+
+                for (int bx = 0; bx < sw; bx++)
+                        small[(long)by * sw + bx] = from[bx * block];
+        }
+
+        bytes = (unsigned long)sw * (unsigned long)sh * 4;
+        for (int step = 1; step <= across / block; step *= 2)
+                memory_average_ahead((p8 address_to)small, bytes - (unsigned long)step * 4, (positive)step * 4);
+        for (int step = 1; step <= down / block; step *= 2)
+                memory_average_ahead((p8 address_to)small, bytes - (unsigned long)step * sw * 4, (positive)step * sw * 4);
+
+        where[0] = ax / block;
+        where[1] = ay / block;
+        where[2] = sw;
+        where[3] = sh;
+        return small;
+}
+
+/*
+        The frost at full size, for the tabs: into (gw pixels a row) has the
+        pixel at x, y of the output at x - across - gx, y - down - gy, a block
+        at a time. False, and into untouched, when there is none.
 */
 static int compositor_blur(unsigned int *into, const struct compositor_frame *frames, unsigned int count, int gx,
                            int gy, int gw, int gh, int across, int down)
 {
-        int cx0 = gx < 0 ? 0 : gx, cx1 = gx + gw > compositor.width ? compositor.width : gx + gw;
-        int cy0 = gy < 0 ? 0 : gy, cy1 = gy + gh > compositor.height ? compositor.height : gy + gh;
-        unsigned long bytes = (unsigned long)gw * (unsigned long)gh * 4;
-        struct compositor_target under;
+        int block = compositor_frost_block(), where[4];
+        const unsigned int *small = compositor_frost(frames, count, gx, gy, gw, gh, across, down, where);
 
-        if (cx1 <= cx0 || cy1 <= cy0)
+        if (!small)
                 return 0;
-
-        under = (struct compositor_target){into, (unsigned long)gw, compositor.width, compositor.height,
-                                           cx0, cy0, cx1, cy1, gx, gy};
-        compositor_scene(&under, frames, count);
-
-        // Past the output's edges, its last row and column again.
         for (int row = 0; row < gh; row++)
         {
+                int by = compositor_floor_to(gy + row, block) / block - where[1];
+                const unsigned int *from = small + (long)(by < where[3] ? by : where[3] - 1) * where[2];
                 unsigned int *line = into + (long)row * gw;
-                int from = gy + row < cy0 ? cy0 - gy : gy + row >= cy1 ? cy1 - 1 - gy : row;
 
-                if (from != row)
-                        memory_copy(line, into + (long)from * gw, (positive)gw * 4);
-                for (int column = 0; column < cx0 - gx; column++)
-                        line[column] = line[cx0 - gx];
-                for (int column = cx1 - gx; column < gw; column++)
-                        line[column] = line[cx1 - gx - 1];
+                for (int column = 0; column < gw;)
+                {
+                        int bx = compositor_floor_to(gx + column, block) / block - where[0];
+                        int run = compositor_floor_to(gx + column, block) + block - (gx + column);
+
+                        run = run > gw - column ? gw - column : run;
+                        memory_fill_u32(line + column, (positive)run, from[bx < where[2] ? bx : where[2] - 1]);
+                        column += run;
+                }
         }
-
-        for (int step = 1; step <= across; step *= 2)
-                memory_average_ahead((p8 address_to)into, bytes - (unsigned long)step * 4, (positive)step * 4);
-        for (int step = 1; step <= down; step *= 2)
-                memory_average_ahead((p8 address_to)into, bytes - (unsigned long)step * gw * 4, (positive)step * gw * 4);
         return 1;
 }
 
@@ -2189,7 +2324,8 @@ static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y
                 unsigned int *into = compositor.band + (long)row * pitch + x;
 
                 for (int column = 0; column < width; column++)
-                        into[column] = window_mix(compositor_vivid(from[column]), target, amount);
+                        into[column] = compositor_grained(window_mix(compositor_vivid(from[column]), target, amount),
+                                                          target != 0, x + column, row);
         }
         return window_mix(middle, target, amount);
 }
@@ -2259,22 +2395,23 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 
 /*
         Glass windows: a window whose program asked for it (WINDOW_GLASS) is
-        what is under it, blurred by compositor_blur as the tabs' glass is
+        what is under it, frosted by compositor_frost as the tabs' glass is
         but further (a box of COMPOSITOR_GLASS_WINDOW each way), made more
         vivid, and tinted toward one side of lightness for the whole window
         -- the side its mean is on, held until the mean is well over on the
         other, so a backdrop near the middle does not flicker -- and every
-        pixel kept on that side, so an ink that stands out from the ground
+        block kept on that side, so an ink that stands out from the ground
         the program is told stands out everywhere. The program's picture,
-        premultiplied ARGB, lies over that.
+        premultiplied ARGB, lies over that, and the grain under it.
 
-        Kept, not made again each frame: the backdrop is blurred again only
+        Kept, not made again each frame: the frost's blocks under the window,
+        as they were blurred and as they were tinted, are made again only
         where the scene under it changed and as far as the blur reaches from
-        the change, or whole when the window moved, changed size or its side
-        changed; the picture over it is composed again only where either
-        changed. Both are cut at the window's own size. Bottom first, so a
-        glass window over another sees it as it is now, and before the tabs'
-        glass, which sees them both.
+        the change, or all of them when the window moved, changed size or
+        its side changed; the picture over them is composed again only where
+        either changed. The blocks are a sixteenth of the window, the picture
+        its own size. Bottom first, so a glass window over another sees it
+        as it is now, and before the tabs' glass, which sees them both.
 */
 #define COMPOSITOR_GLASS_TINT 96      // how far toward its side a glass window's tint goes, in 256ths
 #define COMPOSITOR_GLASS_DARKEST 0x5c // dark glass: no colour of a pixel brighter
@@ -2319,53 +2456,71 @@ static unsigned int compositor_over(unsigned int pixel, unsigned int under)
         return out;
 }
 
-// The picture over the tinted backdrop, inside c (x1, y1, x2, y2 on the output, inside the window).
+// The block of a glass window's frost a pixel of the output is shown from, x across and y down.
+static int compositor_glass_block(int row, int x, int y, int *block_x, int *block_y)
+{
+        int block = compositor_frost_block(), reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
+
+        *block_x = compositor_floor_to(x - reach, block) / block - compositor.glass_blocks[row][0];
+        *block_y = compositor_floor_to(y - reach, block) / block - compositor.glass_blocks[row][1];
+        return block;
+}
+
+// The picture over the tinted frost and its grain, inside c (x1, y1, x2, y2 on the output, inside the window).
 static void compositor_glass_compose(int row, const int *c)
 {
         const unsigned int *picture = compositor_pixels(row);
         unsigned int width = compositor.w[row], side = compositor.glass_side[row];
-        int x0 = compositor.x[row], y0 = compositor.y[row];
+        int x0 = compositor.x[row], y0 = compositor.y[row], blocks = compositor.glass_blocks[row][2];
 
         for (int y = c[1]; y < c[3]; y++)
         {
-                const unsigned int *from = picture + (unsigned long)(y - y0) * (unsigned long)compositor.width + (c[0] - x0);
-                const unsigned int *under = compositor.backdrop[row] + (unsigned long)(y - y0) * width + (c[0] - x0);
-                unsigned int *into = compositor.composed[row] + (unsigned long)(y - y0) * width + (c[0] - x0);
+                const unsigned int *from = picture + (unsigned long)(y - y0) * (unsigned long)compositor.width;
+                unsigned int *into = compositor.composed[row] + (unsigned long)(y - y0) * width;
+                int bx, by, block = compositor_glass_block(row, c[0], y, &bx, &by);
+                const unsigned int *tinted = compositor.tinted[row] + (long)by * blocks;
+                int next = compositor_floor_to(c[0] - compositor_glass_reach(COMPOSITOR_GLASS_WINDOW), block) + block +
+                           compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
 
-                for (int x = 0; x < c[2] - c[0]; x++)
+                for (int x = c[0]; x < c[2]; x++)
                 {
-                        unsigned int pixel = from[x], alpha = pixel >> 24;
+                        unsigned int pixel = from[x - x0], alpha = pixel >> 24, glass;
 
-                        into[x] = alpha == 255 ? pixel & 0xffffffu
-                                  : alpha      ? compositor_over(pixel, compositor_glass_tint(under[x], side))
-                                               : compositor_glass_tint(under[x], side);
+                        if (x == next)
+                        {
+                                bx++;
+                                next += block;
+                        }
+                        if (alpha == 255)
+                        {
+                                into[x - x0] = pixel & 0xffffffu;
+                                continue;
+                        }
+                        glass = compositor_grained(tinted[bx], side, x, y);
+                        into[x - x0] = alpha ? compositor_over(pixel, glass) : glass;
                 }
         }
         compositor.recomposed += (positive)(c[2] - c[0]) * (positive)(c[3] - c[1]);
 }
 
 /*
-        The side a glass window's tint goes to, from the mean of its backdrop
-        (a pixel in eight each way), and the ground that comes to: what its
-        program's inks stand out from. Answers whether the side changed.
+        The side a glass window's tint goes to, from the mean of its frost's
+        blocks, and the ground that comes to: what its program's inks stand
+        out from. Answers whether the side changed.
 */
-static int compositor_glass_side(int row, const int *box)
+static int compositor_glass_side(int row)
 {
-        unsigned long sum[3] = {0, 0, 0}, count = 0;
-        unsigned int width = compositor.w[row], was = compositor.glass_side[row], mean, light, ground;
-        int step = 8 * compositor.scale;
+        unsigned long sum[3] = {0, 0, 0}, count = (unsigned long)compositor.glass_blocks[row][2] * compositor.glass_blocks[row][3];
+        unsigned int was = compositor.glass_side[row], mean, light, ground;
 
-        for (int y = box[1] + step / 2; y < box[3]; y += step)
-                for (int x = box[0] + step / 2; x < box[2]; x += step)
-                {
-                        unsigned int pixel = compositor_vivid(
-                            compositor.backdrop[row][(unsigned long)(y - compositor.y[row]) * width + (unsigned long)(x - compositor.x[row])]);
+        for (unsigned long at = 0; at < count; at++)
+        {
+                unsigned int pixel = compositor_vivid(compositor.backdrop[row][at]);
 
-                        sum[0] += pixel >> 16 & 255;
-                        sum[1] += pixel >> 8 & 255;
-                        sum[2] += pixel & 255;
-                        count++;
-                }
+                sum[0] += pixel >> 16 & 255;
+                sum[1] += pixel >> 8 & 255;
+                sum[2] += pixel & 255;
+        }
         if (!count)
                 return 0;
 
@@ -2400,63 +2555,60 @@ static int compositor_glass_side(int row, const int *box)
         return compositor.glass_side[row] != was;
 }
 
-// A glass window's two pictures given back, and it is none.
+// A glass window's frost and picture given back, and it is none.
 static void compositor_glass_drop(int row)
 {
         if (compositor.backdrop[row])
                 compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
-        compositor.backdrop[row] = compositor.composed[row] = null;
+        compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
         compositor.glass_cut[row] = 0;
         compositor.glassy[row] = 0;
         memory_zero(compositor.glass_made[row], sizeof(compositor.glass_made[row]));
+        memory_zero(compositor.glass_blocks[row], sizeof(compositor.glass_blocks[row]));
         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
         memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));
 }
 
-// Room for both pictures at the window's size, and the blur's scratch for the largest it is asked for.
-static int compositor_glass_room(int row, unsigned long scratch)
+// Room for the frost's blocks, as blurred and as tinted, and the picture, at the window's size and place.
+static int compositor_glass_room(int row)
 {
-        unsigned long pixels = (unsigned long)compositor.w[row] * compositor.h[row];
-        unsigned long need = (pixels * 8 + 4095) & ~4095ul;
+        int block = compositor_frost_block(), reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
+        int x = compositor.x[row], y = compositor.y[row], w = (int)compositor.w[row], h = (int)compositor.h[row];
+        int *blocks = compositor.glass_blocks[row];
+        unsigned long pixels = (unsigned long)w * (unsigned long)h, cells, need;
         long mapped;
+
+        blocks[0] = compositor_floor_to(x - reach, block) / block;
+        blocks[1] = compositor_floor_to(y - reach, block) / block;
+        blocks[2] = compositor_floor_to(x + w - 1 - reach, block) / block - blocks[0] + 1;
+        blocks[3] = compositor_floor_to(y + h - 1 - reach, block) / block - blocks[1] + 1;
+        cells = (unsigned long)blocks[2] * (unsigned long)blocks[3];
+        need = ((cells * 2 + pixels) * 4 + 4095) & ~4095ul;
 
         if (need > compositor.glass_cut[row])
         {
                 if (compositor.backdrop[row])
                         compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
                 mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
-                compositor.backdrop[row] = compositor.composed[row] = null;
+                compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
                 compositor.glass_cut[row] = 0;
                 if (mapped < 0 && mapped > -4096)
                         return 0;
                 compositor.backdrop[row] = (unsigned int *)mapped;
                 compositor.glass_cut[row] = need;
         }
-        compositor.composed[row] = compositor.backdrop[row] + pixels;
-
-        scratch = (scratch * 4 + 4095) & ~4095ul;
-        if (scratch > compositor.blur_bytes)
-        {
-                if (compositor.blur)
-                        compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
-                mapped = compositor_call(syscall(mmap), 0, scratch, 3, 0x22, (positive)-1, 0);
-                compositor.blur = null;
-                compositor.blur_bytes = 0;
-                if (mapped < 0 && mapped > -4096)
-                        return 0;
-                compositor.blur = (unsigned int *)mapped;
-                compositor.blur_bytes = scratch;
-        }
+        compositor.tinted[row] = compositor.backdrop[row] + cells;
+        compositor.composed[row] = compositor.tinted[row] + cells;
         return 1;
 }
 
 static void compositor_glass_pass(struct compositor_frame *frames, const unsigned char *rows, unsigned int count)
 {
-        int reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW);
+        int reach = compositor_glass_reach(COMPOSITOR_GLASS_WINDOW), block = compositor_frost_block();
 
         for (unsigned int at = 0; at < count; at++)
         {
-                int row = rows[at], box[4], blur[4], *made = compositor.glass_made[row];
+                int row = rows[at], box[4], blur[4], *made = compositor.glass_made[row], *blocks;
                 int place[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
 
                 if (!compositor.glassy[row])
@@ -2465,35 +2617,56 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                 compositor_contents_box(row, box);
                 if (memory_compare(made, place, sizeof(place)))
                 {
+                        if (!compositor_glass_room(row))
+                        {
+                                // No memory for it: the window is shown as it is drawn, and no longer glass.
+                                compositor_glass_drop(row);
+                                continue;
+                        }
                         memory_copy(made, place, sizeof(place));
                         memory_copy(compositor.stale[row], box, sizeof(box));
                 }
+                blocks = compositor.glass_blocks[row];
                 memory_copy(blur, compositor.stale[row], sizeof(blur));
                 compositor_meet(blur, box);
 
-                if (!compositor_glass_room(row, blur[2] > blur[0] ? (unsigned long)(blur[2] - blur[0] + 2 * reach) *
-                                                                       (unsigned long)(blur[3] - blur[1] + 2 * reach)
-                                                                 : 0))
-                {
-                        // No memory for it: the window is shown as it is drawn, and no longer glass.
-                        compositor_glass_drop(row);
-                        continue;
-                }
-
                 if (blur[2] > blur[0])
                 {
-                        int gw = blur[2] - blur[0] + 2 * reach, gh = blur[3] - blur[1] + 2 * reach;
+                        int where[4], first_x, first_y, last_x, last_y, shown[4];
+                        const unsigned int *small = compositor_frost(frames, at, blur[0] - reach, blur[1] - reach,
+                                                                     blur[2] - blur[0] + 2 * reach,
+                                                                     blur[3] - blur[1] + 2 * reach, reach, reach, where);
 
-                        compositor_blur(compositor.blur, frames, at, blur[0] - reach, blur[1] - reach, gw, gh, reach, reach);
-                        for (int y = blur[1]; y < blur[3]; y++)
-                                memory_copy(compositor.backdrop[row] + (unsigned long)(y - place[1]) * (unsigned long)place[2] +
-                                                (blur[0] - place[0]),
-                                            compositor.blur + (unsigned long)(y - blur[1]) * (unsigned long)gw,
-                                            (positive)(blur[2] - blur[0]) * 4);
+                        // The blocks the pixels from blur[0], blur[1] to blur[2], blur[3] are shown from.
+                        first_x = compositor_floor_to(blur[0] - reach, block) / block;
+                        first_y = compositor_floor_to(blur[1] - reach, block) / block;
+                        last_x = compositor_floor_to(blur[2] - 1 - reach, block) / block;
+                        last_y = compositor_floor_to(blur[3] - 1 - reach, block) / block;
+                        for (int by = first_y; small && by <= last_y; by++)
+                                for (int bx = first_x; bx <= last_x; bx++)
+                                {
+                                        long cell = (long)(by - blocks[1]) * blocks[2] + (bx - blocks[0]);
+                                        unsigned int value = small[(long)(by - where[1]) * where[2] + (bx - where[0])];
+
+                                        compositor.backdrop[row][cell] = value;
+                                        compositor.tinted[row][cell] = compositor_glass_tint(value, compositor.glass_side[row]);
+                                }
                         compositor.blurred += (positive)(blur[2] - blur[0]) * (positive)(blur[3] - blur[1]);
-                        compositor_union(compositor.dirty[row], blur);
-                        if (compositor_glass_side(row, box))
+
+                        // Their pixels, whole blocks, are composed again.
+                        shown[0] = first_x * block + reach;
+                        shown[1] = first_y * block + reach;
+                        shown[2] = (last_x + 1) * block + reach;
+                        shown[3] = (last_y + 1) * block + reach;
+                        compositor_meet(shown, box);
+                        compositor_union(compositor.dirty[row], shown);
+                        if (compositor_glass_side(row))
+                        {
+                                for (long cell = 0; cell < (long)blocks[2] * blocks[3]; cell++)
+                                        compositor.tinted[row][cell] =
+                                            compositor_glass_tint(compositor.backdrop[row][cell], compositor.glass_side[row]);
                                 memory_copy(compositor.dirty[row], box, sizeof(box));
+                        }
                 }
 
                 compositor_meet(compositor.dirty[row], box);
@@ -2502,7 +2675,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                         int *c = compositor.dirty[row];
 
                         compositor_glass_compose(row, c);
-                        // What changed of it is shown, and blurred again under any glass over it.
+                        // What changed of it is shown, and frosted again under any glass over it.
                         compositor.damage_by = row + 1;
                         compositor_damage(c[0], c[1], c[2] - c[0], c[3] - c[1]);
                         compositor.damage_by = 0;
