@@ -109213,6 +109213,48 @@ static fn check_frames_refused(void)
         terminal.forced = false;
 }
 
+/*
+        A shell that is gone says how it ended in its cells, and that line is
+        drawn even when the compositor has not taken the last picture: the frame
+        waits for it, and is drawn at once once it is forced past the wait.
+*/
+static fn check_killed(void)
+{
+        struct windows address_to table = terminal.own.table;
+        static p8 text[8192];
+        unsigned int cells = ROWS * COLUMNS;
+        b32 said, framed;
+
+        if (cells > sizeof(text))
+        {
+                check("killed: the grid fits the text to search", false);
+                return;
+        }
+
+        table->shown[0] = table->frame[0];
+        terminal.forced = false;
+        terminal_view_live();
+        term_child_killed(9, (string_address)"KILL", false);
+        table->shown[0] = table->frame[0] - 1;
+        check("killed: the frame waits for a picture the compositor has not taken", !terminal_frame());
+
+        terminal.forced = true;
+        framed = terminal_frame();
+        // The characters in order, without the blanks: a folded line may have blank rows in it.
+        for (unsigned int at = 0, length = 0; at < cells; at++)
+        {
+                p32 character = terminal.frame[terminal.shown][at].character;
+
+                if (character > ' ')
+                        text[length++] = (p8)character;
+                if (at + 1 == cells)
+                        said = memory_search(text, length, (address_any)"[shellkilledbysignal9(SIGKILL)]", 31) != null;
+        }
+        check("killed: the line is drawn once the frame is forced", framed && said);
+        table->shown[0] = table->frame[0];
+        terminal.forced = false;
+}
+
 // The frame just drawn, read back: the buffer that is on the screen, or null when it was refused.
 static p32 address_to render_frame(void)
 {
@@ -109359,6 +109401,7 @@ b32 main()
 
         check_forced();
         check_frames_refused();
+        check_killed();
         check_keys();
         check_pointer();
         check_take();
