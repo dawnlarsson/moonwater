@@ -1840,6 +1840,10 @@ static struct
                 card's list, which a plane's possible crtcs are a mask of.
         */
         int overlay_state, overlay_on, overlay_rect[4];
+        // A window on the overlay where it does not fill the output (plane_row, -1 for none): what of it the overlay
+        // shows on the output (plane_rect), and the framebuffer it shows (plane_fb, 0 for none).
+        int plane_row, plane_rect[4];
+        unsigned int plane_fb;
         unsigned int crtc_index, primary, overlay, primary_props[11], overlay_props[11];
         unsigned int overlay_fb[2], overlay_handle[2], overlay_back, overlay_rows;
         unsigned int *overlay_pixels[2];
@@ -3277,8 +3281,10 @@ static void compositor_window_fb_drop(int row)
 
 static int compositor_shows_row(int row)
 {
-        return compositor.on_screen &&
-               (compositor.on_screen == compositor.scan_fb[row][0] || compositor.on_screen == compositor.scan_fb[row][1]);
+        return (compositor.on_screen &&
+                (compositor.on_screen == compositor.scan_fb[row][0] || compositor.on_screen == compositor.scan_fb[row][1])) ||
+               (compositor.plane_fb &&
+                (compositor.plane_fb == compositor.scan_fb[row][0] || compositor.plane_fb == compositor.scan_fb[row][1]));
 }
 
 // A flip to fb, done at the next vertical blank, with its event; false when the card refuses it.
@@ -3764,7 +3770,8 @@ static int compositor_overlay_buffers(unsigned int rows)
         does not wait, and its event is the flip's; false when the card
         refuses it.
 */
-static int compositor_atomic(unsigned int fb, int row, unsigned int which, int overlay, const int *rect, unsigned int buffer)
+static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, int overlay, unsigned int shown,
+                                const int *source, const int *rect)
 {
         unsigned int objects[2] = {compositor.primary, compositor.overlay}, counts[2] = {1, 0}, props[12];
         unsigned long values[12];
@@ -3777,12 +3784,12 @@ static int compositor_atomic(unsigned int fb, int row, unsigned int which, int o
                 unsigned long width = rect ? (unsigned long)(rect[2] - rect[0]) : 0;
                 unsigned long height = rect ? (unsigned long)(rect[3] - rect[1]) : 0;
 
-                props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = rect ? compositor.overlay_fb[buffer] : 0;
+                props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = rect ? shown : 0;
                 props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = rect ? compositor.crtc : 0;
                 if (rect)
                 {
-                        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)rect[0] << 16;
-                        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = 0;
+                        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)source[0] << 16;
+                        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = (unsigned long)source[1] << 16;
                         props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = width << 16;
                         props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = height << 16;
                         props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)rect[0];
@@ -3809,10 +3816,19 @@ static int compositor_atomic(unsigned int fb, int row, unsigned int which, int o
         if (overlay)
         {
                 compositor.overlay_on = rect != 0;
+                compositor.plane_fb = 0;
                 if (rect)
                         memory_copy(compositor.overlay_rect, rect, sizeof(compositor.overlay_rect));
         }
         return 1;
+}
+
+// The tabs' buffer which on the overlay at rect, read from the same place in it.
+static int compositor_atomic(unsigned int fb, int row, unsigned int which, int overlay, const int *rect, unsigned int buffer)
+{
+        int source[2] = {rect ? rect[0] : 0, 0};
+
+        return compositor_atomic_to(fb, row, which, overlay, compositor.overlay_fb[buffer], source, rect);
 }
 
 // The overlay off where it is on and the commits that would take it off are refused: the plane set to nothing.
@@ -3824,6 +3840,7 @@ static void compositor_overlay_off(void)
                 return;
         system_control(compositor.card, COMPOSITOR_SETPLANE, address_of off);
         compositor.overlay_on = 0;
+        compositor.plane_fb = 0;
 }
 
 // The rectangle the tabs cover, on the output; false when they cover none of it.
@@ -3914,6 +3931,90 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         return 1;
 }
 
+/*
+        A window that does not fill the output on the overlay: the card shows
+        the top window's middle straight from its buffer, over the
+        compositor's own screen, and the compositor composes everything else
+        and nothing under it -- where it copied the whole window every frame.
+        The window is the top one, so nothing of the scene is over it but the
+        pointer, on its own plane; opaque, at the size it drew, wholly on the
+        output and clear of the tabs. What the overlay shows is the window
+        less its rows with corners, its close button and its line, which the
+        compositor still draws round it. A card with no overlay, or one that
+        refuses, has the window composed as any other.
+*/
+static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned char *rows,
+                                      unsigned int windows, int rect[4])
+{
+        struct compositor_frame band;
+        int row, bx, by, side, radius, top, bottom;
+
+        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor.cursor.soft ||
+            !windows || compositor.drag >= 0 || compositor.resize >= 0)
+                return -1;
+        row = rows[windows - 1];
+        const struct compositor_frame *frame = &frames[windows - 1];
+
+        if (compositor.table->glass[row] || compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] ||
+            compositor.picture_h[row] != compositor.h[row] || frame->x < 0 || frame->y < 0 ||
+            frame->x + frame->width > compositor.width || frame->y + frame->height > compositor.height)
+                return -1;
+        radius = compositor_radius(frame);
+        top = frame->y + radius;
+        bottom = frame->y + frame->height - radius;
+        if (compositor_close_box(frame, &bx, &by, &side))
+                top = by + side > top ? by + side : top;
+        if (bottom - top < 64 * compositor.scale)
+                return -1;
+        rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
+
+        compositor_band_frame(&band);
+        if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] &&
+            band.y + band.height > rect[1])
+                return -1;
+        // The card asked last: whether it has an overlay, then the window's framebuffer.
+        return compositor_overlay_ready() && compositor_window_fb(row, compositor.front[row]) ? row : -1;
+}
+
+// The damage less the rectangle the overlay shows; false when the pieces do not fit the list, which is then left whole.
+static int compositor_damage_cut(const int *rect)
+{
+        int pieces[COMPOSITOR_DAMAGE][4];
+        unsigned int count = 0;
+
+        for (unsigned int at = 0; at < compositor.damages; at++)
+        {
+                const int *d = compositor.damage[at];
+                int cut[4][4] = {{d[0], d[1], d[2], rect[1]},
+                                 {d[0], rect[3], d[2], d[3]},
+                                 {d[0], rect[1] > d[1] ? rect[1] : d[1], rect[0], rect[3] < d[3] ? rect[3] : d[3]},
+                                 {rect[2], rect[1] > d[1] ? rect[1] : d[1], d[2], rect[3] < d[3] ? rect[3] : d[3]}};
+
+                if (d[2] <= rect[0] || d[0] >= rect[2] || d[3] <= rect[1] || d[1] >= rect[3])
+                {
+                        if (count == COMPOSITOR_DAMAGE)
+                                return 0;
+                        memory_copy(pieces[count++], d, sizeof(pieces[0]));
+                        continue;
+                }
+                for (unsigned int k = 0; k < 4; k++)
+                {
+                        int *c = cut[k];
+
+                        c[0] = c[0] > d[0] ? c[0] : d[0], c[2] = c[2] < d[2] ? c[2] : d[2];
+                        c[1] = c[1] > d[1] ? c[1] : d[1], c[3] = c[3] < d[3] ? c[3] : d[3];
+                        if (c[2] <= c[0] || c[3] <= c[1])
+                                continue;
+                        if (count == COMPOSITOR_DAMAGE)
+                                return 0;
+                        memory_copy(pieces[count++], c, sizeof(pieces[0]));
+                }
+        }
+        memory_copy(compositor.damage, pieces, sizeof(pieces[0]) * count);
+        compositor.damages = count;
+        return 1;
+}
+
 static void compositor_present(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -3980,7 +4081,12 @@ static void compositor_present(void)
         if (direct >= 0 &&
             ((compositor_overlay_ready() && compositor_present_overlaid(direct, frames, count, windows)) ||
              compositor_present_direct(direct, frames + windows, count - windows)))
+        {
+                // The overlay is the tabs' now, or nothing's.
+                compositor.plane_row = -1;
+                compositor.plane_fb = 0;
                 return;
+        }
 
         // Not now: the compositor's own screen is shown again, drawn whole, once the card has finished a flip.
         int back = compositor.on_screen && compositor.on_screen != compositor.fb;
@@ -3995,6 +4101,50 @@ static void compositor_present(void)
         else if (compositor.screen_stale)
                 compositor_damage(0, 0, compositor.width, compositor.height);
         compositor.screen_stale = 0;
+
+        // The top window on the overlay where it can be: nothing of it composed under the plane.
+        int planed[4], plane = !back ? compositor_plane_candidate(frames, rows, windows, planed) : -1;
+
+        if (compositor.plane_row >= 0 && (plane != compositor.plane_row ||
+                                          memory_compare(planed, compositor.plane_rect, sizeof(planed)) != 0))
+        {
+                // Off the plane, or moved on it: the card is to have it no more, and the compositor composes it.
+                if (compositor.flip_pending)
+                        return;
+                compositor_damage(compositor.plane_rect[0], compositor.plane_rect[1],
+                                  compositor.plane_rect[2] - compositor.plane_rect[0],
+                                  compositor.plane_rect[3] - compositor.plane_rect[1]);
+                if (plane < 0 && !compositor_atomic_to(compositor.fb, -1, 0, 1, 0, 0, 0))
+                        compositor_overlay_off();
+                compositor.plane_row = compositor.direct_row = -1;
+                compositor.plane_fb = 0;
+        }
+        if (plane >= 0)
+        {
+                unsigned int which = compositor.front[plane], fb = compositor_window_fb(plane, which);
+                int source[2] = {planed[0] - compositor.x[plane], planed[1] - compositor.y[plane]};
+
+                if (compositor.flip_pending)
+                        return;
+                if (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed))
+                {
+                        // Refused: off the overlay for good, and the window composed whole from now.
+                        compositor.overlay_state = -1;
+                        compositor_overlay_off();
+                        compositor.plane_row = compositor.direct_row = -1;
+                        compositor_damage(planed[0], planed[1], planed[2] - planed[0], planed[3] - planed[1]);
+                }
+                else
+                {
+                        compositor.plane_fb = fb;
+                        compositor.plane_row = compositor.direct_row = plane;
+                        compositor.direct_buffer = which;
+                        memory_copy(compositor.plane_rect, planed, sizeof(planed));
+                        compositor.table->scanned++;
+                        // Where the pieces do not fit the list, what is under the plane is composed too, unseen.
+                        compositor_damage_cut(planed);
+                }
+        }
 
         int apart = compositor_changed_ready();
         struct compositor_apart slices = {compositor_slice_flush, compositor.composing, (unsigned long)compositor.width};
@@ -5292,6 +5442,8 @@ static void compositor_leave(int row)
                 compositor.direct_row = -1;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
+        if (compositor.plane_row == row)
+                compositor.plane_row = -1;
         if (compositor_shows_row(row) || (compositor.flip_pending && compositor.flip_row == row))
                 compositor.dropping |= 1u << row;
         else if (compositor.scan_fb[row][0] || compositor.scan_fb[row][1])
@@ -6504,7 +6656,7 @@ static b32 compositor_main()
         compositor_font(font);
 
         compositor.signals = compositor_signals();
-        compositor.direct_row = compositor.flip_row = -1;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
         compositor.on_screen = compositor.fb;
         status = compositor_table();
         if (status < 0 || compositor.signals < 0)
