@@ -3,11 +3,9 @@
 # that registers or loads. kbuild sees this directory through a symlink at
 # kernel/canvas, made by kernel/patch/apply beside kernel/moonwater.
 #
-# canvas.c is the one translation unit: window.c and term.c are included
-# into it, because the terminal emulator is shared with the shell and the
-# window is the page a program shares with the compositor, and neither is
-# an object of its own. The pixel loops are assembly in lib.c, which this
-# unit declares and does not emit, bar the six that are Canvas's.
+# canvas.c is the one translation unit. The pixel loops are assembly in
+# lib.c, which this unit declares and does not emit, bar the six that are
+# Canvas's.
 obj-$(CONFIG_MOONWATER_CANVAS) += canvas.o
 
 #       A stock comparison: MOONWATER_STOCK in the environment builds the

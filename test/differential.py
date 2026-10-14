@@ -26795,7 +26795,7 @@ static void desktop_attach_buffers(void) { attaches++; }
 static void canvas_release(struct canvas *c) { (void)c; releases++; }
 '''
     source += section(output, "static int canvas_start(struct canvas *canvas)\n{",
-                      "        // The cursor is drawn from a bitmap") + "return 0;\n}\n"
+                      "        canvas_modes_keep();") + "return 0;\n}\n"
     source += (root / "src/platform/spark.inc").read_text()
     source += r'''
 typedef unsigned refcount_t;
@@ -26815,7 +26815,7 @@ struct pid; struct cred; struct pane;
 #define refcount_dec_and_test(p) (--*(p) == 0)
 '''
     source += section(core, "struct spawn_strings\n",
-                      "_Static_assert(offsetof(struct device_context, display) == 0,")
+                      "// Kernel functions rewritten in assembly (kernel/kernel.c")
     # The real request path, not a stub: one opcode now carries every launch,
     # so what used to be decided by the opcode number -- interpretation policy
     # and the descriptors -- is decided by fields the caller controls, and the
@@ -26884,7 +26884,7 @@ static void atomic_long_sub(long n, atomic_long_t *p) { *p -= n; }
 #define user_mode_thread(fn, arg, sig) \
         ((void)(sig), spawn_handed=(arg), spawn_entered++, spawn_pid)
 '''
-    source += section(spark, "struct spawn_work\n", "/*\n        Starts one program")
+    source += section(spark, "struct spawn_work\n", "/*\n        A program starts able to be interrupted.")
     source += section(spark, "static bool spawn_keeps", "static void spawn_default_signals")
     source += section(spark, "static int copy_strings", "static long do_spawn")
     source += section(spark, "static long do_spawn", "static long report_stats")
@@ -27083,12 +27083,6 @@ static unsigned long wait_timeout;
 #define KEY_F9 67
 #define KEY_T 20
 #define KEY_BACKSPACE 14
-#define WINDOW_KEYS 64
-#define WINDOW_KEY_DOWN 1u
-#define WINDOW_KEY_SHIFT 2u
-#define WINDOW_KEY_CONTROL 4u
-#define WINDOW_KEY_ALT 8u
-struct window_key { unsigned code,character,flags,reserved; };
 #define EV_SYN 0
 #define EV_KEY 1
 #define EV_REL 2
@@ -27110,32 +27104,13 @@ struct input_absinfo { int minimum,maximum; };
 struct input_dev { struct input_absinfo absinfo[2]; unsigned long relbit[1]; };
 struct input_handle { struct input_dev *dev; };
 static struct {
-    int width,height,abs_x,abs_y,raw_x,raw_y,accel_x,accel_y;
-    unsigned abs_have;
-    atomic_t pending_x,pending_y,motion_pending,shake_dir,shake_count,magnify,wheel;
-    atomic_t button_x,button_y,button_down,button_changed;
-    atomic_t client_button,client_down,client_changed;
-    atomic_t modifiers,key_head,key_tail,focus_steps,focus_commit,focus_cycling,minimize;
-    struct window_key key_ring[WINDOW_KEYS];
+    int width,height;
+    atomic_t modifiers,reclaim;
     int input_lock;
-    u64 accel_stamp,motion_stamp,shake_window;
-    /*
-            What a resize measures from. struct pane is declared further down
-            with the geometry it belongs to, so the pane being resized is held
-            as void * here -- resize_move's own first line is what gives it a
-            type, and this mock has no business having an opinion about it.
-    */
-    unsigned resize_edges;
-    int resize_x,resize_y,resize_w,resize_h,press_x,press_y;
-    void *resizing;
-    atomic_t spawn,spawn_key,reclaim;
-    // What a suspension throws away, and the lock it is decided under.
-    atomic_t frame_pending;
+    // The lock the desktop is decided under, and what it decides.
     int lock;
     _Bool suspended;
     _Bool asleep;
-    _Bool awake;
-    _Bool terminal;
 } desktop;
 #ifndef READ_ONCE
 #define READ_ONCE(x) (x)
@@ -27257,16 +27232,10 @@ static void vt_event(unsigned long event,unsigned console) {
     if (vt_watcher) vt_watcher->notifier_call(vt_watcher,event,&param);
 }
 '''
-    source += "static _Bool bind_key_swallowed(unsigned int code, int value);\n"
-    source += "_Bool moonwater_bind_swallowed(unsigned int code, int value);\n"
-    source += section(keys, "#define KEY_TABLE", "// Under desktop.lock")
-    source += section(pointer, "static inline struct pointer_handle *pointer_handle_of", "static HOT void pointer_event")
-    source += "static void pointer_event_locked(struct input_handle *handle, unsigned int type, unsigned int code, int value);\n"
+    source += section(keys, "#define KEY_TABLE", "/* ---- client: a client, and what it is allowed to ask for ---- */")
+    source += section(pointer, "static inline struct pointer_handle *pointer_handle_of", "static HOT void pointer_event_run")
     source += section(pointer, "static HOT void pointer_event_run", "static const char *pointer_device_name")
-    source += section(pointer, "static COLD void pointer_disconnect", "static void canvas_input_devices")
-    source += section(drag, "#define WHEEL_LINES", "static void wheel_deliver")
-    source += section(pointer, "#define ACCEL_ONE", "static void desktop_confine_cursor")
-    source += section(pointer, "static void pointer_commit", "#define POINTER_OPEN_TRIES")
+    source += section(pointer, "static COLD void pointer_disconnect", "// Anything with keys, which is every keyboard")
     # Canvas giving up input while another program is master: what is
     # dropped, and when the desktop is taken back.
     source += r"""
@@ -27274,14 +27243,13 @@ static _Bool mock_taken;
 static unsigned mock_resumes;
 static _Bool desktop_taken(void) { assert(desktop.lock);return mock_taken; }
 static void desktop_resume(void) { assert(desktop.lock);mock_resumes++;desktop.suspended=0; }
-static void desktop_set_awake(_Bool awake) { assert(desktop.lock);desktop.awake=awake; }
 """
     # What ends a program is the kernel's own (signals, a card's file list), so
     # the check sees how often it is asked for and not what it does.
     source += section(pointer, "#define CANVAS_SUSPENDED_POLL_MS",
                       "/*\n        The session of whatever holds the display, ended.")
     source += "static unsigned mock_reclaims;\nstatic void canvas_reclaim(void) { mock_reclaims++; }\n"
-    source += section(pointer, "static _Bool canvas_suspend_check", "static void canvas_flush_wake")
+    source += section(pointer, "static _Bool canvas_suspend_check", "/*\n        Sleeps until a chord asks")
     # Bindings: the table, spawn without UMH, debounce, the chord, and the ioctl.
     source += r"""
 #define KEY_POWER 116
@@ -27459,6 +27427,10 @@ static void bind_clear_mods(void) {
     bind_send(EV_KEY,KEY_LEFTCTRL,0); bind_send(EV_KEY,KEY_RIGHTCTRL,0);
     bind_send(EV_KEY,KEY_LEFTALT,0); bind_send(EV_KEY,KEY_RIGHTALT,0);
 }
+/* Whether the key watch has a row for the code: what attaching a machine arms. */
+static _Bool bind_watched(unsigned int code) {
+    return code < BIND_CODES && bind_code_event[code] != 0;
+}
 static unsigned bind_named(const char *first, const char *second) {
     char wanted[SPARK_BIND_NAME_MAX];
     unsigned event;
@@ -27486,7 +27458,6 @@ static long canvas_turn_on(struct canvas_control *answer) {
 }
 static long canvas_turn_off(void) { canvas_offs++; return canvas_off_answer; }
 static void canvas_state(struct canvas_control *answer) { canvas_states++;answer->running=1;answer->cards=1; }
-static unsigned canvas_logs,canvas_terminals;
 static long canvas_scale_answer,canvas_modes_answer;
 static unsigned canvas_scale_sets,canvas_modes_sets,canvas_scale_asked,canvas_modes_asked;
 static long canvas_scale_set(unsigned int setting) {
@@ -27495,21 +27466,7 @@ static long canvas_scale_set(unsigned int setting) {
 static long canvas_modes_set(unsigned int modes) {
     canvas_modes_sets++;canvas_modes_asked=modes;return canvas_modes_answer;
 }
-static long canvas_log_open(void) { canvas_logs++; return 0; }
-static long canvas_terminal_open(void) { canvas_terminals++; return 0; }
 '''
-    #   The three diagnostics, the real macro over collectors that fill one
-    #   field each: what a collector does not fill is zero or it is the stack.
-    source += r'''
-static void canvas_input_stats(struct input_stats *out) { out->events = 5; }
-static void canvas_cursor_stats(struct cursor_stats *out) { out->updates = 3; }
-static void canvas_input_devices(struct input_devices *out) { out->count = 1; }
-'''
-    source += section(canvas, "#define REPORT_CANVAS(name, type, collect)",
-                      "#undef REPORT_CANVAS")
-    source += ("REPORT_CANVAS(report_input_real, input_stats, canvas_input_stats)\n"
-               "REPORT_CANVAS(report_cursor_real, cursor_stats, canvas_cursor_stats)\n"
-               "REPORT_CANVAS(report_devices_real, input_devices, canvas_input_devices)\n")
     source += canvas[canvas.index("static long report_canvas"):
                      canvas.index("/*\n        The window table the compositor shares is a memfd")]
     source += r'''
@@ -27520,7 +27477,7 @@ static struct pointer_handle *keyboard_attach(int opened) {
 }
 static void keyboard_send(struct pointer_handle *p,unsigned code,int value) {
     mutex_lock(&desktop.input_lock);
-    pointer_event_locked(&p->handle,EV_KEY,code,value);
+    keyboard_event(&p->handle,code,value);
     mutex_unlock(&desktop.input_lock);
 }
 // Every key reached the console's tty as well as Canvas, and init's shell
@@ -27720,10 +27677,6 @@ static void check_bind(void) {
     check(bind_queued==queued+1,"a bound canvas on queues");
     atomic_set(&on->bound,0); on->command[0]=0;
 
-    check(bind_key_swallowed(KEY_POWER,1),"a bound power key is swallowed");
-    check(bind_key_swallowed(KEY_POWER,0),"its release is swallowed too");
-    check(!bind_key_swallowed(KEY_TAB,1),"a typing key is not swallowed");
-
     queued=bind_queued;
     atomic_set(&on->busy,1); atomic_set(&off->busy,1);
     bind_queue(on); bind_queue(off);
@@ -27788,9 +27741,6 @@ static void check_bind(void) {
     snprintf(request.command,sizeof(request.command),"true");
     check(!report_bind(&request) && !strcmp(vol->command,"true"),
           "a non-boot event needs CAP_SYS_ADMIN and not CAP_SYS_BOOT");
-    check(bind_key_swallowed(KEY_VOLUMEUP,1),"a bound volume key is swallowed");
-    check(bind_key_swallowed(KEY_VOLUMEUP,0),"its release is swallowed too");
-    check(!bind_key_swallowed(KEY_TAB,1),"a typing key is not swallowed while a volume bind is live");
     power_admin=0;
     memset(&request,0,sizeof(request));
     request.op=SPARK_BIND_SET; request.event=SPARK_BIND_VOLUME_UP;
@@ -27805,8 +27755,8 @@ static void check_bind(void) {
     request.reserved[0]=request.reserved[1]=request.reserved[2]=0;
     check(report_bind(&request)==-ENAMETOOLONG && !strcmp(power->command,"echo set"),
           "a line with no end inside the request is refused");
-    memset(&request,0,sizeof(request)); request.op=SPARK_BIND_FIRE+1; request.event=SPARK_BIND_POWEROFF;
-    check(report_bind(&request)==-EINVAL,"an op that is neither get, set nor fire is refused");
+    memset(&request,0,sizeof(request)); request.op=SPARK_BIND_SET+1; request.event=SPARK_BIND_POWEROFF;
+    check(report_bind(&request)==-EINVAL,"an op that is neither get nor set is refused");
     memset(&request,0,sizeof(request)); request.reserved[1]=1; request.event=SPARK_BIND_POWEROFF;
     check(report_bind(&request)==-EINVAL,"a reserved field that is not zero is refused");
     memset(&request,0,sizeof(request));
@@ -27934,9 +27884,7 @@ static void check_bind_edges(void) {
     for (op=0; op<4; op++)
     for (event=0; event<SPARK_BIND_EVENTS+3; event++)
     for (reserved=0; reserved<8; reserved++) {
-        _Bool invalid=op>SPARK_BIND_FIRE || !event || event>SPARK_BIND_EVENTS || reserved;
-        /* FIRE asks for a run, and only the rows made to be asked for take it. */
-        _Bool refused=!invalid && op==SPARK_BIND_FIRE && event!=SPARK_BIND_DESKTOP_TERMINAL;
+        _Bool invalid=op>SPARK_BIND_SET || !event || event>SPARK_BIND_EVENTS || reserved;
         memset(&request,0,sizeof(request));
         request.op=op; request.event=event;
         request.reserved[0]=reserved&1u;
@@ -27944,19 +27892,8 @@ static void check_bind_edges(void) {
         request.reserved[2]=(reserved>>2)&1u;
         got=report_bind(&request);
         snprintf(who,sizeof(who),"ioctl op=%u event=%u reserved=%u",op,event,reserved);
-        check(invalid ? got==-EINVAL : refused ? got==-EPERM : got==0, who);
+        check(invalid ? got==-EINVAL : got==0, who);
     }
-    /* A program that is not root may not ask, and a root may ask for nothing but a launch. */
-    power_admin=0;
-    memset(&request,0,sizeof(request));
-    request.op=SPARK_BIND_FIRE; request.event=SPARK_BIND_DESKTOP_TERMINAL;
-    check(report_bind(&request)==-EPERM,"FIRE needs CAP_SYS_ADMIN");
-    power_admin=1;
-    memset(&request,0,sizeof(request));
-    request.op=SPARK_BIND_FIRE; request.event=SPARK_BIND_POWEROFF;
-    check(report_bind(&request)==-EPERM,"FIRE cannot say the power button was pressed");
-    request.event=SPARK_BIND_CANVAS_OFF;
-    check(report_bind(&request)==-EPERM,"FIRE cannot say Canvas went off");
     memset(&request,0,sizeof(request)); request.event=~0u;
     check(report_bind(&request)==-EINVAL,"event UINT_MAX is refused");
     memset(&request,0,sizeof(request)); request.op=~0u; request.event=1;
@@ -27973,18 +27910,15 @@ static void check_bind_edges(void) {
             check(got==-ENAMETOOLONG, who);
         else if (!length)
             check(!got && !bind_row(SPARK_BIND_VOLUME_UP)->command[0] &&
-                  !atomic_read(&bind_row(SPARK_BIND_VOLUME_UP)->bound) &&
-                  !bind_key_swallowed(KEY_VOLUMEUP,1), who);
+                  !atomic_read(&bind_row(SPARK_BIND_VOLUME_UP)->bound), who);
         else
-            check(!got && strlen(bind_row(SPARK_BIND_VOLUME_UP)->command)==length &&
-                  bind_key_swallowed(KEY_VOLUMEUP,1) &&
-                  bind_key_swallowed(KEY_VOLUMEUP,0), who);
+            check(!got && strlen(bind_row(SPARK_BIND_VOLUME_UP)->command)==length, who);
     }
 
     memset(&request,0,sizeof(request));
     request.op=SPARK_BIND_SET; request.event=SPARK_BIND_POWEROFF;
     check(!report_bind(&request) && !strcmp(bind_row(SPARK_BIND_POWEROFF)->command,"poweroff") &&
-          bind_key_swallowed(KEY_POWER,1) && bind_key_swallowed(KEY_POWER,0),
+          atomic_read(&bind_row(SPARK_BIND_POWEROFF)->bound),
           "empty SET on poweroff restores the default and stays bound");
 
     queued=bind_queued;
@@ -27996,8 +27930,7 @@ static void check_bind_edges(void) {
     bind_send(EV_KEY,KEY_A,1); bind_send(EV_KEY,KEY_A,0);
     bind_send(EV_KEY,BTN_LEFT,1); bind_send(EV_KEY,BTN_LEFT,0);
     bind_send(EV_KEY,768,1); bind_send(EV_KEY,~0u,1);
-    check(bind_queued==queued && !bind_key_swallowed(KEY_A,1) &&
-          !bind_key_swallowed(BTN_LEFT,1),
+    check(bind_queued==queued,
           "letters, mouse buttons and codes past the map do not bind");
 
     bind_clear_mods();
@@ -28062,24 +27995,6 @@ static void check_bind_edges(void) {
         check(bind_queued==queued+2,
               "volume without drop_busy queues a follow-up while the run is in flight");
         bind_idle(vol);
-    }
-
-    {
-        unsigned held;
-        memset(&request,0,sizeof(request));
-        request.op=SPARK_BIND_SET;
-        snprintf(request.command,sizeof(request.command),"true");
-        request.event=SPARK_BIND_SLEEP; report_bind(&request);
-        request.event=SPARK_BIND_VOLUME_DOWN; report_bind(&request);
-        request.event=SPARK_BIND_MUTE; report_bind(&request);
-        request.event=SPARK_BIND_BRIGHTNESS_UP; report_bind(&request);
-        request.event=SPARK_BIND_BRIGHTNESS_DOWN; report_bind(&request);
-        for (held=0; held<sizeof(hold_codes)/sizeof(*hold_codes); held++)
-            check(bind_key_swallowed(hold_codes[held],1), "nine bound keys all swallow their press");
-        for (held=0; held<sizeof(hold_codes)/sizeof(*hold_codes); held++)
-            check(bind_key_swallowed(hold_codes[held],0), "and all nine releases stay swallowed");
-        check(!bind_held_n && !bind_key_swallowed(KEY_TAB,1),
-              "the hold map is empty after nine releases, and typing is still not swallowed");
     }
 
     queued=bind_queued;
@@ -28213,8 +28128,6 @@ static void check_bind_edges(void) {
     }
 
     bind_clear_mods();
-    check(!bind_key_swallowed(KEY_DELETE,1) && !bind_key_swallowed(KEY_KPDOT,1),
-          "Delete without the chord is watched and not swallowed");
     queued=bind_queued; jiffies+=5000;
     bind_send(EV_KEY,KEY_LEFTCTRL,-1);
     bind_send(EV_KEY,KEY_LEFTALT,1);
@@ -28232,26 +28145,6 @@ static void check_bind_edges(void) {
     bind_send(EV_KEY,KEY_DELETE,1);
     check(bind_queued==queued+1,"a ctrl repeat while held still makes CAD");
     bind_idle(bind_row(SPARK_BIND_CTRL_ALT_DELETE)); bind_clear_mods();
-
-    check(bind_key_swallowed(KEY_POWER,1) && bind_key_swallowed(KEY_POWER,2) &&
-          !bind_key_swallowed(KEY_TAB,1) && bind_key_swallowed(KEY_POWER,0) && !bind_held_n,
-          "a bound power repeat and a typing key while it is held: only the bound key is swallowed");
-
-    {
-        struct bind_row *vol=bind_row(SPARK_BIND_VOLUME_UP);
-        memset(&request,0,sizeof(request));
-        request.op=SPARK_BIND_SET; request.event=SPARK_BIND_VOLUME_UP;
-        snprintf(request.command,sizeof(request.command),"true");
-        check(!report_bind(&request),"volume is bound to unbind while held");
-        check(bind_key_swallowed(KEY_VOLUMEUP,1),"the volume press is held");
-        memset(&request,0,sizeof(request));
-        request.op=SPARK_BIND_SET; request.event=SPARK_BIND_VOLUME_UP;
-        check(!report_bind(&request) && !atomic_read(&vol->bound),
-              "empty SET unbinds volume while the key is down");
-        check(bind_key_swallowed(KEY_VOLUMEUP,2) && bind_key_swallowed(KEY_VOLUMEUP,0) &&
-              !bind_held_n && !bind_key_swallowed(KEY_VOLUMEUP,1),
-              "the release of an unbound-while-held key stays paired, then presses pass");
-    }
 
     {
         memset(&request,0,sizeof(request));
@@ -28313,68 +28206,35 @@ static void check_bind_edges(void) {
     power_admin=1; power_capable=1;
 }
 // KEY_POWER is the ACPI button; bind listens, Canvas does not.
-static void suspend_pending(void) {
-    desktop.button_changed=desktop.client_changed=desktop.motion_pending=1;
-    desktop.wheel=120;desktop.focus_steps=2;desktop.focus_commit=1;desktop.minimize=1;
-    desktop.spawn=1;desktop.frame_pending=1;desktop.key_head=7;desktop.key_tail=3;
-}
-// A program that took the display heard every key Canvas did.
+// A program that took the display is the one the thread waits for.
 static void check_input_suspension(void) {
     memset(&desktop,0,sizeof(desktop));
-    suspend_pending();mock_taken=1;mock_resumes=0;desktop.awake=1;
+    mock_taken=1;mock_resumes=0;
     check(canvas_suspend_check() && desktop.suspended && !desktop.lock,
           "a card another program is master of suspends Canvas");
-    check(!desktop.awake,
-          "a suspension stops the frame timer, which would otherwise wake Canvas every frame");
-    check(!desktop.button_changed && !desktop.client_changed && !desktop.motion_pending &&
-          !desktop.wheel && !desktop.focus_steps && !desktop.focus_commit &&
-          !desktop.minimize && !desktop.frame_pending,
-          "every button, movement, wheel step, chord and frame is dropped");
-    check(desktop.spawn,
-          "a wanted terminal is still wanted when the card is taken before it starts");
-    check(desktop.key_tail==desktop.key_head && desktop.key_head==7,
-          "every key recorded is dropped by moving the tail, the thread's own index");
     check(!mock_resumes,"nothing resumes while the card is still taken");
     check(canvas_yielded,
-          "the handler is told another program has the card, so it keeps out of the way");
-    suspend_pending();mock_taken=0;
+          "the latency report says another program has the card");
+    mock_taken=0;
     check(!canvas_suspend_check() && !desktop.suspended && mock_resumes==1,
           "a card given back resumes the desktop once");
     check(!canvas_yielded,
-          "a card given back is the handler's again");
-    check(!desktop.awake,
-          "the resume leaves re-arming the frame timer to the first commit after it");
-    check(desktop.spawn && desktop.key_tail==3 && desktop.motion_pending,
-          "input arriving after the card is given back is delivered");
+          "a card given back is not another program's any more");
     check(!canvas_suspend_check() && mock_resumes==1,
           "a desktop that was not suspended is not resumed again");
-    // A machine asleep is a card taken, but the key that woke it is kept.
+    // A machine asleep is a card taken, but not another program's.
     memset(&desktop,0,sizeof(desktop));
-    suspend_pending();mock_taken=1;desktop.asleep=1;
-    check(canvas_suspend_check() && desktop.key_tail==3 && desktop.key_head==7,
-          "keys typed while the machine wakes are kept for the redraw");
-    check(!desktop.motion_pending && !desktop.button_changed,
-          "the pointer's movement and buttons of that time are dropped");
-    check(!canvas_yielded,
-          "a card that only sleeps does not quiet the handler: the key that wakes it is kept");
-    memset(&desktop,0,sizeof(desktop));
-    desktop.spawn=1;mock_taken=1;
-    check(canvas_suspend_check() && desktop.spawn,
-          "a terminal the machine script asked for is still wanted while another program has the card");
-    memset(&desktop,0,sizeof(desktop));
-    desktop.suspended=1;mock_taken=0;mock_resumes=0;
-    check(!canvas_suspend_check() && !desktop.spawn && mock_resumes==1,
-          "resume starts no terminal: what a desktop starts with is the machine script's");
+    mock_taken=1;desktop.asleep=1;
+    check(canvas_suspend_check() && !canvas_yielded,
+          "a card that only sleeps is not reported as another program's");
     memset(&desktop,0,sizeof(desktop));mock_taken=0;mock_resumes=0;
 }
 /*
-        Two chords that mean something only where the card is looked at.
+        The chords, which are all Canvas hears.
 
-        Control-Shift-T asks for a terminal and the thread starts one if the
-        desktop is the one on the screen: typed at a program that holds the
-        card (Konsole's new-tab key, in KDE) it started one nobody could see,
-        for every press. Control-Alt-Backspace asks for the card back, and is
-        answered only when somebody does hold it.
+        Control-Alt-Backspace asks for the card back, and is answered only
+        when somebody does hold it. Control-Alt-Shift-Backspace turns Canvas
+        off, whoever holds the card, and is asked from the handler itself.
 */
 static void check_reclaim_chord(void) {
     struct pointer_handle *a;
@@ -28382,9 +28242,7 @@ static void check_reclaim_chord(void) {
     a=keyboard_attach(0);
     keyboard_send(a,KEY_LEFTCTRL,1);keyboard_send(a,KEY_LEFTALT,1);
     keyboard_send(a,KEY_BACKSPACE,1);
-    check(desktop.reclaim==1 && desktop.key_head==2 &&
-          desktop.key_ring[1].code==KEY_BACKSPACE,
-          "Control-Alt-Backspace is noted, and still goes on to the window as a key");
+    check(desktop.reclaim==1,"Control-Alt-Backspace is noted");
     desktop.reclaim=0;
     keyboard_send(a,KEY_BACKSPACE,2);keyboard_send(a,KEY_BACKSPACE,0);
     check(!desktop.reclaim, "a repeat and a release of it ask for nothing");
@@ -28393,13 +28251,6 @@ static void check_reclaim_chord(void) {
     keyboard_send(a,KEY_LEFTSHIFT,0);keyboard_send(a,KEY_LEFTALT,0);keyboard_send(a,KEY_BACKSPACE,1);
     check(!desktop.reclaim, "Control-Backspace alone is a key and nothing more");
     keyboard_send(a,KEY_LEFTCTRL,0);
-    pointer_disconnect(&a->handle);
-
-    memset(&desktop,0,sizeof(desktop));
-    a=keyboard_attach(0);
-    keyboard_send(a,KEY_LEFTCTRL,1);keyboard_send(a,KEY_LEFTSHIFT,1);keyboard_send(a,KEY_T,1);
-    check(desktop.spawn_key==1 && !desktop.spawn,
-          "Control-Shift-T asks for a terminal the thread may start, not one that is started");
     pointer_disconnect(&a->handle);
 
     memset(&desktop,0,sizeof(desktop));
@@ -28415,15 +28266,14 @@ static void check_reclaim_chord(void) {
     memset(&desktop,0,sizeof(desktop));mock_taken=0;mock_resumes=0;
 }
 /*
-        A program that has the display is the one the devices are for.
+        Canvas hears the chords and nothing else.
 
-        KDE's compositor reads the same mouse and keyboard Canvas does, and
-        Canvas used to hear every report as well: the acceleration curve, the
-        shake detector, the desktop's input lock and a wakeup of the thread
-        that runs ahead of every ordinary task, for each one, to throw it away
-        a pass later. The handler returns at once for all of it but the keys
-        the chord that ends that program is made of, and its cost is counted
-        either way.
+        KDE's compositor, and ours, read the same mouse and keyboard Canvas
+        does, and Canvas used to hear every report as well: the acceleration
+        curve, the shake detector, the desktop's input lock and a wakeup of
+        the thread that runs ahead of every ordinary task, for each one. The
+        handler returns at once for all of it but the keys the chords are made
+        of, and its cost is counted either way.
 */
 static unsigned yield_locks;
 static void yield_lock_seen(const void *lock) { (void)lock;yield_locks++; }
@@ -28436,20 +28286,11 @@ static void check_yielded_handler(void) {
     struct pointer_handle *a;
     unsigned reports,taken;
 
-    /* What it does with the card its own: the baseline the rest is against. */
     memset(&desktop,0,sizeof(desktop));
-    canvas_yielded=0;wakes=0;
     desktop.width=3840;desktop.height=2160;
+    wakes=0;yield_locks=0;cost_begun=cost_ended=0;taken=allocations;
     a=keyboard_attach(0);a->handle.dev=&tablet;
-    yield_send(a,EV_REL,REL_X,5);yield_send(a,EV_REL,REL_Y,3);yield_send(a,EV_SYN,SYN_REPORT,0);
-    unlock_hook=0;
-    check(desktop.motion_pending==1 && wakes==1,
-          "a movement moves the cursor and wakes the thread while Canvas has the card");
-
-    memset(&desktop,0,sizeof(desktop));
-    desktop.width=3840;desktop.height=2160;
-    canvas_yielded=1;wakes=0;yield_locks=0;cost_begun=cost_ended=0;taken=allocations;
-    canvas_quiet=0;canvas_cost.events=0;a->events=0;reports=0;
+    canvas_quiet=0;canvas_cost.events=0;reports=0;
 #define YIELD_SEND(type,code,value) do { yield_send(a,(type),(code),(value));reports++; } while (0)
     for (unsigned round=0;round<200;round++) {
         YIELD_SEND(EV_REL,REL_X,7);YIELD_SEND(EV_REL,REL_Y,-4);YIELD_SEND(EV_SYN,SYN_REPORT,0);
@@ -28462,51 +28303,33 @@ static void check_yielded_handler(void) {
     }
     unlock_hook=0;
     check(!wakes && !yield_locks && allocations==taken,
-          "while another program has the card a mouse and a keyboard wake nothing, lock nothing and allocate nothing");
-    check(!desktop.motion_pending && !desktop.button_changed && !desktop.client_changed &&
-          !desktop.wheel && !desktop.key_head && !desktop.focus_steps &&
-          !desktop.minimize && !desktop.spawn_key && !desktop.abs_have &&
-          !desktop.raw_x && !desktop.raw_y && !desktop.shake_count,
-          "and leave nothing pending for the thread to drop");
-    check(a->events==reports && canvas_quiet==reports &&
+          "a mouse and a keyboard wake nothing, lock nothing and allocate nothing");
+    check(!desktop.reclaim && !atomic_read(&desktop.modifiers),
+          "and leave nothing pending for the thread");
+    check(canvas_quiet==reports &&
           cost_begun==reports && cost_ended==reports && canvas_cost.events==reports,
-          "every report is still counted, as the device's, as quiet and in the handler's cost");
+          "every report is still counted, as quiet and in the handler's cost");
 
-    /* The one chord that is Canvas's here: a modifier is tracked, and Backspace
-       with Control and Alt asks the thread to take the card back. */
+    /* The chords: a modifier is tracked, and Backspace with Control and Alt
+       asks the thread to take the card back. */
     wakes=0;
     yield_send(a,EV_KEY,KEY_LEFTCTRL,1);yield_send(a,EV_KEY,KEY_LEFTALT,1);
     check(!wakes && !desktop.reclaim && atomic_read(&desktop.modifiers),
           "a modifier is kept track of and asks for nothing");
     yield_send(a,EV_KEY,KEY_BACKSPACE,1);
-    check(desktop.reclaim==1 && wakes==1 && !desktop.key_head,
-          "Control-Alt-Backspace asks for the card, and is queued for no window");
+    check(desktop.reclaim==1 && wakes==1,
+          "Control-Alt-Backspace asks for the card");
     desktop.reclaim=0;
     yield_send(a,EV_KEY,KEY_BACKSPACE,2);yield_send(a,EV_KEY,KEY_BACKSPACE,0);
     yield_send(a,EV_KEY,KEY_TAB,1);yield_send(a,EV_KEY,KEY_LEFTSHIFT,1);yield_send(a,EV_KEY,KEY_BACKSPACE,1);
-    check(!desktop.reclaim && !desktop.focus_steps,
+    check(!desktop.reclaim,
           "a repeat, a release, another chord and Alt-Tab ask for nothing");
     yield_send(a,EV_KEY,KEY_LEFTSHIFT,0);yield_send(a,EV_KEY,KEY_LEFTALT,0);yield_send(a,EV_KEY,KEY_LEFTCTRL,0);
     unlock_hook=0;
-    check(!atomic_read(&desktop.modifiers) && !desktop.key_head,
+    check(!atomic_read(&desktop.modifiers),
           "and the modifiers let go are let go of");
-    yield_send(a,EV_KEY,KEY_LEFTCTRL,1);yield_send(a,EV_KEY,KEY_LEFTSHIFT,1);yield_send(a,EV_KEY,KEY_T,1);
-    check(!desktop.spawn_key,
-          "Control-Shift-T typed at the program that has the card starts no terminal");
-    yield_send(a,EV_KEY,KEY_LEFTSHIFT,0);yield_send(a,EV_KEY,KEY_LEFTCTRL,0);
-    unlock_hook=0;
-
-    /* And the card given back: the same reports are the desktop's again. */
-    canvas_yielded=0;wakes=0;
-    yield_send(a,EV_REL,REL_X,5);yield_send(a,EV_REL,REL_Y,3);yield_send(a,EV_SYN,SYN_REPORT,0);
-    yield_send(a,EV_KEY,KEY_A,1);
-    unlock_hook=0;
-    check(desktop.motion_pending==1 && desktop.key_head==1 && wakes>=2,
-          "a card given back is moved and typed on again");
     pointer_disconnect(&a->handle);
     memset(&desktop,0,sizeof(desktop));
-    canvas_yielded=0;
-#undef YIELD_SEND
 }
 /* GET writes the script into a buffer the kernel is told the size of, and
    refuses rather than writing past one too small. length carries the room in
@@ -29023,61 +28846,13 @@ static void check_settings_sum(void) {
     check(spark_settings_check(&slot) == 1, "and checks");
 }
 
-/* What the input handler counted is a live record of somebody's hands: a
-   report count per device moves with every key pressed, the cursor's
-   coordinates are where the pointer is. CAP_SYS_ADMIN, refused before
-   anything is collected, and the struct that goes back is zero where the
-   collector wrote nothing rather than whatever the stack held. */
-__attribute__((noinline)) static void poison_stack(void) {
-    volatile unsigned char junk[8192];
-    for (unsigned i=0; i<sizeof(junk); i++) junk[i]=0xa5;
-}
-static void check_input_reports(void) {
-    struct input_stats stats;
-    struct cursor_stats cursor;
-    struct input_devices devices;
-    unsigned char *bytes;
-    unsigned i, dirty;
-
-    power_admin=0;
-    memset(&stats,0x5a,sizeof(stats));memset(&cursor,0x5a,sizeof(cursor));
-    memset(&devices,0x5a,sizeof(devices));
-    check(report_input_real(&stats)==-EPERM && stats.events==0x5a5a5a5a5a5a5a5aul,
-          "the input counters are refused without CAP_SYS_ADMIN, and nothing is written");
-    check(report_cursor_real(&cursor)==-EPERM && cursor.updates==0x5a5a5a5a5a5a5a5aul,
-          "so is where the cursor is");
-    check(report_devices_real(&devices)==-EPERM && devices.count==0x5a5a5a5a5a5a5a5aul,
-          "so is which devices have reported how much");
-    power_admin=1;
-    poison_stack();
-    memset(&stats,0x5a,sizeof(stats));
-    check(!report_input_real(&stats) && stats.events==5,"CAP_SYS_ADMIN reads them");
-    bytes=(unsigned char *)&stats;
-    for (i=sizeof(stats.events),dirty=0; i<sizeof(stats); i++) dirty+=bytes[i]!=0;
-    check(!dirty,"the counters a collector did not fill are zero, not the stack's");
-    poison_stack();
-    memset(&cursor,0x5a,sizeof(cursor));
-    check(!report_cursor_real(&cursor) && cursor.updates==3,"the cursor's state likewise");
-    bytes=(unsigned char *)&cursor;
-    for (i=0,dirty=0; i<sizeof(cursor); i++)
-        dirty+=bytes[i]!=0 && (i<offsetof(struct cursor_stats,updates) ||
-                               i>=offsetof(struct cursor_stats,updates)+sizeof(cursor.updates));
-    check(!dirty,"and every field but the one written is zero");
-    poison_stack();
-    memset(&devices,0x5a,sizeof(devices));
-    check(!report_devices_real(&devices) && devices.count==1,"and the devices");
-    bytes=(unsigned char *)&devices;
-    for (i=sizeof(devices.count),dirty=0; i<sizeof(devices); i++) dirty+=bytes[i]!=0;
-    check(!dirty,"with every device slot past the count zero");
-}
-
 // moonwater canvas on and off: who may, and what comes back.
 static void check_canvas_control(void) {
     struct canvas_control control;
     power_capable=0;power_admin=0;canvas_ons=canvas_offs=canvas_states=0;
-    memset(&control,0,sizeof(control));control.windows=99;
+    memset(&control,0,sizeof(control));control.retired_windows=99;
     check(!report_canvas(&control) && canvas_states==1 && !canvas_ons && !canvas_offs &&
-          control.running==1 && !control.windows,
+          control.running==1 && !control.retired_windows,
           "reading Canvas's state needs no capability and answers only what the kernel filled in");
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_ON;
     check(report_canvas(&control)==-EPERM && !canvas_ons && canvas_states==1,
@@ -29086,14 +28861,17 @@ static void check_canvas_control(void) {
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_OFF;
     check(report_canvas(&control)==-EPERM && !canvas_offs,
           "CAP_SYS_BOOT is not enough to turn Canvas off");
-    /* The log window and a terminal show the machine's log and start a root
-       shell, so they are refused like off, before anything is asked. */
-    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_KERNEL_LOG;
-    check(report_canvas(&control)==-EPERM && !canvas_logs,
-          "opening the kernel log window without CAP_SYS_ADMIN is refused");
-    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL;
-    check(report_canvas(&control)==-EPERM && !canvas_terminals,
-          "starting a terminal without CAP_SYS_ADMIN is refused");
+    /* The kernel's own desktop is gone, and with it the requests for its
+       keymap, its log window and its terminal: numbers nothing answers. */
+    memset(&control,0,sizeof(control));control.request=4;
+    check(report_canvas(&control)==-EINVAL && canvas_states==1,
+          "the kernel log window is not asked for any more");
+    memset(&control,0,sizeof(control));control.request=5;
+    check(report_canvas(&control)==-EINVAL && canvas_states==1,
+          "nor is a terminal");
+    memset(&control,0,sizeof(control));control.request=3;
+    check(report_canvas(&control)==-EINVAL && canvas_states==1,
+          "nor the keymap, which is the compositor's");
     /* How the desktop is drawn is the machine's: changing it needs the same
        right, and is refused before anything is asked of the scale or the mode. */
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_SCALE;control.scale_setting=2;
@@ -29107,7 +28885,7 @@ static void check_canvas_control(void) {
        rather than naming a number, as 3 became LAYOUT and 5 TERMINAL. */
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_MODES+1;
     check(report_canvas(&control)==-EINVAL && !canvas_ons && !canvas_offs &&
-          !canvas_logs && !canvas_terminals && !canvas_scale_sets && !canvas_modes_sets,
+          !canvas_scale_sets && !canvas_modes_sets,
           "an unknown Canvas request is refused");
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_SET_SCALE;control.scale_setting=3;
     check(!report_canvas(&control) && canvas_scale_sets==1 && canvas_scale_asked==3 &&
@@ -29138,14 +28916,6 @@ static void check_canvas_control(void) {
     memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_OFF;
     check(!report_canvas(&control) && canvas_offs==1 && control.request==SPARK_CANVAS_OFF,
           "off with CAP_SYS_ADMIN turns Canvas off and answers what that answered");
-    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_KERNEL_LOG;
-    check(!report_canvas(&control) && canvas_logs==1 && !canvas_terminals &&
-          control.request==SPARK_CANVAS_KERNEL_LOG && control.running==1,
-          "the kernel log request reaches the log and answers the state");
-    memset(&control,0,sizeof(control));control.request=SPARK_CANVAS_TERMINAL;
-    check(!report_canvas(&control) && canvas_terminals==1 && canvas_logs==1 &&
-          control.request==SPARK_CANVAS_TERMINAL,
-          "the terminal request reaches the terminal and nothing else");
     power_capable=1;power_admin=1;canvas_on_answer=0;
 }
 
@@ -29379,7 +29149,6 @@ int main(void) {
     check_bind_edges();
     check_bind_report();
     check_canvas_control();
-    check_input_reports();
     check_machine_script();
     check_machine_events();
     check_machine_owner();
@@ -29687,7 +29456,7 @@ line_add_padded() { line_add "$@"; }
         seam = (root / "src/moonwater/seam.h").read_text()
         macro = section(seam, "#define IOCTL_IS", "#define IOCTL_BOTH 3\n") + "#define IOCTL_BOTH 3\n"
         numbers = macro + section(core, "IOCTL_IS(SPARK_IOCTL_SPAWN", "static long device_ioctl")
-        canvas_numbers = section(canvas, "IOCTL_IS(SPARK_IOCTL_INPUT_STATS",
+        canvas_numbers = section(canvas, "IOCTL_IS(SPARK_IOCTL_CANVAS",
                                  "long canvas_client_ioctl")
         shapes = ("#include <stddef.h>\n"
                   "#define CONFIG_MOONWATER_CANVAS 1\n"
@@ -32140,12 +31909,11 @@ call-frame lifetime are covered separately by harness shell_functions.
 
 
 def harness_canvas_lifetime(argv):
-    """Fault-inject Canvas output retirement against a reference-counted DRM model.
+    """Canvas's card and output ownership against a reference-counted DRM model.
 
-    Runs extracted production ownership transitions, not a GPU driver. Atomic plane
-    state owns a framebuffer reference independently of the client buffer wrapper;
-    failed atomic framebuffer removal leaves that state reference until a later
-    commit/device shutdown. Early RMFB errors retain file ownership until close.
+    Runs extracted production ownership transitions, not a GPU driver: an output
+    owns its scanout buffer and the one a grow replaced, a card is released only
+    after its outputs, and a card's minor is forgotten when it goes.
     """
     ROOT = HARNESS_ROOT
     parser = argparse.ArgumentParser(description=harness_canvas_lifetime.__doc__)
@@ -32175,32 +31943,7 @@ def harness_canvas_lifetime(argv):
 #include <stdlib.h>
 #include <string.h>
 #define COLD
-#define GFP_KERNEL 0
-#define CURSOR_W 16
-#define CURSOR_H 20
-#define CURSOR_ARROW 0
-#define DRM_FORMAT_ARGB8888 1
-#define DRM_FORMAT_INVALID 0
 #define IS_ERR(p) ((intptr_t)(p) < 0)
-#define PTR_ERR(p) ((long)(intptr_t)(p))
-#define max_t(t,a,b) ((t)(a) > (t)(b) ? (t)(a) : (t)(b))
-#define min_t(t,a,b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
-/* A plane given up is said, never silently dropped: count what is said. */
-static unsigned said;
-static char said_last[256];
-#define pr_info(...) (said++, (void)snprintf(said_last, sizeof(said_last), __VA_ARGS__))
-#define pr_info_once(...) do { static bool once; if (!once) { once=true; pr_info(__VA_ARGS__); } } while (0)
-static bool canvas_cursor_plane = true;
-/* Used as statements only; void, so gcc's -Werror=unused-value accepts them. */
-#define atomic_fetch_add(v,p) ((void)(*(p) += (v)))
-#define atomic_fetch_sub(v,p) ((void)(*(p) -= (v)))
-#define atomic_read(p) (*(p))
-#define wake_up_all(q) ((void)(q))
-/* The release waits for the flusher: here, waiting is the flush finishing. */
-static void flusher_step(void);
-static unsigned waited;
-#define wait_event(q,cond) do { (void)(q); while (!(cond)) { waited++; flusher_step(); } } while (0)
-#define cancel_work_sync(w) ((void)(w))
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 struct list_head { struct list_head *next, *prev; };
 static void list_init(struct list_head *h) { h->next = h->prev = h; }
@@ -32209,7 +31952,6 @@ static void list_add_tail(struct list_head *n, struct list_head *h) {
     n->prev=h->prev; n->next=h; h->prev->next=n; h->prev=n;
 }
 static void list_del(struct list_head *n) { n->prev->next=n->next; n->next->prev=n->prev; }
-static void list_del_init(struct list_head *n) { list_del(n); list_init(n); }
 #define list_for_each_entry(p,h,m) \
     for (p=container_of((h)->next,__typeof__(*p),m); &p->m!=(h); \
          p=container_of(p->m.next,__typeof__(*p),m))
@@ -32217,99 +31959,63 @@ static void list_del_init(struct list_head *n) { list_del(n); list_init(n); }
     for (p=container_of((h)->next,__typeof__(*p),m), \
          n=container_of(p->m.next,__typeof__(*p),m); &p->m!=(h); \
          p=n,n=container_of(n->m.next,__typeof__(*n),m))
-struct drm_driver { const char *name; };
-struct drm_mode_config { unsigned cursor_width,cursor_height; int min_width,min_height,max_width,max_height; };
+#define cancel_work_sync(w) ((void)(w))
 struct drm_minor { int index; };
-struct drm_device { bool atomic; struct drm_mode_config mode_config; const struct drm_driver *driver; struct drm_minor *primary; };
+struct drm_device { struct drm_minor *primary; };
 struct drm_client_dev { struct drm_device *dev; };
 typedef uint64_t u64;
 #define BIT_ULL(n) (1ULL << (n))
 static u64 canvas_claimed;
 struct drm_client_buffer { unsigned resource; };
-struct drm_plane_funcs { void (*update_plane)(void), (*disable_plane)(void); };
-struct drm_plane { const struct drm_plane_funcs *funcs; };
-struct drm_crtc { struct drm_plane *cursor; };
-struct drm_mode_set { struct drm_crtc *crtc; };
-struct canvas { struct list_head link; struct drm_client_dev client; bool started; int retiring; int plug; };
+struct canvas { struct list_head link; struct drm_client_dev client; bool started; int plug; };
 struct output {
     struct list_head link; struct canvas *canvas;
-    struct drm_client_buffer *buffer, *cursor_buffer, *cursor_back, *replaced;
-    struct drm_mode_set *mode_set; struct drm_plane *cursor_plane;
-    unsigned cursor_w,cursor_h,cursor_recovery; bool cursor_shown; int x,y;
-    struct list_head flush_link; bool flush_queued, flush_whole, flushing, retired;
+    struct drm_client_buffer *buffer, *replaced;
 };
-static struct { struct list_head outputs; int lock; int flush_lock; struct list_head flush_queue; int flush_idle; int flushes_in_flight; } desktop;
+static struct { struct list_head outputs; int lock; } desktop;
 static struct list_head canvas_list;
-static int canvas_list_lock, cursor_plane_failures;
-static bool cursor_plane_recovery;
-static void atomic_long_inc(int *n) { ++*n; }
+static int canvas_list_lock;
 static void mutex_lock(int *m) { (void)m; }
 static void mutex_unlock(int *m) { (void)m; }
 static void rt_mutex_lock(int *m) { assert(!*m); *m=1; }
 static void rt_mutex_unlock(int *m) { assert(*m); *m=0; }
-static void spin_lock(int *l) { assert(!*l); *l=1; }
-static void spin_unlock(int *l) { assert(*l); *l=0; }
-static void canvas_thread_stop(void) {}
+static unsigned threads_stopped;
+static void canvas_thread_stop(void) { threads_stopped++; }
 static struct canvas *canvas_from_client(struct drm_client_dev *c) {
     return container_of(c,struct canvas,client);
 }
 static void kfree(void *p) { free(p); }
 
-/* Separate client wrapper, file framebuffer, and plane-state ownership. */
+/* The client wrapper of a buffer, and the file that holds its framebuffer. */
 struct resource { struct drm_client_buffer *wrapper; struct drm_client_dev *client;
-                  bool file, plane, gem; };
+                  bool file, gem; };
 static struct resource resources[64];
-static unsigned allocated, deleted, paint_calls, release_calls, commit_calls;
-static bool disable_fail, remove_fail, close_fail, commit_fail, create_fail, paint_fail;
-static struct output *fail_during_commit;
-static bool drm_drv_uses_atomic_modeset(struct drm_device *d) { return d->atomic; }
-static unsigned canvas_plane_pick_format(struct drm_plane *p, unsigned a, unsigned b) {
-    (void)p; (void)b; return a;
-}
-static void collect(struct resource *r) { if (!r->wrapper && !r->file && !r->plane) r->gem=false; }
-static unsigned created_w, created_h;
+static unsigned allocated, deleted, release_calls, redraws, places;
+static void collect(struct resource *r) { if (!r->wrapper && !r->file) r->gem=false; }
 static struct drm_client_buffer *drm_client_buffer_create_dumb(
     struct drm_client_dev *c,unsigned w,unsigned h,unsigned f) {
-    (void)f; created_w=w; created_h=h;
-    if (create_fail) return (void *)(intptr_t)-12;
+    (void)w; (void)h; (void)f;
     assert(allocated < 64);
     struct drm_client_buffer *b=malloc(sizeof(*b)); assert(b);
     b->resource=allocated++;
-    resources[b->resource]=(struct resource){b,c,true,false,true};
+    resources[b->resource]=(struct resource){b,c,true,true};
     return b;
 }
 static void drm_client_buffer_delete(struct drm_client_buffer *b) {
     if (!b) return;
     struct resource *r=&resources[b->resource];
     assert(r->wrapper == b && r->gem);
-    if (!close_fail) {
-        if (!remove_fail) r->plane=false;
-        r->file=false;
-    }
+    r->file=false;
     r->wrapper=NULL; deleted++; free(b); collect(r);
 }
-static int plane_update(struct output *o,bool show,int x,int y) {
-    (void)x; (void)y; assert(!show);
-    struct resource *r=&resources[o->cursor_buffer->resource];
-    assert(r->gem);
-    if (disable_fail) return -5;
-    r->plane=false; collect(r); return 0;
-}
-static int plane_paint(struct output *o,unsigned shape,unsigned scale) {
-    (void)o; (void)shape; (void)scale; paint_calls++; return paint_fail ? -5 : 0;
-}
-static void desktop_place_outputs(void) {}
-static void desktop_redraw(void) {}
-static bool desktop_commit(void);
+static void desktop_place_outputs(void) { places++; }
+static void desktop_redraw(void) { redraws++; }
 /* What the card still had when its client was released. */
-static int release_retiring;
 static unsigned release_wrappers;
 static void drm_client_release(struct drm_client_dev *c) {
-    release_retiring=canvas_from_client(c)->retiring; release_wrappers=0;
+    release_wrappers=0;
     for (unsigned i=0;i<allocated;i++) release_wrappers+=resources[i].client==c && resources[i].wrapper;
-    /* Client close cannot discover an orphaned drm_client_buffer wrapper. */
     for (unsigned i=0;i<allocated;i++) if (resources[i].client==c) {
-        if (resources[i].file && !remove_fail) resources[i].plane=false;
         resources[i].file=false; collect(&resources[i]);
     }
     release_calls++; free(canvas_from_client(c));
@@ -32317,69 +32023,27 @@ static void drm_client_release(struct drm_client_dev *c) {
 '''
 
     bodies = "".join(function(file, name) for file, name in [
-        ("src/canvas/canvas.c", "cursor_buffers_drop"),
-        ("src/canvas/canvas.c", "plane_drop"),
-        ("src/canvas/canvas.c", "plane_lost"),
-        ("src/canvas/canvas.c", "plane_claim"),
         ("src/canvas/canvas.c", "output_free"),
-        ("src/canvas/canvas.c", "output_flush_done"),
         ("src/canvas/canvas.c", "output_drop"),
-        ("src/canvas/canvas.c", "cursor_plane_recover"),
         ("src/canvas/canvas.c", "canvas_release"),
         ("src/canvas/canvas.c", "canvas_claimed_forget"),
         ("src/canvas/canvas.c", "client_unregister"),
     ])
 
     runner = r'''
-/* The one flush the flusher has with the driver, finished on demand. */
-static struct output *in_flight;
-static void flusher_step(void) {
-    assert(in_flight);
-    struct output *o=in_flight; in_flight=NULL; output_flush_done(o);
-}
-static bool desktop_commit(void) {
-    commit_calls++;
-    if (commit_fail) return false;
-    /* Only cards still represented in desktop.outputs get a client commit. */
-    struct output *o;
-    list_for_each_entry(o,&desktop.outputs,link)
-        for (unsigned i=0;i<allocated;i++) if (resources[i].client==&o->canvas->client) {
-            resources[i].plane=false; collect(&resources[i]);
-        }
-    if (fail_during_commit) {
-        struct output *failed=fail_during_commit; fail_during_commit=NULL;
-        plane_drop(failed);
-    }
-    return true;
-}
-static void dummy(void) {}
-static const struct drm_plane_funcs funcs={dummy,dummy};
-static struct drm_plane plane={&funcs};
-static struct drm_crtc crtc={&plane};
-static struct drm_mode_set mode={&crtc};
-static const struct drm_driver driver={"stub"};
-static struct drm_device atomic_device={.atomic=true,.driver=&driver}, legacy_device={.driver=&driver};
-static struct canvas *card(bool atomic) {
+static struct drm_device device;
+static struct canvas *card(void) {
     struct canvas *c=calloc(1,sizeof(*c)); assert(c);
-    c->client.dev=atomic?&atomic_device:&legacy_device; c->started=true;
+    c->client.dev=&device; c->started=true;
     list_add_tail(&c->link,&canvas_list); return c;
 }
 static struct output *output(struct canvas *c) {
-    struct output *o=calloc(1,sizeof(*o)); assert(o); o->canvas=c; o->mode_set=&mode;
-    o->x=13; o->y=-27;
+    struct output *o=calloc(1,sizeof(*o)); assert(o); o->canvas=c;
     o->buffer=drm_client_buffer_create_dumb(&c->client,640,480,1);
-    plane_claim(&c->client,o);
-    if (o->cursor_plane) { resources[o->cursor_buffer->resource].plane=true; o->cursor_shown=true; }
     list_add_tail(&o->link,&desktop.outputs); return o;
 }
 static unsigned wrappers(void) {
     unsigned n=0; for (unsigned i=0;i<allocated;i++) n+=resources[i].wrapper!=NULL; return n;
-}
-static unsigned scanouts(void) {
-    unsigned n=0; for (unsigned i=0;i<allocated;i++) if(resources[i].plane) {
-        assert(resources[i].gem); n++;
-    }
-    return n;
 }
 static unsigned gems(void) {
     unsigned n=0; for (unsigned i=0;i<allocated;i++) n+=resources[i].gem; return n;
@@ -32389,182 +32053,43 @@ static void check(const char *name,bool okay) {
     checks++; if (!okay) { failures++; printf("FAIL %s\n",name); }
 }
 static void reset(void) {
-    /* Dispose failed-baseline orphans after recording them; keep cases isolated. */
     for(unsigned i=0;i<allocated;i++) free(resources[i].wrapper);
     for(unsigned i=0;i<allocated;i++) resources[i]=(struct resource){0};
-    allocated=deleted=paint_calls=release_calls=commit_calls=0;
-    disable_fail=remove_fail=close_fail=commit_fail=create_fail=paint_fail=false;
-    fail_during_commit=NULL; cursor_plane_recovery=false; cursor_plane_failures=0;
+    allocated=deleted=release_calls=redraws=places=threads_stopped=0;
     canvas_claimed=0;
-    list_init(&desktop.outputs); list_init(&canvas_list); list_init(&desktop.flush_queue);
-    in_flight=NULL; waited=0;
+    list_init(&desktop.outputs); list_init(&canvas_list);
 }
 int main(void) {
-    for (unsigned pending=0;pending<2;pending++) for(unsigned failure=0;failure<2;failure++)
-    for(unsigned rmfail=0;rmfail<3;rmfail++) {
-        reset(); struct canvas *c=card(true); struct output *o=output(c);
-        disable_fail=failure; remove_fail=rmfail==1; close_fail=rmfail==2;
-        if (pending) plane_drop(o);
+    for (unsigned replaced=0; replaced<2; replaced++) {
+        reset(); struct canvas *c=card(); struct output *o=output(c);
+        if (replaced) o->replaced=drm_client_buffer_create_dumb(&c->client,320,240,1);
         output_drop(o);
-        check("retire releases both client buffers",wrappers()==0 && deleted==2);
-        check("retire preserves failed scanout's GEM",scanouts()==(failure&&rmfail));
-        cursor_plane_recover();
-        check("recovery without outputs cannot strand a client buffer",wrappers()==0);
+        check("an output dropped releases its scanout, and the one a grow replaced",
+              wrappers()==0 && deleted==1+replaced);
+        check("and is off the desktop",list_empty(&desktop.outputs));
         client_unregister(&c->client);
-        check("unregister releases canvas after its outputs",release_calls==1 && list_empty(&desktop.outputs));
-        for(unsigned i=0;i<allocated;i++) { resources[i].plane=false; collect(&resources[i]); }
-        check("device shutdown releases final scanout references",gems()==0);
-    }
-    reset(); struct canvas *c=card(true); struct output *o=output(c);
-    disable_fail=true; plane_drop(o); commit_fail=true; cursor_plane_recover();
-    check("live failed commit keeps recovery ownership",wrappers()==2 && o->cursor_recovery==1);
-    commit_fail=false; cursor_plane_recover();
-    check("live recovery releases cursor once",wrappers()==1 && deleted==1 && !o->cursor_recovery);
-    client_unregister(&c->client); check("recovered teardown has no remaining GEM",gems()==0);
-
-    reset(); c=card(true); o=output(c); struct output *second=output(c);
-    disable_fail=true; plane_drop(o); fail_during_commit=second; cursor_plane_recover();
-    check("failure while rearming survives current recovery",second->cursor_recovery==1 && wrappers()==3);
-    cursor_plane_recover(); check("next recovery covers rearm failure",wrappers()==2);
-    client_unregister(&c->client); check("two-output teardown is balanced",gems()==0 && deleted==4);
-
-    reset(); c=card(true); o=output(c); struct canvas *other=card(true); second=output(other);
-    disable_fail=remove_fail=true; plane_drop(o); canvas_release(c); cursor_plane_recover();
-    check("other card's recovery cannot own retired buffers",wrappers()==2 && scanouts()==1);
-    client_unregister(&c->client); client_unregister(&other->client);
-    check("multi-card unregister releases every wrapper",wrappers()==0);
-
-    reset(); c=card(true); o=output(c); disable_fail=remove_fail=true;
-    client_unregister(&c->client);
-    check("unregister after failed disable releases client wrappers",wrappers()==0 && release_calls==1);
-    check("unregister keeps scanout alive until device teardown",scanouts()==1);
-
-    reset(); c=card(true); o=output(c);
-    o->cursor_back=drm_client_buffer_create_dumb(&c->client,o->cursor_w,o->cursor_h,1);
-    output_drop(o);
-    check("retire releases the cursor's spare buffer too",wrappers()==0 && deleted==3);
-    client_unregister(&c->client); check("spare-buffer teardown is balanced",!gems());
-
-    reset(); c=card(true); o=output(c);
-    o->replaced=drm_client_buffer_create_dumb(&c->client,320,240,1);
-    output_drop(o);
-    check("retire releases a replaced scanout too",wrappers()==0 && deleted==3);
-    client_unregister(&c->client); check("replaced-scanout teardown is balanced",!gems());
-
-    reset(); c=card(false); o=output(c);
-    check("legacy modesetting uses software cursor",!o->cursor_plane && !o->cursor_buffer && !paint_calls);
-    check("software cursor claim leaves placement and allocation unchanged",o->x==13 && o->y==-27 && allocated==1);
-    client_unregister(&c->client); check("software-only teardown is balanced",!gems());
-
-    reset(); c=card(true); o=calloc(1,sizeof(*o)); assert(o); o->canvas=c; o->mode_set=&mode;
-    said=0; create_fail=true; plane_claim(&c->client,o);
-    check("allocation failure leaves no cursor owner",!o->cursor_buffer && !o->cursor_plane);
-    check("allocation failure says the plane was lost",said==1);
-    check("a lost plane names the driver, the size tried and the error",
-          strstr(said_last,"stub ") && strstr(said_last,"64x64") && strstr(said_last,"(-12)"));
-    create_fail=false; paint_fail=true; plane_claim(&c->client,o);
-    check("paint failure releases unsubmitted buffer",!o->cursor_buffer && !o->cursor_plane && !gems());
-    check("paint failure says the plane was lost",said==2);
-    free(o); client_unregister(&c->client); reset();
-
-    /* moonwater.cursor_plane=0: nothing claimed on any output, nothing made
-       for a plane, and said once however many outputs there are. */
-    reset(); said=0; canvas_cursor_plane=false;
-    c=card(true); o=output(c); struct output *unplaned=output(c);
-    check("a plane turned off is never claimed",
-          !o->cursor_plane && !o->cursor_buffer && !unplaned->cursor_plane &&
-          !unplaned->cursor_buffer && !paint_calls && allocated==2);
-    check("turning the plane off is said once",said==1 && strstr(said_last,"turned off"));
-    client_unregister(&c->client);
-    check("plane-off teardown is balanced",!gems());
-    canvas_cursor_plane=true; reset();
-
-    /* Haswell will not scan a dumb buffer on the cursor plane. strcmp, not
-       a table, so this extracted harness needs no string_table_find. */
-    {
-        static const struct drm_driver i915_driver={"i915"};
-        static const struct drm_driver xe_driver={"xe"};
-        const struct drm_driver *saved=atomic_device.driver;
-
-        reset(); said=0;
-        atomic_device.driver=&i915_driver;
-        c=card(true); o=output(c);
-        check("i915 does not claim a cursor plane",
-              !o->cursor_plane && !o->cursor_buffer && !paint_calls && allocated==1);
-        check("skipping i915's plane is said once",
-              said==1 && strstr(said_last,"i915") && strstr(said_last,"skipped"));
-        client_unregister(&c->client);
-
-        reset(); said=0;
-        atomic_device.driver=&xe_driver;
-        c=card(true); o=output(c);
-        check("xe does not claim a cursor plane",
-              !o->cursor_plane && !o->cursor_buffer && !paint_calls && allocated==1);
-        check("skipping xe's plane is not said again",said==0);
-        client_unregister(&c->client);
-        atomic_device.driver=saved; reset();
+        check("unregister releases the card after its outputs",
+              release_calls==1 && list_empty(&canvas_list) && threads_stopped==1);
+        check("and nothing of it is left to the driver",release_wrappers==0 && gems()==0);
     }
 
-    /* The plane's size: the driver's cursor size, 64 when it gives none (what
-       DRM_CAP_CURSOR_WIDTH answers userspace), raised to its framebuffer
-       minimum and held to its maximum. virtio-gpu gives none and refuses
-       anything under 32x32; the arrow's own 16x20 fallback lost its plane. */
-    static const struct { unsigned cw,ch; int minw,minh,maxw,maxh; unsigned w,h; bool plane; } sizes[] = {
-        {0,0, 32,32, 16384,16384, 64,64, true},    /* virtio-gpu */
-        {0,0, 0,0, 0,0, 64,64, true},              /* nothing said at all */
-        {24,28, 0,0, 8192,8192, 24,28, true},      /* the driver's own size */
-        {0,0, 96,80, 4096,4096, 96,80, true},      /* a larger minimum wins */
-        {256,256, 0,0, 128,128, 128,128, true},    /* held to the maximum */
-        {0,0, 0,0, 8,8, 8,8, false},               /* smaller than the arrow */
-    };
-    for (unsigned i=0;i<sizeof(sizes)/sizeof(sizes[0]);i++) {
-        reset(); said=0; created_w=created_h=0;
-        atomic_device.mode_config=(struct drm_mode_config){sizes[i].cw,sizes[i].ch,
-            sizes[i].minw,sizes[i].minh,sizes[i].maxw,sizes[i].maxh};
-        c=card(true); o=output(c);
-        check("cursor plane size follows the driver",
-              o->cursor_w==sizes[i].w && o->cursor_h==sizes[i].h &&
-              (!sizes[i].plane || (created_w==sizes[i].w && created_h==sizes[i].h)));
-        check("a plane is claimed exactly when the arrow fits",
-              !!o->cursor_plane==sizes[i].plane);
-        check("only a lost plane is said", said==(sizes[i].plane ? 0u : 1u));
-        client_unregister(&c->client);
-        check("sized claim teardown is balanced",!gems());
-    }
-    atomic_device.mode_config=(struct drm_mode_config){0};
-    reset();
-
-    /* Hotplug against the flusher. A queued flush goes with its output; a
-       flush with the driver keeps the scanout buffer until it is back, the
-       flusher frees that output exactly once, and the card's client is
-       released only after -- never while a dirtyfb holds its buffer. */
-    reset(); c=card(true); o=output(c);
-    o->flush_queued=true; list_add_tail(&o->flush_link,&desktop.flush_queue);
-    output_drop(o);
-    check("a queued flush leaves with its output",list_empty(&desktop.flush_queue) && wrappers()==0 && c->retiring==0);
+    reset(); struct canvas *c=card(); struct output *a=output(c),*b=output(c);
+    (void)a; (void)b;
     client_unregister(&c->client);
-    check("no flush in flight means no wait",waited==0 && release_calls==1);
+    check("unregister drops every output the card had before it is released",
+          release_wrappers==0 && deleted==2 && gems()==0 && list_empty(&desktop.outputs));
+    check("the last card leaving draws nothing again",redraws==0 && places==1);
 
-    reset(); c=card(true); o=output(c);
-    o->flushing=true; in_flight=o;
-    output_drop(o);
-    /* o itself is not read again: if it had been freed here, reading it is the bug. */
-    check("an output mid-flush keeps its scanout buffer",c->retiring==1 && wrappers()==1 && deleted==1);
-    check("and is off the desktop",list_empty(&desktop.outputs));
-    client_unregister(&c->client);
-    check("the card waits for the flush to come back",waited==1 && release_retiring==0 && release_wrappers==0);
-    check("the flusher freed that buffer once, before the client",wrappers()==0 && deleted==2 && release_calls==1);
-    check("device shutdown after a flush in flight is balanced",!gems());
-
-    reset(); c=card(true); o=output(c); struct output *next=output(c);
-    next->flushing=true; in_flight=next;
-    o->flush_queued=true; list_add_tail(&o->flush_link,&desktop.flush_queue);
+    reset(); c=card(); a=output(c); struct canvas *other=card(); struct output *second=output(other);
     canvas_release(c);
-    check("releasing a card clears its queue and retires the flushing output",
-          list_empty(&desktop.flush_queue) && c->retiring==1 && wrappers()==1);
+    check("releasing a card leaves another card's outputs alone",
+          wrappers()==1 && !list_empty(&desktop.outputs) && desktop.outputs.next==&second->link);
+    check("and lays the desktop out again and draws it",places==1 && redraws==1);
     client_unregister(&c->client);
-    check("two outputs, one mid-flush, tear down balanced",
-          waited==1 && release_retiring==0 && release_wrappers==0 && wrappers()==0 && deleted==4 && !gems());
+    check("a card released first has nothing more to drop",release_calls==1 && threads_stopped==0);
+    client_unregister(&other->client);
+    check("multi-card unregister releases every wrapper and stops the thread once",
+          wrappers()==0 && gems()==0 && release_calls==2 && threads_stopped==1);
 
     /* A GPU taking simpledrm's minor must be claimable. Leaving the bit set
        after unregister skipped card0 once the firmware node was gone. */
@@ -32573,13 +32098,13 @@ int main(void) {
         static struct drm_minor firmware_minor={.index=0};
         u64 others=BIT_ULL(1)|BIT_ULL(3);
 
-        atomic_device.primary=&firmware_minor;
+        device.primary=&firmware_minor;
         canvas_claimed=BIT_ULL(0)|others;
-        c=card(true);
+        c=card();
         client_unregister(&c->client);
         check("unregister forgets that card's claimed minor",
               canvas_claimed==others && !(canvas_claimed&BIT_ULL(0)));
-        atomic_device.primary=NULL;
+        device.primary=NULL;
     }
     reset();
     printf("canvas-lifetime %u/%u\n",checks-failures,checks); return failures?1:0;
@@ -36703,9 +36228,9 @@ def harness_canvas_scale(argv):
     screens it has to refuse (a virtual display that reports a size that is
     fiction, a connector no panel is wired to, a size that is not the mode's
     shape) and the ones it has to take, with the dots to the inch it went by.
-    Around it the command line's parser, the laying out again of every window
-    and the cursor on a change and not on a repeat, a setting kept while no
-    screen is up, and a change of mode asking each card to look again.
+    Around it the command line's parser, the scale taken on a change and not
+    on a repeat, a setting kept while no screen is up, and a change of mode
+    asking each card to look again.
     """
     import subprocess
     import tempfile
@@ -36718,10 +36243,10 @@ def harness_canvas_scale(argv):
     abi = (root / "src/canvas/canvas_abi.h").read_text()
     cut = lambda first, following: src_slice(canvas, first, following, "canvas_scale")
     rule = cut("static unsigned int canvas_scale_setting =", "// Read-only: a running desktop")
-    rescale = cut("static void desktop_regrid_panes(void)",
+    rescale = cut("/*\n        The scale the desktop is drawn at, with desktop.lock held",
                   "/*\n        Whether a program other than this one is master")
     setters = cut("static long canvas_scale_set(",
-                  "/*\n        The kernel log window and a terminal, when userspace asks.")
+                  "/* ---- pointer: the pointer ---- */")
     source = r'''
 #include <errno.h>
 #include <stdbool.h>
@@ -36775,18 +36300,12 @@ struct drm_client_dev { struct drm_mode_set *modesets; };
 static _Bool canvas_is_virtual(struct drm_device *dev) { return dev->virtual_card; }
 
 struct output { struct list_head link; struct drm_mode_set *mode_set; };
-struct pane { struct list_head link; };
 struct canvas { struct list_head link; _Bool retarget; struct drm_client_dev client; };
-static struct { unsigned scale, cursor_scale; int cursor_x, cursor_y;
-                struct list_head outputs, windows; int lock; } desktop;
+static struct { unsigned scale; struct list_head outputs; int lock; } desktop;
 static LIST_HEAD(canvas_list);
 static int canvas_list_lock;
 
-static unsigned regrids, gathers, moves, redraws, hotplugs;
-static void pane_regrid(struct pane *pane) { (void)pane; regrids++; }
-static void desktop_gather_panes(void) { gathers++; }
-static void cursor_move(int x, int y) { (void)x; (void)y; moves++; }
-static void desktop_redraw(void) { redraws++; }
+static unsigned redraws, hotplugs;
 static int client_hotplug(struct drm_client_dev *client) { (void)client; hotplugs++; return 0; }
 
 /* The parts of the kernel's strings and parameters the parser is given. */
@@ -36905,7 +36424,7 @@ int main(void)
         struct drm_client_dev joining = {&s3};
         s0.connectors = l0; s1.connectors = l1; s2.connectors = l2; s3.connectors = l3;
 
-        list_init(&desktop.outputs); list_init(&desktop.windows);
+        list_init(&desktop.outputs);
         check(canvas_scale_auto(NULL, &dpi) == 1 && !dpi, "no screen is one and no dots to the inch");
         check(canvas_scale_auto(&joining, &dpi) == 2 && dpi == 227,
               "the card about to join says when nothing on the desktop can");
@@ -36923,50 +36442,38 @@ int main(void)
         check(canvas_scale_wanted(NULL) == 2, "a number is that number, whatever the screens say");
         canvas_scale_setting = 0;
 
-        /* Laying out again: every window and the cursor, on a change, and nothing on a repeat. */
+        /* The scale taken on a change, and nothing on a repeat. */
         {
-            struct pane panes[3];
-            desktop.scale = 1; desktop.cursor_scale = 1; desktop.cursor_x = 40; desktop.cursor_y = 50;
-            for (int i = 0; i < 3; i++) list_add_tail(&panes[i].link, &desktop.windows);
-            regrids = gathers = moves = 0;
-            check(!desktop_rescale(1) && !regrids && !gathers && !moves, "the scale it already is touches nothing");
-            desktop_regrid_panes();
-            check(regrids == 3 && gathers == 1 && !moves,
-                  "a start at another scale lays out the windows that outlived the last desktop, and not the cursor");
-            regrids = gathers = 0;
-            check(desktop_rescale(2) && desktop.scale == 2 && desktop.cursor_scale == 2 &&
-                      regrids == 3 && gathers == 1 && moves == 1,
-                  "a change lays out every window once, keeps them on the desktop and redraws the cursor");
+            desktop.scale = 1;
+            check(!desktop_rescale(1) && desktop.scale == 1, "the scale it already is touches nothing");
+            check(desktop_rescale(2) && desktop.scale == 2, "a change is taken");
 
             /* A hotplug asks the screens only when it is theirs to be asked. */
             canvas_scale_setting = 3;
-            regrids = 0;
-            check(!canvas_scale_refresh() && desktop.scale == 2 && !regrids,
+            check(!canvas_scale_refresh() && desktop.scale == 2,
                   "a number is not moved by a screen arriving");
             canvas_scale_setting = 0;
-            check(canvas_scale_refresh() && desktop.scale == 3 && regrids == 3,
+            check(canvas_scale_refresh() && desktop.scale == 3,
                   "auto follows the screens when one arrives");
             check(!canvas_scale_refresh(), "and says nothing when they agree");
 
-            /* The request: what it keeps, what it refuses, what it draws. */
-            redraws = 0; regrids = 0;
+            /* The request: what it keeps and what it refuses. */
             check(canvas_scale_set(SPARK_CANVAS_SCALE_MOST + 1) == -EINVAL && !canvas_scale_setting &&
-                      canvas_scale_origin == SPARK_CANVAS_ORIGIN_DEFAULT && !redraws,
+                      canvas_scale_origin == SPARK_CANVAS_ORIGIN_DEFAULT,
                   "a scale past the most is refused and keeps nothing");
             check(canvas_scale_set(2) == 0 && canvas_scale_setting == 2 && desktop.scale == 2 &&
-                      canvas_scale_origin == SPARK_CANVAS_ORIGIN_SET && redraws == 1 && regrids == 3,
-                  "a number is taken, laid out and drawn once");
-            check(canvas_scale_set(2) == 0 && redraws == 1, "the same number again draws nothing");
+                      canvas_scale_origin == SPARK_CANVAS_ORIGIN_SET,
+                  "a number is taken");
             check(canvas_scale_set(SPARK_CANVAS_SCALE_AUTO) == 0 && !canvas_scale_setting &&
-                      desktop.scale == 3 && redraws == 2,
+                      desktop.scale == 3,
                   "auto goes back to what the screens say");
 
             /* With no screen up the setting is kept for the one that comes. */
             list_init(&desktop.outputs);
-            desktop.scale = 1; redraws = 0; regrids = 0;
+            desktop.scale = 1;
             check(canvas_scale_set(4) == 0 && canvas_scale_setting == 4 && desktop.scale == 1 &&
-                      !redraws && !regrids && canvas_scale_wanted(NULL) == 4,
-                  "with no screen the setting is kept and nothing is drawn");
+                      canvas_scale_wanted(NULL) == 4,
+                  "with no screen the setting is kept and the scale is not touched");
             canvas_scale_setting = 0;
         }
     }
@@ -37096,7 +36603,7 @@ def harness_canvas_seam(argv):
         'SPARK_BIND_CANVAS_ON', 'SPARK_BIND_CANVAS_OFF',
         'SPARK_BIND_CANVAS_ON_NAME', 'SPARK_BIND_CANVAS_OFF_NAME',
         'canvas_is_on', 'canvas_boot', 'canvas_unload',
-        'canvas_client_ioctl', 'canvas_client_release', 'CANVAS_FILE_OPERATIONS',
+        'canvas_client_ioctl', 'canvas_client_release',
         'canvas_latency',
         'LIBRARY_CANVAS_ELSEWHERE',
     }
@@ -37134,7 +36641,7 @@ def harness_canvas_seam(argv):
               '%s includes nothing of the core' % name)
     seam_names = set(re.findall(r'\b(moonwater_\w+)\s*\(', code(seam)))
     used = set(re.findall(r'\bmoonwater_\w+', code(canvas)))
-    check(used <= seam_names and seam_names <= used | {'moonwater_display'},
+    check(used <= seam_names and seam_names <= used,
           'Canvas calls exactly what seam.h gives it (%s against %s)' % (sorted(used), sorted(seam_names)))
     core_defined = set()
     for path in core_files:
@@ -37162,15 +36669,15 @@ def harness_canvas_seam(argv):
     live, _, stubs = header.partition('#else')
     declared = set(re.findall(r'\b(canvas_\w+)\s*\(', code(live)))
     stubbed = set(re.findall(r'\b(canvas_\w+)\s*\(', code(stubs)))
-    defined = set(re.findall(r'^(?:_Bool|void|long|int|__poll_t)\s+(canvas_\w+)\s*\(', code(canvas), re.M))
+    defined = set(re.findall(r'^(?:_Bool|void|long|int)\s+(canvas_\w+)\s*\(', code(canvas), re.M))
     check(declared and declared <= defined,
           'canvas.h declares only what canvas.c defines (%s)' % sorted(declared - defined))
-    check(stubbed <= declared and declared - stubbed <= {'canvas_client_mmap', 'canvas_client_poll'},
+    check(stubbed <= declared and not declared - stubbed,
           'with Canvas off every call the core makes is an empty inline (%s)' % sorted(declared - stubbed))
     wanted = set(re.findall(r'\b(canvas_\w+)\s*\(', code(read('src/moonwater/core.c') + read('src/moonwater/moonwater.c'))))
-    check(wanted <= declared | {'canvas_client_mmap', 'canvas_client_poll'},
+    check(wanted <= declared,
           'the core calls only what canvas.h declares (%s)' % sorted(wanted - declared))
-    for name in sorted(seam_names - {'moonwater_display'}):
+    for name in sorted(seam_names):
         defines = [str(p.relative_to(ROOT)) for p in core_files
                    if re.search(r'^[\w\s\*]*\b%s\s*\([^;{]*\)\s*\n?\{' % name, code(p.read_text()), re.M)]
         check(len(defines) == 1, '%s is defined once in the core (%s)' % (name, defines))

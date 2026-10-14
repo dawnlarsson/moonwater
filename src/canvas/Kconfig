@@ -1,27 +1,27 @@
 menu "Moonwater Canvas"
     config MOONWATER_CANVAS
-        bool "Moonwater Canvas, the in-kernel compositor"
+        bool "Moonwater Canvas, the kernel's side of the desktop"
         depends on MOONWATER_CORE=y && DRM && DRM_CLIENT
-        select FONT_SUPPORT
-        select FONT_8x16
         default y
         help
-          Own the display from kernel space: Canvas draws the desktop,
-          windows and cursor itself through the in-kernel DRM client API
-          rather than handing a device node to a userspace display
-          server. Its source is src/canvas/, an object of its own beside
-          the core, which is why the core has to be built in. Disable this
-          option to omit the compositor C and architecture-specific renderer
-          assembly entirely; Moonwater core, Spark programs and the ordinary
-          kernel consoles remain available.
+          Own the display from kernel space until the desktop starts:
+          Canvas claims each card as an in-kernel DRM client, chooses the
+          mode and the scale, commits a first picture and holds the card
+          until the compositor, a program, takes it as DRM master. When the
+          compositor lets go of the card Canvas draws the ground again.
+          Its source is src/canvas/, an object of its own beside the core,
+          which is why the core has to be built in. Disable this option to
+          omit it and the architecture-specific pixel assembly entirely;
+          Moonwater core, Spark programs and the ordinary kernel consoles
+          remain available.
 
     config MOONWATER_CANVAS_AUTOSTART
         bool "Start Canvas automatically during boot"
         depends on MOONWATER_CANVAS && MOONWATER_SHELL
         default y
         help
-          Probe DRM devices and start the Canvas desktop and its terminal as
-          soon as display drivers appear.
+          Probe DRM devices and claim them as soon as display drivers
+          appear, so the machine script can start the compositor.
 
           Disable this while keeping MOONWATER_CANVAS enabled to retain the
           compositor in the image without claiming a display at boot. The

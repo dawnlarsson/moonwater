@@ -364,8 +364,6 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 
 #define SPARK_BIND_GET 0u
 #define SPARK_BIND_SET 1u
-// Raises one of the events a program may ask for (SPARK_BIND_RAISED): it runs as if the machine had seen it.
-#define SPARK_BIND_FIRE 2u
 
 #define SPARK_BIND_DEFAULT 0x1u // the line is the event's default
 #define SPARK_BIND_RUNNING 0x2u // a run is in flight
@@ -393,10 +391,7 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 #define SPARK_BIND_DOCK_ON 20u
 #define SPARK_BIND_DOCK_OFF 21u
 #define SPARK_BIND_RESUME 22u
-// 23, desktop terminal: a request for the machine script and not a thing the machine saw. The desktop's
-// compositor raises it through SPARK_BIND_FIRE, and moonwater_desktop_terminal starts the terminal, so every
-// program on the desktop is started by the script and by nothing else. canvas_abi.h has the id.
-#define SPARK_BIND_EVENTS 23u
+#define SPARK_BIND_EVENTS 22u
 
 /*
         Names in event-id order, the same strings the kernel table uses.
@@ -427,7 +422,6 @@ static const char spark_bind_event_name[SPARK_BIND_EVENTS][SPARK_BIND_NAME_MAX] 
         "dock on",
         "dock off",
         "resume",
-        "desktop terminal",
 };
 
 static const unsigned char spark_bind_stop[SPARK_BIND_EVENTS] = {
@@ -1376,8 +1370,6 @@ struct spawn_work
         unsigned int argc;
         bool shell_fallback;
         bool path_owned;
-        // moonwater_spawn_recorded's: where the task says who it is.
-        struct pid **record;
         // SPARK_SPAWN_KEEP_*: the ignores the program keeps.
         unsigned int keep;
         struct file *stdio[3];
@@ -1439,57 +1431,6 @@ static void spawn_free(struct spawn_work *work)
 }
 
 /*
-        Starts one program with no arguments and no environment.
-
-        The ioctl path exists for a program that wants to start another; this
-        is for the kernel starting the first one, which is a much smaller
-        request and needs none of the copying from userspace.
-
-        The program is borrowed, not copied, so it has to be a literal or
-        otherwise outlive the task. A caller that wants to know which program
-        in the system is its own gives a place to write the thread group's
-        pid: the task records itself there before it becomes the program, so
-        what it opens can be told from what any other program opens.
-*/
-static int spawn_enter(void *data);
-
-int moonwater_spawn_recorded(const char *program, struct pid **record)
-{
-        struct spawn_work *work = kzalloc(sizeof(*work), GFP_KERNEL);
-
-        if (!work)
-                return -ENOMEM;
-
-        /* Borrow the literal like do_spawn borrows its fixed /shell path;
-           copying it for a worker whose next action is execve adds a slab
-           round trip and no lifetime. */
-        work->path = (char *)program;
-        work->arguments = kvmalloc(sizeof(*work->arguments) +
-                                   2 * sizeof(char *), GFP_KERNEL);
-
-        if (!work->arguments)
-        {
-                spawn_free(work);
-                return -ENOMEM;
-        }
-
-        refcount_set(&work->arguments->references, 1);
-        work->arguments->vector = (char **)(work->arguments + 1);
-        work->arguments->vector[0] = work->path;
-        work->arguments->vector[1] = NULL;
-        work->argc = 1;
-        work->record = record;
-
-        if (user_mode_thread(spawn_enter, work, SIGCHLD) <= 0)
-        {
-                spawn_free(work);
-                return -EAGAIN;
-        }
-
-        return 0;
-}
-
-/*
         A program starts able to be interrupted.
 
         execve resets handled signals to default but carries ignored ones
@@ -1544,8 +1485,6 @@ static int spawn_enter(void *data)
                 puts it ahead of that program's first window; a newer launch
                 replaces one that never opened one.
         */
-        if (unlikely(work->record))
-                put_pid(xchg(work->record, get_pid(task_tgid(current))));
 
         /* Without the close-on-exec flag, so these three outlive the load
            while every other descriptor the caller happened to hold does

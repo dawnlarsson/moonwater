@@ -308,14 +308,6 @@ static inline void window_damage(struct window *window, unsigned int row,
 // many columns; answers the stride they are now
 #define WINDOW_IOCTL_STRIDE 0x00007310u
 
-// _IO('s', 17) -- the compositor's window table given to the device: the
-// argument its descriptor, -1 none; root's only
-#define WINDOWS_IOCTL_TABLE_SET 0x00007311u
-
-// _IO('s', 18) -- a descriptor of the window table, close-on-exec; ENOENT
-// when no compositor has given one
-#define WINDOWS_IOCTL_TABLE_GET 0x00007312u
-
 struct window_request
 {
         unsigned int width;

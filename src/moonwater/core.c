@@ -108,11 +108,9 @@ struct spawn_strings
         char **vector;
 };
 
-/* One open device is one independent launch/cache and window context. */
+/* One open device is one independent launch/cache context. */
 struct device_context
 {
-        // The display client's, and the first member: see moonwater_display.
-        void *display;
         struct mutex spawn_lock;
         struct spawn_strings *environment;
         unsigned long environment_generation;
@@ -131,9 +129,6 @@ struct device_context
         */
         const struct cred *environment_cred;
 };
-
-_Static_assert(offsetof(struct device_context, display) == 0,
-               "moonwater_display reads the first word of the file's context");
 
 // Kernel functions rewritten in assembly (kernel/kernel.c, GPL-2.0), which
 // kernel/patch/functions puts in the place of the C originals. A stock build
@@ -292,16 +287,14 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 return settings_set((struct spark_settings_request __user *)arg);
         }
 
-        // The compositor's requests, and the windows' ones: a program's
-        // commit is a frame, and the one more compare is not measurable
-        // against it. -ENOTTY from the client is what the switch would say.
+        // The compositor's requests: -ENOTTY from the client is what the
+        // switch would say.
         return canvas_client_ioctl(file, cmd, arg);
 }
 
 /*
         misc_open leaves the miscdevice in private_data. Replace it with one
-        context per open: its environment snapshot belongs to that launcher,
-        and its pane belongs to that window client.
+        context per open: its environment snapshot belongs to that launcher.
 */
 static int device_open(struct inode *inode, struct file *file)
 {
@@ -339,7 +332,6 @@ static const struct file_operations device_ops = {
     .unlocked_ioctl = device_ioctl,
     .flush = device_flush,
     .release = device_close,
-    CANVAS_FILE_OPERATIONS
     .llseek = noop_llseek,
 };
 

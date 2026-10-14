@@ -42,35 +42,8 @@
 #define IOCTL_READ 2
 #define IOCTL_BOTH 3
 
-/*
-        An open /dev/spark file keeps one pointer for the display client, and
-        the core never looks at it: whatever the client hangs there is its
-        own, and it is the client's to free when the file is released. It is
-        the first member of the file's context, so the file is all a client
-        is handed.
-*/
-static inline void **moonwater_display(struct file *file)
-{
-        return file->private_data;
-}
-
-struct pid;
-
-/*
-        Start a program with no arguments and no environment, as a thread of
-        the kernel, and if record is given have the task write its thread
-        group there before it execs. The program is borrowed, not copied.
-*/
-int moonwater_spawn_recorded(const char *program, struct pid **record);
-
 // Fire one of the machine's events, as a key bound to it would.
 void moonwater_bind_fire(unsigned int event);
-
-// The same, answering whether the machine script or a bound line will run it.
-_Bool moonwater_bind_ask(unsigned int event);
-
-// Whether a key belongs to a binding, which then takes it and not the desktop.
-_Bool moonwater_bind_swallowed(unsigned int code, int value);
 
 /*
         The flags of the settings this machine booted with, or those a later

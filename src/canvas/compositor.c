@@ -9,7 +9,7 @@
         and keeps the console keyboard muted, and its own input handler
         still hears Control-Alt-Backspace, which ends this program's session
         if it ever stops answering. When it exits, the card's last file
-        closes and Canvas's restore hook redraws the kernel desktop at once.
+        closes and Canvas's restore hook draws its ground again at once.
 
         What it draws is the desktop ink and each window's own pixels inside
         a black line of one pixel, round at the corners, and over them the
@@ -4427,11 +4427,9 @@ static void compositor_wake_pass(positive now)
                 compositor.wake_at = now + COMPOSITOR_WAKE_SECOND_NS;
 }
 
-// The layout the machine keeps, which `moonwater keyboard` writes: the setting itself, and
-// failing that the one Canvas was told, which a machine that has not kept one still has.
+// The layout the machine keeps, which `moonwater keyboard` writes; a machine that has not kept one has the US.
 static void compositor_layout_read(void)
 {
-        struct canvas_control control = {0};
         char name[8] = {0};
         bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/keyboard", FILE_READ | O_CLOEXEC);
         int layout = -1;
@@ -4445,18 +4443,6 @@ static void compositor_layout_read(void)
                         if (name[at] == '\n' || name[at] == ' ')
                                 name[at] = 0;
                 layout = compositor_layout_index(name);
-        }
-
-        if (layout < 0)
-        {
-                handle = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
-                if (handle >= 0)
-                {
-                        control.request = SPARK_CANVAS_LAYOUT;
-                        if (system_control(handle, SPARK_IOCTL_CANVAS, address_of control) >= 0)
-                                layout = compositor_layout_index(control.master_command);
-                        system_close(handle);
-                }
         }
 
         if (layout >= 0 && layout != compositor.keymap.layout)
@@ -6232,44 +6218,17 @@ static void compositor_say(string_address what, bipolar value)
 }
 
 /*
-        The card back to Canvas, and how long Canvas took to draw again.
+        The card back to Canvas.
 
         The scanout's mapping holds the card's file open as surely as the
         descriptor does, so both go before the last close -- which is what
-        runs Canvas's restore hook. The kernel's own count of composes says
-        when the desktop was drawn again; it needs CAP_SYS_ADMIN, which a
-        program that could take the card has.
+        runs Canvas's restore hook. The kernel says in its log when the card
+        is Canvas's again.
 */
 static void compositor_hand_back(void)
 {
-        struct input_stats before = {0}, after = {0};
-        b32 spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
-        b32 counted = spark >= 0 && system_control(spark, SPARK_IOCTL_INPUT_STATS, address_of before) == 0;
-        positive start, now;
-
         compositor_call(syscall(munmap), (positive)compositor.scanout, compositor.scanout_bytes, 0, 0, 0, 0);
-        start = clock_monotonic_nanoseconds();
         system_close(compositor.card);
-        now = start;
-
-        while (counted && now - start < 2000000000ull)
-        {
-                long nap[2] = {0, 200000};
-
-                if (system_control(spark, SPARK_IOCTL_INPUT_STATS, address_of after) != 0)
-                        break;
-                now = clock_monotonic_nanoseconds();
-                if (after.composes != before.composes)
-                {
-                        compositor_say("the kernel desktop was drawn again, microseconds after the card was let go:",
-                                       (bipolar)((now - start) / 1000));
-                        break;
-                }
-                system_call_2(syscall(nanosleep), (positive)nap, 0);
-        }
-
-        if (spark >= 0)
-                system_close(spark);
 }
 
 // The desktop scale Canvas is drawing at, which is what a panel's 24 pixels are multiplied by.

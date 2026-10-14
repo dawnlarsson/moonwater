@@ -51,6 +51,8 @@ struct moonwater_overlay {
         unsigned short end_line;
         unsigned short star_line;
         unsigned short bind_line[SPARK_BIND_EVENTS];
+        // The twenty-third event is gone; the request is the size its number says.
+        unsigned short retired;
 };
 
 _Static_assert(sizeof(struct moonwater_overlay) == 56, "moonwater overlay");
@@ -777,7 +779,6 @@ static void moonwater_scan(const char *text, unsigned long length,
 #define BIND_DROP 2u
 #define BIND_STATE 4u
 #define BIND_CAD 8u
-#define BIND_RAISED 16u // a program may ask for it (SPARK_BIND_FIRE)
 #define BIND_CODES 768u
 #define BIND_MACHINE_QUEUE 32
 #define BIND_CODES_PER 2
@@ -811,7 +812,6 @@ static struct bind_row bind_table[SPARK_BIND_EVENTS];
 static DEFINE_SPINLOCK(bind_lock);
 static atomic_t bind_ctrl;
 static atomic_t bind_alt;
-static unsigned bind_held_n;
 static _Bool bind_handler_registered;
 static struct work_struct bind_state_work;
 
@@ -893,7 +893,6 @@ static const struct {
         { "", 500, BIND_DROP, { 0, 0 } },
         { "", 500, BIND_DROP, { 0, 0 } },
         { "", 0, BIND_DROP, { 0, 0 } },
-        { "", 0, BIND_DROP | BIND_RAISED, { 0, 0 } },
 };
 
 _Static_assert(sizeof(bind_spec) / sizeof(bind_spec[0]) == SPARK_BIND_EVENTS,
@@ -933,32 +932,7 @@ static struct bind_row *bind_row(unsigned int event)
         return bind_table + event - 1;
 }
 
-static void bind_map_set(unsigned long *map, unsigned int code, _Bool on)
-{
-        unsigned int word;
-        unsigned long bit, now;
-
-        if (code >= BIND_CODES)
-                return;
-        word = code / 64;
-        bit = 1UL << (code % 64);
-        now = READ_ONCE(map[word]);
-        WRITE_ONCE(map[word], on ? now | bit : now & ~bit);
-}
-
-static unsigned long bind_down[BIND_CODES / 64];
 static u8 bind_code_event[BIND_CODES];
-
-static _Bool bind_map_on(const unsigned long *map, unsigned int code)
-{
-        return code < BIND_CODES &&
-               (READ_ONCE(map[code / 64]) & (1UL << (code % 64))) != 0;
-}
-
-static _Bool bind_watched(unsigned int code)
-{
-        return code < BIND_CODES && READ_ONCE(bind_code_event[code]) != 0;
-}
 
 static void bind_watch_code(unsigned int code, unsigned int event, _Bool on)
 {
@@ -1242,26 +1216,6 @@ static void bind_fire(unsigned int event)
 void moonwater_bind_fire(unsigned int event)
 {
         bind_fire(event);
-}
-
-/*
-        Asks for a row's run, and says whether anyone will make it: the
-        machine script when it owns the row, or the line somebody bound. A
-        caller with another way to do the thing (the kernel's own desktop
-        starting its own terminal) does it when this says nobody will.
-*/
-_Bool moonwater_bind_ask(unsigned int event)
-{
-        struct bind_row *row = bind_row(event);
-
-        if (!row || system_state != SYSTEM_RUNNING || !atomic_read(&bind_alive))
-                return false;
-        if (!row->command[0] &&
-            !(atomic_read(&bind_machine_live) &&
-              (READ_ONCE(machine_script_owned) & (1u << (event - 1)))))
-                return false;
-        bind_fire(event);
-        return true;
 }
 
 /*
@@ -1685,46 +1639,6 @@ static struct bind_row *bind_match(unsigned int type, unsigned int code, int val
         return bind_row(event);
 }
 
-static void bind_hold(unsigned int code, int value)
-{
-        _Bool down = value != 0;
-
-        if (code >= BIND_CODES || bind_map_on(bind_down, code) == down)
-                return;
-        bind_map_set(bind_down, code, down);
-        bind_held_n += down ? 1 : -1;
-}
-
-static _Bool bind_key_swallowed(unsigned int code, int value)
-{
-        struct bind_row *row;
-        unsigned long flags;
-        _Bool swallow = false;
-
-        if (likely(!bind_watched(code) && (value == 1 || !READ_ONCE(bind_held_n))))
-                return false;
-
-        spin_lock_irqsave(&bind_lock, flags);
-        if (value == 1) {
-                row = bind_match(EV_KEY, code, 1);
-                if (row) {
-                        bind_hold(code, 1);
-                        swallow = true;
-                }
-        } else if (bind_map_on(bind_down, code)) {
-                if (!value)
-                        bind_hold(code, 0);
-                swallow = true;
-        }
-        spin_unlock_irqrestore(&bind_lock, flags);
-        return swallow;
-}
-
-_Bool moonwater_bind_swallowed(unsigned int code, int value)
-{
-        return bind_key_swallowed(code, value);
-}
-
 static void bind_mods(struct bind_handle *bind, unsigned int code, int value)
 {
         unsigned int bit = code < 256 ? bind_mod_of[code] : 0;
@@ -1902,8 +1816,6 @@ static void bind_start(void)
         spin_unlock_irq(&bind_machine_lock);
         atomic_set(&bind_ctrl, 0);
         atomic_set(&bind_alt, 0);
-        bind_held_n = 0;
-        memset(bind_down, 0, sizeof(bind_down));
         memset(bind_code_event, 0, sizeof(bind_code_event));
 
         for (at = 0; at < SPARK_BIND_EVENTS; at++) {
@@ -2015,25 +1927,13 @@ static long report_bind(struct bind_control __user *out)
 
         if (copy_from_user(&request, out, sizeof(request)))
                 return -EFAULT;
-        if (request.op > SPARK_BIND_FIRE || request.reserved[0] ||
+        if (request.op > SPARK_BIND_SET || request.reserved[0] ||
             request.reserved[1] || request.reserved[2])
                 return -EINVAL;
 
         row = bind_row(request.event);
         if (!row)
                 return -EINVAL;
-
-        /*
-                A program asking the machine script for something. The line
-                a row runs is root's, so only a root may ask, and only for
-                the rows made to be asked for: poweroff and canvas off are
-                the machine's to see, not a program's to say it saw.
-        */
-        if (request.op == SPARK_BIND_FIRE) {
-                if (!capable(CAP_SYS_ADMIN) || !(row->flags & BIND_RAISED))
-                        return -EPERM;
-                bind_fire(request.event);
-        }
 
         if (request.op == SPARK_BIND_SET) {
                 if (!capable(CAP_SYS_ADMIN) ||
