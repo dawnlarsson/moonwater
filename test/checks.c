@@ -109909,9 +109909,23 @@ static fn check_registry(void)
                 string_append_bounded((string_address)key, (string_address)" ", sizeof(key));
                 check("registry: a plain row's key is its last word", row->key && string_equals((string_address)row->key, (string_address)key));
                 if (row->usage)
-                        check("registry: and its usage begins with its verb", !string_compare_max((string_address)row->usage, (string_address)joined, string_length((string_address)joined)) &&
-                              (!row->usage[string_length((string_address)joined)] || row->usage[string_length((string_address)joined)] == ' ') && row->help &&
+                {
+                        //      The usage begins with the verb, or with its words but the last and names that one in brackets (canvas cursor [size ...).
+                        positive whole = string_length((string_address)joined), cut = whole;
+                        char bracketed[48] = "[";
+
+                        while (cut && joined[cut - 1] != ' ')
+                                cut--;
+                        string_append_bounded((string_address)bracketed, (string_address)joined + cut, sizeof(bracketed));
+                        check("registry: and its usage begins with its verb",
+                              (!string_compare_max((string_address)row->usage, (string_address)joined, whole) &&
+                               (!row->usage[whole] || row->usage[whole] == ' ')) ||
+                                  (cut && !string_compare_max((string_address)row->usage, (string_address)joined, cut) &&
+                                   string_first_of_or_end((string_address)row->usage, '[')[0] &&
+                                   !string_compare_max(string_first_of_or_end((string_address)row->usage, '[') , (string_address)bracketed, string_length((string_address)bracketed))));
+                        check("registry: and it says itself plainly", row->help &&
                               !string_first_of_or_end((string_address)row->usage, '\'')[0] && !string_first_of_or_end((string_address)row->help, '\'')[0]);
+                }
                 else
                 {
                         //      A row with no line of its own is said by the line of the row of its verb above it (cursor look by cursor size).

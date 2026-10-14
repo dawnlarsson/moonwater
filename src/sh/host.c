@@ -17799,12 +17799,15 @@ static b32 host_setting_refuse(const struct settings_row address_to row, string_
         if (row->refusal)
                 return host_refuse((string_address)row->refusal, word);
         host_setting_says(row, says, sizeof(says));
+        string_format(log_error, host_label);
         if (row->type == SETTING_NUMBER)
-                return host_refuse("%s is a number from %p to %p %s, %sor default, not %s\n", (string_address)says,
-                                   (positive)row->low, (positive)row->high, (string_address)(row->unit ? row->unit : ""),
-                                   row->choices ? (string_address)"off, " : (string_address)"", word);
-        return host_refuse(row->kind == SETTINGS_SWITCH ? "%s is on or off, not %s\n" : "%s is %s, not %s\n",
-                           (string_address)says, row->kind == SETTINGS_SWITCH ? word : (string_address)row->choices, word);
+                host_say(log_error, "%s is a number from %p to %p %s, %sor default, not %s\n", (string_address)says,
+                         (positive)row->low, (positive)row->high, (string_address)(row->unit ? row->unit : ""),
+                         row->choices ? (string_address)"off, " : (string_address)"", word);
+        else
+                host_say(log_error, row->kind == SETTINGS_SWITCH ? "%s is on or off, not %s\n" : "%s is %s, not %s\n",
+                         (string_address)says, row->kind == SETTINGS_SWITCH ? word : (string_address)row->choices, word);
+        return 1;
 }
 
 //      The row the words name (found by setting_find), read or set.
