@@ -1760,15 +1760,33 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
                 }
         }
 
-        //      A stem that would cross a fixed line, or straddles one, is let
-        //      go: the line wins.
+        //      A whole stem that straddles a fixed line is laid against it, on
+        //      the side its centre is: f's arm, 0.69 px across the cap height
+        //      at 11 px, was let go and drawn as two rows a third grey, the
+        //      smudge at the top of every f. Then a stem that would cross a
+        //      fixed line, or still straddles one, is let go: the line wins.
+        for (p32 s = 0; s < stems && whole; s++)
+                for (p32 f = 0; f < fixes; f++)
+                {
+                        b64 k = fixed[f], width = to[2 * s + 1] - to[2 * s];
+
+                        if (!(stem[2 * s] < k && k < stem[2 * s + 1]))
+                                continue;
+                        if (stem[2 * s] + stem[2 * s + 1] < 2 * k)
+                                to[2 * s] = k - width, to[2 * s + 1] = k;
+                        else
+                                to[2 * s] = k, to[2 * s + 1] = k + width;
+                        break;
+                }
         for (p32 s = 0; s < stems; s++)
                 for (p32 f = 0; f < fixes && !dropped[s]; f++)
                 {
                         b64 k = fixed[f];
+                        bool straddled = stem[2 * s] < k && k < stem[2 * s + 1];
 
-                        if ((stem[2 * s] < k && k < stem[2 * s + 1]) || (stem[2 * s + 1] <= k && to[2 * s + 1] > k) ||
-                            (stem[2 * s] >= k && to[2 * s] < k))
+                        if ((straddled && !whole) || (to[2 * s] < k && k < to[2 * s + 1]) ||
+                            (!straddled && stem[2 * s + 1] <= k && to[2 * s + 1] > k) ||
+                            (!straddled && stem[2 * s] >= k && to[2 * s] < k))
                                 dropped[s] = true;
                 }
 
@@ -4301,6 +4319,12 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
 
         flags = font_polarity(flags, colour, background);
         p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
+
+        //      Stems on whole pixels as a cell's are, though the pen is in
+        //      eighths: the glyph is snapped where it lands, its two ends kept,
+        //      so its spacing is the font's. Unsnapped, Inter's l at 10 to
+        //      14 px fell across two grey columns at most phases.
+        style |= style & 1 ? 4 : 0;
 
         while (at < length && count)
         {
