@@ -3,7 +3,7 @@
 
         rtnetlink, DNS, HTTP -- which is reached only through TLS, which is
         reached only through the hashes and curves it needs -- and DHCP.
-        Nothing here is a command. src/sh/net.c has ip, wget and ping, and
+        Nothing here is a command. src/sh/net.c has ip, host, fetch and wget, and
         test/checks.c builds this file with no shell around it at all, which
         is why it is its own unit and not folded in behind them.
 
@@ -368,9 +368,7 @@ static COLD fn netlink_nested_end(netlink_buffer address_to buffer,
         one netlink error that looks like a hang rather than a failure.
 
         EXT_ACK is asked for and not required. It costs one setsockopt and
-        turns "-EINVAL" into a sentence naming the attribute that was wrong;
-        a kernel too old to know the option says so and everything else works
-        exactly as before.
+        turns "-EINVAL" into a sentence naming the attribute that was wrong.
 */
 #define RTNLGRP_LINK_MASK 1
 
@@ -2470,12 +2468,12 @@ static COLD bipolar net_resolve_v4(string_address name, p32 address_to found,
 /*
         Hashes, AES-GCM, X25519 and the signature checks HTTPS needs.
 
-        wget speaks TLS 1.3 with AES-128-GCM, X25519, P-256 and P-384. The chain for that
-        handshake is ECDSA on P-256 and P-384, RSA PKCS#1 and RSA-PSS SHA-256;
+        wget speaks TLS 1.3 and 1.2 with AES-128-GCM, X25519, P-256 and P-384. The chain for
+        those handshakes is ECDSA on P-256 and P-384, RSA PKCS#1 and RSA-PSS SHA-256;
         Alpine and GitHub still present RSA leaves. SHA-256 compression is
         sha256_compress in lib.c, on the same hardware floor as the rest
         of the binary, and SHA-384 is sha512_blocks through the same streaming
-        digests the checksum utilities use. X25519 and ECDSA stay C for now. None of
+        digests the checksum utilities use. ECDSA stays C, and X25519 is lib.c's. None of
         this is a kernel crypto ABI: AF_ALG is off on Moonwater, and a
         downloader cannot wait on it.
 */

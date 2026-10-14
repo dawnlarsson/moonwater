@@ -505,7 +505,7 @@ static COLD bipolar net_index_of(b32 handle, string_address name)
 /*
         host NAME [SERVER]
 
-        The server is normally the first nameserver line in /etc/resolv.conf.
+        The server is normally the nameservers of /etc/resolv.conf, in order.
         It can be given instead, which is the only way to ask anything on a
         machine that has no resolv.conf -- which the boot image does not, and
         which is exactly when someone is trying to find out whether the

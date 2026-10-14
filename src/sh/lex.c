@@ -1130,7 +1130,7 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                 }
 
                 /* A ) that sits in a here-document body does not close
-                   $( ) on bash or on lima dash 0.5.x. Remember << until
+                   $( ) on bash or on dash. Remember << until
                    the newline that begins the body, then skip those
                    lines. A ) still on the operator line closes, which is
                    how dash reads $(cat <<EOF) before any body arrives. */
@@ -1721,7 +1721,7 @@ static HOT KEEP b32 lex_word(string_address address_to at)
                 /* a=(...) stays one word so the parenthesis is not a
                    subshell. Unquoted ( inside the body is diagnosed later.
                    Dash has no arrays: name=() is name= and then (, which
-                   lima dash 0.5.x reports as "(" unexpected. Bash --posix
+                   dash reports as "(" unexpected. Bash --posix
                    still reads the compound form. */
                 if (shell_bash_compat && c == '(' && step > start &&
                     step[-1] == '=' &&

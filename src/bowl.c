@@ -5553,8 +5553,8 @@ static b32 bowl_land(string_address archive, string_address root,
         Arch itself builds x86_64 only. arm64 is Arch Linux ARM, the port
         whose root tarball carries its own keyring and mirror list; its
         download host has no TLS, so the file comes from one of its mirrors
-        that speaks TLS 1.3, which is all this wget speaks: de3, the nearest
-        to most of Europe, answers only TLS 1.2. riscv64 is Arch Linux RISC-V, which Arch's own
+        that speaks TLS 1.3: de3, the nearest to most of Europe, answers
+        only TLS 1.2. riscv64 is Arch Linux RISC-V, which Arch's own
         riscv.mirror.pkgbuild.com serves. Fedora builds riscv64 in its alt/
         tree beside the primary architectures. Nix publishes all three from
         the one release.

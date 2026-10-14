@@ -5178,7 +5178,7 @@ static fn expand_run(string_address command, bool quoted)
 
         /* A substitution that went through a child shell already wrote this
            line there. A direct spawn has no such child, and dash still names
-           the signal the way lima 0.5.x does. Bash keeps substitutions
+           the signal the way dash does. Bash keeps substitutions
            silent. */
         if (waited >= 0 && !shell_bash_compat)
                 shell_child_death(child, status, true);
@@ -5311,7 +5311,7 @@ static string_address expand_command(string_address step, bool quoted)
 }
 
 /*
-        lima dash 0.5.x re-parses a backtick body with list(2).  After the
+        dash re-parses a backtick body with list(2).  After the
         first complete command, a leftover `(` is not a syntax error: the
         list ends and the rest of the extracted text is dropped.  `\$()` is
         that leftover -- the backslash made a literal `$` argument, and the
@@ -6790,8 +6790,8 @@ static fn expand_substring(expand_reference reference, string_address expression
                 return;
         }
 
-        /* ${name:} is a bad substitution even when the name is unset: lima
-           bash 5.2.32 still names `${x:}`, and an unset skip used to swallow
+        /* ${name:} is a bad substitution even when the name is unset: bash
+           still names `${x:}`, and an unset skip used to swallow
            that and expand to nothing. */
         if (!string_get(expression) && !expand_substring_separator(expression))
         {
@@ -11481,7 +11481,7 @@ static positive shell_expand_without_braces(string_address word,
                 return expand_split(out);
 
         /* A redirect kept whole: no field split and no glob. expand_emit
-           would still pathname-expand, and lima bash 5.2.32 --posix does
+           would still pathname-expand, and bash --posix does
            not: > .* creates that name even with failglob on, and a glob
            with a slash stays the pattern, so the open fails, even with
            globstar. An unquoted expansion to nothing is still no target,
@@ -11984,7 +11984,7 @@ HOT RETURNS_NONNULL string_address shell_expand_word(string_address word)
 /* A redirect is a single whole word in POSIX/non-Bash policy. Dash has no
    brace expansion, so that path is enough. Bash --posix still honours the
    braceexpand extra option (on by default, including under --posix) and
-   treats several brace fields as an ambiguous redirect, but lima 5.2.32
+   treats several brace fields as an ambiguous redirect, but bash
    --posix does not split or glob the word: failglob, globstar and
    globskipdots apply to pathname expansion of command words, not to the
    name opened here. Bash's default policy additionally splits and

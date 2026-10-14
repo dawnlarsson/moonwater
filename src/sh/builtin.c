@@ -16094,7 +16094,7 @@ static bool trap_exit_inherited HOT_STATE;
 /* Catch strings stay in the table so a bare `trap` can still list what the
    parent had, while the handlers themselves are already default. The first
    trap that changes a condition throws those inherited catches away, so
-   only ignores and what this process has set remain. lima 5.2 does the
+   only ignores and what this process has set remain. Bash does the
    same in a ( ) and in a pipeline child. */
 static bool trap_inherited_pending HOT_STATE;
 /* Bash finishes a pipeline while/for/if with _exit, so an EXIT trap set
@@ -16169,7 +16169,7 @@ static bipolar trap_pending_number()
         one stays ignored, which is what POSIX asks for and what keeps a
         subshell from dying of a signal its parent chose to sit out.
 
-        dash also forgets the catch strings, the same reset lima 0.5.x runs
+        dash also forgets the catch strings, the same reset dash runs
         on every fork, so `trap | wc -l` in a pipeline is 0. An ignored trap
         stays in the table and still lists. Bash keeps every entry: listing
         through a pipe still names them.
@@ -17087,7 +17087,7 @@ COLD fn shell_unalias(writer write)
         there when a shell was built around it.
 
         Bash -v reprints each physical line of that joined text as if the
-        reader had seen it: lima 5.2 writes the inner `echo evaluated` after
+        reader had seen it: bash writes the inner `echo evaluated` after
         `eval 'echo evaluated'`. dash does not -- an eval is not a file, and
         a -c command stays quiet through from_string -- so the walker below
         is asked to echo only under bash.
@@ -20435,7 +20435,7 @@ static bool shell_tool_run_hashed(string_address name, positive2 named)
 
         /* Spark starts the immutable multicall image without copying this
            resident shell. A stock kernel forks, and the child execs the
-           PATH file lima would have run: cat is /usr/bin/cat there. A
+           PATH file the reference would have run: cat is /usr/bin/cat there. A
            function that cats and then echoes into /bin/true is killed by
            SIGPIPE because that exec is still in flight when true has closed
            the pipe. Calling the utility in the fork, or execing this same
@@ -20750,7 +20750,7 @@ static bipolar shell_source_read(bipolar handle,
         it is declared here, beside the reader that runs one, rather than
         beside the process reader in the entry file that is included last.
 
-        An eval body is bash's only: lima 5.2 reprints it, dash does not,
+        An eval body is bash's only: bash reprints it, dash does not,
         and the walker that runs those lines is told so beside eval.
 */
 static bool shell_verbose_from_string HOT_STATE;
@@ -21438,7 +21438,7 @@ static bipolar shell_wait_call(bipolar pid, positive address_to status)
 
         /* One wait4 either way. Asking for a specific pid leaves a sibling
            zombie unmarked, so wait-all would later collect a Terminated job
-           and drop the line lima keeps for `jobs`. Anyone else who dies is
+           and drop the line the reference keeps for `jobs`. Anyone else who dies is
            the same news job_reap already files, just heard while we sit. */
         while ((got = job_wait_call(-1, status, 0)) > 0 && got != pid)
                 job_child_changed(got, address_to status);

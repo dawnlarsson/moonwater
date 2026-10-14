@@ -2609,7 +2609,7 @@ fn shell_input_end()
                 A here-document the input ended inside of.
 
                 Both dash and bash take the end of the input as the delimiter
-                and run the command. Bash says so on stderr; lima dash 0.5.x
+                and run the command. Bash says so on stderr; dash
                 prints nothing. Refusing the line here threw away a script
                 whose last line was the body -- which is what a generated one
                 looks like when the generator forgot the delimiter, and what

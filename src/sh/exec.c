@@ -1952,9 +1952,9 @@ static positive job_signal_named(positive number, p8 address_to into)
         reported deaths are `name: line N: PID word` padded to the jobs
         column, then the command. Interrupt and a broken pipe stay silent,
         a substitution stays silent, and a background SIGTERM stays silent.
-        A posix `-c` command string is silent too: lima 5.2.32 prints the
-        same deaths from a posix script file, and stays quiet once posix
-        is on for a `-c` invocation.
+        A posix `-c` command string is silent too: bash prints the same
+        deaths from a posix script file, and stays quiet once posix is on
+        for a `-c` invocation.
 
         lastpipe freezes bash's jobs list while the last stage runs, so a
         death inside `if` / `{ }` / a loop is not written until that
@@ -2251,7 +2251,7 @@ static fn job_line(writer write, job_entry address_to entry, bool detailed)
                          entry->state == JOB_RUNNING && entry->background;
 
         /* Without job control dash still numbers background children, but
-           the listing is the status column only: lima 0.5.x writes no
+           the listing is the status column only: dash writes no
            command text until `set -m` has actually taken a terminal.
            A pipeline still shows the bar between empty stages. */
         if (shell_dash_columns() && !shell_option_on(SHELL_OPTION_MONITOR))
@@ -2456,7 +2456,7 @@ static positive job_specified(string_address word, positive address_to found)
 
         if (string_get(text) == '-' && !string_get(text + 1))
         {
-                /* One job is both current and previous: lima bash `fg %-`
+                /* One job is both current and previous: bash `fg %-`
                    with only `%1` still finds it. */
                 positive number = job_previous || !shell_bash_compat
                                       ? job_previous : job_current;
@@ -3368,7 +3368,7 @@ fn shell_kill(writer write)
 
                         /* `%sleep` is not a job without a monitor.
                            `%%` / `%1` still name the table, and then
-                           lima says "No such process" rather than killing. */
+                           dash says "No such process" rather than killing. */
                         if (!numbered)
                         {
                                 answer = shell_reported(2,
@@ -3393,8 +3393,8 @@ fn shell_kill(writer write)
 
                 /* Dash kill only follows a job spec under job control.
                    With the monitor off, a live `%1` is still "No such
-                   process" and the child is left running, matching lima
-                   0.5.x. A spec nobody has stays "No such job" above. */
+                   process" and the child is left running, matching
+                   dash. A spec nobody has stays "No such job" above. */
                 if (!shell_bash_compat && !job_monitor())
                 {
                         answer = shell_reported(1,
@@ -3799,7 +3799,7 @@ fn job_wait(writer write)
 
                 /* Running jobs first. A sibling that dies while we sit is
                    filed by wait4(-1) into the same table; collecting it here
-                   would drop the Terminated line lima keeps for `jobs`. */
+                   would drop the Terminated line the reference keeps for `jobs`. */
                 while (true)
                 {
                         positive at;
@@ -3887,7 +3887,7 @@ fn job_wait(writer write)
                                 at++;
                         }
 
-                        /* lima writes `[2]   Terminated` with a blank mark
+                        /* The reference writes `[2]   Terminated` with a blank mark
                            after wait collected the running jobs around it. */
                         job_current = 0;
                         job_previous = 0;
@@ -11352,7 +11352,7 @@ static bool exec_prefix_assign(exec_kept_value address_to kept,
                    `r=new true 2>/dev/null` leaves stderr empty. exec_simple
                    does that first; still say the sentence so a function
                    body with no redirect writes `x: is read only` the way
-                   lima dash does. Bash diagnoses and keeps going. */
+                   dash does. Bash diagnoses and keeps going. */
                 shell_readonly_refused(null, null, kept->binding.name,
                                        string_length(kept->binding.name));
                 return exec_assignment_error(assignment_error);
@@ -12914,7 +12914,7 @@ static HOT b32 exec_simple(b32 index)
                 else
                         exec_redirect_restore(mark);
         }
-        /* lima bash waitchld's leftover children when a simple command
+        /* Bash waitchld's leftover children when a simple command
            finishes, which is when a coproc that died during `sleep` is
            forgotten so a later unquoted wait $C_PID sees nothing. */
         exec_coproc_drop_finished();
@@ -16312,7 +16312,7 @@ static b32 exec_coproc(b32 index)
 /*
         lastpipe runs a final builtin, function or compound in this shell so
         `echo | read x` leaves x set. A path, or a name that is only a tool
-        or a PATH lookup, is still a process of its own: lima forks /bin/true
+        or a PATH lookup, is still a process of its own: bash forks /bin/true
         even with lastpipe on.
 */
 static PURE bool exec_pipe_lastpipes(b32 index)
@@ -17562,7 +17562,7 @@ static b32 exec_node_kind(b32 index)
 
         if (shell_bash_compat && exec_compound_depth == 0)
                 shell_child_death_flush();
-        /* lima bash 5.2 leaves process-substitution write ends open after a
+        /* Bash leaves process-substitution write ends open after a
            brace group. `>(sed > file)` has not seen EOF, so a later cat of
            that file is still empty; the writer finishes when this shell
            itself leaves. A simple command still closes them, which is why

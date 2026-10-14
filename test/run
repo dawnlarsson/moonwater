@@ -21249,8 +21249,7 @@ with comm_left.open("wb") as left, \
 tool_names = ["cat", "wc", "grep", "cut", "tr", "sed", "awk",
               "sort", "uniq", "head", "tail", "rev", "find"]
 
-# These applets use Linux-only kernel paths in Moonwater (AF_ALG for the
-# checksum one), so keep the long-standing portable benchmark usable on
+# These applets use Linux-only kernel paths in Moonwater, so keep the long-standing portable benchmark usable on
 # development hosts while making the Linux performance gate comprehensive.
 if sys.platform.startswith("linux"):
     tool_names.extend(("base64", "base32", "od", "comm", "paste", "join",

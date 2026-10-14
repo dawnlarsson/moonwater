@@ -406,7 +406,7 @@ static PURE positive parse_pending_start_line()
         return parse_pending_line ? parse_pending_line : 1;
 }
 
-/* Bash 5.2 keeps at most sixteen here-documents waiting for a body. lima
+/* Bash keeps at most sixteen here-documents waiting for a body. It
    reports `maximum here-document count exceeded` and leaves 2. Dash has no
    such cap. A document whose body has already been read is not pending, so
    forty cats on forty lines still run. */
@@ -1449,7 +1449,7 @@ static p8 address_to parse_here_scan_line(
         <<- and backslash-newline decisions as parse_here_line without retaining
         a speculative body copy.  Bash also ends a document at the delimiter
         followed immediately by `)`, and leaves that `)` for the substitution
-        closer.  lima dash 0.5.x does not: `EOF)` is a body line, so an
+        closer.  Dash does not: `EOF)` is a body line, so an
         unquoted multi-word `<<-EOF EOF` whose closer is `EOF EOF` never
         matches delimiter `EOF` and the `)` stays inside the document.
         The returned address is the source byte after the final delimiter
@@ -1540,13 +1540,13 @@ static string_address parse_here_skip_bodies(string_address line,
                         delimiter followed immediately by the substitution's
                         closer, so `EOF)` is not a body line: the document
                         ends and the ) is left for lex_nesting, which is how
-                        lima bash 5.2 reads
+                        bash reads
 
                             $(cat <<EOF
                             body
                             EOF)
 
-                        lima dash 0.5.x keeps `EOF)` as body text. An
+                        Dash keeps `EOF)` as body text. An
                         unquoted `<<-EOF EOF` is therefore delimiter EOF
                         and a cat operand, and the closer `EOF EOF` does
                         not end the document.
@@ -3131,7 +3131,7 @@ static HOT b32 parse_command_body()
         else if (keyword == PARSE_KEYWORD_NONE ||
                  keyword == PARSE_KEYWORD_TIME)
         {
-                //      `time` after `|` is an ordinary name: lima runs the
+                //      `time` after `|` is an ordinary name: the reference runs the
                 //      utility, because a bang is the only reserved word the
                 //      pipeline production itself consumes. At the start of
                 //      a pipeline parse_pipeline has already taken `time`.
@@ -3141,7 +3141,7 @@ static HOT b32 parse_command_body()
         else
         {
                 //      then/do/in/fi, a bang after `|`, and bash `]]` are
-                //      reserved here. lima reports a syntax error, not
+                //      reserved here. The reference reports a syntax error, not
                 //      command-not-found. Bang at the start of a pipeline is
                 //      consumed above this.
                 parse_fail();
