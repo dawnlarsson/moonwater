@@ -18315,7 +18315,7 @@ out.append(("D2.1 with the shake off a shake of the hand leaves the pointer its 
 out.append(("D2.2 at a sensitivity of 200 and no acceleration a slow hand of 100 counts goes 200 pixels",
             str(off_200), "200"))
 out.append(("D2.3 with the shake on and a delay of 3000 ms the pointer is large when shaken, and still two seconds after, and not four",
-            "%s | %s | %s" % (large_now, large_later, small_again), "495 414 | 495 414 | 55 46"))
+            "%s, %s, %s" % (large_now, large_later, small_again), "495 414, 495 414, 55 46"))
 out.append(("D2.4 at the standard sensitivity a slow hand of 100 counts goes 100 pixels, and at 50 it goes 50",
             "%d %d" % (standard, slow), "100 50"))
 
