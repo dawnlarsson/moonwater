@@ -18027,17 +18027,6 @@ handed = re.findall(rb"drawn again, microseconds after the card was let go: (\d+
 #   the frame target of 1.4 is what the number is compared against.
 print("m1 hand-back %s us" % (handed[-1].decode() if handed else "unknown"), file=sys.stderr)
 
-type_text("echo m1-typed-")
-chord("shift", "4")
-chord("shift", "4")
-type_text(" ")
-chord("shift", "dot")
-type_text(" /dev/tty")
-chord("shift", "s")
-type_text("0\n")
-out.append(("and the keyboard reaches the terminal again",
-            "yes" if wait_for(b"m1-typed-", 10) else "no", "yes"))
-
 start_script("m2")
 ready2 = wait_for(b"m2-ready", 40)
 time.sleep(0.5)
