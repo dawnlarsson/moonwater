@@ -47992,33 +47992,66 @@ static b32 file_mktemp()
 /*
         A signal, sent.
 
-        The names are one table read two ways: printed for -l, and walked to
-        turn a name back into a number, so the two can never disagree about
-        what SIGRTMIN+3 is called.
+        Every name a signal has is in one table, kill_table, read three ways:
+        printed for -l, walked to turn a name back into a number, and asked
+        for the name of a number, so they can never disagree about what
+        SIGRTMIN+3 is called. The shells' trap and compgen read it too.
 
-        Sixteen through thirty three have no name here for the same reason
-        they have none in dash: what they are called is not the same on every
-        machine, and a number is always right.
+        Sixteen, thirty two and thirty three are written as numbers in the
+        shells' spelling, for the same reason they are in dash: what they are
+        called is not the same on every machine, and a number is always right.
 */
-#define KILL_NAMED 34
 #define KILL_LEAST_REAL 34
 #define KILL_MOST 64
 
-static string_address kill_names[KILL_NAMED] = {
-    "0", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS",
-    "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM", "TERM",
-    "16", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG",
-    "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS",
-    "32", "33",
+/*
+        The external kill is util-linux's, which is a different program from
+        the shell builtin of the same name: it names signals in a table of
+        its own, prints that table for -l and -L, and says what it could not
+        do rather than answering with a number alone. The builtin's spelling
+        (kill_name below, which four other programs read) is this table with
+        the first name of each number, bar sixteen, and RTMIN to RTMAX.
+*/
+typedef struct
+{
+        p8 number;
+        string_address name;
+} kill_row;
+
+static const kill_row kill_table[] = {
+    {1, "HUP"},     {2, "INT"},     {3, "QUIT"},    {4, "ILL"},    {5, "TRAP"},
+    {6, "ABRT"},    {6, "IOT"},     {7, "BUS"},     {8, "FPE"},    {9, "KILL"},
+    {10, "USR1"},   {11, "SEGV"},   {12, "USR2"},   {13, "PIPE"},  {14, "ALRM"},
+    {15, "TERM"},   {16, "STKFLT"}, {17, "CHLD"},   {17, "CLD"},   {18, "CONT"},
+    {19, "STOP"},   {20, "TSTP"},   {21, "TTIN"},   {22, "TTOU"},  {23, "URG"},
+    {24, "XCPU"},   {25, "XFSZ"},   {26, "VTALRM"}, {27, "PROF"},  {28, "WINCH"},
+    {29, "IO"},     {29, "POLL"},   {30, "PWR"},    {31, "SYS"},   {34, "RTMIN"},
+    {64, "RTMAX"},
 };
+
+// The first name a signal below 32 has: the aliases after it are only ever
+// looked up, never written.
+static string_address kill_canonical(positive number)
+{
+        for (positive i = 0; i < array_count(kill_table) && kill_table[i].number < 32; i++)
+                if (kill_table[i].number == number)
+                        return kill_table[i].name;
+
+        return null;
+}
 
 static fn kill_name(positive number, p8 address_to into)
 {
         positive at = 0;
 
-        if (number < KILL_NAMED)
+        if (number < KILL_LEAST_REAL)
         {
-                string_copy(into, kill_names[number]);
+                string_address name = number == 16 ? null : kill_canonical(number);
+
+                if (name)
+                        string_copy(into, name);
+                else
+                        positive_into_string(into, number);
                 return;
         }
 
@@ -48072,13 +48105,7 @@ static bipolar kill_number(string_address word)
         if (string_is(word, 'S') && string_is(word + 1, 'I') && string_is(word + 2, 'G'))
                 word += 3;
 
-        positive found = string_table_find(word, kill_names + 1,
-                                           sizeof(kill_names[0]), KILL_NAMED - 1);
-
-        if (found != KILL_NAMED - 1)
-                return (bipolar)(found + 1);
-
-        for (positive i = KILL_LEAST_REAL; i <= KILL_MOST; i++)
+        for (positive i = 1; i <= KILL_MOST; i++)
         {
                 kill_name(i, name);
 
@@ -48088,31 +48115,6 @@ static bipolar kill_number(string_address word)
 
         return -1;
 }
-
-/*
-        The external kill is util-linux's, which is a different program from
-        the shell builtin of the same name: it names signals in a table of
-        its own, prints that table for -l and -L, and says what it could not
-        do rather than answering with a number alone. The shared kill_name
-        above is the builtin's spelling and four other programs read it, so
-        the table here is this program's own and leaves that one alone.
-*/
-typedef struct
-{
-        p8 number;
-        string_address name;
-} kill_row;
-
-static const kill_row kill_table[] = {
-    {1, "HUP"},     {2, "INT"},     {3, "QUIT"},    {4, "ILL"},    {5, "TRAP"},
-    {6, "ABRT"},    {6, "IOT"},     {7, "BUS"},     {8, "FPE"},    {9, "KILL"},
-    {10, "USR1"},   {11, "SEGV"},   {12, "USR2"},   {13, "PIPE"},  {14, "ALRM"},
-    {15, "TERM"},   {16, "STKFLT"}, {17, "CHLD"},   {17, "CLD"},   {18, "CONT"},
-    {19, "STOP"},   {20, "TSTP"},   {21, "TTIN"},   {22, "TTOU"},  {23, "URG"},
-    {24, "XCPU"},   {25, "XFSZ"},   {26, "VTALRM"}, {27, "PROF"},  {28, "WINCH"},
-    {29, "IO"},     {29, "POLL"},   {30, "PWR"},    {31, "SYS"},   {34, "RTMIN"},
-    {64, "RTMAX"},
-};
 
 // The names -l lists: the table without the two real-time ends, and the
 // three shapes a real-time signal is written in rather than every number
@@ -48163,12 +48165,13 @@ static bool kill_number_named(positive number, p8 address_to into)
                 return true;
         }
 
-        for (positive i = 0; i < array_count(kill_table); i++)
-                if (kill_table[i].number == number && number < 32)
-                {
-                        string_copy(into, kill_table[i].name);
-                        return true;
-                }
+        string_address named = kill_canonical(number);
+
+        if (named)
+        {
+                string_copy(into, named);
+                return true;
+        }
 
         if (number >= KILL_LEAST_REAL && number <= KILL_MOST)
         {

@@ -15973,15 +15973,15 @@ static shell_trap_entry address_to trap_table;
 static positive trap_room;
 static positive trap_count HOT_STATE;
 
-static string_address trap_names[] = {
-    "EXIT", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS",
-    "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM", "TERM",
-    "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG",
-    "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS",
-    null,
-};
+//      Zero is EXIT and one to thirty one are the names kill_table has: the
+//      numbers a trap can name without the real-time ones.
+#define TRAP_NAMED 32
 
-#define TRAP_NAMES (array_count(trap_names))
+static string_address trap_name(positive number)
+{
+        return number ? kill_canonical(number) : (string_address) "EXIT";
+}
+
 // The real-time signals have numbers and no names, up to the kernel's last.
 #define TRAP_NUMBER_MAX 64
 
@@ -16041,13 +16041,12 @@ bipolar trap_number(string_address word)
         if (shell_bash_compat && !string_compare_folded_max(name, "SIG", 3))
                 name += 3;
 
-        positive index = string_table_find_ascii_case(
-            name, trap_names, sizeof(trap_names[0]), TRAP_NAMES);
-        if (index < TRAP_NAMES)
-                return (bipolar)index;
+        for (positive named = 0; named < TRAP_NAMED; named++)
+                if (!string_compare_folded(name, trap_name(named)))
+                        return (bipolar)named;
 
         //      dash has the signals and EXIT and no conditions of bash's.
-        index = string_table_find_ascii_case(name, trap_condition_names,
+        positive index = string_table_find_ascii_case(name, trap_condition_names,
                                              sizeof(trap_condition_names[0]), 3);
         if (index < 3 && !shell_dash_compat)
                 return (bipolar)(TRAP_ERR + index);
@@ -16311,8 +16310,8 @@ static fn trap_write_condition(writer write, positive number,
             number <= TRAP_NUMBER_MAX)
                 write("SIG", 3);
 
-        if (number < TRAP_NAMES - 1)
-                string_format(write, "%s", trap_names[number]);
+        if (number < TRAP_NAMED)
+                string_format(write, "%s", trap_name(number));
         else if (number >= TRAP_ERR && number <= TRAP_DEBUG)
                 string_format(write, "%s", trap_condition_names[number -
                                                                 TRAP_ERR]);
@@ -16394,9 +16393,9 @@ static COLD fn trap_listed(writer write)
                 write(written, digits);
                 write(") SIG", 5);
 
-                if (number < TRAP_NAMES - 1)
-                        write(trap_names[number],
-                              string_length(trap_names[number]));
+                if (number < TRAP_NAMED)
+                        write(trap_name(number),
+                              string_length(trap_name(number)));
                 else
                 {
                         p8 name[16];
@@ -16515,7 +16514,7 @@ COLD fn shell_trap(writer write)
                         //      last real-time signal and the three conditions
                         //      that are not signals at all.
                         bool every = shell_posix_on();
-                        positive last = every ? TRAP_NUMBER_MAX : TRAP_NAMES - 2;
+                        positive last = every ? TRAP_NUMBER_MAX : TRAP_NAMED - 1;
 
                         for (positive number = 0; number <= last; number++)
                         {
@@ -25973,21 +25972,6 @@ static const string_address comp_bash_added[] = {
     "shell-kill-word", "shell-transpose-words", "spell-correct-word",
     "vi-edit-and-execute-command",
     null};
-static const string_address comp_signals[] = {
-    "EXIT", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT",
-    "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2",
-    "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD", "SIGCONT",
-    "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU",
-    "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO", "SIGPWR",
-    "SIGSYS", "SIGJUNK(32)", "SIGJUNK(33)", "SIGRTMIN", "SIGRTMIN+1",
-    "SIGRTMIN+2", "SIGRTMIN+3", "SIGRTMIN+4", "SIGRTMIN+5", "SIGRTMIN+6",
-    "SIGRTMIN+7", "SIGRTMIN+8", "SIGRTMIN+9", "SIGRTMIN+10", "SIGRTMIN+11",
-    "SIGRTMIN+12", "SIGRTMIN+13", "SIGRTMIN+14", "SIGRTMIN+15",
-    "SIGRTMAX-14", "SIGRTMAX-13", "SIGRTMAX-12", "SIGRTMAX-11",
-    "SIGRTMAX-10", "SIGRTMAX-9", "SIGRTMAX-8", "SIGRTMAX-7", "SIGRTMAX-6",
-    "SIGRTMAX-5", "SIGRTMAX-4", "SIGRTMAX-3", "SIGRTMAX-2", "SIGRTMAX-1",
-    "SIGRTMAX", "DEBUG", "ERR", "RETURN",
-    null};
 //      Bash's builtins, which is what -A builtin writes whatever this shell
 //      keeps besides; enabled and disabled ask the table for the state.
 static const string_address comp_builtins[] = {
@@ -26004,6 +25988,40 @@ static COLD fn compgen_names(const string_address address_to list)
 {
         for (positive at = 0; list[at]; at++)
                 compgen_offer(list[at]);
+}
+
+//      What -A signal writes: EXIT, every named signal with SIG in front, the
+//      two numbers bash calls junk, the real-time ones from RTMIN+n to
+//      RTMAX-n, and the three conditions that are not signals.
+static COLD fn compgen_signals()
+{
+        p8 name[24];
+
+        compgen_offer((string_address) "EXIT");
+        for (positive number = 1; number < 32; number++)
+        {
+                string_copy(name, (string_address) "SIG");
+                string_copy(name + 3, kill_canonical(number));
+                compgen_offer(name);
+        }
+        compgen_offer((string_address) "SIGJUNK(32)");
+        compgen_offer((string_address) "SIGJUNK(33)");
+        for (positive number = KILL_LEAST_REAL; number <= KILL_MOST; number++)
+        {
+                bool low = number <= KILL_LEAST_REAL + 15;
+                positive offset = low ? number - KILL_LEAST_REAL : KILL_MOST - number;
+
+                string_copy(name, (string_address)(low ? "SIGRTMIN" : "SIGRTMAX"));
+                if (offset)
+                {
+                        name[8] = low ? '+' : '-';
+                        positive_into_string(name + 9, offset);
+                }
+                compgen_offer(name);
+        }
+        compgen_offer((string_address) "DEBUG");
+        compgen_offer((string_address) "ERR");
+        compgen_offer((string_address) "RETURN");
 }
 
 static COLD fn compgen_builtins(int which)
@@ -26514,7 +26532,7 @@ static COLD fn compgen_generate(comp_request address_to want,
                         compgen_names(shell_shopt_names);
                         break;
                 case COMP_ACTION_SIGNAL:
-                        compgen_names(comp_signals);
+                        compgen_signals();
                         break;
                 case COMP_ACTION_USER:
                         compgen_file_names("/etc/passwd", false, false);
