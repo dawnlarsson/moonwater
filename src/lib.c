@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        406 routines (383 public, 23 local), 396 of them on all three and 10 local to one.
+        407 routines (384 public, 23 local), 397 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -216,6 +216,7 @@
           memory_copy                    public  yes     yes     yes
           memory_copy_apart              public  yes     yes     yes
           memory_copy_apart_end          public  yes     yes     yes
+          memory_copy_changed_u32        public  yes     yes     yes
           memory_copy_end                public  yes     yes     yes
           memory_copy_match              public  yes     yes     yes
           memory_copy_source_first       public  yes     yes     yes
@@ -13037,6 +13038,70 @@ __asm__(
     ASM_END(memory_fill_u32_rect)
 
     //
+    //       memory_copy_changed_u32 -- rdi into, rsi mirror, rdx from, rcx
+    //       count in words; answers in rax how many 64-byte chunks were
+    //       stored. A chunk of from is compared with mirror's and, where any
+    //       word differs, stored to both; the rest of a count past its last
+    //       whole chunk is one more chunk, taken as the 64 bytes that end at
+    //       the count, whose front the chunk before has already made equal.
+    //       into is only ever written (a card's memory, where a read is
+    //       dear and a store crosses a bus). AVX-512: one load and one
+    //       compare against memory a chunk, kortest, and under 16 words one
+    //       masked chunk; AVX2: two of each and vpmovmskb; SSE2: four, and
+    //       under 16 words 16-byte pieces from either end, under four words
+    //       a word at a time. On a 9950X core (test/run bench copy-changed,
+    //       rows of 1220 words), against the same chunks compared and copied
+    //       in C: 44-56% with nothing or one chunk changed and 33% with every
+    //       word (AVX-512), 46-51% and 35% (AVX2), 36-41% and 28% (SSE2);
+    //       against a plain copy into cached memory, 98-101% with nothing
+    //       changed and 150-158% with every word (AVX2, AVX-512); what it
+    //       saves is the stores to the card, which that copy does not pay.
+    //
+    ASM_FUNC(memory_copy_changed_u32)
+    "xor %eax, %eax\n   test %rcx, %rcx\n   jz 9f\n   shl $2, %rcx\n   xor %r8d, %r8d\n"
+    ASM_NARROW("cpu_has_avx512", "20f")
+    "cmp $64, %rcx\n   jb 4f\n"
+    "1:  vmovdqu64 (%rdx,%r8), %zmm0\n   vpcmpq $4, (%rsi,%r8), %zmm0, %k1\n   kortestw %k1, %k1\n   jz 2f\n"
+    "vmovdqu64 %zmm0, (%rsi,%r8)\n   vmovdqu64 %zmm0, (%rdi,%r8)\n   inc %rax\n"
+    "2:  add $64, %r8\n   lea 64(%r8), %r9\n   cmp %rcx, %r9\n   jbe 1b\n   cmp %rcx, %r8\n   jae 3f\n"
+    "mov %rcx, %r8\n   sub $64, %r8\n   jmp 1b\n"
+    "3:  vzeroupper\n" ASM_RET
+    "4:  shr $2, %rcx\n   mov $0xffff, %r9d\n   bzhi %ecx, %r9d, %r9d\n   kmovw %r9d, %k2\n"
+    "vmovdqu32 (%rdx), %zmm0{%k2}{z}\n   vmovdqu32 (%rsi), %zmm1{%k2}{z}\n   vpcmpd $4, %zmm1, %zmm0, %k1\n"
+    "kortestw %k1, %k1\n   jz 3b\n   vmovdqu32 %zmm0, (%rsi){%k2}\n   vmovdqu32 %zmm0, (%rdi){%k2}\n   mov $1, %eax\n   jmp 3b\n"
+    "20: "
+    ASM_NARROW("cpu_has_avx2", "5f")
+    "cmp $64, %rcx\n   jb 5f\n"
+    "21: vmovdqu (%rdx,%r8), %ymm0\n   vmovdqu 32(%rdx,%r8), %ymm1\n   vpcmpeqd (%rsi,%r8), %ymm0, %ymm2\n"
+    "vpcmpeqd 32(%rsi,%r8), %ymm1, %ymm3\n   vpand %ymm3, %ymm2, %ymm2\n   vpmovmskb %ymm2, %r9d\n   cmp $-1, %r9d\n   je 22f\n"
+    "vmovdqu %ymm0, (%rsi,%r8)\n   vmovdqu %ymm1, 32(%rsi,%r8)\n   vmovdqu %ymm0, (%rdi,%r8)\n   vmovdqu %ymm1, 32(%rdi,%r8)\n   inc %rax\n"
+    "22: add $64, %r8\n   lea 64(%r8), %r9\n   cmp %rcx, %r9\n   jbe 21b\n   cmp %rcx, %r8\n   jae 3b\n"
+    "mov %rcx, %r8\n   sub $64, %r8\n   jmp 21b\n"
+    "5:  cmp $16, %rcx\n   jb 6f\n   cmp $64, %rcx\n   jb 7f\n"
+    "51: movdqu (%rdx,%r8), %xmm0\n   movdqu 16(%rdx,%r8), %xmm1\n   movdqu 32(%rdx,%r8), %xmm2\n   movdqu 48(%rdx,%r8), %xmm3\n"
+    "movdqu (%rsi,%r8), %xmm4\n   movdqu 16(%rsi,%r8), %xmm5\n   movdqu 32(%rsi,%r8), %xmm6\n   movdqu 48(%rsi,%r8), %xmm7\n"
+    "pcmpeqd %xmm0, %xmm4\n   pcmpeqd %xmm1, %xmm5\n   pcmpeqd %xmm2, %xmm6\n   pcmpeqd %xmm3, %xmm7\n"
+    "pand %xmm5, %xmm4\n   pand %xmm7, %xmm6\n   pand %xmm6, %xmm4\n   pmovmskb %xmm4, %r9d\n   cmp $0xffff, %r9d\n   je 52f\n"
+    "movdqu %xmm0, (%rsi,%r8)\n   movdqu %xmm1, 16(%rsi,%r8)\n   movdqu %xmm2, 32(%rsi,%r8)\n   movdqu %xmm3, 48(%rsi,%r8)\n"
+    "movdqu %xmm0, (%rdi,%r8)\n   movdqu %xmm1, 16(%rdi,%r8)\n   movdqu %xmm2, 32(%rdi,%r8)\n   movdqu %xmm3, 48(%rdi,%r8)\n   inc %rax\n"
+    "52: add $64, %r8\n   lea 64(%r8), %r9\n   cmp %rcx, %r9\n   jbe 51b\n   cmp %rcx, %r8\n   jae 9f\n"
+    "mov %rcx, %r8\n   sub $64, %r8\n   jmp 51b\n"
+    //  Four to fifteen words: their 16-byte pieces from the front and the last from the end, xors gathered.
+    "7:  pxor %xmm4, %xmm4\n"
+    "71: movdqu (%rdx,%r8), %xmm0\n   movdqu (%rsi,%r8), %xmm1\n   pxor %xmm0, %xmm1\n   por %xmm1, %xmm4\n"
+    "add $16, %r8\n   lea 16(%r8), %r9\n   cmp %rcx, %r9\n   jbe 71b\n   cmp %rcx, %r8\n   jae 72f\n   mov %rcx, %r8\n   sub $16, %r8\n   jmp 71b\n"
+    "72: pxor %xmm5, %xmm5\n   pcmpeqb %xmm5, %xmm4\n   pmovmskb %xmm4, %r9d\n   cmp $0xffff, %r9d\n   je 9f\n   xor %r8d, %r8d\n"
+    "73: movdqu (%rdx,%r8), %xmm0\n   movdqu %xmm0, (%rsi,%r8)\n   movdqu %xmm0, (%rdi,%r8)\n"
+    "add $16, %r8\n   lea 16(%r8), %r9\n   cmp %rcx, %r9\n   jbe 73b\n   cmp %rcx, %r8\n   jae 74f\n   mov %rcx, %r8\n   sub $16, %r8\n   jmp 73b\n"
+    "74: mov $1, %eax\n" ASM_RET
+    "6:  xor %r10d, %r10d\n"
+    "61: mov (%rdx,%r8), %r9d\n   xor (%rsi,%r8), %r9d\n   or %r9d, %r10d\n   add $4, %r8\n   cmp %rcx, %r8\n   jb 61b\n"
+    "test %r10d, %r10d\n   jz 9f\n   xor %r8d, %r8d\n"
+    "62: mov (%rdx,%r8), %r9d\n   mov %r9d, (%rsi,%r8)\n   mov %r9d, (%rdi,%r8)\n   add $4, %r8\n   cmp %rcx, %r8\n   jb 62b\n   mov $1, %eax\n"
+    "9:  " ASM_RET
+    ASM_END(memory_copy_changed_u32)
+
+    //
     //       memory_sweep_coverage -- a row of coverage cells summed, made
     //       bytes and cleared: rdi into, rsi cells, rdx count, ecx sum.
     //
@@ -22408,6 +22473,33 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_fill_u32_rect)
 
+    //       memory_copy_changed_u32: a chunk is two ldp of q from each side,
+    //       four eor and three orr folded by umaxp to one doubleword, and on
+    //       a difference two stp pairs to each of mirror and into; under 16
+    //       words, 16-byte pieces from either end, under four a word at a
+    //       time. The x86_64 block carries the contract.
+    ASM_FUNC(memory_copy_changed_u32)
+    "mov x5, x0\n   mov x0, #0\n   cbz x3, 9f\n   lsl x3, x3, #2\n   mov x6, #0\n   cmp x3, #64\n   b.lo 5f\n"
+    "1:  add x7, x2, x6\n   add x8, x1, x6\n   ldp q0, q1, [x7]\n   ldp q2, q3, [x7, #32]\n   ldp q4, q5, [x8]\n   ldp q6, q7, [x8, #32]\n"
+    "eor v4.16b, v4.16b, v0.16b\n   eor v5.16b, v5.16b, v1.16b\n   eor v6.16b, v6.16b, v2.16b\n   eor v7.16b, v7.16b, v3.16b\n"
+    "orr v4.16b, v4.16b, v5.16b\n   orr v6.16b, v6.16b, v7.16b\n   orr v4.16b, v4.16b, v6.16b\n   umaxp v4.4s, v4.4s, v4.4s\n"
+    "fmov x9, d4\n   cbz x9, 2f\n   add x10, x5, x6\n   stp q0, q1, [x8]\n   stp q2, q3, [x8, #32]\n   stp q0, q1, [x10]\n   stp q2, q3, [x10, #32]\n"
+    "add x0, x0, #1\n"
+    "2:  add x6, x6, #64\n   add x9, x6, #64\n   cmp x9, x3\n   b.ls 1b\n   cmp x6, x3\n   b.hs 9f\n   sub x6, x3, #64\n   b 1b\n"
+    "5:  cmp x3, #16\n   b.lo 6f\n   movi v4.16b, #0\n"
+    "51: ldr q0, [x2, x6]\n   ldr q1, [x1, x6]\n   eor v1.16b, v1.16b, v0.16b\n   orr v4.16b, v4.16b, v1.16b\n"
+    "add x6, x6, #16\n   add x9, x6, #16\n   cmp x9, x3\n   b.ls 51b\n   cmp x6, x3\n   b.hs 52f\n   sub x6, x3, #16\n   b 51b\n"
+    "52: umaxp v4.4s, v4.4s, v4.4s\n   fmov x9, d4\n   cbz x9, 9f\n   mov x6, #0\n"
+    "53: ldr q0, [x2, x6]\n   str q0, [x1, x6]\n   str q0, [x5, x6]\n"
+    "add x6, x6, #16\n   add x9, x6, #16\n   cmp x9, x3\n   b.ls 53b\n   cmp x6, x3\n   b.hs 54f\n   sub x6, x3, #16\n   b 53b\n"
+    "54: mov x0, #1\n" ASM_RET
+    "6:  mov w10, #0\n"
+    "61: ldr w7, [x2, x6]\n   ldr w8, [x1, x6]\n   eor w7, w7, w8\n   orr w10, w10, w7\n   add x6, x6, #4\n   cmp x6, x3\n   b.lo 61b\n"
+    "cbz w10, 9f\n   mov x6, #0\n"
+    "62: ldr w7, [x2, x6]\n   str w7, [x1, x6]\n   str w7, [x5, x6]\n   add x6, x6, #4\n   cmp x6, x3\n   b.lo 62b\n   mov x0, #1\n"
+    "9:  " ASM_RET
+    ASM_END(memory_copy_changed_u32)
+
     //       memory_sweep_coverage: sixteen cells a turn in four vectors, each
     //       its own prefix sum by two ext against zero, the four joined by
     //       their last lanes, and the carry one add a turn; the byte by abs,
@@ -30909,6 +31001,33 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_fill_u32_rect)
 
+    //       memory_copy_changed_u32: with V, a chunk is up to 16 words at
+    //       e32 m4 (64 bytes at the smallest VLEN), vmsne and vfirst, and on
+    //       a difference vse32 to mirror and into, the count's rest the last
+    //       chunk at its own length; without, the chunk's words xored and
+    //       gathered a word at a time, then copied. The x86_64 block carries
+    //       the contract.
+    ASM_FUNC(memory_copy_changed_u32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 1f\n   bnez t3, 5f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_copy_changed_u32\n"
+    "1:  mv a5, a0\n   li a0, 0\n   beqz a3, 9f\n   li t6, 16\n"
+    "2:  mv t1, a3\n   bleu t1, t6, 3f\n   mv t1, t6\n"
+    "3:  vsetvli t0, t1, e32, m4, ta, ma\n   vle32.v v8, (a2)\n   vle32.v v12, (a1)\n   vmsne.vv v0, v8, v12\n   vfirst.m t2, v0\n"
+    "bltz t2, 4f\n   vse32.v v8, (a1)\n   vse32.v v8, (a5)\n   addi a0, a0, 1\n"
+    "4:  slli t3, t0, 2\n   add a2, a2, t3\n   add a1, a1, t3\n   add a5, a5, t3\n   sub a3, a3, t0\n   bnez a3, 2b\n   ret\n"
+#endif
+    "5:  mv a5, a0\n   li a0, 0\n   beqz a3, 9f\n   li t6, 16\n"
+    "6:  mv t0, a3\n   bleu t0, t6, 7f\n   mv t0, t6\n"
+    "7:  slli t5, t0, 2\n   add t4, a2, t5\n   mv t1, a2\n   mv t2, a1\n   li t3, 0\n"
+    "8:  lw a4, 0(t1)\n   lw a6, 0(t2)\n   xor a4, a4, a6\n   or t3, t3, a4\n   addi t1, t1, 4\n   addi t2, t2, 4\n   bne t1, t4, 8b\n"
+    "beqz t3, 11f\n   mv t1, a2\n   mv t2, a1\n   mv a7, a5\n"
+    "10: lw a4, 0(t1)\n   sw a4, 0(t2)\n   sw a4, 0(a7)\n   addi t1, t1, 4\n   addi t2, t2, 4\n   addi a7, a7, 4\n   bne t1, t4, 10b\n"
+    "addi a0, a0, 1\n"
+    "11: add a2, a2, t5\n   add a1, a1, t5\n   add a5, a5, t5\n   sub a3, a3, t0\n   bnez a3, 6b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_copy_changed_u32)
+
     //       memory_sweep_coverage: with V, as many cells as four registers
     //       hold, the prefix sum by vslideup of 1, 2, 4 ... lanes into a
     //       zeroed group and vadd, the carry added and taken from the last
@@ -37899,6 +38018,11 @@ fn memory_glass_over_u32(p32 address_to into, const p32 address_to picture, cons
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
+// count 32-bit words of from copied to into and to mirror wherever they differ from mirror, in 64-byte chunks from
+// the front, the count's rest past its last whole chunk being one more: a chunk whose words all equal mirror's is
+// stored to neither. Answers how many chunks were stored. into is only written, never read (a card's memory, where
+// mirror is what it holds); into may be mirror itself, and from overlaps neither. A zero count touches nothing.
+positive memory_copy_changed_u32(p32 address_to into, p32 address_to mirror, const p32 address_to from, positive count);
 #endif
 // Remove every byte whose entry in a readable 256-byte table is nonzero, moving
 // the kept bytes to the front of the block in their order, and answer how many

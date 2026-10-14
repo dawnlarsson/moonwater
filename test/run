@@ -16684,10 +16684,13 @@ EOF
 }
 
 # The script with its absolute paths pointed into the case directory. The kmsg stub appends, as
-# /dev/kmsg does, and the program paths are matched only where a space follows them.
+# /dev/kmsg does, and the program paths are matched only where a space follows them. The screens
+# are the case's, none: the machine running the lane may have two connected, which keeps the
+# kernel's desktop.
 redirect()
 {
         sed -e "s#> /dev/kmsg#>> \$STUB/kmsg#g" \
+            -e "s#/sys/class/drm#\$STUB/drm#g" \
             -e "s#/run/moonwater#\$STUB/run/moonwater#g" \
             -e "s#/root/font#\$STUB/root/font#g" \
             -e "s#/dev/kmsg#\$STUB/kmsg#g" \
@@ -22101,7 +22104,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect blend-rect average-ahead glass fill-rect sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -22132,6 +22135,8 @@ bench_about()
                  bench_line="the glass halved, doubled and laid over its ground, against the byte loops they are" ;;
         fill-rect) bench_section=BENCH_fill_rect
                  bench_line="rectangles of one 32-bit value, a cell's ground, against a fill a row" ;;
+        copy-changed) bench_section=BENCH_copy_changed
+                 bench_line="a composed frame's rows stored to the card only where they changed, against C and a plain copy" ;;
         sweep-coverage) bench_section=BENCH_sweep_coverage
                  bench_line="the text engine's coverage rows summed into bytes, against the C loop it replaced" ;;
         escape)  bench_section=BENCH_escape

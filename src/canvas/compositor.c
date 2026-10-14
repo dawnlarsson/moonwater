@@ -791,50 +791,97 @@ static void compositor_scene(const struct compositor_target *t,
 // what a shell under a 12 MiB cap cannot spare, in every program that links this.
 static unsigned int *compositor_band_scratch;
 
+/*
+        A scene composed apart: each band a slice of COMPOSITOR_SLICE rows at
+        a time, into its own rows of slices (pitch words a row), and each
+        slice handed to flush while it is still in cache, which stores it to
+        the card and says the rows it changed there, first to last, -1 none.
+*/
+#define COMPOSITOR_SLICE 16
+
+struct compositor_apart
+{
+        void (*flush)(const struct compositor_target *slice, int *first, int *last);
+        unsigned int *slices;
+        unsigned long pitch;
+};
+
 struct compositor_banding
 {
         const struct compositor_target *target;
         const struct compositor_frame *frames;
         unsigned int count, bands;
+        const struct compositor_apart *apart;
+        int first[COMPOSITOR_BANDS], last[COMPOSITOR_BANDS];
 };
 
 static void compositor_scene_band(address_any context, positive index)
 {
-        const struct compositor_banding *banding = (const struct compositor_banding *)context;
+        struct compositor_banding *banding = (struct compositor_banding *)context;
         struct compositor_target band = *banding->target;
         long height = band.y2 - band.y1;
 
         band.y1 = banding->target->y1 + (int)(height * (long)index / banding->bands);
         band.y2 = banding->target->y1 + (int)(height * (long)(index + 1) / banding->bands);
-        band.scratch = compositor_band_scratch + index * (COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST);
-        if (band.y2 > band.y1)
+        band.scratch = compositor_band_scratch
+                           ? compositor_band_scratch + index * (COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST)
+                           : 0;
+        banding->first[index] = banding->last[index] = -1;
+        if (band.y2 <= band.y1)
+                return;
+        if (!banding->apart)
+        {
                 compositor_scene(&band, banding->frames, banding->count);
+                return;
+        }
+        for (int top = band.y1; top < band.y2; top += COMPOSITOR_SLICE)
+        {
+                struct compositor_target slice = band;
+                int first, last;
+
+                slice.y1 = top;
+                slice.y2 = top + COMPOSITOR_SLICE < band.y2 ? top + COMPOSITOR_SLICE : band.y2;
+                slice.pixels = banding->apart->slices + index * COMPOSITOR_SLICE * banding->apart->pitch;
+                slice.pitch = banding->apart->pitch;
+                slice.ox = 0;
+                slice.oy = top;
+                compositor_scene(&slice, banding->frames, banding->count);
+                banding->apart->flush(&slice, &first, &last);
+                if (first < 0)
+                        continue;
+                banding->first[index] = banding->first[index] < 0 ? first : banding->first[index];
+                banding->last[index] = last;
+        }
 }
 
+// The scene of a damage, in bands where it is large; composed apart (apart not none), the rows it changed on the card
+// are rows[0] to rows[1], rows[0] -1 for none.
 static void compositor_scene_banded(const struct compositor_target *t, const struct compositor_frame *frames,
-                                    unsigned int count)
+                                    unsigned int count, const struct compositor_apart *apart, int rows[2])
 {
         positive bytes = (positive)(t->x2 - t->x1) * (positive)(t->y2 - t->y1) * 4;
         positive bands = parallel_width();
-        struct compositor_banding banding = {t, frames, count, 0};
+        struct compositor_banding banding = {t, frames, count, 1, apart, {0}, {0}};
 
         bands = bands < COMPOSITOR_BANDS ? bands : COMPOSITOR_BANDS;
         bands = bands < (positive)(t->y2 - t->y1) / 16 ? bands : (positive)(t->y2 - t->y1) / 16;
-        if (bytes < PARALLEL_MINIMUM_BYTES || bands < 2)
-        {
-                compositor_scene(t, frames, count);
-                return;
-        }
-        if (!compositor_band_scratch)
+        if (bytes >= PARALLEL_MINIMUM_BYTES && bands >= 2 && !compositor_band_scratch)
                 compositor_band_scratch = (unsigned int *)compositor_map_zeroed(
                     (unsigned long)COMPOSITOR_BANDS * COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST * sizeof(unsigned int));
-        if (!compositor_band_scratch)
+        if (bytes < PARALLEL_MINIMUM_BYTES || bands < 2 || !compositor_band_scratch)
+                compositor_scene_band(&banding, 0);
+        else
         {
-                compositor_scene(t, frames, count);
-                return;
+                banding.bands = (unsigned int)bands;
+                parallel_for(compositor_scene_band, &banding, bands, bytes);
         }
-        banding.bands = (unsigned int)bands;
-        parallel_for(compositor_scene_band, &banding, bands, bytes);
+        rows[0] = rows[1] = -1;
+        for (unsigned int at = 0; at < banding.bands; at++)
+                if (banding.first[at] >= 0)
+                {
+                        rows[0] = rows[0] < 0 ? banding.first[at] : rows[0];
+                        rows[1] = banding.last[at];
+                }
 }
 
 // Every corner mask the frames draw with, made now, so no band makes one while another reads it.
@@ -1686,6 +1733,12 @@ static struct
         unsigned int *scanout;
         unsigned long scanout_bytes, scanout_pitch; // pitch in bytes
         unsigned int fb, crtc;
+        // Where a store to the card is dear: slices of the scene composed apart, and what the card holds (mirror, words a row
+        // mirror_pitch; the scanout itself where the card's memory is the machine's). changed: 0 not yet asked, 1 on,
+        // -1 off. mirror_stale: the card may hold anything, so the next present stores all it composes.
+        unsigned int *composing, *mirror;
+        unsigned long mirror_pitch;
+        int changed, mirror_stale;
         int width, height;
         int damage[COMPOSITOR_DAMAGE][4]; // x1, y1, x2, y2: what changed, apart
         unsigned int damages;
@@ -3323,6 +3376,116 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
         return 1;
 }
 
+/*
+        A slice of the scene composed apart, stored to the card: the software
+        pointer over it, then each row by memory_copy_changed_u32 against
+        the mirror, which stores only the 64-byte chunks that differ from
+        what the card holds, so the card is written (and a virtual card's
+        host told) only where the frame changed, however large the damage.
+        A stale mirror is stored whole.
+*/
+static void compositor_slice_flush(const struct compositor_target *slice, int *first, int *last)
+{
+        unsigned long width = (unsigned long)(slice->x2 - slice->x1);
+        unsigned long pitch = compositor.scanout_pitch / 4;
+
+        *first = *last = -1;
+        if (compositor.cursor.soft && compositor.cursor.drawn)
+                compositor_cursor_draw(slice, compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
+                                       compositor.cursor.drawn_scale, 0xffffffu, 0x000000u);
+        for (int y = slice->y1; y < slice->y2; y++)
+        {
+                const unsigned int *from = slice->pixels + (unsigned long)(y - slice->oy) * slice->pitch +
+                                           (unsigned long)(slice->x1 - slice->ox);
+                unsigned int *into = compositor.scanout + (unsigned long)y * pitch + (unsigned long)slice->x1;
+                unsigned int *mirror = compositor.mirror + (unsigned long)y * compositor.mirror_pitch + (unsigned long)slice->x1;
+
+                if (compositor.mirror_stale)
+                {
+                        memory_copy(into, from, width * 4);
+                        if (mirror != into)
+                                memory_copy(mirror, from, width * 4);
+                }
+                else if (!memory_copy_changed_u32(into, mirror, from, width))
+                        continue;
+                *first = *first < 0 ? y : *first;
+                *last = y;
+        }
+}
+
+// Whether the card's driver is one of count names.
+static int compositor_driver_in(const char *const *names, unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+        {
+                unsigned int same = 0;
+
+                while (names[at][same] && names[at][same] == compositor.driver[same])
+                        same++;
+                if (!names[at][same] && !compositor.driver[same])
+                        return 1;
+        }
+        return 0;
+}
+
+/*
+        Whether the scene is composed apart and stored to the card only where
+        it changed (compositor_slice_flush), decided once by the card's driver.
+        On where a store to the card is dear: a card with memory of its own
+        mapped across the bus (amdgpu, radeon, nouveau, and the emulated
+        cards' VRAM), and a card whose framebuffer is the machine's memory
+        but which copies what it is told changed to the device or its host
+        (virtio_gpu, simpledrm and the like), where the mirror is the
+        scanout itself, read at the machine's speed. Off on i915 and xe,
+        whose dumb buffer is the machine's memory and shown as it is, where
+        composing apart is only one more pass, and with no card. The cost
+        is a slice of rows a band (COMPOSITOR_SLICE), and the mirror's memory
+        where it is apart.
+*/
+static int compositor_changed_ready(void)
+{
+        static const char *const apart[] = {"amdgpu", "radeon", "nouveau", "bochs-drm", "qxl", "vmwgfx"};
+        static const char *const shared[] = {"virtio_gpu", "simpledrm", "cirrus-qemu", "hyperv_drm", "ast",
+                                             "mgag200", "udl", "gud"};
+        unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
+        unsigned long slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
+        int own;
+
+        if (compositor.changed)
+                return compositor.changed > 0;
+        compositor.changed = -1;
+        if (compositor.card < 0)
+                return 0;
+        own = compositor_driver_in(apart, sizeof(apart) / sizeof(apart[0]));
+        if (!own && !compositor_driver_in(shared, sizeof(shared) / sizeof(shared[0])))
+                return 0;
+
+        long composing = compositor_call(syscall(mmap), 0, slices, 3, 0x22, (positive)-1, 0);
+
+        if (composing < 0 && composing > -4096)
+                return 0;
+        compositor.composing = (unsigned int *)composing;
+        compositor.mirror = compositor.scanout;
+        compositor.mirror_pitch = compositor.scanout_pitch / 4;
+        if (own)
+        {
+                long mirror = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+                if (mirror < 0 && mirror > -4096)
+                {
+                        compositor_call(syscall(munmap), (positive)composing, slices, 0, 0, 0, 0);
+                        compositor.composing = 0;
+                        return 0;
+                }
+                compositor.mirror = (unsigned int *)mirror;
+                compositor.mirror_pitch = (unsigned long)compositor.width;
+                compositor.mirror_stale = 1;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        }
+        compositor.changed = 1;
+        return 1;
+}
+
 static void compositor_present(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -3400,27 +3563,44 @@ static void compositor_present(void)
                 compositor_damage(0, 0, compositor.width, compositor.height);
         compositor.screen_stale = 0;
 
+        int apart = compositor_changed_ready();
+        struct compositor_apart slices = {compositor_slice_flush, compositor.composing, (unsigned long)compositor.width};
+        unsigned int clips = 0;
+
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
                 const int *rectangle = compositor.damage[at];
                 struct compositor_target target = {
                     compositor.scanout, compositor.scanout_pitch / 4, compositor.width,
                     compositor.height, rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
+                int rows[2];
 
-                compositor_scene_banded(&target, frames, count);
+                compositor_scene_banded(&target, frames, count, apart ? &slices : 0, rows);
 
-                if (compositor.cursor.soft && compositor.cursor.drawn)
+                if (!apart && compositor.cursor.soft && compositor.cursor.drawn)
                         compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y,
                                                compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
                                                0xffffffu, 0x000000u);
 
-                for (unsigned int side = 0; side < 4; side++)
-                        clip[at][side] = (unsigned short)rectangle[side];
                 compositor.painted += (unsigned long)compositor_area(rectangle);
+                // Composed apart, the card is told only the rows that changed on it, and nothing where none did.
+                if (apart && rows[0] < 0)
+                        continue;
+                for (unsigned int side = 0; side < 4; side++)
+                        clip[clips][side] = (unsigned short)rectangle[side];
+                if (apart)
+                {
+                        clip[clips][1] = (unsigned short)rows[0];
+                        clip[clips][3] = (unsigned short)(rows[1] + 1);
+                }
+                clips++;
         }
+        compositor.mirror_stale = 0;
 
-        dirty.clip_count = compositor.damages;
-        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+        // No clips at all would tell the card everything changed.
+        dirty.clip_count = clips;
+        if (clips)
+                system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
         compositor.damages = 0;
 
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
@@ -3754,16 +3934,7 @@ static int compositor_virtual(void)
 {
         static const char *const guests[] = {"bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu", "hyperv_drm", "vkms"};
 
-        for (unsigned int at = 0; at < sizeof(guests) / sizeof(guests[0]); at++)
-        {
-                unsigned int same = 0;
-
-                while (guests[at][same] && guests[at][same] == compositor.driver[same])
-                        same++;
-                if (!guests[at][same] && !compositor.driver[same])
-                        return 1;
-        }
-        return 0;
+        return compositor_driver_in(guests, sizeof(guests) / sizeof(guests[0]));
 }
 
 // How far ahead of the clock that stops in a sleep the one that does not is, in nanoseconds.
@@ -3795,6 +3966,7 @@ static void compositor_resume(int cycle)
 
         // What the plane wears and where it was is whatever the driver put back: say it all again.
         compositor.cursor.plane_shape = -1;
+        compositor.mirror_stale = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_cursor_move();
 }

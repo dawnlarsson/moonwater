@@ -107713,6 +107713,140 @@ static fn check_fill_rect()
 }
 
 /*
+        memory_copy_changed_u32: every count to 80 words and rows of 127 to
+        1000, differences none, one at each place and everywhere; the answer
+        against chunks counted from the front, mirror equal to from after,
+        into holding from over every chunk that differed and nothing but
+        from or its own words elsewhere, nothing before or after any run
+        touched, the ends of from, mirror and into against pages that fault,
+        and into as mirror itself; on x86_64 with AVX-512, AVX2 and SSE2,
+        on riscv64 with V and without.
+*/
+static fn check_copy_changed()
+{
+        static const positive wide[] = {127, 128, 129, 255, 256, 257, 300, 1000};
+        p32 address_to pages = memory(4 * 4096 * 3);
+        bool guarded = pages != null;
+
+        for (positive at = 0; guarded && at < 3; at++)
+                guarded = system_call_3(syscall(mprotect), (positive)((p8 address_to)pages + (at * 4 + 3) * 4096), 4096, 0) == 0;
+        check("copy changed: guard pages", guarded);
+        if (!guarded)
+                return;
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier < 2 ? wide2 : 0;
+#elif RISCV64
+        cpu_has_vector = 0;
+        memory_copy_changed_u32(pages, pages + 4096, pages + 8192, 0);
+        p8 vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#endif
+                bool answers = true, mirrored = true, into_right = true, outside = true, same = true;
+
+                for (positive w = 0; w <= 80 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                {
+                        positive count = w <= 80 ? w : wide[w - 81];
+
+                        for (b64 place = -2; place < (b64)count; place++)
+                        {
+                                p32 address_to ends[3];
+
+                                for (positive at = 0; at < 3; at++)
+                                        ends[at] = (p32 address_to)((p8 address_to)pages + (at * 4 + 3) * 4096);
+                                p32 address_to into = ends[0] - count, address_to mirror = ends[1] - count;
+                                p32 address_to from = ends[2] - count;
+                                positive want = 0;
+
+                                for (positive i = 0; i < count + 16; i++)
+                                {
+                                        into[(b64)i - 16] = 0xdead0000u + (p32)i;
+                                        mirror[(b64)i - 16] = 0x51000000u + (p32)i * 7;
+                                        from[(b64)i - 16] = 0x51000000u + (p32)i * 7;
+                                }
+                                // place -2: nothing differs; -1: everything; else the one word there.
+                                for (positive i = 0; i < count; i++)
+                                        if (place == -1 || (b64)i == place)
+                                                from[i] ^= 0x00010000u;
+                                for (positive chunk = 0; chunk < count; chunk += 16)
+                                {
+                                        bool differs = false;
+
+                                        for (positive i = chunk; i < count && i < chunk + 16; i++)
+                                                differs = differs || from[i] != mirror[i];
+                                        want += differs;
+                                }
+                                p32 before[16];
+
+                                for (positive i = 0; i < 16; i++)
+                                        before[i] = mirror[(b64)i - 16];
+                                p32 kept[1000];
+
+                                for (positive i = 0; i < count; i++)
+                                        kept[i] = mirror[i];
+                                answers = answers && memory_copy_changed_u32(into, mirror, from, count) == want;
+                                for (positive i = 0; i < count; i++)
+                                {
+                                        positive chunk = i / 16 * 16;
+                                        bool differed = false;
+
+                                        for (positive j = chunk; j < count && j < chunk + 16; j++)
+                                                differed = differed || kept[j] != from[j];
+                                        mirrored = mirrored && mirror[i] == from[i];
+                                        into_right = into_right && (differed ? into[i] == from[i]
+                                                                             : into[i] == from[i] || into[i] == 0xdead0000u + (p32)i + 16);
+                                        // A chunk that did not differ is not written, but for the last 16 words, which
+                                        // the chunk of the count's rest may cover again.
+                                        if (!differed && (count < 16 || i + 16 < count))
+                                                into_right = into_right && into[i] == 0xdead0000u + (p32)i + 16;
+                                }
+                                for (positive i = 0; i < 16; i++)
+                                        outside = outside && into[(b64)i - 16] == 0xdead0000u + (p32)i &&
+                                                  mirror[(b64)i - 16] == before[i] && from[(b64)i - 16] == 0x51000000u + (p32)i * 7;
+                        }
+
+                        // into as mirror itself: one copy, the same answer.
+                        {
+                                p32 address_to mirror = (p32 address_to)((p8 address_to)pages + 7 * 4096) - count;
+                                p32 address_to from = (p32 address_to)((p8 address_to)pages + 11 * 4096) - count;
+                                positive want = 0;
+
+                                for (positive i = 0; i < count; i++)
+                                        mirror[i] = 3, from[i] = i % 37 ? 3 : 4;
+                                for (positive chunk = 0; chunk < count; chunk += 16)
+                                {
+                                        bool differs = false;
+
+                                        for (positive i = chunk; i < count && i < chunk + 16; i++)
+                                                differs = differs || i % 37 == 0;
+                                        want += differs;
+                                }
+                                same = same && memory_copy_changed_u32(mirror, mirror, from, count) == want;
+                                for (positive i = 0; i < count; i++)
+                                        same = same && mirror[i] == from[i];
+                        }
+                }
+                check("copy changed: the chunks it answers", answers);
+                check("copy changed: mirror is from after", mirrored);
+                check("copy changed: into is from where a chunk differed and nothing else", into_right);
+                check("copy changed: nothing before a run touched", outside);
+                check("copy changed: into as mirror", same);
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide2;
+#elif RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+}
+
+/*
         memory_sweep_coverage against the loop it replaces in font_raster:
         every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
         outline leaves them and dense, sums that run past full both ways and
@@ -108032,6 +108166,7 @@ b32 main()
         check_average_ahead();
         check_glass_routines();
         check_fill_rect();
+        check_copy_changed();
         check_sweep();
         check_edges(&one, &two);
 
@@ -120248,6 +120383,116 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_fill_rect */
+
+#ifdef BENCH_copy_changed
+/* memory_copy_changed_u32 against the same chunks compared and copied in C
+   and against a plain copy of every row, over a 1220-pixel window's rows
+   (the terminal of the desk bench) in a 3840-pixel frame: rows with no
+   change, one changed chunk a row and every word changed; on x86_64 with
+   AVX-512, AVX2 and SSE2. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define WIDE 1220
+#define TALL 64
+
+static p32 into[3840 * TALL], mirror[3840 * TALL], from[3840 * TALL];
+
+__attribute__((noinline, noclone)) static positive former_changed(p32 address_to to, p32 address_to seen,
+                                                                const p32 address_to source, positive count)
+{
+        positive stored = 0;
+
+        for (positive at = 0; at < count; at += 16)
+        {
+                positive words = count - at < 16 ? count - at : 16;
+
+                if (!memory_compare(seen + at, source + at, words * 4))
+                        continue;
+                memory_copy(seen + at, source + at, words * 4);
+                memory_copy(to + at, source + at, words * 4);
+                stored++;
+        }
+        return stored;
+}
+
+// The frame's change: none, the word at a row's middle, every word; mirror made the frame before it.
+static fn prepare(positive pattern, positive round)
+{
+        for (positive row = 0; row < TALL; row++)
+                for (positive x = 0; x < WIDE; x++)
+                {
+                        p32 was = (p32)(row * 7 + x);
+
+                        mirror[row * 3840 + x] = was;
+                        from[row * 3840 + x] = pattern == 2 || (pattern == 1 && x == WIDE / 2) ? was ^ (p32)(round + 1) : was;
+                }
+}
+
+static p64 run(positive side, positive pattern, positive rounds)
+{
+        p64 took = 0;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                prepare(pattern, round);
+                p64 start = get_cpu_time();
+
+                for (positive row = 0; row < TALL; row++)
+                        if (side == 0)
+                                former_changed(into + row * 3840, mirror + row * 3840, from + row * 3840, WIDE);
+                        else if (side == 1)
+                                memory_copy_changed_u32(into + row * 3840, mirror + row * 3840, from + row * 3840, WIDE);
+                        else
+                                memory_copy(into + row * 3840, from + row * 3840, WIDE * 4);
+                took += get_cpu_time() - start;
+        }
+        return took;
+}
+
+b32 main(void)
+{
+        static const string_address names[] = {"no change", "one chunk a row", "every word"};
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier < 2 ? wide2 : 0;
+                if ((tier == 0 && !wide512) || (tier == 1 && !wide2))
+                        continue;
+#endif
+                for (positive pattern = 0; pattern < 3; pattern++)
+                {
+                        positive ratios[TRIES], plain[TRIES];
+
+                        BENCH_PAIRED(ratios, former, run(0, pattern, 200), assembly, run(1, pattern, 200));
+                        BENCH_PAIRED(plain, copy, run(2, pattern, 200), assembly, run(1, pattern, 200));
+                        string_format(log, "memory_copy_changed_u32 %p by %p, %s%s: paired median ASM/C %p.", (positive)WIDE,
+                                      (positive)TALL, names[pattern],
+#if X64
+                                      cpu_has_avx512 ? (string_address) " avx512" : cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        string_format(log, "%%, ASM/copy %p.", plain[TRIES / 2] / 100);
+                        positive_to_padded(log, plain[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide2;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_copy_changed */
 
 #ifdef BENCH_sweep_coverage
 /* memory_sweep_coverage against the loop it replaced in font_raster, over

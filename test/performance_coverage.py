@@ -271,6 +271,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_glass', 'memory_halve_u32 memory_
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
+      'paired timing against the chunks compared and copied in C and against a '
+      'plain copy a row, over rows with no change, one chunk and every word, '
+      'with AVX-512, AVX2 and SSE2')
 cover('direct_benchmark', 'test/checks.c#BENCH_sweep_coverage', 'memory_sweep_coverage',
       'paired former-C/assembly timing over coverage runs of 8 to 400 cells, '
       'every x86-64 body')
