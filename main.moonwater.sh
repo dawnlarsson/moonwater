@@ -40,25 +40,15 @@ function moonwater_ctrl_alt_delete {
   reboot
 }
 
-# The kernel's desktop is started first, with its log: it is what takes the card back and draws when the
-# compositor ends, before the supervisor has started it again.
+# The compositor is the desktop. Canvas holds the card and fills it with the desktop's colour between
+# one compositor and the next; a desktop that is not the compositor's is what `desktop boot` starts.
 function moonwater_canvas_on {
-  moonwater canvas log
-  desktop_start || moonwater canvas terminal
+  desktop_start
   moonwater desktop boot
 }
 
 function moonwater_canvas_off {
   desktop_stop
-}
-
-# The kernel's own desktop asks for a terminal at its Control-Shift-T.
-function moonwater_desktop_terminal {
-  if desktop_up; then
-    desktop_terminal
-  else
-    moonwater canvas terminal
-  fi
 }
 
 function key_ctrl_shift_t {
@@ -73,7 +63,7 @@ function key_super_space {
 
 # The desktop: the compositor, the kernel log and a terminal on it, under a
 # supervisor that starts the compositor again when it ends (at once, after half
-# a second, after two) and gives up to the kernel's desktop after four short
+# a second, after two) and gives up to the text console after four short
 # lives. Nothing here is named moonwater_, which would make it an event.
 
 function desktop_up {
@@ -209,8 +199,8 @@ function desktop_supervise {
     # Canvas turned off is why it ended, which is no failure.
     desktop_on || break
     if [ $desktop_fails -ge 4 ]; then
-      echo "desktop: the compositor ended $desktop_fails times in a row; Canvas has the card, and a terminal" > /dev/kmsg
-      moonwater canvas terminal
+      echo "desktop: the compositor ended $desktop_fails times in a row; Canvas is turned off, for the text console" > /dev/kmsg
+      moonwater canvas off
       break
     fi
     case $desktop_fails in
@@ -221,20 +211,24 @@ function desktop_supervise {
   rm -f /run/moonwater/supervisor.pid
 }
 
-# The compositor's desktop, unless the settings say another or moonwater.desktop=none
-# keeps it out of the way, or there is no font to draw with.
+# The compositor's desktop. The settings can name another (a profile's session,
+# or off, which `desktop boot` carries out) and moonwater.desktop=none keeps the
+# compositor out of the way: Canvas holds the card and nothing draws on it. With
+# no font to draw with there is no desktop to start, and Canvas is turned off for the
+# text console.
 function desktop_start {
   case $(moonwater desktop) in
   *"desktop canvas"*) ;;
-  *) return 1 ;;
+  *) return 0 ;;
   esac
   case $(cat /proc/cmdline) in
-  *moonwater.desktop=none*) return 1 ;;
+  *moonwater.desktop=none*) return 0 ;;
   esac
   desktop_font
   if [ -z "$desktop_face" ]; then
     desktop_named
-    echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and no mono face is under /usr/share/fonts; the desktop is the kernel's" > /dev/kmsg
+    echo "desktop: no font to draw with: /root/font names ${desktop_try:-no file}, which is not readable, and no mono face is under /usr/share/fonts; Canvas is turned off, for the text console" > /dev/kmsg
+    moonwater canvas off
     return 1
   fi
   if [ -s /run/moonwater/supervisor.pid ] && kill -0 $(cat /run/moonwater/supervisor.pid) 2> /dev/null; then

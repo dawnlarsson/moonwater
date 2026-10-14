@@ -16595,7 +16595,7 @@ counted
 #       mouse_move there is relative whatever device is selected and a tablet
 #       has no relative axes to move along.
 #
-#       The machine script's desktop functions, the supervisor's give-up and canvas off, the
+#       The machine script's desktop functions, the supervisor's give-up to the text console, the
 #       stop, the font the terminal draws with and the no-table line, run the way the machine
 #       runs them: the moonwater shell as bash, which is where the function keyword and $SECONDS
 #       are, against stub programs with the paths they name redirected into a directory of the
@@ -16631,9 +16631,11 @@ make_stub()
         rm -rf "$d"
         mkdir -p "$d/bin" "$d/root" "$d/run/moonwater" "$d/fonts"
         echo on > "$d/canvas"
+        echo canvas > "$d/desktop"
+        echo "console=ttyS0" > "$d/cmdline"
         : > "$d/starts"
         : > "$d/args"
-        : > "$d/kernel"
+        : > "$d/calls"
         : > "$d/kmsg"
         echo x > "$d/fonts/A-Mono.ttf"
         echo x > "$d/fonts/Q-Face.ttf"
@@ -16671,12 +16673,11 @@ EOF
         cat > "$d/bin/moonwater" <<'EOF'
 #!/bin/sh
 case $1 in
-desktop) echo "desktop canvas" ;;
+desktop) echo "desktop $(cat "$STUB/desktop")" ;;
 canvas)
         case $2 in
         "") if [ "$(cat "$STUB/canvas")" = on ]; then echo "Canvas is on"; else echo "Canvas is off"; fi ;;
-        terminal) echo terminal >> "$STUB/kernel" ;;
-        log) echo log >> "$STUB/kernel" ;;
+        off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
         esac ;;
 esac
 EOF
@@ -16684,9 +16685,7 @@ EOF
 }
 
 # The script with its absolute paths pointed into the case directory. The kmsg stub appends, as
-# /dev/kmsg does, and the program paths are matched only where a space follows them. The screens
-# are the case's, none: the machine running the lane may have two connected, which keeps the
-# kernel's desktop.
+# /dev/kmsg does, and the program paths are matched only where a space follows them.
 redirect()
 {
         sed -e "s#> /dev/kmsg#>> \$STUB/kmsg#g" \
@@ -16694,6 +16693,7 @@ redirect()
             -e "s#/run/moonwater#\$STUB/run/moonwater#g" \
             -e "s#/root/font#\$STUB/root/font#g" \
             -e "s#/dev/kmsg#\$STUB/kmsg#g" \
+            -e "s#/proc/cmdline#\$STUB/cmdline#g" \
             -e "s#/usr/share/fonts#\$STUB/fonts#g" \
             -e "s#/compositor\([ &]\)#\$STUB/bin/compositor\1#g" \
             -e "s#/klog\([ ]\)#\$STUB/bin/klog\1#g" \
@@ -16741,12 +16741,12 @@ desktop_start
 sup=$(cat "$STUB/run/moonwater/supervisor.pid")
 wait $sup
 echo "starts=$(wc -l < "$STUB/starts")"
-echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "off=$(grep -c off "$STUB/calls")"
 echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
 EOF
 run_driver
 report "a long life restarts the count of deaths" "$(grep '^starts=' "$STUB/out")" "starts=6"
-report "no give-up terminal after a long life" "$(grep '^kernel=' "$STUB/out")" "kernel=0"
+report "no give-up to the text console after a long life" "$(grep '^off=' "$STUB/out")" "off=0"
 report "supervisor pid file removed when it ends" "$(grep '^stale=' "$STUB/out")" "stale=no"
 
 # B: four deaths, the fourth with Canvas turned off (the chord): the supervisor ends and is not given up on.
@@ -16757,11 +16757,11 @@ cat > "$STUB/driver.sh" <<'EOF'
 desktop_start
 sup=$(cat "$STUB/run/moonwater/supervisor.pid")
 wait $sup
-echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "off=$(grep -c off "$STUB/calls")"
 echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
 EOF
 run_driver
-report "canvas off ends a supervisor with no give-up terminal" "$(grep '^kernel=' "$STUB/out")" "kernel=0"
+report "canvas off ends a supervisor with no give-up to the text console" "$(grep '^off=' "$STUB/out")" "off=0"
 report "canvas off leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
 
 # C: desktop_stop returns when the compositor has ended, not while it is on its way out.
@@ -16827,35 +16827,24 @@ run_driver
 report "a second start keeps the one supervisor" "$(grep '^same=' "$STUB/out")" "same=1"
 report "and starts one compositor" "$(grep '^starts=' "$STUB/out")" "starts=1"
 
-# G: a terminal asked for with no compositor is the kernel's, once.
-begin request
-printf '0 off\n' > "$STUB/lives"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
-before=$(grep -c terminal "$STUB/kernel")
-moonwater_desktop_terminal
-after=$(grep -c terminal "$STUB/kernel")
-echo "delta=$((after - before))"
-EOF
-run_driver
-report "one request with no compositor is one kernel terminal" "$(grep '^delta=' "$STUB/out")" "delta=1"
-# H: four quick deaths with Canvas on: the supervisor gives up, one kernel terminal, and no pid file is left.
+# H: four quick deaths with Canvas on: the supervisor gives up, asks for the text console once, and no pid file is left.
 begin giveup-quick
 printf '0\n0\n0\n0\n' > "$STUB/lives"
 cat > "$STUB/driver.sh" <<'EOF'
 . "$STUB/main.sed.sh"
 desktop_start
 wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
-echo "kernel=$(grep -c terminal "$STUB/kernel")"
+echo "off=$(grep -c off "$STUB/calls")"
+echo "said=$(grep -c 'ended 4 times in a row' "$STUB/kmsg")"
 echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
 EOF
 run_driver
-report "a give-up opens one kernel terminal" "$(grep '^kernel=' "$STUB/out")" "kernel=1"
+report "a give-up turns Canvas off once, for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
+report "a give-up says so in the log" "$(grep '^said=' "$STUB/out")" "said=1"
 report "a give-up leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
 
-# I: a machine with no font at all keeps the kernel's desktop: no compositor, and the log says so.
+# I: a machine with no font at all has no desktop to start: no compositor, the log says so, and
+# Canvas is turned off once, for the text console.
 begin nofont
 rm -f "$STUB/fonts/A-Mono.ttf" "$STUB/fonts/Q-Face.ttf"
 cat > "$STUB/driver.sh" <<'EOF'
@@ -16864,11 +16853,44 @@ desktop_start
 echo "rc=$?"
 echo "nofont=$(grep -c 'no font to draw with' "$STUB/kmsg")"
 echo "starts=$(wc -l < "$STUB/starts")"
+echo "off=$(grep -c off "$STUB/calls")"
 EOF
 run_driver
 report "no font: desktop_start refuses" "$(grep '^rc=' "$STUB/out")" "rc=1"
 report "no font: the log names the missing font" "$(grep '^nofont=' "$STUB/out")" "nofont=1"
 report "no font: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
+report "no font: Canvas is turned off for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
+
+# J: moonwater.desktop=none keeps the compositor out of the way, and so does a desktop choice that is
+# not the compositor's; neither is a failure and neither turns Canvas off (desktop boot carries out the choice).
+begin none
+echo "console=ttyS0 moonwater.desktop=none" > "$STUB/cmdline"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+echo "rc=$?"
+echo "starts=$(wc -l < "$STUB/starts")"
+echo "off=$(grep -c off "$STUB/calls")"
+echo "pidfile=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
+EOF
+run_driver
+report "desktop=none: desktop_start comes back well" "$(grep '^rc=' "$STUB/out")" "rc=0"
+report "desktop=none: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
+report "desktop=none: Canvas stays on" "$(grep '^off=' "$STUB/out")" "off=0"
+report "desktop=none: no supervisor is left" "$(grep '^pidfile=' "$STUB/out")" "pidfile=no"
+begin profile
+echo kde > "$STUB/desktop"
+cat > "$STUB/driver.sh" <<'EOF'
+. "$STUB/main.sed.sh"
+desktop_start
+echo "rc=$?"
+echo "starts=$(wc -l < "$STUB/starts")"
+echo "off=$(grep -c off "$STUB/calls")"
+EOF
+run_driver
+report "another desktop: desktop_start comes back well" "$(grep '^rc=' "$STUB/out")" "rc=0"
+report "another desktop: the compositor is not started" "$(grep '^starts=' "$STUB/out")" "starts=0"
+report "another desktop: Canvas stays on for its session" "$(grep '^off=' "$STUB/out")" "off=0"
 
 RUNNER
         unshare -Urpf --mount-proc sh "$desktop_work/runner.sh" "$desktop_work/bash" "$desktop_work/cases" \
@@ -20702,19 +20724,20 @@ back, took = until(lambda: newer(stopped), 15)
 out.append(("R1.5 moonwater canvas on starts the desktop again",
             "yes" if back and canvas() == "on" else "no", "yes"))
 
-#   Four deaths in a row and the supervisor stops: the kernel's desktop has the
-#   card, and a terminal of its own, which the keyboard reaches.
+#   Four deaths in a row and the supervisor stops: Canvas is turned off, for the text console, and
+#   the shell on it answers the keyboard.
 for _ in range(6):
     pid = compositor()
     if not (pid and alive(pid)):
         break
     shell.run("kill -9 %s" % pid)
     until(lambda: newer(pid), 6)
+until(lambda: canvas() == "off", 10)
 time.sleep(3)
-windows = shell.run("moonwater canvas | head -1")[0]
-out.append(("R1.6 four deaths in a row end the supervisor: no compositor, and the kernel desktop has a terminal beside its log",
-            "%s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
-                       "1 window" if "1 window" in windows else windows[-30:]), "none 1 window"))
+said_up = shell.run("dmesg | grep 'times in a row'")[0]
+out.append(("R1.6 four deaths in a row end the supervisor: no compositor, Canvas off for the text console, and the log says so",
+            "%s %s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
+                          canvas(), "said" if "ended 4 times in a row" in said_up else "not said"), "none off said"))
 type_text("echo r1-typed-")
 chord("shift", "4")
 chord("shift", "4")
@@ -20724,35 +20747,22 @@ type_text(" /dev/tty")
 chord("shift", "s")
 type_text("0\n")
 until(lambda: shell.run("echo", 2) and re.search(rb"r1-typed-\d+", shell.heard), 10)
-out.append(("and the kernel's terminal answers the keyboard",
+out.append(("and the shell on the text console answers the keyboard",
             "yes" if re.search(rb"r1-typed-\d+", shell.heard) else "no", "yes"))
 
-#   Control-Shift-T on the kernel's own desktop is the same request to the machine script, which answers
-#   it with the kernel's terminal where there is no compositor: one more window.
-def windows():
-    found = re.search(r"(\d+) windows?", shell.run("moonwater canvas | head -1", 10)[0])
-    return int(found.group(1)) if found else -1
-
-had = windows()
-chord("ctrl", "shift", "t")
-more, _ = until(lambda: windows() == had + 1, 10)
-out.append(("R1.6b Control-Shift-T on the kernel's desktop is answered by the machine script with a terminal of its own: one more window",
-            "yes" if more else "no (%d to %d)" % (had, windows()), "yes"))
-
 #   No font to draw with: the engine has no face of its own, so the desktop is not started on a screen with
-#   nothing on it. The kernel's desktop has the screen, with its log and a terminal, and the log of the
-#   machine names the file that is missing. The image's own fonts are hidden under a file system with none.
-shell.run("moonwater canvas off", 15)
-until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
+#   nothing on it. Canvas is turned off for the text console, and the log of the machine names the file that
+#   is missing. The image's own fonts are hidden under a file system with none.
 shell.run("mkdir -p /usr/share/fonts; mount -t tmpfs none /usr/share/fonts; echo /nonexistent/font.ttf > /root/font", 20)
 shell.run("moonwater canvas on", 15)
-time.sleep(4)
+until(lambda: "no font" in shell.run("dmesg | grep 'desktop: no font'")[0] and canvas() == "off", 15)
+time.sleep(2)
 said_no_font = shell.run("dmesg | grep 'desktop: no font'")[0]
 out.append(("R1.7 with no font to draw with the machine script starts no compositor, and the log of the machine names the file that is missing",
             "%s %s" % ("none" if shell.number("ps | grep -c '[c]ompositor'") == "0" else "running",
                        "named" if "/nonexistent/font.ttf" in said_no_font else "not named"), "none named"))
-out.append(("and Canvas is on with the kernel's desktop, which has a terminal at the keyboard",
-            "%s %s" % ("on" if canvas() == "on" else "off", "terminal" if windows() >= 1 else "no window"), "on terminal"))
+out.append(("and Canvas is turned off, for the text console",
+            "off" if canvas() == "off" else "on", "off"))
 type_text("echo r1-nofont-")
 chord("shift", "4")
 chord("shift", "4")
@@ -20762,7 +20772,7 @@ type_text(" /dev/tty")
 chord("shift", "s")
 type_text("0\n")
 until(lambda: shell.run("echo", 2) and re.search(rb"r1-nofont-\d+", shell.heard), 10)
-out.append(("and that terminal answers the keyboard", "yes" if re.search(rb"r1-nofont-\d+", shell.heard) else "no", "yes"))
+out.append(("and the shell on it answers the keyboard", "yes" if re.search(rb"r1-nofont-\d+", shell.heard) else "no", "yes"))
 
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
