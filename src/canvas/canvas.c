@@ -3231,11 +3231,11 @@ static void canvas_thread_wake(void)
         stay off throughout: the other program (the compositor, KDE's, Weston)
         reads the devices itself.
 
-        The test is made when the thread wakes for a chord, and every ~250 ms
-        while suspended with nothing else to wake for, so a program that drops
-        master and stays running does not leave a frozen screen: the ground is
-        drawn again within a poll of the card coming back. A commit made while
-        the other program was master answered EBUSY and changed nothing.
+        The test is made every ~250 ms, and when the thread wakes for a
+        chord, so a program that drops master and stays running does not leave
+        a frozen screen: the ground is drawn again within a poll of the card
+        coming back. A commit made while the other program was master answered
+        EBUSY and changed nothing.
 */
 #define CANVAS_SUSPENDED_POLL_MS 250
 
@@ -3426,13 +3426,20 @@ static _Bool canvas_suspend_check(void)
 }
 
 /*
-        Sleeps until a chord asks for something, and while another program
-        holds a card polls for the card coming back.
+        Looks at who holds the cards four times a second, and at once when a
+        chord asks for something.
+
+        Nothing tells Canvas that a program took the display or gave it back
+        without closing it: no hook runs when a master is dropped, only when
+        the last file of a card closes. So the thread looks, and says so
+        (`moonwater canvas`) while another program is master, and draws the
+        ground again within a poll of the card coming back. A machine that
+        sleeps is not looked at.
 
         set_current_state before the flag is read, which is what makes the
         sleep safe: a wake arriving between the two finds the task already
         marked and schedule_timeout returns at once rather than losing the
-        event. With nothing held and nothing asked it sleeps for good.
+        event.
 */
 static int canvas_loop(void *unused)
 {
@@ -3441,9 +3448,9 @@ static int canvas_loop(void *unused)
                 set_current_state(TASK_IDLE);
 
                 if (!atomic_read(&desktop.reclaim))
-                        schedule_timeout(READ_ONCE(desktop.suspended) && !READ_ONCE(desktop.asleep)
-                                             ? msecs_to_jiffies(CANVAS_SUSPENDED_POLL_MS)
-                                             : MAX_SCHEDULE_TIMEOUT);
+                        schedule_timeout(READ_ONCE(desktop.asleep)
+                                             ? MAX_SCHEDULE_TIMEOUT
+                                             : msecs_to_jiffies(CANVAS_SUSPENDED_POLL_MS));
 
                 __set_current_state(TASK_RUNNING);
                 WRITE_ONCE(canvas_passes, canvas_passes + 1);

@@ -27249,7 +27249,7 @@ static void desktop_resume(void) { assert(desktop.lock);mock_resumes++;desktop.s
     source += section(pointer, "#define CANVAS_SUSPENDED_POLL_MS",
                       "/*\n        The session of whatever holds the display, ended.")
     source += "static unsigned mock_reclaims;\nstatic void canvas_reclaim(void) { mock_reclaims++; }\n"
-    source += section(pointer, "static _Bool canvas_suspend_check", "/*\n        Sleeps until a chord asks")
+    source += section(pointer, "static _Bool canvas_suspend_check", "/*\n        Looks at who holds the cards")
     # Bindings: the table, spawn without UMH, debounce, the chord, and the ioctl.
     source += r"""
 #define KEY_POWER 116
