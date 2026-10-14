@@ -1917,6 +1917,99 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
 //      straight bar's are.
 #define FONT_ROUND_BAR 6
 
+/*
+        Dots: a contour of ink (not a counter) half a pixel to two and a half
+        across either way and no more than twice as long one way as the
+        other -- the dots of . : ; ! ? i and j -- made whole pixels each way
+        and set on the grid about its centre. A dot of 1.2 px fell on two
+        rows and two columns at most places and was a grey blot; code is full
+        of them. Which contours are dots, and their sizes, are taken before the
+        stems are snapped (font_dots_measure), whose map stretches a dot beside
+        a stem (the dot of ! at 10 px went from 1.0 to 2.04 px wide); where
+        each goes is its centre after them, so the dot of i stays over its
+        stem.
+*/
+#define FONT_DOTS 16
+
+static fn font_dots_measure(const font_engine address_to e, b64 address_to sizes)
+{
+        f64 whole = 0;
+        p32 first = 0;
+
+        memory_zero(sizes, 2 * FONT_DOTS * sizeof(b64));
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+                for (p32 i = first; i <= e->contour[c].last; i++)
+                {
+                        font_point a = e->points[i], b = e->points[i == e->contour[c].last ? first : i + 1];
+
+                        whole += (f64)a.x * b.y - (f64)b.x * a.y;
+                }
+        first = 0;
+        for (p32 c = 0; c < e->contour_count && c < FONT_DOTS; first = e->contour[c++].last + 1u)
+        {
+                p32 last = e->contour[c].last;
+                b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
+                f64 area = 0;
+
+                if (last <= first)
+                        continue;
+                for (p32 i = first; i <= last; i++)
+                {
+                        font_point a = e->points[i], b = e->points[i == last ? first : i + 1];
+
+                        area += (f64)a.x * b.y - (f64)b.x * a.y;
+                        left = a.x < left ? a.x : left;
+                        right = a.x > right ? a.x : right;
+                        bottom = a.y < bottom ? a.y : bottom;
+                        top = a.y > top ? a.y : top;
+                }
+
+                b64 width = right - left, height = top - bottom;
+                if ((area < 0) != (whole < 0) || width < FONT_ONE / 2 || height < FONT_ONE / 2 ||
+                    width > FONT_ONE * 5 / 2 || height > FONT_ONE * 5 / 2 || width > 2 * height || height > 2 * width)
+                        continue;
+                sizes[2 * c] = font_round(width) < FONT_ONE ? FONT_ONE : font_round(width);
+                sizes[2 * c + 1] = font_round(height) < FONT_ONE ? FONT_ONE : font_round(height);
+        }
+}
+
+static fn font_dots(font_engine address_to e, const b64 address_to sizes)
+{
+        p32 first = 0;
+
+        for (p32 c = 0; c < e->contour_count && c < FONT_DOTS; first = e->contour[c++].last + 1u)
+        {
+                p32 last = e->contour[c].last;
+                b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
+                b64 across = sizes[2 * c], up = sizes[2 * c + 1];
+
+                if (!across)
+                        continue;
+                for (p32 i = first; i <= last; i++)
+                {
+                        left = e->points[i].x < left ? e->points[i].x : left;
+                        right = e->points[i].x > right ? e->points[i].x : right;
+                        bottom = e->points[i].y < bottom ? e->points[i].y : bottom;
+                        top = e->points[i].y > top ? e->points[i].y : top;
+                }
+
+                b64 width = right - left, height = top - bottom;
+                b64 x = ((left + right - across + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                b64 y = ((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+
+                if (width <= 0 || height <= 0)
+                        continue;
+                for (p32 i = first; i <= last; i++)
+                {
+                        f64 u = (f64)(e->points[i].x - left) * (f64)across / (f64)width;
+                        f64 v = (f64)(e->points[i].y - bottom) * (f64)up / (f64)height;
+
+                        e->points[i].x = x + (b64)(u + 0.5);
+                        e->points[i].y = y + (b64)(v + 0.5);
+                }
+        }
+}
+
 //      Horizontal bars, for any fitted text: its baseline is a whole pixel.
 //      The axes are swapped so the bars are the stems above, and the
 //      fitted lines are kept where the fit put them.
@@ -3096,7 +3189,10 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                              : pixels >= until ? 0
                              : (b32)e->darken * (until - pixels) / (until - 12);
                 if (amount > 0)
-                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, true);
+                        //      Across only where the heights are fitted: grown every
+                        //      way, it put a row of 6 percent ink over the cap
+                        //      height and under the baseline of every glyph.
+                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, (style & 1) != 0);
         }
         b64 heavier = style & 16 ? (b64)size * (FONT_ONE / 64) / 24 : 0;
         if (heavier)
@@ -3122,6 +3218,9 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         //      Stems under three quarters of a pixel (Plex Mono at 8 and 9 px) are thickened across to a whole
         //      pixel and snapped whole: grown in both directions the bars and the lines would move, and snapped
         //      whole at their own width the diagonal between two black stems, N's, faded to nothing.
+        b64 dots[2 * FONT_DOTS];
+        if (style & 1)
+                font_dots_measure(e, dots);
         b64 thin = 0;
         if (standard && !(style & 8))
         {
@@ -3134,6 +3233,8 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         }
         if (fixes && zones[3])
                 font_bars(e, face, size, zones[3], lines, fixes, heavier);
+        if (style & 1)
+                font_dots(e, dots);
 
         b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
         for (p32 i = 0; i < e->point_count; i++)

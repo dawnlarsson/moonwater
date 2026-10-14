@@ -107080,9 +107080,10 @@ static fn check_synthetic(const font_face address_to one, const font_face addres
 /*
         Darkening by default: a cell of black on white drawn as asked has
         more ink than with FONT_UNDARKENED, and one of white on black is the
-        same pixels either way. Unhinted: darkening moves points across only,
-        and a hinted cell's stems snap back to the same whole pixels, so on
-        this face's straight A it would add nothing to count.
+        same pixels either way. Unhinted, where darkening grows the outline
+        every way: fitted, it moves points across only and a cell's stems
+        snap back to the same whole pixels, so on this face's straight A it
+        would add nothing to count.
 */
 static p32 polarity_one[64 * 400], polarity_two[64 * 400];
 
