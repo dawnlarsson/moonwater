@@ -93582,11 +93582,11 @@ static fn huffman_exact_end(void)
         positive tree = 0;
         zstd_huff huff;
         check("the exactness section packs and its tree reads",
-              cn && zstd_huff_read(zstd_packed_lits, cn, address_of tree,
+              cn && zstd_huff_read(zstd_arena->packed_lits, cn, address_of tree,
                                    address_of huff));
         if (!cn || tree >= cn)
                 return;
-        p8 address_to streams = zstd_packed_lits + tree;
+        p8 address_to streams = zstd_arena->packed_lits + tree;
         positive size = cn - tree;
         check("four streams that end on their last bits decode",
               zstd_huffman_4x(back, sizeof(src), streams, size, huff.cell,
@@ -93715,7 +93715,7 @@ static fn literal_codebooks(void)
                                 check("literal tree worth encoding", n < 513);
                                 continue;
                         }
-                        memory_copy_apart(packed + hn, zstd_packed_lits, cn);
+                        memory_copy_apart(packed + hn, zstd_arena->packed_lits, cn);
                         positive used = 0, got = 0;
                         zstd_block_limit = ZSTD_BLOCK_MAX;
                         check("four streams and complete direct/FSE tree",

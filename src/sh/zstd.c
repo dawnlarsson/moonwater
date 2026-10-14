@@ -3383,21 +3383,48 @@ static zstd_ctable zstd_ct_ll;
 static zstd_ctable zstd_ct_of;
 static zstd_ctable zstd_ct_ml;
 static bool zstd_ct_ready;
-static zstd_enc_seq zstd_seqs[ZSTD_ENC_SEQ_MAX];
-static p8 zstd_enc_lits[ZSTD_BLOCK_MAX + 64];
-static p8 zstd_enc_bits[ZSTD_BLOCK_MAX + 256];
-static p8 zstd_enc_block_out[ZSTD_BLOCK_MAX + 2048];
-static p8 zstd_enc_trial_out[ZSTD_BLOCK_MAX + 2048];
-static p8 zstd_enc_split_out[ZSTD_BLOCK_MAX + 2048 * 4];
-static p32 zstd_enc_cum_lit[ZSTD_ENC_SEQ_MAX + 2];
-static p32 zstd_enc_cum_src[ZSTD_ENC_SEQ_MAX + 2];
-static p8 zstd_packed_lits[ZSTD_BLOCK_MAX * 2 + 512];
-static p32 zstd_lit_table_new[256];
-static p8 zstd_lit_length_new[256];
 #define ZSTD_OPT_NUM 4096
 #define ZSTD_PRICE_MAX ((bipolar)1 << 30)
-static zstd_opt_node zstd_opt[ZSTD_OPT_NUM + 3];
-static zstd_opt_match zstd_matches[ZSTD_OPT_NUM + 3];
+
+/*
+        The encoder's working buffers, one block's worth of each (about 2 MiB
+        together): mapped when the first encoder opens, and not kept in the
+        image, where they were address space for every tool of the shell that
+        never compresses a byte.
+*/
+typedef struct
+{
+        zstd_enc_seq seqs[ZSTD_ENC_SEQ_MAX];
+        p8 lits[ZSTD_BLOCK_MAX + 64];
+        p8 bits[ZSTD_BLOCK_MAX + 256];
+        p8 block_out[ZSTD_BLOCK_MAX + 2048];
+        p8 trial_out[ZSTD_BLOCK_MAX + 2048];
+        p8 split_out[ZSTD_BLOCK_MAX + 2048 * 4];
+        p32 cum_lit[ZSTD_ENC_SEQ_MAX + 2];
+        p32 cum_src[ZSTD_ENC_SEQ_MAX + 2];
+        p8 packed_lits[ZSTD_BLOCK_MAX * 2 + 512];
+        p32 lit_table_new[256];
+        p8 lit_length_new[256];
+        zstd_opt_node opt[ZSTD_OPT_NUM + 3];
+        zstd_opt_match matches[ZSTD_OPT_NUM + 3];
+} zstd_enc_arena;
+
+static zstd_enc_arena address_to zstd_arena;
+
+/* The arena, mapped on the first call; null when the map is refused. */
+static zstd_enc_arena address_to zstd_arena_map(void)
+{
+        if (!zstd_arena)
+        {
+                bipolar mapped = system_call_6(syscall(mmap), 0, sizeof(zstd_enc_arena), FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                                               FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS, (positive)-1, 0);
+
+                if (mapped < 0 && mapped > -4096)
+                        return null;
+                zstd_arena = (zstd_enc_arena address_to)mapped;
+        }
+        return zstd_arena;
+}
 
 static __attribute__((always_inline)) inline fn zstd_bout_add(zstd_bout address_to b, p64 v, p8 nbits)
 {
@@ -3934,7 +3961,7 @@ static fn zstd_huffman_shape(const p32 address_to freq, positive max_sym,
 }
 
 /*
-        Huffman literals into the encoder's packed buffer (zstd_packed_lits
+        Huffman literals into the encoder's packed buffer (the arena's
         with no encoder): a new tree, or none when the
         encoder's last table codes every symbol here for no more bytes than
         a new tree and its description (treeless literals); one stream under
@@ -3962,9 +3989,12 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
         p64 field;
         bool reuse = false;
         bool const single = n < 256;
-        p8 address_to const packed_out = e ? e->packed : zstd_packed_lits;
-        p32 address_to const table_new = e ? e->lit_table_new : zstd_lit_table_new;
-        p8 address_to const length_new = e ? e->lit_length_new : zstd_lit_length_new;
+        zstd_enc_arena address_to const arena = e ? zstd_arena : zstd_arena_map();
+        if (!arena)
+                return 0;
+        p8 address_to const packed_out = e ? e->packed : arena->packed_lits;
+        p32 address_to const table_new = e ? e->lit_table_new : arena->lit_table_new;
+        p8 address_to const length_new = e ? e->lit_length_new : arena->lit_length_new;
         p32 address_to table = table_new;
         p8 type = 2;
 
@@ -6376,19 +6406,21 @@ static bool zstd_encoder_open(zstd_encoder address_to e,
         e->output = null;
         if (!e->seqs)
         {
-                e->seqs = zstd_seqs;
-                e->lits = zstd_enc_lits;
-                e->bits = zstd_enc_bits;
-                e->block_out = zstd_enc_block_out;
-                e->trial_out = zstd_enc_trial_out;
-                e->split_out = zstd_enc_split_out;
-                e->cum_lit = zstd_enc_cum_lit;
-                e->cum_src = zstd_enc_cum_src;
-                e->packed = zstd_packed_lits;
-                e->lit_table_new = zstd_lit_table_new;
-                e->lit_length_new = zstd_lit_length_new;
-                e->opt = zstd_opt;
-                e->matches = zstd_matches;
+                if (!zstd_arena_map())
+                        return false;
+                e->seqs = zstd_arena->seqs;
+                e->lits = zstd_arena->lits;
+                e->bits = zstd_arena->bits;
+                e->block_out = zstd_arena->block_out;
+                e->trial_out = zstd_arena->trial_out;
+                e->split_out = zstd_arena->split_out;
+                e->cum_lit = zstd_arena->cum_lit;
+                e->cum_src = zstd_arena->cum_src;
+                e->packed = zstd_arena->packed_lits;
+                e->lit_table_new = zstd_arena->lit_table_new;
+                e->lit_length_new = zstd_arena->lit_length_new;
+                e->opt = zstd_arena->opt;
+                e->matches = zstd_arena->matches;
         }
         if (zstd_dict_on)
         {
