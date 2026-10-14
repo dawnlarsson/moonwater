@@ -5139,8 +5139,11 @@ static b32 host_canvas_open(positive request, string_address what)
 }
 
 static b32 locale_canvas_setting(string_address address_to arguments, positive count);
+static b32 locale_canvas_background(string_address address_to arguments, positive count);
+static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
 
-/* moonwater canvas [on|off|log|terminal|scale [N|auto]|modes [largest|preferred]] */
+/* moonwater canvas [on|off|log|terminal|scale [N|auto]|modes [largest|preferred]|
+   background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -5151,6 +5154,10 @@ static b32 host_canvas(string_address address_to arguments, positive count)
         if (count >= 3 && (string_equals(arguments[2], "scale") ||
                            string_equals(arguments[2], "modes")))
                 return locale_canvas_setting(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "background"))
+                return locale_canvas_background(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "cursor"))
+                return locale_canvas_cursor(arguments, count);
 
         return_if(count > 3, host_usage());
 
@@ -14984,6 +14991,9 @@ static COLD bipolar sntp_query_apart(string_address name, p16 port, bool filter,
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_CANVAS_SCALE_PATH "/root/canvas.scale"
 #define LOCALE_CANVAS_MODES_PATH "/root/canvas.modes"
+#define LOCALE_CANVAS_BACKGROUND_PATH "/root/canvas.background"
+#define LOCALE_CANVAS_CURSOR_SIZE_PATH "/root/canvas.cursor.size"
+#define LOCALE_CANVAS_CURSOR_LOOK_PATH "/root/canvas.cursor.look"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
 #define LOCALE_NTP_SERVER_ROOM 80
 #define LOCALE_NTP_RETRY_LEAST 1
@@ -17845,6 +17855,137 @@ static b32 locale_canvas_setting(string_address address_to arguments, positive c
 }
 
 /*
+        The desktop's ink and the pointer's look and size: the compositor's, kept in /root as the
+        scale is and taken by the compositor as soon as a file is written (it watches /root, as
+        it does for the keyboard layout) and again whenever it starts. Nothing is asked of Canvas,
+        so what is said is what is kept: the default when nothing is.
+*/
+#define LOCALE_CANVAS_BACKGROUND_STANDARD "#1e1e1e" // the compositor's COMPOSITOR_INK_DESKTOP
+
+//      A colour as #rrggbb in lower case, from rrggbb or the three digits of either that
+//      stand for each one twice: false for anything else.
+static bool locale_background_normal(string_address word, p8 address_to into)
+{
+        long colour = window_colour_parse(word);
+        p8 bytes[3] = {(p8)(colour >> 16), (p8)(colour >> 8), (p8)colour};
+
+        if (colour < 0)
+                return false;
+        into[0] = '#';
+        memory_into_hex(into + 1, bytes, 3);
+        into[7] = end;
+        return true;
+}
+
+static bool locale_background_ok(string_address word)
+{
+        p8 normal[8];
+
+        return string_equals(word, "default") || locale_background_normal(word, normal);
+}
+
+static bool locale_cursor_size_ok(string_address word)
+{
+        return string_equals(word, "auto") || (word[0] >= '1' && word[0] <= '4' && !word[1]);
+}
+
+static bool locale_cursor_look_ok(string_address word)
+{
+        return string_equals(word, "auto") || string_equals(word, "light") || string_equals(word, "dark");
+}
+
+//      What one of them is: the word kept when it is one, the standard when it is not or none is,
+//      and that it is root's to read when /root is closed to the caller.
+static string_address locale_canvas_word(string_address path, string_address standard,
+                                         bool (*ok)(string_address), p8 address_to word, positive room)
+{
+        if (!locale_readable(path, word, room))
+                return (string_address)LOCALE_NEEDS_ROOT;
+        return word[0] && !string_equals(word, "default") && ok((string_address)word)
+                   ? (string_address)word : standard;
+}
+
+static b32 locale_canvas_background_status(void)
+{
+        p8 word[16], shown[8];
+        string_address say = locale_canvas_word(LOCALE_CANVAS_BACKGROUND_PATH, LOCALE_CANVAS_BACKGROUND_STANDARD,
+                                                locale_background_ok, word, sizeof(word));
+
+        //      A colour written by hand without its # is said as the one the verb keeps.
+        if (say == (string_address)word && locale_background_normal(word, shown))
+                say = (string_address)shown;
+        host_say(log, host_label "background %s\n", say);
+        return 0;
+}
+
+//      Said as the one word the way is shown, and with both in a line when a verb asks for neither.
+static string_address locale_canvas_cursor_say(bool size, p8 address_to word, positive room)
+{
+        return size ? locale_canvas_word(LOCALE_CANVAS_CURSOR_SIZE_PATH, "auto", locale_cursor_size_ok, word, room)
+                    : locale_canvas_word(LOCALE_CANVAS_CURSOR_LOOK_PATH, "auto", locale_cursor_look_ok, word, room);
+}
+
+//      The word as it is kept: a root's, and never half written.
+static b32 locale_canvas_keep(string_address label, string_address path, string_address word)
+{
+        if (!bowl_is_root())
+                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
+        return host_save(label, path, word);
+}
+
+//      moonwater canvas background [COLOUR|default]
+static b32 locale_canvas_background(string_address address_to arguments, positive count)
+{
+        p8 normal[8];
+
+        return_if(count > 4, host_usage());
+        if (count < 4)
+                return locale_canvas_background_status();
+        if (!string_equals(arguments[3], "default") && !locale_background_normal(arguments[3], normal))
+                return host_refuse("background is a colour like 1e1e1e, or default, not %s\n", arguments[3]);
+        if (string_equals(arguments[3], "default"))
+                string_copy_bounded(normal, "default", sizeof(normal));
+        if (locale_canvas_keep("canvas background", LOCALE_CANVAS_BACKGROUND_PATH, (string_address)normal))
+                return 1;
+        return locale_canvas_background_status();
+}
+
+//      moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]
+static b32 locale_canvas_cursor(string_address address_to arguments, positive count)
+{
+        p8 word[16], other[16];
+        bool size;
+
+        if (count < 4)
+        {
+                host_say(log, host_label "cursor size %s, look %s\n",
+                         locale_canvas_cursor_say(true, word, sizeof(word)),
+                         locale_canvas_cursor_say(false, other, sizeof(other)));
+                return 0;
+        }
+        return_if(!string_equals(arguments[3], "size") && !string_equals(arguments[3], "look"), host_usage());
+        size = string_equals(arguments[3], "size");
+        return_if(count > 5, host_usage());
+        if (count < 5)
+        {
+                host_say(log, host_label "cursor %s %s\n", size ? "size" : "look",
+                         locale_canvas_cursor_say(size, word, sizeof(word)));
+                return 0;
+        }
+        if (size && !locale_cursor_size_ok(arguments[4]))
+                return host_refuse("cursor size is auto or a number from 1 to 4, not %s\n", arguments[4]);
+        if (!size && !locale_cursor_look_ok(arguments[4]))
+                return host_refuse("cursor look is light, dark or auto, not %s\n", arguments[4]);
+        if (locale_canvas_keep(size ? "cursor size" : "cursor look",
+                               size ? LOCALE_CANVAS_CURSOR_SIZE_PATH : LOCALE_CANVAS_CURSOR_LOOK_PATH,
+                               arguments[4]))
+                return 1;
+        host_say(log, host_label "cursor %s %s\n", size ? "size" : "look",
+                 locale_canvas_cursor_say(size, word, sizeof(word)));
+        return 0;
+}
+
+/*
         What the schedule makes of a query that ended, or of a look between
         queries. A success is only a success if the kernel still says the
         clock is synchronised when it is looked at: any change of
@@ -19304,6 +19445,8 @@ static const host_row host_rows[] = {
     {null, "canvas log|terminal", "open the kernel log or a terminal", 'b'},
     {null, "canvas scale [N|auto]", "device pixels to a drawn one, 1 to 4 [auto]", 'b'},
     {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
+    {null, "canvas background [COLOUR|default]", "the desktop colour, rrggbb [1e1e1e]", 'b'},
+    {null, "canvas cursor [size [N|auto]|look [light|dark|auto]]", "the pointer: size 1 to 4, colours [auto]", 'b'},
     {null, "desktop [canvas|off|PROFILE]", "what the machine starts as its desktop [canvas]", 'b'},
     {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
@@ -19700,6 +19843,9 @@ static string_address host_wipe_keep[] = {
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
+    HOST_WIPE_KEEP(LOCALE_CANVAS_BACKGROUND_PATH),
+    HOST_WIPE_KEEP(LOCALE_CANVAS_CURSOR_SIZE_PATH),
+    HOST_WIPE_KEEP(LOCALE_CANVAS_CURSOR_LOOK_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),

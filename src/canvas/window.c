@@ -1277,5 +1277,26 @@ static void windows_hover(const struct window_row *own, unsigned int wanted)
         __atomic_store_n(&own->table->hover_off[own->row], wanted ? 0u : 1u, __ATOMIC_RELEASE);
 }
 
+/*
+        A colour as the settings keep it: #rrggbb or rrggbb, or the three digits of either that stand
+        for each one twice. Negative for anything else.
+*/
+static long window_colour_parse(string_address text)
+{
+        p8 digits[6], bytes[3];
+
+        if (*text == '#')
+                text++;
+        if (string_length(text) == 3)
+        {
+                for (positive at = 0; at < 3; at++)
+                        digits[at * 2] = digits[at * 2 + 1] = text[at];
+                text = digits;
+        }
+        else if (string_length(text) != 6)
+                return -1;
+        return memory_from_hex(bytes, text, 3) ? (long)(bytes[0] << 16 | bytes[1] << 8 | bytes[2]) : -1;
+}
+
 #endif // KERNEL_MODE
 #endif // WINDOW_INCLUDED

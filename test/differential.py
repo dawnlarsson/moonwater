@@ -45321,6 +45321,10 @@ def harness_moonwater_cli(argv):
                 "canvas bogus", "canvas scale", "canvas scale 2", "canvas scale auto", "canvas scale 9",
                 "canvas scale 2 3", "canvas modes", "canvas modes preferred", "canvas modes sideways",
                 "canvas modes largest preferred",
+                "canvas background", "canvas background 112233", "canvas background default", "canvas background red",
+                "canvas background a b", "canvas cursor", "canvas cursor size", "canvas cursor size 2",
+                "canvas cursor size 9", "canvas cursor size 2 3", "canvas cursor look", "canvas cursor look dark",
+                "canvas cursor look sideways", "canvas cursor look dark light", "canvas cursor bogus",
                 "settings", "settings extra",
                 "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
@@ -45382,6 +45386,14 @@ def harness_moonwater_cli(argv):
             'canvas scale auto',
             'canvas modes',
             'canvas modes preferred',
+            'canvas background',
+            'canvas background 112233',
+            'canvas background default',
+            'canvas cursor',
+            'canvas cursor size',
+            'canvas cursor size 2',
+            'canvas cursor look',
+            'canvas cursor look dark',
             'name',
             'name random',
             'name x',
@@ -45432,6 +45444,9 @@ def harness_moonwater_cli(argv):
             'canvas off',
             'canvas scale 9',
             'canvas modes sideways',
+            'canvas background red',
+            'canvas cursor size 9',
+            'canvas cursor look sideways',
             'settings',
             'bind',
             'bind bogus',
@@ -45489,6 +45504,10 @@ def harness_moonwater_cli(argv):
             'canvas bogus',
             'canvas scale 2 3',
             'canvas modes largest preferred',
+            'canvas background a b',
+            'canvas cursor size 2 3',
+            'canvas cursor look dark light',
+            'canvas cursor bogus',
             'wifi add',
             'wifi remove',
             'wifi remove a b',
@@ -46779,7 +46798,8 @@ while True:
         # (their race ends on Paris or on Tokyo, which is JST) can spell.
         locale_say = say
         script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
-                  "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes\n"
+                  "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes "
+                  "/root/canvas.background /root/canvas.cursor.size /root/canvas.cursor.look\n"
                   "echo '@@ tz'; TZ=QQQ-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
                   "echo '@@ tz time'; TZ=QQQ-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
                   "printf 'off\\r\\n' > /root/wired.power\n" + locale_say("wired") +
@@ -46787,11 +46807,13 @@ while True:
         #       What a machine nobody has told anything says, then what it says to a
         #       caller with no right to look: /root at mode 000 is closed to nobody.
         readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard", "canvas scale",
-                   "canvas modes", "status")
+                   "canvas modes", "canvas background", "canvas cursor", "status")
         script += "".join(f"echo '@@ open {verb}'; timeout 20 /tmp/moonwater {verb} 2>&1; "
                           "echo \"@@status $?\"\n" for verb in readers)
         script += ("echo off > /root/ntp; echo off > /root/ntp.sampling; echo de > /root/keyboard\n"
                    "echo 3 > /root/canvas.scale; echo preferred > /root/canvas.modes\n"
+                   "echo ff0000 > /root/canvas.background; echo 3 > /root/canvas.cursor.size; "
+                   "echo dark > /root/canvas.cursor.look\n"
                    "echo Europe/Paris > /root/timezone; echo manual > /root/timezone.mode\n"
                    "chmod 000 /root\n")
         lines, finished = session(script)
@@ -46840,6 +46862,31 @@ while True:
                    canvas_kept("scale") + canvas_kept("modes") +
                    ": > /dev/spark\n" + locale_say("canvas scale 3") + canvas_kept("scale") +
                    locale_say("canvas modes largest") + canvas_kept("modes") + "rm -f /dev/spark\n")
+        #       The desktop's ink and the pointer are kept in /root as the scale is, and
+        #       a refusal keeps nothing; each shows the file after, the way the rows above do.
+        def look_kept(name):
+            return "echo \"@@look $(cat /root/canvas.%s 2>/dev/null || echo none)\"\n" % name
+        script += ("rm -f /root/canvas.background /root/canvas.cursor.size /root/canvas.cursor.look\n" +
+                   locale_say("canvas background") + locale_say("canvas cursor") +
+                   look_kept("background") + look_kept("cursor.size") + look_kept("cursor.look") +
+                   locale_say("canvas background \"#FF8800\"") + look_kept("background") +
+                   locale_say("canvas background 0af") + look_kept("background") +
+                   locale_say("canvas background 336699") + look_kept("background") +
+                   "".join(locale_say("canvas background " + bad) + look_kept("background")
+                           for bad in ("red", '"#12345"', '"#1234567"', "12345g", '""', '"##123456"')) +
+                   locale_say("canvas background default") + look_kept("background") +
+                   locale_say("canvas cursor size 3") + look_kept("cursor.size") +
+                   locale_say("canvas cursor look dark") + look_kept("cursor.look") +
+                   locale_say("canvas cursor size") + locale_say("canvas cursor look") +
+                   "".join(locale_say("canvas cursor size " + bad) + look_kept("cursor.size")
+                           for bad in ("0", "5", "big", "2x", '""')) +
+                   "".join(locale_say("canvas cursor look " + bad) + look_kept("cursor.look")
+                           for bad in ("grey", "Light", '""')) +
+                   locale_say("canvas cursor size auto") + look_kept("cursor.size") +
+                   locale_say("canvas cursor look light") + look_kept("cursor.look") +
+                   locale_say("canvas background a b") + locale_say("canvas cursor bogus") +
+                   locale_say("canvas cursor size 2 3") + locale_say("canvas cursor look dark light") +
+                   look_kept("background") + look_kept("cursor.size") + look_kept("cursor.look"))
         #       One query at a time: the clock is moved by what a query measured,
         #       so two that measured before either applied would move it twice. A
         #       hand's `time sync` against a query that holds the lock says so and
@@ -46863,7 +46910,8 @@ while True:
         wants = {"ntp": ("ntp off", "sampling off"), "ntp sampling": ("sampling off",),
                  "ntp server": (), "timezone": ("Europe/Paris", "manual"), "time": ("Europe/Paris",),
                  "keyboard": ("keyboard de",), "canvas scale": ("scale 3",),
-                 "canvas modes": ("modes preferred",),
+                 "canvas modes": ("modes preferred",), "canvas background": ("background #ff0000",),
+                 "canvas cursor": ("size 3", "look dark"),
                  "status": ("Europe/Paris", "ntp off", "keyboard de")}
         for verb in readers:
             shut, kept = text(f"shut {verb}"), text(f"kept {verb}")
@@ -46923,6 +46971,38 @@ while True:
               seen.get("canvas modes largest", {}).get("status") == 1,
               "a Canvas that refused the ioctl is a word kept and said not taken",
               text("canvas scale 3"))
+        #       In the order they ran: none kept (three), then #ff8800, #00aaff, #336699; six refusals
+        #       leave it; default; then the sizes and looks, the refusals leaving them as they were.
+        looks = [line[len("@@look "):] for line in lines if line.startswith("@@look ")]
+        wanted = (["none"] * 3 + ["#ff8800", "#00aaff", "#336699"] + ["#336699"] * 6 + ["default", "3", "dark"] +
+                  ["3"] * 5 + ["dark"] * 3 + ["auto", "light"] + ["default", "auto", "light"])
+        check(looks == wanted,
+              "canvas background and cursor keep the word they were given and nothing a refusal was given",
+              repr(looks))
+        check("background #1e1e1e" in text("canvas background") and "cursor size auto, look auto" in text("canvas cursor") and
+              seen.get("canvas background", {}).get("status") == 0 and
+              "background #ff8800" in text("canvas background \"#FF8800\"") and
+              "background #00aaff" in text("canvas background 0af") and
+              "background #1e1e1e" in text("canvas background default") and
+              "cursor size 3" in text("canvas cursor size 3") and "cursor look dark" in text("canvas cursor look dark") and
+              "cursor size 3" in text("canvas cursor size") and "cursor look dark" in text("canvas cursor look"),
+              "the bare words say what is kept, the default when nothing is, and a word is kept and said",
+              text("canvas background") + text("canvas cursor") + text("canvas cursor size 3"))
+        for bad in ("red", '"#12345"', '"#1234567"', "12345g", '""', '"##123456"'):
+            check(seen.get("canvas background " + bad, {}).get("status") == 1 and
+                  "background is a colour like 1e1e1e, or default" in text("canvas background " + bad),
+                  f"canvas background {bad} is refused in words", text("canvas background " + bad))
+        for bad in ("0", "5", "big", "2x", '""'):
+            check(seen.get("canvas cursor size " + bad, {}).get("status") == 1 and
+                  "cursor size is auto or a number from 1 to 4" in text("canvas cursor size " + bad),
+                  f"canvas cursor size {bad} is refused in words", text("canvas cursor size " + bad))
+        for bad in ("grey", "Light", '""'):
+            check(seen.get("canvas cursor look " + bad, {}).get("status") == 1 and
+                  "cursor look is light, dark or auto" in text("canvas cursor look " + bad),
+                  f"canvas cursor look {bad} is refused in words", text("canvas cursor look " + bad))
+        check(all(seen.get(word, {}).get("status") == 2 for word in
+                  ("canvas background a b", "canvas cursor bogus", "canvas cursor size 2 3", "canvas cursor look dark light")),
+              "a word the verb does not take, or one too many, is a usage page", "")
         words = [line[len("@@word "):] for line in lines if line.startswith("@@word ")]
         check(seen.get("ntp server", {}).get("status") == 0 and "pool.ntp.org" in text("ntp server"),
               "ntp server says the pool when none is named", text("ntp server"))
@@ -47286,7 +47366,8 @@ while True:
             "power bogus", "power powersave", "brightness", "charge", "power", "ntp sideways", "ntp off",
             "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "bios reboot",
             "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine extra",
-            "latency", "latency sideways", "latency reset extra")))
+            "latency", "latency sideways", "latency reset extra", "canvas background 112233",
+            "canvas cursor size 2", "canvas cursor look dark")))
         lines, finished = session(script, nobody=True)
         seen = answers(lines)
         wanted = {
@@ -47311,6 +47392,9 @@ while True:
             "boot extra": (2, ""), "ask": (1, "moonwater ask needs root"), "machine extra": (2, ""),
             "latency": (1, "moonwater latency needs root"), "latency sideways": (2, ""),
             "latency reset extra": (2, ""),
+            "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
+            "canvas cursor size 2": (1, "needs root (CAP_SYS_ADMIN)"),
+            "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
         }
         for command, (status, words) in wanted.items():
             got = seen.get(command, {"out": [], "status": None})
@@ -47329,7 +47413,8 @@ while True:
         hostile = ("timezone x${e}", "keyboard x${e}", "name x${e}", "wifi remove x${e}", "bluetooth remove x${e}",
                    "bind init remove x${e}", "setup install x${e}", "setup use x${e}", "setup update x${e}",
                    "link remove x${e}", "link x${e} abc-def", "link group x${e}", "link allow x${e} shell",
-                   "link add x${e} AAAA", "canvas x${e}", "wifi add x${e} pw", "priority x${e}", "x${e}", "help x${e}")
+                   "link add x${e} AAAA", "canvas x${e}", "canvas background x${e}", "canvas cursor size x${e}",
+                   "canvas cursor look x${e}", "wifi add x${e} pw", "priority x${e}", "x${e}", "help x${e}")
         script = ("e=$(printf '\\033[2J')\n" +
                   "".join(f"/tmp/moonwater {command} > /tmp/o 2>&1; echo \"@@escapes {command}: $(tr -cd '\\033' < /tmp/o | wc -c)\"\n"
                           for command in quiet) +

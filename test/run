@@ -19383,6 +19383,34 @@ wait $c
 echo m1-done
 """)
 
+#   The desktop's ink and the pointer's look and size: what `moonwater canvas background` and
+#   `moonwater canvas cursor` kept is what the compositor starts with, and a change is drawn at
+#   once while it runs. The pointer is drawn into the scanout here (the plane is off), so the
+#   screen has its pixels: the arrow is 55 pixels of fill and 46 of outline at a scale, each
+#   that many squared; light is white inside black, dark the other way.
+open(stick + "/m13", "w").write(r"""exec > /dev/ttyS0 2>&1
+moonwater canvas background 224466
+moonwater canvas cursor size 2
+/compositor &
+c=$!
+sleep 2
+echo m13-ready
+sleep 7
+moonwater canvas background 336699
+moonwater canvas cursor size 4
+moonwater canvas cursor look dark
+echo m13-set
+sleep 5
+moonwater canvas background default
+moonwater canvas cursor size auto
+moonwater canvas cursor look auto
+echo m13-back
+sleep 5
+kill $c
+wait $c
+echo m13-done
+""")
+
 guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
@@ -19665,6 +19693,38 @@ out.append(("K1.3 Caps Lock turns a letter over, å included, and turning it off
             " ".join(typed("m4-se-dump", "m4-se-end").split()[10:]), "30:65 26:197 30:97"))
 out.append(("K1.4 the layout set while the compositor runs is the layout it types with: de has z where y is, and @ on AltGr and q",
             typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
+
+#   The desktop's ink and the pointer, started with what was kept and changed while it runs.
+type_text("sh /mnt/m13\n")
+wait_for(b"m13-ready", 60)
+click(1000, 600)
+
+def pointer_pixels(at):
+    # What the pointer's box holds, colour by colour: it is 80 pixels at most each way at the largest size.
+    found = {}
+    for y in range(596, 700):
+        for x in range(996, 1090):
+            found[at(x, y)] = found.get(at(x, y), 0) + 1
+    return found
+
+width, height, one = picture("m13-start")
+start = pointer_pixels(one)
+wait_for(b"m13-set", 30)
+time.sleep(1)
+width, height, two = picture("m13-set")
+changed = pointer_pixels(two)
+wait_for(b"m13-back", 30)
+time.sleep(1)
+width, height, three = picture("m13-back")
+default = pointer_pixels(three)
+done13 = wait_for(b"m13-done", 60)
+out.append(("D1.1 the ink the compositor starts with is the one kept, and the pointer is its size",
+            "%s %s %s" % (one(4, 4), start.get("ffffff", 0), start.get("000000", 0)), "224466 220 184"))
+out.append(("D1.2 a new ink is drawn at once, and the pointer is four times, dark: black inside, white outline",
+            "%s %s %s %s" % (two(4, 4), two(width - 4, 4), changed.get("ffffff", 0), changed.get("000000", 0)),
+            "336699 336699 736 880"))
+out.append(("D1.3 default and auto are the ink and the pointer of an unset machine",
+            "%s %s %s" % (three(4, 4), default.get("ffffff", 0), default.get("000000", 0)), "1e1e1e 55 46"))
 
 #   Alt-Tab and Alt-F9 on three windows. The button in the panel of the window that has
 #   the keys is lit (38383c) and the others' are not (000000); a window put away has

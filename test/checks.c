@@ -108985,6 +108985,130 @@ static void check_compositor_cycle(void)
 }
 
 /*
+        The desktop's ink and the pointer's look, which `moonwater canvas background` and
+        `moonwater canvas cursor` keep. A colour is parsed as the verb keeps it; once the ink is
+        another none of the default's is left on the screen, round the corners too; a tab of
+        glass over any ink has a title that can be read; and the pointer is drawn in the colours
+        and at the size it was asked, on the plane only where the plane holds it.
+*/
+static int look_luma(unsigned int colour)
+{
+        return (int)((299 * (colour >> 16 & 255) + 587 * (colour >> 8 & 255) + 114 * (colour & 255)) / 1000);
+}
+
+static void check_compositor_look(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE], glass[64 * 32], band[64 * 32];
+    static const char *const good[] = {"#1e1e1e", "1e1e1e", "#FFFFFF", "abc", "#0af", "000000"};
+    static const long made[] = {0x1e1e1e, 0x1e1e1e, 0xffffff, 0xaabbcc, 0x00aaff, 0};
+    static const char *const bad[] = {"", "#", "12345", "1234567", "#12345g", "red", "##123456", "default", "12 456", "#1e1e1e "};
+    static const unsigned int grounds[] = {0x000000, 0xffffff, 0x808080, 0x777777, 0x8c8c8c, 0xff0000, 0x00ff00,
+                                           0x0000ff, 0xffff00, 0x336699, 0x1e1e1e, 0xe0e0e0};
+    struct windows address_to table;
+    unsigned int strays = 0, thin = 0;
+    int parsed = 1;
+
+    for (unsigned int at = 0; at < sizeof(good) / sizeof(good[0]); at++)
+        parsed &= window_colour_parse((string_address)good[at]) == made[at];
+    for (unsigned int at = 0; at < sizeof(bad) / sizeof(bad[0]); at++)
+        parsed &= window_colour_parse((string_address)bad[at]) < 0;
+    check("look: a colour is #rrggbb or rrggbb or the three digits of either, and nothing else", parsed);
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("look: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    check("look: the desktop is the default ink with nothing kept", glass_at(2, 2) == COMPOSITOR_INK_DESKTOP &&
+          glass_at(200, 200) == COMPOSITOR_INK_DESKTOP && compositor_ground == COMPOSITOR_INK_DESKTOP);
+
+    compositor_ground = 0x336699u;
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    for (unsigned int at = 0; at < GLASS_SIDE * GLASS_SIDE; at++)
+        strays += (screen[at] & 0xffffffu) == COMPOSITOR_INK_DESKTOP;
+    check("look: with another ink none of the default is left, behind the round corners too",
+          strays == 0 && glass_at(2, 2) == 0x336699u && glass_at(200, 200) == 0x336699u && glass_at(100, 60) == 0x404040u);
+    compositor_ground = COMPOSITOR_INK_DESKTOP;
+
+    // A tab of glass over each ink, lit and not: its title's ink is far enough from it to be read.
+    compositor.glass = glass;
+    compositor.band = band;
+    for (unsigned int at = 0; at < sizeof(grounds) / sizeof(grounds[0]); at++)
+        for (unsigned int lit = 0; lit < 2; lit++)
+        {
+            unsigned int tab, ink;
+
+            for (unsigned int pixel = 0; pixel < 64 * 32; pixel++)
+                glass[pixel] = grounds[at];
+            tab = compositor_glass_tab(64, 64, 0, 4, 4, 40, 20, 0, lit ? COMPOSITOR_TAB_LIT : 0);
+            ink = window_contrast(tab);
+            thin += look_luma(ink) - look_luma(tab) < 100 && look_luma(tab) - look_luma(ink) < 100;
+        }
+    compositor.glass = compositor.band = 0;
+    check("look: a title on a tab of glass is legible over a black, a white, a middling or a coloured desktop", thin == 0);
+
+    // The pointer: white inside black by default and light, the other way dark; one size for each setting.
+    check("look: the pointer is white with a black outline unless it is dark",
+          compositor_cursor_ink(0, 0) == 0xffffffu && compositor_cursor_ink(1, 0) == 0u &&
+          compositor_cursor_ink(0, 0xff000000u) == 0xffffffffu && compositor_cursor_ink(1, 0xff000000u) == 0xff000000u);
+    compositor.cursor.look = 1;
+    check("look: light is the default's colours", compositor_cursor_ink(0, 0) == 0xffffffu && compositor_cursor_ink(1, 0) == 0u);
+    compositor.cursor.look = 2;
+    check("look: dark is black with a white outline", compositor_cursor_ink(0, 0) == 0u && compositor_cursor_ink(1, 0) == 0xffffffu &&
+          compositor_cursor_ink(0, 0xff000000u) == 0xff000000u && compositor_cursor_ink(1, 0xff000000u) == 0xffffffffu);
+    {
+        static unsigned int plane[64 * 64];
+        struct compositor_target t = {plane, 64, 64, 64, 0, 0, 64, 64};
+        unsigned int edge = 0, fill = 0, other = 0;
+
+        for (unsigned int at = 0; at < 64 * 64; at++)
+            plane[at] = 0x555555u;
+        compositor_cursor_draw(&t, 0, 0, CP_ARROW, 2, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
+        for (unsigned int at = 0; at < 64 * 64; at++)
+        {
+            edge += plane[at] == 0xffffffu;
+            fill += plane[at] == 0u;
+            other += plane[at] != 0xffffffu && plane[at] != 0u && plane[at] != 0x555555u;
+        }
+        check("look: a dark arrow's outline is white and its fill black", edge == 4 * 46 && fill == 4 * 55 && other == 0);
+    }
+
+    compositor.scale = 2;
+    check("look: the pointer is the desktop's scale with no size", compositor_cursor_scale() == 2);
+    compositor.cursor.size = 1;
+    check("look: and the size that was asked when there is one", compositor_cursor_scale() == 1);
+    compositor.cursor.size = 4;
+    compositor.cursor.magnified = 1;
+    check("look: shaken it is three times that", compositor_cursor_scale() == 12);
+    compositor.cursor.magnified = 0;
+    compositor.cursor.handle[0] = 7;
+    check("look: a plane is too small for a size of 4, which is drawn", compositor_cursor_in_scene());
+    compositor.cursor.size = 3;
+    check("look: and a size of 3 stays on it", !compositor_cursor_in_scene());
+    compositor.cursor.handle[0] = 0;
+    compositor.cursor.soft = 1;
+    check("look: with no plane the pointer is drawn", compositor_cursor_in_scene());
+    compositor.cursor.soft = 0;
+}
+
+/*
         The pointer's motion, as a window hears it. A window that said it wants
         none (windows_hover) is told nothing of a motion over it, and the program
         is not woken for it; one held down, or pressed over, is told all the same.
@@ -110501,6 +110625,7 @@ b32 main()
         check_compositor_cycle();
         check_compositor_hover();
         check_launcher();
+        check_compositor_look();
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
 

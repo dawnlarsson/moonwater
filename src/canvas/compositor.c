@@ -44,6 +44,10 @@
         from the corner nearest the hand, and a machine that slept has its
         screen drawn again.
 
+        The desktop's ink and the pointer's size and colours are what
+        `moonwater canvas background` and `moonwater canvas cursor` kept in
+        /root, read when it starts and again whenever one is written.
+
         `surface` is a test client: a window of one colour, a line of text
         drawn with font.c when it is given a TrueType file, and a report on
         standard output of everything it is told.
@@ -66,6 +70,10 @@
 #define COMPOSITOR_INK_LINE 0x000000u
 // The line of the window with the keys: white at 30%.
 #define COMPOSITOR_INK_LINE_LIT 0x4d4d4du
+
+// The desktop's ink as `moonwater canvas background` set it, and the default when none is: what is drawn
+// where no window is, and behind a window's round corners. The tabs' glass is made from what is on the screen.
+static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 
 // The panel's height, the radius of a window's corners and the width of the line round it, in logical
 // pixels; and the largest radius in device pixels, which is what the corners' scratch is made for.
@@ -750,7 +758,7 @@ static void compositor_scene(const struct compositor_target *t,
 
                 for (unsigned int s = 0; s < spans; s++)
                         compositor_fill(t, span[s][0], top, span[s][1] - span[s][0], bottom - top,
-                                        COMPOSITOR_INK_DESKTOP);
+                                        compositor_ground);
         }
 
         for (unsigned int at = 0; at < count; at++)
@@ -769,7 +777,7 @@ static void compositor_scene(const struct compositor_target *t,
 
                         if (square.x2 <= square.x1 || square.y2 <= square.y1)
                                 continue;
-                        compositor_fill(&square, cx, cy, r, r, COMPOSITOR_INK_DESKTOP);
+                        compositor_fill(&square, cx, cy, r, r, compositor_ground);
                         for (unsigned int each = 0; each < count; each++)
                                 compositor_draw(&square, &frames[each]);
                         compositor_blit(t, cx, cy, r, r, scratch, (unsigned long)r);
@@ -1865,6 +1873,7 @@ static struct
                 int magnified;          // it is shaken: found
                 positive magnified_until;
                 int magnify;            // the hand shook it since the last motion
+                int size, look;         // `moonwater canvas cursor`: its scale, 0 for the desktop's; 1 light, 2 dark, 0 for light too
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
         } cursor;
         struct compositor_shake shake;
@@ -1891,6 +1900,21 @@ static struct
         unsigned long painted; // pixels composed, all frames
         positive period, presented; // a frame in nanoseconds, and when the last one went out
 } compositor;
+
+// A colour of the pointer: its fill is white and its outline black, or the other way for the dark one.
+// The plane's pixels have an alpha, the scanout's none.
+static unsigned int compositor_cursor_ink(int outline, unsigned int alpha)
+{
+        return ((compositor.cursor.look == 2) == outline ? 0xffffffu : 0u) | alpha;
+}
+
+// Whether the pointer is drawn into the scanout: when the card has no plane for it, or the plane is too
+// small for the size it was asked to be.
+static int compositor_cursor_in_scene(void)
+{
+        return compositor.cursor.soft ||
+               (compositor.cursor.handle[0] && compositor.cursor.size > compositor_cursor_fit(compositor.cursor.size));
+}
 
 static long compositor_call(positive number, positive a, positive b, positive c,
                             positive d, positive e, positive f)
@@ -3341,7 +3365,7 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
 {
         int row;
 
-        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor.cursor.soft || !windows ||
+        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor_cursor_in_scene() || !windows ||
             compositor.drag >= 0 || compositor.resize >= 0)
                 return -1;
         row = rows[windows - 1];
@@ -3405,9 +3429,9 @@ static void compositor_slice_flush(const struct compositor_target *slice, int *f
         unsigned long pitch = compositor.scanout_pitch / 4;
 
         *first = *last = -1;
-        if (compositor.cursor.soft && compositor.cursor.drawn)
+        if (compositor.cursor.drawn)
                 compositor_cursor_draw(slice, compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
-                                       compositor.cursor.drawn_scale, 0xffffffu, 0x000000u);
+                                       compositor.cursor.drawn_scale, compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
         for (int y = slice->y1; y < slice->y2; y++)
         {
                 const unsigned int *from = slice->pixels + (unsigned long)(y - slice->oy) * slice->pitch +
@@ -3932,10 +3956,10 @@ static void compositor_present(void)
 
                 compositor_scene_banded(&target, frames, count, apart ? &slices : 0, rows);
 
-                if (!apart && compositor.cursor.soft && compositor.cursor.drawn)
+                if (!apart && compositor.cursor.drawn)
                         compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y,
                                                compositor.cursor.drawn_shape, compositor.cursor.drawn_scale,
-                                               0xffffffu, 0x000000u);
+                                               compositor_cursor_ink(0, 0), compositor_cursor_ink(1, 0));
 
                 compositor.painted += (unsigned long)compositor_area(rectangle);
                 // Composed apart, the card is told only the rows that changed on it, and nothing where none did.
@@ -4134,10 +4158,13 @@ static b32 compositor_card_open(void)
         where it was and where it is, and is drawn over what is composed there.
 */
 
-// A pointer's cell, in the scale and shape it is drawn: where it was last damaged and drawn.
+// A pointer's cell, in the scale and shape it is drawn: where it was last damaged and drawn. Its own size
+// when `moonwater canvas cursor size` gave one, and the desktop's when it did not.
 static int compositor_cursor_scale(void)
 {
-        return compositor.cursor.magnified ? 3 * compositor.scale : compositor.scale;
+        int base = compositor.cursor.size ? compositor.cursor.size : compositor.scale;
+
+        return compositor.cursor.magnified ? 3 * base : base;
 }
 
 static void compositor_cursor_cell_damage(int x, int y, unsigned int shape, int scale)
@@ -4193,7 +4220,8 @@ static int compositor_cursor_paint(unsigned int shape, int fitted, int left, int
                 struct compositor_target t = {(unsigned int *)mapped, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
 
                 compositor_cursor_draw(&t, compositor_cursor_hot[shape] * fitted, compositor_cursor_hot[shape] * fitted,
-                                       shape, fitted, 0xffffffffu, 0xff000000u);
+                                       shape, fitted, compositor_cursor_ink(0, 0xff000000u),
+                                       compositor_cursor_ink(1, 0xff000000u));
         }
         compositor_call(syscall(munmap), (positive)mapped, CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
 
@@ -4229,8 +4257,16 @@ static void compositor_cursor_move(void)
         int scale = compositor_cursor_scale();
         unsigned int shape = compositor.cursor.shape;
 
-        if (compositor.cursor.soft)
+        if (compositor_cursor_in_scene())
         {
+                // A plane that was showing the pointer shows nothing now, and says so again when it is wanted.
+                if (!compositor.cursor.soft && compositor.cursor.plane_shape >= 0)
+                {
+                        struct compositor_cursor gone = {1, compositor.crtc, 0, 0, CP_PLANE, CP_PLANE, 0};
+
+                        system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
+                        compositor.cursor.plane_shape = -1;
+                }
                 if (compositor.cursor.drawn)
                         compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
                                                       compositor.cursor.drawn_scale);
@@ -4245,6 +4281,14 @@ static void compositor_cursor_move(void)
 
         if (!compositor.cursor.handle[0])
                 return;
+
+        // The pointer drawn into the scanout, which a size the plane holds does not need: it is taken off.
+        if (compositor.cursor.drawn)
+        {
+                compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
+                                              compositor.cursor.drawn_scale);
+                compositor.cursor.drawn = 0;
+        }
 
         {
                 int fitted = compositor_cursor_fit(scale), left, top;
@@ -4326,7 +4370,7 @@ static void compositor_resume(int cycle)
         }
 
         // What the plane wears and where it was is whatever the driver put back: say it all again.
-        compositor.cursor.plane_shape = -1;
+        compositor.cursor.plane_scale = 0;
         compositor.mirror_stale = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_cursor_move();
@@ -4419,6 +4463,62 @@ static void compositor_layout_read(void)
         {
                 compositor.keymap.layout = (unsigned char)layout;
                 compositor.keymap.dead = 0;
+        }
+}
+
+// The word kept in a file of /root: empty when there is none.
+static void compositor_word(const char *path, char *word, unsigned int room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        bipolar got = 0, at = 0;
+
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, word, room - 1);
+                system_close(handle);
+        }
+        while (at < got && word[at] != '\n' && word[at] != ' ' && word[at] != '\r')
+                at++;
+        word[at] = 0;
+}
+
+/*
+        What `moonwater canvas background` and `moonwater canvas cursor` kept in /root: the desktop's ink,
+        the pointer's size (1 to 4, or the desktop's own) and its colours (light or dark, or the light it
+        always was). Read when the compositor starts and again when a file of them is written; a word it
+        does not know is the default, as if nothing were kept. What changed is drawn at once.
+*/
+static void compositor_look_read(void)
+{
+        char word[16];
+        long colour;
+        int size = 0, look = 0;
+
+        compositor_word("/root/canvas.background", word, sizeof(word));
+        colour = word[0] ? window_colour_parse((string_address)word) : -1;
+        if ((unsigned int)(colour < 0 ? COMPOSITOR_INK_DESKTOP : colour) != compositor_ground)
+        {
+                compositor_ground = (unsigned int)(colour < 0 ? COMPOSITOR_INK_DESKTOP : colour);
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        }
+
+        compositor_word("/root/canvas.cursor.size", word, sizeof(word));
+        if (word[0] >= '1' && word[0] <= '4' && !word[1])
+                size = word[0] - '0';
+        compositor_word("/root/canvas.cursor.look", word, sizeof(word));
+        if (!string_compare((string_address)word, (string_address) "light"))
+                look = 1;
+        else if (!string_compare((string_address)word, (string_address) "dark"))
+                look = 2;
+
+        if (size != compositor.cursor.size || look != compositor.cursor.look)
+        {
+                compositor.cursor.size = size;
+                compositor.cursor.look = look;
+                // The plane wears the old one, and is painted again (a scale it is not at); a plane that is
+                // to be hidden still is told so.
+                compositor.cursor.plane_scale = 0;
+                compositor_cursor_move();
         }
 }
 
@@ -4555,6 +4655,9 @@ static void compositor_inputs_watch(void)
                         if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
                             !compositor.layout_given)
                                 compositor_layout_read();
+                        else if ((length > 17 && !string_compare_max((string_address)name, (string_address) "canvas.background", 17)) ||
+                                 (length > 14 && !string_compare_max((string_address)name, (string_address) "canvas.cursor.", 14)))
+                                compositor_look_read();
                         else if (length > 5 && name[0] == 'e' && name[1] == 'v' && name[2] == 'e' &&
                             name[3] == 'n' && name[4] == 't')
                         {
@@ -5623,7 +5726,7 @@ static void compositor_motion(void)
         compositor_cursor_move();
 
         // On the plane the pointer is on the screen when the call returns; drawn, when the frame has gone.
-        if (compositor.motion_ts && !compositor.cursor.soft)
+        if (compositor.motion_ts && !compositor_cursor_in_scene())
         {
                 compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds());
                 compositor.motion_ts = 0;
@@ -6380,6 +6483,7 @@ static b32 compositor_main()
         }
         compositor.pointer_x = compositor.width / 2;
         compositor.pointer_y = compositor.height / 2;
+        compositor_look_read();
         compositor_cursor_move();
         compositor_font(font);
 
