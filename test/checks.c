@@ -107012,13 +107012,13 @@ static fn check_bars()
         b64 fitted[3];
         const b32 round16[] = {0, 8240, 0, -240, 100, 0, 100, 8000};
         snap_load(round16, 4, false);
-        font_fit(&engine, &face, 16 * 64, zones, fitted);
+        font_fit(&engine, &face, 16 * 64, zones, 0, fitted);
         check("fit: an overshoot under half a pixel lies on the x-height and the baseline",
               engine.points[0].y == 8192 && engine.points[1].y == 0 && engine.points[3].y == 8192 && fitted[1] == 8192);
 
         const b32 round48[] = {0, 24720, 0, 24000};
         snap_load(round48, 2, false);
-        font_fit(&engine, &face, 48 * 64, zones, fitted);
+        font_fit(&engine, &face, 48 * 64, zones, 0, fitted);
         check("fit: an overshoot over half a pixel is a whole pixel over the x-height",
               engine.points[0].y == fitted[1] + 1024 && engine.points[1].y == fitted[1]);
 }
@@ -107080,7 +107080,9 @@ static fn check_synthetic(const font_face address_to one, const font_face addres
 /*
         Darkening by default: a cell of black on white drawn as asked has
         more ink than with FONT_UNDARKENED, and one of white on black is the
-        same pixels either way.
+        same pixels either way. Unhinted: hinted, the grown outline is fitted
+        and its stems snapped, so on this face's straight A, every edge on a
+        line or a stem, the grid decides the ink and darkening adds none.
 */
 static p32 polarity_one[64 * 400], polarity_two[64 * 400];
 
@@ -107092,8 +107094,8 @@ static fn check_polarity(const font_face address_to face)
         font_target one = {polarity_one, 400, 400, 64}, two = {polarity_two, 400, 400, 64};
         positive plain = 0, darker = 0;
 
-        font_cell(&engine, chain, 1, 'A', 1, &grid, size, FONT_UNDARKENED, &one, 4, 4, 0, 0xffffff);
-        font_cell(&engine, chain, 1, 'A', 1, &grid, size, 0, &two, 4, 4, 0, 0xffffff);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, FONT_UNDARKENED | FONT_UNHINTED, &one, 4, 4, 0, 0xffffff);
+        font_cell(&engine, chain, 1, 'A', 1, &grid, size, FONT_UNHINTED, &two, 4, 4, 0, 0xffffff);
         for (positive i = 0; i < 64 * 400; i++)
         {
                 plain += 255 - (polarity_one[i] & 255);
