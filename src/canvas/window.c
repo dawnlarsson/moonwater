@@ -583,6 +583,10 @@ struct windows
         unsigned int output_width, output_height, scale, period;
         unsigned int stride;   // pixels a row of every buffer
         unsigned int focus;    // the row with the keys, or WINDOWS
+        // The compositor's: frames the card showed a window straight from its buffer, and why it would not when it
+        // would not (1 no /dev/udmabuf, 2 udmabuf refused the buffer, 3 the card its import, 4 its framebuffer, 5 a flip;
+        // the table is no memfd at 6 memfd_create, 8 its size, 9 its seals, 10 its mode, 11 the link to it).
+        unsigned int scanned, refused;
         unsigned long pixels;  // where row 0's first buffer is, in bytes from the table
         unsigned long buffer;  // the bytes of one buffer
 
@@ -601,6 +605,15 @@ struct windows
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
+        /*
+                The compositor's, for a window it shows straight from its buffers (scanned out, with no
+                copy): pinned is 1 while it does, and a program then never gives a buffer's pages back,
+                which the card is reading; spoiled is the rectangle of a buffer the compositor wrote the
+                tabs over while it showed it, which the program draws again the next time it draws into
+                that buffer, and clears. A height of 0 is nothing spoiled.
+        */
+        unsigned int pinned[WINDOWS];
+        int spoiled_x[WINDOWS][2], spoiled_y[WINDOWS][2], spoiled_width[WINDOWS][2], spoiled_height[WINDOWS][2];
 
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
@@ -1193,9 +1206,33 @@ static long windows_wait(const struct window_row *own, long other, long nanoseco
         return ready;
 }
 
-// A buffer's pages given back, for a program that will draw it whole before it shows it again.
+/*
+        What of buffer which the compositor wrote over since the program last drew into it: false when nothing,
+        and the rectangle cleared once read. The program draws it again, as it would cells that changed.
+*/
+static int windows_spoiled(const struct window_row *own, unsigned int which, int *x, int *y, int *width,
+                           int *height)
+{
+        struct windows *table = own->table;
+        unsigned int row = own->row;
+
+        which &= 1u;
+        if (__atomic_load_n(&table->spoiled_height[row][which], __ATOMIC_ACQUIRE) <= 0)
+                return 0;
+        *x = table->spoiled_x[row][which];
+        *y = table->spoiled_y[row][which];
+        *width = table->spoiled_width[row][which];
+        *height = table->spoiled_height[row][which];
+        __atomic_store_n(&table->spoiled_height[row][which], 0, __ATOMIC_RELEASE);
+        return *width > 0 && *height > 0;
+}
+
+// A buffer's pages given back, for a program that will draw it whole before it shows it again; never while the
+// compositor shows the window straight from its buffers, whose pages the card reads.
 static void windows_discard(const struct window_row *own, unsigned int which)
 {
+        if (__atomic_load_n(&own->table->pinned[own->row], __ATOMIC_ACQUIRE))
+                return;
         // MADV_REMOVE
         window_call(WINDOW_SYS_MADVISE, (long)windows_buffer(own->table, own->row, which), (long)own->table->buffer,
                     9, 0, 0, 0);

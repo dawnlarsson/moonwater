@@ -111,6 +111,15 @@ CONFIG_DRM_DISPLAY_DP_HELPER=y
 CONFIG_DRM_DISPLAY_HDMI_HELPER=y
 
 #
+# Windows the display shows straight from where their programs drew them.
+# The compositor's table of windows is a memfd, and udmabuf makes a window's
+# buffer in it a dma-buf the card imports as a framebuffer: a window that fills
+# the output is scanned out with no copy, and the compositor writes only what
+# lies over it (the tabs, a glass window). Without it every frame is copied.
+#
+CONFIG_UDMABUF=y
+
+#
 # Intel
 #
 CONFIG_DRM_I915=y

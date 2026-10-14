@@ -867,6 +867,33 @@ static void terminal_discard(void)
 }
 
 /*
+        What the compositor wrote over a buffer it showed straight from where
+        it is (the tabs, over a window that fills the output): every row of
+        cells the rectangle reaches is no longer what the buffer holds, so the
+        frame draws it again, its margins and the bar with it.
+*/
+static void terminal_spoiled(struct window_cell address_to drawn, int slot)
+{
+        int x, y, width, height;
+
+        if (!windows_spoiled(&terminal.own, (unsigned int)slot, &x, &y, &width, &height))
+                return;
+
+        int first = (y - (int)terminal.pad_y) / (int)terminal.cell_h;
+        int last = (y + height - (int)terminal.pad_y + (int)terminal.cell_h - 1) / (int)terminal.cell_h;
+
+        first = first < 0 ? 0 : first;
+        last = last > (int)ROWS ? (int)ROWS : last;
+        // Below the grid is the last row's paper, which that row draws.
+        if (y + height > (int)(terminal.pad_y + ROWS * terminal.cell_h))
+                last = (int)ROWS, first = first < (int)ROWS - 1 ? first : (int)ROWS - 1;
+        if (last > first)
+                memory_fill_u64_aligned(drawn + (positive)first * COLUMNS, (positive)(last - first) * COLUMNS, ~0ull);
+        terminal.bar_drawn[slot] = ~0u;
+        (void)x, (void)width;
+}
+
+/*
         The cells of a frame that differ from what the buffer holds, by row:
         found first, in one pass, and drawn after -- here when they are few, and
         when they are many (a screen that scrolled is all of them) in bands of
@@ -981,6 +1008,8 @@ static b32 terminal_frame(void)
         terminal_extent(&first, &shown, &total);
         pixels = windows_buffer(table, own, slot);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
+        if (drawn)
+                terminal_spoiled(drawn, slot);
 
         // The cells are drawn through the grid's own top left, the paper round them through the buffer's.
         whole = pixels;

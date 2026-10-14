@@ -1573,6 +1573,16 @@ _Static_assert(sizeof(struct compositor_cursor) == 28, "drm_mode_cursor");
 #define COMPOSITOR_DIRTYFB COMPOSITOR_DRM(0xb1u, 24u)
 #define COMPOSITOR_CREATE_DUMB COMPOSITOR_DRM(0xb2u, 32u)
 #define COMPOSITOR_MAP_DUMB COMPOSITOR_DRM(0xb3u, 16u)
+// A window shown straight from its buffer: its pages a dma-buf (udmabuf), imported, a framebuffer, flipped to.
+#define COMPOSITOR_RMFB COMPOSITOR_DRM(0xafu, 4u)
+#define COMPOSITOR_PAGE_FLIP COMPOSITOR_DRM(0xb0u, 24u)
+#define COMPOSITOR_ADDFB2 COMPOSITOR_DRM(0xb8u, 104u)
+#define COMPOSITOR_PRIME_FD_TO_HANDLE COMPOSITOR_DRM(0x2eu, 12u)
+#define COMPOSITOR_GEM_CLOSE 0x40086409u    // DRM_IOW(0x09, struct drm_gem_close)
+#define COMPOSITOR_UDMABUF_CREATE 0x40187542u // _IOW('u', 0x42, struct udmabuf_create)
+#define COMPOSITOR_XRGB8888 0x34325258u
+#define COMPOSITOR_FLIP_EVENT 1u
+#define COMPOSITOR_EVENT_FLIP_COMPLETE 2u
 
 struct compositor_input_event
 {
@@ -1688,6 +1698,23 @@ static struct
         */
         struct windows *table;
         unsigned long table_bytes, pixels, buffer; // its size, where the buffers are, one buffer: never the table's numbers
+        /*
+                A window shown straight from its buffer, with no copy: the table is then a memfd bound over
+                WINDOWS_TABLE (its descriptor plus one; 0 when the table is a plain file), /dev/udmabuf is open
+                (plus one), and each buffer asked for is a framebuffer (scan_fb, its card handle scan_handle).
+                on_screen is the framebuffer the card shows: fb, the compositor's own, or a window's, whose row
+                is direct_row (-1 for none) and whose buffer direct_buffer. A flip in flight (flip_pending, to
+                flip_row's flip_buffer) holds back what a window is told was taken (held: a frame, plus one) until
+                the card has let go of the buffer it showed before. The tabs written over a window's buffer are
+                kept there with what they covered (under, a buffer's worth of the band each, patched when it is).
+        */
+        int table_memfd, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
+        unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, direct_buffer, flip_buffer;
+        unsigned int taken_held[WINDOWS], held_rows, dropping, patched[WINDOWS][2];
+        int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
+        unsigned int memfd_failed; // the step the table's memfd was refused at, said in the table's refused
+        unsigned int *under[2];
+        int under_rect[2][4];
         int door[WINDOWS], wake[WINDOWS];
         unsigned int woken;  // the rows to knock on at the end of the pass, a bit each
         unsigned int seen[WINDOWS];     // the frame last taken
@@ -2984,6 +3011,308 @@ static void compositor_close_mean(struct compositor_frame *frame)
         frame->close_mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
 }
 
+/* ---- a window shown straight from its buffer ---- */
+
+/*
+        A window that fills the output is shown from the buffer its program
+        drew, with no copy: the card scans that buffer out, and the compositor
+        writes only what lies over it -- the tabs -- into the buffer itself,
+        keeping what they covered, and tells the program the rectangle it wrote
+        (spoiled) so the program draws it again before it shows that buffer
+        next. A window is told a picture was taken when the card has let go of
+        the buffer it showed before (the flip's event), never while the card
+        still reads it. Anything the card or udmabuf will not do, and any
+        window that does not fill the output alone, is composed and copied as
+        before.
+*/
+struct compositor_fb2
+{
+        unsigned int fb_id, width, height, format, flags;
+        unsigned int handles[4], pitches[4], offsets[4];
+        unsigned long modifier[4];
+};
+
+// The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
+// or the card refuses (a card that cannot show memory it did not make), and then none is asked for again.
+static unsigned int compositor_window_fb(int row, unsigned int which)
+{
+        struct
+        {
+                unsigned int memfd, flags;
+                unsigned long offset, size;
+        } create;
+        struct
+        {
+                unsigned int handle, flags;
+                int fd;
+        } prime = {0, 0, -1};
+        struct compositor_fb2 fb = {0};
+        long dmabuf;
+
+        if (compositor.scan_fb[row][which] || !compositor.table_memfd || compositor.direct_refused)
+                return compositor.scan_fb[row][which];
+        if (!compositor.udmabuf)
+        {
+                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC);
+
+                if (handle < 0)
+                {
+                        compositor.direct_refused = 1;
+                        compositor.table->refused = 1;
+                        return 0;
+                }
+                compositor.udmabuf = (int)handle + 1;
+        }
+
+        // Pinned first: a program gives back no pages of a buffer the card may read.
+        __atomic_store_n(&compositor.table->pinned[row], 1u, __ATOMIC_RELEASE);
+        create.memfd = (unsigned int)(compositor.table_memfd - 1);
+        create.flags = 1; // UDMABUF_FLAGS_CLOEXEC
+        create.offset = compositor.pixels + ((unsigned long)row * 2 + which) * compositor.buffer;
+        create.size = compositor.buffer;
+        dmabuf = system_control(compositor.udmabuf - 1, COMPOSITOR_UDMABUF_CREATE, address_of create);
+        if (dmabuf < 0)
+        {
+                compositor.direct_refused = 1;
+                compositor.table->refused = 2;
+                return 0;
+        }
+        prime.fd = (int)dmabuf;
+        if (system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of prime) != 0)
+        {
+                system_close(dmabuf);
+                compositor.direct_refused = 1;
+                compositor.table->refused = 3;
+                return 0;
+        }
+        system_close(dmabuf);
+
+        fb.width = (unsigned int)compositor.width;
+        fb.height = (unsigned int)compositor.height;
+        fb.format = COMPOSITOR_XRGB8888;
+        fb.handles[0] = prime.handle;
+        fb.pitches[0] = compositor.table->stride * 4;
+        if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0)
+        {
+                unsigned int close[2] = {prime.handle, 0};
+
+                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                compositor.direct_refused = 1;
+                compositor.table->refused = 4;
+                return 0;
+        }
+        compositor.scan_fb[row][which] = fb.fb_id;
+        compositor.scan_handle[row][which] = prime.handle;
+        return fb.fb_id;
+}
+
+// A row's framebuffers gone, when the card is not showing one of them.
+static void compositor_window_fb_drop(int row)
+{
+        for (unsigned int which = 0; which < 2; which++)
+                if (compositor.scan_fb[row][which])
+                {
+                        unsigned int close[2] = {compositor.scan_handle[row][which], 0};
+
+                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor.scan_fb[row][which]);
+                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                        compositor.scan_fb[row][which] = compositor.scan_handle[row][which] = 0;
+                }
+        compositor.patched[row][0] = compositor.patched[row][1] = 0;
+        __atomic_store_n(&compositor.table->pinned[row], 0u, __ATOMIC_RELEASE);
+}
+
+static int compositor_shows_row(int row)
+{
+        return compositor.on_screen &&
+               (compositor.on_screen == compositor.scan_fb[row][0] || compositor.on_screen == compositor.scan_fb[row][1]);
+}
+
+// A flip to fb, done at the next vertical blank, with its event; false when the card refuses it.
+static int compositor_flip(unsigned int fb, int row, unsigned int which)
+{
+        struct
+        {
+                unsigned int crtc_id, fb_id, flags, reserved;
+                unsigned long user_data;
+        } flip = {compositor.crtc, fb, COMPOSITOR_FLIP_EVENT, 0, 0};
+
+        if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
+                return 0;
+        compositor.flip_pending = 1;
+        compositor.flip_row = row;
+        compositor.flip_buffer = which;
+        compositor.on_screen = fb;
+        return 1;
+}
+
+// The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
+static void compositor_flip_done(void)
+{
+        compositor.flip_pending = 0;
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                if (!(compositor.held_rows & (1u << row)))
+                        continue;
+                if (row == compositor.flip_row && compositor.front[row] != compositor.flip_buffer)
+                        continue;
+                __atomic_store_n(&compositor.table->shown[row], compositor.taken_held[row], __ATOMIC_RELEASE);
+                compositor.held_rows &= ~(1u << row);
+                compositor.woken |= 1u << row;
+        }
+        // A window that left while the card showed it: its framebuffers now, the card being off them.
+        for (int row = 0; row < WINDOWS; row++)
+                if ((compositor.dropping & (1u << row)) && !compositor_shows_row(row))
+                {
+                        compositor_window_fb_drop(row);
+                        compositor.dropping &= ~(1u << row);
+                }
+}
+
+// The card's events, read when its descriptor is readable: a flip's completion is the one asked for.
+static void compositor_card_read(void)
+{
+        p8 events[512];
+        long got = compositor_call(syscall(read), (positive)compositor.card, (positive)events, sizeof(events), 0, 0, 0);
+
+        for (long at = 0; at + 8 <= got;)
+        {
+                unsigned int type, length;
+
+                memory_copy(address_of type, events + at, 4);
+                memory_copy(address_of length, events + at + 4, 4);
+                if (length < 8)
+                        break;
+                if (type == COMPOSITOR_EVENT_FLIP_COMPLETE)
+                        compositor_flip_done();
+                at += length;
+        }
+}
+
+// What the tabs covered of the buffer the card shows, put back, so what is made from it (the glass) is the window's.
+static void compositor_direct_unpatch(void)
+{
+        int row = compositor.direct_row;
+        unsigned int which = row >= 0 ? compositor.front[row] : 0;
+        const int *rect = compositor.under_rect[which];
+        unsigned int *pixels;
+
+        if (row < 0 || !compositor.patched[row][which] || !compositor.under[which])
+                return;
+        pixels = windows_buffer(compositor.table, row, which);
+        for (int y = rect[1]; y < rect[3]; y++)
+                memory_copy(pixels + (unsigned long)y * compositor.table->stride + (unsigned long)rect[0],
+                            compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
+                            (unsigned long)(rect[2] - rect[0]) * 4);
+        compositor.patched[row][which] = 0;
+}
+
+// The tabs written over a row's buffer, what they covered kept, and the program told the rectangle.
+static void compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
+{
+        int rect[4] = {compositor.width, compositor.height, 0, 0};
+        unsigned int *pixels = windows_buffer(compositor.table, row, which);
+        struct windows *table = compositor.table;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int x, y, width, height;
+
+                compositor_outline(&tabs[at], &x, &y, &width, &height);
+                rect[0] = x < rect[0] ? x : rect[0];
+                rect[1] = y < rect[1] ? y : rect[1];
+                rect[2] = x + width > rect[2] ? x + width : rect[2];
+                rect[3] = y + height > rect[3] ? y + height : rect[3];
+        }
+        rect[0] = rect[0] < 0 ? 0 : rect[0];
+        rect[1] = rect[1] < 0 ? 0 : rect[1];
+        rect[2] = rect[2] > compositor.width ? compositor.width : rect[2];
+        rect[3] = rect[3] > compositor.height ? compositor.height : rect[3];
+        if (rect[2] <= rect[0] || rect[3] <= rect[1])
+                return;
+
+        if (!compositor.under[which])
+        {
+                long mapped = compositor_call(syscall(mmap), 0, (positive)compositor.width * (positive)compositor.height * 4, 3,
+                                              0x22, (positive)-1, 0);
+
+                if (mapped < 0 && mapped > -4096)
+                        return;
+                compositor.under[which] = (unsigned int *)mapped;
+        }
+        for (int y = rect[1]; y < rect[3]; y++)
+                memory_copy(compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
+                            pixels + (unsigned long)y * table->stride + (unsigned long)rect[0], (unsigned long)(rect[2] - rect[0]) * 4);
+        memory_copy(compositor.under_rect[which], rect, sizeof(rect));
+
+        struct compositor_target target = {pixels, table->stride, compositor.width, compositor.height,
+                                           rect[0], rect[1], rect[2], rect[3]};
+
+        for (unsigned int at = 0; at < count; at++)
+                compositor_draw(&target, &tabs[at]);
+        compositor.patched[row][which] = 1;
+        table->spoiled_x[row][which] = rect[0];
+        table->spoiled_y[row][which] = rect[1];
+        table->spoiled_width[row][which] = rect[2] - rect[0];
+        __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
+}
+
+// The window the card can show straight: the top one, opaque, square and filling the output at the size it drew, with
+// nothing over it but the tabs, a pointer on its own plane, and a framebuffer of its buffer; -1 when there is none.
+static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned char *rows, unsigned int windows)
+{
+        int row;
+
+        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor.cursor.soft || !windows ||
+            compositor.drag >= 0 || compositor.resize >= 0)
+                return -1;
+        row = rows[windows - 1];
+        if (compositor.table->glass[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
+            compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
+            compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
+            compositor.asking[row] || compositor_radius(&frames[windows - 1]) || compositor_line(row))
+                return -1;
+        return compositor_window_fb(row, compositor.front[row]) ? row : -1;
+}
+
+// The frame of a window shown straight: the tabs over its buffer, and the card flipped to it. False when the card will not.
+static b32 compositor_present_direct(int row, const struct compositor_frame *tabs, unsigned int count)
+{
+        unsigned int which = compositor.front[row], fb = compositor_window_fb(row, which);
+        unsigned short clip[COMPOSITOR_DAMAGE][4];
+        struct compositor_dirty dirty = {fb, 0, 0, 0, (unsigned long)clip};
+
+        if (!fb)
+                return 0;
+        compositor_direct_patch(row, which, tabs, count);
+        if (compositor.on_screen != fb)
+        {
+                // The card is still on its way to the last one: this is shown once it is there.
+                if (compositor.flip_pending)
+                        return 1;
+                if (!compositor_flip(fb, row, which))
+                {
+                        compositor_direct_unpatch();
+                        compositor.direct_refused = 1;
+                        compositor.table->refused = 5;
+                        return 0;
+                }
+        }
+        compositor.direct_row = row;
+        compositor.direct_buffer = which;
+        compositor.table->scanned++;
+
+        // A virtual card copies to its host only what it is told changed.
+        for (unsigned int at = 0; at < compositor.damages; at++)
+                for (unsigned int side = 0; side < 4; side++)
+                        clip[at][side] = (unsigned short)compositor.damage[at][side];
+        dirty.clip_count = compositor.damages;
+        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+        compositor.damages = 0;
+        compositor.screen_stale = 1;
+        return 1;
+}
+
 static void compositor_present(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -3004,6 +3333,8 @@ static void compositor_present(void)
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
                 }
         windows = count;
+        // A window the card shows straight has what the tabs covered put back, so the glass is made from the window.
+        compositor_direct_unpatch();
         compositor_glass_pass(frames, rows, windows);
 
         // What is under the tabs changed, or what they say: the glass is made again over it, and shown. The glass
@@ -3039,6 +3370,26 @@ static void compositor_present(void)
                 compositor_close_mean(&frames[at]);
         compositor_corner_masks_ready(frames, count);
 
+        // A window that fills the output alone is shown straight from its buffer, and nothing is composed.
+        int direct = compositor_direct_candidate(frames, rows, windows);
+
+        if (direct >= 0 && compositor_present_direct(direct, frames + windows, count - windows))
+                return;
+
+        // Not now: the compositor's own screen is shown again, drawn whole, once the card has finished a flip.
+        int back = compositor.on_screen && compositor.on_screen != compositor.fb;
+
+        if (back)
+        {
+                if (compositor.flip_pending)
+                        return;
+                compositor.direct_row = -1;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        }
+        else if (compositor.screen_stale)
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        compositor.screen_stale = 0;
+
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
                 const int *rectangle = compositor.damage[at];
@@ -3061,6 +3412,17 @@ static void compositor_present(void)
         dirty.clip_count = compositor.damages;
         system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
         compositor.damages = 0;
+
+        // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
+        if (back && !compositor_flip(compositor.fb, -1, 0))
+        {
+                struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
+                                              0, 0, 0, 1, compositor.mode};
+
+                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+                compositor.on_screen = compositor.fb;
+                compositor_flip_done();
+        }
 }
 
 /*
@@ -4098,7 +4460,15 @@ static void compositor_take(int row)
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor.width ? (unsigned int)compositor.width : width;
         height = height > (unsigned int)compositor.height ? (unsigned int)compositor.height : height;
-        __atomic_store_n(&table->shown[row], frame, __ATOMIC_RELEASE);
+        // A window the card shows straight is told the picture was taken once the card has let go of the buffer
+        // it showed before, at the flip's event; any other at once.
+        if (row == compositor.direct_row)
+        {
+                compositor.taken_held[row] = frame;
+                compositor.held_rows |= 1u << row;
+        }
+        else
+                __atomic_store_n(&table->shown[row], frame, __ATOMIC_RELEASE);
         compositor.woken |= 1u << row;
 
         // A picture of nothing shows nothing.
@@ -4133,6 +4503,9 @@ static void compositor_take(int row)
 
         compositor.picture_w[row] = width;
         compositor.picture_h[row] = height;
+        // The buffer handed back is the program's again, whatever the tabs left on it: it draws that again.
+        if (compositor.front[row] != front)
+                compositor.patched[row][compositor.front[row] & 1u] = 0;
         compositor.front[row] = front;
 
         // The picture of the size asked for: shown as it is from here on, and, the hand let go, the edges are the
@@ -4225,6 +4598,19 @@ static void compositor_leave(int row)
         compositor.title[row][0] = 0;
         compositor_glass_drop(row);
         compositor.glass_side[row] = compositor.glass_told[row] = 0;
+        // Shown straight: the screen is the compositor's again at the next frame, and the window's framebuffers
+        // go when the card is off them (now, if it is).
+        compositor.held_rows &= ~(1u << row);
+        if (compositor.direct_row == row)
+        {
+                compositor.direct_row = -1;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        }
+        if (compositor_shows_row(row) || (compositor.flip_pending && compositor.flip_row == row))
+                compositor.dropping |= 1u << row;
+        else if (compositor.scan_fb[row][0] || compositor.scan_fb[row][1])
+                compositor_window_fb_drop(row);
+        table->spoiled_height[row][0] = table->spoiled_height[row][1] = 0;
         table->ground[row] = 0;
         table->hover_off[row] = 0;
         table->state[row] = 0;
@@ -5024,6 +5410,51 @@ static void compositor_input_read(unsigned int at)
 }
 
 /*
+        The table as a memfd, WINDOWS_TABLE a link to it in this process's
+        /proc: what udmabuf makes a window's buffer a dma-buf of, so the card
+        can show the window straight from where its program drew it. A program
+        opens and maps it as it did the file, at the same path, which reopens
+        the memfd (a memfd cannot be bound over a path: it lives on the
+        kernel's own mount, which no namespace has). Opening it through /proc
+        takes the right to look at this process, which root has, and every
+        program of the desktop is root. It cannot shrink or grow (udmabuf's
+        condition). The descriptor, or an error, and then the table is the
+        plain file and every frame is copied (a headless compositor).
+*/
+static long compositor_table_memfd(unsigned long bytes)
+{
+        p8 path[48] = "/proc/";
+        long handle = compositor_call(syscall(memfd_create), (positive) "moonwater-windows", 1 | 2, 0, 0, 0, 0);
+        positive at = 6;
+
+        if (handle < 0)
+        {
+                compositor.memfd_failed = 6;
+                return handle;
+        }
+        // /proc/PID/fd/N, this process's own number and not self, which is whoever opens it.
+        at += positive_into_string(path + at, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0));
+        memory_copy(path + at, "/fd/", 4);
+        at += 4;
+        path[at + positive_into_string(path + at, (positive)handle)] = 0;
+        // MFD_CLOEXEC | MFD_ALLOW_SEALING above; F_ADD_SEALS of F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW.
+        compositor.memfd_failed = compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0 ? 8
+                                  : compositor_call(syscall(fcntl), (positive)handle, 1033, 1 | 2 | 4, 0, 0, 0) < 0 ? 9
+                                  : compositor_call(syscall(fchmod), (positive)handle, 0666, 0, 0, 0, 0) < 0       ? 10
+                                  : compositor_call(syscall(symlinkat), (positive)path, (positive)AT_FDCWD,
+                                                    (positive)WINDOWS_TABLE, 0, 0, 0) < 0
+                                      ? 11
+                                      : 0;
+        if (compositor.memfd_failed)
+        {
+                system_close(handle);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
+                return -COMPOSITOR_EINVAL;
+        }
+        return handle;
+}
+
+/*
         The table and its doors, made new: whatever is at the paths is from a
         compositor whose session is over. The table is sparse, so its size is
         the most every window could draw and what it costs is the pages that
@@ -5039,19 +5470,28 @@ static int compositor_table(void)
 
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run", 0755, 0, 0, 0);
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run/moonwater", 0755, 0, 0, 0);
+        // A table a compositor before this one bound there is let go of first (MNT_DETACH).
+        compositor_call(syscall(umount2), (positive)WINDOWS_TABLE, 2, 0, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
 
-        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)WINDOWS_TABLE,
-                                           FILE_READ_WRITE | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+        handle = compositor.card >= 0 ? compositor_table_memfd(bytes) : -COMPOSITOR_EINVAL;
+        compositor.table_memfd = handle >= 0 ? (int)handle + 1 : 0;
         if (handle < 0)
-                return (int)handle;
-        if (compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0)
         {
-                system_close(handle);
-                return -COMPOSITOR_ENOSPC;
+                handle = (long)system_open_at_mode(AT_FDCWD, (string_address)WINDOWS_TABLE,
+                                                   FILE_READ_WRITE | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+                if (handle < 0)
+                        return (int)handle;
+                if (compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0)
+                {
+                        system_close(handle);
+                        return -COMPOSITOR_ENOSPC;
+                }
         }
         mapped = compositor_call(syscall(mmap), 0, bytes, 3, 1, (positive)handle, 0);
-        system_close(handle);
+        // The memfd is kept: udmabuf is given it, buffer by buffer.
+        if (!compositor.table_memfd)
+                system_close(handle);
         if (mapped < 0 && mapped > -4096)
                 return (int)mapped;
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0666, 0, 0, 0);
@@ -5066,6 +5506,7 @@ static int compositor_table(void)
         compositor.table->scale = (unsigned int)compositor.scale;
         compositor.table->period = (unsigned int)compositor.period;
         compositor.table->focus = WINDOWS;
+        compositor.table->refused = compositor.memfd_failed;
         compositor.table->pixels = header;
         compositor.table->buffer = buffer;
 
@@ -5095,6 +5536,7 @@ static void compositor_table_drop(void)
 {
         p8 name[48];
 
+        compositor_call(syscall(umount2), (positive)WINDOWS_TABLE, 2, 0, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
         for (unsigned int row = 0; row < WINDOWS; row++)
                 for (int wake = 0; wake < 2; wake++)
@@ -5380,6 +5822,8 @@ static b32 compositor_main()
         compositor_font(font);
 
         compositor.signals = compositor_signals();
+        compositor.direct_row = compositor.flip_row = -1;
+        compositor.on_screen = compositor.fb;
         status = compositor_table();
         if (status < 0 || compositor.signals < 0)
         {
@@ -5400,8 +5844,8 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll wanted[2 + COMPOSITOR_INPUTS + WINDOWS];
-                unsigned int count = 0, inputs, doors;
+                struct compositor_poll wanted[3 + COMPOSITOR_INPUTS + WINDOWS];
+                unsigned int count = 0, inputs, doors, card_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
 
@@ -5413,6 +5857,12 @@ static b32 compositor_main()
                 doors = count;
                 for (unsigned int row = 0; row < WINDOWS; row++)
                         wanted[count++] = (struct compositor_poll){compositor.door[row], COMPOSITOR_POLLIN, 0};
+                // A flip in flight: its event says the card has let go of the buffer it showed before.
+                if (compositor.flip_pending)
+                {
+                        card_at = count;
+                        wanted[count++] = (struct compositor_poll){compositor.card, COMPOSITOR_POLLIN, 0};
+                }
 
                 // With nothing to show or time the wait is for ever. With
                 // something to show it is until a frame has gone by since the
@@ -5488,6 +5938,9 @@ static b32 compositor_main()
                 for (unsigned int row = 0; row < WINDOWS; row++)
                         if (wanted[doors + row].returned)
                                 compositor_door((int)row, wanted[doors + row].returned);
+
+                if (card_at && wanted[card_at].returned)
+                        compositor_card_read();
 
                 // A pointer that was shaken is its own size again when its time is up.
                 if (compositor.cursor.magnified && clock_monotonic_nanoseconds() >= compositor.cursor.magnified_until)
