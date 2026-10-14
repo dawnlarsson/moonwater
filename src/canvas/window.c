@@ -308,6 +308,14 @@ static inline void window_damage(struct window *window, unsigned int row,
 // many columns; answers the stride they are now
 #define WINDOW_IOCTL_STRIDE 0x00007310u
 
+// _IO('s', 17) -- the compositor's window table given to the device: the
+// argument its descriptor, -1 none; root's only
+#define WINDOWS_IOCTL_TABLE_SET 0x00007311u
+
+// _IO('s', 18) -- a descriptor of the window table, close-on-exec; ENOENT
+// when no compositor has given one
+#define WINDOWS_IOCTL_TABLE_GET 0x00007312u
+
 struct window_request
 {
         unsigned int width;
@@ -1075,12 +1083,19 @@ static void windows_drain(long handle)
 */
 static long windows_take(struct window_row *own)
 {
-        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOW_OPEN_FLAGS, 0, 0, 0);
+        long spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
+        long file = spark >= 0 ? window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0) : -2;
         long size, mapped, probe;
         unsigned int pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
         struct windows *table;
         char name[48];
 
+        // The table from the device, which hands any program the compositor's; the path where it gave none
+        // (a headless compositor's file).
+        if (spark >= 0)
+                window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
+        if (file < 0)
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOW_OPEN_FLAGS, 0, 0, 0);
         if (file < 0)
                 return file;
 

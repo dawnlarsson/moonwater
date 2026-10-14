@@ -1762,8 +1762,9 @@ static struct
         struct windows *table;
         unsigned long table_bytes, pixels, buffer; // its size, where the buffers are, one buffer: never the table's numbers
         /*
-                A window shown straight from its buffer, with no copy: the table is then a memfd bound over
-                WINDOWS_TABLE (its descriptor plus one; 0 when the table is a plain file), /dev/udmabuf is open
+                A window shown straight from its buffer, with no copy: the table is then a memfd, given to
+                /dev/spark by table_giver (a descriptor of the device, plus one) and linked at WINDOWS_TABLE (its
+                descriptor plus one; 0 when the table is a plain file), /dev/udmabuf is open
                 (plus one), and each buffer asked for is a framebuffer (scan_fb, its card handle scan_handle).
                 on_screen is the framebuffer the card shows: fb, the compositor's own, or a window's, whose row
                 is direct_row (-1 for none) and whose buffer direct_buffer. A flip in flight (flip_pending, to
@@ -1771,7 +1772,7 @@ static struct
                 the card has let go of the buffer it showed before. The tabs written over a window's buffer are
                 kept there with what they covered (under, a buffer's worth of the band each, patched when it is).
         */
-        int table_memfd, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
+        int table_memfd, table_giver, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
         unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, direct_buffer, flip_buffer;
         unsigned int taken_held[WINDOWS], held_rows, dropping, patched[WINDOWS][2];
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
@@ -5598,9 +5599,10 @@ static void compositor_input_read(unsigned int at)
         opens and maps it as it did the file, at the same path, which reopens
         the memfd (a memfd cannot be bound over a path: it lives on the
         kernel's own mount, which no namespace has). Opening it through /proc
-        takes the right to look at this process, which root has, and every
-        program of the desktop is root. It cannot shrink or grow (udmabuf's
-        condition). The descriptor, or an error, and then the table is the
+        takes the right to look at this process, which root has; any program
+        takes it from /dev/spark instead (WINDOWS_IOCTL_TABLE_GET), which is
+        given it here, and the link is for where the device is not. It cannot
+        shrink or grow (udmabuf's condition). The descriptor, or an error, and then the table is the
         plain file and every frame is copied (a headless compositor).
 */
 static long compositor_table_memfd(unsigned long bytes)
@@ -5652,12 +5654,19 @@ static int compositor_table(void)
 
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run", 0755, 0, 0, 0);
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run/moonwater", 0755, 0, 0, 0);
-        // A table a compositor before this one bound there is let go of first (MNT_DETACH).
-        compositor_call(syscall(umount2), (positive)WINDOWS_TABLE, 2, 0, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
 
         handle = compositor.card >= 0 ? compositor_table_memfd(bytes) : -COMPOSITOR_EINVAL;
         compositor.table_memfd = handle >= 0 ? (int)handle + 1 : 0;
+        if (handle >= 0)
+        {
+                long spark = (long)system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
+
+                if (spark >= 0 && system_control(spark, WINDOWS_IOCTL_TABLE_SET, handle) == 0)
+                        compositor.table_giver = (int)spark + 1;
+                else if (spark >= 0)
+                        system_close(spark);
+        }
         if (handle < 0)
         {
                 handle = (long)system_open_at_mode(AT_FDCWD, (string_address)WINDOWS_TABLE,
@@ -5718,7 +5727,12 @@ static void compositor_table_drop(void)
 {
         p8 name[48];
 
-        compositor_call(syscall(umount2), (positive)WINDOWS_TABLE, 2, 0, 0, 0, 0);
+        if (compositor.table_giver)
+        {
+                system_control(compositor.table_giver - 1, WINDOWS_IOCTL_TABLE_SET, -1l);
+                system_close(compositor.table_giver - 1);
+                compositor.table_giver = 0;
+        }
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
         for (unsigned int row = 0; row < WINDOWS; row++)
                 for (int wake = 0; wake < 2; wake++)

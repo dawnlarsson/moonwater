@@ -12368,6 +12368,80 @@ static long report_canvas(struct canvas_control __user *out)
         return answer;
 }
 
+/*
+        The window table the compositor shares is a memfd, which no path names
+        that another process may open: its /proc/<pid>/fd link asks for the
+        right to trace the compositor. The compositor gives it here, as root,
+        and any program takes a descriptor of it (close-on-exec) from the
+        device, as it could open the table's file before. The table is let go
+        when the compositor gives another or none, or closes the /dev/spark
+        descriptor it gave it with.
+*/
+static DEFINE_SPINLOCK(windows_table_lock);
+static struct file *windows_table, *windows_table_giver;
+
+static long windows_table_set(struct file *giver, unsigned long arg)
+{
+        struct file *table = NULL, *old;
+
+        if (!capable(CAP_SYS_ADMIN))
+                return -EPERM;
+        if ((long)arg >= 0)
+        {
+                table = fget((unsigned int)arg);
+                if (!table)
+                        return -EBADF;
+                if (!S_ISREG(file_inode(table)->i_mode) || !(table->f_mode & FMODE_WRITE))
+                {
+                        fput(table);
+                        return -EINVAL;
+                }
+        }
+        spin_lock(&windows_table_lock);
+        old = windows_table;
+        windows_table = table;
+        windows_table_giver = table ? giver : NULL;
+        spin_unlock(&windows_table_lock);
+        if (old)
+                fput(old);
+        return 0;
+}
+
+static long windows_table_get(void)
+{
+        struct file *table;
+        int fd;
+
+        spin_lock(&windows_table_lock);
+        table = windows_table ? get_file(windows_table) : NULL;
+        spin_unlock(&windows_table_lock);
+        if (!table)
+                return -ENOENT;
+        fd = get_unused_fd_flags(O_CLOEXEC);
+        if (fd < 0)
+        {
+                fput(table);
+                return fd;
+        }
+        fd_install(fd, table);
+        return fd;
+}
+
+static void windows_table_release(struct file *giver)
+{
+        struct file *old = NULL;
+
+        spin_lock(&windows_table_lock);
+        if (windows_table_giver == giver)
+        {
+                old = windows_table;
+                windows_table = windows_table_giver = NULL;
+        }
+        spin_unlock(&windows_table_lock);
+        if (old)
+                fput(old);
+}
+
 /* ---- what the core calls ---- */
 
 /*
@@ -12382,6 +12456,8 @@ IOCTL_IS(SPARK_IOCTL_CANVAS, IOCTL_BOTH, 10, sizeof(struct canvas_control));
 IOCTL_IS(WINDOW_IOCTL_CREATE, IOCTL_WRITE, 4, sizeof(struct window_request));
 IOCTL_IS(WINDOW_IOCTL_COMMIT, IOCTL_NONE, 5, 0);
 IOCTL_IS(WINDOW_IOCTL_STRIDE, IOCTL_NONE, 16, 0);
+IOCTL_IS(WINDOWS_IOCTL_TABLE_SET, IOCTL_NONE, 17, 0);
+IOCTL_IS(WINDOWS_IOCTL_TABLE_GET, IOCTL_NONE, 18, 0);
 
 long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -12401,6 +12477,10 @@ long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 return window_ioctl_commit(file);
         case WINDOW_IOCTL_STRIDE:
                 return window_ioctl_stride(file, arg);
+        case WINDOWS_IOCTL_TABLE_SET:
+                return windows_table_set(file, arg);
+        case WINDOWS_IOCTL_TABLE_GET:
+                return windows_table_get();
         }
 
         return -ENOTTY;
@@ -12418,6 +12498,7 @@ __poll_t canvas_client_poll(struct file *file, poll_table *wait)
 
 void canvas_client_release(struct file *file)
 {
+        windows_table_release(file);
         window_release(file);
 }
 
