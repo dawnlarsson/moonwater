@@ -80894,6 +80894,9 @@ static bool wl_clock_set; // the wall clock reads a time, which freshness is ask
 static bool wl_entropy_down;
 static positive wl_entropy_fail_size;
 static p64 wl_random_state = 1;
+#ifndef CLOCK_BOOTTIME
+#define CLOCK_BOOTTIME 7
+#endif
 static p64 system_clock_ns(int which) { return which ? wl_clock : wl_wall + wl_clock; }
 static bipolar system_random_fill(void *into, positive size, positive flags)
 {
