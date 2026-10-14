@@ -304,6 +304,9 @@ cover('folds_already', 'count', 'memory_copy_changed_u32',
 cover('folds_already', 'count', 'memory_sweep_coverage',
       'the rasteriser hands it a run of touched blocks whose length the '
       'outline decides at run time; no reachable call site passes a literal')
+cover('folds_already', 'width', 'memory_translate_planes_u32_rect',
+      'the text engine hands it a run of cells or one cell in a screen\'s '
+      'subpixels; widths and heights come from the grid at run time')
 cover('folds_already', 'width', 'memory_translate_u32_rect',
       'the text engine hands it a terminal cell or a glyph clipped to one; '
       'widths and heights come from the grid and the glyph at run time, so '

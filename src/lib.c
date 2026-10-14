@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        407 routines (384 public, 23 local), 397 of them on all three and 10 local to one.
+        408 routines (385 public, 23 local), 398 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -287,6 +287,7 @@
           memory_to_lower_ascii          public  yes     yes     yes
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
+          memory_translate_planes_u32_rect public  yes     yes     yes
           memory_translate_u32_rect      public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
           memory_utf8_span_wide          local   yes     yes     yes
@@ -12939,6 +12940,69 @@ __asm__(
     ASM_END(memory_translate_u32_rect)
 
     //
+    //       memory_translate_planes_u32_rect -- words made from four bytes
+    //       each, every byte through its own plane: rdi into, rsi
+    //       into_stride in words, rdx from, rcx from_stride, r8 width in
+    //       words, r9 height, the table on the stack (memory_translate_
+    //       u32_rect's: 256 words, then their four byte planes). Coverage in
+    //       a screen's subpixels: a channel's coverage into the pair's tone
+    //       of that channel. The bytes in and the bytes out lie alike, so
+    //       there is nothing to interleave.
+    //
+    //       With AVX-512 VBMI the planes are zmm16 to zmm31; 64 bytes are
+    //       looked up in each plane (two vpermt2b and the byte's top bit to
+    //       choose) and merged under the byte masks of the second, third and
+    //       fourth byte of a word, a fourth plane of zeros (every table the
+    //       text engine makes) a zeroing merge instead of a lookup; loads
+    //       and stores are masked to the row. Otherwise a word a turn: four
+    //       byte loads, four plane loads, three shifts and three ors.
+    //
+#define TP32_X64_BODY(kind, FOURTH)                                                                     \
+    ".Ltp32_x64_" kind ":\n   xor %r10d, %r10d\n"                                                       \
+    ".Ltp32_x64_" kind "_piece:\n   mov %r8, %r11\n   sub %r10, %r11\n   mov $64, %eax\n   cmp %rax, %r11\n   cmova %rax, %r11\n" \
+    "mov $-1, %rax\n   bzhi %r11, %rax, %rax\n   kmovq %rax, %k1\n"                                     \
+    "vmovdqu8 (%rdx,%r10), %zmm0{%k1}{z}\n   vpmovb2m %zmm0, %k4\n"                                     \
+    "vmovdqa64 %zmm16, %zmm1\n   vpermt2b %zmm17, %zmm0, %zmm1\n   vmovdqa64 %zmm18, %zmm2\n"          \
+    "vpermt2b %zmm19, %zmm0, %zmm2\n   vmovdqu8 %zmm2, %zmm1{%k4}\n"                                  \
+    "vmovdqa64 %zmm20, %zmm2\n   vpermt2b %zmm21, %zmm0, %zmm2\n   vmovdqa64 %zmm22, %zmm3\n"          \
+    "vpermt2b %zmm23, %zmm0, %zmm3\n   vmovdqu8 %zmm3, %zmm2{%k4}\n   vmovdqu8 %zmm2, %zmm1{%k5}\n"   \
+    "vmovdqa64 %zmm24, %zmm2\n   vpermt2b %zmm25, %zmm0, %zmm2\n   vmovdqa64 %zmm26, %zmm3\n"          \
+    "vpermt2b %zmm27, %zmm0, %zmm3\n   vmovdqu8 %zmm3, %zmm2{%k4}\n   vmovdqu8 %zmm2, %zmm1{%k6}\n"   \
+    FOURTH                                                                                              \
+    "vmovdqu8 %zmm1, (%rdi,%r10){%k1}\n"                                                               \
+    "add $64, %r10\n   cmp %r8, %r10\n   jb .Ltp32_x64_" kind "_piece\n"                              \
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltp32_x64_" kind "\n   jmp .Ltp32_x64_wide_done\n"
+    ASM_FUNC(memory_translate_planes_u32_rect)
+    "test %r8, %r8\n   jz .Ltp32_x64_done\n   test %r9, %r9\n   jz .Ltp32_x64_done\n   mov 8(%rsp), %rax\n   shl $2, %rsi\n"
+    ASM_NARROW("cpu_has_avx512_vbmi", ".Ltp32_x64_narrow")
+    "shl $2, %r8\n"
+    "vmovdqu64 1024(%rax), %zmm16\n   vmovdqu64 1088(%rax), %zmm17\n   vmovdqu64 1152(%rax), %zmm18\n   vmovdqu64 1216(%rax), %zmm19\n"
+    "vmovdqu64 1280(%rax), %zmm20\n   vmovdqu64 1344(%rax), %zmm21\n   vmovdqu64 1408(%rax), %zmm22\n   vmovdqu64 1472(%rax), %zmm23\n"
+    "vmovdqu64 1536(%rax), %zmm24\n   vmovdqu64 1600(%rax), %zmm25\n   vmovdqu64 1664(%rax), %zmm26\n   vmovdqu64 1728(%rax), %zmm27\n"
+    "vmovdqu64 1792(%rax), %zmm28\n   vmovdqu64 1856(%rax), %zmm29\n   vmovdqu64 1920(%rax), %zmm30\n   vmovdqu64 1984(%rax), %zmm31\n"
+    "mov $0x2222222222222222, %r10\n   kmovq %r10, %k5\n   mov $0x4444444444444444, %r10\n   kmovq %r10, %k6\n"
+    "mov $0x8888888888888888, %r10\n   kmovq %r10, %k7\n"
+    "vporq %zmm28, %zmm29, %zmm1\n   vporq %zmm30, %zmm31, %zmm2\n   vporq %zmm1, %zmm2, %zmm1\n"
+    "vptestmq %zmm1, %zmm1, %k1\n   kortestb %k1, %k1\n   jz .Ltp32_x64_three\n"
+    TP32_X64_BODY("all", "vmovdqa64 %zmm28, %zmm2\n   vpermt2b %zmm29, %zmm0, %zmm2\n   vmovdqa64 %zmm30, %zmm3\n"
+                         "vpermt2b %zmm31, %zmm0, %zmm3\n   vmovdqu8 %zmm3, %zmm2{%k4}\n   vmovdqu8 %zmm2, %zmm1{%k7}\n")
+    ".Ltp32_x64_three:\n   knotq %k7, %k7\n"
+    TP32_X64_BODY("three_rows", "vmovdqu8 %zmm1, %zmm1{%k7}{z}\n")
+    ".Ltp32_x64_wide_done:\n   vzeroupper\n" ASM_RET
+    //  A word a turn from the planes.
+    ".Ltp32_x64_narrow:\n   push %rbx\n   push %r12\n   push %r13\n   add $1024, %rax\n"
+    ".Ltp32_x64_row:\n   xor %ebx, %ebx\n"
+    ".Ltp32_x64_word:\n"
+    "movzbl (%rdx,%rbx,4), %r10d\n   movzbl 1(%rdx,%rbx,4), %r11d\n   movzbl 2(%rdx,%rbx,4), %r12d\n   movzbl 3(%rdx,%rbx,4), %r13d\n"
+    "movzbl (%rax,%r10), %r10d\n   movzbl 256(%rax,%r11), %r11d\n   movzbl 512(%rax,%r12), %r12d\n   movzbl 768(%rax,%r13), %r13d\n"
+    "shl $8, %r11d\n   shl $16, %r12d\n   shl $24, %r13d\n   or %r11d, %r10d\n   or %r13d, %r12d\n   or %r12d, %r10d\n"
+    "mov %r10d, (%rdi,%rbx,4)\n   inc %rbx\n   cmp %r8, %rbx\n   jb .Ltp32_x64_word\n"
+    "add %rsi, %rdi\n   add %rcx, %rdx\n   dec %r9\n   jnz .Ltp32_x64_row\n"
+    "pop %r13\n   pop %r12\n   pop %rbx\n"
+    ".Ltp32_x64_done:\n" ASM_RET
+    ASM_END(memory_translate_planes_u32_rect)
+
+    //
     //       memory_blend_u32_rect -- coverage laid over a known ground: rdi
     //       into, rsi into_stride in words, rdx from, rcx from_stride, r8
     //       width, r9 height, the table on the stack, the ground after it.
@@ -22418,6 +22482,43 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_translate_u32_rect)
 
+    //       memory_translate_planes_u32_rect: a grey table, its first three
+    //       planes alike and its fourth zero (light text on a dark ground of
+    //       greys), is one plane in v16 to v31 and 16 bytes a turn through
+    //       tbl and three tbx, the fourth byte of each word cleared; any
+    //       other a word at a time, four byte loads, four plane loads and
+    //       three shifted orrs. The x86_64 block carries the contract.
+    ASM_FUNC(memory_translate_planes_u32_rect)
+    "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n   add x6, x6, #1024\n"
+    //  Grey: planes 0, 1 and 2 alike and 3 zero, compared 16 bytes at a time.
+    "mov x7, #0\n   movi v7.16b, #0\n"
+    "1:  ldr q0, [x6, x7]\n   add x8, x6, x7\n   ldr q1, [x8, #256]\n   ldr q2, [x8, #512]\n   ldr q3, [x8, #768]\n"
+    "eor v1.16b, v1.16b, v0.16b\n   eor v2.16b, v2.16b, v0.16b\n   orr v1.16b, v1.16b, v2.16b\n   orr v1.16b, v1.16b, v3.16b\n"
+    "orr v7.16b, v7.16b, v1.16b\n   add x7, x7, #16\n   cmp x7, #256\n   b.lo 1b\n"
+    "umaxp v7.4s, v7.4s, v7.4s\n   fmov x8, d7\n   cbnz x8, 5f\n"
+    "ld1 {v16.16b-v19.16b}, [x6]\n   add x8, x6, #64\n   ld1 {v20.16b-v23.16b}, [x8]\n   add x8, x6, #128\n"
+    "ld1 {v24.16b-v27.16b}, [x8]\n   add x8, x6, #192\n   ld1 {v28.16b-v31.16b}, [x8]\n"
+    "movi v5.16b, #64\n   movi v6.4s, #0xff, msl #16\n   lsl x9, x4, #2\n"
+    "2:  mov x7, #0\n"
+    "3:  add x8, x7, #16\n   cmp x8, x9\n   b.hi 4f\n   ldr q0, [x2, x7]\n"
+    "tbl v1.16b, {v16.16b-v19.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n   tbx v1.16b, {v20.16b-v23.16b}, v0.16b\n"
+    "sub v0.16b, v0.16b, v5.16b\n   tbx v1.16b, {v24.16b-v27.16b}, v0.16b\n   sub v0.16b, v0.16b, v5.16b\n"
+    "tbx v1.16b, {v28.16b-v31.16b}, v0.16b\n   and v1.16b, v1.16b, v6.16b\n   str q1, [x0, x7]\n   mov x7, x8\n   b 3b\n"
+    "4:  cmp x7, x9\n   b.hs 41f\n   ldrb w10, [x2, x7]\n   ldrb w10, [x6, x10]\n   add x11, x7, #1\n   ldrb w12, [x2, x11]\n   ldrb w12, [x6, x12]\n"
+    "add x11, x7, #2\n   ldrb w13, [x2, x11]\n   ldrb w13, [x6, x13]\n   orr w10, w10, w12, lsl #8\n   orr w10, w10, w13, lsl #16\n"
+    "str w10, [x0, x7]\n   add x7, x7, #4\n   b 4b\n"
+    "41: add x0, x0, x1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 2b\n" ASM_RET
+    //  Any other table: a word at a time.
+    "5:  add x12, x6, #256\n   add x13, x6, #512\n   add x14, x6, #768\n"
+    "6:  mov x7, #0\n"
+    "7:  add x15, x2, x7, lsl #2\n   ldrb w8, [x15]\n   ldrb w9, [x15, #1]\n   ldrb w10, [x15, #2]\n   ldrb w11, [x15, #3]\n"
+    "ldrb w8, [x6, x8]\n   ldrb w9, [x12, x9]\n   ldrb w10, [x13, x10]\n   ldrb w11, [x14, x11]\n"
+    "orr w8, w8, w9, lsl #8\n   orr w8, w8, w10, lsl #16\n   orr w8, w8, w11, lsl #24\n   str w8, [x0, x7, lsl #2]\n"
+    "add x7, x7, #1\n   cmp x7, x4\n   b.lo 7b\n"
+    "add x0, x0, x1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 6b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_translate_planes_u32_rect)
+
     //       memory_blend_u32_rect: four pixels a turn with no branch on the
     //       coverage. The four words are looked up whatever the bytes and
     //       put in a vector; the pixels are tested against the ground and the
@@ -30943,6 +31044,36 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_translate_u32_rect)
 
+    //       memory_translate_planes_u32_rect: with V, as many bytes as a
+    //       group of two registers holds, widened to 16-bit offsets with the
+    //       plane of each (its place in the word times 256) added, and one
+    //       indexed load from the planes; without, a word at a time. The
+    //       x86_64 block carries the contract.
+    ASM_FUNC(memory_translate_planes_u32_rect)
+    "beqz a4, 9f\n   beqz a5, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 1f\n   bnez t3, 5f\n"
+    "addi sp, sp, -32\n   sd ra, 16(sp)\n   sd a5, 8(sp)\n   sd a6, 0(sp)\n   call cpu_vector_detect\n   ld a6, 0(sp)\n   ld a5, 8(sp)\n"
+    "ld ra, 16(sp)\n   addi sp, sp, 32\n"
+    "j memory_translate_planes_u32_rect\n"
+    "1:  addi a6, a6, 1024\n   slli a1, a1, 2\n   slli a4, a4, 2\n"
+    "vsetvli t0, a4, e16, m4, ta, ma\n   vid.v v8\n   vand.vi v8, v8, 3\n   vsll.vi v8, v8, 8\n"
+    "2:  mv t1, a2\n   mv t2, a0\n   mv t3, a4\n"
+    "3:  vsetvli t0, t3, e8, m2, ta, ma\n   vle8.v v0, (t1)\n   vsetvli zero, t0, e16, m4, ta, ma\n   vzext.vf2 v4, v0\n"
+    "vadd.vv v4, v4, v8\n   vsetvli zero, t0, e8, m2, ta, ma\n   vluxei16.v v12, (a6), v4\n   vse8.v v12, (t2)\n"
+    "add t1, t1, t0\n   add t2, t2, t0\n   sub t3, t3, t0\n   bnez t3, 3b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 2b\n   ret\n"
+#endif
+    "5:  addi a6, a6, 1024\n   slli a1, a1, 2\n   addi t4, a6, 256\n   addi t5, a6, 512\n   addi t6, a6, 768\n"
+    "6:  mv t1, a2\n   mv t2, a0\n   slli t3, a4, 2\n   add t3, a2, t3\n"
+    "7:  lbu a7, 0(t1)\n   add a7, a6, a7\n   lbu a7, 0(a7)\n   lbu t0, 1(t1)\n   add t0, t4, t0\n   lbu t0, 0(t0)\n"
+    "slli t0, t0, 8\n   or a7, a7, t0\n   lbu t0, 2(t1)\n   add t0, t5, t0\n   lbu t0, 0(t0)\n   slli t0, t0, 16\n   or a7, a7, t0\n"
+    "lbu t0, 3(t1)\n   add t0, t6, t0\n   lbu t0, 0(t0)\n   slli t0, t0, 24\n   or a7, a7, t0\n   sw a7, 0(t2)\n"
+    "addi t1, t1, 4\n   addi t2, t2, 4\n   bne t1, t3, 7b\n"
+    "add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 6b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_translate_planes_u32_rect)
+
     //       memory_blend_u32_rect: with V, as many pixels as a register
     //       holds: the bytes widened, vmsne for the ones not zero, the pixels
     //       against the ground, vfirst for the first that is not and is
@@ -37976,6 +38107,16 @@ fn memory_translate_u32_rect(p32 address_to into, positive into_stride,
                              const p8 address_to from, positive from_stride,
                              positive width, positive height,
                              const p32 address_to table);
+// height rows of width 32-bit words made from four bytes each, from_stride
+// bytes apart and 4 * width bytes a row, into rows into_stride words apart:
+// byte k of into[r][i] is plane k at from[r][4i + k], the planes being the
+// 1024 bytes after table's 256 words (memory_translate_u32_rect's table).
+// Text in a screen's subpixels: each channel's coverage into the pair's tone
+// of that channel. A zero width or height touches nothing, and nothing past a
+// row is read.
+fn memory_translate_planes_u32_rect(p32 address_to into, positive into_stride, const p8 address_to from,
+                                    positive from_stride, positive width, positive height,
+                                    const p32 address_to table);
 // count running sums of 32-bit differences made bytes, a row of the text
 // engine's coverage: sum += cells[i], cells[i] = 0, and into[i] is
 // (min(|sum|, 2^21) * 255 + 2^20) >> 21 -- the sum being twice an area in

@@ -3803,8 +3803,8 @@ static bool font_room(font_engine address_to e, b32 width, b32 height, p16 addre
         of the sharpness, and each pixel's three are written in the order the
         pixel's bytes are (blue, green, red, then the most of the three), so
         the cell is one byte a channel and the pair's planes make it pixels a
-        byte at a time (font_translate_lcd). A bitmap of this kind is four
-        bytes a pixel; width stays in pixels.
+        byte at a time (memory_translate_planes_u32_rect). A bitmap of this
+        kind is four bytes a pixel; width stays in pixels.
 */
 static fn font_raster_lcd(font_engine address_to e, b32 width, b32 height, p8 address_to out, positive stride)
 {
@@ -4540,19 +4540,6 @@ static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const f
         return box;
 }
 
-//      Coverage of the subpixel kind, four bytes a pixel, made pixels: each byte of a pixel through its own plane of
-//      the pair's tones, that is each channel mixed by its own subpixel's coverage.
-static fn font_translate_lcd(p32 address_to into, positive stride, const p8 address_to from, positive from_stride,
-                             positive width, positive height, const p32 address_to pixel)
-{
-        const p8 address_to planes = (const p8 address_to)(pixel + 256);
-
-        for (positive r = 0; r < height; r++, into += stride, from += from_stride)
-                for (positive c = 0; c < width; c++)
-                        into[c] = planes[from[4 * c]] | (p32)planes[256 + from[4 * c + 1]] << 8 |
-                                  (p32)planes[512 + from[4 * c + 2]] << 16;
-}
-
 /*
         A terminal cell, whole: its background and its glyph written in one
         pass, each pixel once, through the pair's tones. A glyph is cached as
@@ -4619,9 +4606,10 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         font_ground(target, left, above, from, below, background);
         font_ground(target, to, above, right, below, background);
         if (from < to && k == 4)
-                font_translate_lcd(target->pixels + (positive)above * target->stride + from, target->stride,
-                                   box.coverage + (positive)(above - gy) * box.stride + 4 * (from - gx), box.stride,
-                                   (positive)(to - from), (positive)(below - above), pixel);
+                memory_translate_planes_u32_rect(target->pixels + (positive)above * target->stride + from,
+                                                 target->stride,
+                                                 box.coverage + (positive)(above - gy) * box.stride + 4 * (from - gx),
+                                                 box.stride, (positive)(to - from), (positive)(below - above), pixel);
         else if (from < to)
                 memory_translate_u32_rect(target->pixels + (positive)above * target->stride + from, target->stride,
                                           box.coverage + (positive)(above - gy) * box.stride + (from - gx),
@@ -4761,8 +4749,9 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                         font_lay_cell(e->strip + (positive)i * (positive)(width * k), stride, &e->run[i], e->run_dx[i],
                                       e->run_dy[i], width, height, from, rows, limit, k);
                 if (k == 4)
-                        font_translate_lcd(target->pixels + (positive)(y + from) * target->stride + (positive)x,
-                                           target->stride, e->strip, stride, across, (positive)rows, pixel);
+                        memory_translate_planes_u32_rect(target->pixels + (positive)(y + from) * target->stride +
+                                                             (positive)x,
+                                                         target->stride, e->strip, stride, across, (positive)rows, pixel);
                 else
                         memory_translate_u32_rect(target->pixels + (positive)(y + from) * target->stride + (positive)x,
                                                   target->stride, e->strip, stride, across, (positive)rows, pixel);

@@ -107290,6 +107290,104 @@ static fn check_translate_table(p32 kind)
 }
 
 /*
+        memory_translate_planes_u32_rect against its definition: every width
+        from 0 to 40 and rows of 64 to 300 words, heights to 5, two strides,
+        the source's last row and the destination's against pages that
+        fault, the words around the rows held to a canary. Three tables:
+        four random bytes a word, a zero fourth byte (the text engine's), and
+        grey, its three low planes alike (arm64's one-plane body). On x86_64
+        with VBMI and without, on riscv64 with V and without, and the first
+        riscv64 call that asks for V.
+*/
+static fn check_translate_planes()
+{
+        static p32 table[512];
+        p8 address_to source = memory(8 * 4096);
+        p32 address_to into = memory(4 * 4096);
+        bool guarded = source && into &&
+                       system_call_3(syscall(mprotect), (positive)(source + 7 * 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+        p64 state = 0x51ce0f7a3d2b9c41ull;
+        bool fine = true;
+
+        check("translate planes: guard pages", guarded);
+        if (!guarded)
+                return;
+        for (p32 kind = 0; kind < 3; kind++)
+        {
+                for (p32 i = 0; i < 256; i++)
+                {
+                        XORSHIFT64(state);
+                        table[i] = kind == 0 ? (p32)state : kind == 1 ? (p32)state & 0xffffff : ((p32)state & 0xff) * 0x010101;
+                        for (p32 k = 0; k < 4; k++)
+                                ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+                }
+                const p8 address_to planes = (const p8 address_to)(table + 256);
+#if RISCV64
+                cpu_has_vector = 0;
+                source[0] = 7, source[1] = 200, source[2] = 9, source[3] = 255;
+                memory_translate_planes_u32_rect(into, 1, source, 4, 1, 1, table);
+                check("translate planes: the first call asks for V and still has its height and table",
+                      into[0] == ((p32)planes[7] | (p32)planes[256 + 200] << 8 | (p32)planes[512 + 9] << 16 |
+                                  (p32)planes[768 + 255] << 24) &&
+                          cpu_has_vector != 0);
+                p8 vector = cpu_has_vector;
+                for (p32 tier = 0; tier < 2; tier++)
+                {
+                        cpu_has_vector = tier ? 1 : vector;
+#elif X64
+                p8 wide_on = cpu_has_avx512_vbmi;
+                for (p32 tier = 0; tier < 2; tier++)
+                {
+                        cpu_has_avx512_vbmi = tier ? 0 : wide_on;
+#endif
+                        static const positive wide[] = {64, 127, 128, 300};
+                        for (positive w = 0; w <= 40 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                                for (positive width = w <= 40 ? w : wide[w - 41], height = 0; height <= (width > 40 ? 3u : 5u);
+                                     height++)
+                                        for (positive gap = 0; gap <= 7; gap += 7)
+                                        {
+                                                positive bytes = 4 * width, from_stride = bytes + gap, stride = width + gap;
+                                                positive span = height ? (height - 1) * from_stride + bytes : 0;
+                                                positive words = height ? (height - 1) * stride + width : 0;
+                                                p8 address_to from = source + 7 * 4096 - span;
+                                                p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - words;
+
+                                                for (positive i = 0; i < span; i++)
+                                                {
+                                                        XORSHIFT64(state);
+                                                        from[i] = (p8)state;
+                                                }
+                                                for (positive i = 0; i < words + 16; i++)
+                                                        to[(b64)i - 16] = 0xdeadbeef;
+                                                memory_translate_planes_u32_rect(to, stride, from, from_stride, width, height, table);
+                                                for (b64 i = -16; i < (b64)words; i++)
+                                                {
+                                                        bool inside = i >= 0 && (positive)i % stride < width;
+                                                        p32 want = 0xdeadbeef;
+
+                                                        if (inside)
+                                                        {
+                                                                const p8 address_to b = from + (positive)i / stride * from_stride +
+                                                                                        4 * ((positive)i % stride);
+                                                                want = (p32)planes[b[0]] | (p32)planes[256 + b[1]] << 8 |
+                                                                       (p32)planes[512 + b[2]] << 16 | (p32)planes[768 + b[3]] << 24;
+                                                        }
+                                                        fine = fine && to[i] == want;
+                                                }
+                                        }
+#if RISCV64
+                }
+                cpu_has_vector = vector;
+#elif X64
+                }
+                cpu_has_avx512_vbmi = wide_on;
+#endif
+        }
+        check("translate planes: every byte its plane's, nothing else written, every width and height", fine);
+}
+
+/*
         memory_blend_u32_rect against the loop it replaces in font_blend:
         every width to 80 and rows of 127 to 300, heights to 6, two strides,
         coverage half zero, the pixels the ground but for a few that another
@@ -108162,6 +108260,7 @@ b32 main()
         check_polarity(&two);
         check_cells(&small_engine, &two);
         check_translate();
+        check_translate_planes();
         check_blend();
         check_average_ahead();
         check_glass_routines();
@@ -120383,6 +120482,101 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_fill_rect */
+
+#ifdef BENCH_translate_planes
+/* memory_translate_planes_u32_rect against the C loop it replaced in
+   src/canvas/font.c (font_translate_lcd): a strip of a terminal row as
+   font_cells lays it (1220 by 15) and cells (9 by 19, 16 by 35), into a
+   3840-pixel frame, with a grey table and a colour one; on x86_64 with VBMI
+   and without. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 frame[3840 * 40];
+static p8 strip[4 * 1300 * 40];
+static p32 table[512];
+
+__attribute__((noinline, noclone)) static fn former_planes(p32 address_to into, positive stride, const p8 address_to from,
+                                                           positive from_stride, positive width, positive height,
+                                                           const p32 address_to pixel)
+{
+        const p8 address_to planes = (const p8 address_to)(pixel + 256);
+
+        for (positive r = 0; r < height; r++, into += stride, from += from_stride)
+                for (positive c = 0; c < width; c++)
+                        into[c] = planes[from[4 * c]] | (p32)planes[256 + from[4 * c + 1]] << 8 |
+                                  (p32)planes[512 + from[4 * c + 2]] << 16;
+}
+
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                if (assembly)
+                        memory_translate_planes_u32_rect(frame + round % 7, 3840, strip, 4 * width + 16, width, height, table);
+                else
+                        former_planes(frame + round % 7, 3840, strip, 4 * width + 16, width, height, table);
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{9, 19}, {16, 35}, {1220, 15}};
+        p64 state = 0x2d6b1f0e93a7c845ull;
+
+        for (positive i = 0; i < sizeof(strip); i++)
+        {
+                XORSHIFT64(state);
+                strip[i] = (p8)(state % 3 == 0 ? 0 : state % 3 == 1 ? 255 : state >> 8);
+        }
+        for (p32 grey = 0; grey < 2; grey++)
+        {
+                for (p32 i = 0; i < 256; i++)
+                {
+                        p32 g = grey ? 0x10 + i * 0xd8 / 255 : 0;
+
+                        table[i] = grey ? g * 0x010101 : (0x20 + i / 2) << 16 | (0x30 + i / 3) << 8 | (0x10 + i * 3 / 4);
+                        for (p32 k = 0; k < 4; k++)
+                                ((p8 address_to)(table + 256))[k * 256 + i] = (p8)(table[i] >> (8 * k));
+                }
+#if X64
+                p8 wide = cpu_has_avx512_vbmi;
+                for (p32 tier = 0; tier < (wide ? 2u : 1u); tier++)
+                {
+                        cpu_has_avx512_vbmi = tier ? 0 : wide;
+#endif
+                        for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                        {
+                                positive width = shapes[row][0], height = shapes[row][1];
+                                positive ratios[TRIES];
+                                positive rounds = 4000000 / (width * height) + 1;
+
+                                BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                                string_format(log, "memory_translate_planes_u32_rect %p by %p, %s%s: paired median ASM/C %p.",
+                                              width, height, grey ? (string_address) "grey" : (string_address) "colour",
+#if X64
+                                              cpu_has_avx512_vbmi ? (string_address) " vbmi" : (string_address) " scalar",
+#else
+                                              (string_address) "",
+#endif
+                                              ratios[TRIES / 2] / 100);
+                                positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                                log("%\n", 2);
+                        }
+#if X64
+                }
+                cpu_has_avx512_vbmi = wide;
+#endif
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_translate_planes */
 
 #ifdef BENCH_copy_changed
 /* memory_copy_changed_u32 against the same chunks compared and copied in C

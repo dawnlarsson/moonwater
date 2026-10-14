@@ -271,6 +271,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_glass', 'memory_halve_u32 memory_
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_translate_planes', 'memory_translate_planes_u32_rect',
+      'paired timing against the C loop it replaced over a terminal strip and '
+      'two cell sizes, grey and colour tables, with VBMI and without')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '
