@@ -20847,7 +20847,7 @@ def reds(data, width, x0, x1, ys):
             own += (r, g, b) == (0xff, 0x20, 0x20)
     return red, own
 
-ys = range(300, 820, 9)
+ys = range(H // 2 - 12 - 200, H // 2 - 12 + 200, 9)   # inside the window, whose middle is the output's, a little up
 shot("r1-settings", 1)
 width, height, glass = load("r1-settings")
 left_red, left_own = reds(glass, width, W // 2 - 220, W // 2 - 40, ys)
@@ -20947,12 +20947,29 @@ key("esc")
 time.sleep(1)
 out.append(("S1.5c a choice opens a list on the screen: Escape leaves the value, a way down it and Enter sets another, and back",
             "%s %s %s %s %d" % ("kept" if kept == had_nts else "moved to " + kept, "set" if set_other else "not set",
-                                "back" if back_nts else "not back", "drawn" if differing("r1-list-closed", "r1-list-open") > 400 and
-                                differing("r1-list-closed", "r1-list-closed-again") < 60 else
+                                "back" if back_nts else "not back", "drawn" if differing("r1-list-closed", "r1-list-open") > 3000 and
+                                differing("r1-list-closed", "r1-list-closed-again") < 1000 else
                                 "%d/%d" % (differing("r1-list-closed", "r1-list-open"),
                                            differing("r1-list-closed", "r1-list-closed-again")), len(pids("settings"))),
             "kept set back drawn 1"))
 said("S1.5c")
+#   A group with a feed is kept up with while it is shown: the clock's row, in Time, is asked again every second,
+#   so the window's picture changes with the time and nobody pressed anything.
+key("tab")
+key("down")
+key("down")
+time.sleep(1.5)
+shot("r1-time-one", 1)
+time.sleep(2.5)
+shot("r1-time-two", 1)
+live = differing("r1-time-one", "r1-time-two")
+key("up")
+key("up")
+key("ret")
+time.sleep(0.5)
+out.append(("S1.5d the group shown is kept up with: the clock in Time changes in the picture with nothing pressed",
+            "live" if live > 15 else "%d pixels changed" % live, "live"))
+said("S1.5d")
 shell.run("moonwater settings", 15)
 time.sleep(2)
 out.append(("S1.6 a second moonwater settings lifts the window that is up and makes no other",

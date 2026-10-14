@@ -79,15 +79,17 @@ it changes it and needs root, and a word it does not take is a usage page
 script that sets a machine up at boot.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
-(machine, canvas, time, network, power, boot, and all commands) are listed at the left
-and the rows of the one chosen at the right, each row a setting a person flips, and
-under All commands a row to every line of `moonwater help`, so no verb is out of its
-reach. Tab goes between the groups and the rows, the arrow keys move in either, and
-a press on a group or a row does what Enter does on it. A choice opens a list of
-all its choices under it: Up and Down, a letter and Enter pick one and Escape leaves
-the row as it was. Typing filters the rows of
-every group; a command that ends the session or throws away what is kept is run by a
-second Enter.
+(machine, canvas, time, network, Wi-Fi, Bluetooth, power, boot, and all commands) are
+listed at the left and the rows of the one chosen at the right, each row a setting a
+person flips, and under All commands a row to every line of `moonwater help`, so no
+verb is out of its reach. Tab goes between the groups and the rows, the arrow keys
+move in either, and a press on a group or a row does what Enter does on it. A choice
+opens a list of all its choices under it: Up and Down, a letter and Enter pick one
+and Escape leaves the row as it was. The group on show is kept up with: the networks
+in range (Wi-Fi), the devices kept (Bluetooth), the battery and the clock are asked
+again every second or two, and joining a network asks for its passphrase in the
+window. Typing filters the rows of every group; a command that ends the session or
+throws away what is kept is run by a second Enter.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away.
 

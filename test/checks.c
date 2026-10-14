@@ -110555,6 +110555,324 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.child = 0;
                         settings.queued = 0;
                 }
+
+                // The feeds: the networks in range and the devices kept are rows that come and go as the verb is read again.
+                {
+                        static const char air[] =
+                            "[Moonwater] wifi on\n[Moonwater]   HomeNet\n[Moonwater]   Old Cafe\n[Moonwater]   Far Away\n"
+                            "[Moonwater] * HomeNet    -48 dBm ####  WPA2     5 GHz ch 36\n"
+                            "[Moonwater]   Guest      -61 dBm ###.  open     2.4 GHz ch 6\n"
+                            "[Moonwater] + Old Cafe   -80 dBm #...  WPA2/3   5 GHz ch 100\n"
+                            "[Moonwater]   Corp -x    -70 dBm ##..  802.1X   5 GHz ch 40\n"
+                            "[Moonwater]   and 4 more\n"
+                            "[Moonwater] * joined  + saved  moonwater wifi add SSID asks for its password\n";
+                        static const char again[] =
+                            "[Moonwater] wifi off\n[Moonwater]   HomeNet\n[Moonwater]   Old Cafe\n[Moonwater]   Far Away\n"
+                            "[Moonwater]   Newcomer   -40 dBm ####  WPA3     5 GHz ch 44\n"
+                            "[Moonwater] * HomeNet    -50 dBm ###.  WPA2     5 GHz ch 36\n"
+                            "[Moonwater] + Old Cafe   -82 dBm #...  WPA2/3   5 GHz ch 100\n"
+                            "[Moonwater]   Guest      -62 dBm ###.  open     2.4 GHz ch 6\n"
+                            "[Moonwater]   Corp -x    -70 dBm ##..  802.1X   5 GHz ch 40\n";
+                        static const char silent[] =
+                            "[Moonwater] wifi on\n[Moonwater]   HomeNet\n[Moonwater] no networks heard (a new scan needs root)\n";
+                        static const char tooth[] = "[Moonwater] bluetooth on\n[Moonwater]   Keyboard K1\n[Moonwater]   Mouse\n";
+                        int wifi = settings_row_named("Wi-Fi"), bt = settings_row_named("Bluetooth"), battery = settings_row_named("Battery"),
+                            clock_row = settings_row_named("Clock (Enter sets it now)"), wifi_group = settings_group_of(wifi),
+                            bt_group = settings_group_of(bt);
+                        struct settings_item address_to items = settings_large->item[0], address_to devices = settings_large->item[1];
+                        struct windows address_to table = (struct windows address_to)compositor_call(
+                            syscall(mmap), 0, (sizeof(struct windows) + 4095) & ~(positive)4095, 3, 0x22, (positive)-1, 0);
+                        int row_of;
+
+                        check("settings: Wi-Fi and Bluetooth are groups of their own, each with the switch first",
+                              wifi_group != bt_group && wifi_group != settings_group_of(settings_row_named("Wired")) &&
+                                  string_equals((string_address)settings_group_name(wifi_group), (string_address) "Wi-Fi") &&
+                                  string_equals((string_address)settings_group_name(bt_group), (string_address) "Bluetooth"));
+                        settings.group = wifi_group;
+                        check("settings: the feeds are of Wi-Fi, Bluetooth, Power and Time and no others",
+                              settings_feed_of_group() == 0 && (settings.group = bt_group, settings_feed_of_group() == 1) &&
+                                  (settings.group = settings_group_of(battery), settings_feed_of_group() == 2) &&
+                                  (settings.group = settings_group_of(clock_row), settings_feed_of_group() == 3) &&
+                                  (settings.group = 0, settings_feed_of_group() < 0));
+
+                        // What moonwater wifi says, as the list: marker, name (with blanks), dBm, bars, what it asks for.
+                        settings.group = wifi_group;
+                        settings.focus = wifi;
+                        memory_copy(settings_large->said, air, sizeof(air) - 1);
+                        settings.said_length = sizeof(air) - 1;
+                        settings_feed_wifi();
+                        check("settings: the networks heard are rows, strongest first as the verb says, then a saved one not heard",
+                              settings.item_count[0] == 5 && string_equals((string_address)items[0].label, (string_address) "HomeNet") &&
+                                  string_equals((string_address)items[1].label, (string_address) "Guest") &&
+                                  string_equals((string_address)items[2].label, (string_address) "Old Cafe") &&
+                                  string_equals((string_address)items[3].label, (string_address) "Corp -x") &&
+                                  string_equals((string_address)items[4].label, (string_address) "Far Away") && !(items[4].flags & SETTINGS_ITEM_HEARD));
+                        check("settings: a network's signal, bars and what it asks for are read from its row",
+                              items[0].dbm == -48 && items[0].bars == 4 && string_equals((string_address)items[0].security, (string_address) "WPA2") &&
+                                  items[1].dbm == -61 && items[1].bars == 3 && (items[1].flags & SETTINGS_ITEM_OPEN) &&
+                                  items[2].dbm == -80 && items[2].bars == 1 && string_equals((string_address)items[2].security, (string_address) "WPA2/3"));
+                        check("settings: the one joined and the ones saved are marked, a saved name among the heard marks that one",
+                              (items[0].flags & SETTINGS_ITEM_JOINED) && (items[0].flags & SETTINGS_ITEM_SAVED) && !(items[1].flags & SETTINGS_ITEM_SAVED) &&
+                                  (items[2].flags & SETTINGS_ITEM_SAVED) && (items[4].flags & SETTINGS_ITEM_SAVED));
+                        check("settings: what moonwater cannot join is marked, and so is what it can", (items[3].flags & SETTINGS_ITEM_CANNOT) &&
+                                  !(items[0].flags & SETTINGS_ITEM_CANNOT) && !(items[1].flags & SETTINGS_ITEM_CANNOT) && !(items[2].flags & SETTINGS_ITEM_CANNOT));
+                        memory_copy(settings_large->said, silent, sizeof(silent) - 1);
+                        settings.said_length = sizeof(silent) - 1;
+                        settings_feed_wifi();
+                        check("settings: a line that is about no network is a row of its own, after the saved ones",
+                              settings.item_count[0] == 2 && items[0].kind == SETTINGS_NETWORK && items[1].kind == SETTINGS_NOTE &&
+                                  !memory_compare(items[1].label, "no networks heard", 17));
+
+                        // Read again: the keys stay on the network by its name, the view stays, an unchanged list draws nothing.
+                        settings.item_count[0] = 0;
+                        settings.pane = 1;
+                        settings.editing = -1;
+                        settings.menu = -1;
+                        settings.feed_list = 0;
+                        settings.value[wifi][0] = 0;
+                        memory_copy(settings_large->said, air, sizeof(air) - 1);
+                        settings.said_length = sizeof(air) - 1;
+                        settings_feed_read(false, false);
+                        check("settings: a feed read puts its rows in the group, after the group's own, and sets its switch from the same words",
+                              settings.item_count[0] == 5 && settings.state[wifi] == SETTINGS_READ &&
+                                  string_equals((string_address)settings.value[wifi], (string_address) "on") &&
+                                  settings.visible_count == 1 + 5 && settings.visible[0] == wifi);
+                        settings.focus = (int)SETTINGS_LIST + 1; // Guest
+                        settings.dirty = false;
+                        settings_feed_read(false, false);
+                        check("settings: a reading that says what the last said changes nothing and draws nothing", !settings.dirty && settings.focus == (int)SETTINGS_LIST + 1);
+                        settings.scroll = 0;
+                        memory_copy(settings_large->said, again, sizeof(again) - 1);
+                        settings.said_length = sizeof(again) - 1;
+                        settings_feed_read(false, false);
+                        row_of = settings.focus;
+                        check("settings: a list that moves under the keys does not move them: they stay on the network of that name",
+                              settings.item_count[0] == 6 && settings_item(row_of) && string_equals((string_address)settings_item(row_of)->label, (string_address) "Guest") &&
+                                  row_of != (int)SETTINGS_LIST + 1 && settings.dirty && settings_pos(row_of) >= 0 && settings.pane == 1);
+                        check("settings: and the switch follows what the verb says now", string_equals((string_address)settings.value[wifi], (string_address) "off"));
+                        memory_copy(settings_large->said, silent, sizeof(silent) - 1);
+                        settings.said_length = sizeof(silent) - 1;
+                        settings_feed_read(false, false);
+                        check("settings: a network gone from under the keys leaves them on a row of the list", settings_item(settings.focus) != null &&
+                                  settings_pos(settings.focus) >= 0);
+                        settings.feed_due = 0;
+                        settings_feed_read(true, false);
+                        check("settings: a reading that was stopped changes no row, and the next is later", settings.item_count[0] == 2 &&
+                                  settings.feed_due > clock_monotonic_nanoseconds());
+                        memory_copy(settings_large->said, air, sizeof(air) - 1);
+                        settings.said_length = sizeof(air) - 1;
+                        settings_feed_read(false, false);
+                        settings.editing = (int)SETTINGS_LIST + 2;
+                        settings.dirty = false;
+                        memory_copy(settings_large->said, again, sizeof(again) - 1);
+                        settings.said_length = sizeof(again) - 1;
+                        settings_feed_read(false, false);
+                        check("settings: nothing is changed under a passphrase being typed", settings.item_count[0] == 5 &&
+                                  string_equals((string_address)items[1].label, (string_address) "Guest") && !settings.dirty);
+                        settings.editing = -1;
+
+                        // What a person does to a row of the list.
+                        settings.child = 1;
+                        settings.queued = 0;
+                        settings.pane = 1;
+                        memory_copy(settings_large->said, air, sizeof(air) - 1);
+                        settings.said_length = sizeof(air) - 1;
+                        settings_feed_read(false, false);
+                        settings.focus = (int)SETTINGS_LIST + 1; // Guest, open
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on an open network joins it, by the verb's own words and no passphrase",
+                              settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "j\nGuest") && settings.editing < 0);
+                        settings.queued = 0;
+                        settings.focus = (int)SETTINGS_LIST; // HomeNet, joined
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on the one joined sends nothing and says so", settings.queued == 0 && settings.status[0]);
+                        settings.focus = (int)SETTINGS_LIST + 3; // Corp, 802.1X
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on a network moonwater cannot join sends nothing and says so", settings.queued == 0 && settings.editing < 0 &&
+                                  string_length((string_address)settings.status) > 10);
+                        settings.focus = (int)SETTINGS_LIST + 2; // Old Cafe, WPA2/3, saved
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on a network that asks for a passphrase opens a field for it", settings.editing == (int)SETTINGS_LIST + 2 &&
+                                  settings.queued == 0 && string_equals((string_address)settings.joining, (string_address) "Old Cafe"));
+                        for (const char address_to letter = "hunter22"; *letter; letter++)
+                                settings_type_code((unsigned int)*letter);
+                        settings_press(SETTINGS_KEY_ESCAPE);
+                        {
+                                b32 wiped = true;
+
+                                for (positive at = 0; at < sizeof(settings.typed); at++)
+                                        wiped &= settings.typed[at] == 0;
+                                check("settings: Escape leaves it: nothing is sent and nothing typed is kept", settings.editing < 0 && settings.queued == 0 && wiped);
+                        }
+                        settings_press(SETTINGS_KEY_ENTER);
+                        for (const char address_to letter = "hunter22"; *letter; letter++)
+                                settings_type_code((unsigned int)*letter);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        {
+                                b32 wiped = true;
+
+                                for (positive at = 0; at < sizeof(settings.typed); at++)
+                                        wiped &= settings.typed[at] == 0;
+                                check("settings: Enter in it joins with the passphrase, and keeps none of it here",
+                                      settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "j\nOld Cafe\nhunter22") && wiped);
+                        }
+                        settings.queued = 0;
+
+                        // The words that run it: the passphrase goes to the verb's input after "-", and is in no word.
+                        {
+                                string_address words[SETTINGS_WORDS];
+                                const char address_to pass;
+
+                                settings.moonwater = (string_address) "/moonwater";
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "j\nOld Cafe\nhunter22", sizeof(settings.job_value));
+                                pass = settings_act_words(words);
+                                check("settings: a join is wifi add, the name as one word, - for the passphrase, which goes to the input",
+                                      words[0] && string_equals(words[1], (string_address) "wifi") && string_equals(words[2], (string_address) "add") &&
+                                          string_equals(words[3], (string_address) "Old Cafe") && string_equals(words[4], (string_address) "-") && !words[5] &&
+                                          pass && string_equals((string_address)pass, (string_address) "hunter22"));
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "j\nGuest", sizeof(settings.job_value));
+                                pass = settings_act_words(words);
+                                check("settings: an open network is joined with no passphrase and no -", words[0] && !pass && !words[4] &&
+                                          string_equals(words[3], (string_address) "Guest"));
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "f\nOld Cafe", sizeof(settings.job_value));
+                                pass = settings_act_words(words);
+                                check("settings: forgetting is wifi remove and the name", words[0] && !pass && string_equals(words[2], (string_address) "remove") &&
+                                          string_equals(words[3], (string_address) "Old Cafe") && !words[4]);
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "x\nwhatever", sizeof(settings.job_value));
+                                settings_act_words(words);
+                                check("settings: and a change that is none of these runs nothing", !words[0]);
+                                string_copy_bounded((string_address)settings.job_value, (string_address) "j\n", sizeof(settings.job_value));
+                                settings_act_words(words);
+                                check("settings: nor one with no name", !words[0]);
+                        }
+
+                        // Delete forgets, when pressed twice on the same name.
+                        settings.focus = (int)SETTINGS_LIST + 2;
+                        settings_press(SETTINGS_KEY_DELETE);
+                        check("settings: Delete on a saved network asks to be pressed again", settings.queued == 0 && settings.forget[0]);
+                        settings_press(SETTINGS_KEY_DELETE);
+                        check("settings: and the second Delete forgets it", settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "f\nOld Cafe"));
+                        settings.queued = 0;
+                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(SETTINGS_KEY_DOWN);
+                        settings_press(SETTINGS_KEY_DELETE);
+                        check("settings: a key between two Deletes, or another network, starts it over", settings.queued == 0);
+                        settings.focus = (int)SETTINGS_LIST + 1; // Guest, not saved
+                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(SETTINGS_KEY_DELETE);
+                        check("settings: Delete on a network that is not saved does nothing", settings.queued == 0);
+
+                        // Devices: the names kept, and a row that keeps another.
+                        settings.group = bt_group;
+                        settings.item_count[1] = 0;
+                        settings.feed_list = 1;
+                        memory_copy(settings_large->said, tooth, sizeof(tooth) - 1);
+                        settings.said_length = sizeof(tooth) - 1;
+                        settings_feed_read(false, false);
+                        check("settings: the devices kept are rows, and a last row keeps one more",
+                              settings.item_count[1] == 3 && string_equals((string_address)devices[0].label, (string_address) "Keyboard K1") &&
+                                  devices[0].kind == SETTINGS_DEVICE && devices[2].kind == SETTINGS_ADD &&
+                                  string_equals((string_address)settings.value[bt], (string_address) "on"));
+                        settings.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 2;
+                        settings_press(SETTINGS_KEY_ENTER);
+                        for (const char address_to letter = "Pen"; *letter; letter++)
+                                settings_type_code((unsigned int)*letter);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on it opens a field, and the name typed is kept by bluetooth add", settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "a\nPen") && settings.editing < 0);
+                        settings.queued = 0;
+                        settings.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 1;
+                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(SETTINGS_KEY_DELETE);
+                        check("settings: and Delete twice on a device forgets it", settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "d\nMouse"));
+                        settings.queued = 0;
+                        settings.child = 0;
+
+                        // The rows that change by themselves, and when a feed is run.
+                        {
+                                int charge = settings_row_named("Charge limit (20 to 100, or off)");
+                                char value[SETTINGS_VALUE];
+
+                                check("settings: a verb that two rows ask is one run", settings_same_verb(&settings_rows[battery], &settings_rows[charge]) &&
+                                          !settings_same_verb(&settings_rows[wifi], &settings_rows[bt]) &&
+                                          settings_same_verb(&settings_rows[wifi], &settings_rows[wifi]));
+                                check("settings: the battery says its charge and state, and is not a row that is set",
+                                      settings_parsed(battery, "[Moonwater] battery 80%, Charging; charging stops at 80%\n", value) == SETTINGS_READ &&
+                                          string_equals((string_address)value, (string_address) "80%, Charging") &&
+                                          settings_parsed(battery, "[Moonwater] this machine has no battery\n", value) == SETTINGS_ABSENT &&
+                                          settings_rows[battery].kind == SETTINGS_INFO);
+                                settings.unread = 0;
+                                settings.group = settings_group_of(battery);
+                                settings_feed_rows();
+                                check("settings: a rows feed asks again the rows of its group that change by themselves, and those only",
+                                      settings.unread == ((positive)1 << battery));
+                                settings.unread = 0;
+                                settings.group = settings_group_of(clock_row);
+                                settings_feed_rows();
+                                check("settings: the clock is such a row, and the time server beside it is not",
+                                      settings.unread == ((positive)1 << clock_row));
+                                settings.unread = 0;
+                        }
+                        settings.own.table = table;
+                        settings.group = bt_group;
+                        settings.view = false;
+                        settings.editing = -1;
+                        settings.filter_length = 0;
+                        settings.queued = 0;
+                        settings.help = 2;
+                        settings.child = 0;
+                        settings.unread = 0;
+                        settings.feed_due = clock_monotonic_nanoseconds() + 5000000000ull;
+                        {
+                                long wait = settings_feed_tick();
+
+                                check("settings: a feed not yet due waits the time that is left", wait > 4000000000l && wait <= 5000000000l && settings.child == 0);
+                        }
+                        table->state[settings.own.row] = WINDOW_MINIMIZED;
+                        check("settings: a feed is not run, and not waited for, while the window is put away", settings_feed_tick() == -1);
+                        table->state[settings.own.row] = 0;
+                        settings.group = 0;
+                        check("settings: nor while the group shown has none", settings_feed_tick() == -1);
+                        settings.group = bt_group;
+                        settings.filter_length = 1;
+                        check("settings: nor while what is typed filters the rows of every group", settings_feed_tick() == -1);
+                        settings.filter_length = 0;
+                        settings.editing = 0;
+                        check("settings: nor while a field is typed in", settings_feed_tick() == -1);
+                        settings.editing = -1;
+                        settings.view = true;
+                        check("settings: nor while a card fills the window", settings_feed_tick() == -1);
+                        settings.view = false;
+                        settings.queued = 1;
+                        check("settings: nor while a change waits", settings_feed_tick() == -1);
+                        settings.queued = 0;
+                        settings.child = 1;
+                        check("settings: nor while another verb runs", settings_feed_tick() == -1);
+                        settings.child = 0;
+                        settings.unread = 1;
+                        check("settings: nor while rows are still to be asked", settings_feed_tick() == -1);
+                        settings.unread = 0;
+                        settings.feed_due = 0;
+                        settings.moonwater = (string_address) "/nonexistent/moonwater-check";
+                        settings_feed_tick();
+                        check("settings: a feed due is run: its verb is started, as a reading and not a change",
+                              settings.child > 0 && settings.job == SETTINGS_JOB_FEED && !settings.job_sets && settings.feed_list == 1);
+                        settings_feed_drop();
+                        check("settings: a change that arrives drops a reading under way, which is had again later",
+                              settings.child <= 0 && settings.feed_due > clock_monotonic_nanoseconds());
+                        settings.moonwater = (string_address) "/moonwater";
+                        compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
+                        settings.own.table = null;
+                        settings.group = 0;
+                        settings.item_count[0] = 0;
+                        settings.item_count[1] = 0;
+                        settings.pane = 1;
+                        settings_refilter();
+                }
                 compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
         }
 }

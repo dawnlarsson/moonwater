@@ -78,6 +78,27 @@
         closes the list, the pointer over a choice puts the keys on it, and
         the wheel scrolls it. A choice the machine has none of opens none.
 
+        What changes under a person's eyes is kept up with. While a group is
+        shown, the verb it declares (a feed, settings_feeds) is run again
+        every second or two, and never while the window is put away, while
+        another group is shown, while what is typed filters every group,
+        while a card or a field fills the window, or while any other verb
+        is running or waiting (a change a person makes drops a reading under
+        way, which is had again). Wi-Fi lists the networks in range under
+        its switch (marked joined or saved, with what each asks for and the
+        bars of its signal) and the saved ones not heard, from moonwater
+        wifi, whose own first line is also the state of the switch; Enter
+        joins one that is open, asks for the passphrase of one that is not
+        (shown as dots, given to the verb on its input and never in its
+        words, and kept nowhere here), and Delete twice forgets a saved
+        one. Bluetooth lists the devices kept, from moonwater bluetooth,
+        with a last row that keeps another by its name and Delete twice to
+        forget one: the command has no scan, no pairing and no connecting,
+        so the window has none either. Power asks the battery again and Time
+        the clock. The keys stay on the row of the name they were on when
+        the list moves under them, and a reading that says what the last
+        said draws nothing.
+
         One window: a second start finds the first by the program's name and
         lifts it -- raised, brought back if it was put away, given the keys --
         and ends.
@@ -98,10 +119,17 @@
 #define SETTINGS_STEP 4u
 #define SETTINGS_ACTION 5u
 #define SETTINGS_COMMAND 6u // a row of what moonwater help says: its words are typed
+#define SETTINGS_INFO 7u    // a value that only says, and that a person cannot set
+// The rows of a list a verb's output makes (a network in range, a device kept), which come and go as it is read again.
+#define SETTINGS_NETWORK 8u
+#define SETTINGS_DEVICE 9u
+#define SETTINGS_NOTE 10u // what the verb said that is no row: no networks heard, and why the machine is not joined
+#define SETTINGS_ADD 11u  // the last row of a list that adds one by its name
 
 // How a row's value is taken from the line it is on.
 #define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
 #define SETTINGS_SPLIT 2u // what is set is the value's words, one each, and not one word
+#define SETTINGS_TICK 4u  // the value changes by itself: it is asked again while its group is shown
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
 #define SETTINGS_UNREAD 0u
@@ -152,6 +180,7 @@
 #define SETTINGS_KEY_SPACE 57
 #define SETTINGS_KEY_HOME 102
 #define SETTINGS_KEY_UP 103
+#define SETTINGS_KEY_DELETE 111
 #define SETTINGS_KEY_PAGE_UP 104
 #define SETTINGS_KEY_LEFT 105
 #define SETTINGS_KEY_RIGHT 106
@@ -192,21 +221,22 @@ static const struct settings_row settings_rows[] = {
     {"Canvas", "Scale", SETTINGS_CHOICE, 0, 0, {"canvas", "scale"}, "scale ", null, {"canvas", "scale"}, "auto 1 2 3 4", 0, "auto:"},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null},
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null},
-    {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE, {"time"}, "local ", null, {"time", "sync"}, null, 0, null},
+    {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0, null},
     {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null},
     {null, "Keep the lowest-delay sample", SETTINGS_SWITCH, 0, 0, {"ntp", "sampling"}, "ntp sampling ", null, {"ntp", "sampling"}, null, 0, null},
     {null, "Authenticated time (NTS)", SETTINGS_CHOICE, 0, 0, {"ntp", "nts"}, "ntp nts ", null, {"ntp", "nts"}, "on off only", 0, null},
     {null, "NTS servers (or default)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"ntp", "nts"}, "servers ", null,
      {"ntp", "nts", "servers"}, null, ';', null},
     {"Network", "Wired", SETTINGS_SWITCH, 0, 0, {"wired"}, "wired ", null, {"wired"}, null, 0, null},
-    {null, "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0, null},
-    {null, "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null},
     {null, "Airplane mode", SETTINGS_SWITCH, 0, 0, {"airplane"}, "airplane ", null, {"airplane"}, null, 0, null},
     {null, "The internet prefers", SETTINGS_CHOICE, 0, 0, {"priority"}, "internet prefers ", null,
      {"priority", "internet"}, "wired wifi", 0, null},
     {null, "Names over TLS", SETTINGS_CHOICE, 0, 0, {"dns", "tls"}, "dns tls ", null, {"dns", "tls"}, "off on only", 0, null},
     {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(', null},
-    {"Power", "Power profile", SETTINGS_CHOICE, 1, 0, {"power"}, "power ", "profile ", {"power"},
+    {"Wi-Fi", "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0, null},
+    {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null},
+    {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
+    {null, "Power profile", SETTINGS_CHOICE, 1, 0, {"power"}, "power ", "profile ", {"power"},
      "balanced performance powersave", 0, null},
     {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0, null},
     {null, "Boost", SETTINGS_SWITCH, 1, 0, {"cpu"}, "boost ", null, {"cpu", "boost"}, null, 0, null},
@@ -221,8 +251,69 @@ static const struct settings_row settings_rows[] = {
 
 #define SETTINGS_ROWS (sizeof(settings_rows) / sizeof(settings_rows[0]))
 #define SETTINGS_ANY ((int)SETTINGS_ROWS) // the row of All commands that runs any command
-#define SETTINGS_ALL (SETTINGS_ROWS + 1 + SETTINGS_GENERATED)
 #define SETTINGS_ALL_HEADER "All commands"
+
+/*
+        A feed is a verb run again while the group it belongs to is shown, so
+        that what changes under a person's eyes is what the window shows. It
+        is not run while the window is put away, while another group is
+        shown, while a field is typed in or a card is up, while what is typed
+        filters the rows of every group, or while another verb runs or waits.
+        A list feed turns what the verb says into the rows of a list under
+        the group's own rows (the networks in range, the devices kept), and
+        the verb's own first line is also what the switch of the group reads
+        as; a rows feed asks again the rows of the group that say they change
+        by themselves (the clock, the battery).
+*/
+#define SETTINGS_FEED_ROWS 1u
+#define SETTINGS_FEED_WIFI 2u
+#define SETTINGS_FEED_DEVICES 3u
+#define SETTINGS_LISTS 2 // the list feeds, which come first in the table
+#define SETTINGS_LIST_ROWS 24
+#define SETTINGS_ITEM_LABEL 96
+#define SETTINGS_FEED_WAIT_NS 8000000000ll
+#define SETTINGS_ACT_WAIT_NS 60000000000ll // a join waits for its handshake
+
+struct settings_feed
+{
+        const char address_to group;    // the group whose rows it keeps up with
+        const char address_to owner;    // the row whose value the verb's own words also say, or none
+        const char address_to read[3];  // what is asked, after moonwater
+        const char address_to heading;  // what the list is headed
+        unsigned short every;           // milliseconds from one reading's end to the next
+        unsigned char kind;
+};
+
+static const struct settings_feed settings_feeds[] = {
+    {"Wi-Fi", "Wi-Fi", {"wifi"}, "In range and saved", 2000, SETTINGS_FEED_WIFI},
+    {"Bluetooth", "Bluetooth", {"bluetooth"}, "Remembered devices", 3000, SETTINGS_FEED_DEVICES},
+    {"Power", null, {null}, null, 2000, SETTINGS_FEED_ROWS},
+    {"Time", null, {null}, null, 1000, SETTINGS_FEED_ROWS},
+};
+
+#define SETTINGS_FEEDS (sizeof(settings_feeds) / sizeof(settings_feeds[0]))
+// The rows of the lists come after the commands': row SETTINGS_LIST + list * SETTINGS_LIST_ROWS + n.
+#define SETTINGS_LIST (SETTINGS_ANY + 1 + SETTINGS_GENERATED)
+#define SETTINGS_ALL ((positive)SETTINGS_LIST + SETTINGS_LISTS * SETTINGS_LIST_ROWS)
+
+// Jobs that are no row's: the help, a feed's reading, and what is done to a list's row.
+#define SETTINGS_JOB_FEED -3
+#define SETTINGS_JOB_ACT -4
+
+// A network or a device, as a row of a list: what the verb said of it.
+#define SETTINGS_ITEM_JOINED 1u
+#define SETTINGS_ITEM_SAVED 2u
+#define SETTINGS_ITEM_HEARD 4u
+#define SETTINGS_ITEM_OPEN 8u    // asks for no passphrase
+#define SETTINGS_ITEM_CANNOT 16u // moonwater cannot join what it asks for
+
+struct settings_item
+{
+        char label[SETTINGS_ITEM_LABEL];
+        char security[12];
+        signed short dbm;
+        unsigned char bars, flags, kind;
+};
 
 _Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) < 64, "the rows to ask are a bit each of a word");
 
@@ -531,6 +622,13 @@ static struct
         b32 truncated;          // help said more than the rows and the pool hold
         int help;               // 0 not asked, 1 to be asked, 2 asked
 
+        // The lists' rows read last (their counts), when the shown group's feed is next due, and what is done to a row:
+        // the name a Delete asked to forget, and the name a passphrase is being typed for.
+        unsigned short item_count[SETTINGS_LISTS];
+        positive feed_due;
+        int feed_list; // the feed whose verb is being run
+        char forget[SETTINGS_ITEM_LABEL], joining[SETTINGS_ITEM_LABEL];
+
         // The rows that show, in order, and where each is in the list, from the list's top.
         unsigned short visible[SETTINGS_ALL];
         positive visible_count;
@@ -588,6 +686,7 @@ static struct settings_large
         char card[SETTINGS_CARD];
         unsigned short card_at[SETTINGS_CARD_LINES], card_size[SETTINGS_CARD_LINES];
         char split[SETTINGS_TYPED * 2];
+        struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
 } address_to settings_large;
 
 static b32 settings_map(void)
@@ -617,28 +716,65 @@ static positive settings_rows_count(void)
 
 static const struct settings_generic address_to settings_generic_of(int row)
 {
-        return row > SETTINGS_ANY ? &settings.generic[row - SETTINGS_ANY - 1] : null;
+        return row > SETTINGS_ANY && row < (int)SETTINGS_LIST ? &settings.generic[row - SETTINGS_ANY - 1] : null;
+}
+
+// Which list a row is in (an index of the feeds), or -1 when it is in none.
+static int settings_list_of(int row)
+{
+        return row >= (int)SETTINGS_LIST ? (row - (int)SETTINGS_LIST) / SETTINGS_LIST_ROWS : -1;
+}
+
+// The network or the device a row is, or none: a row of a list that was read and is still there.
+static struct settings_item address_to settings_item(int row)
+{
+        int list = settings_list_of(row), at = row - (int)SETTINGS_LIST - list * SETTINGS_LIST_ROWS;
+
+        return list >= 0 && list < SETTINGS_LISTS && at < settings.item_count[list] ? &settings_large->item[list][at] : null;
 }
 
 static unsigned char settings_kind(int row)
 {
+        const struct settings_item address_to item = settings_item(row);
+
+        if (item)
+                return item->kind;
         return row < SETTINGS_ANY ? settings_rows[row].kind : (unsigned char)SETTINGS_COMMAND;
 }
 
 static const char address_to settings_label(int row)
 {
         const struct settings_generic address_to generic = settings_generic_of(row);
+        const struct settings_item address_to item = settings_item(row);
 
+        if (item)
+                return item->label;
         if (row < SETTINGS_ANY)
                 return settings_rows[row].label;
         return generic ? settings_large->pool + generic->command : "Run any moonwater command";
+}
+
+// What a row of a list does when it is pressed, said where the status is.
+static const char address_to settings_item_text(const struct settings_item address_to item)
+{
+        if (item->kind == SETTINGS_NETWORK)
+                return item->flags & SETTINGS_ITEM_JOINED   ? "joined: Delete forgets it"
+                       : item->flags & SETTINGS_ITEM_CANNOT ? "moonwater cannot join what this network asks for"
+                       : item->flags & SETTINGS_ITEM_OPEN   ? "Enter joins it, and saves it"
+                       : item->flags & SETTINGS_ITEM_SAVED  ? "saved: Enter types its passphrase again, Delete forgets it"
+                                                            : "Enter asks for its passphrase and joins it";
+        return item->kind == SETTINGS_DEVICE ? "kept by its name: Delete forgets it"
+               : item->kind == SETTINGS_ADD  ? "Enter keeps the name of a device; the radio goes on for what pairs" : "";
 }
 
 // What a command of All commands does, as help says; the any row's own words.
 static const char address_to settings_text(int row)
 {
         const struct settings_generic address_to generic = settings_generic_of(row);
+        const struct settings_item address_to item = settings_item(row);
 
+        if (item)
+                return settings_item_text(item);
         return generic ? settings_large->pool + generic->text : "any command, as the words after moonwater: its verb, then its arguments";
 }
 
@@ -650,9 +786,11 @@ static b32 settings_takes(int row)
         return !generic || settings_large->pool[generic->command + generic->verb] != 0;
 }
 
-// The first row of the section a row is in.
+// The first row of the section a row is in: a list is a section of its own.
 static int settings_section_start(int row)
 {
+        if (row >= (int)SETTINGS_LIST)
+                return (int)SETTINGS_LIST + settings_list_of(row) * SETTINGS_LIST_ROWS;
         if (row >= SETTINGS_ANY)
                 return SETTINGS_ANY;
         while (row > 0 && !settings_rows[row].section)
@@ -662,6 +800,8 @@ static int settings_section_start(int row)
 
 static const char address_to settings_section(int row)
 {
+        if (row >= (int)SETTINGS_LIST)
+                return settings_feeds[settings_list_of(row)].heading;
         return row >= SETTINGS_ANY ? SETTINGS_ALL_HEADER : settings_rows[settings_section_start(row)].section;
 }
 
@@ -689,11 +829,19 @@ static const char address_to settings_group_name(int group)
         return SETTINGS_ALL_HEADER;
 }
 
-// The group a row is in.
+// The group a row is in; a list is in the group its feed keeps up with.
 static int settings_group_of(int row)
 {
         int group = -1;
 
+        if (row >= (int)SETTINGS_LIST)
+        {
+                for (int at = 0; at < settings_groups(); at++)
+                        if (string_equals((string_address)settings_group_name(at),
+                                          (string_address)settings_feeds[settings_list_of(row)].group))
+                                return at;
+                return 0;
+        }
         if (row >= SETTINGS_ANY)
                 return settings_groups() - 1;
         for (int at = 0; at <= row; at++)
@@ -724,6 +872,8 @@ static b32 settings_matches(int row)
 
         if (!size)
                 return true;
+        if (row >= (int)SETTINGS_LIST)
+                return settings_has(settings_label(row), settings.filter, size) || settings_has(settings_section(row), settings.filter, size);
         if (row < SETTINGS_ANY)
         {
                 const struct settings_row address_to which = &settings_rows[row];
@@ -890,8 +1040,12 @@ static fn settings_reveal(void)
                 settings_scroll_to(top + height - room);
 }
 
-// The rows that match the filter, laid out; the focus stays on its row when that still shows, and else goes to the first.
-static fn settings_refilter(void)
+/*
+        The rows that match the filter, laid out; the focus stays on its row
+        when that still shows, and else goes to the first. The view stays
+        where it is, which is what a list read again must not move.
+*/
+static fn settings_rebuild(void)
 {
         positive count = 0;
 
@@ -899,6 +1053,15 @@ static fn settings_refilter(void)
         for (positive row = 0; row < settings_rows_count(); row++)
                 if (settings.filter_length ? settings_matches((int)row) : settings_group_of((int)row) == settings.group)
                         settings.visible[count++] = (unsigned short)row;
+        // The rows of a list come after, each in the group of its feed.
+        for (int list = 0; list < SETTINGS_LISTS; list++)
+                for (int at = 0; at < settings.item_count[list]; at++)
+                {
+                        int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
+
+                        if (settings.filter_length ? settings_matches(row) : settings_group_of(row) == settings.group)
+                                settings.visible[count++] = (unsigned short)row;
+                }
         settings.visible_count = count;
         if (settings.menu >= 0 && settings_pos(settings.menu) < 0)
                 settings.menu = -1;
@@ -906,8 +1069,14 @@ static fn settings_refilter(void)
                 settings.focus = settings.visible[0];
         settings_layout();
         settings_scroll_to(settings.scroll);
-        settings_reveal();
         settings.dirty = true;
+}
+
+// The same, and the row with the focus brought into view.
+static fn settings_refilter(void)
+{
+        settings_rebuild();
+        settings_reveal();
 }
 
 /* ---- what help says ---- */
@@ -1256,10 +1425,16 @@ static fn settings_say(string_address text)
         settings.dirty = true;
 }
 
-// A verb run with its output to a pipe this end reads, its input nothing; false when it could not be.
-static b32 settings_start(string_address address_to words, positive count)
+/*
+        A verb run with its output to a pipe this end reads, and for its input
+        what is in input (a password, which the verb takes from a line of its
+        standard input and not from its words, where ps would show it) or
+        nothing; false when it could not be.
+*/
+static b32 settings_start(string_address address_to words, positive count, const char address_to input)
 {
-        int ends[2] = {-1, -1};
+        int ends[2] = {-1, -1}, feeds[2] = {-1, -1};
+        positive length = input ? string_length((string_address)input) : 0;
         bipolar child;
 
         // Only this program's end does not block: the verb's standard output and error are the other end, and a
@@ -1267,11 +1442,26 @@ static b32 settings_start(string_address address_to words, positive count)
         if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
                 return false;
         system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
+        // What it reads is written before it starts, whole, to a pipe that holds it, and closed: a line and then its end.
+        if (length && (system_call_2(syscall(pipe2), (positive)feeds, O_CLOEXEC) != 0 ||
+                       system_write_once((b32)feeds[1], input, length) != (bipolar)length ||
+                       system_write_once((b32)feeds[1], "\n", 1) != 1))
+        {
+                system_close(ends[0]);
+                system_close(ends[1]);
+                if (feeds[0] >= 0)
+                        system_close(feeds[0]);
+                if (feeds[1] >= 0)
+                        system_close(feeds[1]);
+                return false;
+        }
+        if (feeds[1] >= 0)
+                system_close(feeds[1]);
 
         child = system_fork();
         if (child == 0)
         {
-                bipolar quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
+                bipolar quiet = feeds[0] >= 0 ? feeds[0] : system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
 
                 if (quiet >= 0)
                         system_call_3(syscall(dup3), (positive)quiet, 0, 0);
@@ -1282,6 +1472,8 @@ static b32 settings_start(string_address address_to words, positive count)
                 system_call_1(syscall(exit), 127);
         }
         system_close(ends[1]);
+        if (feeds[0] >= 0)
+                system_close(feeds[0]);
         if (child < 0)
         {
                 system_close(ends[0]);
@@ -1306,6 +1498,56 @@ static fn settings_join(string_address address_to words, positive count, char ad
         }
 }
 
+/*
+        The words of what is done to a row of a list, from the change queued
+        (a letter, a newline, a name, and for a join a newline and the
+        passphrase): into words, which point into job_value, cut at its
+        newlines. Answers the passphrase, which is to be given to the verb's
+        input, or none; words[0] is none when the change is no known one.
+*/
+static const char address_to settings_act_words(string_address address_to words)
+{
+        char address_to what = settings.job_value, address_to name, address_to pass = null;
+        string_address radio = (string_address) "wifi", how = (string_address) "add";
+
+        words[0] = null;
+        if (!what[0] || what[1] != '\n' || !(what[0] == 'j' || what[0] == 'f' || what[0] == 'a' || what[0] == 'd'))
+                return null;
+        name = what + 2;
+        for (char address_to at = name; *at; at++)
+                if (*at == '\n')
+                {
+                        *at = 0;
+                        pass = at + 1;
+                        break;
+                }
+        if (!name[0])
+                return null;
+        if (what[0] == 'a' || what[0] == 'd')
+                radio = (string_address) "bluetooth";
+        if (what[0] == 'f' || what[0] == 'd')
+                how = (string_address) "remove";
+        pass = what[0] == 'j' && pass && pass[0] ? pass : null;
+        words[0] = settings.moonwater;
+        words[1] = radio;
+        words[2] = how;
+        words[3] = (string_address)name;
+        // A password is read from a line of the input, which "-" says.
+        words[4] = pass ? (string_address) "-" : null;
+        words[5] = null;
+        return pass;
+}
+
+// Whether two rows ask the same verb, and so are answered by one run of it.
+static b32 settings_same_verb(const struct settings_row address_to one, const struct settings_row address_to other)
+{
+        for (positive at = 0; at < 3; at++)
+                if (one->read[at] != other->read[at] &&
+                    (!one->read[at] || !other->read[at] || !string_equals((string_address)one->read[at], (string_address)other->read[at])))
+                        return false;
+        return true;
+}
+
 // The next verb to run: a change first, then the rows not yet asked, then help.
 static fn settings_next_job(void)
 {
@@ -1321,6 +1563,8 @@ static fn settings_next_job(void)
                         memory_copy(settings.job_value, settings.queue[0].value, sizeof(settings.job_value));
                         settings.queued--;
                         memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
+                        // Nothing a change carried (a passphrase) stays in the slot it leaves.
+                        memory_zero(&settings.queue[settings.queued], sizeof(settings.queue[0]));
                 }
                 else if (settings.unread)
                 {
@@ -1344,12 +1588,26 @@ static fn settings_next_job(void)
                         words[2] = null;
                         count = 2;
                 }
+                else if (settings.job == SETTINGS_JOB_ACT)
+                {
+                        const char address_to pass = settings_act_words(words);
+
+                        count = words[0] ? 4 + (positive)(pass != null) : 0;
+                        if (count && settings_start(words, count, pass))
+                        {
+                                // The password went to the verb's input; none is left here.
+                                memory_zero(settings.job_value, sizeof(settings.job_value));
+                                return;
+                        }
+                        memory_zero(settings.job_value, sizeof(settings.job_value));
+                        count = 0;
+                }
                 else if (settings.job >= SETTINGS_ANY)
                         count = settings_generic_words(settings.job, settings.job_value, words, SETTINGS_WORDS);
                 else
                         count = settings_command(&settings_rows[settings.job], settings.moonwater, settings.job_value, words,
                                                  SETTINGS_WORDS, !settings.job_sets);
-                if (count && settings_start(words, count))
+                if (count && settings_start(words, count, null))
                 {
                         if (settings.job >= SETTINGS_ANY)
                         {
@@ -1369,7 +1627,7 @@ static fn settings_next_job(void)
                         settings_say((string_address)(count || settings.job < SETTINGS_ANY
                                                           ? "the moonwater command could not be run"
                                                           : "that is more words than one command takes"));
-                else if (settings.job != SETTINGS_JOB_HELP)
+                else if (settings.job >= 0)
                         settings.state[settings.job] = SETTINGS_FAILED;
                 settings.dirty = true;
         }
@@ -1391,10 +1649,16 @@ static positive settings_slot(int row)
         return at;
 }
 
+static fn settings_feed_drop(void);
+
 // A row changed to value, now or once the verb running has finished: a change to a row already waiting replaces it.
 static fn settings_change(int row, const char address_to value)
 {
-        positive at = settings_slot(row);
+        positive at;
+
+        // A feed's reading is one that can be had again: a change waits for no feed.
+        settings_feed_drop();
+        at = settings_slot(row);
 
         if (at == settings.queued)
         {
@@ -1433,6 +1697,329 @@ static fn settings_report(b32 killed, positive status)
         }
 }
 
+/* ---- feeds: what is read again while it is on show ---- */
+
+// Where a (non-empty) key is in a line, the last time; the line's length when it is not there.
+static positive settings_find_last(const char address_to line, positive length, const char address_to key)
+{
+        positive size = string_length((string_address)key), found = length;
+
+        for (positive at = 0; at + size <= length; at++)
+                if (!memory_compare(line + at, key, size))
+                        found = at;
+        return found;
+}
+
+static b32 settings_starts(const char address_to line, const char address_to prefix)
+{
+        positive size = string_length((string_address)prefix);
+
+        return !memory_compare(line, prefix, size);
+}
+
+// A name into an item's label, cut to what it holds; a name a person did not make is shown as it was said.
+static fn settings_item_label(struct settings_item address_to item, const char address_to name, positive size)
+{
+        size = size >= sizeof(item->label) ? sizeof(item->label) - 1 : size;
+        memory_copy(item->label, name, size);
+        item->label[size] = 0;
+}
+
+static struct settings_item address_to settings_item_find(int list, const char address_to name, positive size)
+{
+        for (int at = 0; at < settings.item_count[list]; at++)
+        {
+                struct settings_item address_to item = &settings_large->item[list][at];
+
+                if (item->kind != SETTINGS_NOTE && string_length((string_address)item->label) == size &&
+                    !memory_compare(item->label, name, size))
+                        return item;
+        }
+        return null;
+}
+
+// Whether moonwater can join what a network asks for: open, WPA2, WPA3 and the two together, with protected management frames.
+static b32 settings_joinable(const char address_to security)
+{
+        return string_equals((string_address)security, (string_address) "open") ||
+               string_equals((string_address)security, (string_address) "WPA2") ||
+               string_equals((string_address)security, (string_address) "WPA2/3") ||
+               string_equals((string_address)security, (string_address) "WPA3") || string_equals((string_address)security, (string_address) "PMF");
+}
+
+/*
+        One line of what a verb said, past its label: where it is in line
+        (kept with its indentation, which says what kind of line it is), its
+        length without the blanks that end it. False at the end of what was
+        said.
+*/
+static b32 settings_feed_line(positive address_to at, char address_to line, positive room, char address_to address_to text,
+                              positive address_to size)
+{
+        positive length, skip;
+
+        if (address_to at >= settings.said_length)
+                return false;
+        length = settings_keep(settings_large->said, settings.said_length, at, line, room);
+        skip = settings_label_length(line, length);
+        while (length > skip && line[length - 1] == ' ')
+                length--;
+        line[length] = 0;
+        address_to text = line + skip;
+        address_to size = length - skip;
+        return true;
+}
+
+/*
+        What moonwater wifi said, as the list of networks: the ones heard,
+        strongest first as it prints them (marker, name, dBm, bars, what it
+        asks for), then the saved ones not heard, then the one line it said
+        that is about none of them (no networks heard, why it is not joined).
+*/
+static fn settings_feed_wifi(void)
+{
+        struct settings_item address_to items = settings_large->item[0];
+        char line[SETTINGS_PROBE], note[SETTINGS_ITEM_LABEL] = {0};
+        char address_to text;
+        positive at, size, count = 0;
+
+        memory_zero(items, sizeof(settings_large->item[0]));
+        for (int pass = 0; pass < 2; pass++)
+                for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
+                {
+                        positive dbm_at = size > 7 ? settings_find_last(text, size, " dBm ") : size;
+
+                        if (!pass && dbm_at < size && dbm_at > 2)
+                        {
+                                // marker, name, blanks, the signal in dBm, " dBm ", four bars, what it asks for, band and channel.
+                                positive number = dbm_at, name_end, word;
+                                struct settings_item address_to item;
+                                int level = 0;
+                                b32 below = false;
+
+                                while (number > 2 && ((text[number - 1] >= '0' && text[number - 1] <= '9') || text[number - 1] == '-'))
+                                        number--;
+                                name_end = number;
+                                while (name_end > 2 && text[name_end - 1] == ' ')
+                                        name_end--;
+                                if (name_end <= 2 || count + 1 >= SETTINGS_LIST_ROWS)
+                                        continue;
+                                item = &items[count++];
+                                item->kind = SETTINGS_NETWORK;
+                                settings_item_label(item, text + 2, name_end - 2);
+                                item->flags = SETTINGS_ITEM_HEARD | (text[0] == '*' ? SETTINGS_ITEM_JOINED | SETTINGS_ITEM_SAVED
+                                                                      : text[0] == '+' ? SETTINGS_ITEM_SAVED : 0);
+                                for (positive digit = number; digit < dbm_at; digit++)
+                                        if (text[digit] == '-')
+                                                below = true;
+                                        else
+                                                level = level * 10 + (text[digit] - '0');
+                                item->dbm = (signed short)(below ? -level : level);
+                                word = dbm_at + 5;
+                                for (positive bar = 0; bar < 4 && word < size; bar++, word++)
+                                        item->bars += text[word] == '#';
+                                while (word < size && text[word] == ' ')
+                                        word++;
+                                for (positive own = 0; word + own < size && text[word + own] != ' ' && own + 1 < sizeof(item->security); own++)
+                                        item->security[own] = text[word + own];
+                                if (string_equals((string_address)item->security, (string_address) "open"))
+                                        item->flags |= SETTINGS_ITEM_OPEN;
+                                if (!settings_joinable(item->security))
+                                        item->flags |= SETTINGS_ITEM_CANNOT;
+                        }
+                        else if (pass && dbm_at >= size && size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ')
+                        {
+                                // A saved network, as a name with two blanks before it, and not "and 3 more".
+                                struct settings_item address_to item = settings_item_find(0, text + 2, size - 2);
+
+                                if (settings_starts(text + 2, "and ") && size > 7 && !memory_compare(text + size - 5, " more", 5))
+                                        continue;
+                                settings.item_count[0] = (unsigned short)count;
+                                if (item)
+                                        item->flags |= SETTINGS_ITEM_SAVED;
+                                else if (count + 1 < SETTINGS_LIST_ROWS)
+                                {
+                                        item = &items[count++];
+                                        item->kind = SETTINGS_NETWORK;
+                                        item->flags = SETTINGS_ITEM_SAVED;
+                                        settings_item_label(item, text + 2, size - 2);
+                                }
+                        }
+                        else if (pass && dbm_at >= size && size && text[0] != ' ' && !note[0] && !settings_starts(text, "wifi ") &&
+                                 !settings_starts(text, "* joined"))
+                        {
+                                size = size >= sizeof(note) ? sizeof(note) - 1 : size;
+                                memory_copy(note, text, size);
+                                note[size] = 0;
+                        }
+                        settings.item_count[0] = (unsigned short)count;
+                }
+        if (note[0] && count < SETTINGS_LIST_ROWS)
+        {
+                items[count].kind = SETTINGS_NOTE;
+                settings_item_label(&items[count++], note, string_length((string_address)note));
+        }
+        settings.item_count[0] = (unsigned short)count;
+}
+
+// What moonwater bluetooth said, as the list of devices kept: the lines after its first, a name each, and a last row that keeps one more.
+static fn settings_feed_devices(void)
+{
+        struct settings_item address_to items = settings_large->item[1];
+        char line[SETTINGS_PROBE];
+        char address_to text;
+        positive at, size, count = 0;
+
+        memory_zero(items, sizeof(settings_large->item[1]));
+        for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
+                if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
+                {
+                        items[count].kind = SETTINGS_DEVICE;
+                        items[count].flags = SETTINGS_ITEM_SAVED;
+                        settings_item_label(&items[count++], text + 2, size - 2);
+                }
+        items[count].kind = SETTINGS_ADD;
+        settings_item_label(&items[count++], "Keep a device by its name", string_length((string_address) "Keep a device by its name"));
+        settings.item_count[1] = (unsigned short)count;
+}
+
+// A sum of a list as it stands, to tell whether a reading changed what is shown.
+static positive settings_list_sum(int list)
+{
+        positive sum = 1469598103934665603ull;
+        const unsigned char address_to bytes = (const unsigned char address_to)settings_large->item[list];
+
+        for (positive at = 0; at < sizeof(settings_large->item[list]); at++)
+                sum = (sum ^ bytes[at]) * 1099511628211ull;
+        return sum ^ settings.item_count[list];
+}
+
+// The row whose switch a feed's verb also says the state of, or none.
+static int settings_feed_owner(int feed)
+{
+        for (positive at = 0; at < SETTINGS_ROWS && settings_feeds[feed].owner; at++)
+                if (string_equals((string_address)settings_rows[at].label, (string_address)settings_feeds[feed].owner))
+                        return (int)at;
+        return -1;
+}
+
+// The feed that keeps up with the group shown, or none.
+static int settings_feed_of_group(void)
+{
+        for (positive feed = 0; feed < SETTINGS_FEEDS; feed++)
+                if (string_equals((string_address)settings_feeds[feed].group, (string_address)settings_group_name(settings.group)))
+                        return (int)feed;
+        return -1;
+}
+
+/*
+        A feed's verb has said its words, or was stopped: they are the rows
+        of its list and the state of its switch. The row the keys are on is
+        found again by its name, so a list that moves under it does not move
+        the keys, and a reading that says what the last said draws nothing.
+*/
+static fn settings_feed_read(b32 killed, b32 failed)
+{
+        int feed = settings.feed_list, list = feed, owner = settings_feed_owner(feed), at;
+        char keep[SETTINGS_ITEM_LABEL] = {0};
+        positive before, was = 0;
+        b32 changed;
+
+        settings.feed_due = clock_monotonic_nanoseconds() + (positive)settings_feeds[feed].every * 1000000ull;
+        // What is being typed for a row of the list is for the row as it was: nothing is changed under it.
+        if (killed || settings.editing >= (int)SETTINGS_LIST || settings_feeds[feed].kind == SETTINGS_FEED_ROWS)
+                return;
+        if (owner >= 0)
+        {
+                char value[SETTINGS_VALUE];
+
+                string_copy_bounded((string_address)value, (string_address)settings.value[owner], sizeof(value));
+                was = settings.state[owner];
+                settings.state[owner] = (unsigned char)settings_read(&settings_rows[owner], settings_large->said, settings.said_length,
+                                                                     settings.value[owner], SETTINGS_VALUE, failed);
+                changed = was != settings.state[owner] || !string_equals((string_address)value, (string_address)settings.value[owner]);
+        }
+        else
+                changed = false;
+        before = settings_list_sum(list);
+        if (settings_list_of(settings.focus) == list && settings_item(settings.focus))
+                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.focus)->label, sizeof(keep));
+        at = settings.focus - (int)SETTINGS_LIST - list * SETTINGS_LIST_ROWS;
+
+        if (settings_feeds[feed].kind == SETTINGS_FEED_WIFI)
+                settings_feed_wifi();
+        else
+                settings_feed_devices();
+        if (settings_list_sum(list) == before && !changed)
+                return;
+
+        // The keys stay on the row of that name; one gone leaves them at the place it was, or the last.
+        if (keep[0])
+        {
+                int found = at < settings.item_count[list] ? at : settings.item_count[list] - 1;
+
+                for (int each = 0; each < settings.item_count[list]; each++)
+                        if (string_equals((string_address)settings_large->item[list][each].label, (string_address)keep))
+                        {
+                                found = each;
+                                break;
+                        }
+                settings.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + (found < 0 ? 0 : found);
+        }
+        settings_rebuild();
+}
+
+// The rows of the group shown that change by themselves, asked again.
+static fn settings_feed_rows(void)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if ((settings_rows[at].flags & SETTINGS_TICK) && settings_group_of((int)at) == settings.group &&
+                    settings.editing != (int)at)
+                        settings.unread |= (positive)1 << at;
+}
+
+/*
+        What a feed wants while the window runs: nothing when it is put
+        away, when the group shown has none, when a card or a field or what
+        is typed fills the window, and nothing while another verb is
+        running or waited for. Then, when it is due, its verb is run; until
+        then, how long to wait, in nanoseconds, or -1 for nothing to wait for.
+*/
+static long settings_feed_tick(void)
+{
+        int feed = settings_feed_of_group();
+        positive now = clock_monotonic_nanoseconds();
+        string_address words[SETTINGS_WORDS];
+        positive count = 1;
+
+        if (feed < 0 || settings.view || settings.editing >= 0 || settings.filter_length ||
+            (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED) || settings.child > 0 || settings.queued ||
+            settings.unread || settings.help == 1)
+                return -1;
+        if (now < settings.feed_due)
+                return (long)(settings.feed_due - now);
+
+        settings.feed_due = now + (positive)settings_feeds[feed].every * 1000000ull;
+        if (settings_feeds[feed].kind == SETTINGS_FEED_ROWS)
+        {
+                settings_feed_rows();
+                settings_next_job();
+                return -1;
+        }
+        words[0] = settings.moonwater;
+        for (positive at = 0; at < 3 && settings_feeds[feed].read[at]; at++)
+                words[count++] = (string_address)settings_feeds[feed].read[at];
+        words[count] = null;
+        if (settings_start(words, count, null))
+        {
+                settings.job = SETTINGS_JOB_FEED;
+                settings.job_sets = false;
+                settings.feed_list = feed;
+        }
+        return -1;
+}
+
+
 // The verb running has finished, or taken too long: what it said, put where it belongs.
 static fn settings_finished(b32 killed)
 {
@@ -1466,8 +2053,14 @@ static fn settings_finished(b32 killed)
                                 settings_say((string_address)(wait_status_code(status) ? "moonwater refused" : "done"));
                 }
                 settings.stopped = false;
-                settings_ask_all();
+                // What was done to a row of a list is seen at once in the list; any other change may move another row.
+                if (row == SETTINGS_JOB_ACT)
+                        settings.feed_due = 0;
+                else
+                        settings_ask_all();
         }
+        else if (row == SETTINGS_JOB_FEED)
+                settings_feed_read(killed, wait_status_code(status) != 0);
         else if (row == SETTINGS_JOB_HELP)
         {
                 if (!killed)
@@ -1478,11 +2071,26 @@ static fn settings_finished(b32 killed)
         }
         else
         {
-                settings.state[row] = killed ? SETTINGS_FAILED
-                                             : (unsigned char)settings_read(&settings_rows[row], settings_large->said, settings.said_length,
-                                                                            settings.value[row], SETTINGS_VALUE,
-                                                                            wait_status_code(status) != 0);
-                settings.dirty = true;
+                // What a row's verb said is what every row waiting to be asked the same of says too: one run for them all.
+                for (positive other = 0; other < SETTINGS_ROWS; other++)
+                {
+                        char before[SETTINGS_VALUE];
+                        unsigned char was = settings.state[other];
+
+                        if ((int)other != row && !((settings.unread >> other) & 1))
+                                continue;
+                        if (!settings_same_verb(&settings_rows[row], &settings_rows[other]))
+                                continue;
+                        settings.unread &= ~((positive)1 << other);
+                        string_copy_bounded((string_address)before, (string_address)settings.value[other], sizeof(before));
+                        settings.state[other] = killed ? SETTINGS_FAILED
+                                                       : (unsigned char)settings_read(&settings_rows[other], settings_large->said,
+                                                                                       settings.said_length, settings.value[other],
+                                                                                       SETTINGS_VALUE, wait_status_code(status) != 0);
+                        // A row asked again that says what it said is no change to draw.
+                        settings.dirty |= settings.state[other] != was ||
+                                          !string_equals((string_address)before, (string_address)settings.value[other]);
+                }
         }
 
         settings_next_job();
@@ -1498,6 +2106,13 @@ static fn settings_finished(b32 killed)
                 compositor_kmsg((string_address) "settings: rows unread or not understood when first asked: ", failed,
                                 (string_address) "");
         }
+}
+
+// A feed's reading under way is dropped, for a change that is wanted now.
+static fn settings_feed_drop(void)
+{
+        if (settings.child > 0 && settings.job == SETTINGS_JOB_FEED)
+                settings_finished(true);
 }
 
 // What the verb running has said, read; its end, heard.
@@ -1796,11 +2411,108 @@ static fn settings_menu_key(const struct window_event address_to event)
 }
 
 // A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
+/*
+        What is done to a network or a device, as a change for the verb:
+        a letter (j joins a network, f forgets it, a keeps a device, d
+        forgets it), a newline, the name and for a join a newline and its
+        passphrase. What is built here is not left behind.
+*/
+static fn settings_act(char what, const char address_to name, const char address_to pass)
+{
+        char value[SETTINGS_TYPED];
+        positive size = 0;
+
+        value[size++] = what;
+        value[size++] = '\n';
+        for (positive at = 0; name[at] && size + 2 < sizeof(value); at++)
+                value[size++] = name[at];
+        if (pass && pass[0])
+        {
+                value[size++] = '\n';
+                for (positive at = 0; pass[at] && size + 1 < sizeof(value); at++)
+                        value[size++] = pass[at];
+        }
+        value[size] = 0;
+        settings_change(SETTINGS_JOB_ACT, value);
+        memory_zero(value, sizeof(value));
+}
+
+// A field typed in is done with, and nothing typed for a passphrase is kept.
+static fn settings_edit_end(void)
+{
+        if (settings.editing >= (int)SETTINGS_LIST)
+                memory_zero(settings.typed, sizeof(settings.typed));
+        settings.editing = -1;
+        settings.dirty = true;
+}
+
+// A row of a list pressed: a network is joined (asking its passphrase when it has one), a device is said what can be done.
+static fn settings_item_activate(int row, const struct settings_item address_to item)
+{
+        char line[SETTINGS_STATUS];
+
+        if (item->kind == SETTINGS_NETWORK)
+        {
+                if (item->flags & SETTINGS_ITEM_JOINED)
+                {
+                        string_copy_bounded((string_address)line, (string_address) "already joined to ", sizeof(line));
+                        string_append_bounded((string_address)line, (string_address)item->label, sizeof(line));
+                        settings_say((string_address)line);
+                }
+                else if (item->flags & SETTINGS_ITEM_CANNOT)
+                        settings_say((string_address) "moonwater cannot join what that network asks for");
+                else if (item->flags & SETTINGS_ITEM_OPEN)
+                        settings_act('j', item->label, null);
+                else
+                {
+                        settings.editing = row;
+                        settings.typed[0] = 0;
+                        string_copy_bounded((string_address)settings.joining, (string_address)item->label, sizeof(settings.joining));
+                        settings_say((string_address) "type its passphrase: Enter joins it, Escape leaves it");
+                }
+        }
+        else if (item->kind == SETTINGS_ADD)
+        {
+                settings.editing = row;
+                settings.typed[0] = 0;
+                settings_say((string_address) "type the name of a device: Enter keeps it, Escape leaves it");
+        }
+        else
+                settings_say((string_address)settings_item_text(item));
+        settings.dirty = true;
+}
+
+// Delete on a saved network or a kept device forgets it, when it is pressed twice.
+static fn settings_forget(void)
+{
+        const struct settings_item address_to item = settings_item(settings.focus);
+        char line[SETTINGS_STATUS];
+
+        if (!item || !(item->flags & SETTINGS_ITEM_SAVED) || (item->kind != SETTINGS_NETWORK && item->kind != SETTINGS_DEVICE))
+                return;
+        if (!string_equals((string_address)settings.forget, (string_address)item->label))
+        {
+                string_copy_bounded((string_address)settings.forget, (string_address)item->label, sizeof(settings.forget));
+                string_copy_bounded((string_address)line, (string_address) "press Delete again to forget ", sizeof(line));
+                string_append_bounded((string_address)line, (string_address)item->label, sizeof(line));
+                settings_say((string_address)line);
+                return;
+        }
+        settings.forget[0] = 0;
+        settings_act(item->kind == SETTINGS_NETWORK ? 'f' : 'd', item->label, null);
+}
+
 static fn settings_activate(int row, int way)
 {
+        const struct settings_item address_to item = settings_item(row);
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         char next[SETTINGS_VALUE];
 
+        if (item)
+        {
+                settings_item_activate(row, item);
+                return;
+        }
         if (!which)
         {
                 // A command with something to type opens a field; one without is run.
@@ -1823,6 +2535,8 @@ static fn settings_activate(int row, int way)
                 settings.editing = row;
                 string_copy_bounded((string_address)settings.typed, (string_address)settings.value[row], sizeof(settings.typed));
                 settings.dirty = true;
+                return;
+        case SETTINGS_INFO:
                 return;
         case SETTINGS_CHOICE:
                 settings_menu_open(row);
@@ -1876,6 +2590,7 @@ static fn settings_group_choose(int group)
         if (group == before && !typed)
                 return;
         settings.group = group;
+        settings.feed_due = 0;
         settings.filter[0] = 0;
         settings.filter_length = 0;
         settings.scroll = 0;
@@ -1909,6 +2624,20 @@ static fn settings_type(const struct window_event address_to event)
         {
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
+                // A passphrase joins the network, a name keeps the device; neither is kept here after.
+                if (settings.editing >= (int)SETTINGS_LIST)
+                {
+                        const struct settings_item address_to item = settings_item(settings.editing);
+
+                        if (!length)
+                                settings_say((string_address) "nothing typed");
+                        else if (item && item->kind == SETTINGS_NETWORK)
+                                settings_act('j', item->label, settings.typed);
+                        else if (item && item->kind == SETTINGS_ADD)
+                                settings_act('a', settings.typed, null);
+                        settings_edit_end();
+                        break;
+                }
                 // A command runs with what is typed, which may be nothing; the field stays when it asked for another Enter.
                 if (settings.editing >= SETTINGS_ANY)
                 {
@@ -1924,7 +2653,7 @@ static fn settings_type(const struct window_event address_to event)
                 settings.editing = -1;
                 break;
         case SETTINGS_KEY_ESCAPE:
-                settings.editing = -1;
+                settings_edit_end();
                 break;
         case SETTINGS_KEY_BACKSPACE:
                 while (length && ((unsigned char)settings.typed[length - 1] & 0xc0) == 0x80)
@@ -1938,7 +2667,8 @@ static fn settings_type(const struct window_event address_to event)
                 positive size;
                 b32 name = settings.editing == SETTINGS_NAME_ROW;
                 // A value of one word or line is kept in what a row reads; what is typed for a list or a command is longer.
-                positive most = settings.editing >= SETTINGS_ANY || (settings_rows[settings.editing].flags & SETTINGS_SPLIT)
+                positive most = settings.editing >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL
+                                : settings.editing >= SETTINGS_ANY || (settings_rows[settings.editing].flags & SETTINGS_SPLIT)
                                     ? sizeof(settings.typed)
                                     : SETTINGS_VALUE;
 
@@ -2059,6 +2789,8 @@ static b32 settings_key(const struct window_event address_to event)
         }
         if (event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD && event->a != SETTINGS_KEY_SPACE)
                 settings.confirm = 0;
+        if (event->a != SETTINGS_KEY_DELETE)
+                settings.forget[0] = 0;
 
         switch (event->a)
         {
@@ -2105,6 +2837,10 @@ static b32 settings_key(const struct window_event address_to event)
                         settings_rows_enter();
                 else if (settings_pos(settings.focus) >= 0)
                         settings_activate(settings.focus, 1);
+                break;
+        case SETTINGS_KEY_DELETE:
+                if (settings.pane)
+                        settings_forget();
                 break;
         case SETTINGS_KEY_LEFT:
                 // A switch or a step is turned; on any other row Left goes back to the groups.
@@ -2200,7 +2936,7 @@ static b32 settings_event(const struct window_event address_to event)
                 row = settings_group_hit(settings.pointer_x, settings.pointer_y);
                 if (row >= 0)
                 {
-                        settings.editing = -1;
+                        settings_edit_end();
                         settings.pane = 0;
                         settings_group_choose(row);
                         settings.dirty = true;
@@ -2208,10 +2944,7 @@ static b32 settings_event(const struct window_event address_to event)
                 }
                 row = settings_hit(settings.pointer_x, settings.pointer_y);
                 if (settings.editing >= 0 && row != settings.editing)
-                {
-                        settings.editing = -1;
-                        settings.dirty = true;
-                }
+                        settings_edit_end();
                 if (row < 0)
                         break;
                 if (row != settings.focus)
@@ -2260,6 +2993,87 @@ static b32 settings_event(const struct window_event address_to event)
 
 /* ---- the picture ---- */
 
+/*
+        A row of a list: a network (a dot when it is the one joined, its
+        name, what it is as a word, what it asks for and the bars of its
+        signal), a device kept, the line the verb said that is no row, or
+        the row that keeps another device; with its field when a passphrase
+        or a name is being typed, shown as dots when it is a passphrase.
+*/
+static fn settings_draw_item(struct ui address_to ui, int at, int y, const struct settings_item address_to item)
+{
+        int left = settings_pane_left(), right = settings_pane_right(), inset = settings_px(14);
+        int height = settings_px(UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT), edge = right - inset, gap = settings_px(10);
+        int text_left = left + inset;
+        char cut[SETTINGS_ITEM_LABEL], mask[SETTINGS_ITEM_LABEL * 3 + 1];
+        const char address_to words;
+
+        if (at == settings.editing)
+        {
+                int width = settings_px(SETTINGS_FIELD_W), wide;
+                string_address label = item->kind == SETTINGS_ADD ? (string_address) "Name of the device" : (string_address)settings.joining;
+                positive dots = 0;
+
+                wide = ui_text(ui, text_left, baseline,
+                               settings_fit(ui, label, UI_TEXT, (right - left) / 2, cut, sizeof(cut)), UI_TEXT, false, ui->ink, 255);
+                width = width > right - inset - (text_left + wide + gap) ? right - inset - (text_left + wide + gap) : width;
+                width = width < settings_px(100) ? settings_px(100) : width;
+                // A passphrase is shown as a dot for each character, and never as it is.
+                if (item->kind == SETTINGS_NETWORK)
+                {
+                        for (positive each = 0; settings.typed[each] && dots + 1 < SETTINGS_ITEM_LABEL; each++)
+                                if (((unsigned char)settings.typed[each] & 0xc0) != 0x80)
+                                {
+                                        memory_copy(mask + dots * 3, "\xe2\x80\xa2", 3);
+                                        dots++;
+                                }
+                        mask[dots * 3] = 0;
+                }
+                ui_field(ui, edge - width, y + settings_px(7), width, height - settings_px(14),
+                         item->kind == SETTINGS_NETWORK ? (string_address)mask : (string_address)settings.typed, true);
+                return;
+        }
+
+        if (item->kind == SETTINGS_NETWORK)
+        {
+                unsigned int alpha = item->flags & SETTINGS_ITEM_HEARD ? 255 : 150;
+
+                if (item->flags & SETTINGS_ITEM_HEARD)
+                {
+                        ui_signal(ui, edge, y + height / 2, item->bars);
+                        edge -= settings_px(18) + gap;
+                }
+                if (item->security[0])
+                {
+                        edge -= ui_text(ui, edge - ui_measure(ui, (string_address)item->security, UI_SMALL, false), baseline,
+                                        (string_address)item->security, UI_SMALL, false, ui->quiet, alpha) + gap;
+                }
+                words = item->flags & SETTINGS_ITEM_JOINED ? "joined" : item->flags & SETTINGS_ITEM_SAVED ? "saved" : null;
+                if (words)
+                        edge -= ui_text(ui, edge - ui_measure(ui, (string_address)words, UI_SMALL, false), baseline, (string_address)words,
+                                        UI_SMALL, false, item->flags & SETTINGS_ITEM_JOINED ? ui->ink : ui->quiet, 255) + gap;
+                if (item->flags & SETTINGS_ITEM_JOINED)
+                {
+                        ui_round(ui, text_left, y + (height - settings_px(7)) / 2, settings_px(7), settings_px(7), settings_px(3),
+                                 ui_tone(ui->ink, 235));
+                        text_left += settings_px(17);
+                }
+                ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
+                        UI_TEXT, false, ui->ink, alpha);
+                return;
+        }
+        if (item->kind == SETTINGS_DEVICE)
+        {
+                edge -= ui_text(ui, edge - ui_measure(ui, (string_address) "kept", UI_SMALL, false), baseline, (string_address) "kept",
+                                UI_SMALL, false, ui->quiet, 255) + gap;
+                ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
+                        UI_TEXT, false, ui->ink, 255);
+                return;
+        }
+        ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
+                UI_TEXT, false, item->kind == SETTINGS_NOTE ? ui->quiet : ui->ink, 255);
+}
+
 static fn settings_draw_row(struct ui address_to ui, int at, int y)
 {
         const struct settings_row address_to row = at < SETTINGS_ANY ? &settings_rows[at] : null;
@@ -2274,6 +3088,12 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         if (at == settings.focus && (settings.pane || settings.filter_length))
                 ui_focus(ui, left + settings_px(3), y + settings_px(2), right - left - settings_px(6), height - settings_px(4),
                          settings.focused && settings.pane);
+
+        if (settings_item(at))
+        {
+                settings_draw_item(ui, at, y, settings_item(at));
+                return;
+        }
 
         // A command being typed: its verb at the left, and the field after it for what follows.
         if (!row && at == settings.editing)
@@ -2804,18 +3624,32 @@ static b32 settings_main()
                 if (settings.dirty && !settings_frame())
                         timeout = 50000000;
 
-                // A verb that reads or sets a row is given a time; a command of All commands runs until it ends or is stopped.
+                // A verb that reads or sets a row is given a time (a feed's reading a short one, a join a long one); a command
+                // of All commands runs until it ends or is stopped.
                 if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
                 {
                         positive now = clock_monotonic_nanoseconds(), left;
+                        positive most = settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
+                                        : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
+                                                                           : (positive)SETTINGS_WAIT_NS;
 
-                        if (now - settings.began >= (positive)SETTINGS_WAIT_NS)
+                        if (now - settings.began >= most)
                         {
                                 settings_finished(true);
                                 continue;
                         }
-                        left = (positive)SETTINGS_WAIT_NS - (now - settings.began);
+                        left = most - (now - settings.began);
                         timeout = timeout < 0 || (positive)timeout > left ? (long)left : timeout;
+                }
+                else if (settings.child <= 0)
+                {
+                        // What the group shown keeps up with, when it is due; otherwise how long till it is.
+                        long wait = settings_feed_tick();
+
+                        if (wait >= 0 && (timeout < 0 || wait < timeout))
+                                timeout = wait;
+                        if (settings.child > 0)
+                                continue;
                 }
 
                 ready = windows_wait(&settings.own, settings.child > 0 ? settings.output : -1, timeout);

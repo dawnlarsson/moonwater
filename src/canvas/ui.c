@@ -396,6 +396,23 @@ static int ui_value(struct ui address_to ui, int right, int baseline, string_add
 }
 
 /*
+        The bars of a signal, its right edge at right and their middle on
+        middle: four, as many lit as bars says and the rest faint.
+*/
+static fn ui_signal(struct ui address_to ui, int right, int middle, int bars)
+{
+        int width = 3 * ui->scale, gap = 2 * ui->scale, bottom = middle + 7 * ui->scale;
+
+        for (int bar = 0; bar < 4; bar++)
+        {
+                int height = (4 + 3 * bar) * ui->scale;
+
+                ui_round(ui, right - 4 * width - 3 * gap + bar * (width + gap), bottom - height, width, height, ui->scale,
+                         ui_tone(ui->ink, bar < bars ? 235 : 55));
+        }
+}
+
+/*
         The panel of a list that opens over the rows, x, y, width by height:
         the ground itself, so what is under it does not show through the
         text, lit a little and with a faint line round it.
