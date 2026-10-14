@@ -221,15 +221,15 @@ function desktop_supervise {
   rm -f /run/moonwater/supervisor.pid
 }
 
-# The compositor's desktop, unless the settings or moonwater.desktop=kernel say
-# the kernel's, or there is no font to draw with.
+# The compositor's desktop, unless the settings say another or moonwater.desktop=none
+# keeps it out of the way, or there is no font to draw with.
 function desktop_start {
   case $(moonwater desktop) in
   *"desktop canvas"*) ;;
   *) return 1 ;;
   esac
   case $(cat /proc/cmdline) in
-  *moonwater.desktop=kernel*) return 1 ;;
+  *moonwater.desktop=none*) return 1 ;;
   esac
   desktop_font
   if [ -z "$desktop_face" ]; then

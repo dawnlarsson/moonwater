@@ -13470,7 +13470,7 @@ timeout 5400 qemu-system-x86_64 -m 1G -smp 2 "$@" -kernel "$image" \
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
-        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel mac80211_hwsim.radios=0" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none mac80211_hwsim.radios=0" \
         > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_WIFI_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_WIFI_TRANSCRIPT"
 
@@ -13604,7 +13604,7 @@ timeout $((seconds * 30 + 900)) qemu-system-x86_64 -m 3G -smp 4 "$@" -kernel "$i
         -device qemu-xhci \
         -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
         -device usb-storage,drive=stick,removable=on \
-        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel mac80211_hwsim.radios=0 panic=-1" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none mac80211_hwsim.radios=0 panic=-1" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
 [ -n "${MOONWATER_RING0_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_RING0_TRANSCRIPT"
 
@@ -13741,7 +13741,7 @@ set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
 timeout 300 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
         -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
-        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
+        -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
 tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
 mv "$work/said" "$work/transcript"
@@ -14250,14 +14250,14 @@ if [ "$boot_emulator" = qemu-system-x86_64 ]; then
         timeout 240 "$boot_emulator" -m 2G -smp 2 "$@" \
                 -kernel "$image" -no-reboot -display none -serial stdio \
                 $coverage_serial \
-                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=kernel" \
+                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=none" \
                 < "$work/commands" > "$work/transcript" 2>&1 || true
         coverage_guest_collect boot
 else
         { sleep 15; cat "$work/commands"; } |
                 timeout 480 "$boot_emulator" -m 2G -smp 2 "$@" \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=kernel" \
+                -append "console=$boot_console drm_client_lib.active= moonwater.desktop=none" \
                 > "$work/transcript" 2>&1 || true
 fi
 
@@ -14516,7 +14516,7 @@ if [ "$boot_emulator" = qemu-system-riscv64 ]; then
         { sleep 15; cat "$work/commands"; } |
                 timeout 360 qemu-system-riscv64 -m 2G -smp 2 -machine virt -cpu max \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none" \
                 > "$work/transcript" 2>&1 || true
 
         says transcript 'init started on the widest'  'Run /init as init process'
@@ -14529,7 +14529,7 @@ elif [ "$boot_emulator" != qemu-system-x86_64 ]; then
 elif [ -r /dev/kvm ]; then
         timeout 180 qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none" \
                 < "$work/commands" > "$work/transcript" 2>&1 || true
 
         says transcript 'init started on this host'   'Run /init as init process'
@@ -14655,7 +14655,7 @@ guest = Guest([
     "-serial", "chardev:console"] +
     (["-serial", "file:" + os.environ["MOONWATER_POWER_COVERAGE"]]
      if os.environ.get("MOONWATER_POWER_COVERAGE") else []) + [
-    "-append", "console=" + tty + " drm_client_lib.active= moonwater.desktop=kernel"],
+    "-append", "console=" + tty + " drm_client_lib.active= moonwater.desktop=none"],
     qmp, None, work, (console,), 0.1)
 
 serial = socket.socket(socket.AF_UNIX)
@@ -15152,7 +15152,7 @@ install_boot()
         # shellcheck disable=SC2086
         timeout $((240 * install_slow)) "$install_emulator" -m "${install_memory:-2G}" -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio $coverage_serial \
-                -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
+                -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
                 -device qemu-xhci,id=xhci \
                 -drive if=none,id=disk,format=raw,file="${install_disk:-$work/disk.img}" \
                 -device nvme,serial=moonwater,drive=disk \
@@ -15517,7 +15517,7 @@ if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
                         "$work/$name.sent" 240 -- \
                         "$install_emulator" -m 2G -smp 2 $install_board $install_machine \
                         -kernel "$image" -no-reboot -display none -serial stdio \
-                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
+                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
                         -device qemu-xhci,id=xhci \
                         -drive if=none,id=disk,format=raw,file="$disk" \
                         -device nvme,serial=moonwater,drive=disk "$@" \
@@ -15971,7 +15971,7 @@ COMMANDS
         # shellcheck disable=SC2086
         timeout $((300 * install_slow)) "$install_emulator" -m 1G -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
+                -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
                 $lan -device virtio-net-pci,netdev=lan,mac=52:54:00:66:00:02 \
                 < "$work/neighbour.in" > "$work/neighbour" 2>&1 &
         neighbour_qemu=$!
@@ -16448,7 +16448,7 @@ PY
                         -drive if=pflash,format=raw,file="$work/$name.vars" \
                         -kernel "$work/$name.efi" -no-reboot -display none \
                         -serial stdio $coverage_serial \
-                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=kernel" \
+                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
                         < "$work/serial.in" > "$work/$name" 2>&1 &
                 booting=$!
                 exec 9> "$work/serial.in"
@@ -16943,7 +16943,7 @@ guest = Guest(desktop(image) + [
     # nokaslr so the samples map onto System.map. The cursor plane is off here
     # because QEMU's screendump has no cursor plane in it, and the pixel checks
     # below count the cursor's pixels; the plane boot after this one covers it.
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(0.5)
 
@@ -18255,7 +18255,7 @@ leak_guest = Guest(desktop(image) + [
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/leak-serial",
     # The cursor plane is off here too: this guest counts the cursor's pixels in
     # a screendump, and QEMU's screendump has no cursor plane in it.
-    "-append", "drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/leak-qmp", work + "/leak-mon", work)
 
 time.sleep(25)
@@ -18825,7 +18825,7 @@ if ovmf:
         "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial",
         #   The console on the serial port: what moonwater canvas off finds is a
         #   console that is not a screen, and starts a shell on tty1 for.
-        "-append", "console=ttyS0 moonwater.desktop=kernel"],
+        "-append", "console=ttyS0 moonwater.desktop=none"],
         work + "/fw-qmp", work + "/fw-mon", work)
     time.sleep(40)
     type_shell("moonwater canvas > /dev/ttyS0 2>&1")
@@ -18903,7 +18903,7 @@ if holder:
             "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
             "-device", "usb-storage,drive=stick,removable=on",
             "-no-reboot", "-display", "none", "-serial", "file:" + lost_work + "/serial",
-            "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
+            "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
             lost_work + "/qmp", lost_work + "/mon", lost_work)
         time.sleep(25)
         shot("lost-start")
@@ -18986,7 +18986,7 @@ os.makedirs(work, exist_ok=True)
 guest = Guest(desktop(image) + [
     "-device", "usb-mouse,id=xhcimouse",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 
 # What the tablet reports for a point, and where pointer.c puts the pointer
@@ -19415,7 +19415,7 @@ guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(25)
 
@@ -20016,7 +20016,7 @@ guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial-plane",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp2", work + "/mon2", work)
 time.sleep(25)
 serial_plane = lambda: open(work + "/serial-plane", "rb").read()
@@ -20118,7 +20118,7 @@ ser = work + "/ser"
 guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none printk.time=1 moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
 shell = Shell(ser)
@@ -20177,7 +20177,7 @@ def guest_of(name, kernel):
         "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
         "-chardev", "socket,id=s0,path=" + path + ",server=on,wait=off", "-serial", "chardev:s0",
         "-no-reboot", "-display", "none",
-        "-append", "console=ttyS0 printk.time=1 moonwater.desktop=kernel"],
+        "-append", "console=ttyS0 printk.time=1 moonwater.desktop=none"],
         directory + "/qmp", directory + "/mon", directory, sockets=(path,))
     time.sleep(35)
     shell = Shell(path)
@@ -20261,7 +20261,7 @@ ser = work + "/ser"
 guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none printk.time=1 moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
 shell = Shell(ser)
@@ -21287,7 +21287,7 @@ guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work)
 time.sleep(25)
 
@@ -21628,7 +21628,7 @@ guest = Guest(desktop(image) + [
     "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
     "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
 
 shell = socket.socket(socket.AF_UNIX)
@@ -21790,7 +21790,7 @@ guest = Guest(machine + [
     "-chardev", "socket,id=s0,path=" + work + "/ser,server=on,wait=off",
     "-serial", "chardev:s0",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"],
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
     work + "/qmp", work + "/mon", work, sockets=(work + "/ser",))
 
 shell = socket.socket(socket.AF_UNIX)
@@ -21968,7 +21968,7 @@ for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", 
     guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
         "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
         "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
-        "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel " + extra],
+        "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none " + extra],
         work + "/qmp", work + "/mon", work, (console,), 0.1)
     serial = socket.socket(socket.AF_UNIX)
     serial.connect(console)
@@ -23567,7 +23567,7 @@ one()
         qemu-system-x86_64 -m 2G -smp 2 -cpu host -enable-kvm \
                 -kernel "$image" -no-reboot -display none \
                 -serial "file:$log" \
-                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel printk.time=1 $extra" \
+                -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none printk.time=1 $extra" \
                 < /dev/null > /dev/null 2>&1 &
         pid=$!
         n=0

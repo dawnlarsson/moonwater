@@ -89215,7 +89215,7 @@ class Box:
                           "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
                           "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off",
                           "-serial", "chardev:s0", "-no-reboot", "-display", "none",
-                          "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=kernel moonwater.cursor_plane=0"]
+                          "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"]
         self.guest = Guest(args, work + "/qmp", work + "/mon", work, sockets=(ser,))
         self.sh = socket.socket(socket.AF_UNIX)
         self.sh.connect(ser)
