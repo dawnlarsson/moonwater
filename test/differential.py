@@ -36658,51 +36658,12 @@ def harness_image_nodes(argv):
               'a bound event runs with bowl\'s default PATH (%s)'
               % define(spark, 'SPARK_COMMAND_PATH'))
 
-    #   The compositor's first program, which is the one crossing here with
-    #   no compiler behind it at all. The kernel execs a path; the path is a
-    #   link the build makes for every applet in the SYSTEM category, and it
-    #   is made because of that category and nothing else. Move term to
-    #   another category and the link stops being made, the exec fails in a
-    #   worker that has already returned success -- a 127 in a child nobody
-    #   waits for -- and the desktop comes up with nothing on it while the
-    #   log still says terminal: 0. Three files have to agree and none of
-    #   them can see the other two.
-    abi = (ROOT / 'src/canvas/canvas_abi.h').read_text()
-    canvas = (ROOT / 'src/canvas/canvas.c').read_text()
-    tools = (ROOT / 'src/sh/tools.inc').read_text()
-    system = {name for category, name in re.findall(
-        r'SHELL_TOOL\(\s*(\w+)\s*,\s*([^,\s]+)\s*,', tools)
-        if category == 'SYSTEM'}
-    check(bool(system), 'tools.inc still has a SYSTEM category')
-    terminal = define(abi, 'SPARK_TERMINAL_PROGRAM')
-    check(terminal is not None, 'canvas_abi.h names what the compositor starts')
-    if terminal:
-        name = terminal.strip('"')
-        check(name.startswith('/') and '/' not in name[1:],
-              'the terminal is at the image root, where the links are (%s)'
-              % terminal)
-        check(name.lstrip('/') in system,
-              '%s is a SYSTEM applet, which is why the image links it to the '
-              'shell' % terminal)
-    check('moonwater_spawn_recorded(SPARK_TERMINAL_PROGRAM, &canvas_spawned)' in canvas,
-          'the compositor asks for the path canvas_abi.h publishes')
-    #   And spells none of its own, which is the shape that could drift.
-    check(canvas.count('moonwater_spawn_recorded(') == 1 and
-          not re.search(r'moonwater_spawn_recorded\(\s*"', canvas),
-          'the compositor spells no path of its own to the spawn')
-
-    #   The build's side of the same agreement: SYSTEM is what makes the
-    #   link, and the terminal is one of the programs no switch can take
-    #   out of the image.
+    #   The build's side of the link agreement: SYSTEM is what makes the link
+    #   at the image root to the shell, for every enabled applet.
     check('word_is(one->category, "SYSTEM") && build_tool_on(one) &&' in build and
           'build_tool_links(image, applet, false)' in build and
           'applet = "shell";' in build,
           'the build links every enabled SYSTEM applet at the root to the shell')
-    if terminal:
-        fixed_at = build.index('static bool build_tool_fixed(')
-        fixed = build[fixed_at:build.index('\n}', fixed_at)]
-        check('word_is(name, "%s")' % terminal.strip('"').lstrip('/') in fixed,
-              '%s has no switch, so no configuration can drop it' % terminal)
 
     #   One place says where a bowl root lives. Anything else spelling it is
     #   the drift this whole harness exists to catch.
@@ -45159,7 +45120,8 @@ while True:
         asked = asked.replace("@@ shut", "@@ kept")
         lines += session(asked, nobody=True)[0]
         #       A /dev/spark that is a plain file takes the open and refuses the
-        #       ioctl, which is a Canvas that did not take the layout.
+        #       ioctl, which is a Canvas that did not take the scale below; the
+        #       layout never asks it, and is kept and said.
         script = (": > /dev/spark\n" + locale_say("keyboard fr") +
                   "echo \"@@kept $(cat /root/keyboard)\"\nrm -f /dev/spark\n")
         script += ("echo off > /root/ntp; rm -f /root/ntp.server\n" + locale_say("ntp server") +
@@ -45267,9 +45229,9 @@ while True:
               text("open ntp") + text("open ntp server"))
         check("keyboard us" in text("open keyboard") and "(auto, waiting" in text("open timezone"),
               "and so does its keyboard and its zone", text("open keyboard") + text("open timezone"))
-        check(seen.get("keyboard fr", {}).get("status") == 1 and "saved, but Canvas did not" in text("keyboard fr")
-              and "@@kept fr" in lines,
-              "a layout Canvas did not take is saved and said not taken", text("keyboard fr"))
+        check(seen.get("keyboard fr", {}).get("status") == 0 and "keyboard fr" in text("keyboard fr")
+              and "Canvas did not" not in text("keyboard fr") and "@@kept fr" in lines,
+              "a layout is kept and said, and asks no Canvas", text("keyboard fr"))
         #       The rows above, in the order they ran: none kept, then 2, auto, 4;
         #       the eight refusals leave 4; then the modes the same way; then the
         #       usage lines leave both, and the Canvas that took neither keeps 3
@@ -45433,11 +45395,6 @@ while True:
                               "no": "no", "nb": "no", "dk": "dk", "fi": "fi", "fr": "fr", "es": "es",
                               "it": "it"},
               "every layout moonwater keyboard offers has the XKB name a compositor wants", sorted(dict(pairs).items()))
-        layout_body = (HARNESS_ROOT / "src/canvas/canvas.c").read_text().split(
-            "static long canvas_layout_set", 1)[1].split("\n}\n", 1)[0]
-        check(table and table == set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body)),
-              "the layouts moonwater keyboard offers are the ones Canvas takes",
-              sorted(table ^ set(re.findall(r'strcmp\(name, "(\w+)"\)', layout_body))))
         #       moonwater desktop is a setting like the keyboard's: bare it says
         #       what is chosen, a word is saved when it is canvas, off or a
         #       profile that is installed, and nothing else is, and a layout is
@@ -46287,7 +46244,7 @@ def harness_moonwater_script(argv):
         ("bind init add echo hi", 0), ("bind init add echo hi", 0), ("bind init mount off", 0),
         ("bind init mount off", 0), ("bind init", 0), ("bind exit add echo bye", 0), ("bind exit add echo bye", 0),
         ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 1), ("canvas off", 1),
-        ("canvas log", 1), ("canvas terminal", 1), ("canvas scale 2", 0), ("canvas modes preferred", 0),
+        ("canvas scale 2", 0), ("canvas modes preferred", 0),
         ("desktop off", 0), ("desktop start", 0), ("desktop stop", 1), ("desktop boot", 0), ("desktop", 0),
         ("latency", 1), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
         ("link add peer1 " + key, 0), ("link add peer1 " + key, 0), ("link allow peer1 run", 0),
