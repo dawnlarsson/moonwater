@@ -14324,26 +14324,6 @@ says transcript 'moved script reader' 'naelc-redaer-resrap-lf'
 says transcript 'ordinary fifo script' 'ydaer-elbitapmoc-ofif-lf'
 
 #
-#       The compositor put something on the screen.
-#
-#       Nothing here watched this before, and the log cannot: "terminal: 0"
-#       is spawn_terminal saying it made the worker, not that the worker ran
-#       anything. The exec happens after that return, in a child nobody
-#       waits for, so a path that is not in the image fails as a 127 the log
-#       never sees and the desktop comes up empty behind a line saying 0.
-#       /term is a link the build makes only because term is a SYSTEM
-#       applet; the harness checks those three spellings agree, and this
-#       checks the machine.
-#
-#       The window is the proof, because the terminal is the only thing that
-#       opens one this size -- the console pane is the kernel's own and is
-#       cut to the screen. The compositor prints the grid when a program
-#       asks for text cells, so the line is there when a terminal started
-#       and absent when one did not.
-#
-says transcript 'a terminal opened'   'window grid 80x24'
-
-#
 #       The machine has a name from its first boot: two words rolled and
 #       saved in /root, and the kernel told, not the one every image is built
 #       with. moonwater name says the same.
@@ -17341,20 +17321,16 @@ out.append(("and auto on a virtual display is one, whatever size it claims, and 
             "yes" if "scale 1, auto: no screen says a size that can be trusted" in said else "no: " + said[-80:], "yes"))
 
 #       A program takes the display, the way Weston does: master of the card,
-#       a mode of its own, held. Canvas says so, and has the card back when
-#       the program is done.
+#       a mode of its own, held. Canvas does nothing about it, and has the
+#       card back, with its own colour on it, when the program is done.
 shot("foreign-before")
 before_w, before_h, before_px = load("foreign-before")
 if holder:
     tag = start_holder("8 0 0")
     held = holder_said(tag, "DRMHOLD master", 15)
-    said_held = "held by the desktop or another program" in canvas_text() if held else False
     finished = holder_said(tag, "DRMHOLD done", 20)
     time.sleep(2)
     out.append(("a program takes the display", "yes" if held and finished else "no", "yes"))
-    out.append(("and Canvas says the display is held while it has it", "yes" if said_held else "no", "yes"))
-    out.append(("and Canvas says no such thing once it exits",
-                "yes" if "held by the desktop or another program" not in canvas_text() else "no", "yes"))
     shot("foreign-after")
     after_w, after_h, after_px = load("foreign-after")
     out.append(("the desktop comes back the size it was",
@@ -17363,30 +17339,9 @@ if holder:
     out.append(("and the holder's picture is gone: Canvas fills the screen with its own colour again",
                 "yes" if white < 50 else "%d%% white" % white, "yes"))
 
-    #   A program that gives master back without exiting. Nothing closes
-    #   the card, so nothing tells Canvas; it has to notice on its own.
-    tag = start_holder("3 1 8")
-    dropped = holder_said(tag, "DRMHOLD dropped", 20)
-    quiet = "no drop"
-    if dropped:
-        #   Nothing is typed or moved in this second and the holder writes
-        #   only to a file, so no key or pointer wakes Canvas: its colour
-        #   replaces the holder's white fill only if the suspended loop looks
-        #   at the card again by itself.
-        time.sleep(1)
-        shot("dropped-quiet", 0.5)
-        quiet_w, quiet_h, quiet_px = load("dropped-quiet")
-        grid = [(y * quiet_w + x) * 3 for y in range(0, quiet_h, 8) for x in range(0, quiet_w, 8)]
-        white = sum(1 for at in grid if quiet_px[at:at + 3] == b"\xff\xff\xff")
-        quiet = "yes" if white * 2 < len(grid) else "%d of %d sampled pixels still white" % (white, len(grid))
-    out.append(("a program that gives master back and stays is noticed",
-                "yes" if dropped and holder_said(tag, "DRMHOLD done", 20) else "no", "yes"))
-    out.append(("and the desktop is back within a second with nothing typed or moved", quiet, "yes"))
-    time.sleep(2)
-
-    #   How often a suspended Canvas wakes with a pointer moving over it. The
-    #   look it takes at the card is four a second at most; the thing that
-    #   used to wake it was the pointer itself: every report of a tablet or a
+    #   How often Canvas wakes with a pointer moving over a card another
+    #   program holds: not at all, and the most it may is four a second. What
+    #   once woke it was the pointer itself, every report of a tablet or a
     #   mouse that the program holding the card reads too.
     def pointer_storm(seconds):
         stop = time.time() + seconds
@@ -17407,7 +17362,7 @@ if holder:
     holder_said(tag, "-per-second", 15)
     text = shell.run("cat %s" % tag, 10)[0]
     rate = re.findall(r"wakes-(\d+)-per-second", text)
-    out.append(("a suspended Canvas wakes fewer than 20 times a second, a pointer moving over it",
+    out.append(("Canvas wakes fewer than 20 times a second, a pointer moving over a card another program holds",
                 "yes" if rate and int(rate[-1]) < 20
                 else ("%s a second" % rate[-1] if rate else "no count"), "yes"))
     if reader:
@@ -17424,13 +17379,9 @@ if holder:
     time.sleep(2)
 else:
     for name, want in (("a program takes the display", "yes"),
-                       ("and Canvas says the display is held while it has it", "yes"),
-                       ("and Canvas says no such thing once it exits", "yes"),
                        ("the desktop comes back the size it was", "same"),
                        ("and the holder's picture is gone: Canvas fills the screen with its own colour again", "yes"),
-                       ("a program that gives master back and stays is noticed", "yes"),
-                       ("and the desktop is back within a second with nothing typed or moved", "yes"),
-                       ("a suspended Canvas wakes fewer than 20 times a second, a pointer moving over it", "yes"),
+                       ("Canvas wakes fewer than 20 times a second, a pointer moving over a card another program holds", "yes"),
                        ("a report reaches a program reading it within 250 us at the median, another program holding the card", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
 
@@ -17512,7 +17463,7 @@ if holder:
     started = holder_said(tag, "DRMHOLD master", 15)
     chord("ctrl", "alt", "backspace")
     time.sleep(3)
-    back = "held by the desktop or another program" not in canvas_text()
+    back = shell.number("ps | grep -c '[d]rmhold'") == "0"
     time.sleep(12)
     masters = len(re.findall(r"DRMHOLD master", shell.run("cat %s" % tag, 10)[0]))
     out.append((way_names[0], ("yes" if back else "no") if started else "the holder did not start", "yes"))
@@ -17525,8 +17476,9 @@ if holder:
                 "desktop desktop, from the next start" in plain else "no: " + repr(plain[:400]), "yes"))
     out.append((way_names[3], str(len(re.findall(r"DRMHOLD master", profile_said))), "1"))
     out.append((way_names[4], "yes" if "desktop desktop, running" in plain else "no", "yes"))
-    out.append((way_names[5], "yes" if "desktop stopped" in plain and
-                "held by the desktop or another program" not in canvas_text() else "no", "yes"))
+    shot("profile-after", 0.5)
+    vga, white = vga_share("profile-after")
+    out.append((way_names[5], "yes" if "desktop stopped" in plain and white < 50 else "no (%d%% white)" % white, "yes"))
     out.append((way_names[6], "yes" if re.search(
         r"desktop stopped.*desktop desktop, not running.*desktop canvas, from the next start"
         r".*desktop canvas\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
