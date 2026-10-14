@@ -421,6 +421,64 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
         the target's clip, so the scene's pieces and its corners' scratch both
         have it.
 */
+/*
+        How much of each pixel of a close button the X's halo and its stroke
+        cover, in sixteenths (four by four samples): the geometry of the
+        button alone, its side and its scale, so made once for them
+        (compositor_close_ready, before the scene's bands) and read for every
+        window's button at every present, where the sixteen samples a pixel
+        were most of a present's cost after the copy.
+*/
+#define COMPOSITOR_CLOSE_MOST (COMPOSITOR_CLOSE * 8)
+
+static struct
+{
+        int side, half;
+        unsigned char halo[COMPOSITOR_CLOSE_MOST * COMPOSITOR_CLOSE_MOST];
+        unsigned char cross[COMPOSITOR_CLOSE_MOST * COMPOSITOR_CLOSE_MOST];
+} compositor_close_cover;
+
+static void compositor_close_sample(int side, int half, int x, int y, unsigned int *halo, unsigned int *cross)
+{
+        int arm = side * 2 / 7;
+
+        *halo = *cross = 0;
+        // In eighths of a pixel from the button's middle, sample centres odd.
+        for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++)
+                {
+                        int dx = 8 * x + 2 * sx + 1 - 4 * side, dy = 8 * y + 2 * sy + 1 - 4 * side;
+                        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+                        int d1 = dx - dy, d2 = dx + dy;
+
+                        d1 = d1 < 0 ? -d1 : d1;
+                        d2 = d2 < 0 ? -d2 : d2;
+                        *cross += ax <= 8 * arm && ay <= 8 * arm && (d1 <= 11 * half || d2 <= 11 * half);
+                        *halo += ax <= 8 * arm + 12 * half && ay <= 8 * arm + 12 * half && (d1 <= 28 * half || d2 <= 28 * half);
+                }
+}
+
+// The cover of a frame's button, made where it is not already for its side and scale.
+static void compositor_close_ready(const struct compositor_frame *frame)
+{
+        int bx, by, side;
+
+        if (!compositor_close_box(frame, &bx, &by, &side) || side > COMPOSITOR_CLOSE_MOST ||
+            (compositor_close_cover.side == side && compositor_close_cover.half == frame->scale))
+                return;
+        for (int y = 0; y < side; y++)
+                for (int x = 0; x < side; x++)
+                {
+                        unsigned int halo, cross;
+
+                        compositor_close_sample(side, frame->scale, x, y, &halo, &cross);
+                        compositor_close_cover.halo[y * side + x] = (unsigned char)halo;
+                        compositor_close_cover.cross[y * side + x] = (unsigned char)cross;
+                }
+        compositor_close_cover.side = side;
+        compositor_close_cover.half = frame->scale;
+}
+
 static void compositor_close_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
         int bx, by, side;
@@ -435,27 +493,19 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                 return;
 
         unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : 0x000000u;
-        int arm = side * 2 / 7, half = frame->scale; // the X's reach from the middle, and half its stroke
+        int half = frame->scale; // half the X's stroke
+        bool made = compositor_close_cover.side == side && compositor_close_cover.half == half;
 
         for (int py = y1; py < y2; py++)
                 for (int px = x1; px < x2; px++)
                 {
-                        unsigned int halo = 0, cross = 0;
+                        unsigned int halo, cross;
 
-                        // In eighths of a pixel from the button's middle, sample centres odd.
-                        for (int sy = 0; sy < 4; sy++)
-                                for (int sx = 0; sx < 4; sx++)
-                                {
-                                        int dx = 8 * (px - bx) + 2 * sx + 1 - 4 * side, dy = 8 * (py - by) + 2 * sy + 1 - 4 * side;
-                                        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
-                                        int d1 = dx - dy, d2 = dx + dy;
-
-                                        d1 = d1 < 0 ? -d1 : d1;
-                                        d2 = d2 < 0 ? -d2 : d2;
-                                        cross += ax <= 8 * arm && ay <= 8 * arm && (d1 <= 11 * half || d2 <= 11 * half);
-                                        halo += ax <= 8 * arm + 12 * half && ay <= 8 * arm + 12 * half &&
-                                                (d1 <= 28 * half || d2 <= 28 * half);
-                                }
+                        if (made)
+                                halo = compositor_close_cover.halo[(py - by) * side + (px - bx)],
+                                cross = compositor_close_cover.cross[(py - by) * side + (px - bx)];
+                        else
+                                compositor_close_sample(side, half, px - bx, py - by, &halo, &cross);
                         if (!halo)
                                 continue;
 
@@ -3918,7 +3968,10 @@ static void compositor_present(void)
 
         // The close buttons' means, now the glass and the band are made: where a change reaches a box.
         for (unsigned int at = 0; at < windows; at++)
+        {
                 compositor_close_mean(&frames[at]);
+                compositor_close_ready(&frames[at]);
+        }
         compositor_corner_masks_ready(frames, count);
 
         // A window that fills the output alone is shown straight from its buffer, and nothing is composed.
