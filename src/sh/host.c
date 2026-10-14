@@ -4996,7 +4996,7 @@ fn host_exit_run(void)
         Canvas, off and on.
 
         Reading needs nothing; the kernel decides who may turn it off or on.
-        Off is usually typed into a Canvas terminal, which closes under it, so
+        Off is usually typed into a terminal of the desktop, which closes under it, so
         the way back is said first and the hangup that closing sends is
         ignored. Where the kernel console is not a screen -- console=ttyS0,
         with init's shell on the serial line -- the text console off leaves
@@ -5020,9 +5020,7 @@ static fn host_canvas_write(bool label,
                 return;
         }
 
-        string_format(log, "Canvas is on: %s, %p window%s\n",
-                      (string_address)control->driver, (positive)control->windows,
-                      control->windows == 1 ? "" : "s");
+        string_format(log, "Canvas is on: %s\n", (string_address)control->driver);
 
         for (positive at = 0; at < control->output_count && at < SPARK_CANVAS_OUTPUTS; at++)
         {
@@ -5034,36 +5032,18 @@ static fn host_canvas_write(bool label,
                               (positive)control->output[at].refresh);
         }
 
-        if (control->detached)
-        {
-                host_prefix(label);
-                string_format(log, "%p window%s still open off the desktop\n",
-                              (positive)control->detached,
-                              control->detached == 1 ? "" : "s");
-        }
-
         if (control->suspended)
         {
                 host_prefix(label);
-                string_format(log, "another program holds the display; Canvas "
-                                   "ignores input until it lets go, and "
-                                   "Control-Alt-Backspace ends it\n");
+                string_format(log, "the display is held by the desktop or another "
+                                   "program; Control-Alt-Backspace ends it\n");
         }
 
         host_prefix(label);
-        string_format(log, "drawn at %p times the size, modes %s\n",
+        string_format(log, "the desktop is drawn at %p times the size, modes %s\n",
                       (positive)control->scale,
                       control->modes == SPARK_CANVAS_MODES_PREFERRED
                           ? "preferred" : "largest");
-
-        host_prefix(label);
-        string_format(log, "low-latency hold: %s, taken %p time%s; "
-                           "canvas thread woke %p, frame timer fired %p\n",
-                      control->latency_hold ? "held" : "idle",
-                      (positive)control->latency_holds,
-                      control->latency_holds == 1 ? "" : "s",
-                      (positive)control->thread_passes,
-                      (positive)control->frame_ticks);
 }
 
 static fn host_canvas_say(struct canvas_control address_to control)
@@ -5120,29 +5100,11 @@ static fn host_tty1_shell(void)
                 host_shell_start(argv, 1, "/dev/tty1", -1);
 }
 
-/*
-        moonwater canvas log and moonwater canvas terminal: the windows a
-        desktop starts with. Canvas opens neither by itself; the machine
-        script asks for them on the canvas on event.
-*/
-static b32 host_canvas_open(positive request, string_address what)
-{
-        struct canvas_control control;
-        bipolar failed = host_canvas_request(request, address_of control);
-
-        if (failed == -EPERM)
-                return host_refuse("opening %s needs root (CAP_SYS_ADMIN)\n", what);
-        if (failed == -ENODEV)
-                return host_refuse("Canvas is off, so there is nowhere to open %s\n", what);
-        return_if(failed < 0, host_fail(what, failed));
-        return 0;
-}
-
 static b32 locale_canvas_setting(string_address address_to arguments, positive count);
 static b32 locale_canvas_background(string_address address_to arguments, positive count);
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
 
-/* moonwater canvas [on|off|log|terminal|scale [N|auto]|modes [largest|preferred]|
+/* moonwater canvas [on|off|scale [N|auto]|modes [largest|preferred]|
    background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
@@ -5209,12 +5171,6 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        if (string_equals(arguments[2], "log"))
-                return host_canvas_open(SPARK_CANVAS_KERNEL_LOG, "the kernel log");
-
-        if (string_equals(arguments[2], "terminal"))
-                return host_canvas_open(SPARK_CANVAS_TERMINAL, "a terminal");
-
         if (string_equals(arguments[2], "on"))
         {
                 failed = host_canvas_request(SPARK_CANVAS_ON, address_of control);
@@ -5257,11 +5213,12 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 
         The two input handlers Moonwater attaches to every device are counted
         by the kernel and one report in sixteen is timed, so what each costs a
-        report is a figure here and not a guess: Canvas's, which moves the
-        cursor and takes the keys while it has the display and says nothing
-        while another program has it (a desktop of a bowl), and the machine's
-        key watch, which fires the bound events. The stages after the kernel
-        (the compositor, the screen) are not the machine's to see. reset
+        report is a figure here and not a guess: Canvas's, which watches the
+        keys for the chords that end a desktop and says nothing while another
+        program has the display (the compositor, or a desktop of a bowl), and
+        the machine's key watch, which fires the bound events. The stages
+        after the kernel (the compositor, the screen) are not the machine's
+        to see. reset
         zeroes the counts, so a minute of moving a mouse is a reset, the
         minute and a bare read.
 */
@@ -5282,9 +5239,6 @@ static fn latency_cost_say(string_address name, const struct latency_cost addres
 static b32 host_latency(string_address address_to arguments, positive count)
 {
         struct latency_stats stats;
-        struct input_stats pointer;
-        struct input_devices devices;
-        bipolar device;
         bipolar failed;
         positive elapsed_ms;
         bool reset = count == 3 && string_equals(arguments[2], "reset");
@@ -5318,34 +5272,6 @@ static b32 host_latency(string_address address_to arguments, positive count)
                 string_format(log, host_label "%p of Canvas's reports were heard while another "
                                               "program had the display\n", (positive)stats.quiet);
 
-        string_format(log, host_label "canvas thread woke %p times, frame timer fired %p, "
-                                      "low-latency hold: %s, taken %p time%s\n",
-                      (positive)stats.thread_passes, (positive)stats.frame_ticks,
-                      stats.latency_hold ? "held" : "idle", (positive)stats.latency_holds,
-                      stats.latency_holds == 1 ? "" : "s");
-
-        device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
-        if (device < 0)
-        {
-                log_flush();
-                return 0;
-        }
-
-        if (system_control(device, SPARK_IOCTL_INPUT_STATS, address_of pointer) == 0 && pointer.events)
-                string_format(log, host_label "pointer to screen, as Canvas draws it: %p events, "
-                                              "%p ns each and %p at worst (queued %p, drawing %p, "
-                                              "flush %p)\n",
-                              pointer.events, pointer.mean_ns, pointer.worst_ns,
-                              pointer.queue_ns, pointer.draw_ns, pointer.flush_ns);
-
-        if (system_control(device, SPARK_IOCTL_INPUT_DEVICES, address_of devices) == 0)
-                for (positive at = 0; at < devices.count && at < INPUT_DEVICES_MAX; at++)
-                        string_format(log, host_label "  %s: %p reports%s\n",
-                                      (string_address)devices.device[at].name,
-                                      (positive)devices.device[at].events,
-                                      devices.device[at].opened ? ", would not open" : "");
-
-        system_close(device);
         log_flush();
         return 0;
 }
@@ -13926,20 +13852,18 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
         poll would see its first query running for ever. It says how it
         went on a pipe (locale_child), and is waited for once it has.
 
-        NOTHING BELOW HAS BEEN SEEN TO SET A CLOCK
+        THE STEP AND THE SLEW HAVE BEEN RUN
 
-        Setting CLOCK_REALTIME needs a machine it is acceptable to
-        disturb, and no machine in reach was one, so neither the step nor
-        the slew has ever been run against a kernel that carried it out.
-        What has been checked is what gets asked for: every ADJ_ and STA_
-        value here against uapi/linux/timex.h, every timex word index
-        against the struct's own offsets, and the choice between stepping
-        and slewing against crafted offsets either side of the threshold
-        in the machine lane. Take that as the request being right, not as
-        the request having been granted.
+        Both have been carried out against a kernel: KVM guests were set and
+        slewed by this code and read back against a panel of stratum-1
+        servers, one reading a minute (55d6b775 has the figures), and the
+        choice between stepping and slewing is checked against crafted
+        offsets either side of the threshold in the machine lane. Every ADJ_
+        and STA_ value here is also held against uapi/linux/timex.h, and
+        every timex word index against the struct's own offsets.
 
-        The reason to be careful about the difference is in the constants
-        below. ADJ_SETOFFSET was 0x80, which is ADJ_TAI, for as long as
+        The reason to read a granted call apart from an accepted one is in
+        the constants below. ADJ_SETOFFSET was 0x80, which is ADJ_TAI, for as long as
         this file has had it -- so no correction this program ever
         computed reached the clock. It survived because adjtimex answers a
         wrong mode the same way it answers a right one: with the clock
@@ -17618,39 +17542,13 @@ static bool locale_keyboard_ok(string_address name)
         return false;
 }
 
-static bipolar locale_keyboard_live(string_address name)
-{
-        struct canvas_control control;
-
-        memory_zero(address_of control, sizeof(control));
-        control.request = SPARK_CANVAS_LAYOUT;
-        if (name)
-        {
-                positive length = string_length(name);
-
-                if (length >= sizeof(control.master_command))
-                        return -22;
-                memory_copy(control.master_command, name, length);
-        }
-        return host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ);
-}
-
-//      The layout Canvas has, when it can be asked, and else the one that
-//      is kept: us when none is, and nothing when it is not the caller's to
-//      read.
+//      The layout that is kept: us when none is, and nothing when it is not
+//      the caller's to read.
 static string_address locale_keyboard_say(p8 address_to name, positive room)
 {
-        struct canvas_control control;
-        bool readable = locale_readable(LOCALE_KEYBOARD_PATH, name, room);
-
-        memory_zero(address_of control, sizeof(control));
-        control.request = SPARK_CANVAS_LAYOUT;
-        if (host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ) >= 0 &&
-            control.master_command[0])
-                string_copy_bounded(name, control.master_command, room);
-        else if (!readable)
+        if (!locale_readable(LOCALE_KEYBOARD_PATH, name, room))
                 return (string_address)LOCALE_NEEDS_ROOT;
-        else if (!name[0])
+        if (!name[0])
                 string_copy_bounded(name, "us", room);
         return (string_address)name;
 }
@@ -17696,27 +17594,14 @@ static b32 locale_keyboard_list(void)
 
 static b32 locale_keyboard_set(string_address name)
 {
-        bipolar live;
-
         if (!locale_keyboard_ok(name))
                 return host_refuse("unknown keyboard layout %s -- "
                                    "moonwater keyboard list shows them\n",
                                    name);
-        //      Canvas first: its refusal of a layout it does not have keeps
-        //      nothing, and a machine with no Canvas to ask (a device that is
-        //      not there) takes the layout when it starts.
-        live = locale_keyboard_live(name);
-        if (live == -EINVAL)
-                return host_refuse("Canvas has no keyboard layout %s\n", name);
+        //      Kept in /root, which the compositor watches: it takes the
+        //      layout as soon as the file is written and when it starts.
         if (host_save("keyboard", LOCALE_KEYBOARD_PATH, name))
                 return 1;
-        if (live < 0 && live != -ENOENT)
-        {
-                host_say(log_error, host_label "keyboard %s is saved, but "
-                                    "Canvas did not take it: %s\n",
-                         name, file_reason(live));
-                return 1;
-        }
         host_say(log, host_label "keyboard %s\n", name);
         return 0;
 }
@@ -17732,7 +17617,8 @@ static b32 locale_keyboard_set(string_address name)
         Canvas off, and only then kept in /root, as the keyboard layout is;
         the machine process puts the kept one back when it starts, and a
         kernel command line (canvas.scale=2, canvas.modes=preferred) gives
-        the first frame the one before that.
+        the first frame the one before that. The compositor reads the scale
+        once, as it starts, so a new one is the desktop's when it restarts.
 */
 static bool locale_canvas_scale_ok(string_address word)
 {
@@ -17801,7 +17687,7 @@ static b32 locale_canvas_status(bool scale)
                 host_say(log, host_label "scale auto, Canvas asks its screens when it "
                                          "starts%s\n", and_kept);
         else if (control.scale_setting)
-                host_say(log, host_label "scale %p, set%s%s\n",
+                host_say(log, host_label "scale %p, set%s%s; the desktop takes it when it restarts\n",
                          (positive)control.scale,
                          control.scale_origin == SPARK_CANVAS_ORIGIN_COMMAND_LINE
                              ? " on the kernel command line" : "",
@@ -18101,10 +17987,6 @@ static fn locale_restore(void)
                 (void)bowl_write_localtime_host();
                 (void)bowl_write_localtime_all(null);
         }
-
-        host_read_word(LOCALE_KEYBOARD_PATH, keyboard, sizeof(keyboard));
-        if (keyboard[0])
-                locale_keyboard_live(keyboard);
 
         //      How Canvas draws, as it was left: a word the kernel does not
         //      take is not one that was ever kept.
@@ -18588,14 +18470,12 @@ static b32 host_keyboard(string_address address_to arguments, positive count)
 /*
         moonwater desktop: what is on the screen once the machine has started.
 
-        Canvas is the desktop unless this says otherwise. A bowl profile's
+        The compositor is the desktop unless this says otherwise. A bowl profile's
         session can be the desktop instead (bowl profile desktop installs one):
         it takes the display from Canvas the way any program that opens the card
         does, Canvas lets go and drops the keys while it holds it, and has the
-        windows and the keyboard back when it ends. Canvas still starts first,
-        with the kernel log and a terminal, so a session that ends or is ended
-        leaves a shell where it was. off is the text console: Canvas is turned
-        off as soon as it has started.
+        keyboard back when it ends. Canvas still starts first. off is the text
+        console: Canvas is turned off as soon as it has started.
 
         The choice is /root/desktop, as the keyboard's is /root/keyboard. The
         machine script's canvas on line runs `desktop boot`, once for each boot,
@@ -19366,7 +19246,7 @@ static b32 host_bind(string_address address_to arguments, positive count)
                                       arguments[2]);
                 host_bind_names(log_error);
                 host_say(log_error, "\n");
-                return 1;
+                return host_usage();
         }
 
         if (count == words)
@@ -19441,9 +19321,8 @@ static const host_row host_rows[] = {
     {null, "bind exit", "what runs at poweroff or reboot", 'f'},
     {null, "bind exit add \"command\"", "run a command before the disks go read-only", 'f'},
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
-    {null, "canvas [on|off]", "the desktop, and on which screens [on]", 'b'},
-    {null, "canvas log|terminal", "open the kernel log or a terminal", 'b'},
-    {null, "canvas scale [N|auto]", "device pixels to a drawn one, 1 to 4 [auto]", 'b'},
+    {null, "canvas [on|off]", "the desktop; off leaves the text console [on]", 'b'},
+    {null, "canvas scale [N|auto]", "device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]", 'b'},
     {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
     {null, "canvas background [COLOUR|default]", "the desktop colour, rrggbb [1e1e1e]", 'b'},
     {null, "canvas cursor [size [N|auto]|look [light|dark|auto]]", "the pointer: size 1 to 4, colours [auto]", 'b'},
@@ -19456,7 +19335,7 @@ static const host_row host_rows[] = {
     {null, "power [performance|balanced|powersave]", "profile and CPU governor, kept across boots", 'b'},
     {null, "cpu [boost|smt on|off]", "turbo and SMT, kept across boots", 'b'},
     {null, "cpu online|offline N", "hotplug one processor", 'b'},
-    {null, "charge [limit N|off]", "where the battery stops charging, 20 to 100", 'b'},
+    {null, "charge [limit N|limit off]", "where the battery stops charging, 20 to 100", 'b'},
     {"sleep hibernate", "sleep | hibernate", "suspend to RAM or to disk", 'b'},
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
     {null, "wired [on|off]", "the wired links; off keeps them down", 'b'},
@@ -19487,6 +19366,7 @@ static const host_row host_rows[] = {
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
     {null, "link NAME CODE", "link to the machine called NAME, which waits", 'f'},
     {null, "link NAME [COMMAND...]", "a terminal on NAME, or one command with its status", 'f'},
+    {null, "link key", "the public key of this machine, which link add takes", 'f'},
     {null, "link push NAME FILE PATH", "a file here to PATH there, whole or not at all", 'f'},
     {null, "link pull NAME PATH FILE", "PATH there to a file here", 'f'},
     {null, "link log NAME", "follow the kernel log of NAME", 'f'},
