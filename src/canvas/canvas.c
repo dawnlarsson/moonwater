@@ -4697,25 +4697,19 @@ static void glyph_braille(unsigned int dots, unsigned char *bits)
 
 static void glyph_tofu(unsigned char *bits)
 {
-        unsigned int y;
-
         bits[1] = 0x7e;
         bits[WINDOW_CELL_H - 2] = 0x7e;
-        for (y = 2; y < WINDOW_CELL_H - 2; y++)
-                bits[y] = 0x42;
+        memory_fill(bits + 2, 0x42, WINDOW_CELL_H - 4);
 }
 
 // One half of a box two cells wide, for a double-width character the face
 // has no glyph for.
 static void glyph_tofu_half(unsigned char *bits, _Bool right)
 {
-        unsigned int y;
-
         memory_fill(bits, 0, WINDOW_CELL_H);
         bits[1] = right ? 0xfe : 0x7f;
         bits[WINDOW_CELL_H - 2] = bits[1];
-        for (y = 2; y < WINDOW_CELL_H - 2; y++)
-                bits[y] = right ? 0x02 : 0x40;
+        memory_fill(bits + 2, right ? 0x02 : 0x40, WINDOW_CELL_H - 4);
 }
 
 /*

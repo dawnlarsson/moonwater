@@ -2373,8 +2373,7 @@ static positive zstd_par_scan(zstd_par_run address_to run, p8 address_to base, p
                                 if (((modes >> (6 - 2 * kind)) & 3) == 3 && !run->seq[kind].src)
                                         goto stop;
                         b->huf = run->huf;
-                        for (positive kind = 0; kind < 3; kind++)
-                                b->seq[kind] = run->seq[kind];
+                        memory_copy(b->seq, run->seq, sizeof(b->seq));
                         if (lit.type == 2)
                         {
                                 run->huf.src = payload;

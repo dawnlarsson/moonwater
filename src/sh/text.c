@@ -41284,8 +41284,7 @@ static bool sort_obsolete_words(file_taking address_to taking)
 
         memory_fill(sort_word_roles, SORT_WORD_PLAIN, count);
 
-        for (positive at = 0; at < count; at++)
-                sort_words[at] = argv[at];
+        memory_copy(sort_words, argv, count * sizeof(sort_words[0]));
 
         // Under POSIXLY_CORRECT a file ends the keys: GNU takes every word
         // after the first one as a file.

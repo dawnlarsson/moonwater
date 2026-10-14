@@ -306,6 +306,7 @@ static void compositor_panel_tab(const struct compositor_target *t, int slot, un
 #define COMPOSITOR_MASKS_BYTES 89440
 // Mapped when the first is wanted, not kept in the image: the address space of every program that links this is
 // the image's, and a shell under a 12 MiB cap has none to spare.
+static void *compositor_map_zeroed(unsigned long bytes);
 static unsigned char *compositor_corner_masks;
 static unsigned char compositor_corner_made[COMPOSITOR_RADIUS_MOST + 1];
 static unsigned char compositor_corner_none[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
@@ -316,11 +317,9 @@ static const unsigned char *compositor_corner_mask(int radius)
 
         if (!compositor_corner_masks)
         {
-                long got = (long)system_call_6(syscall(mmap), 0, COMPOSITOR_MASKS_BYTES, 3, 0x22, (positive)-1, 0);
-
-                if (got < 0 && got > -4096)
+                compositor_corner_masks = compositor_map_zeroed(COMPOSITOR_MASKS_BYTES);
+                if (!compositor_corner_masks)
                         return compositor_corner_none;
-                compositor_corner_masks = (unsigned char *)got;
         }
         mask = compositor_corner_masks + (unsigned long)(radius - 1) * radius * (2 * radius - 1) / 6;
 
@@ -688,8 +687,9 @@ static void compositor_scene(const struct compositor_target *t,
                                 {
                                         unsigned int place = edges++;
 
-                                        for (; place && edge[place - 1] > box[piece][side]; place--)
-                                                edge[place] = edge[place - 1];
+                                        while (place && edge[place - 1] > box[piece][side])
+                                                place--;
+                                        memory_copy(edge + place + 1, edge + place, (edges - 1 - place) * sizeof(edge[0]));
                                         edge[place] = box[piece][side];
                                 }
         }
@@ -1093,8 +1093,7 @@ static unsigned int compositor_keymap_character(const struct compositor_keymap *
         level[1] = compositor_us[code][1];
         for (at = 0; at < count; at++)
                 if (patch[at].code == code)
-                        for (unsigned int l = 0; l < CK_LEVELS; l++)
-                                level[l] = patch[at].level[l];
+                        memory_copy(level, patch[at].level, sizeof(level));
 
         if (modifiers & WINDOW_KEY_ALTGR)
                 want += 2;
@@ -1794,6 +1793,14 @@ static long compositor_call(positive number, positive a, positive b, positive c,
         return (long)system_call_6(number, a, b, c, d, e, f);
 }
 
+// Zeroed pages of their own, or null.
+static void *compositor_map_zeroed(unsigned long bytes)
+{
+        long got = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+        return got < 0 && got > -4096 ? 0 : (void *)got;
+}
+
 /*
         What changed, as a few rectangles that do not overlap. A rectangle
         joins one it overlaps or lines up with, which costs nothing, and
@@ -2096,8 +2103,9 @@ static unsigned int compositor_windows(void)
 
                 if (!compositor.showing[row])
                         continue;
-                for (; place && compositor.made[compositor.listed[place - 1]] > compositor.made[row]; place--)
-                        compositor.listed[place] = compositor.listed[place - 1];
+                while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
+                        place--;
+                memory_copy(compositor.listed + place + 1, compositor.listed + place, count - place);
                 compositor.listed[place] = (unsigned char)row;
                 count++;
         }
@@ -3720,8 +3728,7 @@ static void compositor_stack_remove(int row)
         if (at >= compositor.stacked)
                 return;
 
-        for (; at + 1 < compositor.stacked; at++)
-                compositor.stack[at] = compositor.stack[at + 1];
+        memory_copy(compositor.stack + at, compositor.stack + at + 1, compositor.stacked - at - 1);
         compositor.stacked--;
 }
 

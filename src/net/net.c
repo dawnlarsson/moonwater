@@ -15092,8 +15092,11 @@ static COLD bipolar dns_resolve_wanted(string_address path, string_address name,
                 if (dns_offers_tls(named[at]))
                         asked[count++] = named[at];
         if (!count)
-                for (; count < array_count(dns_tls_public); count++)
-                        asked[count] = dns_tls_public[count];
+        {
+                memory_copy(asked + count, dns_tls_public + count,
+                            (array_count(dns_tls_public) - count) * sizeof(asked[0]));
+                count = array_count(dns_tls_public);
+        }
         if (network_deadline_begin(address_of deadline,
                                    mode == DNS_TLS_ONLY || seconds < DNS_TLS_SECONDS
                                        ? seconds : DNS_TLS_SECONDS,

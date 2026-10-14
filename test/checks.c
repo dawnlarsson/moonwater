@@ -112837,6 +112837,21 @@ static void memory_fill_u32_rect(u32 *into,unsigned long stride,unsigned long wi
     compositor_written+=width*height;
     for(unsigned long y=0;y<height;y++)for(unsigned long x=0;x<width;x++)into[y*stride+x]=value;
 }
+/* What the backend takes from the library: the pool it bands a scene across (here one band, in this thread), the
+   pages the corner masks are mapped into, and the copy that moves a list along. */
+typedef unsigned long positive;
+typedef void *address_any;
+#define PARALLEL_MINIMUM_BYTES ((positive)1 << 62)
+static positive parallel_width(void) { return 1; }
+static void parallel_for(void (*body)(address_any, positive), address_any context, positive count, positive bytes)
+{
+    (void)bytes;
+    for(positive at=0;at<count;at++)body(context,at);
+}
+static void *compositor_map_zeroed(unsigned long bytes) { return calloc(1,bytes); }
+#ifndef memory_copy
+#define memory_copy memmove
+#endif
 #include "compositor-backend.inc"
 /* A failed row says which one, not only that one failed. */
 #define cc_check(x) do{if(!(x))fprintf(stderr,"compositor row failed, line %d: %s\n",__LINE__,#x);check(x);}while(0)

@@ -15066,8 +15066,7 @@ COLD fn shell_read(writer write, string_address input)
                 for (string_address walk = value ? value : ifs_default;
                      string_get(walk); walk++)
                         read_ifs_bits[(p8)*walk >> 6] |= (p64)1 << ((p8)*walk & 63);
-                for (positive blank = 0; blank < 4; blank++)
-                        read_blank_bits[blank] = 0;
+                memory_zero(read_blank_bits, sizeof(read_blank_bits));
                 for (string_address walk = " \t\n"; string_get(walk); walk++)
                         read_blank_bits[(p8)*walk >> 6] |=
                             read_ifs_bits[(p8)*walk >> 6] &

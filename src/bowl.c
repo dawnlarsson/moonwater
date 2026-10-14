@@ -7866,8 +7866,9 @@ static b32 bowl_profile_packages(const struct bowl_distro address_to distro,
         string_address argv[BOWL_PROFILE_ARGV];
         positive used = 0;
 
-        for (; verb[used]; used++)
-                argv[used] = verb[used];
+        while (verb[used])
+                used++;
+        memory_copy(argv, verb, used * sizeof(argv[0]));
         for (positive at = 0; packages[at]; at++)
         {
                 if (used + 2 > BOWL_PROFILE_ARGV)
