@@ -113932,7 +113932,7 @@ b32 main(void)
 #endif /* CHECK_spark_entry */
 
 #ifdef CHECK_canvas_cells
-/* Actual Canvas assembly and composition, with ordinary memory instead of DRM. */
+/* The compositor's CPU backend and the library's cell and glyph bodies, with ordinary memory instead of DRM. */
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -113969,24 +113969,7 @@ typedef uint64_t u64;
 #define WINDOW_CELL_WIDE 128u
 #define WINDOW_CELL_WIDE_RIGHT 256u
 #define WINDOW_CELL_BAR 512u
-#define DRM_FORMAT_ARGB8888 0x34325241u
-static struct {unsigned scale;int bar_grab,frame_pending;} desktop={1};
-#define canvas_cell_w (WINDOW_CELL_W * (int)desktop.scale)
-#define canvas_cell_h (WINDOW_CELL_H * (int)desktop.scale)
-static unsigned long canvas_painted,canvas_runs;
-struct drm_rect {int x1,y1,x2,y2;};
-static void drm_rect_init(struct drm_rect *r,int x,int y,int w,int h) {
-    *r=(struct drm_rect){x,y,x+w,y+h};
-}
-static int drm_rect_width(const struct drm_rect *r) {return r->x2-r->x1;}
-static int drm_rect_height(const struct drm_rect *r) {return r->y2-r->y1;}
-static void drm_rect_translate(struct drm_rect *r,int dx,int dy) {r->x1+=dx;r->x2+=dx;r->y1+=dy;r->y2+=dy;}
 struct window_cell {unsigned character; unsigned char ink,paper; unsigned short flags;};
-struct font_desc {unsigned width,height; const unsigned char *data;};
-static const unsigned char *font_data_buf(const unsigned char *p) {return p;}
-static unsigned font_glyph_pitch(unsigned w) {return (w+7)/8;}
-static unsigned font_glyph_size(unsigned w,unsigned h) {return font_glyph_pitch(w)*h;}
-static unsigned long int_sqrt(unsigned long v) {unsigned long r=0;while((r+1)*(r+1)<=v)r++;return r;}
 void memory_fill_u32(u32 *p,unsigned long n,u32 v) {while(n--)*p++=v;}
 void *memory_copy_apart(void *to,const void *from,unsigned long n) {return memcpy(to,from,n);}
 void *memory_copy(void *to,const void *from,unsigned long n) {return memcpy(to,from,n);}
@@ -114005,86 +113988,11 @@ void canvas_cells_wide(u32 *,unsigned long,const u8 *,const struct window_cell *
 void canvas_rect_fill_wide(u32 *,unsigned long,unsigned long,unsigned long,u32);
 void canvas_glyph_wide(u32 *,unsigned long,const u8 *,unsigned long,unsigned long,u32);
 void canvas_glyph2_wide(u32 *,unsigned long,const u8 *,unsigned long,unsigned long,u32);
-// The ring reads the program's line lengths through the kernel's single-load
-// spelling; hosted, one load is all there is.
-#define READ_ONCE(a) (a)
-#include "canvas-cells.inc"
-
 static unsigned checks;
 static void check(int okay) {checks++;assert(okay);}
-static u32 pixels[1024*64+2],expected[1024*64+2];
-static unsigned char font_bits[256*16];
-static void reference_row(const struct target *t,const struct shape *s,int x,int y,
-                          const struct window_cell *cells,int used,int first,int last) {
-    for(int c=first;c<last;c++) {
-        unsigned ch=c<used?cells[c].character:0;
-        u32 ink=c<used?canvas_terminal[cells[c].ink]|t->opaque:0;
-        u32 paper=canvas_terminal[c<used?cells[c].paper:0]|t->opaque;
-        for(int dy=0;dy<canvas_cell_h;dy++)for(int dx=0;dx<canvas_cell_w;dx++) {
-            int px=x+c*canvas_cell_w+dx,py=y+dy;
-            if(px<max(t->clip.x1,0)||px>=min(t->clip.x2,t->width)||
-               py<max(t->clip.y1,0)||py>=min(t->clip.y2,t->height))continue;
-            int inset=round_inset(py-s->y,s->h,s->radius);
-            if(px>=s->x+inset && px<s->x+s->w-inset)t->pixels[py*t->pitch+px]=paper;
-            // Past ASCII, a character nothing is drawn for shows the font's '?'.
-            if(ch>' ' &&
-               (font_bits[(ch>126?'?':ch)*16+dy/desktop.scale]&(0x80>>(dx/desktop.scale))))
-                t->pixels[py*t->pitch+px]=ink;
-        }
-    }
-}
+static u32 pixels[1024*64+2];
+static u32 expected[1024*64+2];
 
-struct pane {unsigned grid_columns,grid_rows,columns,rows,view,head,history,stride,skip;
-    unsigned *lengths;struct window_cell *cells;
-    int x,y,width,height,edge;unsigned style,state,title_length,pitch;
-    const char *title;u32 *pixels;void *shared;};
-static unsigned pane_rows(struct pane *p) {return p->rows;}
-static unsigned pane_view_at(struct pane *p,unsigned view,unsigned *skip) {*skip=p->skip;return view;}
-// Every line of these rings has memory behind it; holding is the kernel's.
-static _Bool pane_cells_held(struct pane *p,unsigned slot,unsigned length) {(void)p;(void)slot;(void)length;return 1;}
-struct row_call {int y,used,first,last;const struct window_cell *cells;};
-static struct row_call calls[32];
-static unsigned call_count;
-static void record_row(const struct target *t,const struct shape *s,int x,int y,
-                       const struct window_cell *cells,int used,int first,int last) {
-    (void)t;(void)s;(void)x;assert(call_count<32);
-    calls[call_count++]=(struct row_call){y,used,first,last,cells};
-}
-#define compose_row record_row
-#include "canvas-ring.inc"
-#undef compose_row
-
-#define WINDOW_TITLE 20
-#define WINDOW_FRAME 1u
-#define WINDOW_MINIMIZED 4u
-#define WINDOW_FOCUSED 1u
-#define TEXT_CENTRE 1u
-#define TEXT_MIDDLE 4u
-static unsigned extent_first,extent_total,view_set;
-static _Bool pane_extent(struct pane *p,unsigned *first,unsigned *shown,unsigned *total) {
-    *first=extent_first;*shown=p->rows;*total=extent_total;return *shown<*total;
-}
-static _Bool pane_view_set(struct pane *p,unsigned above) {(void)p;view_set=above;return 1;}
-static void canvas_thread_wake(void) {}
-#define atomic_set(at,value) (*(at)=(value))
-// Titles and pixel windows are not exercised by this cell-layout check.
-static void text_draw(const struct target *t,int x,int y,int w,int h,
-    const char *text,unsigned length,unsigned align,int scale,u32 color) {assert(0);}
-#include "canvas-pane.inc"
-
-/* The golden scene G-S1 (canvas spec 05 section 1.3): a 1024 by 768 output
-   in the desktop ink, and one framed, focused pixel window with a shared page
-   and no title at (80, 80), its 128 by 64 buffer all 0x3a5a7a, at scales 1 to
-   4. The value is the SHA-256 of the buffer as little-endian words with the
-   top byte cleared, which is the byte no compositor agrees on. Recorded from
-   the kernel's compose path at 16ee8ddb, where canvas.c is byte for byte
-   cf9a0bca's; every compositor that draws the classic look must give the
-   same four. */
-#define GOLDEN_GS1_1 "a5d98224eb8139bb46fe1595844b0ff371ce4299493ba3e425eed9e8a68f336b"
-#define GOLDEN_GS1_2 "2496ee40f38ce47b559915da2e624285af14b84c576b69daf3ecfc4a5af287c0"
-#define GOLDEN_GS1_3 "ed7f6cb60cfd4def788b666d6d8f905ce347f7883bee301b315c52b9e0833357"
-#define GOLDEN_GS1_4 "cb48e15aa0ffc4674b6f164c92f4ec3a42b0197db1d534b16262d828f4adc2af"
-static const char *const golden_gs1[4]={GOLDEN_GS1_1,GOLDEN_GS1_2,GOLDEN_GS1_3,GOLDEN_GS1_4};
 static void golden_sha256(const u32 *pixels,size_t count,char out[65]) {
     static const uint32_t k[64]={
         0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
@@ -114121,28 +114029,9 @@ static void golden_sha256(const u32 *pixels,size_t count,char out[65]) {
     for(unsigned i=0;i<8;i++)snprintf(out+i*8,9,"%08x",h[i]);
 }
 static u32 golden_screen[1024*768];
-static void check_golden_gs1(const u32 *ink) {
-    static u32 body[128*64];
-    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
-    for(unsigned scale=1;scale<=4;scale++) {
-        desktop.scale=scale;
-        for(unsigned i=0;i<1024*768;i++)golden_screen[i]=ink[INK_DESKTOP];
-        struct pane p={.x=80,.y=80,.width=128,.height=64,.style=WINDOW_FRAME,
-            .state=WINDOW_FOCUSED,.pixels=body,.pitch=128,.shared=body};
-        struct target t={.pixels=golden_screen,.pitch=1024,.width=1024,.height=768,
-            .clip={0,0,1024,768},.ink=ink};
-        compose_pane(&p,&t);
-        char got[65];golden_sha256(golden_screen,1024*768,got);
-        if(strcmp(got,golden_gs1[scale-1]))
-            fprintf(stderr,"G-S1 at scale %u is %s, not the golden %s\n",scale,got,golden_gs1[scale-1]);
-        check(!strcmp(got,golden_gs1[scale-1]));
-    }
-    desktop.scale=1;
-}
-
 /* M1.3: src/canvas/compositor.c's CPU backend draws G-S1 its own way: the
    window is its pixels and nothing around them (no border, titlebar or close
-   box, which the kernel desktop still draws), a black line of one logical
+   box), a black line of one logical
    pixel round them and corners round at 8, so its four hashes are its own,
    recorded from the backend
    that made them and pinned so a later change to the look is as
@@ -114594,102 +114483,6 @@ static void check_compositor_scene(void) {
     #undef RND
 }
 
-static void check_pane_layout(void) {
-    static u32 screen[256*256];
-    const u32 ink[]={0x102030,0x203040,0x304050,0x405060,0x506070,0x607080,0,0};
-    for(unsigned scale=1;scale<=3;scale++)for(unsigned frame=0;frame<2;frame++)
-    for(unsigned grid=3;grid<=7;grid+=2)for(unsigned scroll=0;scroll<3;scroll++)
-    for(unsigned clip=0;clip<3;clip++) {
-        desktop.scale=scale;
-        struct window_cell cells[3*7];unsigned lengths[3]={grid,grid,grid};
-        for(unsigned r=0;r<3;r++)for(unsigned c=0;c<7;c++)
-            cells[r*7+c]=(struct window_cell){' ',0,1+c,0};
-        struct pane p={.x=8,.y=4,.width=5*canvas_cell_w+canvas_bar,
-            .height=3*canvas_cell_h,.columns=5,.rows=3,.grid_columns=grid,
-            .grid_rows=3,.head=3,.history=3,.stride=7,.lengths=lengths,
-            .cells=cells,.style=frame?WINDOW_FRAME:0};
-        int y=p.y+(frame?canvas_title:0),right=p.x+5*canvas_cell_w;
-        struct target t={.pixels=screen,.pitch=256,.width=256,.height=256,
-            .clip={0,0,256,256},.ink=ink};
-        if(clip)t.clip=(struct drm_rect){clip==1?right-canvas_cell_w:right,y,
-            clip==1?right:right+canvas_bar,y+p.height};
-        extent_first=scroll==2?6:0;extent_total=scroll?9:3;
-        memset(screen,0xa5,sizeof(screen));compose_pane(&p,&t);
-        int okay=1;
-        for(int dy=0;dy<p.height;dy++)for(int dx=0;dx<p.width;dx++) {
-            int px=p.x+dx,py=y+dy;
-            u32 color=0xa5a5a5a5;
-            if(point_in_rect(t.clip.x1,t.clip.y1,t.clip.x2-t.clip.x1,
-                    t.clip.y2-t.clip.y1,px,py)) {
-                color=dx<(int)min(grid,5u)*canvas_cell_w?
-                    canvas_terminal[1+dx/canvas_cell_w]:ink[INK_BODY];
-                if(dx>=5*canvas_cell_w && scroll) {
-                    int top=p.height*(int)extent_first/9,span=p.height/3;
-                    color=dy>=top&&dy<top+span?ink[INK_TITLE_LIT]:ink[INK_FRAME];
-                }
-            }
-            okay&=screen[py*256+px]==color;
-        }
-        check(okay); // Every pixel of the last cell survives bar and gap fills.
-        struct pane_bar_geometry bar;
-        check(pane_bar(&p,&bar)==(scroll!=0));
-        if(scroll) {
-            check(bar.x==right && bar.width==canvas_bar && bar.y==y &&
-                !point_in_rect(bar.x,bar.y,bar.width,bar.height,right-1,y) &&
-                point_in_rect(bar.x,bar.y,bar.width,bar.height,right,y));
-            for(int grab=0;grab<=bar.thumb_span;grab+=bar.thumb_span)
-            for(int at=-1;at<=bar.height+1;at+=bar.height+2) {
-                desktop.bar_grab=grab;desktop.frame_pending=0;
-                bar_move(&p,y+at,&bar);
-                check(view_set==(unsigned)(clamp(at-grab,0,bar.height-bar.thumb_span)*9/bar.height)
-                      && desktop.frame_pending);
-            }
-        }
-    }
-}
-
-/*
-   Focus policy lives in the kernel-facing pane section of canvas.c and cannot
-   be executed by this DRM-free pixel harness. Pin the security boundary in the
-   source that ships: create publishes a pane without focusing it, and every
-   client-pane selection goes through the geometry-aware eligibility helper.
-
-   Each anchor below is unique in canvas.c and they appear in this order, so
-   reading the whole unit finds the same spans reading pane.c alone once did.
-*/
-static void check_pane_focus_policy(void) {
-    FILE *source=fopen("src/canvas/canvas.c","rb");check(source!=NULL);
-    assert(!fseek(source,0,SEEK_END));long size=ftell(source);assert(size>0);
-    rewind(source);char *text=malloc((size_t)size+1);assert(text);
-    assert(fread(text,1,(size_t)size,source)==(size_t)size);text[size]=0;
-    assert(!fclose(source));
-
-    char *create=strstr(text,"static long window_ioctl_create");
-    char *poll=create?strstr(create,"static __poll_t window_poll"):NULL;
-    check(create&&poll);if(create&&poll){char keep=*poll;*poll=0;
-        check(strstr(create,"pane_focus(")==NULL);*poll=keep;}
-
-    char *focusable=strstr(text,"static PURE _Bool pane_focusable");
-    char *top=focusable?strstr(focusable,"static PURE struct pane *pane_topmost"):NULL;
-    check(focusable&&top);if(focusable&&top){char keep=*top;*top=0;
-        check(strstr(focusable,"pane_visible(pane)")!=NULL);*top=keep;}
-
-    char *visible=strstr(text,"static PURE _Bool pane_visible");
-    check(visible&&focusable);if(visible&&focusable){char keep=*focusable;*focusable=0;
-        check(strstr(visible,"pane->width <= 0 || pane->height <= 0")!=NULL);
-        check(strstr(visible,"output_touched(output, &frame, 1)")!=NULL);
-        *focusable=keep;}
-
-    char *refresh=strstr(text,"static void desktop_refresh_panes");
-    check(refresh&&create);if(refresh&&create){char keep=*create;*create=0;
-        check(strstr(refresh,"desktop.focused->shared &&")!=NULL);
-        check(strstr(refresh,"!pane_focusable(desktop.focused")!=NULL);
-        *create=keep;}
-    free(text);
-}
-
-/* The wide bodies want what the kernel's dispatch asks for before it calls
-   them: AVX2 here, V on riscv64. Advanced SIMD is every arm64. */
 #if defined(__riscv)
 #include <sys/auxv.h>
 #endif
@@ -114817,66 +114610,10 @@ static void check_character_bounds(int wide) {
 }
 
 int main(void) {
-    const u32 palette[]={0x1e1e1e,0x262628,0x2f2f33,0x4a4a50,
-                         0x121212,0xe4e4e4,0xffffff,0x000000};
-    check_pane_focus_policy();
     const int wide=simd_usable();
     if(wide)check_wide_bodies();
     check_character_bounds(wide);
-    const u32 formats[]={0,DRM_FORMAT_ARGB8888,0x34325258,0xffffffff};
-    for(unsigned f=0;f<4;f++)for(unsigned a=0;a<4;a++) {
-        memset(pixels,0xa5,16*sizeof(*pixels));
-        memset(expected,0xa5,16*sizeof(*expected));
-        for(unsigned i=0;i<8;i++)
-            expected[a+i]=palette[i]|(formats[f]==DRM_FORMAT_ARGB8888?0xff000000:0);
-        canvas_palette(pixels+a,formats[f]);
-        check(!memcmp(pixels,expected,16*sizeof(*pixels)));
-    }
-    // Scaled bitmap runs must become one bounded rectangle, including clips
-    // through the middle of a scaled pixel and rows wholly outside the target.
-    for(unsigned trial=0;trial<2048;trial++) {
-        unsigned w=1+trial%19,h=1+(trial/19)%7,pitch=(w+7)/8,scale=1+(trial/133)%5;
-        unsigned char bits[21];
-        for(unsigned i=0;i<sizeof(bits);i++)bits[i]=(trial*31+i*47)&255;
-        int x=(int)(trial%13)-6,y=(int)(trial%11)-5;
-        struct target t={.pixels=pixels,.pitch=1024,.width=128,.height=64,
-            .clip={(int)(trial%17),(int)(trial%9),128-(int)(trial%23),64-(int)(trial%13)}};
-        memset(pixels,0xa5,sizeof(pixels));memset(expected,0xa5,sizeof(expected));
-        bits_draw(&t,x,y,scale,bits,pitch,w,h,0x12345678);
-        for(unsigned r=0;r<h;r++)for(unsigned c=0;c<w;c++)
-            if(bits[r*pitch+c/8]&(0x80>>(c%8)))
-                for(unsigned dy=0;dy<scale;dy++)for(unsigned dx=0;dx<scale;dx++) {
-                    int px=x+(int)(c*scale+dx),py=y+(int)(r*scale+dy);
-                    if(px>=max(t.clip.x1,0)&&px<min(t.clip.x2,t.width)&&
-                       py>=max(t.clip.y1,0)&&py<min(t.clip.y2,t.height))
-                        expected[py*t.pitch+px]=0x12345678;
-                }
-        check(!memcmp(pixels,expected,sizeof(pixels)));
-    }
     const u32 colors[]={0,1,0x80000000,0xffffffff,0xaabbccdd,0x10203040};
-    // Cursor tiles and clipped/scaled bitmap runs must produce the same pixels.
-    const int positions[]={-6,9,28,60};
-    for(unsigned shape=0;shape<CURSOR_SHAPES;shape++)for(unsigned scale=1;scale<=3;scale++)
-    for(unsigned xi=0;xi<4;xi++)for(unsigned yi=0;yi<4;yi++) {
-        struct target t={.pixels=pixels,.pitch=1024,.width=64,.height=64,
-            .ink=palette,.clip={3,2,61,62}};
-        int x=positions[xi],y=positions[yi];
-        memset(pixels,0xa5,sizeof(pixels));memset(expected,0xa5,sizeof(expected));
-        canvas_draw_cursor(&t,x,y,shape,scale);
-        x-=canvas_cursor_hot[shape][0]*(int)scale;
-        y-=canvas_cursor_hot[shape][1]*(int)scale;
-        for(unsigned layer=0;layer<2;layer++) {
-            const u8 *bits=(const u8 *)(layer?cursor_edge[shape]:cursor_fill[shape]);
-            for(unsigned r=0;r<CURSOR_H;r++)for(unsigned c=0;c<CURSOR_W;c++)
-            if(bits[r*2+c/8]&(0x80>>(c%8)))
-            for(unsigned dy=0;dy<scale;dy++)for(unsigned dx=0;dx<scale;dx++) {
-                int px=x+(int)(c*scale+dx),py=y+(int)(r*scale+dy);
-                if(px>=t.clip.x1&&px<t.clip.x2&&py>=t.clip.y1&&py<t.clip.y2)
-                    expected[py*t.pitch+px]=palette[layer?INK_CURSOR_EDGE:INK_CURSOR];
-            }
-        }
-        check(!memcmp(pixels,expected,sizeof(pixels)));
-    }
     for(unsigned a=0;a<6;a++)for(unsigned b=0;b<6;b++)for(unsigned pattern=0;pattern<256;pattern++) {
         unsigned rows=1+pattern%17,pitch=8+(pattern%10),align=(pattern/10)%2;
         u8 bits[17];for(unsigned r=0;r<rows;r++)bits[r]=(pattern+r*17)&255;
@@ -114914,9 +114651,6 @@ int main(void) {
             canvas_cell(expected+align+i*8,pitch,face+run[i].character*16,16,ink,paper);
         check(!memcmp(pixels,expected,4096*sizeof(*pixels)));
     }
-    struct font_desc face={8,16,font_bits};canvas_font=&face;
-    check_pane_layout();
-    check_golden_gs1(palette);
     check_compositor_gs1();
     check_compositor_gs2();
     check_compositor_panel_slots();
@@ -114924,58 +114658,6 @@ int main(void) {
     check_compositor_keymap();
     check_compositor_pointer();
     check_compositor_scene();
-    for(unsigned i=0;i<sizeof(font_bits);i++)font_bits[i]=(i*29+i/16*73)&255;
-    struct window_cell cells[96];unsigned seed=123;
-    for(unsigned trial=0;trial<2400;trial++) {
-        desktop.scale=1+trial%2;
-        // A face whose space is blank lets a run of text take its spaces in.
-        for(unsigned i=' '*16;i<' '*16+16;i++)font_bits[i]=trial&4?0:(i*29+i/16*73)&255;
-        struct target t={.pixels=pixels,.pitch=1024,.width=1024,.height=64,
-            .opaque=trial&2?0xff000000:0,.clip={0,0,1024,64}};
-        int used=trial%65,last=used+trial%9,first=min((int)(trial%5),used);
-        int x=(int)(trial%7)-2,y=(int)(trial%5)-2;
-        struct shape s={x,y,last*canvas_cell_w,canvas_cell_h,trial%3?0:4};
-        if(trial%4)t.clip=(struct drm_rect){max(x+(int)(trial%13),0),max(y+(int)(trial%3),0),
-            min(x+s.w-(int)(trial%7),1024),min(y+s.h-(int)(trial%5),64)};
-        for(unsigned i=0;i<96;i++) {seed=seed*1664525+1013904223;
-            cells[i]=(struct window_cell){trial%7?32+(seed>>16)%97:' ',trial%3?(seed>>8)&255:7,trial%3?(seed>>24)&255:0,0};}
-        memset(pixels,0xa5,sizeof(pixels));memset(expected,0xa5,sizeof(expected));
-        t.simd=wide&&(trial&8);  // the vector bodies, through the dispatch
-        compose_row(&t,&s,x,y,cells,used,first,last);
-        t.pixels=expected;reference_row(&t,&s,x,y,cells,used,first,last);
-        check(!memcmp(pixels,expected,sizeof(pixels)));
-    }
-    unsigned lengths[8];struct window_cell ring[8*96];
-    for(unsigned trial=0;trial<4096;trial++) {
-        desktop.scale=1;
-        unsigned width=1+trial%32,history=1+trial%8;
-        for(unsigned i=0;i<history;i++)lengths[i]=(trial*7+i*37)%97;
-        struct pane p={.grid_columns=width,.columns=1+trial%width,.rows=1+trial%16,
-            .view=trial%7,.head=trial%7+1+trial%history,.history=history,.stride=96,.lengths=lengths,.cells=ring};
-        p.skip=trial%max((lengths[p.view%history]+width-1)/width,1u);
-        // A userspace writer can shrink the first line after pane_view_at
-        // computed its fold skip. Preserve the old loop's whole-line skip.
-        if(trial%7==0){p.skip=95/width;lengths[p.view%history]=0;}
-        struct target t={.clip={(int)(trial%3)*8,(int)(trial%17)*16,(int)p.columns*8,(int)(trial%19)*16}};
-        struct shape s={0};call_count=0;compose_cells(&p,&t,&s,0,0);
-        unsigned line=p.view,fold=p.skip,at=0;
-        int first=max(t.clip.x1/8,0),last=min(t.clip.x2/8,(int)p.columns);
-        for(unsigned row=0;row<p.rows;row++) {
-            const struct window_cell *from=NULL;int used=0;
-            while(line!=p.head && fold>=max((lengths[line%history]+width-1)/width,1u)){line++;fold=0;}
-            if(line!=p.head) {
-                unsigned length=lengths[line%history];
-                from=ring+(line%history)*96+fold*width;
-                used=min(length>fold*width?length-fold*width:0,width);
-                if(++fold==max((length+width-1)/width,1u)){line++;fold=0;}
-            }
-            if((int)(row*16)<t.clip.y1 || (int)(row*16)>=t.clip.y2 || first>=last)continue;
-            check(at<call_count);
-            struct row_call got=calls[at++];
-            check(got.y==(int)row*16 && got.used==min(used,last) && got.first==first && got.last==last && got.cells==from);
-        }
-        check(at==call_count);
-    }
     printf("  canvas-cells %u of %u\n",checks,checks);
     const char *tally=getenv("TEST_TALLY");
     if(tally){FILE *f=fopen(tally,"a");assert(f);fprintf(f,"canvas-cells %u %u\n",checks,checks);assert(!fclose(f));}
