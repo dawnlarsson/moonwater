@@ -13,7 +13,7 @@ config MOONWATER_TOOLS_ALL
       list. A tool switched off is compiled out of the shell's
       table and linked nowhere, so its name is not found.
 
-      /init, /term and /moonwater have no switch: the kernel and
+      /init and /moonwater have no switch: the kernel and
       init run them by path, and an image without one does not
       boot.
 

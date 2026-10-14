@@ -29467,9 +29467,7 @@ line_add_padded() { line_add "$@"; }
 
                   + moonwater[:moonwater.index("#if defined(STANDARD_MODERN_C_KERNEL)")]
                   + "#endif\n"
-                  + section((root / "src/canvas/window.c").read_text(),
-                            "// _IOW('s', 4, struct window_request)",
-                            "/*\n        A cell, for a window made of text."))
+                  )
         for label, block, expected in (
                 ("real", numbers + canvas_numbers, 0),
                 ("changed", numbers.replace("IOCTL_BOTH, 11,", "IOCTL_BOTH, 12,") + canvas_numbers, 1),
@@ -36140,10 +36138,9 @@ def harness_image_nodes(argv):
     check(define(spark, 'SPARK_DEVICE_MAJOR') == MISC_MAJOR,
           'SPARK_DEVICE_MAJOR is the misc major')
 
-    #   window.c carries its own copy because it is includable alone.
-    check(define(window, 'WINDOW_DEVICE') == device,
-          'window.c opens the device spark publishes (%s against %s)'
-          % (define(window, 'WINDOW_DEVICE'), device))
+    #   window.c carries its own copy of the path because it is includable alone.
+    check('(long)"/dev/spark"' in window and device == '"/dev/spark"',
+          'window.c opens the device spark publishes')
 
     #   host_refuse takes one name. Two %s is the extra-args class gcc 16
     #   already refused, except this time too few arguments rather than too

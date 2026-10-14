@@ -1,29 +1,20 @@
 /*
         Moonwater window
 
-        The whole interface a program needs to put something on screen. Include
-        this one file and nothing else: it carries its own syscalls, so it
-        works from a spark image with no runtime and from an ordinary ELF
-        against libc.
+        What a program shares with the compositor, and the cells a terminal's
+        text lives in. Include this one file and nothing else: it carries its
+        own syscalls, so it works from a spark image with no runtime and from
+        an ordinary ELF against libc.
 
-                struct window *w = window_open(640, 480);
-
-                unsigned int *pixels = window_pixels(w);
-                pixels[y * w->pitch + x] = 0x00ff9900;
-
-                w->x = 200;
-                w->y = 120;
-                window_commit(w);
-
-        The struct is a page the program and the compositor both have mapped,
-        so moving or resizing a window is a store, not a call. The fields above
-        the line are the program's to write and the compositor reads them; the
-        ones below are the compositor's and the program reads them.
-
-        The pixels are the window's contents. The kernel desktop draws a frame
-        and a titlebar around them, so x,y is the top left of the whole window
-        and the contents land WINDOW_TITLE below it. The compositor that runs
-        in userspace has a table of its own (struct windows, below).
+        A program's window is a row of the compositor's table (struct windows,
+        below): the program writes its picture, its size and its title there
+        and knocks on its row's door, and the compositor writes where the
+        window is and which window has the keys. struct window is the page of
+        cells a window of text is made of, which a terminal holds in its own
+        memory (window_grid_open): the program and the emulator address the
+        same ring of lines whoever owns the page. The fields above the line
+        are the program's to write; the ones below are the compositor's,
+        which a program that holds the page itself fills in for itself.
 
         z is the order they stack in: higher is in front. Clicking a window
         puts it above every other, and the compositor writes the new value
@@ -42,11 +33,7 @@
         edge is the corner radius, in pixels. Zero is square.
 
         awake says whether the compositor is currently watching the shared
-        pages. window_commit only makes a call when it is not, so a program
-        drawing every frame makes none at all. The first commit after opening a
-        window is always a call, so whatever the compositor decides -- where a
-        region put the window, how large its display is -- is there to read as
-        soon as it returns.
+        pages.
 */
 
 #ifndef WINDOW_INCLUDED
@@ -54,8 +41,6 @@
 
 // The numbers /dev/spark takes, which the compositor's ABI header holds.
 #include "canvas_abi.h"
-
-#define WINDOW_DEVICE "/dev/spark"
 
 // O_RDWR | O_CLOEXEC, which are the same numbers on all three architectures.
 // A window is this program's, not whatever it goes on to exec.
@@ -65,7 +50,7 @@
 // and the pixels stay page aligned.
 #define WINDOW_PIXELS 4096
 
-// The titlebar the kernel desktop draws above the contents.
+// The titlebar the contents were laid under, which the shared page still measures from.
 #define WINDOW_TITLE 20
 
 // The handle of a window of cells the program holds itself (window_grid_open):
@@ -195,7 +180,7 @@ struct window
         unsigned int display_height;
         unsigned int awake;         // whether the compositor is watching
 
-        // window_open's own bookkeeping. The compositor never reads it.
+        // The window's own bookkeeping: WINDOW_PRIVATE for a page the program holds itself.
         unsigned int handle;
 
         /*
@@ -297,27 +282,6 @@ static inline void window_damage(struct window *window, unsigned int row,
 
         window->damage_rows = last - window->damage_row;
 }
-
-// _IOW('s', 4, struct window_request)
-#define WINDOW_IOCTL_CREATE 0x40107304u
-
-// _IO('s', 5) -- redraw what changed
-#define WINDOW_IOCTL_COMMIT 0x00007305u
-
-// _IO('s', 16) -- spread the lines of a window of cells out to at least this
-// many columns; answers the stride they are now
-#define WINDOW_IOCTL_STRIDE 0x00007310u
-
-struct window_request
-{
-        unsigned int width;
-        unsigned int height;
-        unsigned int columns; // non-zero asks for cells rather than pixels,
-        unsigned int rows;    // and decides the size
-};
-
-_Static_assert(((WINDOW_IOCTL_CREATE >> 16) & 0x3fffu) == sizeof(struct window_request),
-               "window create ioctl size");
 
 /*
         A cell, for a window made of text.
@@ -648,9 +612,8 @@ struct window_event
 _Static_assert(sizeof(struct window) == 1288, "window page ABI");
 _Static_assert(sizeof(struct window_key) == 16, "window key ABI");
 _Static_assert(sizeof(struct window_cell) == 8, "window cell ABI");
-_Static_assert(sizeof(struct window_request) == 16, "window request ABI");
 
-/* Every field of the page, where the kernel's desktop and its programs both
+/* Every field of the page, where the compositor and its programs both
    expect it. */
 #define WINDOW_AT(field, offset)                                               \
         _Static_assert(__builtin_offsetof(struct window, field) == (offset), "window page ABI " #field)
@@ -694,9 +657,6 @@ _Static_assert(__builtin_offsetof(struct window_key, character) == 4, "window ke
 _Static_assert(__builtin_offsetof(struct window_cell, ink) == 4, "window cell ABI");
 _Static_assert(__builtin_offsetof(struct window_cell, paper) == 5, "window cell ABI");
 _Static_assert(__builtin_offsetof(struct window_cell, flags) == 6, "window cell ABI");
-_Static_assert(__builtin_offsetof(struct window_request, columns) == 8, "window request ABI");
-
-#ifndef KERNEL_MODE
 
 #if defined(__x86_64__)
 #define WINDOW_SYS_OPENAT 257
@@ -795,62 +755,6 @@ static long window_call(long number, long a, long b, long c, long d, long e, lon
 #endif
 
 /*
-        One file per window: the ioctl sizes it and the mapping is at offset
-        zero, so there is no offset for either side to get wrong, and closing
-        the file is what destroys the window.
-*/
-static struct window *window_request_open(struct window_request request)
-{
-        long bytes;
-        struct window *window;
-        long file, mapped;
-
-        file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_DEVICE,
-                           WINDOW_OPEN_FLAGS, 0, 0, 0);
-        if (file < 0)
-                return 0;
-
-        // The compositor answers with how much it allocated, which is not
-        // always what was asked for.
-        bytes = window_call(WINDOW_SYS_IOCTL, file, WINDOW_IOCTL_CREATE,
-                            (long)&request, 0, 0, 0);
-
-        if (bytes <= 0)
-        {
-                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                return 0;
-        }
-
-        // PROT_READ | PROT_WRITE, MAP_SHARED
-        mapped = window_call(WINDOW_SYS_MMAP, 0, (unsigned long)bytes, 3, 1, file, 0);
-        if (mapped < 0 && mapped > -4096)
-        {
-                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                return 0;
-        }
-
-        window = (struct window *)mapped;
-        window->handle = (unsigned int)file;
-
-        return window;
-}
-
-static struct window *window_open(unsigned int width, unsigned int height)
-{
-        struct window_request request = {width, height, 0, 0};
-
-        return window_request_open(request);
-}
-
-// A window of text. The compositor decides how large that is in pixels.
-static struct window *window_open_text(unsigned int columns, unsigned int rows)
-{
-        struct window_request request = {0, 0, columns, rows};
-
-        return window_request_open(request);
-}
-
-/*
         Sleeps until there is something for the program: a key in its ring,
         a grid the compositor changed, or the other descriptor -- a pty
         master, for a terminal -- having bytes. Napping and looking was how
@@ -878,45 +782,14 @@ static long window_wait(struct window *window, long other, long nanoseconds)
 }
 
 /*
-        Bumping sequence is what says a window changed. While the compositor is
-        awake it is already reading that, so there is nothing else to do; the
-        call below only happens on the first change after it went to sleep.
-*/
-static void window_commit(struct window *window)
-{
-        // Release, so the compositor cannot see the bump before the pixels,
-        // cells or damage rows it is the announcement of.
-        __atomic_store_n(&window->sequence, window->sequence + 1, __ATOMIC_RELEASE);
-
-        // A window of cells the program holds itself has no compositor to tell.
-        if (window->handle == WINDOW_PRIVATE)
-                return;
-
-        /*
-                The compositor clears awake and then looks at sequence one more
-                time. This store has to be visible before that load for the
-                pair to work, or the last frame of an animation is the one that
-                never arrives.
-        */
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
-        if (!__atomic_load_n(&window->awake, __ATOMIC_ACQUIRE))
-                window_call(WINDOW_SYS_IOCTL, window->handle, WINDOW_IOCTL_COMMIT, 0, 0, 0, 0);
-}
-
-/*
-        The same, but now rather than within a frame.
-
-        window_commit leaves it to the compositor's own timer while that is
-        running, which is right for something animating and wrong for
-        something echoing a keystroke: the letter would wait up to a frame for
-        a clock it has no reason to be on. This one always makes the call.
+        Bumping sequence is what says a window changed, and the program that
+        holds the page itself has no compositor to tell: the bump is the whole
+        of it, and the release keeps it from being seen before the cells,
+        damage rows or pixels it announces.
 */
 static void window_flush(struct window *window)
 {
         __atomic_store_n(&window->sequence, window->sequence + 1, __ATOMIC_RELEASE);
-        if (window->handle != WINDOW_PRIVATE)
-                window_call(WINDOW_SYS_IOCTL, window->handle, WINDOW_IOCTL_COMMIT, 0, 0, 0, 0);
 }
 
 /*
@@ -995,13 +868,6 @@ static void window_widen(struct window *window, unsigned int columns)
         if (columns <= was)
                 return;
 
-        if (window->handle != WINDOW_PRIVATE)
-        {
-                window_call(WINDOW_SYS_IOCTL, window->handle, WINDOW_IOCTL_STRIDE,
-                            columns, 0, 0, 0);
-                return;
-        }
-
         /*
                 A step at a time, so a drag that widens the window recuts the
                 lines a few times and not once a column, and never past what
@@ -1028,14 +894,6 @@ static void window_widen(struct window *window, unsigned int columns)
         }
 
         window->stride = stride;
-}
-
-static void window_close(struct window *window)
-{
-        long file = window->handle;
-
-        window_call(WINDOW_SYS_MUNMAP, (long)window, window->mapping, 0, 0, 0, 0);
-        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
 }
 
 /*
@@ -1291,5 +1149,4 @@ static long window_colour_parse(string_address text)
         return memory_from_hex(bytes, text, 3) ? (long)(bytes[0] << 16 | bytes[1] << 8 | bytes[2]) : -1;
 }
 
-#endif // KERNEL_MODE
 #endif // WINDOW_INCLUDED

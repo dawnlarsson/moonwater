@@ -4218,14 +4218,13 @@ static bool build_switch_on(string_address kind, string_address key)
 
 /*
         The SYSTEM tools the kernel and init reach by absolute path: /init
-        is what the kernel execs, /term is SPARK_TERMINAL_PROGRAM, and
-        /moonwater is the settle program system.c runs at every boot. Each
-        is a boot that stops if it is missing, so none has a switch.
+        is what the kernel execs, and /moonwater is the settle program
+        system.c runs at every boot. Each is a boot that stops if it is
+        missing, so none has a switch.
 */
 static bool build_tool_fixed(string_address name)
 {
-        return word_is(name, "init") || word_is(name, "term") ||
-               word_is(name, "moonwater");
+        return word_is(name, "init") || word_is(name, "moonwater");
 }
 
 //      An existing build tree has no lines for newly added symbols until
@@ -4832,7 +4831,7 @@ static string_address build_switches_text()
             "      list. A tool switched off is compiled out of the shell's\n"
             "      table and linked nowhere, so its name is not found.\n"
             "\n"
-            "      /init, /term and /moonwater have no switch: the kernel and\n"
+            "      /init and /moonwater have no switch: the kernel and\n"
             "      init run them by path, and an image without one does not\n"
             "      boot.\n";
 

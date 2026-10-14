@@ -30,7 +30,7 @@
 #define EAGAIN 11
 #endif
 
-// Three below are the shell's, and the kernel's console has no use for them.
+// Three below are the shell's.
 // Not the attribute that keeps a symbol: this one lets the compiler drop what
 // it finds no call to, and only quiets the warning about having found none.
 #define SPARE __attribute__((unused))
@@ -672,32 +672,11 @@ static fn put(unsigned int character)
         emulator itself still makes no system call.
 */
 /*
-        Which body the emulator's runs of text take.
-
-        In a program, cells_from_ascii picks its own. In the kernel the
-        emulator is the console's, and the routine may only take its vector
-        body inside the vector bracket, which is console_drain's -- it sets
-        term_simd for the stretch it holds the bracket and console_cells, and
-        clears it before letting either go. Every other writer finds it
-        false.
+        The queue's fixed buffer, which only the test harness asks for
+        (TERM_FIXED_QUEUE): it holds the fixed buffer's limits to what a full
+        queue does, whole answers and nothing else.
 */
-#ifdef KERNEL_MODE
-static _Bool term_simd;
-#define TERM_PICK(name) (term_simd ? name##_wide : name)
-#else
-#define TERM_PICK(name) name
-#endif
-
-/*
-        The queue's fixed buffer. TERM_FIXED_QUEUE gives a userspace build the
-        same buffer, so the test harness runs ring 0's limits too.
-
-        Ring 0 has no reader for it: the drain that writes it to a pty is
-        screen.c, and screen.c is included by the userspace shell only. In the
-        kernel the buffer fills once, and what it then holds is whole answers
-        and nothing else; nothing is sent from it.
-*/
-#if defined(KERNEL_MODE) || defined(TERM_FIXED_QUEUE)
+#ifdef TERM_FIXED_QUEUE
 #define TO_SHELL_MAX 2048
 #define TO_SHELL_FIXED
 static p8 to_shell[TO_SHELL_MAX];
@@ -905,11 +884,9 @@ static CONST unsigned int acs_character(unsigned int c)
 
 // A colour in xterm's spelling, sixteen bits a channel, ended the way the
 // question was.
-#ifndef KERNEL_MODE
 // Where a colour index is looked up for what a program asks the terminal its colours are: the table a
 // program that paints with a theme paints from, so that what is answered is what is on the screen.
 static unsigned int (*term_palette)(unsigned int index);
-#endif
 
 static fn osc_colour(unsigned int colour, b32 bell)
 {
@@ -1016,11 +993,7 @@ static fn osc_finish(b32 bell)
                                 positive_to_string(emit_bytes, index);
                                 emit(';');
                         }
-#ifndef KERNEL_MODE
                         osc_colour(term_palette ? term_palette(index) : window_cell_colour(index), bell);
-#else
-                        osc_colour(window_cell_colour(index), bell);
-#endif
                 }
 
                 while (i < osc_length && osc_bytes[i++] != ';')
@@ -1856,8 +1829,8 @@ static fn csi_final(unsigned int final)
                 break;
         /*
                 A count saturates at four billion rather than wrapping, and
-                this runs in the kernel console with interrupts off: no count
-                of tab stops can go further than the width has stops.
+                this is bounded: no count of tab stops can go further than the
+                width has stops.
         */
         case 'I':
                 for (a = a < COLUMNS ? a : COLUMNS; a; a--)
@@ -2318,8 +2291,7 @@ static fn consume(unsigned int c)
         byte that is not UTF-8 or a character the read has not all of -- and
         the byte it ended at is consume()'s, as it always was.
 
-        Every loop here is bounded by the bytes it was handed: the kernel
-        console calls this with interrupts off.
+        Every loop here is bounded by the bytes it was handed.
 */
 static inline INLINE b32 text_ground()
 {
@@ -2390,7 +2362,7 @@ static positive text_ascii(const p8 address_to bytes, positive count)
                 if (n == limit || (unsigned int)bytes[n] - ' ' >= 95)
                         break;
 
-                n += TERM_PICK(cells_from_ascii)(
+                n += cells_from_ascii(
                     cells + first + n, (address_any)(bytes + n), limit - n,
                     guarded > n ? guarded - n : 0, attribute,
                     (positive)(WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT) << 48);
@@ -2751,8 +2723,7 @@ static positive csi_parse(const p8 address_to bytes, positive count)
 /*
         A read's worth of what the far end sent.
 
-        The pty loop and the kernel console hand over what they have in one
-        call, so a run of text and a whole control sequence can each be taken
+        The pty loop hands over what it has in one call, so a run of text and a whole control sequence can each be taken
         in one step; everything else is still consume()'s a byte at a time.
 */
 static fn term_bytes(const p8 address_to bytes, positive count)
@@ -2788,20 +2759,6 @@ static fn term_bytes(const p8 address_to bytes, positive count)
                 at++;
         }
 }
-
-#ifdef KERNEL_MODE
-/* A pty is a stream, but printk records are unrelated messages. Do not let an
-   unfinished escape or UTF-8 sequence in attacker-controlled log text consume
-   later diagnostics. */
-static fn term_record_begin()
-{
-        in_escape = in_csi = in_string = false;
-        escape_intermediate = string_escape = false;
-        osc_length = 0;
-        terminal_parameters_reset(address_of terminal_csi);
-        terminal_utf8.left = 0;
-}
-#endif
 
 static fn cursor_hide()
 {
@@ -2897,11 +2854,9 @@ static b32 line_anchored;
 // row: the screen scrolls out from under a long line, and a row would then be
 // pointing at somebody else's text. Out here with the rest of what the output
 // half touches, because a resize has an opinion about the column.
-#ifndef KERNEL_MODE
 static unsigned int line_anchor;
 static positive line_view;
 static unsigned int line_screen_anchor, line_screen_column;
-#endif
 static unsigned int line_anchor_column;
 
 /*
@@ -2909,21 +2864,14 @@ static unsigned int line_anchor_column;
 
         Anything the far end prints moves the cursor out from under a line the
         editor drew, so consume() says so and the next keystroke draws it
-        again. That is the whole of what the kernel build needs: printk writes
-        into the console window and nobody types into it, so the editor itself
-        -- and the thirty four kilobytes of line and history behind it -- is
-        left out below.
+        again.
 */
 static fn line_forget()
 {
         line_anchored = false;
         line_drawn = 0;
-#ifndef KERNEL_MODE
         line_view = 0;
-#endif
 }
-
-#ifndef KERNEL_MODE
 
 static b32 line_editing;
 static p8 address_to line;
@@ -3757,10 +3705,6 @@ static fn term_focus(b32 in)
                 emit_literal("\x1b[O");
 }
 
-#endif
-
-#ifndef KERNEL_MODE
-
 #define F_GETFD 1
 
 /*
@@ -3782,8 +3726,6 @@ fn claim_standard_descriptors()
                                       FILE_READ_WRITE);
 }
 
-#endif
-
 // The grid the window has room for. A window narrower or shorter than one
 // cell is not a grid, and every wrap and scroll divides by these: zero rows had
 // put wrapped forever looking for a row to land on.
@@ -3792,17 +3734,13 @@ static fn grid_take()
         COLUMNS = window->columns ? window->columns : 1;
         ROWS = window->rows ? window->rows : 1;
 
-#ifndef KERNEL_MODE
-        // A window wider than its lines are apart spreads them first; the
-        // kernel log's own ring is recut by the compositor instead.
+        // A window wider than its lines are apart spreads them first.
         window_widen(window, COLUMNS);
-#endif
 
         if (COLUMNS > window->stride)
                 COLUMNS = window->stride;
 }
 
-#ifndef KERNEL_MODE
 // The pixels a cell is, which is the kernel's face until a program that draws
 // its own glyphs says what its font made them.
 static unsigned int term_cell_w = WINDOW_CELL_W, term_cell_h = WINDOW_CELL_H;
@@ -3817,7 +3755,6 @@ static fn grid_tell(b32 master)
 
         system_control(master, TIOCSWINSZ, address_of size);
 }
-#endif
 
 /*
         The alternate screen does not reflow.
@@ -3875,9 +3812,7 @@ fn regrid(b32 master)
 {
         unsigned int was_rows = ROWS;
         bipolar shift;
-#ifndef KERNEL_MODE
         b32 cursor_was_shown = shown;
-#endif
 
         /* A resize is itself a synchronous publication in the new geometry.
            End any program-held frame first; SIGWINCH will ask a full-screen
@@ -3889,10 +3824,8 @@ fn regrid(b32 master)
         // good.
         cursor_hide();
 
-#ifndef KERNEL_MODE
         if (line_editing)
                 line_erase(true);
-#endif
 
         grid_take();
 
@@ -3939,21 +3872,16 @@ fn regrid(b32 master)
         // next keystroke left the cursor and the editable text in the old
         // geometry even though the window had already changed underneath it.
         line_drawn = 0;
-#ifndef KERNEL_MODE
         line_view = 0;
-#endif
 
-#ifndef KERNEL_MODE
         if (line_editing)
                 line_show();
-#endif
 
         shown = false;
         touch_all();
 
         window_grid(window, COLUMNS, ROWS);
 
-#ifndef KERNEL_MODE
         /*
                 A resize is one transaction, including the cursor.
 
@@ -3962,8 +3890,8 @@ fn regrid(b32 master)
                 which the cursor could remain absent until some later input.
                 Publish the new grid, put the cursor into that grid, damage
                 it, and synchronously commit before returning. master is -1
-                in the pure emulator harness and in the kernel console; both
-                have an owner that paints their cells directly.
+                in the pure emulator harness, whose owner paints its cells
+                directly.
         */
         if (master >= 0 || cursor_was_shown)
                 cursor_show();
@@ -3979,9 +3907,6 @@ fn regrid(b32 master)
                 touched_top = ROWS;
                 touched_bottom = 0;
         }
-#endif
 
-#ifndef KERNEL_MODE
         grid_tell(master);
-#endif
 }
