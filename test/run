@@ -15785,6 +15785,7 @@ moonwater link add host LINK_HOST_KEY > /dev/null 2>&1
 moonwater link allow host run log > /dev/null 2>&1
 moonwater link on > /tmp/linkon 2>&1
 printf 'link-on-%s\n' $(( $(grep -c 'link on,' /tmp/linkon) * 7 ))
+printf 'link-on-key-%s\n' $(( $(grep -cF "this machine is $(cat /tmp/linkkey)" /tmp/linkon) * 7 ))
 moonwater link group lab LINK_LAN_SECRET allow run > /tmp/linkjoin 2>&1
 printf 'link-joined-%s\n' $(( $(grep -c 'in group lab; its members may run' /tmp/linkjoin) * 7 ))
 printf 'link-key-%s\n' "$(cat /tmp/linkkey)"
@@ -15980,6 +15981,7 @@ says disk 'a machine script overlays mute' 'script-7'
 says disk 'SET is refused at the script' 'refused-7'
 says disk 'init stays the stored list without moonwater_init' 'init-kept-7'
 says live 'link on starts the listener'  'link-on-7'
+says live 'and names the machine by its key' 'link-on-key-7'
 says disk 'the link switch came through the install and the reboot' 'link-kept-7'
 says live 'join takes the group and its grant' 'link-joined-7'
 says neighbour 'a machine on the LAN paired with the headless box and ran a command there' 'lan-run-xob-sseldaeh-eht-morf'

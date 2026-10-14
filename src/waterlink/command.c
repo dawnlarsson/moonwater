@@ -618,8 +618,8 @@ static b32 link_switch(bool on, bool say)
                                            "taken?\n", (positive)link_port());
         }
 
-        link_key_text(me.public, key);
-        crypto_forget(address_of me, sizeof me);
+        // The key's text was made above, before the identity was forgotten: made again here it was the
+        // forgotten one, 32 zeros, and link on said this machine is AAAA...A=.
         if (say)
         {
                 string_format(log, host_label "link on, udp %p; this machine is %s\n",

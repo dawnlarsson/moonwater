@@ -72331,6 +72331,11 @@ except subprocess.TimeoutExpired:
 
 status, out, err = on("b", moon + " link on")
 say(status == 0 and b"link on" in out, "link on starts the listener (%r)" % (err[-200:],))
+#   The key link on names the machine by is its key, as link key gives it: it was
+#   made again from the identity after it was forgotten, 32 zeros, AAAA...A=.
+_, key, _ = on("b", moon + " link key")
+say(key.strip() != b"" and key.strip() in out and b"AAAAAAAAAAAAAAAA" not in out,
+    "and names this machine by its key (%r, %r)" % (out.strip()[-60:], key.strip()[-60:]))
 status, out, err = on("b", "cat /root/link")
 say(out.strip() == b"on", "and keeps the choice in /root/link")
 status, out, err = on("a", moon + " link run b echo detached")
