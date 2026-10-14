@@ -82,6 +82,8 @@ power, boot), and under All commands a row to every line of `moonwater help`, so
 no verb is out of its reach. Typing filters the rows; a command that ends the
 session or throws away what is kept is run by a second Enter.
 
+On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord puts away.
+
 ## Layout
 
 | | |

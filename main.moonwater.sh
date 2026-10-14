@@ -65,6 +65,12 @@ function key_ctrl_shift_t {
   desktop_terminal
 }
 
+# Super and Space: the launcher, a search bar in the middle of the screen for the desktop's programs, the programs of
+# PATH and shell commands. -x puts away the one that is up, so the same chord opens it and closes it.
+function key_super_space {
+  desktop_launcher
+}
+
 # The desktop: the compositor, the kernel log and a terminal on it, under a
 # supervisor that starts the compositor again when it ends (at once, after half
 # a second, after two) and gives up to the kernel's desktop after four short
@@ -129,6 +135,13 @@ function desktop_terminal {
   else
     echo "desktop: no font in /root/font or /usr/share/fonts, so no terminal on the compositor" > /dev/kmsg
   fi
+}
+
+# The launcher is drawn in the tabs' face; the terminals it starts are given the faces of the terminal.
+function desktop_launcher {
+  desktop_font
+  [ -n "$desktop_face" ] || return
+  desktop_run /launcher -x ${desktop_text:+-f "$desktop_text"} -m "$desktop_face" ${desktop_bold:+-M "$desktop_bold"}
 }
 
 # The key_ functions, for the compositor to listen for, and the FIFO it names a

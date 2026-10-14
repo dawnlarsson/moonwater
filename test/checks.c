@@ -108076,6 +108076,7 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/terminal.c"
 #include "../src/canvas/ui.c"
 #include "../src/canvas/settings.c"
+#include "../src/canvas/launcher.c"
 
 #define SHARED_counted
 #include "checks.c"
@@ -108997,6 +108998,289 @@ static positive settings_lit(const unsigned int address_to pixels, positive coun
         for (positive at = 0; at < count; at++)
                 lit += pixels[at] >> 24 > 64;
         return lit;
+}
+
+/*
+        The launcher's model: what a text names, in what order, and what a row
+        starts. The names of PATH are a fixture here, so the list is a plain
+        function of them; no key that would start a program is pressed.
+*/
+static b32 launcher_typed(unsigned int code)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, (int)code};
+
+        return launcher_key(&event);
+}
+
+static b32 launcher_pressed(int key, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, 0};
+
+        return launcher_key(&event);
+}
+
+static fn launcher_type_text(const char address_to text)
+{
+        launcher.text[0] = 0;
+        launcher_changed();
+        for (positive at = 0; text[at]; at++)
+                launcher_typed((unsigned char)text[at]);
+}
+
+// Whether the list is exactly these rows: a letter for a kind (w window, p program, c command) and the name or index.
+static b32 launcher_list_is(const char address_to want)
+{
+        char got[256] = "";
+
+        for (positive at = 0; at < launcher.entries; at++)
+        {
+                const struct launcher_entry address_to entry = &launcher.entry[at];
+
+                string_append_bounded((string_address)got, (string_address)(entry->kind == LAUNCHER_WINDOW ? "w:" : entry->kind == LAUNCHER_PROGRAM ? "p:" : "c"), sizeof(got));
+                if (entry->kind == LAUNCHER_WINDOW)
+                        string_append_bounded((string_address)got, (string_address)launcher_programs[entry->index].label, sizeof(got));
+                else if (entry->kind == LAUNCHER_PROGRAM)
+                        string_append_bounded((string_address)got, (string_address)launcher_name(entry->index), sizeof(got));
+                string_append_bounded((string_address)got, (string_address) ",", sizeof(got));
+        }
+        return string_equals((string_address)got, (string_address)want);
+}
+
+static fn launcher_check_path(char address_to path, const char address_to directory, const char address_to name)
+{
+        string_copy((string_address)path, (string_address) "/tmp/mw-launcher-check/");
+        string_append_bounded((string_address)path, (string_address)directory, 96);
+        string_append_bounded((string_address)path, (string_address) "/", 96);
+        string_append_bounded((string_address)path, (string_address)name, 96);
+}
+
+static fn check_launcher(void)
+{
+        static char names[10][LAUNCHER_NAME];
+        static unsigned char from[10];
+        static unsigned short hashed[LAUNCHER_HASH];
+        static struct windows table;
+        static const char address_to const fixture[] = {"ls", "lsblk", "less", "also", "cat", "false", "lsof", "xls", "term-x"};
+        string_address words[LAUNCHER_WORDS];
+        char full[LAUNCHER_FULL];
+        positive count;
+
+        for (positive at = 0; at < sizeof(fixture) / sizeof(fixture[0]); at++)
+                string_copy((string_address)names[at], (string_address)fixture[at]);
+        memory_zero(&launcher, sizeof(launcher));
+        launcher.names = (char address_to)names;
+        launcher.count = sizeof(fixture) / sizeof(fixture[0]);
+        launcher.from = from;
+        launcher.hashed = hashed;
+        launcher.dirs[0] = "/bin";
+        launcher.dir_count = 1;
+        launcher.own.table = &table;
+        table.output_width = 1920;
+        table.output_height = 1080;
+        launcher.ui.scale = 1;
+        launcher.regular = "/fonts/ui.ttf";
+        launcher.mono = "/fonts/mono.ttf";
+        launcher.mono_bold = "/fonts/mono-bold.ttf";
+
+        check("launcher: a plain word is not a command line",
+              !launcher_command_line("") && !launcher_command_line("ls") && !launcher_command_line("htop") &&
+                  !launcher_command_line("x-terminal"));
+        check("launcher: a blank, a pipe, a redirect, a list, a quote or an expansion makes one",
+              launcher_command_line("ls -l") && launcher_command_line("a|b") && launcher_command_line("a>b") &&
+                  launcher_command_line("a<b") && launcher_command_line("a;b") && launcher_command_line("a&") &&
+                  launcher_command_line("echo $HOME") && launcher_command_line("\"q\"") && launcher_command_line("'q'") &&
+                  launcher_command_line("*.c") && launcher_command_line("a`b`") && launcher_command_line("(a)"));
+        check("launcher: an assignment and a path are one too", launcher_command_line("A=1") && launcher_command_line("./run") &&
+                                                                     launcher_command_line("/bin/ls"));
+
+        check("launcher: a text ranks as the same, as a start, as inside, or not at all",
+              launcher_rank("ls", 2, "ls", 2) == 3 && launcher_rank("ls", 2, "lsblk", 5) == 2 &&
+                  launcher_rank("ls", 2, "false", 5) == 1 && launcher_rank("ls", 2, "cat", 3) == 0 &&
+                  launcher_rank("lsblkx", 6, "lsblk", 5) == 0 && launcher_rank("", 0, "ls", 2) == 0);
+        check("launcher: case does not matter, on either side",
+              launcher_rank("TERM", 4, "Terminal", 8) == 2 && launcher_rank("kernel LOG", 10, "Kernel log", 10) == 3 &&
+                  launcher_rank("inal", 4, "Terminal", 8) == 1);
+        check("launcher: a desktop program is named by its label and by its other words",
+              launcher_program_rank("pref", 4, &launcher_programs[0]) == 2 && launcher_program_rank("set", 3, &launcher_programs[0]) == 2 &&
+                  launcher_program_rank("dmesg", 5, &launcher_programs[2]) == 3 && launcher_program_rank("xyz", 3, &launcher_programs[1]) == 0);
+        check("launcher: the nearer name is listed first: better rank, then shorter, then alphabetical",
+              launcher_before(3, "ls", 2, "lsof") && !launcher_before(2, "lsof", 3, "ls") && launcher_before(2, "lsof", 2, "lsblk") &&
+                  launcher_before(2, "less", 2, "lsof") && !launcher_before(2, "lsof", 2, "lsof"));
+        check("launcher: the system's machinery and the desktop's own names are not programs of PATH",
+              launcher_hidden_name("compositor") && launcher_hidden_name("init") && launcher_hidden_name("launcher") &&
+                  launcher_hidden_name("settings") && launcher_hidden_name("terminal") && launcher_hidden_name("klog") &&
+                  !launcher_hidden_name("ls") && !launcher_hidden_name("setting"));
+
+        launcher_type_text("");
+        check("launcher: with nothing typed the list is the desktop's programs",
+              launcher_list_is("w:Settings,w:Terminal,w:Kernel log,"));
+        launcher_type_text("ls");
+        check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
+              launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.highlight == 0);
+        launcher_type_text("ls -l");
+        check("launcher: a command line is the command row alone", launcher_list_is("c,"));
+        launcher_type_text("xyzzy");
+        check("launcher: a word no program is named by is the command row alone", launcher_list_is("c,"));
+        launcher_type_text("a|b");
+        check("launcher: a pipe is the command row alone", launcher_list_is("c,"));
+        launcher_type_text("term");
+        check("launcher: the desktop's programs a word names come before PATH's, and the command last",
+              launcher_list_is("w:Terminal,p:term-x,c,"));
+        launcher_type_text("kernel log");
+        check("launcher: the whole name of a desktop program is that program even with a blank in it, and the command after",
+              launcher_list_is("w:Kernel log,c,"));
+        launcher_type_text("kernel log x");
+        check("launcher: more than the name is a command line", launcher_list_is("c,"));
+        launcher_type_text("SET");
+        check("launcher: case is not what names a program", launcher_list_is("w:Settings,c,"));
+        check("launcher: a text that is none of the names of PATH lists no more than a desktop program and the command",
+              launcher.entries == 2 && launcher.entry[0].kind == LAUNCHER_WINDOW);
+
+        // The list never has more rows than the window has room for.
+        {
+                static const char address_to const many[] = {"ab1", "ab2", "ab3", "ab4", "ab5", "ab6", "ab7", "ab8", "ab9"};
+
+                for (positive at = 0; at < 9; at++)
+                        string_copy((string_address)names[at], (string_address)many[at]);
+                launcher.count = 9;
+                launcher_type_text("ab");
+                check("launcher: the list is no longer than its rows, and its last row is the command's",
+                      launcher.entries == LAUNCHER_ROWS && launcher.entry[LAUNCHER_ROWS - 1].kind == LAUNCHER_COMMAND &&
+                          launcher_list_is("p:ab1,p:ab2,p:ab3,p:ab4,p:ab5,p:ab6,c,"));
+        }
+
+        // A name is kept once, the first directory that has it winning.
+        launcher.count = 0;
+        check("launcher: a name is kept", launcher_keep("ls", 0) && launcher_keep("cat", 0));
+        check("launcher: and not again, from another directory", !launcher_keep("ls", 1) && !launcher_keep("cat", 2) &&
+                                                                    launcher_keep("ps", 1) && launcher.count == 3);
+        check("launcher: each keeps the directory it came from first",
+              from[0] == 0 && from[1] == 0 && from[2] == 1 && string_equals((string_address)launcher_name(2), (string_address) "ps"));
+        check("launcher: a name too long for the table is left out",
+              !launcher_keep("a-name-that-is-longer-than-any-the-table-keeps", 0) && launcher.count == 3);
+
+        // Keys: typing, moving and clearing, none of which starts a program.
+        launcher.count = sizeof(fixture) / sizeof(fixture[0]);
+        for (positive at = 0; at < sizeof(fixture) / sizeof(fixture[0]); at++)
+                string_copy((string_address)names[at], (string_address)fixture[at]);
+        launcher_type_text(" ls");
+        check("launcher: a blank is not the first thing in the field", string_equals((string_address)launcher.text, (string_address) "ls"));
+        launcher_pressed(LAUNCHER_KEY_DOWN, 0);
+        check("launcher: Down moves to the next row", launcher.highlight == 1);
+        launcher_pressed(LAUNCHER_KEY_UP, 0);
+        launcher_pressed(LAUNCHER_KEY_UP, 0);
+        check("launcher: Up from the first row goes round to the last", launcher.highlight == (int)launcher.entries - 1);
+        launcher_pressed(LAUNCHER_KEY_N, WINDOW_KEY_CONTROL);
+        check("launcher: Control-N is Down", launcher.highlight == 0);
+        launcher_pressed(LAUNCHER_KEY_DOWN, 0);
+        launcher_typed('x');
+        check("launcher: a key typed starts the list again from its top", launcher.highlight == 0 && string_equals((string_address)launcher.text, (string_address) "lsx"));
+        launcher_pressed(LAUNCHER_KEY_BACKSPACE, 0);
+        check("launcher: Backspace takes a character back", string_equals((string_address)launcher.text, (string_address) "ls") && launcher.entries == 7);
+        launcher_pressed(LAUNCHER_KEY_TAB, 0);
+        check("launcher: Tab takes the highlighted name into the field", string_equals((string_address)launcher.text, (string_address) "ls"));
+        launcher_pressed(LAUNCHER_KEY_DOWN, 0);
+        launcher_pressed(LAUNCHER_KEY_TAB, 0);
+        check("launcher: and the name of the row it is on", string_equals((string_address)launcher.text, (string_address) "lsof"));
+        launcher_type_text("ls -l -a");
+        launcher_pressed(LAUNCHER_KEY_W, WINDOW_KEY_CONTROL);
+        check("launcher: Control-W takes the last word", string_equals((string_address)launcher.text, (string_address) "ls -l "));
+        launcher_pressed(LAUNCHER_KEY_U, WINDOW_KEY_CONTROL);
+        check("launcher: Control-U clears the field, and the list is the desktop's", launcher.text[0] == 0 && launcher.entries == LAUNCHER_PROGRAMS);
+        check("launcher: Escape closes it", !launcher_pressed(LAUNCHER_KEY_ESCAPE, 0));
+        launcher_type_text("caf");
+        launcher_typed(0xe9);
+        launcher_pressed(LAUNCHER_KEY_BACKSPACE, 0);
+        check("launcher: Backspace takes a whole character back, not a byte of one", string_equals((string_address)launcher.text, (string_address) "caf"));
+        launcher_type_text("");
+
+        // What a row starts.
+        launcher_type_text("ls");
+        count = launcher_words(&launcher.entry[1], words, full, sizeof(full));
+        check("launcher: a program of PATH is run by its full name in a terminal drawn in the monospace face, not through a shell",
+              count == 7 && string_equals(words[0], (string_address) "/terminal") && string_equals(words[2], (string_address) "/fonts/mono.ttf") &&
+                  string_equals(words[4], (string_address) "/fonts/mono-bold.ttf") && string_equals(words[5], (string_address) "-x") &&
+                  string_equals(words[6], (string_address) "/bin/lsof") && !words[7]);
+        launcher_type_text("ls -l | head");
+        count = launcher_words(&launcher.entry[0], words, full, sizeof(full));
+        check("launcher: a command is the machine's shell given the text, in a terminal",
+              count == 9 && string_equals(words[0], (string_address) "/terminal") && string_equals(words[5], (string_address) "-x") &&
+                  string_equals(words[6], (string_address) "/shell") && string_equals(words[7], (string_address) "-c") &&
+                  string_equals(words[8], (string_address) "ls -l | head") && !words[9]);
+        launcher_type_text("");
+        count = launcher_words(&launcher.entry[0], words, full, sizeof(full));
+        check("launcher: the settings are a window of their own in the bar's face",
+              count == 3 && string_equals(words[0], (string_address) "/settings") && string_equals(words[1], (string_address) "-f") &&
+                  string_equals(words[2], (string_address) "/fonts/ui.ttf") && !words[3]);
+        count = launcher_words(&launcher.entry[2], words, full, sizeof(full));
+        check("launcher: the kernel log is a window drawn in the monospace face",
+              count == 5 && string_equals(words[0], (string_address) "/klog") && string_equals(words[2], (string_address) "/fonts/mono.ttf") &&
+                  string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
+        launcher.height = 0;
+        launcher_changed();
+        check("launcher: the picture's height follows the list", launcher.height == 2 * UI_PAD + LAUNCHER_FIELD + LAUNCHER_GAP + 3 * LAUNCHER_ROW);
+
+        // PATH read from real directories: a program of any name length, once, and nothing that is not one.
+        {
+                static unsigned short scan_hashed[LAUNCHER_HASH + LAUNCHER_DIRENTS / 2];
+                static const char address_to const made[] = {"/tmp/mw-launcher-check", "/tmp/mw-launcher-check/one", "/tmp/mw-launcher-check/two"};
+                static const char address_to const files[][3] = {{"one", "a", "\x01"}, {"one", "bb", "\x01"}, {"one", "uname", "\x01"},
+                                                                  {"one", "plain", "\x00"}, {"one", "x y", "\x01"}, {"one", "compositor", "\x01"},
+                                                                  {"one", "settings", "\x01"}, {"two", "a", "\x01"}, {"two", "zz", "\x01"}};
+                char path[96];
+                b32 found = true;
+
+                for (positive at = 0; at < 3; at++)
+                        system_make_directory_at(AT_FDCWD, made[at], 0755);
+                system_make_directory_at(AT_FDCWD, "/tmp/mw-launcher-check/one/subdirectory", 0755);
+                for (positive at = 0; at < sizeof(files) / sizeof(files[0]); at++)
+                {
+                        bipolar handle;
+
+                        launcher_check_path(path, files[at][0], files[at][1]);
+                        handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE, files[at][2][0] ? 0755 : 0644);
+                        if (handle >= 0)
+                                system_close(handle);
+                        else
+                                found = false;
+                        system_change_mode_at(AT_FDCWD, path, files[at][2][0] ? 0755 : 0644);
+                }
+                memory_zero(&launcher, sizeof(launcher));
+                launcher.names = (char address_to)names;
+                launcher.from = from;
+                launcher.hashed = scan_hashed;
+                memory_zero(scan_hashed, sizeof(scan_hashed));
+                launcher_scan("/tmp/mw-launcher-check/one:/tmp/mw-launcher-check/nowhere::/tmp/mw-launcher-check/two");
+                {
+                        static const char address_to const wanted[] = {"a", "bb", "uname", "zz"};
+                        positive same = 0;
+
+                        for (positive at = 0; at < sizeof(wanted) / sizeof(wanted[0]); at++)
+                        {
+                                b32 there = false;
+
+                                for (positive each = 0; each < launcher.count; each++)
+                                        there |= string_equals((string_address)launcher_name(each), (string_address)wanted[at]);
+                                found &= there;
+                        }
+                        for (positive at = 0; at < launcher.count; at++)
+                                same += string_equals((string_address)launcher_name(at), (string_address) "a");
+                        check("launcher: PATH is read from its directories, names of every length among them",
+                              found && launcher.dir_count == 3);
+                        check("launcher: and nothing but programs: not a directory, a file that cannot be run, a name with a blank, the machinery or the desktop's own",
+                              launcher.count == 4);
+                        check("launcher: a name in two directories is listed once, with the first directory", same == 1 && from[0] == 0);
+                }
+                for (positive at = 0; at < sizeof(files) / sizeof(files[0]); at++)
+                {
+                        launcher_check_path(path, files[at][0], files[at][1]);
+                        system_remove_at(AT_FDCWD, path, 0);
+                }
+                system_remove_at(AT_FDCWD, "/tmp/mw-launcher-check/one/subdirectory", 0x200);
+                system_remove_at(AT_FDCWD, made[2], 0x200);
+                system_remove_at(AT_FDCWD, made[1], 0x200);
+                system_remove_at(AT_FDCWD, made[0], 0x200);
+        }
 }
 
 static fn check_settings(string_address regular, string_address bold)
@@ -109982,6 +110266,7 @@ b32 main()
         check_compositor_partial();
         check_compositor_cycle();
         check_compositor_hover();
+        check_launcher();
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
 

@@ -16917,7 +16917,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -20865,6 +20865,205 @@ else
                 same "$name" "$want" "$got"
         done < "$work/s1-answers"
         sed -n 's/^s1 /  canvas       /p' "$work/s1-why"
+fi
+fi
+
+#       The launcher (src/canvas/launcher.c) on a plain boot's desktop, a guest of its own: Super and
+#       Space open it in the middle of the screen with the keys in it, what is typed there is run (a
+#       program of PATH in a terminal that stays for a key, a command line by the machine's shell),
+#       and the same chord, Escape and a click elsewhere put it away.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = l1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/l1-answers" 2>"$work/l1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/l1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def pids(name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+def said(row):
+    """A row that did not hold says where the guest was: the programs and the log's end."""
+    if out and out[-1][1] != out[-1][2]:
+        print("l1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -14; dmesg | tail -12", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+def launcher_up():
+    return len(pids("launcher")) == 1
+
+def super_space():
+    chord("meta_l", "spc")
+
+def click(x, y):
+    moveto(x, y)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.05)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.3)
+
+until(lambda: len(pids("terminal")) == 1, 60)
+time.sleep(2)
+
+#   The Super key alone is no key: nothing typed in the terminal that has the keys after it is changed by it.
+shell.run("rm -f /tmp/l1-alone /tmp/l1-ran", 10)
+key("meta_l")
+type_text("touch /tmp/l1-alone\n")
+until(lambda: shell.run("ls /tmp/l1-alone 2>/dev/null", 10)[0] == "/tmp/l1-alone", 10)
+out.append(("L1.1 the Super key pressed alone is harmless, and opens nothing",
+            "%s %d" % (shell.run("ls /tmp/l1-alone 2>/dev/null", 10)[0], len(pids("launcher"))), "/tmp/l1-alone 0"))
+said("L1.1")
+
+#   Super and Space: one launcher, in the middle, about a third of the way down, with the keys. Found as what the
+#   screen has with it that it has neither before it nor after it (the terminals' own changes are in both).
+def keep(name):
+    where = os.environ.get("L1_SHOTS")
+    if where:
+        os.makedirs(where, exist_ok=True)
+        os.system("cp %s/%s.ppm %s/" % (work, name, where))
+
+time.sleep(2)
+shot("l1-before", 1)
+super_space()
+opened, _ = until(launcher_up, 10)
+time.sleep(1.5)
+shot("l1-open", 1)
+keep("l1-open")
+key("esc")
+until(lambda: not pids("launcher"), 10)
+time.sleep(1.5)
+shot("l1-after", 1)
+bw, bh, before = load("l1-before")
+ow, oh, after = load("l1-open")
+cw, ch, closed = load("l1-after")
+x0 = y0 = None
+x1 = y1 = 0
+#   Blocks of 8 by 8 where most of the pixels are the launcher's: its glass changes the whole of it, the text beside it only here and there.
+for by in range(0, oh - 8, 8):
+    for bx in range(0, ow - 8, 8):
+        changed = 0
+        for y in range(by, by + 8, 2):
+            for x in range(bx, bx + 8, 2):
+                o = (y * ow + x) * 3
+                changed += after[o:o + 3] != before[o:o + 3] and before[o:o + 3] == closed[o:o + 3]
+        if changed >= 12:
+            x0 = bx if x0 is None else min(x0, bx)
+            y0 = by if y0 is None else min(y0, by)
+            x1 = max(x1, bx + 8)
+            y1 = max(y1, by + 8)
+where = "nothing changed" if x0 is None else "%d-%d,%d-%d of %dx%d" % (x0, x1, y0, y1, ow, oh)
+middle = x0 is not None and abs((x0 + x1) / 2 - ow / 2) < ow * 0.03 and oh * 0.15 < y0 < oh * 0.40 and (x1 - x0) > ow * 0.1
+out.append(("L1.2 Super and Space open one launcher, a bar in the middle a third of the way down",
+            "%s %s" % ("opened" if opened else "not up", "centred" if middle else where), "opened centred"))
+said("L1.2")
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
+
+#   A command line is the machine's shell's, in a terminal of its own that stays when the command has ended.
+terminals = len(pids("terminal"))
+type_text("touch /tmp/l1-ran\n")
+ran, _ = until(lambda: shell.run("ls /tmp/l1-ran 2>/dev/null", 10)[0] == "/tmp/l1-ran", 15)
+time.sleep(1.5)
+more = len(pids("terminal")) - terminals
+words = ""
+if more:
+    newest = sorted(pids("terminal"), key=int)[-1]
+    words = shell.run("tr '\\0' ' ' < /proc/%s/cmdline" % newest, 10)[0]
+out.append(("L1.3 a command typed is run by the shell in a new terminal that stays, and the launcher is gone",
+            "%s %d %s %d" % ("ran" if ran else "not run", more, "shell -c" if "/shell -c touch /tmp/l1-ran" in words else words[-70:],
+                             len(pids("launcher"))), "ran 1 shell -c 0"))
+said("L1.3")
+
+#   A key closes the terminal that stayed (it said it would wait for one).
+key("spc")
+gone, _ = until(lambda: len(pids("terminal")) == terminals, 10)
+out.append(("L1.4 a key ends the terminal a finished command left", "closed" if gone else "still there", "closed"))
+said("L1.4")
+
+#   A program of PATH is started in a terminal, by its name and not through a shell.
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
+terminals = len(pids("terminal"))
+type_text("uname\n")
+until(lambda: len(pids("terminal")) == terminals + 1, 15)
+time.sleep(1.5)
+words = ""
+if len(pids("terminal")) == terminals + 1:
+    newest = sorted(pids("terminal"), key=int)[-1]
+    words = shell.run("tr '\\0' ' ' < /proc/%s/cmdline" % newest, 10)[0]
+out.append(("L1.5 a program of PATH named is run by its name in a terminal, with no shell in between",
+            "%s %s" % ("program" if "-x " in words and "uname" in words and "-c" not in words else words[-80:] or "no terminal",
+                       len(pids("launcher"))), "program 0"))
+said("L1.5")
+key("spc")
+until(lambda: len(pids("terminal")) == terminals, 10)
+
+#   Settings, from the list, as a window of its own.
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
+type_text("settings\n")
+opened_settings, _ = until(lambda: len(pids("settings")) == 1, 15)
+out.append(("L1.6 a desktop program typed and entered opens as its own window, and the launcher is gone",
+            "%s %d" % ("opened" if opened_settings else "not up", len(pids("launcher"))), "opened 0"))
+said("L1.6")
+shell.run("kill $(grep -l '^settings$' /proc/[0-9]*/comm | cut -d/ -f3) 2> /dev/null", 10)
+time.sleep(1)
+
+#   Escape, the chord again, and a click elsewhere put it away; a second start lifts the one up.
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
+key("esc")
+closed_escape, _ = until(lambda: not pids("launcher"), 10)
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
+super_space()
+closed_chord, _ = until(lambda: not pids("launcher"), 10)
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
+shell.run("/launcher -f /usr/share/fonts/inter/Inter-Regular.ttf > /dev/null 2>&1", 20)
+time.sleep(1)
+lifted = len(pids("launcher"))
+click(120, 120)
+closed_click, _ = until(lambda: not pids("launcher"), 10)
+out.append(("L1.7 Escape, the same chord and a click on the desktop each put it away, and a second start makes no other",
+            "%s %s %s %d" % ("escape" if closed_escape else "open", "chord" if closed_chord else "open", "click" if closed_click else "open", lifted),
+            "escape chord click 1"))
+said("L1.7")
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/l1-answers" ]; then
+        same "the launcher boot answered" "yes" "no"
+        sed 's/^/    /' "$work/l1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/l1-answers"
+        sed -n 's/^l1 /  canvas       /p' "$work/l1-why"
 fi
 fi
 

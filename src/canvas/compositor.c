@@ -787,7 +787,9 @@ static void compositor_scene(const struct compositor_target *t,
 */
 #define COMPOSITOR_BANDS 8
 
-static unsigned int compositor_band_scratch[COMPOSITOR_BANDS][COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
+// Mapped when the first banded scene is drawn, not kept in the image: 128 KiB of the image's address space is
+// what a shell under a 12 MiB cap cannot spare, in every program that links this.
+static unsigned int *compositor_band_scratch;
 
 struct compositor_banding
 {
@@ -804,7 +806,7 @@ static void compositor_scene_band(address_any context, positive index)
 
         band.y1 = banding->target->y1 + (int)(height * (long)index / banding->bands);
         band.y2 = banding->target->y1 + (int)(height * (long)(index + 1) / banding->bands);
-        band.scratch = compositor_band_scratch[index];
+        band.scratch = compositor_band_scratch + index * (COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST);
         if (band.y2 > band.y1)
                 compositor_scene(&band, banding->frames, banding->count);
 }
@@ -819,6 +821,14 @@ static void compositor_scene_banded(const struct compositor_target *t, const str
         bands = bands < COMPOSITOR_BANDS ? bands : COMPOSITOR_BANDS;
         bands = bands < (positive)(t->y2 - t->y1) / 16 ? bands : (positive)(t->y2 - t->y1) / 16;
         if (bytes < PARALLEL_MINIMUM_BYTES || bands < 2)
+        {
+                compositor_scene(t, frames, count);
+                return;
+        }
+        if (!compositor_band_scratch)
+                compositor_band_scratch = (unsigned int *)compositor_map_zeroed(
+                    (unsigned long)COMPOSITOR_BANDS * COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST * sizeof(unsigned int));
+        if (!compositor_band_scratch)
         {
                 compositor_scene(t, frames, count);
                 return;

@@ -37,7 +37,12 @@
         The font is a path: the image carries IBM Plex Mono under
         /usr/share/fonts, and the machine script names it.
 
-            terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf] [-g COLUMNSxROWS]
+            terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf] [-g COLUMNSxROWS] [-x PROGRAM [WORD]...]
+
+        -x runs a program on the pty in place of the shell (everything after it
+        is the program's words), which is how the launcher shows a command's
+        output: the window says how the program ended and stays, its text where
+        it was, until a key is pressed or its X.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -49,6 +54,8 @@
 // them, and never fewer than two screens of the tallest window the output could hold.
 #define TERMINAL_HISTORY 512
 #define TERMINAL_FACES 4
+// The words of a program a terminal runs in place of the shell (-x), the program's own among them.
+#define TERMINAL_PROGRAM_WORDS 16
 // The window of each on a plain boot, as percents of the output: the width and height it takes and where its top left
 // corner goes. The log is behind and the terminal in front, over the log's right edge; the compositor keeps both on the
 // work area, which the shares leave room for at any scale a panel takes.
@@ -1710,6 +1717,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         return true;
 }
 
+// The tab's name at the prompt: "shell", or the program a terminal was asked to run (-x).
+static const char address_to terminal_label = "shell";
+
 /*
         The window's title, which its tab shows: the program in front on the
         pty -- btop while btop runs -- and "shell" back at the prompt, and a
@@ -1751,7 +1761,7 @@ static void terminal_title(b32 master, bipolar shell)
                         system_read_once((b32)handle, name, sizeof(name) - 1);
                         system_close(handle);
                 }
-                terminal_title_set(name[0] ? (const char address_to)name : "shell");
+                terminal_title_set(name[0] ? (const char address_to)name : terminal_label);
         }
 
         // A title a program set, each time it sets one: the same again after the program's name took the tab
@@ -1779,6 +1789,34 @@ static void terminal_said(b32 reading, string_address what)
         compositor_kmsg(line, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), what);
 }
 
+// What is said after a program this terminal was asked to run has ended: how it did, and what closes the window.
+static fn terminal_exit_said(void)
+{
+        p8 line[96] = "\x1b[0m\r\n[";
+        positive at = string_length(line);
+
+        if (!(term_exit_status & 0x7f))
+        {
+                string_copy(line + at, (string_address) "exited with status ");
+                at += string_length(line + at);
+                at += positive_into_string(line + at, (term_exit_status >> 8) & 0xff);
+                string_copy(line + at, (string_address) ", ");
+                at += 2;
+        }
+        string_copy(line + at, (string_address) "press a key to close]");
+        at += string_length(line + at);
+        cursor_hide();
+        term_bytes(line, at);
+}
+
+// Whether an event is a key that was pressed and means something: not a repeat, and not a modifier on its own.
+static b32 terminal_key_pressed(const struct window_event address_to event)
+{
+        return event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && !(event->flags & WINDOW_KEY_REPEAT) &&
+               event->a != 29 && event->a != 42 && event->a != 54 && event->a != 56 && event->a != 97 && event->a != 100 &&
+               event->a != 125 && event->a != 126;
+}
+
 static b32 klog_drain(b32 far, b32 address_to gone, positive budget);
 static b32 klog_receive(const struct window_event address_to event, b32 address_to dirty);
 
@@ -1789,6 +1827,7 @@ static b32 klog_receive(const struct window_event address_to event, b32 address_
 static b32 terminal_run(b32 reading)
 {
         string_address paths[TERMINAL_FACES];
+        string_address program_words[TERMINAL_PROGRAM_WORDS];
         string_address bold = null, ready_file = null;
         unsigned int cells[2] = {0, 0};
         unsigned int count = 0, size = 0, columns, rows;
@@ -1809,6 +1848,15 @@ static b32 terminal_run(b32 reading)
 
                 if (option[0] != '-' || !option[1] || option[2] || !value)
                         continue;
+                // The rest is the program's own words, whatever they look like.
+                if (option[1] == 'x' && !reading)
+                {
+                        for (; at + 1 < program_argument_count() && term_program_count + 1 < TERMINAL_PROGRAM_WORDS; at++)
+                                program_words[term_program_count++] = program_argument(at + 1);
+                        program_words[term_program_count] = null;
+                        term_program_words = program_words;
+                        break;
+                }
                 at++;
                 if (option[1] == 'f' && count < TERMINAL_FACES)
                         paths[count++] = value;
@@ -1861,7 +1909,17 @@ static b32 terminal_run(b32 reading)
         terminal.bar_grab = -1;
 
         // Named, because two untitled terminals are a guessing game.
-        string_copy((string_address)table->title[own], (string_address)(reading ? "kernel log" : "shell"));
+        if (term_program_count)
+        {
+                // A command given to the shell as it was typed, else the program's name and not its path.
+                string_address slash = string_last_of(term_program_words[0], '/');
+
+                terminal_label = term_program_count == 3 && string_equals(term_program_words[1], (string_address) "-c")
+                                     ? term_program_words[2]
+                                     : slash ? slash + 1 : term_program_words[0];
+        }
+        string_copy_bounded((string_address)table->title[own],
+                            (string_address)(reading ? "kernel log" : terminal_label), WINDOWS_TITLE);
 
         // The ring is cut for the smallest text a zoom reaches, so that every size after this one has room in it.
         font_metrics least = font_metrics_at(terminal.plain[0], terminal_steps[0] << 6);
@@ -2146,14 +2204,24 @@ static b32 terminal_run(b32 reading)
         if (reading)
                 system_close(master);
 
-        if (!reading && term_finish(child, master, hung, oom_kills))
+        b32 stays = !reading && term_finish(child, master, hung, oom_kills), keyed = false;
+
+        // A program that was asked for ends in a window that waits for a key, unless the X sent the end.
+        if (!reading && term_program_count && !hung)
+        {
+                terminal_exit_said();
+                stays = keyed = true;
+        }
+
+        if (stays)
         {
                 // What is left of a window whose shell is gone: its cells, and what said how it ended, until
-                // the X. Drawn again until the compositor has taken it, and at a new size or text size.
+                // the X (or, for a program asked for, a key). Drawn again until the compositor has taken it, and at a
+                // new size or text size.
                 cursor_show();
-                b32 owed = !terminal_frame();
+                b32 owed = !terminal_frame(), pressed = false;
 
-                while (!(table->state[own] & WINDOW_CLOSING))
+                while (!pressed && !(table->state[own] & WINDOW_CLOSING))
                 {
                         struct window_event event;
                         long ready = windows_wait(&terminal.own, -1, owed ? TERMINAL_STALL_NANOSECONDS : -1);
@@ -2170,6 +2238,8 @@ static b32 terminal_run(b32 reading)
                                         terminal_zoom(master, zoom);
                                         owed = true;
                                 }
+                                else if (keyed && terminal_key_pressed(&event))
+                                        pressed = true;
                         }
                         if (terminal_asked(master))
                                 owed = true;

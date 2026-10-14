@@ -859,6 +859,10 @@ config MOONWATER_TOOL_KLOG
     bool "klog"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_LAUNCHER
+    bool "launcher"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_POINTER
     bool "pointer"
     default MOONWATER_TOOLS_ALL

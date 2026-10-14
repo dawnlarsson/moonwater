@@ -236,6 +236,17 @@ static fn term_linger(void)
 }
 
 /*
+        What the pty's far end runs when it is not the shell: a program and its
+        words, set by a terminal that was asked for one (terminal.c, -x). Null
+        is the shell, as it always was.
+*/
+static string_address address_to term_program_words;
+static positive term_program_count;
+
+// How the program that ended did, as wait4 said it: set by term_finish.
+static positive term_exit_status;
+
+/*
         A shell on a pty of its own, started.
 
         Answers the shell's pid, with the pty's master in master and the
@@ -331,6 +342,13 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
                 host_terminal_opening();
 
                 bowl_session_prepare("/root", null);
+                if (term_program_count)
+                {
+                        // A program that cannot start is its window's end, not a shell in its place.
+                        (void)shell_exec_file(term_program_words[0], term_program_words, term_program_count,
+                                              bowl_environment(seed));
+                        system_call_1(syscall(exit), 127);
+                }
                 (void)shell_exec_file((string_address)SHELL, argv, 1,
                                       bowl_environment(seed));
                 system_call_1(syscall(exit), 127);
@@ -422,6 +440,7 @@ static b32 term_finish(bipolar child, b32 master, b32 hung_up, positive oom_kill
         system_wait4_retry(child, address_of status, 0, null);
         system_close(master);
 
+        term_exit_status = status;
         signal = status & 0x7f;
 
         if (!hung_up && signal && signal != 0x7f)

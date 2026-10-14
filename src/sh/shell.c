@@ -919,6 +919,7 @@ static bool floodlight_parent_supervised;
 #include "../canvas/klog.c"
 #include "../canvas/ui.c"
 #include "../canvas/settings.c"
+#include "../canvas/launcher.c"
 #endif
 #include "edit.c"
 #include "system.c"
