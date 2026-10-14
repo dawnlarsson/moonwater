@@ -12,15 +12,13 @@
 
             ink         text, the knob of a switch that is off, a switch on
             quiet       a value, a header: ink most of the way to the ground
-            faint       a card's fill: the ink at a twentieth
-            line        a rule between two rows: the ink at a tenth
             lit         the row with the focus: the ink at a seventh
             ring        round the row with the focus, and a field being typed in
 
-        The pieces: a title, a section header, a card that groups rows, a
-        row (a label at the left and its value, a switch or a choice at the
-        right), a switch, a choice, a field to type in, and the ring round
-        whatever has the focus. Sizes are logical pixels, times the scale
+        The pieces: a title, a section header, a row (a label at the left and
+        its value, a switch or a choice at the right), a switch, a choice, a
+        field to type in, and the ring round whatever has the focus. Rows
+        stand on the glass with space between sections: no box and no rule. Sizes are logical pixels, times the scale
         the compositor draws at. Text is font.c's, Inter; a run is drawn as
         coverage into a scratch line and laid over the picture in the ink,
         so it is premultiplied like everything else and the glass shows
@@ -36,8 +34,8 @@
 #define UI_SMALL 12    // a section's header
 #define UI_TITLE 20    // the window's title
 #define UI_ROW 40      // a row
-#define UI_PAD 16      // a card's inside margin, and the window's
-#define UI_RADIUS 8    // a card's corners, as the windows'
+#define UI_PAD 16      // the window's margin
+#define UI_RADIUS 8    // a focused row's and a field's corners, as the windows'
 #define UI_SWITCH_W 36 // a switch
 #define UI_SWITCH_H 20
 #define UI_RING 2      // the focus ring's width
@@ -53,7 +51,7 @@ struct ui
         font_engine address_to engine;
         const font_face address_to regular;
         const font_face address_to bold;
-        unsigned int ground, ink, quiet, faint, line, lit, ring;
+        unsigned int ground, ink, quiet, lit, ring;
         unsigned int address_to scratch; // a line of text, as coverage
         int scratch_width;
 };
@@ -71,8 +69,6 @@ static fn ui_inks(struct ui address_to ui, unsigned int ground)
         ui->ground = ground & 0xffffffu;
         ui->ink = window_contrast(ui->ground);
         ui->quiet = window_mix(ui->ground, ui->ink, 176);
-        ui->faint = ui_tone(ui->ink, 13);
-        ui->line = ui_tone(ui->ink, 26);
         ui->lit = ui_tone(ui->ink, 36);
         ui->ring = ui_tone(ui->ink, 190);
 }
@@ -311,22 +307,10 @@ static fn ui_title(struct ui address_to ui, int x, int y, int height, string_add
         ui_text(ui, x, ui_baseline(ui, y, height, UI_TITLE), text, UI_TITLE, true, ui->ink, 255);
 }
 
-// A section's header: small and quiet, over its card.
+// A section's header: small and quiet, over its rows.
 static fn ui_header(struct ui address_to ui, int x, int y, int height, string_address text)
 {
         ui_text(ui, x, y + height - 8 * ui->scale, text, UI_SMALL, true, ui->quiet, 255);
-}
-
-// A card: the rows of a section on a faint ground of their own.
-static fn ui_card(struct ui address_to ui, int x, int y, int width, int height)
-{
-        ui_round(ui, x, y, width, height, UI_RADIUS * ui->scale, ui->faint);
-}
-
-// The rule between two rows of a card, inset from its left.
-static fn ui_rule(struct ui address_to ui, int x, int y, int width)
-{
-        ui_fill(ui, x, y, width, ui->scale, ui->line);
 }
 
 // The row with the focus: lit, with a ring round it.

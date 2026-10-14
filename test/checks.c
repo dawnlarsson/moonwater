@@ -108958,7 +108958,7 @@ static fn check_glass(void)
         and the command that changes a row made of words and never a line
         for a shell. And the system's pieces (ui.c) draw: a run of text
         lights its pixels at each size the window uses, in either face, a
-        switch puts its knob on its side, and a rounded card's corner is
+        switch puts its knob on its side, and a rounded rectangle's corner is
         covered in part and its middle whole.
 */
 static unsigned int settings_parsed(unsigned int row, const char address_to said, char address_to value)
@@ -109001,6 +109001,11 @@ static positive settings_lit(const unsigned int address_to pixels, positive coun
 
 static fn check_settings(string_address regular, string_address bold)
 {
+        if (!settings_map())
+        {
+                check("settings: the buffers map", false);
+                return;
+        }
         char value[SETTINGS_VALUE], next[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
         int name = settings_row_named("Name"), keyboard = settings_row_named("Keyboard"),
@@ -109132,6 +109137,324 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: and what is asked is the verb that shows it", count == 3 && string_equals(words[1], (string_address) "dns") &&
                                                                            string_equals(words[2], (string_address) "tls"));
 
+        // The rows a person flips beyond the first: what each says, and the words that set it.
+        {
+                int scale = settings_row_named("Scale"), modes = settings_row_named("Screen modes"),
+                    server = settings_row_named("Time server (auto for the pool)"),
+                    sampling = settings_row_named("Keep the lowest-delay sample"),
+                    nts = settings_row_named("Authenticated time (NTS)"),
+                    nts_servers = settings_row_named("NTS servers (or default)"),
+                    dns = settings_row_named("Name servers (auto for the network)"),
+                    smt = settings_row_named("Simultaneous threads (SMT)"), charge = settings_row_named("Charge limit (20 to 100, or off)"),
+                    desktop = settings_row_named("Start the desktop"), mount = settings_row_named("Mount kept disks");
+
+                check("settings: a scale is its number",
+                      settings_parsed(scale, "[Moonwater] scale 2, set, kept across boots\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "2"));
+                check("settings: and auto when the panel chose it, whatever number it came to",
+                      settings_parsed(scale, "[Moonwater] scale 2, auto: the panel is 96 dots to the inch\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "auto") &&
+                          settings_parsed(scale, "[Moonwater] scale auto, Canvas asks its screens when it starts\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "auto"));
+                check("settings: the screen modes", settings_parsed(modes, "[Moonwater] modes preferred, kept across boots\n", value) == SETTINGS_READ &&
+                                                        string_equals((string_address)value, (string_address) "preferred"));
+                check("settings: the time server is a word, and sampling a switch",
+                      settings_parsed(server, "[Moonwater] ntp server pool.ntp.org\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "pool.ntp.org") &&
+                          settings_parsed(sampling, "[Moonwater] ntp sampling off\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "off"));
+                check("settings: authenticated time is its word, before the servers",
+                      settings_parsed(nts, "[Moonwater] ntp nts only, servers time.cloudflare.com:4460 nts.ntp.se; the clock was last set by nts\n",
+                                      value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "only"));
+                check("settings: and its servers are the words from there to the semicolon",
+                      settings_parsed(nts_servers,
+                                      "[Moonwater] ntp nts only, servers time.cloudflare.com:4460 nts.ntp.se; the clock was last set by nts\n",
+                                      value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "time.cloudflare.com:4460 nts.ntp.se"));
+                check("settings: the name servers are the addresses before their word in brackets",
+                      settings_parsed(dns, "[Moonwater] dns 1.1.1.1 9.9.9.9 (kept)\n[Moonwater] dns tls off\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "1.1.1.1 9.9.9.9"));
+                check("settings: the charge limit is its number, and a battery without one has none",
+                      settings_parsed(charge, "[Moonwater] battery 80%, Charging; charging stops at 80%\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "80") &&
+                          settings_parsed(charge, "[Moonwater] battery 90%, Full; this battery has no charge limit\n", value) == SETTINGS_ABSENT &&
+                          settings_parsed(charge, "[Moonwater] this machine has no battery\n", value) == SETTINGS_ABSENT);
+                check("settings: SMT is on or off, and a machine that cannot say so has none",
+                      settings_parsed(smt, "[Moonwater] cpu: 8 online; boost on; smt on\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "on") &&
+                          settings_parsed(smt, "[Moonwater] cpu: 2 online; smt notsupported\n", value) == SETTINGS_ABSENT);
+                check("settings: what the machine starts at boot",
+                      settings_parsed(desktop, "[Moonwater] init canvas on\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "on") &&
+                          settings_parsed(mount, "[Moonwater] init mount off\n", value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "off"));
+
+                count = settings_command(&settings_rows[dns], (string_address) "/moonwater", "1.1.1.1 9.9.9.9", words, SETTINGS_WORDS, false);
+                check("settings: a list of servers is the words of the command, one each",
+                      count == 4 && string_equals(words[1], (string_address) "dns") && string_equals(words[2], (string_address) "1.1.1.1") &&
+                          string_equals(words[3], (string_address) "9.9.9.9") && !words[4]);
+                count = settings_command(&settings_rows[nts_servers], (string_address) "/moonwater", "a:1 b", words, SETTINGS_WORDS, false);
+                check("settings: and after three words of the verb", count == 6 && string_equals(words[3], (string_address) "servers") &&
+                                                                         string_equals(words[4], (string_address) "a:1") &&
+                                                                         string_equals(words[5], (string_address) "b"));
+                count = settings_command(&settings_rows[charge], (string_address) "/moonwater", "80", words, SETTINGS_WORDS, false);
+                check("settings: a charge limit is charge limit and the number",
+                      count == 4 && string_equals(words[2], (string_address) "limit") && string_equals(words[3], (string_address) "80"));
+                count = settings_command(&settings_rows[scale], (string_address) "/moonwater", "auto", words, SETTINGS_WORDS, false);
+                check("settings: and a scale is canvas scale and its word",
+                      count == 4 && string_equals(words[1], (string_address) "canvas") && string_equals(words[2], (string_address) "scale") &&
+                          string_equals(words[3], (string_address) "auto"));
+        }
+
+        // All commands: the rows of what moonwater help says, as the window reads them.
+        {
+                static const char help[] =
+"Moonwater\n"
+"\n"
+"  status                            this session as one page\n"
+"  help [VERB]                       these commands, or the page of one\n"
+"  setup                             where it runs: install, update, use, live\n"
+"  wipe [yes]                        forget /home and /root, keep the machine; yes\n"
+"                                    is for a script, which cannot be asked\n"
+"  bind                              the events of the machine, and what each runs\n"
+"  bind EVENT [COMMAND]              one event; empty puts the default back\n"
+"  bind init [add|remove ...]        what runs at boot\n"
+"  bind exit [add|remove ...]        what runs when the machine stops\n"
+"  bind init mount [on|off]          mount kept disks at boot [on]\n"
+"  bind init canvas [on|off]         start Canvas at boot [on]\n"
+"  canvas [on|off]                   the desktop, and on which screens [on]\n"
+"  canvas log|terminal               open the kernel log or a terminal\n"
+"  canvas scale [N|auto]             device pixels to a drawn one, 1 to 4 [auto]\n"
+"  canvas modes [largest|preferred]  which mode a screen is driven at [largest]\n"
+"  desktop [canvas|off|PROFILE]      what the machine starts as its desktop [canvas]\n"
+"  desktop start|stop                begin the chosen profile now, or end its session\n"
+"  settings                          the settings window, on the desktop of the compositor\n"
+"  latency [reset]                   what the input handlers cost a report, and who has the display\n"
+"  airplane [on|off]                 every radio at once\n"
+"  brightness [N%|+N|-N]             the screen backlight\n"
+"  power [performance|balanced|powersave]\n"
+"                                    profile and CPU governor, kept across boots\n"
+"  cpu [boost|smt on|off]            turbo and SMT, kept across boots\n"
+"  cpu online|offline N              hotplug one processor\n"
+"  charge [limit N|off]              where the battery stops charging, 20 to 100\n"
+"  sleep | hibernate                 suspend to RAM or to disk\n"
+"  bios [reboot]                     whether firmware setup is on offer; reboot goes\n"
+"  wired [on|off]                    the wired links; off keeps them down\n"
+"  wifi [on|off]                     the radio, saved networks and those in range\n"
+"  wifi add SSID [PASSWORD|-] [wpa2]\n"
+"                                    remember a network and join it; asks for\n"
+"                                    the password, - reads it from stdin; wpa2 lets\n"
+"                                    a tight tier join it without WPA3\n"
+"  wifi remove SSID                  forget a saved network, and leave it\n"
+"  bluetooth [on|off]                the radio and the remembered devices\n"
+"  bluetooth add NAME                keep the name of a device; the radio goes on for what pairs\n"
+"  bluetooth remove NAME             forget a bluetooth device\n"
+"  priority [internet [wired|wifi]]  which link wins when both are up [wired]\n"
+"  time [sync]                       the clock; sync sets it and the zone now\n"
+"  timezone [ZONE|list]              IANA name, country, +1 or POSIX; manual\n"
+"  timezone auto                     from the network, one Cloudflare request\n"
+"                                    per network joined [auto]\n"
+"  ntp [on|off]                      set the clock from the network [on]\n"
+"  ntp server [NAME|auto]            who is asked first: a name or address [auto]\n"
+"  ntp sampling [on|off]             keep the lowest-delay sample of five [on]\n"
+"  ntp nts [on|off|only]             authenticated time (RFC 8915) first; only refuses plain [on]\n"
+"  ntp nts servers [NAME[:PORT]...|default]\n"
+"                                    who is asked for it, up to four\n"
+"  keyboard [LAYOUT|list|xkb]        us uk gb de se sv no nb dk fi fr es it [us]\n"
+"  name [NEW|random]                 what this machine is called, like space-wizard\n"
+"  dns [ADDRESS...|auto]             up to three servers names are asked of, or the network gives them [auto]\n"
+"  dns tls [on|off|only]             names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]\n"
+"  link [pair|NAME]                  machines linked by name, with a code\n"
+"\n"
+"  Settings stay in the image this session started from.\n"
+"  install takes this session's; update keeps the disk's.\n"
+"  The machine script overwrites bind, init and exit.\n"
+"  /root/main.moonwater.sh overlays the kernel builtin.\n"
+                    ;
+                string_address more[SETTINGS_WORDS];
+                int status = -1, wipe = -1, servers = -1, sleep = -1, hibernate = -1, setup = -1, canvas = -1, link = -1, any = SETTINGS_ANY;
+                positive rows;
+
+                settings.moonwater = (string_address) "/moonwater";
+                settings_help(help, sizeof(help) - 1);
+                rows = settings.generic_count;
+                for (positive at = 0; at < rows; at++)
+                {
+                        const char address_to command = settings_large->pool + settings.generic[at].command;
+                        int row = (int)at + SETTINGS_ANY + 1;
+
+                        status = string_equals((string_address)command, (string_address) "status") ? row : status;
+                        wipe = string_equals((string_address)command, (string_address) "wipe [yes]") ? row : wipe;
+                        servers = string_equals((string_address)command, (string_address) "ntp nts servers [NAME[:PORT]...|default]") ? row : servers;
+                        sleep = string_equals((string_address)command, (string_address) "sleep") ? row : sleep;
+                        hibernate = string_equals((string_address)command, (string_address) "hibernate") ? row : hibernate;
+                        setup = string_equals((string_address)command, (string_address) "setup") ? row : setup;
+                        canvas = string_equals((string_address)command, (string_address) "canvas [on|off]") ? row : canvas;
+                        link = string_equals((string_address)command, (string_address) "link [pair|NAME]") ? row : link;
+                }
+                check("settings: help's main page is a row to each command, and its notes are none",
+                      rows > 40 && rows <= SETTINGS_GENERATED && !settings.truncated && status > 0 && wipe > 0 && setup > 0 && canvas > 0 && link > 0);
+                check("settings: a command with nothing after its verb takes nothing, one with brackets takes words",
+                      !settings_takes(status) && !settings_takes(setup) && settings_takes(wipe) && settings_takes(canvas) && settings_takes(link) &&
+                          settings_takes(any));
+                check("settings: the verb is the leading words in small letters",
+                      settings.generic[servers - any - 1].verb == sizeof("ntp nts servers") - 1 &&
+                          settings.generic[canvas - any - 1].verb == sizeof("canvas") - 1 &&
+                          settings.generic[status - any - 1].verb == sizeof("status") - 1);
+                check("settings: sleep | hibernate is two rows with one text",
+                      sleep > 0 && hibernate == sleep + 1 &&
+                          string_equals((string_address)settings_text(sleep), (string_address)settings_text(hibernate)) &&
+                          string_equals((string_address)settings_text(sleep), (string_address) "suspend to RAM or to disk"));
+                check("settings: a line indented far under a row is more of its text",
+                      string_equals((string_address)settings_text(wipe),
+                                    (string_address) "forget /home and /root, keep the machine; yes is for a script, which cannot be asked"));
+                check("settings: a command too long to leave two blanks has its text on the next line",
+                      servers > 0 && string_equals((string_address)settings_text(servers), (string_address) "who is asked for it, up to four"));
+
+                // More commands than the table holds: the first rows, and it says so.
+                {
+                        static char many[SETTINGS_GENERATED * 48 + 64];
+                        positive length = 0;
+
+                        for (positive at = 0; at < SETTINGS_GENERATED + 8; at++)
+                        {
+                                many[length++] = ' ';
+                                many[length++] = ' ';
+                                memory_copy(many + length, "verb ", 5);
+                                length += 5;
+                                length += positive_into_string((p8 address_to)many + length, at);
+                                memory_copy(many + length, "                    does it\n", 28);
+                                length += 28;
+                        }
+                        settings_help(many, length);
+                        check("settings: more commands than rows leaves the first ones and says there were more",
+                              settings.generic_count == SETTINGS_GENERATED && settings.truncated);
+                }
+                settings_help("Moonwater\n\nnothing\n", 19);
+                check("settings: a page with no rows is no rows", settings.generic_count == 0 && !settings.truncated);
+                settings_help(help, sizeof(help) - 1);
+
+                // Words: blanks part them, quotes hold blanks, nothing else is read.
+                count = settings_generic_words(any, "bind init add \"echo hi there\" ; rm -rf /", more, SETTINGS_WORDS);
+                check("settings: a typed command is words, a pair of quotes holds one, and a semicolon is a word",
+                      count == 9 && string_equals(more[0], (string_address) "/moonwater") && string_equals(more[1], (string_address) "bind") &&
+                          string_equals(more[4], (string_address) "echo hi there") && string_equals(more[5], (string_address) ";") && !more[9]);
+                count = settings_generic_words(canvas, "off", more, SETTINGS_WORDS);
+                check("settings: a row's verb comes before what is typed", count == 3 && string_equals(more[1], (string_address) "canvas") &&
+                                                                              string_equals(more[2], (string_address) "off"));
+                count = settings_generic_words(any, "a b c d e f g h i j k l m n o p q r s t u v w x y z", more, SETTINGS_WORDS);
+                check("settings: more words than a command takes are none", count == 0);
+                count = settings_generic_words(any, "name 'a \"b' \"it's\"", more, SETTINGS_WORDS);
+                check("settings: the other quote is a letter inside a pair", count == 4 && string_equals(more[2], (string_address) "a \"b") &&
+                                                                              string_equals(more[3], (string_address) "it's"));
+
+                // What asks twice, by the words that would run and not by the row.
+                count = settings_generic_words(canvas, "off", more, SETTINGS_WORDS);
+                check("settings: canvas off asks twice and canvas on does not",
+                      settings_asks_for(more + 1, count - 1) &&
+                          (settings_generic_words(canvas, "on", more, SETTINGS_WORDS), !settings_asks_for(more + 1, 2)));
+                settings_generic_words(any, "setup install /dev/sda yes", more, SETTINGS_WORDS);
+                check("settings: setup install asks twice, typed in any row", settings_asks_for(more + 1, 4));
+                settings_generic_words(any, "wipe", more, SETTINGS_WORDS);
+                check("settings: and wipe, bare", settings_asks_for(more + 1, 1));
+                settings_generic_words(any, "link group leave home", more, SETTINGS_WORDS);
+                check("settings: and link group leave", settings_asks_for(more + 1, 4));
+                settings_generic_words(any, "link group home", more, SETTINGS_WORDS);
+                check("settings: but not link group", !settings_asks_for(more + 1, 3));
+                settings_generic_words(any, "sleep", more, SETTINGS_WORDS);
+                check("settings: sleep asks, status does not",
+                      settings_asks_for(more + 1, 1) && (settings_generic_words(any, "status", more, SETTINGS_WORDS), !settings_asks_for(more + 1, 1)));
+                check("settings: a row whose verb alone ends what a person has says so, one that needs a word typed does not",
+                      settings_row_asks(wipe) && settings_row_asks(sleep) && !settings_row_asks(status) && !settings_row_asks(canvas));
+
+                // The second Enter: the first says so and runs nothing, a key between asks again, the same Enter after it runs.
+                settings.child = 1;
+                settings.queued = 0;
+                settings.job = clock;
+                settings.job_sets = false;
+                settings.editing = -1;
+                settings.confirm = 0;
+                settings_activate(wipe, 1);
+                check("settings: Enter on a command with words to type opens its field", settings.editing == wipe && !settings.typed[0]);
+                settings_type_code('y');
+                settings_type_code('e');
+                settings_type_code('s');
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: a command that ends what a person has is not run by the first Enter, which says what would run",
+                      settings.queued == 0 && settings.editing == wipe &&
+                          string_equals((string_address)settings.status, (string_address) "press Enter again to run: moonwater wipe yes"));
+                settings_type_code('x');
+                settings_press(SETTINGS_KEY_BACKSPACE);
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: a key between the two Enters asks again", settings.queued == 0 && settings.editing == wipe);
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: and the second Enter runs it, words and all",
+                      settings.queued == 1 && settings.queue[0].row == wipe && string_equals((string_address)settings.queue[0].value, (string_address) "yes") &&
+                          settings.editing < 0);
+                settings.queued = 0;
+                settings_activate(sleep, 1);
+                check("settings: a command with no words to type asks on its own Enter", settings.queued == 0 && settings.editing < 0 &&
+                                                                                          settings.confirm == sleep + 1);
+                settings_activate(sleep, 1);
+                check("settings: and runs on the second", settings.queued == 1 && settings.queue[0].row == sleep);
+                settings.queued = 0;
+                settings.confirm = 0;
+                settings_activate(status, 1);
+                check("settings: one that asks nothing is run by its Enter", settings.queued == 1 && settings.queue[0].row == status);
+                settings.queued = 0;
+
+                // The any row: the verb is in what is typed, and nothing typed is no command.
+                settings_activate(any, 1);
+                check("settings: the any row opens a field", settings.editing == any);
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: and nothing typed in it runs nothing and says so", settings.queued == 0 && settings.editing == any &&
+                          string_equals((string_address)settings.status, (string_address) "type a command: its verb, then what follows it"));
+                for (const char address_to letter = "name lane-any"; *letter; letter++)
+                        settings_type_code((unsigned int)*letter);
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: a command typed in it runs", settings.queued == 1 && settings.queue[0].row == any &&
+                          string_equals((string_address)settings.queue[0].value, (string_address) "name lane-any") && settings.editing < 0);
+                settings.queued = 0;
+                settings.child = 0;
+
+                // The filter: letters typed with no field open, Backspace, and Escape clearing before it closes.
+                settings.ui.scale = 1;
+                settings.editing = -1;
+                settings.filter_length = 0;
+                settings_refilter();
+                check("settings: with nothing typed every row shows", settings.visible_count == settings_rows_count());
+                settings_type_code('W');
+                settings_type_code('i');
+                settings_type_code('f');
+                settings_type_code('i');
+                check("settings: letters typed with no field open are the filter, in small letters",
+                      string_equals((string_address)settings.filter, (string_address) "wifi") && settings.visible_count < settings_rows_count());
+                {
+                        b32 structured = false, generic = false, each = true;
+
+                        for (positive at = 0; at < settings.visible_count; at++)
+                        {
+                                structured |= settings.visible[at] == settings_row_named("Wi-Fi");
+                                generic |= settings.visible[at] > SETTINGS_ANY;
+                                each &= settings_matches(settings.visible[at]);
+                        }
+                        check("settings: the rows that show are those that mention it, the switch and the commands both", structured && generic && each);
+                }
+                check("settings: the focus goes to a row that shows", settings_pos(settings.focus) >= 0);
+                settings_press(SETTINGS_KEY_BACKSPACE);
+                check("settings: Backspace takes a letter off it", string_equals((string_address)settings.filter, (string_address) "wif"));
+                check("settings: Escape clears it and keeps the window", settings_press(SETTINGS_KEY_ESCAPE) && !settings.filter_length &&
+                                                                              settings.visible_count == settings_rows_count());
+                check("settings: and Escape with none typed closes it", !settings_press(SETTINGS_KEY_ESCAPE));
+                for (const char address_to letter = "zzzzqq"; *letter; letter++)
+                        settings_type_code((unsigned int)*letter);
+                check("settings: a filter nothing matches shows no row", settings.visible_count == 0);
+                settings_press(SETTINGS_KEY_ESCAPE);
+                settings_type_code(' ');
+                check("settings: a blank is no letter of it", !settings.filter_length);
+        }
+
         // The pieces, drawn.
         {
                 static unsigned int pixels[320 * 80], scratch[400 * UI_SCRATCH_ROWS];
@@ -109240,8 +109563,43 @@ static fn check_settings(string_address regular, string_address bold)
 
                 ui_clear(&ui);
                 ui_round(&ui, 10, 10, 100, 50, UI_RADIUS, ui_tone(0xffffffu, 255));
-                check("ui: a card's corner is covered in part, its middle whole",
+                check("ui: a rounded corner is covered in part, its middle whole",
                       pixels[10 * 320 + 10] >> 24 < 64 && pixels[30 * 320 + 60] >> 24 == 255 && pixels[10 * 320 + 60] >> 24 == 255);
+
+                // What a command said, as a card: its lines kept, and cut to the window's width.
+                {
+                        static const char said[] = "\x1b[1m[Moonwater]\x1b[0m Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz   \n\n\n";
+                        static const char wide[] = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+                                                   "seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four\n";
+                        int room;
+                        b32 within = true;
+
+                        settings.ui = ui;
+                        settings.width = 300;
+                        settings.height = 200;
+                        settings.view = false;
+                        memory_copy(settings_large->said, said, sizeof(said) - 1);
+                        settings.said_length = sizeof(said) - 1;
+                        settings_card_fill();
+                        check("settings: a card keeps the lines, without the label or the escapes or the blanks that end them",
+                              settings.card_length == sizeof("Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz") - 1 &&
+                                  !memory_compare(settings_large->card, "Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz",
+                                                  settings.card_length));
+                        memory_copy(settings_large->said, wide, sizeof(wide) - 1);
+                        settings.said_length = sizeof(wide) - 1;
+                        settings_card_fill();
+                        settings_wrap();
+                        room = settings.width - 2 * settings_px(UI_PAD) - 2 * settings_px(14);
+                        for (int at = 0; at < settings.card_lines; at++)
+                                within &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
+                        check("settings: a line wider than the window is cut into more, each within it", settings.card_lines >= 3 && within);
+                        settings_card_open("moonwater status");
+                        settings_press(SETTINGS_KEY_DOWN);
+                        check("settings: a card is scrolled by the keys", settings.view && settings.card_scroll > 0);
+                        check("settings: Escape on it goes back to the list, and keeps the window",
+                              settings_press(SETTINGS_KEY_ESCAPE) && !settings.view);
+                        settings.card_scroll = 0;
+                }
                 compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
         }
 }

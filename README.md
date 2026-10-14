@@ -76,6 +76,12 @@ it changes it and needs root, and a word it does not take is a usage page
 (`bowl profile desktop` installs KDE), and `main.moonwater.sh` is the machine
 script that sets a machine up at boot.
 
+`moonwater settings` opens the same command as a window on the desktop: a row to
+each setting a person flips (name, keyboard, how Canvas is drawn, time, network,
+power, boot), and under All commands a row to every line of `moonwater help`, so
+no verb is out of its reach. Typing filters the rows; a command that ends the
+session or throws away what is kept is run by a second Enter.
+
 ## Layout
 
 | | |

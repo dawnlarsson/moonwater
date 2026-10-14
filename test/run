@@ -20822,6 +20822,25 @@ out.append(("S1.5 its name row changed by the keys is the command's name, and ba
             "%s %s" % ("changed" if renamed else "not changed", "back" if back else shell.run("moonwater name", 10)[0]),
             "changed back"))
 said("S1.5")
+#   Under All commands the window has a row to what `moonwater help` says, and the first runs any command. A word
+#   typed with no field open filters the rows, Enter on what is left opens its field, the words typed in it are the
+#   command, and Escape clears the filter before it would close the window.
+time.sleep(2)
+type_text("anything")
+key("ret")
+type_text("name lane-any")
+key("ret")
+anyname, _ = until(lambda: shell.run("moonwater name", 10)[0].strip() == "lane-any", 15)
+key("ret")
+type_text("name " + had_name)
+key("ret")
+anyback, _ = until(lambda: shell.run("moonwater name", 10)[0].strip() == had_name, 15)
+key("esc")
+time.sleep(1)
+out.append(("S1.5b the filter and the any row run a command typed in the window, and Escape clears the filter and keeps the window",
+            "%s %s %d" % ("ran" if anyname else "not run", "back" if anyback else shell.run("moonwater name", 10)[0],
+                          len(pids("settings"))), "ran back 1"))
+said("S1.5b")
 shell.run("moonwater settings", 15)
 time.sleep(2)
 out.append(("S1.6 a second moonwater settings lifts the window that is up and makes no other",
