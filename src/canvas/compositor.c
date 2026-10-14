@@ -3985,13 +3985,23 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         compositor still draws round it. A card with no overlay, or one that
         refuses, has the window composed as any other.
 */
+// The card's first picture is drawn before the compositor has made its window table, so what the table is to say of that
+// present has nowhere to go yet.
+static unsigned int compositor_unscanned_spare;
+
+static void compositor_unscanned(unsigned int why)
+{
+        if (compositor.table)
+                compositor.table->unscanned = why;
+}
+
 static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned char *rows,
                                       unsigned int windows, int rect[4])
 {
         struct compositor_frame band;
         int row, bx, by, side, radius, top, bottom;
 
-        unsigned int *why = &compositor.table->unscanned;
+        unsigned int *why = compositor.table ? &compositor.table->unscanned : &compositor_unscanned_spare;
 
         if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd)
                 return *why = compositor.card < 0 ? 1 : compositor.direct_refused ? 11 : 2, -1;
@@ -4081,10 +4091,13 @@ static void compositor_present(void)
         if (!compositor.damages)
                 return;
 
-        // What moonwater debug says of the card.
-        memory_copy(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver));
-        compositor.table->pointer_plane = !compositor.cursor.soft;
-        compositor.table->overlay = compositor.overlay_state;
+        // What moonwater debug says of the card, once there is a table to say it in.
+        if (compositor.table)
+        {
+                memory_copy(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver));
+                compositor.table->pointer_plane = !compositor.cursor.soft;
+                compositor.table->overlay = compositor.overlay_state;
+        }
 
         for (unsigned int at = 0; at < compositor.stacked; at++)
                 if (compositor_visible(compositor.stack[at]))
@@ -4141,7 +4154,7 @@ static void compositor_present(void)
              compositor_present_direct(direct, frames + windows, count - windows)))
         {
                 // The overlay is the tabs' now, or nothing's.
-                compositor.table->unscanned = 0;
+                compositor_unscanned(0);
                 compositor.plane_row = -1;
                 compositor.plane_fb = 0;
                 return;
@@ -4188,7 +4201,7 @@ static void compositor_present(void)
                 if (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed))
                 {
                         // Refused: off the overlay for good, and the window composed whole from now.
-                        compositor.table->unscanned = 12;
+                        compositor_unscanned(12);
                         compositor.overlay_state = -1;
                         compositor_overlay_off();
                         compositor.plane_row = compositor.direct_row = -1;
@@ -4197,7 +4210,7 @@ static void compositor_present(void)
                 else
                 {
                         compositor.plane_fb = fb;
-                        compositor.table->unscanned = 0;
+                        compositor_unscanned(0);
                         compositor.plane_row = compositor.direct_row = plane;
                         compositor.direct_buffer = which;
                         memory_copy(compositor.plane_rect, planed, sizeof(planed));
