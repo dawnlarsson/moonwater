@@ -1015,14 +1015,16 @@ static b32 settings_lift_other(void)
 
 static b32 settings_fonts(string_address regular, string_address bold)
 {
-        static p8 atlas[512 * 512];
+        //      The engine and its atlas are one mapping, made here: a static atlas is 256 KiB of the image's
+        //      address space in every program that links this, a shell under a 12 MiB cap among them.
         positive size = 0, bytes = regular ? compositor_map_file(regular, &size) : 0;
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        positive atlas_at = (sizeof(font_engine) + 4095) & ~(positive)4095;
+        long engine = compositor_call(syscall(mmap), 0, atlas_at + 512 * 512, 3, 0x22, (positive)-1, 0);
 
         if (!bytes || (engine < 0 && engine > -4096) || font_load(&settings.face[0], (const p8 address_to)bytes, size, 0) != 0)
                 return false;
         settings.ui.engine = (font_engine address_to)engine;
-        font_start(settings.ui.engine, atlas, 512, 512);
+        font_start(settings.ui.engine, (p8 address_to)(engine + atlas_at), 512, 512);
         settings.ui.regular = &settings.face[0];
         settings.ui.bold = null;
 

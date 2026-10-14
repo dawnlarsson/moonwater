@@ -304,12 +304,25 @@ static void compositor_panel_tab(const struct compositor_target *t, int slot, un
 // COMPOSITOR_RADIUS_MOST, 89440 bytes, of which only the first few pages are ever written (a window's radius is
 // eight to its scale, four times at most).
 #define COMPOSITOR_MASKS_BYTES 89440
-static unsigned char compositor_corner_masks[COMPOSITOR_MASKS_BYTES];
+// Mapped when the first is wanted, not kept in the image: the address space of every program that links this is
+// the image's, and a shell under a 12 MiB cap has none to spare.
+static unsigned char *compositor_corner_masks;
 static unsigned char compositor_corner_made[COMPOSITOR_RADIUS_MOST + 1];
+static unsigned char compositor_corner_none[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
 
 static const unsigned char *compositor_corner_mask(int radius)
 {
-        unsigned char *mask = compositor_corner_masks + (unsigned long)(radius - 1) * radius * (2 * radius - 1) / 6;
+        unsigned char *mask;
+
+        if (!compositor_corner_masks)
+        {
+                long got = (long)system_call_6(syscall(mmap), 0, COMPOSITOR_MASKS_BYTES, 3, 0x22, (positive)-1, 0);
+
+                if (got < 0 && got > -4096)
+                        return compositor_corner_none;
+                compositor_corner_masks = (unsigned char *)got;
+        }
+        mask = compositor_corner_masks + (unsigned long)(radius - 1) * radius * (2 * radius - 1) / 6;
 
         if (!compositor_corner_made[radius])
         {
@@ -5552,8 +5565,8 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
         {
                 positive size = 0;
                 positive bytes = compositor_map_file(font, address_of size);
-                long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
-                static p8 atlas[256 * 256];
+                positive atlas_at = (sizeof(font_engine) + 4095) & ~(positive)4095;
+                long engine = compositor_call(syscall(mmap), 0, atlas_at + 256 * 256, 3, 0x22, (positive)-1, 0);
                 font_face face;
                 const font_face address_to faces[1] = {&face};
                 font_target target = {pixels, table->stride, (b32)width, (b32)height};
@@ -5561,7 +5574,7 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
 
                 if (bytes && !(engine < 0 && engine > -4096) && font_load(&face, (const p8 address_to)bytes, size, 0) == 0)
                 {
-                        font_start((font_engine address_to)engine, atlas, 256, 256);
+                        font_start((font_engine address_to)engine, (p8 address_to)(engine + atlas_at), 256, 256);
                         string_format(log, "surface: text drawn %b px wide\n",
                                       (bipolar)(font_draw((font_engine address_to)engine, faces, 1,
                                                           (const p8 address_to)text, string_length(text), em, 0,
