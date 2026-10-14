@@ -1773,6 +1773,19 @@ static struct
                 kept there with what they covered (under, a buffer's worth of the band each, patched when it is).
         */
         int table_memfd, table_giver, udmabuf, direct_row, direct_refused, flip_pending, flip_row;
+        /*
+                The tabs over a window shown straight, on an overlay plane where the card has one
+                (compositor_overlay_ready: overlay_state 0 not yet asked, 1 found, -1 none or refused): the
+                primary plane and the overlay with their property ids, two buffers of the card's the band is
+                composed into (overlay_back the one drawn next, overlay_rows how many rows each holds), and
+                overlay_on with overlay_rect, what the card shows of it. crtc_index is the crtc's place in the
+                card's list, which a plane's possible crtcs are a mask of.
+        */
+        int overlay_state, overlay_on, overlay_rect[4];
+        unsigned int crtc_index, primary, overlay, primary_props[11], overlay_props[11];
+        unsigned int overlay_fb[2], overlay_handle[2], overlay_back, overlay_rows;
+        unsigned int *overlay_pixels[2];
+        unsigned long overlay_pitch, overlay_bytes; // pitch in words
         unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, direct_buffer, flip_buffer;
         unsigned int taken_held[WINDOWS], held_rows, dropping, patched[WINDOWS][2];
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
@@ -3487,6 +3500,344 @@ static int compositor_changed_ready(void)
         return 1;
 }
 
+/*
+        The tabs over a window shown straight, on a plane of their own where
+        the card has an overlay: the band's rectangle composed (the window
+        under it, the glass, the tabs) into a buffer of the card's, and the
+        window's buffer and that one given to the card in one atomic commit,
+        which does not wait for the vertical blank and whose completion is the
+        flip's event. The window's buffer is then never written: nothing it
+        drew is spoiled and nothing is kept to put back. A card with no
+        overlay that takes XRGB8888 on this crtc, or one that refuses the
+        commit, has the tabs patched in as above.
+*/
+#define COMPOSITOR_SET_CLIENT_CAP 0x4010640du
+#define COMPOSITOR_GETPLANERESOURCES COMPOSITOR_DRM(0xb5u, 16u)
+#define COMPOSITOR_GETPLANE COMPOSITOR_DRM(0xb6u, 32u)
+#define COMPOSITOR_SETPLANE COMPOSITOR_DRM(0xb7u, 48u)
+#define COMPOSITOR_GETPROPERTY COMPOSITOR_DRM(0xaau, 64u)
+#define COMPOSITOR_OBJ_GETPROPERTIES COMPOSITOR_DRM(0xb9u, 32u)
+#define COMPOSITOR_ATOMIC COMPOSITOR_DRM(0xbcu, 56u)
+#define COMPOSITOR_OBJECT_PLANE 0xeeeeeeeeu
+#define COMPOSITOR_ATOMIC_NONBLOCK 0x0200u
+
+enum
+{
+        COMPOSITOR_PLANE_FB,
+        COMPOSITOR_PLANE_CRTC,
+        COMPOSITOR_PLANE_SRC_X,
+        COMPOSITOR_PLANE_SRC_Y,
+        COMPOSITOR_PLANE_SRC_W,
+        COMPOSITOR_PLANE_SRC_H,
+        COMPOSITOR_PLANE_CRTC_X,
+        COMPOSITOR_PLANE_CRTC_Y,
+        COMPOSITOR_PLANE_CRTC_W,
+        COMPOSITOR_PLANE_CRTC_H,
+        COMPOSITOR_PLANE_TYPE,
+        COMPOSITOR_PLANE_PROPS
+};
+
+// A plane's property ids by name and the value of its type (0 overlay, 1 primary, 2 cursor); false when one is missing.
+static int compositor_plane_props(unsigned int plane, unsigned int props[COMPOSITOR_PLANE_PROPS], unsigned long *type)
+{
+        static const char *const names[COMPOSITOR_PLANE_PROPS] = {"FB_ID",  "CRTC_ID", "SRC_X",  "SRC_Y",
+                                                                   "SRC_W",  "SRC_H",   "CRTC_X", "CRTC_Y",
+                                                                   "CRTC_W", "CRTC_H",  "type"};
+        unsigned int ids[64];
+        unsigned long values[64];
+        struct
+        {
+                unsigned long props, values;
+                unsigned int count, object, type;
+        } got = {(unsigned long)ids, (unsigned long)values, 64, plane, COMPOSITOR_OBJECT_PLANE};
+
+        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+                return 0;
+        memory_zero(props, sizeof(unsigned int) * COMPOSITOR_PLANE_PROPS);
+        for (unsigned int at = 0; at < got.count; at++)
+        {
+                struct
+                {
+                        unsigned long values, enums;
+                        unsigned int id, flags;
+                        char name[32];
+                        unsigned int count_values, count_enums;
+                } property = {0, 0, ids[at], 0, {0}, 0, 0};
+
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
+                        continue;
+                for (unsigned int name = 0; name < COMPOSITOR_PLANE_PROPS; name++)
+                {
+                        unsigned int same = 0;
+
+                        while (names[name][same] && names[name][same] == property.name[same])
+                                same++;
+                        if (names[name][same] || property.name[same])
+                                continue;
+                        props[name] = ids[at];
+                        if (name == COMPOSITOR_PLANE_TYPE)
+                                *type = values[at];
+                }
+        }
+        for (unsigned int name = 0; name < COMPOSITOR_PLANE_PROPS; name++)
+                if (!props[name])
+                        return 0;
+        return 1;
+}
+
+// The primary plane of this crtc and an overlay that takes XRGB8888 on it, found once; false when the card has none.
+static int compositor_overlay_ready(void)
+{
+        unsigned int planes[32];
+        struct
+        {
+                unsigned long ids;
+                unsigned int count, pad;
+        } resources = {(unsigned long)planes, 32, 0};
+        unsigned long cap[2] = {3, 1}; // DRM_CLIENT_CAP_ATOMIC, which brings every plane with it
+
+        if (compositor.overlay_state)
+                return compositor.overlay_state > 0;
+        compositor.overlay_state = -1;
+        if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
+            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 32)
+                return 0;
+
+        for (unsigned int at = 0; at < resources.count; at++)
+        {
+                unsigned int formats[64], props[COMPOSITOR_PLANE_PROPS], takes = 0;
+                unsigned long type = 3;
+                struct
+                {
+                        unsigned int id, crtc, fb, possible, gamma, count;
+                        unsigned long formats;
+                } plane = {planes[at], 0, 0, 0, 0, 64, (unsigned long)formats};
+
+                if (system_control(compositor.card, COMPOSITOR_GETPLANE, address_of plane) != 0 || plane.count > 64 ||
+                    !(plane.possible & 1u << compositor.crtc_index) || !compositor_plane_props(planes[at], props, &type))
+                        continue;
+                for (unsigned int format = 0; format < plane.count; format++)
+                        takes |= formats[format] == COMPOSITOR_XRGB8888;
+                if (type == 1 && (!compositor.primary || plane.crtc == compositor.crtc))
+                {
+                        compositor.primary = planes[at];
+                        memory_copy(compositor.primary_props, props, sizeof(props));
+                }
+                else if (type == 0 && takes && !compositor.overlay)
+                {
+                        compositor.overlay = planes[at];
+                        memory_copy(compositor.overlay_props, props, sizeof(props));
+                }
+        }
+        if (!compositor.primary || !compositor.overlay)
+                return 0;
+        compositor.overlay_state = 1;
+        return 1;
+}
+
+// The overlay's two buffers, rows of the output's width each, made again when the band wants more rows.
+static int compositor_overlay_buffers(unsigned int rows)
+{
+        if (rows <= compositor.overlay_rows)
+                return 1;
+        for (unsigned int which = 0; which < 2; which++)
+                if (compositor.overlay_fb[which])
+                {
+                        unsigned int close[2] = {compositor.overlay_handle[which], 0};
+
+                        compositor_call(syscall(munmap), (positive)compositor.overlay_pixels[which], compositor.overlay_bytes, 0, 0, 0, 0);
+                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor.overlay_fb[which]);
+                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                        compositor.overlay_fb[which] = 0;
+                }
+        compositor.overlay_rows = 0;
+        rows = (rows + 63) & ~63u;
+        for (unsigned int which = 0; which < 2; which++)
+        {
+                struct compositor_dumb dumb = {rows, (unsigned int)compositor.width, 32, 0, 0, 0, 0};
+                struct compositor_map_dumb map = {0};
+                struct compositor_fb2 fb = {0};
+                long mapped;
+
+                if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
+                        return 0;
+                fb.width = dumb.width;
+                fb.height = dumb.height;
+                fb.format = COMPOSITOR_XRGB8888;
+                fb.handles[0] = map.handle = dumb.handle;
+                fb.pitches[0] = dumb.pitch;
+                if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0 ||
+                    system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
+                        return 0;
+                mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1, (positive)compositor.card, map.offset);
+                if (mapped < 0 && mapped > -4096)
+                        return 0;
+                compositor.overlay_fb[which] = fb.fb_id;
+                compositor.overlay_handle[which] = dumb.handle;
+                compositor.overlay_pixels[which] = (unsigned int *)mapped;
+                compositor.overlay_pitch = dumb.pitch / 4;
+                compositor.overlay_bytes = dumb.size;
+        }
+        compositor.overlay_rows = rows;
+        return 1;
+}
+
+/*
+        One commit: fb on the primary plane and, where overlay says, the
+        overlay's buffer which at rect, or the overlay off (rect none). It
+        does not wait, and its event is the flip's; false when the card
+        refuses it.
+*/
+static int compositor_atomic(unsigned int fb, int row, unsigned int which, int overlay, const int *rect, unsigned int buffer)
+{
+        unsigned int objects[2] = {compositor.primary, compositor.overlay}, counts[2] = {1, 0}, props[12];
+        unsigned long values[12];
+        unsigned int n = 0;
+
+        props[n] = compositor.primary_props[COMPOSITOR_PLANE_FB], values[n++] = fb;
+        if (overlay)
+        {
+                const unsigned int *id = compositor.overlay_props;
+                unsigned long width = rect ? (unsigned long)(rect[2] - rect[0]) : 0;
+                unsigned long height = rect ? (unsigned long)(rect[3] - rect[1]) : 0;
+
+                props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = rect ? compositor.overlay_fb[buffer] : 0;
+                props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = rect ? compositor.crtc : 0;
+                if (rect)
+                {
+                        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)rect[0] << 16;
+                        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = 0;
+                        props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = width << 16;
+                        props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = height << 16;
+                        props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)rect[0];
+                        props[n] = id[COMPOSITOR_PLANE_CRTC_Y], values[n++] = (unsigned long)rect[1];
+                        props[n] = id[COMPOSITOR_PLANE_CRTC_W], values[n++] = width;
+                        props[n] = id[COMPOSITOR_PLANE_CRTC_H], values[n++] = height;
+                }
+                counts[1] = n - 1;
+        }
+
+        struct
+        {
+                unsigned int flags, count;
+                unsigned long objects, counts, props, values, reserved, user_data;
+        } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, overlay ? 2u : 1u, (unsigned long)objects,
+                    (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
+
+        if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
+                return 0;
+        compositor.flip_pending = 1;
+        compositor.flip_row = row;
+        compositor.flip_buffer = which;
+        compositor.on_screen = fb;
+        if (overlay)
+        {
+                compositor.overlay_on = rect != 0;
+                if (rect)
+                        memory_copy(compositor.overlay_rect, rect, sizeof(compositor.overlay_rect));
+        }
+        return 1;
+}
+
+// The overlay off where it is on and the commits that would take it off are refused: the plane set to nothing.
+static void compositor_overlay_off(void)
+{
+        unsigned int off[12] = {compositor.overlay, compositor.crtc};
+
+        if (!compositor.overlay_on)
+                return;
+        system_control(compositor.card, COMPOSITOR_SETPLANE, address_of off);
+        compositor.overlay_on = 0;
+}
+
+// The rectangle the tabs cover, on the output; false when they cover none of it.
+static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned int count, int rect[4])
+{
+        rect[0] = compositor.width, rect[1] = compositor.height, rect[2] = rect[3] = 0;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int x, y, width, height;
+
+                compositor_outline(&tabs[at], &x, &y, &width, &height);
+                rect[0] = x < rect[0] ? x : rect[0];
+                rect[1] = y < rect[1] ? y : rect[1];
+                rect[2] = x + width > rect[2] ? x + width : rect[2];
+                rect[3] = y + height > rect[3] ? y + height : rect[3];
+        }
+        rect[0] = rect[0] < 0 ? 0 : rect[0];
+        rect[1] = rect[1] < 0 ? 0 : rect[1];
+        rect[2] = rect[2] > compositor.width ? compositor.width : rect[2];
+        rect[3] = rect[3] > compositor.height ? compositor.height : rect[3];
+        return rect[2] > rect[0] && rect[3] > rect[1];
+}
+
+// The frame of a window shown straight with the tabs on the overlay: false when the card will not, and the tabs are
+// then patched in.
+static b32 compositor_present_overlaid(int row, const struct compositor_frame *frames, unsigned int count, unsigned int windows)
+{
+        unsigned int which = compositor.front[row], fb = compositor_window_fb(row, which), buffer = compositor.overlay_back;
+        int rect[4], shown = compositor_tabs_rect(frames + windows, count - windows, rect), drawn = 0;
+        unsigned short clip[COMPOSITOR_DAMAGE][4];
+        struct compositor_dirty dirty = {fb, 0, 0, 0, (unsigned long)clip};
+
+        if (!fb)
+                return 0;
+        // The card is still on its way to the last commit: this frame is made once it is there.
+        if (compositor.flip_pending)
+                return 1;
+
+        if (shown)
+        {
+                drawn = !compositor.overlay_on || memory_compare(compositor.overlay_rect, rect, sizeof(rect)) != 0;
+                for (unsigned int at = 0; at < compositor.damages && !drawn; at++)
+                {
+                        int meet[4];
+
+                        memory_copy(meet, compositor.damage[at], sizeof(meet));
+                        compositor_meet(meet, rect);
+                        drawn = meet[2] > meet[0] && meet[3] > meet[1];
+                }
+                if (drawn)
+                {
+                        struct compositor_target target = {compositor.overlay_pixels[buffer], 0, compositor.width,
+                                                           compositor.height, rect[0], rect[1], rect[2], rect[3], 0, rect[1], 0};
+                        int rows[2];
+
+                        if (!compositor_overlay_buffers((unsigned int)(rect[3] - rect[1])))
+                        {
+                                compositor.overlay_state = -1;
+                                return 0;
+                        }
+                        target.pixels = compositor.overlay_pixels[buffer];
+                        target.pitch = compositor.overlay_pitch;
+                        compositor_scene_banded(&target, frames, count, 0, rows);
+                }
+        }
+        if (fb != compositor.on_screen || drawn || (!shown && compositor.overlay_on))
+        {
+                if (!compositor_atomic(fb, row, which, drawn || !shown, shown ? rect : 0, buffer))
+                {
+                        compositor.overlay_state = -1;
+                        compositor_overlay_off();
+                        return 0;
+                }
+                if (drawn)
+                        compositor.overlay_back ^= 1;
+        }
+        compositor.direct_row = row;
+        compositor.direct_buffer = which;
+        compositor.table->scanned++;
+
+        for (unsigned int at = 0; at < compositor.damages; at++)
+                for (unsigned int side = 0; side < 4; side++)
+                        clip[at][side] = (unsigned short)compositor.damage[at][side];
+        dirty.clip_count = compositor.damages;
+        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+        compositor.damages = 0;
+        compositor.screen_stale = 1;
+        return 1;
+}
+
 static void compositor_present(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -3547,7 +3898,9 @@ static void compositor_present(void)
         // A window that fills the output alone is shown straight from its buffer, and nothing is composed.
         int direct = compositor_direct_candidate(frames, rows, windows);
 
-        if (direct >= 0 && compositor_present_direct(direct, frames + windows, count - windows))
+        if (direct >= 0 &&
+            ((compositor_overlay_ready() && compositor_present_overlaid(direct, frames, count, windows)) ||
+             compositor_present_direct(direct, frames + windows, count - windows)))
                 return;
 
         // Not now: the compositor's own screen is shown again, drawn whole, once the card has finished a flip.
@@ -3605,7 +3958,9 @@ static void compositor_present(void)
         compositor.damages = 0;
 
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
-        if (back && !compositor_flip(compositor.fb, -1, 0))
+        if (back && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
+                compositor_overlay_off();
+        if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
                 struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
                                               0, 0, 0, 1, compositor.mode};
@@ -3711,6 +4066,9 @@ static b32 compositor_card_open(void)
         compositor.width = mode.hdisplay;
         compositor.height = mode.vdisplay;
         compositor.crtc = crtc;
+        for (unsigned int at = 0; at < resources.crtc_count; at++)
+                if (crtcs[at] == crtc)
+                        compositor.crtc_index = at;
         compositor.mode = mode;
         compositor.connector = connector;
         compositor.period = 1000000000ull / (mode.vrefresh >= 24 && mode.vrefresh <= 1000 ? mode.vrefresh : 60);
