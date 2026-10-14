@@ -1686,9 +1686,9 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
 #define FONT_BAR_WHOLE (FONT_ONE / 2)
 
 static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 widest,
-                         const b64 address_to fixed, p32 fixes, b64 whole_from)
+                         const b64 address_to fixed, p32 fixes, b64 whole_from, b64 across)
 {
-        if (normal <= 0 || normal >= (b64)e->snap_widest * (FONT_ONE / 64))
+        if (normal <= 0 || normal >= (b64)e->snap_widest * (FONT_ONE / 64) * across)
                 return;
 
         font_run run[2 * FONT_STEMS];
@@ -1872,13 +1872,17 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
 
 //      Vertical stems, for a cell's whole-pixel pen. heavier is what a
 //      synthetic bold added to every stem, so the standard grows with it.
-static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier)
+//      across is how many columns a pixel the outline is in: 3 in the
+//      screen's subpixels, where a stem snaps to whole subpixels and so
+//      keeps its weight to a sixth of a pixel.
+static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier,
+                    b64 across)
 {
         b64 scale = (b64)size * (FONT_ONE / 64);
-        b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
+        b64 normal = (font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier) * across;
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
-        font_snap_axis(e, normal, x_height / FONT_ROUND_RUN, scale / 4, null, 0, FONT_ONE * 3 / 4);
+        font_snap_axis(e, normal, x_height / FONT_ROUND_RUN, scale * across / 4, null, 0, FONT_ONE * 3 / 4, across);
 }
 
 //      And a bar's edge the same: the tops and bottoms of o, e, a, s, g, 3
@@ -1897,7 +1901,7 @@ static fn font_bars(font_engine address_to e, const font_face address_to face, p
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
         font_swap_axes(e);
-        font_snap_axis(e, normal, x_height / FONT_ROUND_BAR, scale / 4, fixed, fixes, FONT_BAR_WHOLE);
+        font_snap_axis(e, normal, x_height / FONT_ROUND_BAR, scale / 4, fixed, fixes, FONT_BAR_WHOLE, 1);
         font_swap_axes(e);
 }
 
@@ -3091,25 +3095,32 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         //      Stems under three quarters of a pixel (Plex Mono at 8 and 9 px) are thickened across to a whole
         //      pixel and snapped whole: grown in both directions the bars and the lines would move, and snapped
         //      whole at their own width the diagonal between two black stems, N's, faded to nothing.
+        //      In the screen's subpixels the outline is three columns a pixel,
+        //      its bars fitted first (they are rows, which the subpixels do
+        //      not divide) and its stems then snapped to whole subpixels: a
+        //      stem keeps its weight to a sixth of a pixel, where whole pixels
+        //      made Plex Mono's 0.7 px stems a pixel at 9 px and set an edge
+        //      of colour on either side of every one. No stem is thin there.
+        b64 across = style & 32 ? 3 : 1;
+        if (fixes && zones[3] && across == 3)
+                font_bars(e, face, size, zones[3], lines, fixes, heavier);
+        if (across == 3)
+                for (p32 i = 0; i < e->point_count; i++)
+                        e->points[i].x *= 3;
         b64 thin = 0;
         if (standard && !(style & 8))
         {
                 b64 normal = font_divide((b64)standard * size * (FONT_ONE / 64), (b64)face->units << FONT_EXACT) + heavier;
 
-                thin = normal >= FONT_ONE / 2 && normal < FONT_ONE * 3 / 4 && FONT_THIN_TO > normal ? FONT_THIN_TO - normal : 0;
+                thin = across == 1 && normal >= FONT_ONE / 2 && normal < FONT_ONE * 3 / 4 && FONT_THIN_TO > normal
+                           ? FONT_THIN_TO - normal
+                           : 0;
                 if (thin > 0)
                         font_embolden(e, (f32)thin, true);
-                font_snap(e, face, size, standard, heavier + thin);
+                font_snap(e, face, size, standard, heavier + thin, across);
         }
-        if (fixes && zones[3])
+        if (fixes && zones[3] && across == 1)
                 font_bars(e, face, size, zones[3], lines, fixes, heavier);
-
-        //      In the screen's subpixels: three columns a pixel, fitted as
-        //      pixels first, so a stem snapped whole is three subpixels on
-        //      the pixel's own.
-        if (style & 32)
-                for (p32 i = 0; i < e->point_count; i++)
-                        e->points[i].x *= 3;
 
         b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
         for (p32 i = 0; i < e->point_count; i++)
