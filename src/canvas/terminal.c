@@ -519,8 +519,9 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
         cells with glyphs on one pair of colours and one face are one
         font_cells, which lays their coverage side by side and makes it
         pixels in one pass, rows as wide as the run; a cell with a line under
-        or through it, or a wide one, is its own font_cell. A run of blanks
-        on one ground is one fill.
+        or through it, or a wide one, is its own font_cell. A blank between
+        two glyphs of a run, on its ground, is a cell of the run; a run of
+        blanks anywhere else on one ground is one fill.
 */
 /*
         What draws a band of rows: a font engine and the run of codes it lays.
@@ -566,15 +567,22 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
         b32 glyphs_heavy = 0;
         p32 glyphs_flags = 0;
 
+// The run, less the blanks it ends with, which are a fill: a line's trailing blanks would otherwise be
+// made pixels a coverage byte at a time.
 #define TERMINAL_GLYPHS()                                                                              \
         do                                                                                             \
         {                                                                                              \
-                if (glyphs)                                                                            \
+                unsigned int trail = 0;                                                                \
+                while (trail < glyphs && painter->codes[glyphs - 1 - trail] == ' ')                    \
+                        trail++;                                                                       \
+                if (glyphs > trail)                                                                    \
                         font_cells(painter->engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
                                    glyphs_heavy ? terminal.bold_count : terminal.plain_count,          \
-                                   painter->codes, glyphs, &terminal.grid, terminal.size, glyphs_flags,\
-                                   &target,                                                            \
-                                   (b32)(glyphs_from * terminal.cell_w), y, glyphs_ink, glyphs_paper); \
+                                   painter->codes, glyphs - trail, &terminal.grid, terminal.size,      \
+                                   glyphs_flags, &target, (b32)(glyphs_from * terminal.cell_w), y,     \
+                                   glyphs_ink, glyphs_paper);                                          \
+                if (trail)                                                                             \
+                        terminal_blanks(pixels, glyphs_from + glyphs - trail, trail, y, glyphs_paper); \
                 glyphs = 0;                                                                            \
         } while (0)
 
@@ -623,6 +631,15 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                                 glyphs_flags = style;
                         }
                         painter->codes[glyphs++] = cell->character;
+                        continue;
+                }
+                // A blank between glyphs on the run's ground is a cell of the run: a space no
+                // longer ends it, so a line of words in one colour is one font_cells and not one
+                // a word, each with its own setup and its own narrow rows to make pixels.
+                if (glyphs && cells == 1 && !glyph && !decor && paper == glyphs_paper && glyphs_from + glyphs == at &&
+                    glyphs < FONT_RUN)
+                {
+                        painter->codes[glyphs++] = ' ';
                         continue;
                 }
                 TERMINAL_GLYPHS();
