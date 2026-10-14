@@ -5990,14 +5990,10 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         return 1;
 }
 
-static p64 tar_identity(file_facts address_to facts)
-{
-        return ((p64)facts->device_major << 32) | facts->device_minor;
-}
-
 static positive tar_seen_hash(file_facts address_to facts)
 {
-        p64 mix = facts->inode * 0x9e3779b97f4a7c15ull ^ tar_identity(facts);
+        p64 mix = facts->inode * 0x9e3779b97f4a7c15ull ^
+                  file_device_key(facts->device_major, facts->device_minor);
 
         return (positive)(mix ^ (mix >> 29));
 }
@@ -6012,7 +6008,8 @@ static string_address tar_seen_name(file_facts address_to facts)
         while (tar_seen[slot].used)
         {
                 if (tar_seen[slot].inode == facts->inode &&
-                    tar_seen[slot].device == tar_identity(facts))
+                    tar_seen[slot].device ==
+                        file_device_key(facts->device_major, facts->device_minor))
                         return (string_address)(tar_seen_names + tar_seen[slot].name_at);
                 slot = (slot + 1) & (tar_seen_slots - 1);
         }
@@ -6065,7 +6062,8 @@ static fn tar_seen_store(file_facts address_to facts, string_address member)
                 slot = (slot + 1) & (tar_seen_slots - 1);
         tar_seen[slot].used = true;
         tar_seen[slot].inode = facts->inode;
-        tar_seen[slot].device = tar_identity(facts);
+        tar_seen[slot].device =
+            file_device_key(facts->device_major, facts->device_minor);
         tar_seen[slot].name_at = tar_seen_fill;
         memory_copy(tar_seen_names + tar_seen_fill, member, length + 1);
         tar_seen_fill += length + 1;
