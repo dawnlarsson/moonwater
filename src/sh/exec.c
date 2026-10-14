@@ -5774,9 +5774,7 @@ fn history_file_size_changed()
         if (!text || !length)
                 return;
 
-        for (at = 0; at < length; at++)
-                if (text[at] == '\n')
-                        lines++;
+        lines = memory_count(text, length, '\n');
         if (lines <= limit)
                 return;
 

@@ -16403,13 +16403,10 @@ static positive ptx_hash(p8 address_to word, positive length)
 
 static fn ptx_table_build(ptx_table address_to table, byte_span address_to list)
 {
-        positive words = 0;
+        positive words;
 
         table->failed = true;
-        for (positive at = 0; at < list->length; at++)
-                if (list->bytes[at] == '\n')
-                        words++;
-        words++;
+        words = memory_count(list->bytes, list->length, '\n') + 1;
         if (words > ((positive)1 << 40))
                 return;
 
