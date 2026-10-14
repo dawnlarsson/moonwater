@@ -1234,35 +1234,18 @@ static p32 font_fit(font_engine address_to e, const font_face address_to face, p
         //      the descender's bottom and the ascender's top are whole pixels
         //      too, where they took the fractions of the lines next to them,
         //      grey rows under p and q and over b, d, h, k and l.
-        //      And a bar's thickness inside each line: the inner edge of a
-        //      stroke that lies along a line -- the arch of n, the tops of e
-        //      and a, the bottoms of the bowls, the top of O -- lands a whole
-        //      bar from the line. A curve's level run there is a fraction of
-        //      a pixel, too short to be found as a bar (font_bars), and its
-        //      stroke was a row 40 to 70 percent grey under the x-height and
-        //      over the baseline of every round letter at 8 to 14 px.
-        b64 bar = font_divide((b64)zones[3] * scale, (b64)face->units << FONT_EXACT);
-        b64 whole = font_round(bar) < FONT_ONE ? FONT_ONE : font_round(bar);
-        bool inner = bar > 0 && bar < FONT_ONE * 3 / 2 && snapped >= 3 * whole;
-
-        b64 was[11], now[11];
+        b64 was[8], now[8];
         p32 knots = 0;
         if (descender > under + FONT_ONE / 2 && descender > FONT_ONE)
                 was[knots] = -descender, now[knots++] = -font_round(descender);
         if (under > 0)
                 was[knots] = -under, now[knots++] = -font_overshoot(under);
         was[knots] = 0, now[knots++] = 0;
-        if (inner)
-                was[knots] = bar, now[knots++] = whole;
-        if (inner && low - bar > 2 * bar)
-                was[knots] = low - bar, now[knots++] = snapped - whole;
         was[knots] = low, now[knots++] = snapped;
         if (over > 0 && (!high || low + over < high))
                 was[knots] = low + over, now[knots++] = snapped + font_overshoot(over);
         if (high)
         {
-                if (inner && high - bar > was[knots - 1] + bar / 2 && capped - whole > now[knots - 1])
-                        was[knots] = high - bar, now[knots++] = capped - whole;
                 was[knots] = high, now[knots++] = capped;
                 if (cover > 0)
                         was[knots] = high + cover, now[knots++] = capped + font_overshoot(cover);
@@ -1918,18 +1901,43 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
 #define FONT_ROUND_BAR 6
 
 /*
-        Dots: a contour of ink (not a counter) half a pixel to two and a half
-        across either way and no more than twice as long one way as the
-        other -- the dots of . : ; ! ? i and j -- made whole pixels each way
-        and set on the grid about its centre. A dot of 1.2 px fell on two
-        rows and two columns at most places and was a grey blot; code is full
-        of them. Which contours are dots, and their sizes, are taken before the
-        stems are snapped (font_dots_measure), whose map stretches a dot beside
-        a stem (the dot of ! at 10 px went from 1.0 to 2.04 px wide); where
-        each goes is its centre after them, so the dot of i stays over its
-        stem.
+        Dots: a contour of ink (not a counter, and inside no other contour's
+        box) half a pixel to two and a half across either way and no more
+        than twice as long one way as the other -- the dots of . : ; ! ? i
+        and j -- made whole pixels each way and set on the grid about its
+        centre. A dot of 1.2 px fell on two rows and two columns at most
+        places and was a grey blot; code is full of them. Which contours are
+        dots, and their sizes, are taken before the stems are snapped
+        (font_dots_measure), whose map stretches a dot beside a stem (the dot
+        of ! at 10 px went from 1.0 to 2.04 px wide); where each goes is its
+        centre after them, so the dot of i stays over its stem.
 */
 #define FONT_DOTS 16
+
+//      Whether another contour's box holds this one's: the dot of a dotted zero, which whole pixels would set off its
+//      centre (at 10 px it lies between two columns) and the zero would read as a ring.
+static bool font_dot_inside(const font_engine address_to e, p32 contour, b64 left, b64 bottom, b64 right, b64 top)
+{
+        p32 first = 0;
+
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+        {
+                b64 l = (b64)1 << 62, b = l, r = -l, t = -l;
+
+                if (c == contour)
+                        continue;
+                for (p32 i = first; i <= e->contour[c].last; i++)
+                {
+                        l = e->points[i].x < l ? e->points[i].x : l;
+                        r = e->points[i].x > r ? e->points[i].x : r;
+                        b = e->points[i].y < b ? e->points[i].y : b;
+                        t = e->points[i].y > t ? e->points[i].y : t;
+                }
+                if (l <= left && r >= right && b <= bottom && t >= top)
+                        return true;
+        }
+        return false;
+}
 
 static fn font_dots_measure(const font_engine address_to e, b64 address_to sizes)
 {
@@ -1966,7 +1974,8 @@ static fn font_dots_measure(const font_engine address_to e, b64 address_to sizes
 
                 b64 width = right - left, height = top - bottom;
                 if ((area < 0) != (whole < 0) || width < FONT_ONE / 2 || height < FONT_ONE / 2 ||
-                    width > FONT_ONE * 5 / 2 || height > FONT_ONE * 5 / 2 || width > 2 * height || height > 2 * width)
+                    width > FONT_ONE * 5 / 2 || height > FONT_ONE * 5 / 2 || width > 2 * height || height > 2 * width ||
+                    font_dot_inside(e, c, left, bottom, right, top))
                         continue;
                 sizes[2 * c] = font_round(width) < FONT_ONE ? FONT_ONE : font_round(width);
                 sizes[2 * c + 1] = font_round(height) < FONT_ONE ? FONT_ONE : font_round(height);
@@ -3189,10 +3198,7 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                              : pixels >= until ? 0
                              : (b32)e->darken * (until - pixels) / (until - 12);
                 if (amount > 0)
-                        //      Across only where the heights are fitted: grown every
-                        //      way, it put a row of 6 percent ink over the cap
-                        //      height and under the baseline of every glyph.
-                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, (style & 1) != 0);
+                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, false);
         }
         b64 heavier = style & 16 ? (b64)size * (FONT_ONE / 64) / 24 : 0;
         if (heavier)
