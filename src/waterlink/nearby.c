@@ -63,7 +63,6 @@
 */
 #define LINK_GROUP_ONCE 1u
 #define LINK_GROUP_DONE 2u
-#define LINK_CLOCK_BOOT 7
 #define LINK_PAIR_SECONDS 300
 #define LINK_PAIR_GRACE 30
 
@@ -210,7 +209,7 @@ static bipolar link_groups_save(link_groups address_to groups)
 
 static p64 link_boot_seconds(void)
 {
-        return system_clock_ns(LINK_CLOCK_BOOT) / 1000000000ull;
+        return system_clock_ns(CLOCK_BOOTTIME) / 1000000000ull;
 }
 
 //      The check a name carries in a code's record: its CRC-32, which says

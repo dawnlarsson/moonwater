@@ -18158,6 +18158,10 @@ b32 system(string_address command)
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #endif
 
+#ifndef CLOCK_BOOTTIME
+#define CLOCK_BOOTTIME 7
+#endif
+
 #ifndef CLOCK_THREAD_CPUTIME_ID
 #define CLOCK_THREAD_CPUTIME_ID 3
 #endif

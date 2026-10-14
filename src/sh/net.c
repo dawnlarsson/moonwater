@@ -1317,14 +1317,12 @@ typedef struct
    an hour's lease taken before a night asleep still looked half new in the
    morning and the address stayed on the wire after the server had given it
    to somebody else. */
-#define NET_CLOCK_BOOTTIME 7
-
 static positive net_seconds(void)
 {
         timespec stamp = {0, 0};
         positive now = 0;
 
-        if (clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) >= 0 &&
+        if (clock_gettime(CLOCK_BOOTTIME, address_of stamp) >= 0 &&
             stamp.tv_sec >= 0)
                 now = (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
                       (positive)stamp.tv_nsec;

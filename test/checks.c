@@ -99532,7 +99532,7 @@ static positive storage_test_boottime(void)
 {
         timespec stamp = {0, 0};
 
-        return clock_gettime(NET_CLOCK_BOOTTIME, address_of stamp) < 0
+        return clock_gettime(CLOCK_BOOTTIME, address_of stamp) < 0
                    ? 0
                    : (positive)stamp.tv_sec * NETWORK_NANOSECONDS +
                          (positive)stamp.tv_nsec;

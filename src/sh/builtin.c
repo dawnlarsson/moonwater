@@ -4848,9 +4848,6 @@ static COLD bool shell_array_forget_mode(const_string name, positive length,
         does not find it, and only then asks here. A name that is not one of
         these leaves with one length comparison.
 */
-#define SHELL_CLOCK_REALTIME 0
-#define SHELL_CLOCK_MONOTONIC 1
-
 static COLD p64 shell_clock_seconds(positive which, p64 address_to nanoseconds)
 {
         timespec now = {0, 0};
@@ -4904,7 +4901,7 @@ static COLD positive shell_random_next()
                 shell_random_started = true;
                 shell_pid_ensure();
                 shell_random_seed =
-                    (positive)(p32)(shell_clock_seconds(SHELL_CLOCK_REALTIME,
+                    (positive)(p32)(shell_clock_seconds(CLOCK_REALTIME,
                                                         null) *
                                         1103515245 +
                                     (p64)expand_shell_pid);
@@ -4939,15 +4936,15 @@ static COLD fn shell_seconds_begin()
                 return;
 
         shell_seconds_started = true;
-        shell_seconds_origin = shell_clock_seconds(SHELL_CLOCK_MONOTONIC, null);
-        shell_started_seconds = shell_clock_seconds(SHELL_CLOCK_REALTIME, null);
+        shell_seconds_origin = shell_clock_seconds(CLOCK_MONOTONIC, null);
+        shell_started_seconds = shell_clock_seconds(CLOCK_REALTIME, null);
 }
 
 static COLD p64 shell_seconds_now()
 {
         shell_seconds_begin();
 
-        return shell_clock_seconds(SHELL_CLOCK_MONOTONIC, null) -
+        return shell_clock_seconds(CLOCK_MONOTONIC, null) -
                shell_seconds_origin;
 }
 
@@ -5360,7 +5357,7 @@ static COLD string_address shell_dynamic_compute(const_string name, positive len
                 if (shell_bash_compat &&
                     !memory_compare((address_any)text, "BASH_MONOSECONDS", 16))
                         return shell_dynamic_number(
-                            (positive)shell_clock_seconds(SHELL_CLOCK_MONOTONIC,
+                            (positive)shell_clock_seconds(CLOCK_MONOTONIC,
                                                           null),
                             value_length);
                 break;
@@ -5402,7 +5399,7 @@ static COLD string_address shell_dynamic_compute(const_string name, positive len
 
                 if (!memory_compare((address_any)text, "EPOCHSECONDS", 12))
                         return shell_dynamic_number(
-                            (positive)shell_clock_seconds(SHELL_CLOCK_REALTIME,
+                            (positive)shell_clock_seconds(CLOCK_REALTIME,
                                                           null),
                             value_length);
                 break;
@@ -5416,7 +5413,7 @@ static COLD string_address shell_dynamic_compute(const_string name, positive len
                 {
                         p64 nanoseconds = 0;
                         p64 seconds = shell_clock_seconds(
-                            SHELL_CLOCK_REALTIME, address_of nanoseconds);
+                            CLOCK_REALTIME, address_of nanoseconds);
                         positive used = positive_into_string(
                             shell_dynamic_text, (positive)seconds);
 
@@ -5517,7 +5514,7 @@ COLD bool shell_dynamic_assign(const_string name, positive length,
 
                 shell_seconds_started = true;
                 shell_seconds_origin =
-                    shell_clock_seconds(SHELL_CLOCK_MONOTONIC, null) -
+                    shell_clock_seconds(CLOCK_MONOTONIC, null) -
                     (p64)asked;
 
                 return true;
@@ -13813,7 +13810,7 @@ fn printf_one(writer write, string_address format)
 
                         if (when == -1)
                                 when = (bipolar)shell_clock_seconds(
-                                    SHELL_CLOCK_REALTIME, null);
+                                    CLOCK_REALTIME, null);
                         else if (when == -2)
                         {
                                 shell_seconds_begin();
@@ -14335,7 +14332,6 @@ PURE bool read_blank(positive at)
         kept a read -t N waiting forever. So the deadline is fixed once, on
         the monotonic clock, and every wait is for what is left of it.
 */
-#define READ_CLOCK_MONOTONIC 1
 #define READ_TIMEOUT_STATUS 142
 #define READ_WAIT_INTERRUPTED (-4)
 
@@ -14388,7 +14384,7 @@ static bool read_timeout(string_address text, timespec address_to span)
 
 static bool read_deadline(timespec span, timespec address_to deadline)
 {
-        if (system_call_2(syscall(clock_gettime), READ_CLOCK_MONOTONIC,
+        if (system_call_2(syscall(clock_gettime), CLOCK_MONOTONIC,
                           (positive)deadline) < 0)
                 return false;
 
@@ -14449,7 +14445,7 @@ static bipolar read_waited(b32 descriptor, timespec address_to deadline)
                 bipolar ready;
 
                 if (system_call_2(syscall(clock_gettime),
-                                  READ_CLOCK_MONOTONIC,
+                                  CLOCK_MONOTONIC,
                                   (positive)address_of now) < 0)
                         return -1;
 
@@ -26835,7 +26831,7 @@ static fn prompt_quoted(address_any data, positive length)
 static COLD fn prompt_time(writer write, string_address format)
 {
         shell_zone_enter();
-        date_shape(write, shell_clock_seconds(SHELL_CLOCK_REALTIME, null), 0,
+        date_shape(write, shell_clock_seconds(CLOCK_REALTIME, null), 0,
                    format);
         shell_zone_leave();
 }
