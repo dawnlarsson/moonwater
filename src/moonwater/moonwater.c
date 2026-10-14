@@ -1976,7 +1976,7 @@ static long report_bind(struct bind_control __user *out)
 extern string_address address_to shell_argv;
 extern positive shell_argc;
 
-COLD fn shell_dot(writer write, string_address input);
+COLD fn shell_dot(writer write);
 bool exec_function_readonly_set(string_address name);
 bool exec_function_readonly_clear(string_address name);
 positive shell_function_slot(string_address name);
@@ -2502,7 +2502,7 @@ static b32 host_machine_source(void)
         argv[2] = null;
         shell_argv = argv;
         shell_argc = 2;
-        shell_dot(log, HOST_MACHINE_RUNTIME);
+        shell_dot(log);
         shell_argv = saved_argv;
         shell_argc = saved_argc;
 

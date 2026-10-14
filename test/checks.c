@@ -97381,7 +97381,7 @@ static fn enable_name(string_address name, bool off)
         shell_argv[0] = "enable";
         shell_argv[1] = off ? (string_address)"-n" : name;
         shell_argv[2] = name;
-        shell_enable(capture, null);
+        shell_enable(capture);
 }
 
 typedef struct { p16 code; p8 yes, no; p32 value; } audit_filter_instruction;
@@ -97505,7 +97505,7 @@ b32 main(void)
                 shell_argv[0] = "enable";
                 shell_argv[1] = mode == 1 ? "-n" : mode == 2 ? "-p" : "-a";
                 captured_used = 0; captured[0] = 0;
-                shell_enable(capture, null);
+                shell_enable(capture);
                 check("listing selects disabled state", !!string_search(captured, "enable -n complete\n") == (mode == 1 || mode == 3));
                 check("listing selects enabled state", !!string_search(captured, "enable bind\n") == (mode != 1));
         }

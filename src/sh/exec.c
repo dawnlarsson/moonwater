@@ -2579,7 +2579,7 @@ static b32 job_spec_refused(string_address builtin, string_address word,
                          ? word : (string_address) "current");
 }
 
-fn shell_jobs(writer write, string_address input)
+fn shell_jobs(writer write)
 {
         shell_option_walk walk = {1};
         bool detailed = false;
@@ -2589,7 +2589,6 @@ fn shell_jobs(writer write, string_address input)
         bool changed_only = false;
         p8 letter;
 
-        (void)input;
 
         while (shell_option_letter(address_of walk, address_of letter))
                 switch (letter)
@@ -2752,13 +2751,12 @@ fn shell_jobs(writer write, string_address input)
         shell_answer(0);
 }
 
-fn shell_fg(writer write, string_address input)
+fn shell_fg(writer write)
 {
         positive found;
         positive told;
         job_entry address_to entry;
 
-        (void)input;
 
         if (!job_monitor())
         {
@@ -2807,12 +2805,11 @@ fn shell_fg(writer write, string_address input)
         shell_answer(job_wait_foreground(entry->number));
 }
 
-fn shell_bg(writer write, string_address input)
+fn shell_bg(writer write)
 {
         b32 answer = 0;
         positive at = 1;
 
-        (void)input;
 
         return_if(!job_monitor(), shell_answered(1, "%s: no job control\n", "bg"));
 
@@ -2877,7 +2874,7 @@ fn shell_bg(writer write, string_address input)
         `-h` is the exception and keeps the row, because what it asks for is
         not forgetting but an exemption from the hangup a leaving shell sends.
 */
-fn shell_disown(writer write, string_address input)
+fn shell_disown(writer write)
 {
         shell_option_walk walk = {1};
         bool all = false;
@@ -2887,7 +2884,6 @@ fn shell_disown(writer write, string_address input)
         p8 letter;
 
         (void)write;
-        (void)input;
 
         while (shell_option_letter(address_of walk, address_of letter))
                 switch (letter)
@@ -3001,10 +2997,9 @@ fn shell_disown(writer write, string_address input)
         without it there is no other foreground group to hand the terminal to
         and nobody who would ever continue this one.
 */
-fn shell_suspend(writer write, string_address input)
+fn shell_suspend(writer write)
 {
         (void)write;
-        (void)input;
 
         {
                 //      The option walk comes first, because bash refuses a
@@ -3241,7 +3236,7 @@ static bool job_kill_specified()
         return false;
 }
 
-fn shell_kill(writer write, string_address input)
+fn shell_kill(writer write)
 {
         bipolar number = 15;
         positive at = 1;
@@ -3249,7 +3244,6 @@ fn shell_kill(writer write, string_address input)
         bool signalled = false;
 
         (void)write;
-        (void)input;
 
         if (!job_kill_specified())
         {
@@ -3712,7 +3706,7 @@ static b32 job_wait_next(bool force, string_address into, positive first)
         }
 }
 
-fn job_wait(writer write, string_address input)
+fn job_wait(writer write)
 {
         bool next = false;
         bool force = false;
@@ -3906,7 +3900,7 @@ fn job_wait(writer write, string_address input)
                    process is waiting forever. */
                 if (shell_wait_count && !job_count)
                 {
-                        shell_wait(write, input);
+                        shell_wait(write);
                         return;
                 }
 
@@ -5861,13 +5855,12 @@ static bool history_number_word(string_address word, bipolar address_to value)
         return good;
 }
 
-fn shell_history(writer write, string_address input)
+fn shell_history(writer write)
 {
         positive show = history_used;
         positive at = 1;
         string_address path = history_file();
 
-        (void)input;
 
         //      -a, -n, -r and -w each name one thing to do with the file,
         //      and bash will not do two of them at once.
@@ -6464,7 +6457,7 @@ failed:
                              0);
 }
 
-fn shell_fc(writer write, string_address input)
+fn shell_fc(writer write)
 {
         positive count = history_range_count();
         positive at = 1;
@@ -6479,7 +6472,6 @@ fn shell_fc(writer write, string_address input)
         positive first;
         positive last;
 
-        (void)input;
 
         while (at < shell_argc && string_get(shell_argv[at]) == '-' &&
                string_get(shell_argv[at] + 1) &&
@@ -9500,7 +9492,7 @@ PURE bool shell_variable_exported(const_string name, positive length)
         return found < shell_var_count && shell_vars[found].permanent;
 }
 
-fn shell_caller(writer write, string_address input)
+fn shell_caller(writer write)
 {
         positive want = 0;
         bool numbered = shell_argc > 1;
@@ -11988,7 +11980,7 @@ static HOT b32 exec_dispatch(b32 command_word)
                         {
                                 bool tail = shell_tail_command;
 
-                                if (shell_builtin(null, named))
+                                if (shell_builtin(named))
                                         return shell_status;
                                 shell_tail_command = tail;
                         }
@@ -12007,7 +11999,7 @@ static HOT b32 exec_dispatch(b32 command_word)
         {
                 bool tail = shell_tail_command;
 
-                if (shell_builtin(null, named))
+                if (shell_builtin(named))
                         return shell_status;
                 shell_tail_command = tail;
         }

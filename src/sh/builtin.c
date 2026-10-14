@@ -473,8 +473,7 @@ fn history_enabled();
 fn history_size_changed();
 fn history_file_size_changed();
 static fn exec_source_return_trap();
-bool shell_builtin(string_address arguments, positive2 named);
-string_address shell_arguments();
+bool shell_builtin(positive2 named);
 fn shell_execute_command();
 static bipolar shell_spawn_tool_preflighted(
     string_address address_to arguments, b32 output, bool quiet);
@@ -6098,7 +6097,7 @@ bool shell_cd_walk(bool physical, bool address_to say,
         return changed;
 }
 
-COLD fn shell_cd(writer write, string_address input)
+COLD fn shell_cd(writer write)
 {
 
         //      rbash: the working directory is the first thing a restricted
@@ -6396,7 +6395,7 @@ static COLD fn shell_dirstack_listed(writer write, bool full, bool numbered,
                 write("\n", 1);
 }
 
-COLD fn shell_dirs(writer write, string_address input)
+COLD fn shell_dirs(writer write)
 {
         positive index = 1;
         bool full = false;
@@ -6569,7 +6568,7 @@ static COLD bool shell_dirstack_move(string_address where)
                             address_of variables_set, null);
 }
 
-COLD fn shell_pushd(writer write, string_address input)
+COLD fn shell_pushd(writer write)
 {
         positive count;
         string_address address_to list = shell_dirstack_entries(
@@ -6746,7 +6745,7 @@ COLD fn shell_pushd(writer write, string_address input)
         shell_answer(0);
 }
 
-COLD fn shell_popd(writer write, string_address input)
+COLD fn shell_popd(writer write)
 {
         positive count;
         string_address address_to list = shell_dirstack_entries(
@@ -6832,7 +6831,7 @@ COLD fn shell_popd(writer write, string_address input)
         shell_answer(0);
 }
 
-COLD fn shell_clear(writer write, string_address input)
+COLD fn shell_clear(writer write)
 {
         write(str(TERM_CLEAR_SCREEN));
 }
@@ -7009,7 +7008,7 @@ static inline INLINE bool shell_echo_backslash(positive first)
         takes a single exact -n; Bash takes runs of n/e/E options, unless
         POSIX mode together with xpg_echo makes every word an operand.
 */
-HOT fn shell_echo(writer write, string_address input)
+HOT fn shell_echo(writer write)
 {
         positive index = 1;
         bool newline = true;
@@ -7091,7 +7090,7 @@ HOT fn shell_echo(writer write, string_address input)
         dash in front of the name, which is how a login shell is told it is
         one. All three are Bash's and none of them changes what is run.
 */
-COLD fn shell_exec(writer write, string_address input)
+COLD fn shell_exec(writer write)
 {
 
         //      rbash: replacing the shell would replace the restriction
@@ -7256,9 +7255,8 @@ COLD fn shell_exec(writer write, string_address input)
 
 
 #define STORAGE_ADAPTER(name, command)                                      \
-        fn shell_##name(writer output, string_address input)                \
+        fn shell_##name(writer output)                \
         {                                                                   \
-                (void)input;                                                \
                 shell_answer(command(shell_argc, shell_argv, output,        \
                                      log_error));                    \
         }                                                                   \
@@ -7281,14 +7279,13 @@ STORAGE_ADAPTER(findfs, storage_findfs_run)
 //      Whether the last pwd could not find the directory it is in.
 static bool shell_pwd_failed;
 
-COLD fn shell_pwd(writer write, string_address input)
+COLD fn shell_pwd(writer write)
 {
         p8 out_buffer[4096];
         shell_option_walk walk = {1};
         p8 letter;
         bool physical = shell_physical_on();
 
-        (void)input;
 
         while (shell_option_letter(address_of walk, address_of letter))
         {
@@ -7373,7 +7370,7 @@ fn shell_interactive_exit_said()
                 string_format(log_error, "exit\n");
 }
 
-COLD fn shell_exit(writer write, string_address input)
+COLD fn shell_exit(writer write)
 {
         bipolar exit_code = shell_status_entering;
         positive first = 1;
@@ -7453,12 +7450,12 @@ COLD fn shell_exit(writer write, string_address input)
         exit((positive)shell_status & 0xff);
 }
 
-COLD fn shell_logout(writer write, string_address input)
+COLD fn shell_logout(writer write)
 {
         if (!shell_bash_compat || !shell_shopt_on(LOGIN_SHELL))
                 return shell_answered(1, "logout: not login shell: use `exit'\n");
 
-        shell_exit(write, input);
+        shell_exit(write);
 }
 
 
@@ -7515,7 +7512,7 @@ fn shell_stop(writer write, positive command)
         shell_answer(1);
 }
 
-COLD fn shell_reboot(writer write, string_address input)
+COLD fn shell_reboot(writer write)
 {
         if (shell_stop_refused((string_address) "reboot"))
                 return;
@@ -7523,7 +7520,7 @@ COLD fn shell_reboot(writer write, string_address input)
         shell_stop(write, REBOOT_RESTART);
 }
 
-COLD fn shell_poweroff(writer write, string_address input)
+COLD fn shell_poweroff(writer write)
 {
         if (shell_stop_refused((string_address) "poweroff"))
                 return;
@@ -8499,7 +8496,7 @@ static COLD fn shell_shopt_option_said(writer write, string_address name,
                          column, '\t');
 }
 
-COLD fn shell_shopt(writer write, string_address input)
+COLD fn shell_shopt(writer write)
 {
         shell_option_walk walk = {1};
         p8 which;
@@ -8959,7 +8956,7 @@ static PURE bool shell_option_letter_known(p8 letter)
                array_any(option, SHELL_OPTION_NAMES, shell_option_names[option].value == letter);
 }
 
-COLD fn shell_set(writer write, string_address input)
+COLD fn shell_set(writer write)
 {
         positive index = 1;
         bool operands = false;
@@ -9176,7 +9173,7 @@ set_parameters:
         shell_answer(0);
 }
 
-fn shell_shift(writer write, string_address input)
+fn shell_shift(writer write)
 {
         positive amount = 1;
         positive first = 1;
@@ -9299,7 +9296,7 @@ static COLD bool shell_element_holder_absent(const_string name, positive length)
                !(shell_array_attributes(name, length) & SHELL_ARRAY_EITHER);
 }
 
-COLD fn shell_unset(writer write, string_address input)
+COLD fn shell_unset(writer write)
 {
         shell_option_walk walk = {1};
         positive index;
@@ -11316,7 +11313,7 @@ static fn shell_local_written(writer write, string_address name,
                 shell_declare_print_one(write, name, length, filter);
 }
 
-COLD fn shell_local(writer write, string_address input)
+COLD fn shell_local(writer write)
 {
         shell_declare_state state = {1};
 
@@ -11347,7 +11344,6 @@ COLD fn shell_local(writer write, string_address input)
         if (!shell_bash_compat)
         {
                 (void)write;
-                (void)input;
                 state.index = 1;
                 return_if(state.index >= shell_argc, shell_answer(0));
                 shell_declare_apply(address_of state, true);
@@ -11418,12 +11414,11 @@ COLD fn shell_local(writer write, string_address input)
         shell_declare_apply(address_of state, true);
 }
 
-static fn shell_declare(writer write, string_address input)
+static fn shell_declare(writer write)
 {
         shell_declare_state state = {1};
         bool failed = false;
 
-        (void)input;
 
         if (!shell_declare_options(address_of state))
                 return;
@@ -11596,7 +11591,7 @@ static fn shell_marked_written(writer write, string_address name,
         write("\n", 1);
 }
 
-static fn shell_declare(writer write, string_address input);
+static fn shell_declare(writer write);
 static PURE shell_local_entry address_to local_find(string_address name,
                                                     positive begin);
 
@@ -11682,7 +11677,7 @@ static COLD bool shell_readonly_arrays(writer write)
                 words[3] = word;
                 shell_argv = words;
                 shell_argc = in_scope ? 3 : 4;
-                shell_declare(write, null);
+                shell_declare(write);
                 if (shell_status)
                         answer = shell_status;
         }
@@ -11898,12 +11893,12 @@ static COLD fn shell_marked(writer write, p8 mark)
         shell_answer(refused ? 1 : 0);
 }
 
-COLD fn shell_export(writer write, string_address input)
+COLD fn shell_export(writer write)
 {
         shell_marked(write, DECLARE_EXPORT);
 }
 
-COLD fn shell_readonly(writer write, string_address input)
+COLD fn shell_readonly(writer write)
 {
         shell_marked(write, DECLARE_READONLY);
 }
@@ -12842,7 +12837,7 @@ HOT bool test_short(positive from, positive to, bool address_to handled)
         return false;
 }
 
-HOT fn shell_test(writer write, string_address input)
+HOT fn shell_test(writer write)
 {
         bool value;
         bool handled;
@@ -12981,12 +12976,12 @@ HOT fn shell_test(writer write, string_address input)
         shell_answer(value ? 0 : 1);
 }
 
-fn shell_true(writer write, string_address input)
+fn shell_true(writer write)
 {
         shell_answer(0);
 }
 
-fn shell_false(writer write, string_address input)
+fn shell_false(writer write)
 {
         shell_answer(1);
 }
@@ -14081,7 +14076,7 @@ static fn printf_simple_one(writer write, string_address format)
                 write(room, used);
 }
 
-fn shell_printf(writer write, string_address input)
+fn shell_printf(writer write)
 {
         string_address format;
         string_address into = null;
@@ -14599,7 +14594,7 @@ static string_address read_field(positive address_to cursor, bool remainder)
 
 static fn trap_wait_restarting(bool restart);
 
-COLD fn shell_read(writer write, string_address input)
+COLD fn shell_read(writer write)
 {
         bool raw = false;
         string_address array_name = null;
@@ -15117,7 +15112,7 @@ COLD fn shell_read(writer write, string_address input)
 static p8 address_to mapfile_text;
 static positive mapfile_room;
 
-COLD fn shell_mapfile(writer write, string_address input)
+COLD fn shell_mapfile(writer write)
 {
         string_address name = (string_address) "MAPFILE";
         positive index = 1;
@@ -15136,7 +15131,6 @@ COLD fn shell_mapfile(writer write, string_address input)
         bool finished = false;
         b32 from = 0;
 
-        (void)input;
 
         shell_option_walk options = {.index = 1};
         p8 which;
@@ -15406,7 +15400,7 @@ static COLD b32 shell_getopts_usage()
             "getopts: Usage: getopts optstring var [arg...]\n");
 }
 
-COLD fn shell_getopts(writer write, string_address input)
+COLD fn shell_getopts(writer write)
 {
         string_address options;
         string_address name;
@@ -15757,7 +15751,7 @@ fn umask_spoken(writer write, positive mask)
         }
 }
 
-COLD fn shell_umask(writer write, string_address input)
+COLD fn shell_umask(writer write)
 {
         shell_option_walk walk = {1};
         positive index;
@@ -15927,7 +15921,7 @@ fn shell_time_written(writer write, bipolar ticks)
         write("s", 1);
 }
 
-COLD fn shell_times(writer write, string_address input)
+COLD fn shell_times(writer write)
 {
         shell_clocks clocks;
         shell_option_walk walk = {1};
@@ -16418,7 +16412,7 @@ static COLD fn trap_listed(writer write)
                 write("\n", 1);
 }
 
-COLD fn shell_trap(writer write, string_address input)
+COLD fn shell_trap(writer write)
 {
         positive index = 1;
         string_address action;
@@ -16904,7 +16898,7 @@ fn alias_written(writer write, positive index)
         write("\n", 1);
 }
 
-COLD fn shell_alias(writer write, string_address input)
+COLD fn shell_alias(writer write)
 {
         shell_option_walk walk = {1};
         p8 letter;
@@ -17002,7 +16996,7 @@ COLD fn shell_alias(writer write, string_address input)
         shell_answer(answer);
 }
 
-COLD fn shell_unalias(writer write, string_address input)
+COLD fn shell_unalias(writer write)
 {
         shell_option_walk walk = {1};
         positive index;
@@ -17102,7 +17096,7 @@ COLD fn shell_unalias(writer write, string_address input)
 static bool shell_verbose_eval_lines;
 static bool shell_argv_joined(positive from, byte_store address_to store);
 
-COLD fn shell_eval(writer write, string_address input)
+COLD fn shell_eval(writer write)
 {
         byte_store joined = {null, 0, 0};
         string_address eval_storage;
@@ -17222,7 +17216,7 @@ bool exec_control_builtin(string_address name, bool run);
         `enable -n break` sends the name back out to PATH the way the
         reference does.
 */
-fn shell_break(writer write, string_address input)
+fn shell_break(writer write)
 {
         exec_control_builtin(shell_argv[0], true);
 }
@@ -20823,7 +20817,7 @@ static b32 shell_source_execute(p8 address_to text, positive filled,
         return failed;
 }
 
-COLD fn shell_dot(writer write, string_address input)
+COLD fn shell_dot(writer write)
 {
         p8 address_to found = null;
         positive found_room = 0;
@@ -21568,7 +21562,7 @@ static b32 shell_wait_one(bipolar job, bool address_to interrupted, bool forget,
 
 /* The plain wait for every retained child that never became a job. job_wait
    reads the operands and calls this only when it was given none. */
-COLD fn shell_wait(writer write, string_address input)
+COLD fn shell_wait(writer write)
 {
         /*
                 Every job in the order the table has them, and forgotten as a
@@ -21610,25 +21604,25 @@ COLD fn shell_wait(writer write, string_address input)
         shell_answer(0);
 }
 
-COLD fn shell_jobs(writer write, string_address input);
-fn shell_history(writer write, string_address input);
-fn shell_fc(writer write, string_address input);
-fn shell_fg(writer write, string_address input);
-fn shell_bg(writer write, string_address input);
-fn shell_disown(writer write, string_address input);
-fn shell_suspend(writer write, string_address input);
-fn shell_kill(writer write, string_address input);
-fn job_wait(writer write, string_address input);
+COLD fn shell_jobs(writer write);
+fn shell_history(writer write);
+fn shell_fc(writer write);
+fn shell_fg(writer write);
+fn shell_bg(writer write);
+fn shell_disown(writer write);
+fn shell_suspend(writer write);
+fn shell_kill(writer write);
+fn job_wait(writer write);
 // The executor keeps the line a command was written on; $LINENO reads it.
 PURE positive shell_line_now();
 PURE positive shell_lineno_reported();
 
 // caller reads the call frames, which live beside the executor.
-fn shell_caller(writer write, string_address input);
-fn shell_help(writer write, string_address input);
-COLD fn shell_builtin_run(writer write, string_address input);
-COLD fn shell_compgen(writer write, string_address input);
-COLD fn shell_enable(writer write, string_address input);
+fn shell_caller(writer write);
+fn shell_help(writer write);
+COLD fn shell_builtin_run(writer write);
+COLD fn shell_compgen(writer write);
+COLD fn shell_enable(writer write);
 
 //      The POSIX special builtins and bash's source, in bash's own order,
 //      which is how enable -s lists them; exec_special_kind asks it too.
@@ -21636,11 +21630,11 @@ static const string_address shell_special_names[] = {
     ".", ":", "break", "continue", "eval", "exec", "exit", "export",
     "readonly", "return", "set", "shift", "source", "times", "trap", "unset"};
 #define SHELL_SPECIAL_SOURCE 12
-COLD fn shell_which(writer write, string_address input);
-fn shell_type(writer write, string_address input);
-COLD fn shell_command_builtin(writer write, string_address input);
-COLD fn shell_hash(writer write, string_address input);
-COLD fn shell_ulimit(writer write, string_address input);
+COLD fn shell_which(writer write);
+fn shell_type(writer write);
+COLD fn shell_command_builtin(writer write);
+COLD fn shell_hash(writer write);
+COLD fn shell_ulimit(writer write);
 
 /*
         Bash's `let` is the command-shaped spelling of the arithmetic engine
@@ -21649,13 +21643,12 @@ COLD fn shell_ulimit(writer write, string_address input);
         Keeping this as a thin builtin avoids a second arithmetic grammar and
         gives assignments, increments and overflow exactly the same rules.
 */
-COLD fn shell_let(writer write, string_address input)
+COLD fn shell_let(writer write)
 {
         bipolar value = 0;
         positive at;
 
         (void)write;
-        (void)input;
 
         return_if(shell_argc < 2,
                   shell_bash_compat ? shell_refuse(1, "let: expression expected\n")
@@ -21678,7 +21671,7 @@ COLD fn shell_let(writer write, string_address input)
         shell_answer(value ? 0 : 1);
 }
 
-typedef fn(address_to shell_command_function)(writer write, string_address input);
+typedef fn(address_to shell_command_function)(writer write);
 
 typedef struct
 {
@@ -22133,13 +22126,12 @@ static COLD bool comp_read(string_address command, comp_request address_to want,
         return true;
 }
 
-static COLD fn shell_complete(writer write, string_address input)
+static COLD fn shell_complete(writer write)
 {
         positive first = 1;
         comp_request want;
         bool names_given;
 
-        (void)input;
 
         if (shell_completion_refused(
                 "complete",
@@ -22340,14 +22332,13 @@ static COLD fn shell_complete(writer write, string_address input)
         shell_answer(0);
 }
 
-static COLD fn shell_compopt(writer write, string_address input)
+static COLD fn shell_compopt(writer write)
 {
         positive first = 1;
         comp_request want;
         b32 status = 0;
 
         (void)write;
-        (void)input;
 
         if (shell_completion_refused("compopt",
                                      "compopt [-o|+o option] [-DEI] [name ...]",
@@ -23330,7 +23321,7 @@ static COLD fn bind_list_kind(writer write, positive keymap, p8 kind, bool spoke
         }
 }
 
-static COLD fn shell_bind(writer write, string_address input)
+static COLD fn shell_bind(writer write)
 {
         positive first = 1;
         shell_option_walk walk;
@@ -23342,7 +23333,6 @@ static COLD fn shell_bind(writer write, string_address input)
             "[-u name] [-r keyseq] [-x keyseq:shell-command] "
             "[keyseq:readline-function or readline-command]";
 
-        (void)input;
 
         //      Bash says this once per call before it does anything else,
         //      whatever the words are, when readline was never started.
@@ -24101,7 +24091,7 @@ static bool hash_drop(string_address name)
         return true;
 }
 
-fn shell_hash(writer write, string_address input)
+fn shell_hash(writer write)
 {
         shell_option_walk walk = {1};
         p8 which;
@@ -24950,7 +24940,7 @@ static inline INLINE b32 shell_query(writer write, positive index, b32 flags,
         return bad ? bad : !command || any ? 0 : shell_bash_compat ? 1 : 127;
 }
 
-COLD fn shell_type(writer write, string_address input)
+COLD fn shell_type(writer write)
 {
         shell_option_walk walk = {1};
         positive index;
@@ -25061,7 +25051,7 @@ static fn shell_execute_found(string_address found, string_address name,
         command -v prints what would run rather than running it, which is what
         a script uses to ask whether something is there at all.
 */
-fn shell_command_builtin(writer write, string_address input)
+fn shell_command_builtin(writer write)
 {
         shell_option_walk walk = {1};
         positive index;
@@ -25144,8 +25134,7 @@ fn shell_command_builtin(writer write, string_address input)
                 if (reader)
                         shell_command_reader_depth++;
 
-                bool found = shell_builtin(
-                    shell_arguments(), string_hash_33_length(shell_argv[0]));
+                bool found = shell_builtin(string_hash_33_length(shell_argv[0]));
 
                 if (reader)
                 {
@@ -25201,7 +25190,7 @@ fn shell_command_builtin(writer write, string_address input)
         }
 }
 
-fn shell_which(writer write, string_address input)
+fn shell_which(writer write)
 {
         p8 address_to found = null;
         positive found_room = 0;
@@ -25209,7 +25198,6 @@ fn shell_which(writer write, string_address input)
         bool every = false;
         b32 answer = 0;
 
-        (void)input;
 
         /*
                 The GNU program's option surface, so that a script handing
@@ -25477,7 +25465,7 @@ static shell_limit address_to shell_limit_by_letter(shell_limit address_to limit
         return limit;
 }
 
-fn shell_ulimit(writer write, string_address input)
+fn shell_ulimit(writer write)
 {
         positive index = 1;
         bool hard = false;
@@ -25705,7 +25693,7 @@ fn shell_ulimit(writer write, string_address input)
         wraps, and `command` is not it -- command would find the function
         again through PATH if the name happened to be a program too.
 */
-fn shell_builtin_run(writer write, string_address input)
+fn shell_builtin_run(writer write)
 {
         bool tail = shell_tail_command;
         shell_option_walk walk = {1};
@@ -25713,7 +25701,6 @@ fn shell_builtin_run(writer write, string_address input)
         positive index;
 
         (void)write;
-        (void)input;
 
         return_if(shell_argc < 2, shell_answer(0));
 
@@ -25737,8 +25724,7 @@ fn shell_builtin_run(writer write, string_address input)
             exec_control_builtin(shell_argv[0], true))
                 return;
 
-        if (shell_builtin(shell_arguments(),
-                          string_hash_33_length(shell_argv[0])))
+        if (shell_builtin(string_hash_33_length(shell_argv[0])))
         {
                 shell_tail_command = tail;
                 return;
@@ -25756,7 +25742,7 @@ fn shell_builtin_run(writer write, string_address input)
         again gives it back. -a and -p list, which is what a script asking
         what it is running on reads.
 */
-fn shell_enable(writer write, string_address input)
+fn shell_enable(writer write)
 {
         shell_option_walk walk = {1};
         p8 which;
@@ -26542,7 +26528,7 @@ static COLD fn compgen_generate(comp_request address_to want,
         }
 }
 
-COLD fn shell_compgen(writer write, string_address input)
+COLD fn shell_compgen(writer write)
 {
         comp_request want;
         string_address word = null;
@@ -26553,7 +26539,6 @@ COLD fn shell_compgen(writer write, string_address input)
             "[-G globpat] [-W wordlist] [-F function] [-C command] "
             "[-X filterpat] [-P prefix] [-S suffix] [word]";
 
-        (void)input;
 
         if (shell_completion_refused("compgen", usage,
                                      "abcdefgjksuvoAGWFCXPSV",
@@ -27104,7 +27089,7 @@ COLD fn shell_prompt_write(writer write, bool more)
         shell_prompt_written(write, text);
 }
 
-fn shell_help(writer write, string_address input)
+fn shell_help(writer write)
 {
         shell_option_walk walk = {1};
         p8 letter;

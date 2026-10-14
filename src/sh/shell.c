@@ -1307,9 +1307,6 @@ static string_address shell_command_name_address HOT_STATE;
    command while this generation is unchanged -- a kept loop tree. */
 static positive shell_parse_generation HOT_STATE;
 
-p8 address_to argument_line;
-positive argument_line_room;
-
 fn token_push(p8 value)
 {
         if (!token_room(token_used + 2))
@@ -1438,39 +1435,6 @@ __asm__(
     ASM_END(shell_assignment_kind)
 );
 #endif
-
-// The builtins still take the rest of the line as a single string, so the
-// words are handed back joined. Quoting survives as far as argv, no further.
-string_address shell_arguments()
-{
-        positive used = 0;
-        positive index = 1;
-
-        if (shell_argc < 2)
-                return null;
-
-        while (index < shell_argc)
-        {
-                positive length = string_length(shell_argv[index]);
-
-                if (!shell_array_room(argument_line, argument_line_room, used + length + 2))
-                        break;
-
-                if (used)
-                        argument_line[used++] = ' ';
-
-                memory_copy(argument_line + used, shell_argv[index], length);
-                used += length;
-                index++;
-        }
-
-        if (!shell_array_room(argument_line, argument_line_room, used + 1))
-                return null;
-
-        argument_line[used] = end;
-
-        return argument_line;
-}
 
 /*
         A command gets the default disposition back, unless somebody chose
@@ -1959,7 +1923,7 @@ fn shell_execute_command()
         log_flush();
 }
 
-HOT bool shell_builtin(string_address arguments, positive2 named)
+HOT bool shell_builtin(positive2 named)
 {
         static shell_command address_to remembered HOT_STATE;
         static positive remembered_length HOT_STATE;
@@ -1967,7 +1931,7 @@ HOT bool shell_builtin(string_address arguments, positive2 named)
         static positive remembered_generation HOT_STATE;
         shell_command address_to command = null;
 
-        if (!arguments && shell_command_name_stable &&
+        if (shell_command_name_stable &&
             shell_argv[0] == shell_command_name_address && remembered &&
             !shell_disabled[remembered - shell_commands] &&
             remembered_length == named.y && remembered_hash &&
@@ -1982,7 +1946,7 @@ HOT bool shell_builtin(string_address arguments, positive2 named)
                         return false;
                 command = shell_command_named_hashed(shell_argv[0], named);
 
-                if (!arguments && shell_command_name_stable &&
+                if (shell_command_name_stable &&
                     shell_argv[0] == shell_command_name_address && command)
                 {
                         remembered = command;
@@ -2001,12 +1965,6 @@ HOT bool shell_builtin(string_address arguments, positive2 named)
                    complete duplicate command-table probe in exec_dispatch. */
                 if (command->function != shell_command_builtin)
                         shell_tail_command = false;
-
-                /* This old builtin still consumes a rejoined line.  Everyone
-                   else reads argv directly, so do not scan and copy every
-                   argument before every ordinary builtin. */
-                if (!arguments && command->function == shell_which)
-                        arguments = shell_arguments();
 
                 /*
                         A builtin that finishes without an opinion succeeded.
@@ -2027,7 +1985,7 @@ HOT bool shell_builtin(string_address arguments, positive2 named)
                 if (shell_dash_compat && shell_dash_option_refused(command))
                         return true;
 
-                command->function(log, arguments);
+                command->function(log);
                 return true;
         }
 
