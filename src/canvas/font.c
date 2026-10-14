@@ -1234,18 +1234,35 @@ static p32 font_fit(font_engine address_to e, const font_face address_to face, p
         //      the descender's bottom and the ascender's top are whole pixels
         //      too, where they took the fractions of the lines next to them,
         //      grey rows under p and q and over b, d, h, k and l.
-        b64 was[8], now[8];
+        //      And a bar's thickness inside each line: the inner edge of a
+        //      stroke that lies along a line -- the arch of n, the tops of e
+        //      and a, the bottoms of the bowls, the top of O -- lands a whole
+        //      bar from the line. A curve's level run there is a fraction of
+        //      a pixel, too short to be found as a bar (font_bars), and its
+        //      stroke was a row 40 to 70 percent grey under the x-height and
+        //      over the baseline of every round letter at 8 to 14 px.
+        b64 bar = font_divide((b64)zones[3] * scale, (b64)face->units << FONT_EXACT);
+        b64 whole = font_round(bar) < FONT_ONE ? FONT_ONE : font_round(bar);
+        bool inner = bar > 0 && bar < FONT_ONE * 3 / 2 && snapped >= 3 * whole;
+
+        b64 was[11], now[11];
         p32 knots = 0;
         if (descender > under + FONT_ONE / 2 && descender > FONT_ONE)
                 was[knots] = -descender, now[knots++] = -font_round(descender);
         if (under > 0)
                 was[knots] = -under, now[knots++] = -font_overshoot(under);
         was[knots] = 0, now[knots++] = 0;
+        if (inner)
+                was[knots] = bar, now[knots++] = whole;
+        if (inner && low - bar > 2 * bar)
+                was[knots] = low - bar, now[knots++] = snapped - whole;
         was[knots] = low, now[knots++] = snapped;
         if (over > 0 && (!high || low + over < high))
                 was[knots] = low + over, now[knots++] = snapped + font_overshoot(over);
         if (high)
         {
+                if (inner && high - bar > was[knots - 1] + bar / 2 && capped - whole > now[knots - 1])
+                        was[knots] = high - bar, now[knots++] = capped - whole;
                 was[knots] = high, now[knots++] = capped;
                 if (cover > 0)
                         was[knots] = high + cover, now[knots++] = capped + font_overshoot(cover);
@@ -3061,7 +3078,7 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                              : pixels >= until ? 0
                              : (b32)e->darken * (until - pixels) / (until - 12);
                 if (amount > 0)
-                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, false);
+                        font_embolden(e, (f32)(FONT_ONE / 64) * amount, true);
         }
         b64 heavier = style & 16 ? (b64)size * (FONT_ONE / 64) / 24 : 0;
         if (heavier)
