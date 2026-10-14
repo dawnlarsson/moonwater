@@ -461,8 +461,11 @@ static b32 settings_start(string_address address_to words, positive count)
         int ends[2] = {-1, -1};
         bipolar child;
 
-        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC | O_NONBLOCK) != 0)
+        // Only this program's end does not block: the verb's standard output and error are the other end, and a
+        // verb that writes more than the pipe holds would be told EAGAIN, not made to wait. F_SETFL is 4.
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
                 return false;
+        system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
 
         child = system_fork();
         if (child == 0)

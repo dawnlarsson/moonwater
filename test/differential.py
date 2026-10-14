@@ -27662,6 +27662,8 @@ static void canvas_input_devices(struct input_devices *out) { out->count = 1; }
 #define EDGE_BOTTOM 8u
 #define WINDOW_MIN_WIDTH 96
 #define WINDOW_MIN_HEIGHT 48
+#define canvas_min_w WINDOW_MIN_WIDTH
+#define canvas_min_h WINDOW_MIN_HEIGHT
 '''
     source += section(drag, "static void resize_move", "/*\n        The bar under the hand, in rows.")
     # Run the real owned-pane release after printk has drained its callbacks.

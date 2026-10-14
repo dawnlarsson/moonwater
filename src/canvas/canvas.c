@@ -910,6 +910,10 @@ static inline CONST _Bool point_in_rect(int x, int y, int width, int height,
 #define canvas_cell_w (WINDOW_CELL_W * (int)desktop.scale)
 #define canvas_cell_h (WINDOW_CELL_H * (int)desktop.scale)
 #define canvas_bar (10 * (int)desktop.scale)
+// The smallest a window is made, at the scale its title and cells are: unscaled, a window at scale 4 could be
+// made shorter than its own title.
+#define canvas_min_w (WINDOW_MIN_WIDTH * (int)desktop.scale)
+#define canvas_min_h (WINDOW_MIN_HEIGHT * (int)desktop.scale)
 
 #define pane_title(pane) \
         ((pane)->style & WINDOW_FRAME ? canvas_title : 0)
@@ -2801,7 +2805,7 @@ static void desktop_gather_panes(void)
 
         list_for_each_entry(pane, &desktop.windows, link)
         {
-                int x = clamp(pane->x, 0, max(desktop.width - WINDOW_MIN_WIDTH, 0));
+                int x = clamp(pane->x, 0, max(desktop.width - canvas_min_w, 0));
                 int y = clamp(pane->y, 0, max(desktop.height - canvas_title, 0));
 
                 if (x == pane->x && y == pane->y)
@@ -6685,8 +6689,8 @@ static void resize_move(int x, int y)
         int max_w, max_h, min_w, min_h;
 
         pane_limits(pane, &max_w, &max_h);
-        min_w = min(WINDOW_MIN_WIDTH, max_w);
-        min_h = min(WINDOW_MIN_HEIGHT, max_h);
+        min_w = min(canvas_min_w, max_w);
+        min_h = min(canvas_min_h, max_h);
 
         if (edges & EDGE_LEFT)
                 nw = desktop.resize_w - dx;
@@ -6875,8 +6879,8 @@ static void pane_restore_for_drag(struct pane *pane, int x, int y)
         int width, height, grab;
 
         pane_limits(pane, &max_w, &max_h);
-        width = clamp(pane->saved_w, min(WINDOW_MIN_WIDTH, max_w), max_w);
-        height = clamp(pane->saved_h, min(WINDOW_MIN_HEIGHT, max_h), max_h);
+        width = clamp(pane->saved_w, min(canvas_min_w, max_w), max_w);
+        height = clamp(pane->saved_h, min(canvas_min_h, max_h), max_h);
         grab = (int)((long)(x - pane->x) * width / old_w);
 
         pane->arranged = PANE_FLOATING;

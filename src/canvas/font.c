@@ -1790,7 +1790,8 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         //      from a stem stretches or shrinks rather than riding the stem's
         //      move into the next cell (the arms of [ and ] would otherwise
         //      meet across the cell boundary).
-        b64 from[2 * FONT_STEMS + 16], onto[2 * FONT_STEMS + 16];
+        //      Two edges to a stem, and room for the sixteen fixed lines and the glyph's two ends.
+        b64 from[2 * FONT_STEMS + 18], onto[2 * FONT_STEMS + 18];
         b64 lowest = (b64)1 << 62, highest = -lowest;
         p32 edges = 0;
         for (p32 i = 0; i < e->point_count; i++)
@@ -4114,10 +4115,10 @@ static fn font_blend(font_engine address_to e, const font_target address_to targ
         b32 x1 = x + glyph.width > target->width ? target->width - x : glyph.width;
         b32 y1 = y + glyph.height > target->height ? target->height - y : glyph.height;
         bool known = !(background & FONT_UNKNOWN);
-        const p32 address_to pixel = known ? font_tones(e, colour, background, strength) : null;
 
         if (x0 >= x1 || y0 >= y1)
                 return;
+        const p32 address_to pixel = known ? font_tones(e, colour, background, strength) : null;
         font_ramp(e, colour, background, strength > 255 ? 255 : strength);
         colour &= 0xffffff;
 

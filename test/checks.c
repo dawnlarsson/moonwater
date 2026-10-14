@@ -109386,6 +109386,53 @@ static fn check_frames_refused(void)
         drawn even when the compositor has not taken the last picture: the frame
         waits for it, and is drawn at once once it is forced past the wait.
 */
+/*
+        A line written at one width and drawn at a narrower one folds into
+        whole rows, one after the other: the line that says how a shell ended,
+        36 characters, written at 44 columns and drawn at 25, is its first 25
+        characters on one row and the rest on the next, with no blank row
+        between them.
+*/
+static fn check_fold(void)
+{
+        unsigned int was_columns = window->columns, was_rows = window->rows;
+        const struct window_cell address_to cells;
+        b32 found = false, adjacent = false;
+
+        window->columns = 44;
+        window->rows = 6;
+        regrid(-1);
+        render_surface();
+        term_bytes((const p8 address_to)"\r\n$ ls\r\n", 8);
+        term_child_killed(9, (string_address)"KILL", false);
+
+        window->columns = 25;
+        regrid(-1);
+        terminal_view_live();
+        render_surface();
+        terminal.forced = true;
+        terminal_frame();
+        cells = terminal.frame[terminal.shown];
+        for (unsigned int r = 0; r + 1 < ROWS && !found; r++)
+        {
+                const struct window_cell address_to row = cells + (unsigned long)r * COLUMNS;
+
+                if (row[0].character != '[' || row[1].character != 's')
+                        continue;
+                found = row[COLUMNS - 1].character == '9';
+                adjacent = found && row[COLUMNS].character == ' ' && row[COLUMNS + 1].character == '(';
+        }
+        check("fold: a 36 character line at 25 columns is its first 25 characters on a row", found);
+        check("fold: and the rest on the next row, with no blank row between", adjacent);
+
+        terminal.forced = false;
+        window->columns = was_columns;
+        window->rows = was_rows;
+        regrid(-1);
+        terminal_view_live();
+        render_surface();
+}
+
 static fn check_killed(void)
 {
         struct windows address_to table = terminal.own.table;
@@ -109408,16 +109455,14 @@ static fn check_killed(void)
 
         terminal.forced = true;
         framed = terminal_frame();
-        // The characters in order, without the blanks: a folded line may have blank rows in it.
-        for (unsigned int at = 0, length = 0; at < cells; at++)
+        // The characters in order, blanks kept: a folded line is whole rows one after the other, none blank between.
+        for (unsigned int at = 0; at < cells; at++)
         {
                 p32 character = terminal.frame[terminal.shown][at].character;
 
-                if (character > ' ')
-                        text[length++] = (p8)character;
-                if (at + 1 == cells)
-                        said = memory_search(text, length, (address_any)"[shellkilledbysignal9(SIGKILL)]", 31) != null;
+                text[at] = character > ' ' && character < 127 ? (p8)character : (p8)' ';
         }
+        said = memory_search(text, cells, (address_any)"[shell killed by signal 9 (SIGKILL)]", 36) != null;
         check("killed: the line is drawn once the frame is forced", framed && said);
         table->shown[0] = table->frame[0];
         terminal.forced = false;
@@ -109570,6 +109615,7 @@ b32 main()
         check_forced();
         check_frames_refused();
         check_killed();
+        check_fold();
         check_keys();
         check_pointer();
         check_take();

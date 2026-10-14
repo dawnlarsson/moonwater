@@ -151,6 +151,7 @@ static struct
         int group;                      // the pty's foreground process group the title was taken from
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
         unsigned int title_seen;        // how many titles programs had set when it was taken
+        b32 hovering;                   // whether the compositor is told of the pointer's motion over it
 } terminal = {.shown = -1, .view = TERMINAL_LIVE};
 
 static unsigned int terminal_colour[256];
@@ -1108,6 +1109,11 @@ static b32 terminal_open(unsigned int wide, unsigned int high, unsigned int left
         if (windows_take(&terminal.own) < 0)
                 return false;
 
+        // A shell at its prompt has no use for the pointer's motion, and each report of it is a wakeup: asked for
+        // only while a program has a mouse mode (the loop says when that changes).
+        windows_hover(&terminal.own, false);
+        terminal.hovering = false;
+
         table = terminal.own.table;
         display_w = table->output_width;
         display_h = table->output_height;
@@ -1829,6 +1835,14 @@ static b32 terminal_run(b32 reading)
                         gone = true;
 
                 changed = reading ? klog_drain(master, &gone, TERMINAL_BUDGET) : term_drain(master, &gone, TERMINAL_BUDGET);
+
+                // Any mouse mode wants the motion: a press, a held button and a wheel's report all say where the
+                // pointer is. Without one only what a held button needs is sent.
+                if (!reading && (mouse_mode != 0) != terminal.hovering)
+                {
+                        terminal.hovering = mouse_mode != 0;
+                        windows_hover(&terminal.own, terminal.hovering);
+                }
                 if (!reading && changed && !gone)
                         terminal_title(master, child);
 
