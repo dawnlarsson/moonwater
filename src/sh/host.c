@@ -190,6 +190,7 @@ static fn host_events_boot(host_settings address_to settings);
 static fn host_bind_apply(host_settings address_to settings);
 static b32 host_bind(string_address address_to arguments, positive count);
 static b32 host_usage(void);
+static b32 host_setting_group(string_address address_to words, positive count);
 static positive radio_display(p8 address_to into, positive room, p8 address_to name,
                               positive length);
 static p16 host_machine_hook_line(p8 hook);
@@ -17847,7 +17848,7 @@ static b32 locale_canvas_cursor(string_address address_to arguments, positive co
                 host_say(log, host_label "cursor size %s, look %s\n",
                          locale_canvas_cursor_say(true, word, sizeof(word)),
                          locale_canvas_cursor_say(false, other, sizeof(other)));
-                return 0;
+                return host_setting_group(arguments + 1, 2);
         }
         return_if(!string_equals(arguments[3], "size") && !string_equals(arguments[3], "look"), host_usage());
         size = string_equals(arguments[3], "size");
@@ -17869,6 +17870,116 @@ static b32 locale_canvas_cursor(string_address address_to arguments, positive co
         host_say(log, host_label "cursor %s %s\n", size ? "size" : "look",
                  locale_canvas_cursor_say(size, word, sizeof(word)));
         return 0;
+}
+
+/*
+        The plain rows of the settings table (src/sh/registry.c), which are
+        all read and set here and nowhere else. A bare verb says where the
+        row stands, to anybody who can read /root: the word kept, or the
+        standard when none is. One word sets it: the word is judged first
+        (a word that is none of the row's is refused, exit 1), then root is
+        asked for, and the row is kept in its file as the word normalised,
+        and said again. default, and the row's reset word, put it back by
+        keeping that word. More words than one is a usage page. Whoever
+        applies the file (the compositor, which watches /root) takes it as
+        it is written.
+*/
+
+//      What the row's line starts with: its say, or its verb without the first word.
+static fn host_setting_says(const struct settings_row address_to row, p8 address_to into, positive room)
+{
+        positive at = 0;
+
+        into[0] = end;
+        if (row->say)
+        {
+                string_copy_bounded(into, (string_address)row->say, room);
+                return;
+        }
+        for (positive word = 1; word < setting_words(row) && at + 1 < room; word++)
+        {
+                if (word > 1)
+                        into[at++] = ' ';
+                string_copy_bounded(into + at, (string_address)row->read[word], room - at);
+                at += string_length(into + at);
+        }
+}
+
+static b32 host_setting_status(const struct settings_row address_to row)
+{
+        p8 word[32], shown[48], says[48];
+        string_address value = (string_address)LOCALE_NEEDS_ROOT;
+
+        host_setting_says(row, says, sizeof(says));
+        if (locale_readable((string_address)row->path, word, sizeof(word)))
+                value = setting_shown(row, (string_address)word, shown, sizeof(shown));
+        host_say(log, host_label "%s %s\n", (string_address)says, value);
+        return 0;
+}
+
+//      What a word that is none of a row's is told, in the row's words or made from its kind.
+static b32 host_setting_refuse(const struct settings_row address_to row, string_address word)
+{
+        p8 says[48];
+
+        if (row->refusal)
+                return host_refuse((string_address)row->refusal, word);
+        host_setting_says(row, says, sizeof(says));
+        if (row->type == SETTING_NUMBER)
+                return host_refuse("%s is a number from %p to %p %s, %sor default, not %s\n", (string_address)says,
+                                   (positive)row->low, (positive)row->high, (string_address)(row->unit ? row->unit : ""),
+                                   row->choices ? (string_address)"off, " : (string_address)"", word);
+        return host_refuse(row->kind == SETTINGS_SWITCH ? "%s is on or off, not %s\n" : "%s is %s, not %s\n",
+                           (string_address)says, row->kind == SETTINGS_SWITCH ? word : (string_address)row->choices, word);
+}
+
+//      The row the words name (found by setting_find), read or set.
+static b32 host_setting_run(const struct settings_row address_to row, string_address address_to arguments, positive count)
+{
+        positive words = setting_words(row);
+        p8 kept[32], says[48];
+        long value;
+
+        return_if(count - 1 > words + 1, host_usage());
+        if (count - 1 == words)
+                return host_setting_status(row);
+        if (!setting_parse(row, arguments[1 + words], kept, sizeof(kept), &value))
+                return host_setting_refuse(row, arguments[1 + words]);
+        if (!bowl_is_root())
+        {
+                if (row->need)
+                        return host_refuse("setting %s needs root (CAP_SYS_ADMIN)\n", (string_address)row->need);
+                host_need_root();
+        }
+        host_setting_says(row, says, sizeof(says));
+        if (host_save((string_address)says, (string_address)row->path, (string_address)kept))
+                return 1;
+        return host_setting_status(row);
+}
+
+//      The plain rows whose verbs start with these words, each said: what a verb that has more than one setting answers bare.
+static b32 host_setting_group(string_address address_to words, positive count)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to row = &settings_rows[at];
+                positive word = 0;
+
+                if (row->how != SETTING_PLAIN || setting_words(row) <= count)
+                        continue;
+                while (word < count && string_equals(words[word], (string_address)row->read[word]))
+                        word++;
+                if (word == count)
+                        host_setting_status(row);
+        }
+        return 0;
+}
+
+//      A verb with no words of its own but its rows': bare it says them all.
+static b32 host_setting_verb(string_address address_to arguments, positive count)
+{
+        return_if(count != 2, host_usage());
+        return host_setting_group(arguments + 1, 1);
 }
 
 /*
@@ -18458,6 +18569,9 @@ static b32 host_keyboard(string_address address_to arguments, positive count)
         locale_zone_own();
         if (count == 2)
                 return locale_keyboard_status();
+        //      repeat is the rows of the settings table: delay and rate, each by its own words.
+        if (string_equals(word, "repeat"))
+                return count == 3 ? host_setting_group(arguments + 1, 2) : host_usage();
         return_if(count != 3, host_usage());
         if (string_equals(word, "list"))
                 return locale_keyboard_list();
@@ -19285,6 +19399,9 @@ static fn host_title(writer out)
         after the one above it. Most are on the main page and on their
         verb's own, 'b'; a verb with more to say than a line (setup, bind,
         link) has a row for the main page, 'm', and the rows of its own, 'f'.
+        A row 'r' is a verb's rows from the table of settings (registry.c),
+        in its order, each one a row of both: @canvas is every setting row
+        whose words start with canvas.
 */
 typedef struct
 {
@@ -19316,51 +19433,43 @@ static const host_row host_rows[] = {
     {null, "bind init", "what runs at every boot, with ids", 'f'},
     {null, "bind init add \"command\"", "run a command at boot, once disks settle", 'f'},
     {null, "bind init remove ID|\"command\"", "stop running one at boot", 'f'},
-    {null, "bind init mount [on|off]", "mount kept disks at boot [on]", 'b'},
-    {null, "bind init canvas [on|off]", "start Canvas at boot [on]", 'b'},
+    {null, "@bind", null, 'r'},
     {null, "bind exit", "what runs at poweroff or reboot", 'f'},
     {null, "bind exit add \"command\"", "run a command before the disks go read-only", 'f'},
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
     {null, "canvas [on|off]", "the desktop; off leaves the text console [on]", 'b'},
-    {null, "canvas scale [N|auto]", "device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]", 'b'},
-    {null, "canvas modes [largest|preferred]", "which mode a screen is driven at [largest]", 'b'},
-    {null, "canvas background [COLOUR|default]", "the desktop colour, rrggbb [1e1e1e]", 'b'},
-    {null, "canvas cursor [size [N|auto]|look [light|dark|auto]]", "the pointer: size 1 to 4, colours [auto]", 'b'},
+    {null, "@canvas", null, 'r'},
     {null, "desktop [canvas|off|PROFILE]", "what the machine starts as its desktop [canvas]", 'b'},
     {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
-    {null, "airplane [on|off]", "every radio at once", 'b'},
-    {null, "brightness [N%|+N|-N]", "the screen backlight", 'b'},
-    {null, "power [performance|balanced|powersave]", "profile and CPU governor, kept across boots", 'b'},
-    {null, "cpu [boost|smt on|off]", "turbo and SMT, kept across boots", 'b'},
+    {null, "@airplane", null, 'r'},
+    {null, "@brightness", null, 'r'},
+    {null, "@power", null, 'r'},
+    {null, "@cpu", null, 'r'},
     {null, "cpu online|offline N", "hotplug one processor", 'b'},
-    {null, "charge [limit N|limit off]", "where the battery stops charging, 20 to 100", 'b'},
+    {null, "@charge", null, 'r'},
     {"sleep hibernate", "sleep | hibernate", "suspend to RAM or to disk", 'b'},
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
-    {null, "wired [on|off]", "the wired links; off keeps them down", 'b'},
-    {null, "wifi [on|off]", "the radio, saved networks and those in range", 'b'},
+    {null, "@wired", null, 'r'},
+    {null, "@wifi", null, 'r'},
     {null, "wifi add SSID [PASSWORD|-] [wpa2]", "remember a network and join it; asks for", 'b'},
     {null, "", "the password, - reads it from stdin; wpa2 lets", 'b'},
     {null, "", "a tight tier join it without WPA3", 'b'},
     {null, "wifi remove SSID", "forget a saved network, and leave it", 'b'},
-    {null, "bluetooth [on|off]", "the radio and the remembered devices", 'b'},
+    {null, "@bluetooth", null, 'r'},
     {null, "bluetooth add NAME", "keep the name of a device; the radio goes on for what pairs", 'b'},
     {null, "bluetooth remove NAME", "forget a bluetooth device", 'b'},
-    {null, "priority [internet [wired|wifi]]", "which link wins when both are up [wired]", 'b'},
-    {null, "time [sync]", "the clock; sync sets it and the zone now", 'b'},
-    {null, "timezone [ZONE|list]", "IANA name, country, +1 or POSIX; manual", 'b'},
+    {null, "@priority", null, 'r'},
+    {null, "@time", null, 'r'},
+    {null, "@timezone", null, 'r'},
     {null, "timezone auto", "from the network, one Cloudflare request", 'b'},
     {null, "", "per network joined [auto]", 'b'},
-    {null, "ntp [on|off]", "set the clock from the network [on]", 'b'},
-    {null, "ntp server [NAME|auto]", "who is asked first: a name or address [auto]", 'b'},
-    {null, "ntp sampling [on|off]", "keep the lowest-delay sample of five [on]", 'b'},
-    {null, "ntp nts [on|off|only]", "authenticated time (RFC 8915) first; only refuses plain [on]", 'b'},
-    {null, "ntp nts servers [NAME[:PORT]...|default]", "who is asked for it, up to four", 'b'},
-    {null, "keyboard [LAYOUT|list|xkb]", "us uk gb de se sv no nb dk fi fr es it [us]", 'b'},
-    {null, "name [NEW|random]", "what this machine is called, like space-wizard", 'b'},
-    {null, "dns [ADDRESS...|auto]", "up to three servers names are asked of, or the network gives them [auto]", 'b'},
-    {null, "dns tls [on|off|only]", "names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]", 'b'},
+    {null, "@ntp", null, 'r'},
+    {null, "@keyboard", null, 'r'},
+    {null, "@mouse", null, 'r'},
+    {null, "@name", null, 'r'},
+    {null, "@dns", null, 'r'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
@@ -19428,6 +19537,27 @@ static bool host_row_is(const host_row address_to row, string_address verb)
         }
 }
 
+/* The rows of the settings table whose words start with first: all of them, or those of verb when it is that word. */
+static positive host_settings_rows_write(writer out, string_address first, string_address verb)
+{
+        positive written = 0, length = string_length(first);
+
+        if (verb && string_compare(verb, first))
+                return 0;
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to setting = &settings_rows[at];
+                host_row row = {null, (string_address)setting->usage, (string_address)setting->help, 'b'};
+
+                if (!setting->usage || string_compare_max((string_address)setting->usage, first, length) ||
+                    (setting->usage[length] != ' ' && setting->usage[length]))
+                        continue;
+                host_row_write(out, &row);
+                written++;
+        }
+        return written;
+}
+
 /*
         The main page when verb is null, else that verb's own: its full rows
         where it has them, and what the main page shows of it where it has
@@ -19448,6 +19578,11 @@ static positive host_rows_write(writer out, string_address verb)
         {
                 const host_row address_to row = host_rows + at;
 
+                if (row->kind == 'r')
+                {
+                        written += host_settings_rows_write(out, row->command + 1, verb);
+                        continue;
+                }
                 if (row->command[0])
                         live = !verb || host_row_is(row, verb);
                 if (live && (verb && full ? row->kind != 'm' : row->kind != 'f'))
@@ -19702,7 +19837,9 @@ static b32 host_answer(bool update, string_address disk)
 */
 #define HOST_WIPE_KEEP(path) ((path) + sizeof("/root/") - 1)
 
-static string_address host_wipe_keep[] = {
+//      The files of the settings table's plain rows are added when a wipe runs
+//      (host_wipe_table), after the files named here by hand.
+static string_address host_wipe_keep[96] = {
     HOST_WIPE_KEEP(HOST_MACHINE_SCRIPT),
     HOST_WIPE_KEEP(NET_WIFI_LIST),
     HOST_WIPE_KEEP(RADIO_RULES_PATH),
@@ -19741,6 +19878,18 @@ static string_address host_wipe_keep[] = {
     "terminal",
     null,
 };
+
+static fn host_wipe_table(void)
+{
+        positive used = 0;
+
+        while (host_wipe_keep[used])
+                used++;
+        for (positive at = 0; at < SETTINGS_ROWS && used + 1 < array_count(host_wipe_keep); at++)
+                if (settings_rows[at].how == SETTING_PLAIN && settings_rows[at].path)
+                        host_wipe_keep[used++] = (string_address)settings_rows[at].path + sizeof("/root/") - 1;
+        host_wipe_keep[used] = null;
+}
 
 static b32 host_wipe_path(string_address path, positive mode,
                           string_address address_to keep)
@@ -19790,6 +19939,7 @@ static b32 host_wipe(bool said_yes)
                 return 1;
         lock = radio_lock(true);
 
+        host_wipe_table();
         failed = host_wipe_path("/home", 0755, null) ||
                  host_wipe_path("/root", 0700, host_wipe_keep);
 
@@ -20053,6 +20203,7 @@ static b32 host_main()
             {"timezone", host_timezone, false},
             {"ntp", host_ntp, false},
             {"keyboard", host_keyboard, false},
+            {"mouse", host_setting_verb, false},
             {"time", host_time, false},
             {"name", host_name, true},
             {"dns", host_dns, false},
@@ -20077,6 +20228,19 @@ static b32 host_main()
                 host_title(log);
                 host_page_write(log);
                 return 0;
+        }
+
+        //      A plain row of the settings table is answered by its own words,
+        //      the longest of them, before any verb's handler is asked.
+        {
+                positive used;
+                int plain = setting_find(arguments + 1, count - 1, &used);
+
+                if (plain >= 0)
+                {
+                        host_state_once = true;
+                        return host_setting_run(&settings_rows[plain], arguments, count);
+                }
         }
 
         which = string_table_find(host_verb, host_verbs, sizeof(host_verbs[0]),

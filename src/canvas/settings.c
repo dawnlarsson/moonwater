@@ -9,10 +9,14 @@
         the next time it asks, so the two never disagree, and a value the
         command refuses is refused in the window in the command's words.
 
-        The rows are the switches and choices of the command that a person
-        sets by hand: the machine's name, the keyboard, the time zone, how
-        Canvas is drawn (its scale and screen modes, the desktop's colour
-        and the size and look of the pointer), the clock and where the network sets it from, the
+        The rows are not written here: they are the table of settings in
+        src/sh/registry.c, in its order, and a setting added there is a row
+        of this window. They are the switches and choices of the command that
+        a person sets by hand: the machine's name, the keyboard and how its
+        keys repeat, the time zone, how Canvas is drawn (its scale and screen
+        modes, the desktop's colour, the size and look of the pointer and
+        whether a shake of the hand makes it large, and for how long), the
+        mouse's sensitivity and acceleration, the clock and where the network sets it from, the
         wired link, the radios and airplane mode, which link the internet
         prefers, the servers names and time are asked of, the power profile,
         the backlight, the processor and the battery, and what the machine
@@ -121,25 +125,6 @@
 #ifndef MOONWATER_CANVAS_SETTINGS
 #define MOONWATER_CANVAS_SETTINGS
 
-#define SETTINGS_SWITCH 1u
-#define SETTINGS_CHOICE 2u
-#define SETTINGS_FIELD 3u
-#define SETTINGS_STEP 4u
-#define SETTINGS_ACTION 5u
-#define SETTINGS_COMMAND 6u // a row of what moonwater help says: its words are typed
-#define SETTINGS_INFO 7u    // a value that only says, and that a person cannot set
-// The rows of a list a verb's output makes (a network in range, a device kept), which come and go as it is read again.
-#define SETTINGS_NETWORK 8u
-#define SETTINGS_DEVICE 9u
-#define SETTINGS_NOTE 10u // what the verb said that is no row: no networks heard, and why the machine is not joined
-#define SETTINGS_ADD 11u  // the last row of a list that adds one by its name
-
-// How a row's value is taken from the line it is on.
-#define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
-#define SETTINGS_SPLIT 2u // what is set is the value's words, one each, and not one word
-#define SETTINGS_TICK 4u  // the value changes by itself: it is asked again while its group is shown
-#define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
-
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
 #define SETTINGS_UNREAD 0u
 #define SETTINGS_READ 1u
@@ -207,65 +192,7 @@ struct settings_change
         char value[SETTINGS_TYPED];
 };
 
-struct settings_row
-{
-        const char address_to section; // the header this row starts a card under, or none
-        const char address_to label;
-        unsigned char kind;
-        unsigned char lacks;           // a machine may have none: no key said is no value, not a failure
-        unsigned char flags;           // SETTINGS_LINE, SETTINGS_SPLIT
-        const char address_to read[3]; // what is asked, after moonwater
-        const char address_to key;     // the words the value follows ("" is the whole first line)
-        const char address_to also;    // and where it is when that is said with nothing after it
-        const char address_to set[3];  // what changes it; the value goes after
-        const char address_to choices; // a choice's words, or a step's two, a space between
-        char stop;                     // a value ends here as well as at a blank, a comma, a semicolon or a bracket
-        const char address_to marker;  // a line that has this says the value is auto, whatever the word after the key
-};
-
-static const struct settings_row settings_rows[] = {
-    {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0, null},
-    {null, "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it", 0, null},
-    {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null},
-    {"Canvas", "Scale", SETTINGS_CHOICE, 0, 0, {"canvas", "scale"}, "scale ", null, {"canvas", "scale"}, "auto 1 2 3 4", 0, "auto:"},
-    {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null},
-    {null, "Background", SETTINGS_CHOICE, 0, SETTINGS_INK, {"canvas", "background"}, "background ", null, {"canvas", "background"},
-     "default black dark-grey slate midnight-blue forest plum light-grey white", 0, null},
-    {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
-     {"canvas", "background"}, null, 0, null},
-    {null, "Cursor size", SETTINGS_CHOICE, 0, 0, {"canvas", "cursor"}, "size ", null, {"canvas", "cursor", "size"}, "auto 1 2 3 4", 0, null},
-    {null, "Cursor look", SETTINGS_CHOICE, 0, 0, {"canvas", "cursor"}, "look ", null, {"canvas", "cursor", "look"}, "auto light dark", 0,
-     null},
-    {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null},
-    {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0, null},
-    {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null},
-    {null, "Keep the lowest-delay sample", SETTINGS_SWITCH, 0, 0, {"ntp", "sampling"}, "ntp sampling ", null, {"ntp", "sampling"}, null, 0, null},
-    {null, "Authenticated time (NTS)", SETTINGS_CHOICE, 0, 0, {"ntp", "nts"}, "ntp nts ", null, {"ntp", "nts"}, "on off only", 0, null},
-    {null, "NTS servers (or default)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"ntp", "nts"}, "servers ", null,
-     {"ntp", "nts", "servers"}, null, ';', null},
-    {"Network", "Wired", SETTINGS_SWITCH, 0, 0, {"wired"}, "wired ", null, {"wired"}, null, 0, null},
-    {null, "Airplane mode", SETTINGS_SWITCH, 0, 0, {"airplane"}, "airplane ", null, {"airplane"}, null, 0, null},
-    {null, "The internet prefers", SETTINGS_CHOICE, 0, 0, {"priority"}, "internet prefers ", null,
-     {"priority", "internet"}, "wired wifi", 0, null},
-    {null, "Names over TLS", SETTINGS_CHOICE, 0, 0, {"dns", "tls"}, "dns tls ", null, {"dns", "tls"}, "off on only", 0, null},
-    {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(', null},
-    {"Wi-Fi", "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0, null},
-    {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null},
-    {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
-    {null, "Power profile", SETTINGS_CHOICE, 1, 0, {"power"}, "power ", "profile ", {"power"},
-     "balanced performance powersave", 0, null},
-    {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0, null},
-    {null, "Boost", SETTINGS_SWITCH, 1, 0, {"cpu"}, "boost ", null, {"cpu", "boost"}, null, 0, null},
-    {null, "Simultaneous threads (SMT)", SETTINGS_SWITCH, 1, 0, {"cpu"}, "smt ", null, {"cpu", "smt"}, null, 0, null},
-    {null, "Charge limit (20 to 100, or off)", SETTINGS_FIELD, 1, 0, {"charge"}, "charging stops at ", null,
-     {"charge", "limit"}, null, '%', null},
-    {"Boot", "Start the desktop", SETTINGS_SWITCH, 1, 0, {"bind", "init", "canvas"}, "init canvas ", null, {"bind", "init", "canvas"},
-     null, 0, null},
-    {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"bind", "init", "mount"}, "init mount ", null, {"bind", "init", "mount"}, null,
-     0, null},
-};
-
-#define SETTINGS_ROWS (sizeof(settings_rows) / sizeof(settings_rows[0]))
+// The rows are the registry's (src/sh/registry.c): every setting there is a row of this window, in its order.
 #define SETTINGS_ANY ((int)SETTINGS_ROWS) // the row of All commands that runs any command
 #define SETTINGS_ALL_HEADER "All commands"
 
@@ -917,7 +844,7 @@ static b32 settings_matches(int row)
         {
                 const struct settings_row address_to which = &settings_rows[row];
 
-                for (positive at = 0; at < 3; at++)
+                for (positive at = 0; at < SETTING_WORDS; at++)
                         if (settings_has(which->read[at], settings.filter, size) || settings_has(which->set[at], settings.filter, size))
                                 return true;
                 return settings_has(which->label, settings.filter, size) || settings_has(settings_section(row), settings.filter, size);
@@ -1268,10 +1195,10 @@ static positive settings_command(const struct settings_row address_to row, strin
         positive count = 0;
         const char address_to const address_to verb = asking ? row->read : row->set;
 
-        if (room < 6)
+        if (room < SETTING_WORDS + 3)
                 return 0;
         words[count++] = command;
-        for (positive at = 0; at < 3 && verb[at]; at++)
+        for (positive at = 0; at < SETTING_WORDS && verb[at]; at++)
                 words[count++] = (string_address)verb[at];
         if (!asking && row->kind != SETTINGS_ACTION)
         {
@@ -1585,7 +1512,7 @@ static const char address_to settings_act_words(string_address address_to words)
 // Whether two rows ask the same verb, and so are answered by one run of it.
 static b32 settings_same_verb(const struct settings_row address_to one, const struct settings_row address_to other)
 {
-        for (positive at = 0; at < 3; at++)
+        for (positive at = 0; at < SETTING_WORDS; at++)
                 if (one->read[at] != other->read[at] &&
                     (!one->read[at] || !other->read[at] || !string_equals((string_address)one->read[at], (string_address)other->read[at])))
                         return false;

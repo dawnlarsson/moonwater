@@ -108432,6 +108432,7 @@ b32 main()
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"
 #include "../src/canvas/window.c"
+#include "../src/sh/registry.c"
 #include "../src/canvas/term.c"
 #include "../src/sh/pty.c"
 #define BOWL_DEFAULT_PATH "/fixture/bin"
@@ -109874,8 +109875,176 @@ static fn check_launcher(void)
         }
 }
 
+/*
+        The settings table (src/sh/registry.c): every plain row is one verb, with its usage, its key, its file
+        and a standard that its own words take; a word is kept normalised or refused with a number's range
+        kept to the edge; the longest verb wins; and what the compositor takes from the files of the rows it
+        applies: the shake off means a shake finds nothing, the delay is the time the pointer stays large,
+        the sensitivity and the acceleration make the pixels, the repeat is the kept numbers or the device's.
+*/
+static fn check_registry(void)
+{
+        positive plain = 0, labels_equal = 0;
+        char joined[96], key[48];
+        long value;
+        p8 kept[32];
+
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to row = &settings_rows[at];
+
+                for (positive other = at + 1; other < SETTINGS_ROWS; other++)
+                        labels_equal += string_equals((string_address)row->label, (string_address)settings_rows[other].label);
+                if (row->how != SETTING_PLAIN)
+                        continue;
+                plain++;
+                joined[0] = key[0] = 0;
+                for (positive word = 0; word < setting_words(row); word++)
+                {
+                        string_append_bounded((string_address)joined, (string_address)(word ? " " : ""), sizeof(joined));
+                        string_append_bounded((string_address)joined, (string_address)row->read[word], sizeof(joined));
+                        check("registry: a plain row asks the verb it sets", row->set[word] && string_equals((string_address)row->read[word], (string_address)row->set[word]));
+                }
+                string_copy_bounded((string_address)key, (string_address)row->read[setting_words(row) - 1], sizeof(key));
+                string_append_bounded((string_address)key, (string_address)" ", sizeof(key));
+                check("registry: a plain row's key is its last word", row->key && string_equals((string_address)row->key, (string_address)key));
+                check("registry: and its usage begins with its verb", row->usage && !string_compare_max((string_address)row->usage, (string_address)joined, string_length((string_address)joined)) &&
+                      (!row->usage[string_length((string_address)joined)] || row->usage[string_length((string_address)joined)] == ' '));
+                check("registry: and it has a help line, a file under /root and a standard",
+                      row->help && row->path && !string_compare_max((string_address)row->path, (string_address) "/root/", 6) && row->standard);
+                check("registry: and no apostrophe on the pages", !string_first_of_or_end((string_address)row->usage, '\'')[0] && !string_first_of_or_end((string_address)row->help, '\'')[0]);
+                check("registry: and its standard is one of its words", setting_parse(row, (string_address)row->standard, kept, sizeof(kept), &value) &&
+                      value == setting_standard(row));
+                check("registry: default puts it back", setting_parse(row, (string_address) "default", kept, sizeof(kept), &value) && value == setting_standard(row));
+                check("registry: and a word with nothing in it, with blanks, or in capitals is none",
+                      !setting_parse(row, (string_address) "", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "1 ", kept, sizeof(kept), &value) &&
+                      !setting_parse(row, (string_address) "ON", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "-1", kept, sizeof(kept), &value));
+                if (row->type == SETTING_NUMBER)
+                {
+                        char edge[16];
+
+                        check("registry: a number's standard is in its range", setting_standard(row) >= row->low && setting_standard(row) <= row->high);
+                        positive_into_string((p8 address_to)edge, (positive)row->low);
+                        check("registry: its least is a word", setting_parse(row, (string_address)edge, kept, sizeof(kept), &value) && value == row->low && !string_compare(kept, (string_address)edge));
+                        positive_into_string((p8 address_to)edge, (positive)row->high);
+                        check("registry: its greatest is a word", setting_parse(row, (string_address)edge, kept, sizeof(kept), &value) && value == row->high);
+                        positive_into_string((p8 address_to)edge, (positive)row->high + 1);
+                        check("registry: one past it is none", !setting_parse(row, (string_address)edge, kept, sizeof(kept), &value));
+                        positive_into_string((p8 address_to)edge, (positive)row->low - 1);
+                        check("registry: nor one before it", !setting_parse(row, (string_address)edge, kept, sizeof(kept), &value));
+                        check("registry: nor a zero in front, a sign, a fraction or nine digits and more",
+                              !setting_parse(row, (string_address) "0150", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "+150", kept, sizeof(kept), &value) &&
+                              !setting_parse(row, (string_address) "1.5", kept, sizeof(kept), &value) && !setting_parse(row, (string_address) "1000000000", kept, sizeof(kept), &value) &&
+                              !setting_parse(row, (string_address) "18446744073709551617", kept, sizeof(kept), &value));
+                }
+        }
+        check("registry: more than the six new rows are plain, and no two rows are labelled alike", plain >= 6 && !labels_equal);
+
+        /* The longest verb that the words start with is the row. */
+        {
+                string_address delay[] = {(string_address) "canvas", (string_address) "cursor", (string_address) "shake", (string_address) "delay", (string_address) "500"};
+                string_address cursor[] = {(string_address) "canvas", (string_address) "cursor"};
+                positive used = 0;
+                int found = setting_find(delay, 5, &used);
+
+                check("registry: canvas cursor shake delay 500 is the delay with a word", found >= 0 && used == 4 &&
+                      string_equals((string_address)settings_rows[found].read[3], (string_address) "delay"));
+                found = setting_find(delay, 3, &used);
+                check("registry: canvas cursor shake is the switch", found >= 0 && used == 3 && !settings_rows[found].read[3]);
+                check("registry: canvas cursor and no more is no plain row's", setting_find(cursor, 2, &used) < 0);
+                check("registry: nor are the words of a verb written by hand", setting_find(delay + 1, 1, &used) < 0);
+        }
+
+        /* Normalised as they are kept, and said as they are shown. */
+        {
+                p8 shown[48];
+                int rate = -1, shake = -1;
+
+                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                {
+                        rate = string_equals((string_address)settings_rows[at].path ? (string_address)settings_rows[at].path : (string_address) "", (string_address)SETTING_REPEAT_RATE_PATH) ? (int)at : rate;
+                        shake = string_equals((string_address)settings_rows[at].path ? (string_address)settings_rows[at].path : (string_address) "", (string_address)SETTING_SHAKE_PATH) ? (int)at : shake;
+                }
+                check("registry: the rows are found by their files", rate >= 0 && shake >= 0);
+                check("registry: a rate of off is kept as off and means none", setting_parse(&settings_rows[rate], (string_address) "off", kept, sizeof(kept), &value) &&
+                      !string_compare(kept, (string_address) "off") && value == 0);
+                check("registry: a number is shown with its unit, off without",
+                      !string_compare(setting_shown(&settings_rows[rate], (string_address) "45", shown, sizeof(shown)), (string_address) "45 per second") &&
+                      !string_compare(setting_shown(&settings_rows[rate], (string_address) "off", shown, sizeof(shown)), (string_address) "off") &&
+                      !string_compare(setting_shown(&settings_rows[rate], (string_address) "", shown, sizeof(shown)), (string_address) "30 per second") &&
+                      !string_compare(setting_shown(&settings_rows[rate], (string_address) "999", shown, sizeof(shown)), (string_address) "30 per second"));
+                check("registry: a switch is on with nothing kept, and its off is 1 for who applies it",
+                      !string_compare(setting_shown(&settings_rows[shake], (string_address) "", shown, sizeof(shown)), (string_address) "on") &&
+                      !setting_kept(&settings_rows[shake], (string_address) "", &value) && value == 0 &&
+                      setting_kept(&settings_rows[shake], (string_address) "off", &value) && value == 1 &&
+                      !setting_kept(&settings_rows[shake], (string_address) "default", &value) && value == 0 &&
+                      !setting_kept(&settings_rows[shake], (string_address) "maybe", &value) && value == 0);
+                check("registry: a rate kept is a rate, a bad one is the standard",
+                      setting_kept(&settings_rows[rate], (string_address) "45", &value) && value == 45 &&
+                      !setting_kept(&settings_rows[rate], (string_address) "9999", &value) && value == 30 &&
+                      setting_kept(&settings_rows[rate], (string_address) "off", &value) && value == 0);
+        }
+
+        /* The compositor, from the words the files hold. */
+        {
+                unsigned long long now = 1000000000ull;
+                int found = 0;
+
+                compositor.cursor.magnified = compositor.cursor.magnify = 0;
+                compositor_input_settings_set("", "", "", "", "", "");
+                check("compositor: nothing kept is what it always did: a shake finds, the pointer stays large 1200 ms, the gain is the curve, no repeat is set",
+                      !compositor.cursor.shake_off && compositor.cursor.shake_ns == COMPOSITOR_MAGNIFIED_NS && compositor.sensitivity == 100 &&
+                      !compositor.flat && !compositor.repeat_kept);
+                compositor_magnify(5);
+                check("compositor: and a shaken pointer is large until 1200 ms after", compositor.cursor.magnified && compositor.cursor.magnified_until == 5 + 1200000000ull);
+                compositor.cursor.magnified = 0;
+                compositor.shake = (struct compositor_shake){0};
+                for (int step = 0; step < 12; step++) { found += compositor_shaken(step & 1 ? -8 : 8, now); now += 50000000ull; }
+                check("compositor: a shake is found", found == 2);
+
+                compositor_input_settings_set("off", "300", "150", "off", "300", "off");
+                check("compositor: shake off, delay 300, sensitivity 150, acceleration off, repeat delay 300 and no repeat are taken",
+                      compositor.cursor.shake_off && compositor.cursor.shake_ns == 300000000ull && compositor.sensitivity == 150 &&
+                      compositor.flat && compositor.repeat_kept == 3 && compositor.repeat_delay == 300 && compositor.repeat_rate == 0);
+                compositor.shake = (struct compositor_shake){0};
+                found = 0;
+                now = 1000000000ull;
+                for (int step = 0; step < 12; step++) { found += compositor_shaken(step & 1 ? -8 : 8, now); now += 50000000ull; }
+                check("compositor: with shake off no shake finds the pointer", found == 0);
+                compositor.cursor.shake_off = 0;
+                compositor_magnify(7);
+                check("compositor: and the delay is the time it stays large", compositor.cursor.magnified_until == 7 + 300000000ull);
+                compositor.cursor.magnified = 0;
+
+                /* A hand moving 10 counts slowly (a second between reports) and 1000 counts quickly (a millisecond). */
+                compositor.pointer_x = compositor.pointer_y = 0;
+                compositor.raw_x = 10; compositor.raw_y = 0; compositor.stamp = 1; compositor.accel_x = compositor.accel_y = 0;
+                compositor_input_settings_set("", "", "200", "", "", "");
+                compositor_report(1000000000ull);
+                check("compositor: a sensitivity of 200 doubles the pixels of a slow hand", compositor.pointer_x == 20);
+                compositor.pointer_x = 0; compositor.raw_x = 1000; compositor.stamp = 1000000000ull; compositor.accel_x = 0;
+                compositor_input_settings_set("", "", "100", "", "", "");
+                compositor_report(1000000000ull + 1000000ull);
+                check("compositor: the curve makes a fast hand two and a half times", compositor.pointer_x == 2500);
+                compositor.pointer_x = 0; compositor.raw_x = 1000; compositor.stamp = 1000000000ull; compositor.accel_x = 0;
+                compositor_input_settings_set("", "", "100", "off", "", "");
+                compositor_report(1000000000ull + 1000000ull);
+                check("compositor: with acceleration off it is one to one", compositor.pointer_x == 1000);
+                compositor.pointer_x = 0; compositor.raw_x = 1000; compositor.stamp = 1000000000ull; compositor.accel_x = 0;
+                compositor_input_settings_set("", "", "50", "off", "", "");
+                compositor_report(1000000000ull + 1000000ull);
+                check("compositor: and the sensitivity scales that", compositor.pointer_x == 500);
+
+                compositor_input_settings_set("maybe", "5", "9", "x", "1", "0");
+                check("compositor: a word that is none is as if nothing were kept", !compositor.cursor.shake_off && compositor.cursor.shake_ns == COMPOSITOR_MAGNIFIED_NS &&
+                      compositor.sensitivity == 100 && !compositor.flat && !compositor.repeat_kept);
+                compositor_input_settings_set("", "", "", "", "", "");
+        }
+}
+
 static fn check_settings(string_address regular, string_address bold)
 {
+        check_registry();
         if (!settings_map())
         {
                 check("settings: the buffers map", false);
@@ -114952,6 +115121,28 @@ static void check_compositor_pointer(void) {
     ck_ok(compositor_gain_of(-3,-4,1000000)==compositor_gain(5)&&compositor_gain_of(4,-3,1000000)==compositor_gain(5));
     ck_ok(compositor_gain_of(1000,0,1000000)==2560&&compositor_gain_of(-2147483647-1,-2147483647-1,1000000)==2560);
     ck_ok(compositor_gain_of(1,0,~0ull)==1024);
+    /* The gain the hand chose: no setting and a hundred percent are the curve to the bit; a sensitivity scales it, with
+       the curve (the pixels go as the percent) or one to one when acceleration is off, whatever the speed. */
+    for(int gain=1024;gain<=2560;gain+=61) {
+        ck_ok(compositor_gain_wanted(gain,0,0)==gain&&compositor_gain_wanted(gain,0,100)==gain);
+        ck_ok(compositor_gain_wanted(gain,0,200)==2*gain&&compositor_gain_wanted(gain,0,50)==gain/2);
+        ck_ok(compositor_gain_wanted(gain,1,0)==1024&&compositor_gain_wanted(gain,1,100)==1024&&
+              compositor_gain_wanted(gain,1,150)==1536&&compositor_gain_wanted(gain,1,10)==102);
+    }
+    { int remainder=0; ck_ok(compositor_accel(10,&remainder,compositor_gain_wanted(1024,0,200))==20&&
+                             compositor_accel(10,&remainder,compositor_gain_wanted(1024,0,0))==10); }
+    { int remainder=0; long long pixels=0;
+      for(int step=0;step<100;step++)pixels+=compositor_accel(1,&remainder,compositor_gain_wanted(1024,0,25));
+      ck_ok(pixels==25); /* a quarter of a hundred counts, the fraction kept */ }
+    /* A keyboard's repeat: the setting's delay and period where kept, the device's own where not; a rate of none is a period of none. */
+    ck_ok(compositor_repeat_period(30)==33&&compositor_repeat_period(1)==1000&&compositor_repeat_period(100)==10&&
+          compositor_repeat_period(7)==143&&compositor_repeat_period(0)==0&&compositor_repeat_period(-3)==0);
+    { const int own[2]={250,33}; int into[2];
+      compositor_repeat_target(0,999,999,own,into);ck_ok(into[0]==250&&into[1]==33);
+      compositor_repeat_target(1,400,999,own,into);ck_ok(into[0]==400&&into[1]==33);
+      compositor_repeat_target(2,999,10,own,into);ck_ok(into[0]==250&&into[1]==100);
+      compositor_repeat_target(3,150,0,own,into);ck_ok(into[0]==150&&into[1]==0);
+      compositor_repeat_target(3,2000,100,own,into);ck_ok(into[0]==2000&&into[1]==10); }
     /* The square root, which is exact on whole squares and the floor between. */
     for(unsigned long long v=0;v<70000;v++) {
         unsigned long long r=compositor_isqrt(v);

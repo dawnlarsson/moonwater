@@ -291,6 +291,7 @@ seam_of_path()
         src/sh/tools.c | src/sh/tools.inc | src/sh/process_tools.c | \
         src/sh/regex_graph.c | src/sh/snapshot.c | src/sh/monitor.c | \
         programs/utilities.c | programs/monitor.sh) echo tools ;;
+        src/sh/registry.c) echo machine desktop ;;
         src/sh/host.c | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
         main.moonwater.sh) echo machine ;;
         src/sh/edit.c | src/canvas/* | fonts/*) echo desktop ;;

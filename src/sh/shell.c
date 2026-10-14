@@ -909,6 +909,7 @@ static fn job_child_watch();
 static bool floodlight_parent_supervised;
 #include "expand.c"
 #include "../canvas/window.c"
+#include "registry.c"
 #include "../canvas/term.c"
 #include "host.c"
 #include "../canvas/screen.c"

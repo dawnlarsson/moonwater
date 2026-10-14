@@ -1408,6 +1408,39 @@ static int compositor_accel(int delta, int *remainder, int gain)
         return (int)(scaled < -2147483647 ? -2147483647 : scaled > 2147483647 ? 2147483647 : scaled);
 }
 
+/*
+        The gain the hand has chosen: the curve's at the speed, or one to one when
+        `moonwater mouse acceleration off` says the curve is not wanted, times the
+        sensitivity in percent (`moonwater mouse sensitivity`; none given, or 100,
+        leaves the gain as it was, to the bit).
+*/
+static int compositor_gain_wanted(int gain, int flat, int percent)
+{
+        long long base = flat ? CP_ACCEL_ONE : gain;
+
+        if (!percent || percent == 100)
+                return (int)base;
+        return (int)(base * percent / 100);
+}
+
+/*
+        What a keyboard's repeat is made of for `moonwater keyboard repeat`: the delay
+        before the first repeat in milliseconds and the period between repeats (0 stops them),
+        each the setting's when it is kept (delay and rate are 0 when not, a rate of
+        none being the setting's off, which is told by rate_kept) and else the
+        device's own, as it was when it was opened.
+*/
+static int compositor_repeat_period(int rate)
+{
+        return rate > 0 ? (1000 + rate / 2) / rate : 0;
+}
+
+static void compositor_repeat_target(int kept, int delay, int rate, const int own[2], int into[2])
+{
+        into[0] = kept & 1 ? delay : own[0];
+        into[1] = kept & 2 ? compositor_repeat_period(rate) : own[1];
+}
+
 // Where a tablet's report is on a size: the report held to its range, then
 // the offset in it times the size over the range, rounded down.
 static int compositor_tablet(int value, int minimum, int maximum, int size)
@@ -1727,6 +1760,8 @@ struct compositor_absinfo
 #define COMPOSITOR_EV_SYN 0u
 #define COMPOSITOR_BTN_TOUCH 0x14au
 #define COMPOSITOR_EVIOCSCLOCKID 0x400445a0u
+#define COMPOSITOR_EVIOCGREP 0x80084503u // the delay and the period of a keyboard's repeat, in milliseconds
+#define COMPOSITOR_EVIOCSREP 0x40084503u
 #define COMPOSITOR_BTN_LEFT 0x110u
 #define COMPOSITOR_BTN_RIGHT 0x111u
 #define COMPOSITOR_BTN_MIDDLE 0x112u
@@ -1927,6 +1962,8 @@ static struct
                 int magnified;          // it is shaken: found
                 positive magnified_until;
                 int magnify;            // the hand shook it since the last motion
+                int shake_off;          // `moonwater canvas cursor shake off`: a shake finds nothing
+                positive shake_ns;      // how long a shaken pointer stays large (0 is COMPOSITOR_MAGNIFIED_NS)
                 int size, look;         // `moonwater canvas cursor`: its scale, 0 for the desktop's; 1 light, 2 dark, 0 for light too
                 unsigned long paints, moves, refused; // on the plane: shapes given it, moves, and times it refused
         } cursor;
@@ -1950,6 +1987,11 @@ static struct
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths
         unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
+        // `moonwater keyboard repeat` and `moonwater mouse`: what the settings kept, and what each keyboard has been told.
+        unsigned char repeats[COMPOSITOR_INPUTS]; // the keyboard's repeat can be set: it answered EVIOCGREP
+        int repeat_own[COMPOSITOR_INPUTS][2], repeat_now[COMPOSITOR_INPUTS][2]; // delay, period: as it was, as it is
+        int repeat_kept, repeat_delay, repeat_rate; // bit 1 delay, bit 2 rate kept; the delay in ms, the rate a second (0 off)
+        int sensitivity, flat; // percent of the gain (0 is 100); one to one, with no curve
         int layout_given; // -l named one, and the settings are not looked at
         unsigned long painted; // pixels composed, all frames
         positive period, presented; // a frame in nanoseconds, and when the last one went out
@@ -4712,6 +4754,102 @@ static void compositor_look_read(void)
 }
 
 /*
+        What the settings table keeps for the compositor (live is SETTING_LIVE_COMPOSITOR): the file of a
+        row, as the row says it. A value is the row's standard when nothing is kept, and kept says that
+        something is.
+*/
+static bool compositor_setting_kept(const char *path, const char *word, long *value)
+{
+        *value = 0;
+        for (unsigned int at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].path && string_equals((string_address)path, (string_address)settings_rows[at].path))
+                        return setting_kept(&settings_rows[at], (string_address)word, value);
+        return false;
+}
+
+// Whether a name in /root is the file of a row the compositor takes at once.
+static bool compositor_setting_file(const char *name)
+{
+        for (unsigned int at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].live == SETTING_LIVE_COMPOSITOR && settings_rows[at].path &&
+                    string_equals((string_address)name, (string_address)settings_rows[at].path + sizeof("/root/") - 1))
+                        return true;
+        return false;
+}
+
+// A keyboard's repeat as the settings have it, when that is not what it has: delay, then period.
+static void compositor_repeat_apply(unsigned int at)
+{
+        int want[2];
+
+        if (!compositor.repeats[at] || compositor.inputs[at] < 0)
+                return;
+        compositor_repeat_target(compositor.repeat_kept, compositor.repeat_delay, compositor.repeat_rate,
+                                 compositor.repeat_own[at], want);
+        if (want[0] == compositor.repeat_now[at][0] && want[1] == compositor.repeat_now[at][1])
+                return;
+        if (system_control(compositor.inputs[at], COMPOSITOR_EVIOCSREP, want) == 0)
+        {
+                compositor.repeat_now[at][0] = want[0];
+                compositor.repeat_now[at][1] = want[1];
+        }
+}
+
+/*
+        `moonwater canvas cursor shake` (and its delay), `moonwater keyboard repeat` (delay and rate) and
+        `moonwater mouse` (sensitivity and acceleration), as the words their files hold (none is an empty
+        word): taken at once. The defaults are what the compositor did before there were settings, to the
+        bit; a repeat that is not kept leaves each keyboard the way it opened, and one that was kept and is
+        put back is told to the keyboards as they were.
+*/
+static void compositor_input_settings_set(const char *shake, const char *shake_delay, const char *sensitivity,
+                                          const char *acceleration, const char *repeat_delay, const char *repeat_rate)
+{
+        long value;
+        int was_off = compositor.cursor.shake_off;
+
+        compositor.cursor.shake_off = compositor_setting_kept(SETTING_SHAKE_PATH, shake, &value) && value == 1;
+        compositor_setting_kept(SETTING_SHAKE_DELAY_PATH, shake_delay, &value);
+        compositor.cursor.shake_ns = (positive)value * 1000000ull;
+        compositor_setting_kept(SETTING_SENSITIVITY_PATH, sensitivity, &value);
+        compositor.sensitivity = (int)value;
+        compositor.flat = compositor_setting_kept(SETTING_ACCELERATION_PATH, acceleration, &value) && value == 1;
+
+        compositor.repeat_kept = 0;
+        if (compositor_setting_kept(SETTING_REPEAT_DELAY_PATH, repeat_delay, &value))
+        {
+                compositor.repeat_kept |= 1;
+                compositor.repeat_delay = (int)value;
+        }
+        if (compositor_setting_kept(SETTING_REPEAT_RATE_PATH, repeat_rate, &value))
+        {
+                compositor.repeat_kept |= 2;
+                compositor.repeat_rate = (int)value;
+        }
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                compositor_repeat_apply(at);
+
+        // A pointer that is large is no longer shaken for when shaking is turned off.
+        if (compositor.cursor.shake_off && !was_off && (compositor.cursor.magnified || compositor.cursor.magnify))
+        {
+                compositor.cursor.magnified = compositor.cursor.magnify = 0;
+                compositor_cursor_move();
+        }
+}
+
+// Read when the compositor starts and again when a file of them is written.
+static void compositor_input_settings_read(void)
+{
+        char words[6][16];
+        static const char *const paths[6] = {SETTING_SHAKE_PATH, SETTING_SHAKE_DELAY_PATH, SETTING_SENSITIVITY_PATH,
+                                             SETTING_ACCELERATION_PATH, SETTING_REPEAT_DELAY_PATH, SETTING_REPEAT_RATE_PATH};
+
+        for (unsigned int at = 0; at < 6; at++)
+                compositor_word(paths[at], words[at], sizeof(words[at]));
+        compositor_input_settings_set(words[0], words[1], words[2], words[3], words[4], words[5]);
+}
+
+/*
         Every keyboard and pointer evdev has, now and as they come. Read
         beside Canvas's own handler, not grabbed from it: a grab would take
         Control-Alt-Backspace away from the kernel, and that chord is how a
@@ -4794,6 +4932,15 @@ static void compositor_input_add(unsigned int number)
 
         compositor.inputs[at] = (int)handle;
         compositor.device_number[at] = (int)number;
+        // A keyboard whose repeat can be asked is told what the settings keep, now and when they change.
+        compositor.repeats[at] = 0;
+        if (keyboard && system_control(handle, COMPOSITOR_EVIOCGREP, compositor.repeat_own[at]) == 0)
+        {
+                compositor.repeats[at] = 1;
+                compositor.repeat_now[at][0] = compositor.repeat_own[at][0];
+                compositor.repeat_now[at][1] = compositor.repeat_own[at][1];
+                compositor_repeat_apply(at);
+        }
         compositor.devices |= 1ul << number;
         compositor.input_count = at + 1 > compositor.input_count ? at + 1 : compositor.input_count;
 }
@@ -4841,8 +4988,10 @@ static void compositor_inputs_watch(void)
                         if (at + 16 + (long)length > got)
                                 break;
 
-                        if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
-                            !compositor.layout_given)
+                        if (compositor_setting_file(name))
+                                compositor_input_settings_read();
+                        else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
+                                 !compositor.layout_given)
                                 compositor_layout_read();
                         else if ((length > 17 && !string_compare_max((string_address)name, (string_address) "canvas.background", 17)) ||
                                  (length > 14 && !string_compare_max((string_address)name, (string_address) "canvas.cursor.", 14)))
@@ -5889,6 +6038,20 @@ static void compositor_pointer_clamp(void)
                                                                          : compositor.pointer_y;
 }
 
+// Whether a movement of the hand is a shake that finds the pointer: `moonwater canvas cursor shake off` says none is.
+static int compositor_shaken(int delta, unsigned long long now)
+{
+        return compositor_shake(&compositor.shake, delta, now) && !compositor.cursor.shake_off;
+}
+
+// The pointer was shaken: it is large until its time is up, which is COMPOSITOR_MAGNIFIED_NS or what `moonwater canvas cursor shake delay` says, from this last shake.
+static void compositor_magnify(positive now)
+{
+        compositor.cursor.magnify = 0;
+        compositor.cursor.magnified = 1;
+        compositor.cursor.magnified_until = now + (compositor.cursor.shake_ns ? compositor.cursor.shake_ns : COMPOSITOR_MAGNIFIED_NS);
+}
+
 // The pointer, to a window: where it is in the window's picture.
 static void compositor_pointer_to(int row)
 {
@@ -5910,11 +6073,7 @@ static void compositor_motion(void)
                                       : compositor_cursor_by_edges[compositor_edge_zone(under, compositor.pointer_x,
                                                                                          compositor.pointer_y) & 15];
         if (compositor.cursor.magnify)
-        {
-                compositor.cursor.magnify = 0;
-                compositor.cursor.magnified = 1;
-                compositor.cursor.magnified_until = clock_monotonic_nanoseconds() + COMPOSITOR_MAGNIFIED_NS;
-        }
+                compositor_magnify(clock_monotonic_nanoseconds());
         compositor_cursor_move();
 
         // On the plane the pointer is on the screen when the call returns; drawn, when the frame has gone.
@@ -6151,7 +6310,8 @@ static int compositor_report(positive now)
                 int dx = compositor.raw_x, dy = compositor.raw_y, gain;
 
                 compositor.raw_x = compositor.raw_y = 0;
-                gain = compositor_gain_of(dx, dy, now - compositor.stamp);
+                gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now - compositor.stamp), compositor.flat,
+                                              compositor.sensitivity);
                 compositor.stamp = now;
                 compositor.pointer_x += compositor_accel(dx, &compositor.accel_x, gain);
                 compositor.pointer_y += compositor_accel(dy, &compositor.accel_y, gain);
@@ -6208,7 +6368,7 @@ static void compositor_input_read(unsigned int at)
                         if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
                         {
                                 compositor.raw_x += event->value;
-                                if (compositor_shake(&compositor.shake, event->value, now))
+                                if (compositor_shaken(event->value, now))
                                         compositor.cursor.magnify = 1;
                         }
                         else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
@@ -6652,6 +6812,7 @@ static b32 compositor_main()
         compositor.pointer_x = compositor.width / 2;
         compositor.pointer_y = compositor.height / 2;
         compositor_look_read();
+        compositor_input_settings_read();
         compositor_cursor_move();
         compositor_font(font);
 

@@ -45,25 +45,42 @@ moonwater bind init                    what runs at every boot, with ids
 moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas [on|off]              the desktop; off leaves the text console [on]
-moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
-moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
 moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
 moonwater settings                     the settings window, on the desktop of the compositor
-moonwater airplane [on|off]            every radio at once
-moonwater brightness [N%|+N|-N]        the screen backlight
-moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
-moonwater sleep | hibernate            suspend to RAM or to disk
-moonwater wired [on|off]               the wired links; off keeps them down
-moonwater wifi [on|off]                the radio, saved networks and those in range
-moonwater wifi remove SSID             forget a saved network, and leave it
-moonwater bluetooth [on|off]           the radio and the remembered devices
-moonwater time [sync]                  the clock; sync sets it and the zone now
-moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
-moonwater ntp [on|off]                 set the clock from the network [on]
-moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater name [NEW|random]            what this machine is called, like space-wizard
-moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network gives them [auto]
+moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
+moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
+moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
+moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
+moonwater canvas scale [N|auto]        device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]
+moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
+moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
+moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
+moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
+moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
+moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
+moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
+moonwater ntp [on|off]                 set the clock from the network [on]
+moonwater time [sync]                  the clock; sync sets it and the zone now
+moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
+moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
+moonwater ntp nts [on|off|only]        authenticated time (RFC 8915) first; only refuses plain [on]
+moonwater ntp nts servers [NAME[:PORT]...|default]  who is asked for it, up to four
+moonwater wired [on|off]               the wired links; off keeps them down
+moonwater airplane [on|off]            every radio at once
+moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
+moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network gives them [auto]
+moonwater wifi [on|off]                the radio, saved networks and those in range
+moonwater bluetooth [on|off]           the radio and the remembered devices
+moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
+moonwater brightness [N%|+N|-N]        the screen backlight
+moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
+moonwater charge [limit N|limit off]   where the battery stops charging, 20 to 100
+moonwater bind init canvas [on|off]    start Canvas at boot [on]
+moonwater bind init mount [on|off]     mount kept disks at boot [on]
+moonwater sleep | hibernate            suspend to RAM or to disk
+moonwater wifi remove SSID             forget a saved network, and leave it
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
 moonwater link NAME CODE               link to the machine called NAME, which waits
@@ -79,7 +96,7 @@ it changes it and needs root, and a word it does not take is a usage page
 script that sets a machine up at boot.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
-(machine, canvas, time, network, Wi-Fi, Bluetooth, power, boot, and all commands) are
+(machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, power, boot, and all commands) are
 listed at the left and the rows of the one chosen at the right, each row a setting a
 person flips, and under All commands a row to every line of `moonwater help`, so no
 verb is out of its reach. Tab goes between the groups and the rows, the arrow keys

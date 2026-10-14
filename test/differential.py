@@ -43126,6 +43126,16 @@ def harness_moonwater_cli(argv):
                 "canvas background a b", "canvas cursor", "canvas cursor size", "canvas cursor size 2",
                 "canvas cursor size 9", "canvas cursor size 2 3", "canvas cursor look", "canvas cursor look dark",
                 "canvas cursor look sideways", "canvas cursor look dark light", "canvas cursor bogus",
+                #       The rows of the settings table that one generic path answers.
+                "canvas cursor shake", "canvas cursor shake off", "canvas cursor shake maybe", "canvas cursor shake on off",
+                "canvas cursor shake default", "canvas cursor shake delay", "canvas cursor shake delay 800",
+                "canvas cursor shake delay 5", "canvas cursor shake delay 800 900", "canvas cursor shake delay default",
+                "keyboard repeat", "keyboard repeat bogus", "keyboard repeat delay", "keyboard repeat delay 300",
+                "keyboard repeat delay 50", "keyboard repeat delay 300 400", "keyboard repeat delay default",
+                "keyboard repeat rate", "keyboard repeat rate off", "keyboard repeat rate 0", "keyboard repeat rate 5 6",
+                "keyboard repeat rate default", "mouse", "mouse bogus", "mouse sensitivity", "mouse sensitivity 150",
+                "mouse sensitivity 5", "mouse sensitivity 150 200", "mouse sensitivity default", "mouse acceleration",
+                "mouse acceleration off", "mouse acceleration maybe", "mouse acceleration on off", "mouse acceleration default",
                 "settings", "settings extra",
                 "bind", "bind init", "bind exit", "bind bogus", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
@@ -43195,6 +43205,26 @@ def harness_moonwater_cli(argv):
             'canvas cursor size 2',
             'canvas cursor look',
             'canvas cursor look dark',
+            'canvas cursor shake',
+            'canvas cursor shake off',
+            'canvas cursor shake default',
+            'canvas cursor shake delay',
+            'canvas cursor shake delay 800',
+            'canvas cursor shake delay default',
+            'keyboard repeat',
+            'keyboard repeat delay',
+            'keyboard repeat delay 300',
+            'keyboard repeat delay default',
+            'keyboard repeat rate',
+            'keyboard repeat rate off',
+            'keyboard repeat rate default',
+            'mouse',
+            'mouse sensitivity',
+            'mouse sensitivity 150',
+            'mouse sensitivity default',
+            'mouse acceleration',
+            'mouse acceleration off',
+            'mouse acceleration default',
             'name',
             'name random',
             'name x',
@@ -43248,6 +43278,12 @@ def harness_moonwater_cli(argv):
             'canvas background red',
             'canvas cursor size 9',
             'canvas cursor look sideways',
+            'canvas cursor shake maybe',
+            'canvas cursor shake delay 5',
+            'keyboard repeat delay 50',
+            'keyboard repeat rate 0',
+            'mouse sensitivity 5',
+            'mouse acceleration maybe',
             'settings',
             'bind',
             'bind bogus',
@@ -43309,6 +43345,14 @@ def harness_moonwater_cli(argv):
             'canvas cursor size 2 3',
             'canvas cursor look dark light',
             'canvas cursor bogus',
+            'canvas cursor shake on off',
+            'canvas cursor shake delay 800 900',
+            'keyboard repeat bogus',
+            'keyboard repeat delay 300 400',
+            'keyboard repeat rate 5 6',
+            'mouse bogus',
+            'mouse sensitivity 150 200',
+            'mouse acceleration on off',
             'wifi add',
             'wifi remove',
             'wifi remove a b',
@@ -43376,13 +43420,14 @@ def harness_moonwater_cli(argv):
                  "UTC+14", "UTC-14", "<+0530>-5:30", "Europe/", "../../etc/passwd", "x" * 300,
                  "\x1b[31m", "tab\there", "sv", "SE", "\u00e5\u00e4\u00f6", "0", "18446744073709551616",
                  "power", "canvas on", "--", "-h", "status", "scale", "modes", "largest", "preferred", "1", "4", "5",
+                 "cursor", "shake", "delay", "repeat", "rate", "sensitivity", "acceleration", "default", "150", "300",
                  " ", "ON", "on ", "-1", "+1", "99999999999999999999", "%s", "%n", "%%", "$(id)",
                  "a\nb", "\x1b]0;x\x07", "RAW\\377\\376", "RAW\\300\\200", "RAW\\355\\240\\200",
                  "/etc/passwd", "x" * 63, "x" * 64, "x" * 65, "x" * 4096, "help", "setup"]
         #       Neither "reboot" nor "bios" carries a reboot into these words: bios
         #       reboot sets a bit in the firmware, and a run as real root would
         #       leave it set on the machine that ran the lane.
-        verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "name", "canvas", "bind",
+        verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "mouse", "name", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
                  "charge", "airplane", "-h", "help", "setup", "link"]
         fuzzed = []
@@ -44805,6 +44850,96 @@ while True:
         check(all(seen.get(word, {}).get("status") == 2 for word in
                   ("canvas background a b", "canvas cursor bogus", "canvas cursor size 2 3", "canvas cursor look dark light")),
               "a word the verb does not take, or one too many, is a usage page", "")
+        #       The rows of the settings table that one generic path answers (src/sh/registry.c): bare they
+        #       say where they stand, a word sets them in their file as it is kept, a word that is none is
+        #       refused and keeps nothing, a word too many is a usage page, default puts them back, and a
+        #       caller who is not root is refused for a word that is good. Wipe keeps each file (the macros
+        #       of the source name them, which the wipe lane above walks).
+        plain_rows = [
+            # verb, file, a good word and what it is kept as, bad words, the line after it, the standard's line
+            ("canvas cursor shake", "canvas.cursor.shake", "off", "off", ["maybe", "ON", "1", '""', "off,on"],
+             "cursor shake off", "cursor shake on"),
+            ("canvas cursor shake delay", "canvas.cursor.shake.delay", "800", "800", ["99", "10001", "0800", "x", "1e3", '""', "-5", "+5", "8.5", "1000000000"],
+             "cursor shake delay 800 ms", "cursor shake delay 1200 ms"),
+            ("keyboard repeat delay", "keyboard.repeat.delay", "300", "300", ["99", "2001", "x", "0", '""'],
+             "repeat delay 300 ms", "repeat delay 250 ms"),
+            ("keyboard repeat rate", "keyboard.repeat.rate", "off", "off", ["0", "101", "x", "Off", '""'],
+             "repeat rate off", "repeat rate 30 per second"),
+            ("mouse sensitivity", "mouse.sensitivity", "150", "150", ["9", "501", "x", "1.5", '""'],
+             "sensitivity 150 percent", "sensitivity 100 percent"),
+            ("mouse acceleration", "mouse.acceleration", "off", "off", ["maybe", "0", '""'],
+             "acceleration off", "acceleration on"),
+        ]
+
+        def plain_step(label, command):
+            return (f"echo '@@ {label}'; timeout 20 /tmp/moonwater {command} 2>&1; echo \"@@status $?\"\n")
+
+        def plain_kept(path):
+            return f"echo \"@@plain $(cat /root/{path} 2>/dev/null || echo none)\"\n"
+
+        script = "rm -f " + " ".join("/root/" + row[1] for row in plain_rows) + "\n"
+        for number, (verb, path, good, kept_word, bads, line_after, line_default) in enumerate(plain_rows):
+            label = lambda name: f"{number}-{name}"
+            script += (plain_step(label("bare"), verb) + plain_kept(path) + plain_step(label("set"), f"{verb} {good}") +
+                       plain_kept(path) + plain_step(label("read"), verb) + plain_step(label("surplus"), f"{verb} {good} extra") +
+                       plain_kept(path))
+            for at, bad in enumerate(bads):
+                script += plain_step(label(f"bad{at}"), f"{verb} {bad}") + plain_kept(path)
+            script += (plain_step(label("default"), f"{verb} default") + plain_kept(path) +
+                       plain_step(label("back"), verb))
+        #       The group of a verb with more rows than one says them all, and a row's neighbour is not touched.
+        script += (plain_step("group-mouse", "mouse") + plain_step("group-repeat", "keyboard repeat") +
+                   plain_step("group-cursor", "canvas cursor") + plain_step("group-repeat-extra", "keyboard repeat rate 3 4") +
+                   "echo 'tool' > /root/keyboard.repeat.rate; echo 9 > /root/mouse.sensitivity; echo 0 > /root/canvas.cursor.shake.delay\n" +
+                   plain_step("garbage-rate", "keyboard repeat rate") + plain_step("garbage-sens", "mouse sensitivity") +
+                   plain_step("garbage-delay", "canvas cursor shake delay") +
+                   "printf 'off\\r\\n' > /root/canvas.cursor.shake\n" + plain_step("crlf", "canvas cursor shake") +
+                   "rm -f " + " ".join("/root/" + row[1] for row in plain_rows) + "\n")
+        plain_lines, plain_done = session(script)
+        plain_seen = answers(plain_lines)
+        plain_text = lambda name: "\n".join(plain_seen.get(name, {}).get("out", []))
+        plain_files = [line[len("@@plain "):] for line in plain_lines if line.startswith("@@plain ")]
+        check(plain_done, "the settings table's session finished", "")
+        for number, (verb, path, good, kept_word, bads, line_after, line_default) in enumerate(plain_rows):
+            got = lambda name: plain_seen.get(f"{number}-{name}", {"out": [], "status": None})
+            check(got("bare")["status"] == 0 and line_default in plain_text(f"{number}-bare"),
+                  f"moonwater {verb} says its standard when nothing is kept", plain_text(f"{number}-bare"))
+            check(got("set")["status"] == 0 and line_after in plain_text(f"{number}-set") and
+                  got("read")["status"] == 0 and line_after in plain_text(f"{number}-read"),
+                  f"moonwater {verb} {good} keeps it and says it, and the bare verb says it again",
+                  plain_text(f"{number}-set") + plain_text(f"{number}-read"))
+            check(got("surplus")["status"] == 2,
+                  f"moonwater {verb} {good} extra is a usage page", repr(got("surplus")))
+            for at, bad in enumerate(bads):
+                check(got(f"bad{at}")["status"] == 1 and " not " in plain_text(f"{number}-bad{at}"),
+                      f"moonwater {verb} {bad} is refused in words", plain_text(f"{number}-bad{at}"))
+            check(got("default")["status"] == 0 and line_default in plain_text(f"{number}-default") and
+                  line_default in plain_text(f"{number}-back"),
+                  f"moonwater {verb} default puts it back", plain_text(f"{number}-default"))
+        #       What the files held in the order they were looked at: none; the word; the word (a surplus word
+        #       keeps nothing new); the bad words leave it; default.
+        expected = []
+        for verb, path, good, kept_word, bads, line_after, line_default in plain_rows:
+            expected += ["none", kept_word, kept_word] + [kept_word] * len(bads) + ["default"]
+        check(plain_files[:len(expected)] == expected,
+              "the settings table's rows keep the word they were given, normalised, and nothing a refusal was given; default is kept as the word default",
+              repr(plain_files[:len(expected)]))
+        check(all(word in plain_text("group-mouse") for word in ("sensitivity 100 percent", "acceleration on")) and
+              plain_seen.get("group-mouse", {}).get("status") == 0,
+              "a verb of several rows says them all bare", plain_text("group-mouse"))
+        check(all(word in plain_text("group-repeat") for word in ("repeat delay 250 ms", "repeat rate 30 per second")) and
+              plain_seen.get("group-repeat", {}).get("status") == 0,
+              "and so does keyboard repeat", plain_text("group-repeat"))
+        check("cursor shake on" in plain_text("group-cursor") and "cursor shake delay 1200 ms" in plain_text("group-cursor") and
+              "cursor size auto, look " in plain_text("group-cursor"),
+              "canvas cursor says its size and look and then its shake rows", plain_text("group-cursor"))
+        check(plain_seen.get("group-repeat-extra", {}).get("status") == 2,
+              "a word too many to a row under a group is a usage page", repr(plain_seen.get("group-repeat-extra")))
+        check("repeat rate 30 per second" in plain_text("garbage-rate") and "sensitivity 100 percent" in plain_text("garbage-sens") and
+              "cursor shake delay 1200 ms" in plain_text("garbage-delay") and "cursor shake off" in plain_text("crlf"),
+              "a file that holds a word that is none says the standard, and a CRLF is the word it ends",
+              plain_text("garbage-rate") + plain_text("garbage-sens") + plain_text("garbage-delay") + plain_text("crlf"))
+
         words = [line[len("@@word "):] for line in lines if line.startswith("@@word ")]
         check(seen.get("ntp server", {}).get("status") == 0 and "pool.ntp.org" in text("ntp server"),
               "ntp server says the pool when none is named", text("ntp server"))
@@ -45123,6 +45258,27 @@ while True:
         check(in_readme and in_readme <= on_pages,
               "the README's rows are rows of the pages, word for word",
               "only in the README: %r" % sorted(in_readme - on_pages)[:4])
+        #       The settings table (src/sh/registry.c) is where a setting is written once: its row of the
+        #       pages and its line in the README are asked of it, each setting the window lists is a row
+        #       of it and the window keeps no list of its own, and a verb it names has its marker on the
+        #       main page and a place in the dispatcher.
+        registry_source = (HARNESS_ROOT / "src/sh/registry.c").read_text()
+        table_rows = [(usage, " ".join(text.split())) for usage, text in
+                      re.findall(r'\.usage = "((?:[^"\\]|\\.)*)",\s*\.help = "((?:[^"\\]|\\.)*)"', registry_source)]
+        check(len(table_rows) >= 32 and ("canvas cursor shake delay [MS|default]",
+              "how long it stays large after the last shake, 100 to 10000 ms [1200]") in table_rows,
+              "the settings table has its rows", repr(table_rows[:3]))
+        check(all(row in on_pages for row in table_rows),
+              "every row of the settings table is a row of the pages", repr([row for row in table_rows if row not in on_pages][:4]))
+        check(all(row in in_readme for row in table_rows),
+              "and every one has its row in the README, word for word", repr([row for row in table_rows if row not in in_readme][:4]))
+        markers = set(re.findall(r'\{null, "@(\w+)", null, \'r\'\}', host_source))
+        check({usage.split()[0] for usage, _ in table_rows} <= markers,
+              "every verb of the table has its marker on the main page", repr(sorted({u.split()[0] for u, _ in table_rows} - markers)))
+        settings_source = (HARNESS_ROOT / "src/canvas/settings.c").read_text()
+        check("settings_rows[] =" not in settings_source and "struct settings_row\n{" not in settings_source and
+              "SETTINGS_FIELD, 0" not in settings_source,
+              "the settings window keeps no list of rows: its rows are the table's", "")
         #       A quote in a row is read by GitHub's highlighter as the start of
         #       a string and colours the rest of the README's block with it.
         check(not any("'" in command or "'" in text for command, text in on_pages),
@@ -45164,7 +45320,9 @@ while True:
             "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "bios reboot",
             "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine extra",
             "latency", "latency sideways", "latency reset extra", "canvas background 112233",
-            "canvas cursor size 2", "canvas cursor look dark")))
+            "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
+            "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
+            "mouse sensitivity 150", "mouse acceleration off")))
         lines, finished = session(script, nobody=True)
         seen = answers(lines)
         wanted = {
@@ -45192,6 +45350,12 @@ while True:
             "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
             "canvas cursor size 2": (1, "needs root (CAP_SYS_ADMIN)"),
             "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
+            "canvas cursor shake off": (1, "moonwater canvas needs root"),
+            "canvas cursor shake delay 800": (1, "moonwater canvas needs root"),
+            "keyboard repeat delay 300": (1, "moonwater keyboard needs root"),
+            "keyboard repeat rate off": (1, "moonwater keyboard needs root"),
+            "mouse sensitivity 150": (1, "moonwater mouse needs root"),
+            "mouse acceleration off": (1, "moonwater mouse needs root"),
         }
         for command, (status, words) in wanted.items():
             got = seen.get(command, {"out": [], "status": None})
