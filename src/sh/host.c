@@ -5211,10 +5211,10 @@ static b32 host_canvas(string_address address_to arguments, positive count)
 
         The two input handlers Moonwater attaches to every device are counted
         by the kernel and one report in sixteen is timed, so what each costs a
-        report is a figure here and not a guess: Canvas's, which watches the
-        keys for the chords that end a desktop and says nothing while another
-        program has the display (the compositor, or a desktop of a bowl), and
-        the machine's key watch, which fires the bound events. The stages
+        report is a figure here and not a guess: Canvas's, which hears the
+        modifiers and Backspace, the chords that end a desktop, and returns at
+        once for every other report whoever has the display, and the machine's
+        key watch, which fires the bound events. The stages
         after the kernel (the compositor, the screen) are not the machine's
         to see. reset
         zeroes the counts, so a minute of moving a mouse is a reset, the
@@ -5262,13 +5262,11 @@ static b32 host_latency(string_address address_to arguments, positive count)
         latency_cost_say("Canvas's handler", address_of stats.canvas, elapsed_ms);
         latency_cost_say("the key watch", address_of stats.bind, elapsed_ms);
 
-        if (stats.yielded)
-                string_format(log, host_label "another program has the display: Canvas's handler "
-                                              "returned at once for %p of its reports, with no lock "
-                                              "taken and nothing woken\n", (positive)stats.quiet);
-        else
-                string_format(log, host_label "%p of Canvas's reports were heard while another "
-                                              "program had the display\n", (positive)stats.quiet);
+        string_format(log, host_label "Canvas's handler returned at once for %p of its reports "
+                                      "(every one that is no modifier or Backspace), with no lock "
+                                      "taken and nothing woken%s\n",
+                      (positive)stats.quiet,
+                      stats.yielded ? "; another program has the display" : "");
 
         log_flush();
         return 0;
