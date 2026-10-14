@@ -1923,27 +1923,6 @@ static bool file_resolve_homeless;
    above a name that exists is a directory, and need not be asked. */
 static bool file_resolve_present;
 
-/* Whether two names left to resolve walk the same way: a run of slashes
-   is one separator to the walk, and a self-link followed with a trailing
-   slash leaves one more slash each time round, which must not hide the
-   loop. */
-static bool file_resolve_same_walk(string_address a, string_address b)
-{
-        for (;;)
-        {
-                while (string_is(a, '/'))
-                        a++;
-                while (string_is(b, '/'))
-                        b++;
-                if (string_get(a) != string_get(b))
-                        return false;
-                if (!string_get(a))
-                        return true;
-                a++;
-                b++;
-        }
-}
-
 static bool file_resolve_as(string_address path, p8 address_to into,
                             bool follow, p8 policy)
 {
@@ -2135,8 +2114,8 @@ static bool file_resolve_as(string_address path, p8 address_to into,
                         return false;
 
                 if (saved_any && saved_missing == missing_walk &&
-                    file_resolve_same_walk(into, saved_into) &&
-                    file_resolve_same_walk(rest + start, saved_rest))
+                    path_same_walk(into, saved_into) &&
+                    path_same_walk(rest + start, saved_rest))
                 {
                         /* -m treats the link of a loop like an absent
                            component and preserves its spelling. */

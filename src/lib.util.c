@@ -36419,9 +36419,10 @@ static fn process_nap_ns(positive nanoseconds)
         Whether two names left to resolve walk the same way: a run of slashes
         is one separator to the walk, so a self-link followed with a trailing
         slash, which adds a slash each time round, is the same state and not
-        a longer one that never repeats.
+        a longer one that never repeats. realpath and the shell's own
+        resolver (file_resolve_as) both tell a loop of links by it.
 */
-static bool realpath_same_walk(string_address a, string_address b)
+static bool path_same_walk(string_address a, string_address b)
 {
         for (;;)
         {
@@ -36598,7 +36599,7 @@ static string_address realpath(string_address path, string_address into)
                                             saved_answer_length == was &&
                                             !memory_compare(saved_answer, answer,
                                                             was) &&
-                                            realpath_same_walk(rest + at,
+                                            path_same_walk(rest + at,
                                                                saved_rest))
                                                 errno_refuse(ELOOP, null);
 
