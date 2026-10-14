@@ -119,9 +119,9 @@ struct settings_row
         what the window and its lane find a row by.
 */
 #define SETTING_UNWRAP(...) __VA_ARGS__
-// A plain row: group, label, window kind, verb words in brackets, key, choices, then the rest by name.
-#define SETTING_PLAIN_ROW(section_, label_, kind_, verb_, key_, choices_, ...)                                        \
-        {section_, label_, kind_, 0, 0, {SETTING_UNWRAP verb_}, key_, null, {SETTING_UNWRAP verb_}, choices_, 0, null, \
+// A plain row: group, label, window kind and flags, verb words in brackets, key, choices, then the rest by name.
+#define SETTING_PLAIN_ROW(section_, label_, kind_, flags_, verb_, key_, choices_, ...)                                \
+        {section_, label_, kind_, 0, flags_, {SETTING_UNWRAP verb_}, key_, null, {SETTING_UNWRAP verb_}, choices_, 0, null, \
          .how = SETTING_PLAIN, __VA_ARGS__}
 
 static const struct settings_row settings_rows[] = {
@@ -129,12 +129,12 @@ static const struct settings_row settings_rows[] = {
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
     {null, "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it", 0, null,
      .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it [us]"},
-    SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, ("keyboard", "repeat", "delay"), "delay ", null,
+    SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
                       .standard = "250", .unit = "ms", .low = 100, .high = 2000,
                       .usage = "keyboard repeat delay [MS|default]",
                       .help = "how long a key is held before it repeats, 100 to 2000 ms [250]"),
-    SETTING_PLAIN_ROW(null, "Key repeat rate (per second, off or default)", SETTINGS_FIELD, ("keyboard", "repeat", "rate"), "rate ", "off",
+    SETTING_PLAIN_ROW(null, "Key repeat rate (per second, off or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "rate"), "rate ", "off",
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_RATE_PATH,
                       .standard = "30", .unit = "per second", .low = 1, .high = 100,
                       .usage = "keyboard repeat rate [PER-SECOND|off|default]",
@@ -145,28 +145,33 @@ static const struct settings_row settings_rows[] = {
      .usage = "canvas scale [N|auto]", .help = "device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]"},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
-    {null, "Background", SETTINGS_CHOICE, 0, SETTINGS_INK, {"canvas", "background"}, "background ", null, {"canvas", "background"},
-     "default black dark-grey slate midnight-blue forest plum light-grey white", 0, null,
-     .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"},
+    SETTING_PLAIN_ROW(null, "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
+                      "default black dark-grey slate midnight-blue forest plum light-grey white",
+                      .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",
+                      .need = "how Canvas draws", .refusal = "background is a colour like 1e1e1e, or default, not %s\n",
+                      .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
     {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
      {"canvas", "background"}, null, 0, null, .how = SETTING_ALIAS},
-    {null, "Cursor size", SETTINGS_CHOICE, 0, 0, {"canvas", "cursor"}, "size ", null, {"canvas", "cursor", "size"}, "auto 1 2 3 4", 0, null,
-     .usage = "canvas cursor [size [N|auto]|look [light|dark|auto]]", .help = "the pointer: size 1 to 4, colours [auto]"},
-    {null, "Cursor look", SETTINGS_CHOICE, 0, 0, {"canvas", "cursor"}, "look ", null, {"canvas", "cursor", "look"}, "auto light dark", 0,
-     null},
-    SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, ("canvas", "cursor", "shake"), "shake ", null,
+    SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
+                      .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
+                      .usage = "canvas cursor [size [N|auto]|look [light|dark|auto]]", .help = "the pointer: size 1 to 4, colours [auto]"),
+    SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
+                      .refusal = "cursor look is light, dark or auto, not %s\n"),
+    SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_PATH, .standard = "on",
                       .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
-    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_FIELD, ("canvas", "cursor", "shake", "delay"), "delay ", null,
+    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_FIELD, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_DELAY_PATH,
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000,
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
-    SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, ("mouse", "sensitivity"), "sensitivity ", null,
+    SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,
                       .usage = "mouse sensitivity [PERCENT|default]", .help = "how far the pointer goes for the hand, 10 to 500 percent [100]"),
-    SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, ("mouse", "acceleration"), "acceleration ", null,
+    SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null,
@@ -275,6 +280,15 @@ static int setting_find(string_address address_to words, positive count, positiv
         }
         address_to used = most;
         return found;
+}
+
+// The row whose file is path (one of the SETTING_ paths), which every row that is kept has.
+static const struct settings_row address_to setting_by_path(string_address path)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].path && string_equals(path, (string_address)settings_rows[at].path))
+                        return &settings_rows[at];
+        return null;
 }
 
 /*

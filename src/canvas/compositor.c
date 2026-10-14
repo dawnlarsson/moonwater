@@ -4725,7 +4725,7 @@ static void compositor_look_read(void)
         long colour;
         int size = 0, look = 0;
 
-        compositor_word("/root/canvas.background", word, sizeof(word));
+        compositor_word(SETTING_BACKGROUND_PATH, word, sizeof(word));
         colour = word[0] ? window_colour_parse((string_address)word) : -1;
         if ((unsigned int)(colour < 0 ? COMPOSITOR_INK_DESKTOP : colour) != compositor_ground)
         {
@@ -4733,10 +4733,10 @@ static void compositor_look_read(void)
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
 
-        compositor_word("/root/canvas.cursor.size", word, sizeof(word));
+        compositor_word(SETTING_CURSOR_SIZE_PATH, word, sizeof(word));
         if (word[0] >= '1' && word[0] <= '4' && !word[1])
                 size = word[0] - '0';
-        compositor_word("/root/canvas.cursor.look", word, sizeof(word));
+        compositor_word(SETTING_CURSOR_LOOK_PATH, word, sizeof(word));
         if (!string_compare((string_address)word, (string_address) "light"))
                 look = 1;
         else if (!string_compare((string_address)word, (string_address) "dark"))
@@ -4760,11 +4760,10 @@ static void compositor_look_read(void)
 */
 static bool compositor_setting_kept(const char *path, const char *word, long *value)
 {
+        const struct settings_row *row = setting_by_path((string_address)path);
+
         *value = 0;
-        for (unsigned int at = 0; at < SETTINGS_ROWS; at++)
-                if (settings_rows[at].path && string_equals((string_address)path, (string_address)settings_rows[at].path))
-                        return setting_kept(&settings_rows[at], (string_address)word, value);
-        return false;
+        return row && setting_kept(row, (string_address)word, value);
 }
 
 // Whether a name in /root is the file of a row the compositor takes at once.
@@ -4989,13 +4988,13 @@ static void compositor_inputs_watch(void)
                                 break;
 
                         if (compositor_setting_file(name))
+                        {
+                                compositor_look_read();
                                 compositor_input_settings_read();
+                        }
                         else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
                                  !compositor.layout_given)
                                 compositor_layout_read();
-                        else if ((length > 17 && !string_compare_max((string_address)name, (string_address) "canvas.background", 17)) ||
-                                 (length > 14 && !string_compare_max((string_address)name, (string_address) "canvas.cursor.", 14)))
-                                compositor_look_read();
                         else if (length > 5 && name[0] == 'e' && name[1] == 'v' && name[2] == 'e' &&
                             name[3] == 'n' && name[4] == 't')
                         {

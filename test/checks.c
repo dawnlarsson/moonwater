@@ -109908,11 +109908,24 @@ static fn check_registry(void)
                 string_copy_bounded((string_address)key, (string_address)row->read[setting_words(row) - 1], sizeof(key));
                 string_append_bounded((string_address)key, (string_address)" ", sizeof(key));
                 check("registry: a plain row's key is its last word", row->key && string_equals((string_address)row->key, (string_address)key));
-                check("registry: and its usage begins with its verb", row->usage && !string_compare_max((string_address)row->usage, (string_address)joined, string_length((string_address)joined)) &&
-                      (!row->usage[string_length((string_address)joined)] || row->usage[string_length((string_address)joined)] == ' '));
-                check("registry: and it has a help line, a file under /root and a standard",
-                      row->help && row->path && !string_compare_max((string_address)row->path, (string_address) "/root/", 6) && row->standard);
-                check("registry: and no apostrophe on the pages", !string_first_of_or_end((string_address)row->usage, '\'')[0] && !string_first_of_or_end((string_address)row->help, '\'')[0]);
+                if (row->usage)
+                        check("registry: and its usage begins with its verb", !string_compare_max((string_address)row->usage, (string_address)joined, string_length((string_address)joined)) &&
+                              (!row->usage[string_length((string_address)joined)] || row->usage[string_length((string_address)joined)] == ' ') && row->help &&
+                              !string_first_of_or_end((string_address)row->usage, '\'')[0] && !string_first_of_or_end((string_address)row->help, '\'')[0]);
+                else
+                {
+                        //      A row with no line of its own is said by the line of the row of its verb above it (cursor look by cursor size).
+                        positive covered = 0, cut = string_length((string_address)joined);
+
+                        while (cut && joined[cut - 1] != ' ')
+                                cut--;
+                        for (positive other = 0; other < SETTINGS_ROWS; other++)
+                                covered += settings_rows[other].usage && !string_compare_max((string_address)settings_rows[other].usage, (string_address)joined, cut ? cut - 1 : 0) &&
+                                           (cut ? settings_rows[other].usage[cut - 1] == ' ' : 0);
+                        check("registry: and one with no usage is covered by the usage of a row with its verb but the last word", covered > 0);
+                }
+                check("registry: and it has a file under /root and a standard",
+                      row->path && !string_compare_max((string_address)row->path, (string_address) "/root/", 6) && row->standard);
                 check("registry: and its standard is one of its words", setting_parse(row, (string_address)row->standard, kept, sizeof(kept), &value) &&
                       value == setting_standard(row));
                 check("registry: default puts it back", setting_parse(row, (string_address) "default", kept, sizeof(kept), &value) && value == setting_standard(row));
@@ -110260,7 +110273,7 @@ static fn check_settings(string_address regular, string_address bold)
                                   settings_group_of(ink) == settings_group_of(scale) && settings_group_of(colour) == settings_group_of(scale) &&
                                   settings_group_of(size) == settings_group_of(scale) && settings_group_of(look) == settings_group_of(scale) &&
                                   settings_same_verb(&settings_rows[ink], &settings_rows[colour]) &&
-                                  settings_same_verb(&settings_rows[size], &settings_rows[look]) &&
+                                  !settings_same_verb(&settings_rows[size], &settings_rows[look]) &&
                                   !settings_same_verb(&settings_rows[ink], &settings_rows[size]) &&
                                   settings_options(&settings_rows[ink]) == sizeof(settings_inks) / sizeof(settings_inks[0]));
                         check("settings: the first ink is the default",
@@ -110304,8 +110317,9 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: and its look is canvas cursor look and its word",
                               count == 5 && string_equals(words[3], (string_address) "look") && string_equals(words[4], (string_address) "light"));
                         count = settings_command(&settings_rows[look], (string_address) "/moonwater", "", words, SETTINGS_WORDS, true);
-                        check("settings: and what is asked of the pointer is canvas cursor",
-                              count == 3 && string_equals(words[1], (string_address) "canvas") && string_equals(words[2], (string_address) "cursor"));
+                        check("settings: and what is asked of the pointer's look is canvas cursor look, which says it alone",
+                              count == 4 && string_equals(words[1], (string_address) "canvas") && string_equals(words[2], (string_address) "cursor") &&
+                                  string_equals(words[3], (string_address) "look"));
                 }
         }
 

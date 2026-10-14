@@ -5102,7 +5102,6 @@ static fn host_tty1_shell(void)
 }
 
 static b32 locale_canvas_setting(string_address address_to arguments, positive count);
-static b32 locale_canvas_background(string_address address_to arguments, positive count);
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
 
 /* moonwater canvas [on|off|scale [N|auto]|modes [largest|preferred]|
@@ -5117,8 +5116,6 @@ static b32 host_canvas(string_address address_to arguments, positive count)
         if (count >= 3 && (string_equals(arguments[2], "scale") ||
                            string_equals(arguments[2], "modes")))
                 return locale_canvas_setting(arguments, count);
-        if (count >= 3 && string_equals(arguments[2], "background"))
-                return locale_canvas_background(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "cursor"))
                 return locale_canvas_cursor(arguments, count);
 
@@ -14916,9 +14913,6 @@ static COLD bipolar sntp_query_apart(string_address name, p16 port, bool filter,
 #define LOCALE_KEYBOARD_PATH "/root/keyboard"
 #define LOCALE_CANVAS_SCALE_PATH "/root/canvas.scale"
 #define LOCALE_CANVAS_MODES_PATH "/root/canvas.modes"
-#define LOCALE_CANVAS_BACKGROUND_PATH "/root/canvas.background"
-#define LOCALE_CANVAS_CURSOR_SIZE_PATH "/root/canvas.cursor.size"
-#define LOCALE_CANVAS_CURSOR_LOOK_PATH "/root/canvas.cursor.look"
 #define LOCALE_NTP_DEFAULT_SERVER "pool.ntp.org"
 #define LOCALE_NTP_SERVER_ROOM 80
 #define LOCALE_NTP_RETRY_LEAST 1
@@ -17742,136 +17736,11 @@ static b32 locale_canvas_setting(string_address address_to arguments, positive c
 }
 
 /*
-        The desktop's ink and the pointer's look and size: the compositor's, kept in /root as the
-        scale is and taken by the compositor as soon as a file is written (it watches /root, as
-        it does for the keyboard layout) and again whenever it starts. Nothing is asked of Canvas,
-        so what is said is what is kept: the default when nothing is.
+        The desktop's ink and the pointer's look and size are rows of the settings table, kept in /root as the
+        scale is and taken by the compositor as soon as a file is written (it watches /root, as it does for the
+        keyboard layout) and again whenever it starts. Nothing is asked of Canvas, so what is said is what is
+        kept: the default when nothing is. What is left here is the verb that has no row of its own.
 */
-#define LOCALE_CANVAS_BACKGROUND_STANDARD "#1e1e1e" // the compositor's COMPOSITOR_INK_DESKTOP
-
-//      A colour as #rrggbb in lower case, from rrggbb or the three digits of either that
-//      stand for each one twice: false for anything else.
-static bool locale_background_normal(string_address word, p8 address_to into)
-{
-        long colour = window_colour_parse(word);
-        p8 bytes[3] = {(p8)(colour >> 16), (p8)(colour >> 8), (p8)colour};
-
-        if (colour < 0)
-                return false;
-        into[0] = '#';
-        memory_into_hex(into + 1, bytes, 3);
-        into[7] = end;
-        return true;
-}
-
-static bool locale_background_ok(string_address word)
-{
-        p8 normal[8];
-
-        return string_equals(word, "default") || locale_background_normal(word, normal);
-}
-
-static bool locale_cursor_size_ok(string_address word)
-{
-        return string_equals(word, "auto") || (word[0] >= '1' && word[0] <= '4' && !word[1]);
-}
-
-static bool locale_cursor_look_ok(string_address word)
-{
-        return string_equals(word, "auto") || string_equals(word, "light") || string_equals(word, "dark");
-}
-
-//      What one of them is: the word kept when it is one, the standard when it is not or none is,
-//      and that it is root's to read when /root is closed to the caller.
-static string_address locale_canvas_word(string_address path, string_address standard,
-                                         bool (*ok)(string_address), p8 address_to word, positive room)
-{
-        if (!locale_readable(path, word, room))
-                return (string_address)LOCALE_NEEDS_ROOT;
-        return word[0] && !string_equals(word, "default") && ok((string_address)word)
-                   ? (string_address)word : standard;
-}
-
-static b32 locale_canvas_background_status(void)
-{
-        p8 word[16], shown[8];
-        string_address say = locale_canvas_word(LOCALE_CANVAS_BACKGROUND_PATH, LOCALE_CANVAS_BACKGROUND_STANDARD,
-                                                locale_background_ok, word, sizeof(word));
-
-        //      A colour written by hand without its # is said as the one the verb keeps.
-        if (say == (string_address)word && locale_background_normal(word, shown))
-                say = (string_address)shown;
-        host_say(log, host_label "background %s\n", say);
-        return 0;
-}
-
-//      Said as the one word the way is shown, and with both in a line when a verb asks for neither.
-static string_address locale_canvas_cursor_say(bool size, p8 address_to word, positive room)
-{
-        return size ? locale_canvas_word(LOCALE_CANVAS_CURSOR_SIZE_PATH, "auto", locale_cursor_size_ok, word, room)
-                    : locale_canvas_word(LOCALE_CANVAS_CURSOR_LOOK_PATH, "auto", locale_cursor_look_ok, word, room);
-}
-
-//      The word as it is kept: a root's, and never half written.
-static b32 locale_canvas_keep(string_address label, string_address path, string_address word)
-{
-        if (!bowl_is_root())
-                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
-        return host_save(label, path, word);
-}
-
-//      moonwater canvas background [COLOUR|default]
-static b32 locale_canvas_background(string_address address_to arguments, positive count)
-{
-        p8 normal[8];
-
-        return_if(count > 4, host_usage());
-        if (count < 4)
-                return locale_canvas_background_status();
-        if (!string_equals(arguments[3], "default") && !locale_background_normal(arguments[3], normal))
-                return host_refuse("background is a colour like 1e1e1e, or default, not %s\n", arguments[3]);
-        if (string_equals(arguments[3], "default"))
-                string_copy_bounded(normal, "default", sizeof(normal));
-        if (locale_canvas_keep("canvas background", LOCALE_CANVAS_BACKGROUND_PATH, (string_address)normal))
-                return 1;
-        return locale_canvas_background_status();
-}
-
-//      moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]
-static b32 locale_canvas_cursor(string_address address_to arguments, positive count)
-{
-        p8 word[16], other[16];
-        bool size;
-
-        if (count < 4)
-        {
-                host_say(log, host_label "cursor size %s, look %s\n",
-                         locale_canvas_cursor_say(true, word, sizeof(word)),
-                         locale_canvas_cursor_say(false, other, sizeof(other)));
-                return host_setting_group(arguments + 1, 2);
-        }
-        return_if(!string_equals(arguments[3], "size") && !string_equals(arguments[3], "look"), host_usage());
-        size = string_equals(arguments[3], "size");
-        return_if(count > 5, host_usage());
-        if (count < 5)
-        {
-                host_say(log, host_label "cursor %s %s\n", size ? "size" : "look",
-                         locale_canvas_cursor_say(size, word, sizeof(word)));
-                return 0;
-        }
-        if (size && !locale_cursor_size_ok(arguments[4]))
-                return host_refuse("cursor size is auto or a number from 1 to 4, not %s\n", arguments[4]);
-        if (!size && !locale_cursor_look_ok(arguments[4]))
-                return host_refuse("cursor look is light, dark or auto, not %s\n", arguments[4]);
-        if (locale_canvas_keep(size ? "cursor size" : "cursor look",
-                               size ? LOCALE_CANVAS_CURSOR_SIZE_PATH : LOCALE_CANVAS_CURSOR_LOOK_PATH,
-                               arguments[4]))
-                return 1;
-        host_say(log, host_label "cursor %s %s\n", size ? "size" : "look",
-                 locale_canvas_cursor_say(size, word, sizeof(word)));
-        return 0;
-}
-
 /*
         The plain rows of the settings table (src/sh/registry.c), which are
         all read and set here and nowhere else. A bare verb says where the
@@ -17905,15 +17774,20 @@ static fn host_setting_says(const struct settings_row address_to row, p8 address
         }
 }
 
+//      What a row says it is: the word kept or the standard, and that it is root's to read when /root is closed to the caller.
+static string_address host_setting_value(const struct settings_row address_to row, p8 address_to word, p8 address_to shown)
+{
+        if (!locale_readable((string_address)row->path, word, 32))
+                return (string_address)LOCALE_NEEDS_ROOT;
+        return setting_shown(row, (string_address)word, shown, 48);
+}
+
 static b32 host_setting_status(const struct settings_row address_to row)
 {
         p8 word[32], shown[48], says[48];
-        string_address value = (string_address)LOCALE_NEEDS_ROOT;
 
         host_setting_says(row, says, sizeof(says));
-        if (locale_readable((string_address)row->path, word, sizeof(word)))
-                value = setting_shown(row, (string_address)word, shown, sizeof(shown));
-        host_say(log, host_label "%s %s\n", (string_address)says, value);
+        host_say(log, host_label "%s %s\n", (string_address)says, host_setting_value(row, word, shown));
         return 0;
 }
 
@@ -17965,7 +17839,7 @@ static b32 host_setting_group(string_address address_to words, positive count)
                 const struct settings_row address_to row = &settings_rows[at];
                 positive word = 0;
 
-                if (row->how != SETTING_PLAIN || setting_words(row) <= count)
+                if (row->how != SETTING_PLAIN || setting_words(row) < count)
                         continue;
                 while (word < count && string_equals(words[word], (string_address)row->read[word]))
                         word++;
@@ -17973,6 +17847,21 @@ static b32 host_setting_group(string_address address_to words, positive count)
                         host_setting_status(row);
         }
         return 0;
+}
+
+//      moonwater canvas cursor: bare it says the size and the look in one line, then the rows that are
+//      the shake's; any other word is a usage page (the rows have words of their own, found before this).
+static b32 locale_canvas_cursor(string_address address_to arguments, positive count)
+{
+        p8 word[32], shown[48], other[32], more[48];
+        string_address shake[] = {(string_address) "canvas", (string_address) "cursor", (string_address) "shake"};
+
+        return_if(count != 3, host_usage());
+        host_say(log, host_label "cursor size %s, look %s\n",
+                 host_setting_value(setting_by_path(SETTING_CURSOR_SIZE_PATH), word, shown),
+                 host_setting_value(setting_by_path(SETTING_CURSOR_LOOK_PATH), other, more));
+        (void)arguments;
+        return host_setting_group(shake, 3);
 }
 
 //      A verb with no words of its own but its rows': bare it says them all.
@@ -19860,9 +19749,6 @@ static string_address host_wipe_keep[96] = {
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
-    HOST_WIPE_KEEP(LOCALE_CANVAS_BACKGROUND_PATH),
-    HOST_WIPE_KEEP(LOCALE_CANVAS_CURSOR_SIZE_PATH),
-    HOST_WIPE_KEEP(LOCALE_CANVAS_CURSOR_LOOK_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),
