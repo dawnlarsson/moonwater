@@ -27652,7 +27652,7 @@ static void canvas_input_devices(struct input_devices *out) { out->count = 1; }
                "REPORT_CANVAS(report_cursor_real, cursor_stats, canvas_cursor_stats)\n"
                "REPORT_CANVAS(report_devices_real, input_devices, canvas_input_devices)\n")
     source += canvas[canvas.index("static long report_canvas"):
-                     canvas.index("/* ---- what the core calls ---- */")]
+                     canvas.index("/*\n        The window table the compositor shares is a memfd")]
     # Here rather than beside the geometry it reshapes: resize_move reads the
     # drag state off desktop, and desktop is the mock declared just above.
     source += r'''
