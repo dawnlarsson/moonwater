@@ -20532,8 +20532,14 @@ def asked(command, marker, seconds=20):
     return bytes(transcript)
 
 time.sleep(8)
-serial.sendall(b"echo READY-$((20+1))\n")
-out.append((label + ": the serial shell answers", "yes" if wait_for("READY-21", 30) else "no", "yes"))
+# The shell may not have its line yet: ask again until it answers.
+answered = False
+for _ in range(8):
+    serial.sendall(b"echo READY-$((20+1))\n")
+    answered = wait_for("READY-21", 8)
+    if answered:
+        break
+out.append((label + ": the serial shell answers", "yes" if answered else "no", "yes"))
 shot("up", 1)
 out.append((label + ": the compositor's desktop and panel are on the screen before the sleep", ink("up"), "1e1e1e tabs"))
 mark = len(transcript)
