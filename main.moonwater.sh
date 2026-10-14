@@ -218,6 +218,16 @@ function desktop_start {
   case $(cat /proc/cmdline) in
   *moonwater.desktop=kernel*) return 1 ;;
   esac
+  # The compositor draws on one screen, so with two or more connected the cursor and the windows
+  # could not leave it: the kernel's desktop spans every screen and keeps them.
+  desktop_screens=0
+  for desktop_status in /sys/class/drm/card*-*/status; do
+    [ "$(cat $desktop_status 2> /dev/null)" = connected ] && desktop_screens=$((desktop_screens + 1))
+  done
+  if [ $desktop_screens -gt 1 ]; then
+    echo "desktop: $desktop_screens screens are connected and the compositor draws on one; the desktop is the kernel's" > /dev/kmsg
+    return 1
+  fi
   desktop_font
   if [ -z "$desktop_face" ]; then
     desktop_named
