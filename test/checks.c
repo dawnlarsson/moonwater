@@ -109929,6 +109929,66 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: and a scale is canvas scale and its word",
                       count == 4 && string_equals(words[1], (string_address) "canvas") && string_equals(words[2], (string_address) "scale") &&
                           string_equals(words[3], (string_address) "auto"));
+
+                // The desktop's colour and the pointer: what canvas background and canvas cursor say, and the words that set them.
+                {
+                        int ink = settings_row_named("Background"), colour = settings_row_named("Background colour (rrggbb or default)"),
+                            size = settings_row_named("Cursor size"), look = settings_row_named("Cursor look");
+
+                        check("settings: the desktop colour has a choice of inks and a field, and the pointer a size and a look",
+                              settings_rows[ink].kind == SETTINGS_CHOICE && (settings_rows[ink].flags & SETTINGS_INK) &&
+                                  settings_rows[colour].kind == SETTINGS_FIELD && !(settings_rows[colour].flags & SETTINGS_INK) &&
+                                  settings_rows[size].kind == SETTINGS_CHOICE && settings_rows[look].kind == SETTINGS_CHOICE &&
+                                  settings_group_of(ink) == settings_group_of(scale) && settings_group_of(colour) == settings_group_of(scale) &&
+                                  settings_group_of(size) == settings_group_of(scale) && settings_group_of(look) == settings_group_of(scale) &&
+                                  settings_same_verb(&settings_rows[ink], &settings_rows[colour]) &&
+                                  settings_same_verb(&settings_rows[size], &settings_rows[look]) &&
+                                  !settings_same_verb(&settings_rows[ink], &settings_rows[size]) &&
+                                  settings_options(&settings_rows[ink]) == sizeof(settings_inks) / sizeof(settings_inks[0]));
+                        check("settings: the first ink is the default",
+                              string_equals((string_address)settings_inks[0].name, (string_address) "default") &&
+                                  string_equals((string_address)settings_inks[0].colour, (string_address) "1e1e1e"));
+                        check("settings: the field says the colour as the verb does, and the choice by the ink's name",
+                              settings_read(&settings_rows[colour], "[Moonwater] background #1e1e1e\n", 30, value, SETTINGS_VALUE, false) ==
+                                      SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "#1e1e1e") &&
+                                  settings_read(&settings_rows[ink], "[Moonwater] background #1e1e1e\n", 30, value, SETTINGS_VALUE, false) ==
+                                      SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "default") &&
+                                  settings_read(&settings_rows[ink], "[Moonwater] background #163a26\n", 30, value, SETTINGS_VALUE, false) ==
+                                      SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "forest") &&
+                                  settings_read(&settings_rows[ink], "[Moonwater] background #123456\n", 30, value, SETTINGS_VALUE, false) ==
+                                      SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "#123456"));
+                        check("settings: the pointer's size and look are each one word of the one line the verb says",
+                              settings_parsed(size, "[Moonwater] cursor size auto, look dark\n", value) == SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "auto") &&
+                                  settings_parsed(look, "[Moonwater] cursor size auto, look dark\n", value) == SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "dark") &&
+                                  settings_parsed(size, "[Moonwater] cursor size 3, look auto\n", value) == SETTINGS_READ &&
+                                  string_equals((string_address)value, (string_address) "3"));
+                        count = settings_command(&settings_rows[ink], (string_address) "/moonwater", "plum", words, SETTINGS_WORDS, false);
+                        check("settings: an ink is set as its rrggbb, after canvas background",
+                              count == 4 && string_equals(words[1], (string_address) "canvas") &&
+                                  string_equals(words[2], (string_address) "background") && string_equals(words[3], (string_address) "3b1f4a") &&
+                                  !words[4]);
+                        count = settings_command(&settings_rows[ink], (string_address) "/moonwater", "default", words, SETTINGS_WORDS, false);
+                        check("settings: and the default ink is its colour", count == 4 && string_equals(words[3], (string_address) "1e1e1e"));
+                        count = settings_command(&settings_rows[colour], (string_address) "/moonwater", "a0b1c2", words, SETTINGS_WORDS, false);
+                        check("settings: a colour typed is the word the verb is run with, whatever it is",
+                              count == 4 && string_equals(words[3], (string_address) "a0b1c2"));
+                        count = settings_command(&settings_rows[size], (string_address) "/moonwater", "4", words, SETTINGS_WORDS, false);
+                        check("settings: the pointer's size is canvas cursor size and its word",
+                              count == 5 && string_equals(words[2], (string_address) "cursor") && string_equals(words[3], (string_address) "size") &&
+                                  string_equals(words[4], (string_address) "4") && !words[5]);
+                        count = settings_command(&settings_rows[look], (string_address) "/moonwater", "light", words, SETTINGS_WORDS, false);
+                        check("settings: and its look is canvas cursor look and its word",
+                              count == 5 && string_equals(words[3], (string_address) "look") && string_equals(words[4], (string_address) "light"));
+                        count = settings_command(&settings_rows[look], (string_address) "/moonwater", "", words, SETTINGS_WORDS, true);
+                        check("settings: and what is asked of the pointer is canvas cursor",
+                              count == 3 && string_equals(words[1], (string_address) "canvas") && string_equals(words[2], (string_address) "cursor"));
+                }
         }
 
         // All commands: the rows of what moonwater help says, as the window reads them.
@@ -110551,6 +110611,82 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(SETTINGS_KEY_ENTER);
                         check("settings: a value that is none of the choices starts the keys on the first", settings.menu == kb && settings.menu_at == 0);
                         settings_press(SETTINGS_KEY_ESCAPE);
+
+                        // The desktop's colour: a list of named inks, with the one in force the keys' and a letter going by name,
+                        // a field that keeps what is typed as it is, and the pointer's rows found by what they are called.
+                        {
+                                int ink = settings_row_named("Background"), colour = settings_row_named("Background colour (rrggbb or default)"),
+                                    size = settings_row_named("Cursor size"), look = settings_row_named("Cursor look");
+
+                                settings.group = settings_group_of(ink);
+                                settings_refilter();
+                                settings.pane = 1;
+                                settings.focus = ink;
+                                settings.state[ink] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[ink], (string_address) "forest", SETTINGS_VALUE);
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: the inks open as a list, the one in force the keys'",
+                                      settings.menu == ink && settings.menu_count == 9 && settings.menu_at == 5);
+                                settings_type_code('p');
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: an ink chosen goes to the verb by its name, set as its colour there",
+                                      settings.menu < 0 && settings.queued == 1 && settings.queue[0].row == ink &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "plum"));
+                                settings.queued = 0;
+
+                                settings.focus = colour;
+                                settings.state[colour] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[colour], (string_address) "#1e1e1e", SETTINGS_VALUE);
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: Enter on the colour field opens it on the colour as the verb says it",
+                                      settings.editing == colour && string_equals((string_address)settings.typed, (string_address) "#1e1e1e"));
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: and Enter on what it already is sends nothing", settings.editing < 0 && settings.queued == 0);
+                                settings_press(SETTINGS_KEY_ENTER);
+                                for (positive at = 0; at < 7; at++)
+                                        settings_press(SETTINGS_KEY_BACKSPACE);
+                                for (const char address_to c = "20ff00"; address_to c; c++)
+                                        settings_type_code((unsigned char)address_to c);
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: a colour typed is kept on Enter, as typed, for the verb to refuse or take",
+                                      settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == colour &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "20ff00"));
+                                settings.queued = 0;
+
+                                settings.focus = size;
+                                settings.state[size] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[size], (string_address) "auto", SETTINGS_VALUE);
+                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_type_code('3');
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: the pointer's size is chosen from auto and 1 to 4",
+                                      settings.queued == 1 && settings.queue[0].row == size &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "3"));
+                                settings.queued = 0;
+                                settings.focus = look;
+                                settings.state[look] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[look], (string_address) "auto", SETTINGS_VALUE);
+                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_type_code('d');
+                                settings_press(SETTINGS_KEY_ENTER);
+                                check("settings: and its look from auto, light and dark",
+                                      settings.queued == 1 && settings.queue[0].row == look &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "dark"));
+                                settings.queued = 0;
+
+                                for (const char address_to c = "cursor"; address_to c; c++)
+                                        settings_type_code((unsigned char)address_to c);
+                                check("settings: typing cursor lists the pointer's rows, from whatever group is shown, and not the ink's",
+                                      settings_pos(size) >= 0 && settings_pos(look) >= 0 && settings_pos(ink) < 0);
+                                settings_press(SETTINGS_KEY_ESCAPE);
+                                for (const char address_to c = "background"; address_to c; c++)
+                                        settings_type_code((unsigned char)address_to c);
+                                check("settings: and typing background lists the colour's, both rows",
+                                      settings_pos(ink) >= 0 && settings_pos(colour) >= 0 && settings_pos(size) < 0);
+                                settings_press(SETTINGS_KEY_ESCAPE);
+                                settings.group = 0;
+                                settings_refilter();
+                        }
                         settings.child = 0;
                         settings.queued = 0;
                 }

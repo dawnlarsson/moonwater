@@ -11,13 +11,21 @@
 
         The rows are the switches and choices of the command that a person
         sets by hand: the machine's name, the keyboard, the time zone, how
-        Canvas is drawn, the clock and where the network sets it from, the
+        Canvas is drawn (its scale and screen modes, the desktop's colour
+        and the size and look of the pointer), the clock and where the network sets it from, the
         wired link, the radios and airplane mode, which link the internet
         prefers, the servers names and time are asked of, the power profile,
         the backlight, the processor and the battery, and what the machine
         starts at boot. A row the machine has nothing for (no backlight, no
         boost switch) says so and does nothing. Nothing in those rows ends
         the desktop, the session or the machine.
+
+        The desktop's colour is two rows of the one verb (moonwater canvas
+        background): a choice of named inks, whose first is the default,
+        each one an rrggbb that the verb is run with and that is shown by
+        its name when the verb says it, and a field that takes any rrggbb
+        (or default) and keeps it on Enter, the verb's own words being the
+        status when it refuses what was typed.
 
         The last section, All commands, is every row of what `moonwater
         help` says, read from it when the window opens (at most 96 rows, and
@@ -130,6 +138,7 @@
 #define SETTINGS_LINE 1u  // the value is the rest of the line and not a word
 #define SETTINGS_SPLIT 2u // what is set is the value's words, one each, and not one word
 #define SETTINGS_TICK 4u  // the value changes by itself: it is asked again while its group is shown
+#define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
 #define SETTINGS_UNREAD 0u
@@ -220,6 +229,13 @@ static const struct settings_row settings_rows[] = {
     {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null},
     {"Canvas", "Scale", SETTINGS_CHOICE, 0, 0, {"canvas", "scale"}, "scale ", null, {"canvas", "scale"}, "auto 1 2 3 4", 0, "auto:"},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null},
+    {null, "Background", SETTINGS_CHOICE, 0, SETTINGS_INK, {"canvas", "background"}, "background ", null, {"canvas", "background"},
+     "default black dark-grey slate midnight-blue forest plum light-grey white", 0, null},
+    {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
+     {"canvas", "background"}, null, 0, null},
+    {null, "Cursor size", SETTINGS_CHOICE, 0, 0, {"canvas", "cursor"}, "size ", null, {"canvas", "cursor", "size"}, "auto 1 2 3 4", 0, null},
+    {null, "Cursor look", SETTINGS_CHOICE, 0, 0, {"canvas", "cursor"}, "look ", null, {"canvas", "cursor", "look"}, "auto light dark", 0,
+     null},
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null},
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0, null},
     {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null},
@@ -313,6 +329,22 @@ struct settings_item
         char security[12];
         signed short dbm;
         unsigned char bars, flags, kind;
+};
+
+/*
+        The named colours of a row that chooses an ink, as the rrggbb the verb
+        takes and says (with its # in front). A colour the verb says that is
+        none of them is shown as the verb said it.
+*/
+struct settings_ink
+{
+        const char address_to name;
+        const char address_to colour;
+};
+
+static const struct settings_ink settings_inks[] = {
+    {"default", "1e1e1e"}, {"black", "000000"},  {"dark-grey", "3a3a3c"},  {"slate", "334155"}, {"midnight-blue", "101935"},
+    {"forest", "163a26"},  {"plum", "3b1f4a"},   {"light-grey", "d4d4d8"}, {"white", "ffffff"},
 };
 
 _Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) < 64, "the rows to ask are a bit each of a word");
@@ -507,6 +539,13 @@ static unsigned int settings_read(const struct settings_row address_to row, cons
 {
         unsigned int state = settings_parse(row, said, length, value, room);
 
+        if (state == SETTINGS_READ && (row->flags & SETTINGS_INK) && value[0] == '#')
+                for (positive at = 0; at < sizeof(settings_inks) / sizeof(settings_inks[0]); at++)
+                        if (string_equals((string_address)value + 1, (string_address)settings_inks[at].colour))
+                        {
+                                string_copy_bounded((string_address)value, (string_address)settings_inks[at].name, room);
+                                break;
+                        }
         return state == SETTINGS_ABSENT && failed && !length ? SETTINGS_FAILED : state;
 }
 
@@ -1239,6 +1278,11 @@ static positive settings_command(const struct settings_row address_to row, strin
                 if (row->flags & SETTINGS_SPLIT)
                         return settings_tokens(value, settings_large->split, sizeof(settings_large->split), words, count, room);
                 words[count++] = (string_address)value;
+                // An ink is chosen by its name and set by its rrggbb.
+                if (row->flags & SETTINGS_INK)
+                        for (positive at = 0; at < sizeof(settings_inks) / sizeof(settings_inks[0]); at++)
+                                if (string_equals((string_address)value, (string_address)settings_inks[at].name))
+                                        words[count - 1] = (string_address)settings_inks[at].colour;
         }
         words[count] = null;
         return count;
