@@ -108221,7 +108221,8 @@ static fn render_reference(p32 address_to into, const struct window_cell address
                 memory_fill_u32(into + (positive)y * terminal.pitch, terminal.width, 0x123456);
         for (unsigned int row = 0; row < ROWS; row++)
         {
-                terminal_row(terminal_grid(into), row, cells + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+                terminal_row(&terminal_painters[0], terminal_grid(into), row, cells + (unsigned long)row * COLUMNS, null, 0,
+                             COLUMNS);
                 terminal_margin(into, cells, row, 0, COLUMNS);
         }
         terminal_extent(&first, &shown, &total);

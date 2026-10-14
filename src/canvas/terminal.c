@@ -515,7 +515,23 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
         or through it, or a wide one, is its own font_cell. A run of blanks
         on one ground is one fill.
 */
-static p32 terminal_codes[FONT_RUN];
+/*
+        What draws a band of rows: a font engine and the run of codes it lays.
+        A frame whose cells changed over many rows is drawn in bands on as many
+        threads, and an engine's caches and atlas are written as it draws, so
+        each band has its own; the faces are the terminal's, read and never
+        written. The first is the terminal's own engine, the rest made the first
+        time a frame asks for them.
+*/
+#define TERMINAL_BANDS 8
+
+struct terminal_painter
+{
+        font_engine address_to engine;
+        p32 codes[FONT_RUN];
+};
+
+static struct terminal_painter terminal_painters[TERMINAL_BANDS];
 
 //      Italic is a slant of the plain face, and bold without a bold face is
 //      the plain face made heavier: neither has a face of its own here.
@@ -531,7 +547,7 @@ static void terminal_blanks(unsigned int address_to pixels, unsigned int from, u
         terminal_fill(pixels, (int)(from * terminal.cell_w), y, count * terminal.cell_w, terminal.cell_h, colour);
 }
 
-static void terminal_row(unsigned int address_to pixels, unsigned int row,
+static void terminal_row(struct terminal_painter address_to painter, unsigned int address_to pixels, unsigned int row,
                          const struct window_cell address_to now,
                          const struct window_cell address_to old, unsigned int first,
                          unsigned int last)
@@ -547,9 +563,9 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
         do                                                                                             \
         {                                                                                              \
                 if (glyphs)                                                                            \
-                        font_cells(terminal.engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
+                        font_cells(painter->engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
                                    glyphs_heavy ? terminal.bold_count : terminal.plain_count,          \
-                                   terminal_codes, glyphs, &terminal.grid, terminal.size, glyphs_flags,\
+                                   painter->codes, glyphs, &terminal.grid, terminal.size, glyphs_flags,\
                                    &target,                                                            \
                                    (b32)(glyphs_from * terminal.cell_w), y, glyphs_ink, glyphs_paper); \
                 glyphs = 0;                                                                            \
@@ -599,7 +615,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                                 glyphs_heavy = heavy;
                                 glyphs_flags = style;
                         }
-                        terminal_codes[glyphs++] = cell->character;
+                        painter->codes[glyphs++] = cell->character;
                         continue;
                 }
                 TERMINAL_GLYPHS();
@@ -634,7 +650,7 @@ static void terminal_row(unsigned int address_to pixels, unsigned int row,
                 {
                         b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
 
-                        font_cell(terminal.engine, heavy ? terminal.bold : terminal.plain,
+                        font_cell(painter->engine, heavy ? terminal.bold : terminal.plain,
                                   heavy ? terminal.bold_count : terminal.plain_count, cell->character,
                                   cells, &terminal.grid, terminal.size, terminal_style(cell), &target,
                                   (b32)(at * terminal.cell_w), y, ink, paper);
@@ -851,6 +867,83 @@ static void terminal_discard(void)
 }
 
 /*
+        The cells of a frame that differ from what the buffer holds, by row:
+        found first, in one pass, and drawn after -- here when they are few, and
+        when they are many (a screen that scrolled is all of them) in bands of
+        rows on the pool's threads, each band with a painter of its own.
+*/
+#define TERMINAL_SPAN_ROWS 4096
+
+static unsigned short terminal_span_first[TERMINAL_SPAN_ROWS], terminal_span_last[TERMINAL_SPAN_ROWS];
+
+struct terminal_banding
+{
+        unsigned int address_to pixels, address_to whole;
+        const struct window_cell address_to now, address_to drawn;
+        unsigned int rows, bands;
+};
+
+static void terminal_rows_draw(struct terminal_painter address_to painter, const struct terminal_banding address_to banding,
+                               unsigned int from, unsigned int to)
+{
+        for (unsigned int row = from; row < to; row++)
+        {
+                unsigned int a0 = terminal_span_first[row], a1 = terminal_span_last[row];
+
+                if (a1 <= a0)
+                        continue;
+                terminal_row(painter, banding->pixels, row, banding->now + (unsigned long)row * COLUMNS,
+                             banding->drawn ? banding->drawn + (unsigned long)row * COLUMNS : null, a0, a1);
+                terminal_margin(banding->whole, banding->now, row, a0, a1);
+        }
+}
+
+static void terminal_band_draw(address_any context, positive index)
+{
+        const struct terminal_banding address_to banding = (const struct terminal_banding address_to)context;
+
+        terminal_rows_draw(&terminal_painters[index], banding, (unsigned int)(banding->rows * index / banding->bands),
+                           (unsigned int)(banding->rows * (index + 1) / banding->bands));
+}
+
+// The painters a frame of so many bands draws with, each an engine of its own with its own atlas; false when
+// one cannot be made, and the frame is drawn in fewer.
+static unsigned int terminal_painters_ready(unsigned int bands)
+{
+        for (unsigned int at = 1; at < bands; at++)
+        {
+                long engine, atlas;
+
+                if (terminal_painters[at].engine)
+                        continue;
+                engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+                atlas = compositor_call(syscall(mmap), 0, TERMINAL_ATLAS * TERMINAL_ATLAS, 3, 0x22, (positive)-1, 0);
+                if ((engine < 0 && engine > -4096) || (atlas < 0 && atlas > -4096))
+                        return at;
+                terminal_painters[at].engine = (font_engine address_to)engine;
+                font_start(terminal_painters[at].engine, (p8 address_to)atlas, TERMINAL_ATLAS, TERMINAL_ATLAS);
+        }
+        return bands;
+}
+
+static void terminal_cells_draw(struct terminal_banding address_to banding, positive changed)
+{
+        positive bytes = changed * terminal.cell_w * terminal.cell_h * 4, bands = parallel_width();
+
+        bands = bands < TERMINAL_BANDS ? bands : TERMINAL_BANDS;
+        bands = bands < banding->rows ? bands : banding->rows;
+        if (bytes >= PARALLEL_MINIMUM_BYTES && bands >= 2)
+                bands = terminal_painters_ready((unsigned int)bands);
+        if (bytes < PARALLEL_MINIMUM_BYTES || bands < 2)
+        {
+                terminal_rows_draw(&terminal_painters[0], banding, 0, banding->rows);
+                return;
+        }
+        banding->bands = (unsigned int)bands;
+        parallel_for(terminal_band_draw, banding, bands, bytes);
+}
+
+/*
         One frame: the cells that differ drawn into the free buffer, what
         the compositor has to read again named, and the picture shown.
         False when there is no buffer to draw into yet, and nothing was done.
@@ -902,7 +995,10 @@ static b32 terminal_frame(void)
 
         any = bar || bar_told;
 
-        for (unsigned int row = 0; row < ROWS; row++)
+        positive changed = 0;
+        unsigned int rows = ROWS < TERMINAL_SPAN_ROWS ? ROWS : TERMINAL_SPAN_ROWS;
+
+        for (unsigned int row = 0; row < rows; row++)
         {
                 const struct window_cell address_to line = now + (unsigned long)row * COLUMNS;
                 unsigned int a0 = 0, a1 = COLUMNS, b0 = 0, b1 = COLUMNS;
@@ -912,10 +1008,11 @@ static b32 terminal_frame(void)
                 if (screen)
                         terminal_span(line, screen + (unsigned long)row * COLUMNS, &b0, &b1);
 
+                terminal_span_first[row] = (unsigned short)a0;
+                terminal_span_last[row] = (unsigned short)(a1 > a0 ? a1 : a0);
                 if (a1 > a0)
                 {
-                        terminal_row(pixels, row, line, drawn ? drawn + (unsigned long)row * COLUMNS : null, a0, a1);
-                        terminal_margin(whole, now, row, a0, a1);
+                        changed += a1 - a0;
                         right |= a1 == COLUMNS;
                 }
                 any |= a1 > a0 || b1 > b0;
@@ -925,6 +1022,13 @@ static b32 terminal_frame(void)
                 // however old the buffer was.
                 row_x0[row & 1023] = b1 > b0 ? b0 : 0;
                 row_x1[row & 1023] = b1 > b0 ? b1 : 0;
+        }
+
+        if (changed)
+        {
+                struct terminal_banding banding = {pixels, whole, now, drawn, rows, 1};
+
+                terminal_cells_draw(&banding, changed);
         }
 
         // Nothing differs from the buffer or from the screen: nothing is made or said.
@@ -1066,6 +1170,7 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
 
         terminal.engine = (font_engine address_to)engine;
         font_start(terminal.engine, (p8 address_to)atlas, TERMINAL_ATLAS, TERMINAL_ATLAS);
+        terminal_painters[0].engine = terminal.engine;
         terminal.size = size << 6;
         terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
         terminal.cell_w = (unsigned int)terminal.grid.cell_width;

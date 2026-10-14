@@ -86,6 +86,7 @@ struct compositor_target
         int width, height;
         int x1, y1, x2, y2;  // the damage: nothing outside it is written
         int ox, oy;          // the point pixels[0] is, on the output (a corner's scratch); 0 for the output
+        unsigned int *scratch; // where the scene draws a round corner's square; none is the one of its own
 };
 
 /*
@@ -636,6 +637,7 @@ static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITO
 static void compositor_scene(const struct compositor_target *t,
                              const struct compositor_frame *frames, unsigned int count)
 {
+        unsigned int *scratch = t->scratch ? t->scratch : compositor_corner_scratch;
         int edge[2 * COMPOSITOR_PIECES + 2];
         int box[COMPOSITOR_PIECES][4];
         unsigned char owner[COMPOSITOR_PIECES];
@@ -747,7 +749,7 @@ static void compositor_scene(const struct compositor_target *t,
                 for (int corner = 0; r && corner < 4; corner++)
                 {
                         int cx = corner & 1 ? fx + fw - r : fx, cy = corner & 2 ? fy + fh - r : fy;
-                        struct compositor_target square = {compositor_corner_scratch, (unsigned long)r, t->width, t->height,
+                        struct compositor_target square = {scratch, (unsigned long)r, t->width, t->height,
                                                            cx > t->x1 ? cx : t->x1, cy > t->y1 ? cy : t->y1,
                                                            cx + r < t->x2 ? cx + r : t->x2, cy + r < t->y2 ? cy + r : t->y2,
                                                            cx, cy};
@@ -757,8 +759,74 @@ static void compositor_scene(const struct compositor_target *t,
                         compositor_fill(&square, cx, cy, r, r, COMPOSITOR_INK_DESKTOP);
                         for (unsigned int each = 0; each < count; each++)
                                 compositor_draw(&square, &frames[each]);
-                        compositor_blit(t, cx, cy, r, r, compositor_corner_scratch, (unsigned long)r);
+                        compositor_blit(t, cx, cy, r, r, scratch, (unsigned long)r);
                 }
+        }
+}
+
+/*
+        The scene of a large damage, in bands of rows on as many threads: it is
+        copies, and one core copies only as fast as its own loads and stores go,
+        where the rows of a damage are independent and any core's to write. Each
+        band has a corner scratch of its own; the corner masks are made before
+        (compositor_corner_masks_ready), so nothing the bands share is written.
+        Small damage, under the pool's floor, is drawn here in one band.
+*/
+#define COMPOSITOR_BANDS 8
+
+static unsigned int compositor_band_scratch[COMPOSITOR_BANDS][COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
+
+struct compositor_banding
+{
+        const struct compositor_target *target;
+        const struct compositor_frame *frames;
+        unsigned int count, bands;
+};
+
+static void compositor_scene_band(address_any context, positive index)
+{
+        const struct compositor_banding *banding = (const struct compositor_banding *)context;
+        struct compositor_target band = *banding->target;
+        long height = band.y2 - band.y1;
+
+        band.y1 = banding->target->y1 + (int)(height * (long)index / banding->bands);
+        band.y2 = banding->target->y1 + (int)(height * (long)(index + 1) / banding->bands);
+        band.scratch = compositor_band_scratch[index];
+        if (band.y2 > band.y1)
+                compositor_scene(&band, banding->frames, banding->count);
+}
+
+static void compositor_scene_banded(const struct compositor_target *t, const struct compositor_frame *frames,
+                                    unsigned int count)
+{
+        positive bytes = (positive)(t->x2 - t->x1) * (positive)(t->y2 - t->y1) * 4;
+        positive bands = parallel_width();
+        struct compositor_banding banding = {t, frames, count, 0};
+
+        bands = bands < COMPOSITOR_BANDS ? bands : COMPOSITOR_BANDS;
+        bands = bands < (positive)(t->y2 - t->y1) / 16 ? bands : (positive)(t->y2 - t->y1) / 16;
+        if (bytes < PARALLEL_MINIMUM_BYTES || bands < 2)
+        {
+                compositor_scene(t, frames, count);
+                return;
+        }
+        banding.bands = (unsigned int)bands;
+        parallel_for(compositor_scene_band, &banding, bands, bytes);
+}
+
+// Every corner mask the frames draw with, made now, so no band makes one while another reads it.
+static void compositor_corner_masks_ready(const struct compositor_frame *frames, unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int r = compositor_radius(&frames[at]), ox, oy, ow, oh;
+
+                if (!r)
+                        continue;
+                compositor_outline(&frames[at], &ox, &oy, &ow, &oh);
+                compositor_corner_mask(r);
+                if (r > frames[at].x - ox)
+                        compositor_corner_mask(r - (frames[at].x - ox));
         }
 }
 
@@ -2948,6 +3016,7 @@ static void compositor_present(void)
         // The close buttons' means, now the glass and the band are made: where a change reaches a box.
         for (unsigned int at = 0; at < windows; at++)
                 compositor_close_mean(&frames[at]);
+        compositor_corner_masks_ready(frames, count);
 
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
@@ -2956,7 +3025,7 @@ static void compositor_present(void)
                     compositor.scanout, compositor.scanout_pitch / 4, compositor.width,
                     compositor.height, rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
 
-                compositor_scene(&target, frames, count);
+                compositor_scene_banded(&target, frames, count);
 
                 if (compositor.cursor.soft && compositor.cursor.drawn)
                         compositor_cursor_draw(&target, compositor.cursor.x, compositor.cursor.y,
