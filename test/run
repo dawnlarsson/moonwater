@@ -214,7 +214,7 @@ describe()
         boot)     echo "the image boots, init starts, and the shell answers" ;;
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
-        sleep)    echo "moonwater sleep from a terminal, woken by a key: the desktop back on a card that lost its pipe, input alive, the log" ;;
+        sleep)    echo "moonwater sleep from the serial shell, woken by a key: the compositor's desktop back on a card that lost its pipe" ;;
         desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it (NOT RUN without a network, an image or mke2fs)" ;;
         chrome)   echo "a browser that will not run as root, from Debian's package in a booted guest: who a bowl's programs are, and Chromium's sandbox on (NOT RUN without a network, an image or mke2fs)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
@@ -16941,1064 +16941,8 @@ from qmp_guest import *
 
 image = sys.argv[1]
 work = os.environ["MOONWATER_CANVAS_WORK"]
-
-guest = Guest(desktop(image) + [
-    # A relative mouse on each kind of controller a desktop has. The tablet
-    # proves absolute motion; a real mouse is REL_X and REL_Y through usbhid,
-    # and on a Haswell desktop the USB 2 ports hang off EHCI, not xHCI.
-    "-device", "usb-mouse,id=xhcimouse",
-    "-device", "usb-ehci,id=ehci", "-device", "usb-mouse,bus=ehci.0,id=ehcimouse",
-    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial"] +
-    (["-serial", "file:" + os.environ["MOONWATER_CANVAS_COVERAGE"]]
-     if os.environ.get("MOONWATER_CANVAS_COVERAGE") else []) + [
-    # CANVAS_APPEND adds to the guest's command line: a profiling run wants
-    # nokaslr so the samples map onto System.map. The cursor plane is off here
-    # because QEMU's screendump has no cursor plane in it, and the pixel checks
-    # below count the cursor's pixels; the plane boot after this one covers it.
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
-    work + "/qmp", work + "/mon", work)
-time.sleep(0.5)
-
-#       Long enough for the desktop, the shell and the boot log replay. The
-#       serial transcript is not what is being read, but a machine that never
-#       got that far has nothing on its screen either.
-time.sleep(25)
-
 out = []
 
-#       The pointer applet, written to the serial line so the kernel's list
-#       of attached input devices can be read back. Typed first, into the
-#       terminal that has the keyboard at boot, before any window is touched.
-#       The arrow and the capital go in as chords: type_text knows only the
-#       plain keys, and a qcode a key does not have is an error, not a key.
-type_text("pointer ")
-chord("shift", "dot")
-type_text(" /dev/tty")
-chord("shift", "s")
-type_text("0\n")
-time.sleep(1.0)
-
-shot("first")
-w, h, px = load("first")
-
-def at(x, y):
-    o = (y * w + x) * 3
-    return px[o], px[o + 1], px[o + 2]
-
-bg = at(4, 4)
-
-#       Where the windows are, found rather than assumed: a run of non
-#       background across the middle of the screen is a window.
-runs, start = [], None
-for x in range(w):
-    lit = at(x, h // 2) != bg
-    if lit and start is None:
-        start = x
-    elif not lit and start is not None:
-        if x - start > 40:
-            runs.append((start, x - 1))
-        start = None
-
-# A window that reaches the right edge is a run too.
-if start is not None and w - start > 40:
-    runs.append((start, w - 1))
-
-out.append(("windows", str(len(runs)), "2"))
-
-#       Every check below needs the windows it measures. Without them they
-#       used to be skipped without a word, and a display too small for the
-#       layout hid twenty seven of them behind one failing count: a check that
-#       cannot run fails, by name.
-if not runs:
-    out.append(("the log window's checks", "not run: no window found", "run"))
-
-if len(runs) >= 1:
-    left, right = runs[0]
-    top = next((y for y in range(h) if at((left + right) // 2, y) != bg), 0)
-    log_top = top
-
-    #       Every row of the log starts at the left.
-    #
-    #       This is the one the missing carriage return broke. A message that
-    #       begins where the last one ended leaves its row blank on the left
-    #       and its text out in the middle, so counting rows whose first lit
-    #       pixel is near the margin says whether the log is a log or a mess.
-    def lit(x, y):
-        r, g, b = at(x, y)
-        return r + g + b > 180
-
-    margin = 0
-    rows = 0
-    for row in range(3, 26):
-        band = range(top + 24 + row * 16, min(top + 24 + row * 16 + 16, h))
-        first = None
-        for x in range(left + 2, right - 2):
-            if any(lit(x, y) for y in band):
-                first = x
-                break
-        if first is None:
-            continue
-        rows += 1
-        if first - left < 28:
-            margin += 1
-
-    out.append(("log rows at the margin", "yes" if margin >= rows - 4 else
-                "%d of %d" % (margin, rows), "yes"))
-
-    # Three distinct wheel detents should move three conventional lines each,
-    # with no speed multiplier merely because they arrived close together.
-    # Compare the static log before and after: its old pixels move down by
-    # nine 16-pixel rows. Events are separated enough for the compositor to
-    # consume each one, but remain inside the old acceleration window.
-    bottom = next((y for y in range(h - 1, top, -1)
-                   if at((left + right) // 2, y) != bg), h - 1)
-    moveto((left + right) // 2, min(top + 80, bottom - 4))
-    for _ in range(3):
-        send([{"type": "btn", "data": {"down": True,
-                                        "button": "wheel-up"}},
-              {"type": "btn", "data": {"down": False,
-                                        "button": "wheel-up"}}])
-        time.sleep(0.08)
-
-    shot("wheel")
-    wheel_w, wheel_h, wheel_px = load("wheel")
-
-    def pixel(data, width, x, y):
-        offset = (y * width + x) * 3
-        return data[offset:offset + 3]
-
-    content_top = min(top + 20, bottom)
-    content_right = max(left + 1, right - 18)
-    scores = []
-    for shift in range(16, min(320, bottom - content_top), 16):
-        same_pixels = 0
-        evidence = 0
-        for y in range(content_top + shift, bottom - 2):
-            for x in range(left + 4, content_right):
-                old = pixel(px, w, x, y - shift)
-                new = pixel(wheel_px, wheel_w, x, y)
-                if sum(old) > 180 or sum(new) > 180:
-                    evidence += 1
-                    if old == new:
-                        same_pixels += 1
-        scores.append((same_pixels / max(evidence, 1), shift))
-
-    wheel_shift = max(scores, key=lambda item: item[0])[1] if scores else 0
-    out.append(("wheel is three lines", str(wheel_shift), "144"))
-
-    #   A terminal from the keyboard, and where the second one lands.
-    #
-    #   Control-Shift-T asks the compositor for one, which is the only way to
-    #   get a window without a program already running to ask for it. The new
-    #   one is centred like the first, so without a cascade it lands on top of
-    #   it exactly -- same size, same place, pixel for pixel -- and opening a
-    #   terminal looks like nothing happened at all. Measured and not assumed:
-    #   the two overlapping windows make one run across the middle of the
-    #   screen, and that run is one titlebar wider than the single window was.
-    def spans(name):
-        rw, rh, rpx = load(name)
-
-        def rat(x, y):
-            o = (y * rw + x) * 3
-            return rpx[o], rpx[o + 1], rpx[o + 2]
-
-        found, first = [], None
-        for x in range(rw):
-            on = rat(x, rh // 2) != bg
-            if on and first is None:
-                first = x
-            elif not on and first is not None:
-                if x - first > 40:
-                    found.append((first, x - 1))
-                first = None
-        if first is not None and rw - first > 40:
-            found.append((first, rw - 1))
-        return found
-
-    before_spawn = spans("first")
-    term_left, term_right = before_spawn[-1]
-    term_top = next(y for y in range(h) if at((term_left + term_right) // 2, y) != bg)
-
-    chord("ctrl", "shift", "t")
-    time.sleep(3.0)
-    shot("spawned", 0.5)
-    after_spawn = spans("spawned")
-
-    out.append(("Control-Shift-T opens a window",
-                "yes" if len(after_spawn) == len(before_spawn) and
-                after_spawn and after_spawn[-1] != before_spawn[-1] else "no",
-                "yes"))
-
-    #   The step, from the picture and not from a number written here.
-    #
-    #   Everything the compositor draws is multiplied by the scale, so a
-    #   cascade asserted as twenty pixels would be a check that only passes on
-    #   one setting. It moves the window by the same distance
-    #   down as across, and that is what is asserted: the run grew by exactly
-    #   as much as the new window's top sits below the old one's.
-    sw, sh, spx = load("spawned")
-
-    def spixel(x, y):
-        o = (y * sw + x) * 3
-        return spx[o], spx[o + 1], spx[o + 2]
-
-    grew = 0
-    dropped = -1
-
-    if after_spawn:
-        new_left, new_right = after_spawn[-1]
-        grew = (new_right - new_left) - (term_right - term_left)
-        #   Clear of the window behind it, so this is the new window's own
-        #   top edge and not the one it is stacked on.
-        new_top = next((y for y in range(sh) if spixel(new_right - 4, y) != bg),
-                       term_top)
-        dropped = new_top - term_top
-
-    out.append(("the second one cascades", "%d px across" % grew,
-                "%d px across" % dropped if dropped > 0 else "a step down"))
-
-    #   What a terminal the compositor starts runs at.
-    #
-    #   The compositor's thread is SCHED_FIFO, and a task forked from a FIFO
-    #   task stays FIFO unless its parent asked for a reset. Control-Shift-T's
-    #   terminal is started from that thread, so without the reset its shell
-    #   and everything run in it were FIFO 1 beside the cursor, and a busy
-    #   loop typed there held every processor against the desktop. Asked of
-    #   the kernel from inside the new window, which has the keyboard: cat
-    #   writes its own stat, whose 41st field is the policy, to the serial
-    #   line, and is read back below with the rest of the transcript.
-    type_text("cat /proc/self/stat ")
-    chord("shift", "dot")
-    type_text(" /dev/tty")
-    chord("shift", "s")
-    type_text("0\n")
-    time.sleep(1.0)
-
-    #   Through the whole of its ring, so what it holds when the X closes it
-    #   is what a scrolled terminal holds, not an idle one.
-    type_text("seq 700\n")
-    time.sleep(1.5)
-
-    #   The X in the titlebar, which is the only thing on a window that ends
-    #   a program rather than moving it. Aimed at the glyph the compositor
-    #   actually drew -- the rightmost title-coloured text in the new
-    #   window's own titlebar -- because working out where it ought to be is
-    #   how a check passes while the button is somewhere else entirely.
-    if after_spawn and dropped > 0:
-        band = range(new_top + 4, new_top + dropped - 4)
-        marks = [x for x in range(new_right, new_left, -1)
-                 for y in band if spixel(x, y) == (228, 228, 228)]
-
-        if marks:
-            moveto(marks[0] - 3, new_top + dropped // 2)
-            send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-            time.sleep(0.08)
-            send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-            time.sleep(3.0)
-
-        shot("closed", 0.5)
-        out.append(("the X closes a window",
-                    "yes" if marks and spans("closed") == before_spawn else "no",
-                    "yes"))
-
-
-#       A click on a titlebar takes the focus, which the titlebar says.
-if len(runs) < 2:
-    out.append(("the checks between two windows", "not run: %d windows" % len(runs), "run"))
-
-wider_cols = 0
-wider_note = "no second window"
-if len(runs) >= 2:
-    a_left, a_right = runs[0]
-    b_left, b_right = runs[1]
-    a_top = next((y for y in range(h) if at((a_left + a_right) // 2, y) != bg), 0)
-    before = at((a_left + a_right) // 2, a_top + 4)
-
-    moveto((a_left + a_right) // 2, a_top + 6)
-    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-    time.sleep(0.3)
-    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-    time.sleep(1.5)
-
-    shot("focused")
-    w2, h2, px = load("focused")
-    after = at((a_left + a_right) // 2, a_top + 4)
-
-    out.append(("focus follows a click", "moved" if after != before else "same",
-                "moved"))
-
-    # The log window is anchored near the left edge.  The graphical terminal
-    # asks to be centred and is therefore the second run.  Exercise the route
-    # a person on the machine actually uses: USB keyboard -> compositor ->
-    # terminal -> pty -> shell.  The monitor redraws sixteen times, long enough
-    # to catch faults tied to a refresh rather than merely to startup.
-    b_top = next((y for y in range(h2)
-                  if at((b_left + b_right) // 2, y) != bg), 0)
-    b_bottom = next((y for y in range(h2 - 1, b_top, -1)
-                     if at((b_left + b_right) // 2, y) != bg), h2 - 1)
-
-    moveto((b_left + b_right) // 2, b_top + 6)
-    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-    time.sleep(0.2)
-    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-    time.sleep(0.5)
-
-    # A terminal row is kept at its written length and Canvas folds it at the
-    # width on screen. Narrowing must therefore add visible text rows without
-    # losing the tail, and widening must unfold the same cells again. Exercise
-    # the actual edge-drag path: compositor request -> shared window page ->
-    # terminal regrid -> immediate commit -> compositor redraw.
-    type_text("echo " + "abcdefghij" * 14 + "\n")
-    time.sleep(0.5)
-    shot("terminal-wide", 0.3)
-    resize_w, resize_h, terminal_wide = load("terminal-wide")
-
-    def runs_in(data, width, y):
-        found, begin = [], None
-        background = bytes(bg)
-        for x in range(width):
-            on = pixel(data, width, x, y) != background
-            if on and begin is None:
-                begin = x
-            elif not on and begin is not None:
-                if x - begin > 40:
-                    found.append((begin, x - 1))
-                begin = None
-        if begin is not None and width - begin > 40:
-            found.append((begin, width - 1))
-        return found
-
-    def ink_rows(data, width, height, left, right, top, bottom):
-        rows = []
-        for band_top in range(top + 20, min(bottom, height - 1), 16):
-            band_bottom = min(band_top + 16, bottom, height)
-            lit_pixels = 0
-            for y in range(band_top, band_bottom):
-                for x in range(left + 8, max(left + 8, right - 18)):
-                    if sum(pixel(data, width, x, y)) > 180:
-                        lit_pixels += 1
-            if lit_pixels > 8:
-                rows.append(band_top)
-        return rows
-
-    def body_difference(a, b, width, left, right, top, bottom):
-        different = 0
-        for y in range(top + 24, bottom - 2):
-            for x in range(left + 8, right - 18):
-                offset = (y * width + x) * 3
-                if a[offset:offset + 3] != b[offset:offset + 3]:
-                    different += 1
-        return different
-
-    wide_row_positions = ink_rows(terminal_wide, resize_w, resize_h,
-                                  b_left, b_right, b_top, b_bottom)
-    wide_rows = len(wide_row_positions)
-    old_width = b_right - b_left + 1
-    edge_y = (b_top + b_bottom) // 2
-
-    def resize_cursor_pixels(data, width, height, x, y):
-        # CURSOR_RESIZE_H has exactly 25 fill pixels at scale one. No
-        # compositor ink uses pure white (terminal white is e4e4e4), so this
-        # identifies the visible cursor rather than text or the frame below it.
-        return sum(1 for py in range(max(y - 7, 0), min(y + 13, height))
-                   for px in range(max(x - 7, 0), min(x + 9, width))
-                   if pixel(data, width, px, py) == b"\xff\xff\xff")
-
-    moveto(b_right - 1, edge_y)
-    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-    time.sleep(0.08)
-
-    # Sample four positions in one held resize. Checking only the final window
-    # geometry cannot prove that the visible cursor stayed live during it.
-    cursor_samples = []
-    for distance in (70, 140, 210, 280):
-        target_x = b_right - distance
-        moveto(target_x, edge_y)
-        name = "terminal-resize-%d" % distance
-        shot(name, 0.12)
-        sample_w, sample_h, sample_px = load(name)
-        cursor_samples.append(resize_cursor_pixels(
-            sample_px, sample_w, sample_h, target_x, edge_y))
-
-    narrow_w, narrow_h, terminal_narrow = sample_w, sample_h, sample_px
-
-    # The harness screendump exposes the rendered cursor, so every applied
-    # position can be inspected directly without claiming its rendering path.
-    out.append(("visible cursor follows resize",
-                "yes" if cursor_samples == [25, 25, 25, 25] else
-                str(cursor_samples), "yes"))
-
-    narrow_runs = runs_in(terminal_narrow, narrow_w, h // 2)
-    terminal_run = (min(narrow_runs, key=lambda run: abs(run[0] - b_left))
-                    if narrow_runs else None)
-    if terminal_run:
-        narrow_left, narrow_right = terminal_run
-        narrow_row_positions = ink_rows(terminal_narrow, narrow_w, narrow_h,
-                                        narrow_left, narrow_right, b_top, b_bottom)
-        narrow_rows = len(narrow_row_positions)
-        narrow_extent = narrow_right - narrow_left + 1
-    else:
-        narrow_left, narrow_right = b_left, b_right
-        narrow_rows = 0
-        narrow_row_positions = []
-        narrow_extent = old_width
-
-    out.append(("terminal edge resizes",
-                "yes" if narrow_extent + 160 < old_width else
-                "%d to %d" % (old_width, narrow_extent), "yes"))
-    narrow_redraw = body_difference(terminal_wide, terminal_narrow, narrow_w,
-                                    narrow_left, narrow_right, b_top, b_bottom)
-    out.append(("terminal resize redraws",
-                "yes" if narrow_redraw > 200 else
-                "%d pixels" % narrow_redraw, "yes"))
-
-    # Keep the original edge grabbed. A second press has to hit a six-pixel
-    # target in an asynchronously redrawn frame and tests reacquisition more
-    # than it tests resize; the one continuous drag is what a person does.
-    moveto(b_right - 1, edge_y)
-    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-    shot("terminal-wide-again", 0.4)
-    again_w, again_h, terminal_again = load("terminal-wide-again")
-    again_runs = runs_in(terminal_again, again_w, h // 2)
-    again_run = (min(again_runs, key=lambda run: abs(run[0] - b_left))
-                 if again_runs else None)
-    if again_run:
-        again_rows = len(ink_rows(terminal_again, again_w, again_h,
-                                  again_run[0], again_run[1], b_top, b_bottom))
-        again_extent = again_run[1] - again_run[0] + 1
-        restored_difference = body_difference(
-            terminal_wide, terminal_again, again_w,
-            again_run[0], again_run[1], b_top, b_bottom)
-    else:
-        again_rows = 0
-        again_extent = 0
-        restored_difference = old_width * (b_bottom - b_top)
-
-    out.append(("terminal widens back",
-                "yes" if abs(again_extent - old_width) <= 16 and
-                again_rows == wide_rows and restored_difference < 64 else
-                "%dx%d rows %d/%d pixels %d" %
-                (old_width, again_extent, wide_rows, again_rows,
-                 restored_difference), "yes"))
-
-    #   Wider than it opened. A terminal's lines start as far apart as its
-    #   window opens and are spread when it is given more columns than that
-    #   (pane_restride), so a line longer than the window first was must
-    #   still come out on one row once the window is that wide. Dragged well
-    #   past where it opened, a 120 character line has to reach further right
-    #   than any line the opening stride can hold; then back to the width it
-    #   had, for everything below.
-    wider_cols = 0
-    wider_note = "not dragged"
-    if again_run:
-        moveto(b_right - 1, edge_y)
-        send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-        time.sleep(0.08)
-        for distance in (100, 200, 300, 400):
-            moveto(min(b_right - 1 + distance, again_w - 24), edge_y)
-            time.sleep(0.12)
-        time.sleep(0.3)
-        send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-        time.sleep(0.5)
-        type_text("echo " + "0123456789" * 12 + "\n")
-        time.sleep(1.0)
-        shot("terminal-wider", 0.3)
-        wider_w, wider_h, terminal_wider = load("terminal-wider")
-        wider_runs = runs_in(terminal_wider, wider_w, h // 2)
-        wider_run = (min(wider_runs, key=lambda run: abs(run[0] - again_run[0]))
-                     if wider_runs else None)
-        if wider_run:
-            reach = max((x for y in range(b_top + 24, min(b_bottom, wider_h) - 2)
-                         for x in range(wider_run[0] + 8, wider_run[1] - 18)
-                         if sum(pixel(terminal_wider, wider_w, x, y)) > 180),
-                        default=wider_run[0] + 8)
-            wider_cols = (reach - wider_run[0] - 8) // 8 + 1
-            wider_note = "window %d-%d, was %d-%d" % (wider_run[0], wider_run[1],
-                                                     b_left, b_right)
-            moveto(wider_run[1] - 1, edge_y)
-            send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-            time.sleep(0.08)
-            moveto(again_run[1], edge_y)
-            time.sleep(0.3)
-            send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-            time.sleep(0.5)
-
-    shot("shell-before-monitor")
-    before_w, before_h, before_monitor = load("shell-before-monitor")
-    type_text("/mointor.sh 0.5 16\n")
-
-    time.sleep(2.5)
-    shot("monitor-first")
-    first_w, first_h, first_monitor = load("monitor-first")
-    time.sleep(2.0)
-    shot("monitor-second")
-    second_w, second_h, second_monitor = load("monitor-second")
-
-    def changed(a, b):
-        different = 0
-        top = min(b_top + 20, second_h)
-        bottom = min(b_bottom, second_h - 1)
-        for y in range(top, bottom + 1):
-            for x in range(b_left, min(b_right + 1, second_w)):
-                offset = (y * second_w + x) * 3
-                if a[offset:offset + 3] != b[offset:offset + 3]:
-                    different += 1
-        return different
-
-    appeared = changed(before_monitor, first_monitor)
-    redrawn = changed(first_monitor, second_monitor)
-    out.append(("monitor reached screen", "yes" if appeared > 200 else
-                "%d pixels" % appeared, "yes"))
-    out.append(("monitor redraws", "yes" if redrawn > 32 else
-                "%d pixels" % redrawn, "yes"))
-
-    # Let all sixteen updates complete before looking for the fault report.
-    time.sleep(5)
-
-    #       The same tool with no frame count, which runs until something
-    #       stops it, and then control-C to stop it. A full-screen tool that
-    #       keeps redrawing is the one shape that can leave a terminal with
-    #       no reader and no way back, and the terminal is then frozen for
-    #       good: the shell is alive but nothing it prints arrives. Both
-    #       halves are asserted here -- that the tool is still redrawing
-    #       while it runs, and that the shell answers afterwards.
-    type_text("monitor 0.3\n")
-    time.sleep(3)
-    shot("unbounded-first")
-    u1_w, u1_h, unbounded_first = load("unbounded-first")
-    time.sleep(2)
-    shot("unbounded-second")
-    u2_w, u2_h, unbounded_second = load("unbounded-second")
-    out.append(("unbounded monitor redraws",
-                "yes" if changed(unbounded_first, unbounded_second) > 32
-                else "%d pixels" % changed(unbounded_first, unbounded_second),
-                "yes"))
-
-    chord("ctrl", "c")
-    time.sleep(1.5)
-    shot("after-interrupt")
-    ai_w, ai_h, after_interrupt = load("after-interrupt")
-    type_text("echo backagain\n")
-    time.sleep(2)
-    shot("after-interrupt-command")
-    ac_w, ac_h, after_command = load("after-interrupt-command")
-    out.append(("shell answers after the tool",
-                "yes" if changed(after_interrupt, after_command) > 32
-                else "%d pixels" % changed(after_interrupt, after_command),
-                "yes"))
-
-    #       Control-C at a shell the terminal's shell is running. The line
-    #       discipline sends the interrupt to the whole foreground group, a
-    #       non-interactive shell among it, and that shell used to ignore it
-    #       as if it were the one being typed at: the sleep died, the rest of
-    #       the string ran and the terminal's shell was told 0. The answers
-    #       go to the serial line, which the typed line never reaches.
-    def type_shell(line):
-        shifted = {'"': "apostrophe", "$": "4", ">": "dot", "?": "slash"}
-        plain = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", ";": "semicolon",
-                 "\n": "ret"}
-        for character in line:
-            if character in shifted:
-                chord("shift", shifted[character])
-            elif character.isupper():
-                chord("shift", character.lower())
-            else:
-                key(plain.get(character, character))
-
-    type_shell('sh -c "sleep 20; echo stringran-on > /dev/ttyS0"\n')
-    time.sleep(2)
-    chord("ctrl", "c")
-    time.sleep(1)
-    type_shell("echo interrupted-$? > /dev/ttyS0\n")
-    serial_text = b""
-    for _ in range(40):
-        serial_text = open(work + "/serial", "rb").read()
-        if re.search(rb"interrupted-\d+", serial_text):
-            break
-        time.sleep(0.5)
-    stopped = re.findall(rb"interrupted-(\d+)", serial_text)
-    out.append(("Control-C stops a shell run from the terminal",
-                stopped[-1].decode() if stopped else "no answer", "130"))
-    out.append(("and the rest of its string never runs",
-                str(serial_text.count(b"stringran-on")), "0"))
-
-    #       The text window waits for its events, not for a nap. Two reads of
-    #       its own status file, with the uptime beside each, give the turns it
-    #       took between them: a nap every 10 ms was 99.7 a second on the box,
-    #       and the window's wait leaves what the compositor's refresh of its
-    #       page wakes, 25.2 a second there. The bound is 40 a second.
-    def shell_line(line):
-        shifted = {"&": "7", "!": "1", "$": "4", ">": "dot", '"': "apostrophe", "_": "minus"}
-        plain = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", ";": "semicolon", "\n": "ret"}
-        for character in line:
-            if character.isupper():
-                chord("shift", character.lower())
-            elif character in shifted:
-                chord("shift", shifted[character])
-            else:
-                key(plain.get(character, character))
-
-    shell_line("text &\n")
-    time.sleep(1.0)
-    shell_line("cat /proc/uptime /proc/$!/status > /dev/ttyS0\n")
-    time.sleep(1.0)
-    shell_line("cat /proc/uptime /proc/$!/status > /dev/ttyS0")
-    time.sleep(1.5)
-    key("ret")
-    time.sleep(3.0)
-    idle_serial = open(work + "/serial", "rb").read().replace(b"\r", b"")
-    idle_rows = re.findall(rb"(?m)^(\d+\.\d+) \d+\.\d+\n.*?(?<!non)voluntary_ctxt_switches:\s*(\d+)", idle_serial, re.S)
-    turns_rate = -1.0
-    if len(idle_rows) >= 2:
-        (first_up, first_turns), (last_up, last_turns) = idle_rows[-2], idle_rows[-1]
-        span = float(last_up) - float(first_up)
-        if span > 0:
-            turns_rate = (int(last_turns) - int(first_turns)) / span
-    out.append(("the text window takes under 40 turns a second, not a nap each 10 ms",
-                "yes" if 0 <= turns_rate < 40 else "%.1f a second" % turns_rate, "yes"))
-    time.sleep(4.0)
-
-    # A framed pixel window cannot grow beyond the mapping its client owns.
-    # This used to maximize to desktop dimensions anyway, then compose read
-    # those invented pixels past the end of the mapping. The window demo's
-    # blue pane is exactly 200x120; double-click its titlebar and prove those
-    # are still the only blue pixels.
-    type_text("/window\n")
-    time.sleep(0.5)
-    shot("pixel-window", 0.3)
-    pixel_w, pixel_h, pixel_before = load("pixel-window")
-
-    def colour_bounds(data, width, height, colour):
-        xs, ys = [], []
-        for y in range(height):
-            row = data[y * width * 3:(y + 1) * width * 3]
-            for x in range(width):
-                if row[x * 3:x * 3 + 3] == colour:
-                    xs.append(x)
-                    ys.append(y)
-        if not xs:
-            return None
-        return min(xs), min(ys), max(xs), max(ys)
-
-    blue = colour_bounds(pixel_before, pixel_w, pixel_h, b"\x00\x66\xcc")
-    if blue:
-        blue_left, blue_top, blue_right, blue_bottom = blue
-        moveto((blue_left + blue_right) // 2, max(blue_top - 10, 0))
-        for _ in range(2):
-            send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-            time.sleep(0.08)
-            send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-            time.sleep(0.12)
-
-        shot("pixel-maximized", 0.3)
-        max_w, max_h, pixel_after = load("pixel-maximized")
-        blue_after = colour_bounds(pixel_after, max_w, max_h,
-                                   b"\x00\x66\xcc")
-    else:
-        blue_after = None
-
-    if blue_after:
-        blue_width = blue_after[2] - blue_after[0] + 1
-        blue_height = blue_after[3] - blue_after[1] + 1
-        pixel_extent = "%dx%d" % (blue_width, blue_height)
-    else:
-        pixel_extent = "absent"
-    out.append(("pixel maximize is bounded", pixel_extent, "200x120"))
-
-    if blue_after:
-        max_left, max_top, max_right, max_bottom = blue_after
-        title_x = (max_left + max_right) // 2
-        title_y = max(max_top - 10, 0)
-        moveto(title_x, title_y)
-        send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-        time.sleep(0.08)
-        moveto(min(title_x + 120, W - 1), min(title_y + 80, H - 1))
-        send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-        shot("pixel-restored", 0.3)
-        drag_w, drag_h, pixel_dragged = load("pixel-restored")
-        blue_dragged = colour_bounds(pixel_dragged, drag_w, drag_h,
-                                     b"\x00\x66\xcc")
-    else:
-        blue_dragged = None
-
-    restored = (blue_dragged is not None and
-                blue_dragged[0] != blue_after[0] and
-                blue_dragged[2] - blue_dragged[0] + 1 == 200 and
-                blue_dragged[3] - blue_dragged[1] + 1 == 120)
-    out.append(("maximized drag restores", "yes" if restored else "no", "yes"))
-
-    # One held Alt with two Tab presses must walk past the next window to the
-    # third, rather than bouncing between the top two. The orange 400x260
-    # window is third in this demo; raising it changes the pixel where its
-    # titlebar was previously obscured.
-    orange = (colour_bounds(pixel_dragged, drag_w, drag_h, b"\xff\x99\x00")
-              if blue_after else None)
-    if orange:
-        orange_x = (orange[0] + orange[2]) // 2
-        orange_y = max(orange[1] - 10, 0)
-        orange_before = pixel(pixel_dragged, drag_w, orange_x, orange_y)
-    else:
-        orange_before = None
-
-    send([{"type": "key", "data": {"down": True,
-                                     "key": {"type": "qcode", "data": "alt"}}},
-          {"type": "key", "data": {"down": True,
-                                     "key": {"type": "qcode", "data": "tab"}}},
-          {"type": "key", "data": {"down": False,
-                                     "key": {"type": "qcode", "data": "tab"}}},
-          {"type": "key", "data": {"down": True,
-                                     "key": {"type": "qcode", "data": "tab"}}},
-          {"type": "key", "data": {"down": False,
-                                     "key": {"type": "qcode", "data": "tab"}}},
-          {"type": "key", "data": {"down": False,
-                                     "key": {"type": "qcode", "data": "alt"}}}])
-    time.sleep(0.2)
-    shot("third-focused", 0.3)
-    third_w, third_h, third_px = load("third-focused")
-    third_changed = (orange_before is not None and
-                     pixel(third_px, third_w, orange_x, orange_y) !=
-                     orange_before)
-    out.append(("Alt-Tab reaches third", "yes" if third_changed else "no",
-                "yes"))
-
-    # From the newly raised orange window, one step selects the blue window
-    # again so the minimize/restore checks below have an unambiguous target.
-    chord("alt", "tab")
-
-    # Alt-F9 is a compositor shortcut, not a byte sent to the focused
-    # program. Alt-Tab includes minimized clients and restores the selected
-    # one when Alt is released.
-    chord("alt", "f9")
-    shot("pixel-minimized", 0.3)
-    min_w, min_h, pixel_minimized = load("pixel-minimized")
-    blue_minimized = colour_bounds(pixel_minimized, min_w, min_h,
-                                   b"\x00\x66\xcc")
-    out.append(("Alt-F9 minimizes", "yes" if blue_minimized is None else "no",
-                "yes"))
-
-    chord("alt", "tab")
-    shot("pixel-restored-by-key", 0.3)
-    key_w, key_h, pixel_key = load("pixel-restored-by-key")
-    blue_key = colour_bounds(pixel_key, key_w, key_h, b"\x00\x66\xcc")
-    key_extent = ("absent" if blue_key is None else
-                  "%dx%d" % (blue_key[2] - blue_key[0] + 1,
-                             blue_key[3] - blue_key[1] + 1))
-    out.append(("Alt-Tab restores", key_extent, "200x120"))
-
-#       Snapping, at the end because it leaves a window somewhere new.
-#
-#       A drag that ends against an edge of the screen is the window asking
-#       for that half of it, which is what throwing a window at the side has
-#       meant since the idea existed. Top is the whole screen, and taking the
-#       window off again puts back the rectangle its program had -- saved once
-#       on the way out of floating, so left, then right, then off lands where
-#       it started rather than on the left half.
-#
-#       Read as how much of one column of the screen a window covers, and not
-#       as where the edges of a run are: by this point the desktop has the
-#       demo windows on it, runs of non-background merge every window they
-#       touch, and the answer stops meaning anything. A snapped window is the
-#       full height of the screen and nothing else here is -- the largest of
-#       the demos covers an eighth of a column -- so a column that is nearly
-#       all window is a snapped window, wherever the others happen to be.
-if runs:
-    def covered(name, x):
-        """How much of one column of the screen is not desktop."""
-        rw, rh, rpx = load(name)
-        rows = range(0, rh, 4)
-        lit = 0
-        for y in rows:
-            o = (y * rw + x) * 3
-            if (rpx[o], rpx[o + 1], rpx[o + 2]) != bg:
-                lit += 1
-        return lit * 100 // len(list(rows))
-
-    def throw(name, to_x, to_y, grab):
-        gx, gy = grab
-        moveto(gx, gy)
-        send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-        time.sleep(0.1)
-        for stepped in range(1, 9):
-            moveto(gx + (to_x - gx) * stepped // 8,
-                   gy + (to_y - gy) * stepped // 8)
-        send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-        time.sleep(1.6)
-        shot(name, 0.5)
-
-    chord("ctrl", "shift", "t")
-    time.sleep(3.0)
-    shot("snap-start", 0.5)
-    snap_w, snap_h, snap_px = load("snap-start")
-
-    def snap_at(x, y):
-        o = (y * snap_w + x) * 3
-        return snap_px[o], snap_px[o + 1], snap_px[o + 2]
-
-    #   The new terminal is the frontmost window, and the rightmost run at the
-    #   middle of the screen reaches its right edge.
-    start_runs, first_x = [], None
-    for x in range(snap_w):
-        on = snap_at(x, snap_h // 2) != bg
-        if on and first_x is None:
-            first_x = x
-        elif not on and first_x is not None:
-            if x - first_x > 40:
-                start_runs.append((first_x, x - 1))
-            first_x = None
-    if first_x is not None and snap_w - first_x > 40:
-        start_runs.append((first_x, snap_w - 1))
-
-    hold_left, hold_right = start_runs[-1]
-    hold_top = next(y for y in range(snap_h)
-                    if snap_at(hold_right - 4, y) != bg)
-    hold = (hold_right - 40, hold_top + 9)
-    edge = snap_w - 1
-    FULL = 90
-
-    throw("snap-left", 3, snap_h // 2, hold)
-    at_left, at_right = covered("snap-left", 0), covered("snap-left", edge)
-    left_ok = at_left >= FULL and at_right < FULL
-    out.append(("a drag to the left edge takes the left half",
-                "yes" if left_ok else "%d%% of the left column, %d%% of the right"
-                % (at_left, at_right), "yes"))
-
-    inside = covered("snap-left", snap_w // 2 - 30)
-    past = covered("snap-left", snap_w // 2 + 30)
-    out.append(("and stops at the middle",
-                "yes" if inside >= FULL and past < FULL else
-                "%d%% just inside, %d%% just past" % (inside, past), "yes"))
-
-    if left_ok:
-        hold = (snap_w // 4, 11)
-
-    throw("snap-right", edge - 2, snap_h // 2, hold)
-    at_left, at_right = covered("snap-right", 0), covered("snap-right", edge)
-    right_ok = at_right >= FULL and at_left < FULL
-    out.append(("a drag to the right edge takes the right half",
-                "yes" if right_ok else "%d%% of the left column, %d%% of the right"
-                % (at_left, at_right), "yes"))
-
-    if right_ok:
-        hold = (snap_w - snap_w // 4, 11)
-
-    #   A cell short of the far edge, because a window of text is a whole
-    #   number of cells: half a screen rarely divides by eight, and what is
-    #   left over sits at the edge the window was not thrown at. Snapped
-    #   right that is the left, so the check above can ask for the last
-    #   column; filling the screen has no such edge and keeps the remainder
-    #   on the right.
-    throw("snap-top", snap_w // 2, 2, hold)
-    at_left, at_right = covered("snap-top", 0), covered("snap-top", edge - 8)
-    top_ok = at_left >= FULL and at_right >= FULL
-    out.append(("a drag to the top fills the screen",
-                "yes" if top_ok else "%d%% of the left column, %d%% of the right"
-                % (at_left, at_right), "yes"))
-
-    if top_ok:
-        hold = (snap_w // 2, 11)
-
-    #   And off again: a window that is not against any edge and is no longer
-    #   the height of the screen is one that got its own rectangle back.
-    throw("snap-off", snap_w // 3, snap_h // 2, hold)
-    at_left, at_right = covered("snap-off", 0), covered("snap-off", edge)
-    out.append(("dragging off puts the window back",
-                "yes" if at_left < FULL and at_right < FULL else
-                "%d%% of the left column, %d%% of the right" % (at_left, at_right),
-                "yes"))
-
-#       The kernel log's ring is cut for the window it opens as and cut again
-#       when the window grows past it, since nothing maps it. Last, because a
-#       click on its titlebar takes the focus. Filled to the screen, the log
-#       is recut about three times as wide and still starts every row at the
-#       margin: the lines moved over whole and the emulator wraps at the new
-#       width. The serial side is read with the rest below.
-if runs:
-    left, right = runs[0]
-    moveto(left + 30, log_top + 9)
-    for _ in range(2):
-        send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-        time.sleep(0.08)
-        send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-        time.sleep(0.12)
-    time.sleep(1.0)
-    shot("log-filled", 0.5)
-    fw, fh, fpx = load("log-filled")
-
-    def filled_lit(x, y):
-        o = (y * fw + x) * 3
-        return fpx[o] + fpx[o + 1] + fpx[o + 2] > 180
-
-    starts = []
-    for row in range(3, 26):
-        band = range(24 + row * 16, min(24 + row * 16 + 16, fh))
-        first = next((x for x in range(2, fw // 2)
-                      if any(filled_lit(x, y) for y in band)), None)
-        if first is not None:
-            starts.append(first)
-    #   Filled, the window is what covers the right half of the screen: a
-    #   log line is rarely half a screen long, so this asks the window, not
-    #   the text in it.
-    row_y = fh // 2
-    covering = sum(1 for x in range(fw // 2, fw - 8)
-                   if tuple(fpx[(row_y * fw + x) * 3:(row_y * fw + x) * 3 + 3]) != bg)
-    out.append(("the log filled to the screen starts at the margin",
-                "yes" if starts and sum(x < 28 for x in starts) >= len(starts) - 4
-                else str(starts), "yes"))
-    out.append(("and covers the screen",
-                "yes" if covering * 10 >= (fw // 2 - 8) * 9 else
-                "%d of %d columns" % (covering, fw // 2 - 8), "yes"))
-
-try:
-    serial = open(work + "/serial", "rb").read().lower()
-except OSError:
-    serial = b""
-
-if not runs:
-    out.append(("the USB mouse checks", "not run: no window found", "run"))
-
-#       A USB mouse moves the cursor. The arrow's fill is 55 pixels of pure
-#       white, which nothing else on the desktop uses, so counting them at the
-#       expected place is the cursor being there. The tablet parks the cursor
-#       first so the count is taken from a known spot on bare desktop, and
-#       the movement goes in small reports a few milliseconds apart, the way
-#       a hand moves, so the compositor's acceleration leaves the distance
-#       alone. Each mouse is selected through the monitor: naming the device
-#       in input-send-event is not an option, QEMU 11 aborts on it.
-if len(runs) >= 1:
-    def arrow_pixels(data, width, height, x, y):
-        return sum(1 for py in range(max(y, 0), min(y + 20, height))
-                   for px in range(max(x, 0), min(x + 16, width))
-                   if pixel(data, width, px, py) == b"\xff\xff\xff")
-
-    def mouse_rel(dx, dy, steps):
-        for step in range(steps):
-            send([{"type": "rel", "data": {"axis": "x", "value": dx}},
-                  {"type": "rel", "data": {"axis": "y", "value": dy}}])
-            time.sleep(0.01)
-        time.sleep(0.2)
-
-    mice = [line.split("#")[1].split(":")[0]
-            for line in monitor("info mice").splitlines()
-            if "HID Mouse" in line]
-    out.append(("usb mice attached", str(len(mice)), "2"))
-
-    # A different parking spot for each mouse: the tablet reports nothing for
-    # a position equal to its last, so parking twice at one spot would leave
-    # the cursor where the previous mouse put it.
-    for turn, index in enumerate(mice):
-        park_x, park_y = w - 200 - 60 * turn, h - 200 - 40 * turn
-        moveto(park_x, park_y)
-        shot("mouse-parked-" + index, 0.3)
-        parked_w, parked_h, parked = load("mouse-parked-" + index)
-        before = arrow_pixels(parked, parked_w, parked_h, park_x, park_y)
-        monitor("mouse_set " + index)
-        mouse_rel(-3, -2, 40)
-        shot("mouse-moved-" + index, 0.3)
-        moved_w, moved_h, moved = load("mouse-moved-" + index)
-        after = arrow_pixels(moved, moved_w, moved_h, park_x - 120, park_y - 80)
-        still = arrow_pixels(moved, moved_w, moved_h, park_x, park_y)
-        out.append(("usb mouse " + index + " moves the cursor",
-                    "yes" if before == 55 and after == 55 and still == 0
-                    else "%d %d %d" % (before, after, still), "yes"))
-
-# The kernel names them "QEMU QEMU USB Mouse"; the serial log is lower case.
-out.append(("pointer lists the mice", str(serial.count(b"usb mouse: ")), "2"))
-
-#       The policy cat read for itself in the Control-Shift-T terminal: the
-#       41st field of /proc/self/stat, 0 for SCHED_OTHER and 1 for FIFO. Found
-#       by its shape and not its name, because cat is resident in the shell
-#       and runs in a forked child that is still called shell. A comm has no
-#       spaces here, so the state and the fields after it split on whitespace.
-stat = re.search(rb"\d+ \([a-z0-9_./-]+\) ([a-z] (?:-?\d+ ){40,}-?\d+)", serial)
-fields = stat.group(1).split() if stat else []
-out.append(("a terminal from the keyboard is not real time",
-            fields[38].decode() if len(fields) > 38 else "no stat line", "0"))
-
-#       A terminal's line ring is cut once and never grows, so the size it is
-#       cut for decides the largest that window can ever become. Cutting it
-#       for the desktop of the moment froze that at whatever the screen was
-#       when the terminal opened, and the screen is not a constant: it is the
-#       sum of the outputs, recomputed whenever a connector is probed or a
-#       monitor arrives, which on real hardware happens after the first
-#       terminal exists. This display is 2560 wide, so a ring cut for it holds
-#       about 319 columns; one cut for the ceiling holds far more. Anything in
-#       between means the ring followed the mode again.
-ring = re.findall(rb"ring holds (\d+)x(\d+)", serial)
-out.append(("terminal ring is cut for the ceiling",
-            "yes" if ring and min(int(w) for w, _ in ring) >= 400
-            else str([(int(w), int(h)) for w, h in ring]), "yes"))
-
-#       And paid for only as it is written. The ring above is about two
-#       megabytes, of which a terminal that ran a command or two has written a
-#       few lines, so the terminal the X closes reports holding a small part
-#       of it. A ring allocated whole, as every one was before, holds all of
-#       it; this is the idle-memory ratchet for the lazily held ring.
-held = [(int(a), int(b)) for a, b in re.findall(rb"ring held (\d+) of (\d+) kib", serial)]
-out.append(("a closed terminal held a small part of its ring",
-            "yes" if held and all(a * 4 <= b for a, b in held) else str(held), "yes"))
-
-#       Scrolled through all of it, too: the terminal the X closes ran seq 700
-#       first, and its lines are as far apart as it is wide rather than as
-#       the ceiling, so a full ring is still a small part of the reservation.
-#       With lines a page apart it held all of it again.
-apart = [int(a) for a in re.findall(rb"ring holds \d+x\d+ \(\d+ kib\), lines (\d+) apart", serial)]
-out.append(("a terminal's lines start as far apart as it opens",
-            "yes" if apart and max(apart) <= 160 else str(apart), "yes"))
-
-#       And spread when it is widened past that: the line typed into the
-#       widened terminal reached past the widest stride any window opened at,
-#       and the compositor said it recut that ring at least that wide.
-widened = [int(w) for w in re.findall(rb"window ring recut to (\d+)x", serial)]
-out.append(("a widened terminal draws lines wider than it opened",
-            "yes" if runs and apart and widened and
-            wider_cols > max(apart) and max(widened) >= wider_cols
-            else "%s cols drawn (%s), apart %s, recut %s" %
-                 (wider_cols, wider_note, apart, widened), "yes"))
-
-#       The kernel log's ring is cut for its own window, and the fill above
-#       recut it. Cut for the ceiling it held about 2 MiB from boot on.
-cut = re.findall(rb"kernel log grid \d+x\d+, ring cut to (\d+)x\d+ \((\d+) kib\)", serial)
-recut = [int(w) for w in re.findall(rb"kernel log ring recut to (\d+)x", serial)]
-out.append(("the kernel log's ring is cut for its window",
-            "yes" if cut and all(int(k) <= 640 for _, k in cut) else str(cut), "yes"))
-out.append(("and recut for the screen it was filled to",
-            "yes" if runs and recut and max(recut) >= 300 else str(recut), "yes"))
-
-for name, marker in (("no protection fault", b"general protection fault"),
-                     ("no oops", b"oops:"),
-                     ("no kernel panic", b"kernel panic")):
-    out.append((name, "present" if marker in serial else "absent", "absent"))
-
-#       A coverage image writes what it reached, typed into whichever
-#       terminal has the keyboard; see coverage_guest in test/run. Run, not
-#       sourced: a sourced file is a parser source, and the applets in it
-#       refuse to start under one.
-if os.environ.get("MOONWATER_CANVAS_COVERAGE"):
-    type_text("/coverage-dump\n")
-    for _ in range(120):
-        try:
-            if open(os.environ["MOONWATER_CANVAS_COVERAGE"], "rb").read().rstrip().endswith(b"b2sK"):
-                break
-        except OSError:
-            pass
-        time.sleep(0.5)
-
-guest.quit()
-time.sleep(1)
-guest.terminate()
-try:
-    guest.wait(10)
-except Exception:
-    guest.kill()
-
-#       The machine as it boots off a stick: no console= at all, so
-#       /dev/console is tty1 and init's shell reads it. Every other lane names
-#       ttyS0 and moves that shell off the VT, which is exactly why none of
-#       them could see keys typed into a window reach it as well -- every line
-#       ran twice, once as root where nobody could see. A line typed into the
-#       boot terminal must reach one shell, so it arrives on the serial port
-#       once; the port is still there with no console on it.
-#
 #       And a console switch is not a way round it. A program calling
 #       VT_ACTIVATE -- chvt, from any distribution in a bowl -- puts another
 #       console in front, and a console muted only while it was in front let
@@ -18197,77 +17141,56 @@ reader = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/evlat",
 #       while it keeps the card: its voluntary switches from 2 s after the
 #       start to 6 s, a second at a time.
 open(stick + "/holdwake", "w").write(r'''p=$(grep -l '^moonwater/canva' /proc/[0-9]*/comm | head -n 1 | cut -d/ -f3)
-count() { sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$p/status; }
+count() { if [ -n "$p" ]; then sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$p/status; else echo 0; fi; }
 ( sleep 2; a=$(count); sleep 4; b=$(count); echo "wakes-$(( (b - a) / 4 ))-per-second" ) &
 ( sleep 2; /mnt/evlat 3 ) &
 exec /mnt/drmhold "$@"
 ''')
 
-#       Two more a shell runs from the stick: what `moonwater canvas` says,
-#       and whether the kernel has warned about anything since it booted.
-open(stick + "/state", "w").write('''moonwater canvas > /tmp/canvas-state 2>&1
-echo "canvas-on-$(grep -c 'Canvas is on' /tmp/canvas-state)-off-$(grep -c 'Canvas is off' /tmp/canvas-state)" > /dev/ttyS0
-''')
-#       An idle desktop: two readings of `moonwater canvas` eight seconds apart
-#       with nobody touching anything (the three seconds first let the frame
-#       timer's two-second idle tail run out). The hold on the processor's
-#       idle states must be let go of, and neither the canvas thread nor the
-#       frame timer may be waking: a desktop that wakes or holds while nobody
-#       is at it keeps the clock up and the battery going.
-open(stick + "/idlecheck", "w").write(r'''sleep 3
-moonwater canvas > /tmp/idle1 2>&1
-sleep 8
-moonwater canvas > /tmp/idle2 2>&1
-n() { sed -n "s/.*$2 \\([0-9][0-9]*\\).*/\\1/p" "$1" | head -n 1; }
-w=$(( $(n /tmp/idle2 woke) - $(n /tmp/idle1 woke) ))
-t=$(( $(n /tmp/idle2 fired) - $(n /tmp/idle1 fired) ))
-h=$(sed -n 's/.*hold: \([a-z]*\),.*/\1/p' /tmp/idle2)
-echo "idlecheck-$h-$w-$t" > /dev/ttyS0
-''')
 #       A holder that comes back, as KDE's wrapper brings KWin back when KWin
 #       is killed: three runs of the holder in a loop of one shell, which a
 #       key that ends only the holder would leave holding the card again.
 open(stick + "/respawn", "w").write(r'''n=0
 while [ $n -lt 3 ]; do /mnt/drmhold 6 0 0; n=$((n+1)); done
 ''')
-#       How many windows Canvas has, said on the serial port.
-open(stick + "/windows", "w").write(r'''moonwater canvas > /tmp/windows 2>&1
-echo "windows-$(sed -n 's/.*Canvas is on: [^,]*, \([0-9]*\) window.*/\1/p' /tmp/windows)" > /dev/ttyS0
-''')
 #       A bowl profile that is only a program holding the display, installed
 #       where bowl profile puts one, chosen as the desktop, started, looked at,
-#       and ended from the same shell that started it. Run in one script
-#       because Canvas drops every key while the session holds the card. Its
-#       output is the serial port's, since a session's own goes to its log.
-open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/drmhold 120 0 0 > /dev/ttyS0 2>&1\n")
-open(stick + "/desk", "w").write(r'''moonwater desktop > /dev/ttyS0 2>&1
-moonwater desktop desktop > /dev/ttyS0 2>&1
+#       and ended from the same shell that started it. The session's own
+#       output goes to its log, so the profile says what it does in a file.
+open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/drmhold 120 0 0 > /tmp/profile.out 2>&1\n")
+open(stick + "/desk", "w").write(r'''moonwater desktop
+moonwater desktop desktop
 mkdir -p /bowls/bin
 cp /mnt/profile /bowls/bin/desktop
 chmod 755 /bowls/bin/desktop
-moonwater desktop desktop > /dev/ttyS0 2>&1
-moonwater desktop > /dev/ttyS0 2>&1
+moonwater desktop desktop
+moonwater desktop
 rm -f /run/moonwater/desktop.booted
 moonwater desktop boot
 sleep 6
-moonwater desktop > /dev/ttyS0 2>&1
-moonwater desktop stop > /dev/ttyS0 2>&1
+moonwater desktop
+moonwater desktop stop
 sleep 3
-moonwater desktop > /dev/ttyS0 2>&1
-moonwater desktop canvas > /dev/ttyS0 2>&1
-moonwater desktop > /dev/ttyS0 2>&1
-echo desk-done > /dev/ttyS0
-''')
-open(stick + "/kcheck", "w").write('''echo "kernel-warnings-$(dmesg | grep -c -E 'WARNING|BUG:|Oops|circular locking|possible recursive')" > /dev/ttyS0
+moonwater desktop
+moonwater desktop canvas
+moonwater desktop
+echo desk-done
 ''')
 
+#       The plain boot, the machine as it ships: no console= at all, so
+#       /dev/console is tty1 and init's shell reads it, and the compositor
+#       is the desktop, with a terminal that has the keyboard. A line typed
+#       into that terminal must reach one shell, so it arrives on the serial
+#       port once; the port is still there with no console on it.
 leak_guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
-    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/leak-serial",
-    # The cursor plane is off here too: this guest counts the cursor's pixels in
-    # a screendump, and QEMU's screendump has no cursor plane in it.
-    "-append", "drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/leak-serial"] +
+    (["-serial", "file:" + os.environ["MOONWATER_CANVAS_COVERAGE"]]
+     if os.environ.get("MOONWATER_CANVAS_COVERAGE") else []) + [
+    # CANVAS_APPEND adds to the guest's command line: a profiling run wants
+    # nokaslr so the samples map onto System.map.
+    "-append", "drm_client_lib.active= " + os.environ.get("CANVAS_APPEND", "")],
     work + "/leak-qmp", work + "/leak-mon", work)
 
 time.sleep(25)
@@ -18284,91 +17207,6 @@ time.sleep(3)
 leak_serial = open(work + "/leak-serial", "rb").read()
 leaks = re.findall(rb"leak-(\d+)", leak_serial)
 out.append(("a typed line runs in one shell", str(len(leaks)), "1"))
-
-if len(runs) >= 1 and before_spawn:
-    #   The pixel scale, changed while the desktop is up.
-    #
-    #   It is a setting of the machine and not an option of the build:
-    #   moonwater canvas scale 2 draws every metric the compositor owns twice
-    #   as large and lays every window out again, which a program sees as a
-    #   window with half the rows and half the columns that is where it was; and
-    #   auto goes back to what the screens say, which a virtual display does not
-    #   get to say -- it reports a size that is fiction -- so one. Asked of the
-    #   terminal that has the keyboard, which answers on the serial line, from
-    #   its own tty and the command's own words, and measured as a count of
-    #   cells and a window's edges, not as a pixel anyone drew by hand. In the
-    #   guest after the first, whose terminal has the keyboard at boot and whose
-    #   windows nothing after this measures against the first guest's.
-    def to_serial(command):
-        type_text(command + " ")
-        chord("shift", "dot")
-        type_text(" /dev/tty")
-        chord("shift", "s")
-        type_text("0\n")
-
-    def size_to_serial(tag):
-        type_text("echo " + tag + "-")
-        chord("shift", "4")
-        chord("shift", "9")
-        type_text("stty size")
-        chord("shift", "0")
-        type_text(" ")
-        chord("shift", "dot")
-        type_text(" /dev/tty")
-        chord("shift", "s")
-        type_text("0\n")
-
-    def terminal_size(tag):
-        found = re.findall(rb"%s-(\d+) (\d+)" % tag.encode(),
-                           open(work + "/leak-serial", "rb").read())
-        return (int(found[-1][0]), int(found[-1][1])) if found else (0, 0)
-
-    size_to_serial("sizeone")
-    time.sleep(1.0)
-    shot("scale-one", 0.5)
-    to_serial("moonwater canvas scale 2")
-    time.sleep(3.0)
-    size_to_serial("sizetwo")
-    to_serial("moonwater canvas scale")
-    time.sleep(1.5)
-    shot("scale-two", 0.5)
-    one, two = terminal_size("sizeone"), terminal_size("sizetwo")
-    out.append(("scale 2 halves the rows and the columns of a terminal",
-                "yes" if one[0] > 8 and one[1] > 16 and abs(two[0] - one[0] // 2) <= 1 and
-                abs(two[1] - one[1] // 2) <= 2 else "%dx%d against %dx%d" % (two[1], two[0], one[1], one[0]),
-                "yes"))
-    before_edges, after_edges = spans("scale-one"), spans("scale-two")
-    out.append(("and leaves the window where it was",
-                "yes" if len(before_edges) == len(after_edges) and before_edges and
-                all(abs(a - b) <= 24 for pair, other in zip(before_edges, after_edges)
-                    for a, b in zip(pair, other)) else "%r against %r" % (before_edges, after_edges),
-                "yes"))
-    said = open(work + "/leak-serial", "rb").read().decode("utf-8", "replace")
-    out.append(("moonwater canvas scale says what it is set to",
-                "yes" if "scale 2, set" in said else "no", "yes"))
-    to_serial("moonwater canvas scale auto")
-    time.sleep(3.0)
-    size_to_serial("sizeauto")
-    to_serial("moonwater canvas scale")
-    time.sleep(1.5)
-    shot("scale-auto", 0.5)
-    #   A window keeps its pixels and takes the whole cells that fit, so the
-    #   round trip is the size it was to within the cell it gave up at two.
-    again = terminal_size("sizeauto")
-    out.append(("auto on a virtual display is one again, whatever size it claims",
-                "yes" if abs(again[0] - one[0]) <= 1 and abs(again[1] - one[1]) <= 2
-                else "%dx%d against %dx%d" % (again[1], again[0], one[1], one[0]),
-                "yes"))
-    said = open(work + "/leak-serial", "rb").read().decode("utf-8", "replace")
-    out.append(("and says it asked no screen it could trust",
-                "yes" if "scale 1, auto: no screen says a size that can be trusted" in said else "no",
-                "yes"))
-    out.append(("the windows are where they were when the scale comes back",
-                "yes" if len(spans("scale-auto")) == len(before_edges) and
-                all(abs(a - b) <= 24 for pair, other in zip(before_edges, spans("scale-auto"))
-                    for a, b in zip(pair, other))
-                else "%r against %r" % (spans("scale-auto"), before_edges),
-                "yes"))
 
 #       The same line once a program has put tty2 in front, with a shell
 #       reading tty2 the way init's reads tty1. Opening tty2 allocates it,
@@ -18416,121 +17254,140 @@ else:
     out.append(("and a typed line still runs in one shell",
                 "not run: no static cc for the switcher", "1"))
 
-def serial_wait(marker, seconds):
-    stop = time.time() + seconds
-    while time.time() < stop:
-        if marker in open(work + "/leak-serial", "rb").read():
-            return True
-        time.sleep(0.2)
-    return False
+for name, marker in (("no protection fault", b"general protection fault"),
+                     ("no oops", b"oops:"),
+                     ("no kernel panic", b"kernel panic")):
+    out.append((name, "present" if marker in open(work + "/leak-serial", "rb").read().lower() else "absent", "absent"))
 
-def typed_to_serial(word):
-    type_text("echo " + word + "-")
-    chord("shift", "4")
-    chord("shift", "4")
-    type_text(" ")
-    chord("shift", "dot")
-    type_text(" /dev/tty")
-    chord("shift", "s")
-    type_text("0\n")
+#       A coverage image writes what it reached, typed into the terminal that
+#       has the keyboard; see coverage_guest in test/run. Run, not sourced: a
+#       sourced file is a parser source, and the applets in it refuse to start
+#       under one.
+if os.environ.get("MOONWATER_CANVAS_COVERAGE"):
+    type_text("/coverage-dump\n")
+    for _ in range(120):
+        try:
+            if open(os.environ["MOONWATER_CANVAS_COVERAGE"], "rb").read().rstrip().endswith(b"b2sK"):
+                break
+        except OSError:
+            pass
+        time.sleep(0.5)
 
-def run_holder(arguments, program="/mnt/drmhold"):
-    type_text(program + " " + arguments + " ")
-    chord("shift", "dot")
-    type_text(" /dev/tty")
-    chord("shift", "s")
-    type_text("0 2")
-    chord("shift", "dot")
-    chord("shift", "7")
-    type_text("1 ")
-    chord("shift", "7")
-    type_text("\n")
+leak_guest.quit()
+time.sleep(1)
+leak_guest.terminate()
+try:
+    leak_guest.wait(10)
+except Exception:
+    leak_guest.kill()
 
-#       Keys typed at a program that holds the display are that program's.
-#       Canvas and the program both hear every key, and this one used to go
-#       into the focused terminal as well and run there when it could.
-if switcher and holder:
-    shot("foreign-before")
-    before_w, before_h, before_px = load("foreign-before")
-    run_holder("8 0 0")
-    held = serial_wait(b"DRMHOLD master", 15)
-    if held:
-        typed_to_serial("weston")
-    finished = serial_wait(b"DRMHOLD done", 20)
+#       Canvas with no desktop on top: moonwater.desktop=none keeps the
+#       compositor out of the way, so Canvas holds the card and fills it with
+#       the desktop's colour, and everything is asked of the shell on the
+#       serial port. This is what other programs that take the display meet:
+#       a card held by the kernel's client, to be taken and given back.
+ser = work + "/b-ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+    "-device", "usb-storage,drive=stick,removable=on",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none printk.time=1 " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/b-qmp", work + "/b-mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt", 20)
+
+def heard_count(pattern):
+    shell.run("echo", 2)
+    return len(re.findall(pattern, shell.heard))
+
+def canvas_text():
+    return shell.run("moonwater canvas", 15)[0]
+
+def vga_share(name):
+    width, height, data = load(name)
+    grid = [(y * width + x) * 3 for y in range(0, height, 8) for x in range(0, width, 8)]
+    levels = (0, 0x55, 0xaa, 0xff)
+    vga = sum(1 for at in grid if data[at] in levels and data[at + 1] in levels and data[at + 2] in levels)
+    white = sum(1 for at in grid if data[at:at + 3] == b"\xff\xff\xff")
+    return vga * 100 // len(grid), white * 100 // len(grid)
+
+#       A holder is started in the background, says what it does into a file,
+#       and is waited for there.
+holds = [0]
+
+def start_holder(arguments, program="/mnt/drmhold"):
+    holds[0] += 1
+    tag = "/tmp/holder%d" % holds[0]
+    shell.run("%s %s > %s 2>&1 &" % (program, arguments, tag), 10)
+    return tag
+
+def holder_said(tag, text, seconds):
+    found, _ = until(lambda: text in shell.run("cat %s" % tag, 10)[0], seconds)
+    return bool(found)
+
+#       The setting of the pixel scale is the machine's: it is kept in /root
+#       and the desktop takes it when it starts again, so what is asked here is
+#       what it says, from the command's own words.
+shell.run("moonwater canvas scale 2", 20)
+said = shell.run("moonwater canvas scale", 15)[0]
+out.append(("moonwater canvas scale says what it is set to",
+            "yes" if "scale 2, set" in said else "no: " + said[-80:], "yes"))
+shell.run("moonwater canvas scale auto", 20)
+said = shell.run("moonwater canvas scale", 15)[0]
+out.append(("and auto on a virtual display is one, whatever size it claims, and says it asked no screen it could trust",
+            "yes" if "scale 1, auto: no screen says a size that can be trusted" in said else "no: " + said[-80:], "yes"))
+
+#       A program takes the display, the way Weston does: master of the card,
+#       a mode of its own, held. Canvas says so, and has the card back when
+#       the program is done.
+shot("foreign-before")
+before_w, before_h, before_px = load("foreign-before")
+if holder:
+    tag = start_holder("8 0 0")
+    held = holder_said(tag, "DRMHOLD master", 15)
+    said_held = "held by the desktop or another program" in canvas_text() if held else False
+    finished = holder_said(tag, "DRMHOLD done", 20)
     time.sleep(2)
-    serial_now = open(work + "/leak-serial", "rb").read()
     out.append(("a program takes the display", "yes" if held and finished else "no", "yes"))
-    out.append(("keys typed at it never reach a Canvas window",
-                str(len(re.findall(rb"weston-(\d+)", serial_now))), "0"))
-    typed_to_serial("after")
-    time.sleep(3)
-    serial_now = open(work + "/leak-serial", "rb").read()
-    out.append(("and typing reaches Canvas once it exits",
-                str(len(re.findall(rb"after-(\d+)", serial_now))), "1"))
+    out.append(("and Canvas says the display is held while it has it", "yes" if said_held else "no", "yes"))
+    out.append(("and Canvas says no such thing once it exits",
+                "yes" if "held by the desktop or another program" not in canvas_text() else "no", "yes"))
     shot("foreign-after")
     after_w, after_h, after_px = load("foreign-after")
     out.append(("the desktop comes back the size it was",
                 "%dx%d" % (after_w, after_h), "%dx%d" % (before_w, before_h)))
-
-    #   The cursor this guest draws into the framebuffer, where the screendump
-    #   can see it: nothing moved the pointer, so it is where it started, in
-    #   the middle of the desktop, and pure white is no ink but the cursor's.
-    def cursor_white(data, width, height):
-        x, y = width // 2, height // 2
-        return sum(1 for py in range(max(y - 4, 0), min(y + 28, height))
-                   for px in range(max(x - 4, 0), min(x + 24, width))
-                   if data[(py * width + px) * 3:(py * width + px) * 3 + 3] == b"\xff\xff\xff")
-    cursor_before = cursor_white(before_px, before_w, before_h)
-    cursor_after = cursor_white(after_px, after_w, after_h)
-    out.append(("the cursor is drawn again where it was",
-                "yes" if cursor_before and cursor_after == cursor_before
-                else "%d before, %d after" % (cursor_before, cursor_after), "yes"))
-    type_text("pointer ")
-    chord("shift", "dot")
-    type_text(" /dev/tty")
-    chord("shift", "s")
-    type_text("0\n")
-    time.sleep(2)
-    synced = re.findall(rb"cursor sync +(\d+) requested, (\d+) armed",
-                        open(work + "/leak-serial", "rb").read())
-    out.append(("the cursor is back at a new generation",
-                "yes" if synced and synced[-1][0] == synced[-1][1] and int(synced[-1][0]) > 0
-                else repr(synced[-1:]), "yes"))
+    vga, white = vga_share("foreign-after")
+    out.append(("and the holder's picture is gone: Canvas fills the screen with its own colour again",
+                "yes" if white < 50 else "%d%% white" % white, "yes"))
 
     #   A program that gives master back without exiting. Nothing closes
     #   the card, so nothing tells Canvas; it has to notice on its own.
-    run_holder("3 1 8")
-    dropped = serial_wait(b"DRMHOLD dropped", 20)
+    tag = start_holder("3 1 8")
+    dropped = holder_said(tag, "DRMHOLD dropped", 20)
     quiet = "no drop"
     if dropped:
         #   Nothing is typed or moved in this second and the holder writes
-        #   only to the serial port, so no key, pointer or terminal output
-        #   wakes Canvas: its desktop replaces the holder's white fill only
-        #   if the suspended loop looks at the card again by itself.
+        #   only to a file, so no key or pointer wakes Canvas: its colour
+        #   replaces the holder's white fill only if the suspended loop looks
+        #   at the card again by itself.
         time.sleep(1)
         shot("dropped-quiet", 0.5)
         quiet_w, quiet_h, quiet_px = load("dropped-quiet")
         grid = [(y * quiet_w + x) * 3 for y in range(0, quiet_h, 8) for x in range(0, quiet_w, 8)]
         white = sum(1 for at in grid if quiet_px[at:at + 3] == b"\xff\xff\xff")
         quiet = "yes" if white * 2 < len(grid) else "%d of %d sampled pixels still white" % (white, len(grid))
-        typed_to_serial("dropped")
-        time.sleep(2)
-    serial_now = open(work + "/leak-serial", "rb").read()
     out.append(("a program that gives master back and stays is noticed",
-                "yes" if dropped and serial_now.count(b"DRMHOLD done") == 1 else "no", "yes"))
+                "yes" if dropped and holder_said(tag, "DRMHOLD done", 20) else "no", "yes"))
     out.append(("and the desktop is back within a second with nothing typed or moved", quiet, "yes"))
-    out.append(("and typing reaches Canvas while it still runs",
-                str(len(re.findall(rb"dropped-(\d+)", serial_now))), "1"))
-    serial_wait(b"DRMHOLD done\r\nDRMHOLD", 0)
-    time.sleep(8)
+    time.sleep(2)
 
     #   How often a suspended Canvas wakes with a pointer moving over it. The
-    #   look it takes at the card is four a second and a frame timer left
-    #   running while the card is taken is one a frame, but the thing that
+    #   look it takes at the card is four a second at most; the thing that
     #   used to wake it was the pointer itself: every report of a tablet or a
-    #   mouse that the program holding the card reads too went through the
-    #   acceleration curve and woke a thread that runs ahead of every ordinary
-    #   task, which looked at the card and threw it away.
+    #   mouse that the program holding the card reads too.
     def pointer_storm(seconds):
         stop = time.time() + seconds
         swing = 0
@@ -18542,263 +17399,159 @@ if switcher and holder:
 
     #   What a program that reads the pointer is given, and how soon: the
     #   median wait of a report between the kernel stamping it and the read
-    #   having it, with Canvas moving the cursor on the same reports first,
-    #   and then with it keeping out of the way of a program that has the
-    #   card. Asked of the same tablet in the same guest in the same second
-    #   of a storm, so what differs is who has the display.
-    delivered = [0]
-
-    def delivery(label, rows):
-        delivered[0] += 1
-        for _ in range(60):
-            if open(work + "/leak-serial", "rb").read().count(b"evlat-") >= delivered[0]:
-                break
-            time.sleep(0.2)
-        said = re.findall(rb"evlat-(\d+)-(\d+)-(\d+)-(\d+)", open(work + "/leak-serial", "rb").read())
-        got = said[delivered[0] - 1] if len(said) >= delivered[0] else None
-        rows.append((label, "yes" if got and int(got[0]) > 100 and int(got[1]) < 250
-                     else ("%s reports, median %s us, p99 %s us" % (got[0].decode(), got[1].decode(), got[2].decode())
-                           if got else "no count"), "yes"))
-        return got
-
-    if reader:
-        run_holder("4", "/mnt/evlat")
-        time.sleep(0.5)
-        pointer_storm(2.5)
-        delivery("a report reaches a program reading it within 250 us at the median, Canvas moving the cursor", out)
-
-    run_holder("7 0 0", "/shell /mnt/holdwake")
+    #   having it, with Canvas keeping out of the way of a program that has
+    #   the card.
+    tag = start_holder("7 0 0", "/shell /mnt/holdwake")
     time.sleep(2.2)
     pointer_storm(3.4)
-    serial_wait(b"-per-second", 15)
-    rate = re.findall(rb"wakes-(\d+)-per-second", open(work + "/leak-serial", "rb").read())
+    holder_said(tag, "-per-second", 15)
+    text = shell.run("cat %s" % tag, 10)[0]
+    rate = re.findall(r"wakes-(\d+)-per-second", text)
     out.append(("a suspended Canvas wakes fewer than 20 times a second, a pointer moving over it",
                 "yes" if rate and int(rate[-1]) < 20
-                else ("%s a second" % rate[-1].decode() if rate else "no count"), "yes"))
+                else ("%s a second" % rate[-1] if rate else "no count"), "yes"))
     if reader:
-        delivery("and a report reaches a program reading it within 250 us at the median, another program holding the card", out)
-    for _ in range(60):
-        if open(work + "/leak-serial", "rb").read().count(b"DRMHOLD done") >= 3:
-            break
-        time.sleep(0.2)
+        holder_said(tag, "evlat-", 15)
+        got = re.findall(r"evlat-(\d+)-(\d+)-(\d+)-(\d+)", shell.run("cat %s" % tag, 10)[0])
+        got = got[-1] if got else None
+        out.append(("a report reaches a program reading it within 250 us at the median, another program holding the card",
+                    "yes" if got and int(got[0]) > 100 and int(got[1]) < 250
+                    else ("%s reports, median %s us, p99 %s us" % got[:3] if got else "no count"), "yes"))
+    else:
+        out.append(("a report reaches a program reading it within 250 us at the median, another program holding the card",
+                    "not run: no static cc for the helpers", "yes"))
+    holder_said(tag, "DRMHOLD done", 30)
     time.sleep(2)
 else:
     for name, want in (("a program takes the display", "yes"),
-                       ("keys typed at it never reach a Canvas window", "0"),
-                       ("and typing reaches Canvas once it exits", "1"),
+                       ("and Canvas says the display is held while it has it", "yes"),
+                       ("and Canvas says no such thing once it exits", "yes"),
                        ("the desktop comes back the size it was", "same"),
-                       ("the cursor is drawn again where it was", "yes"),
-                       ("the cursor is back at a new generation", "yes"),
+                       ("and the holder's picture is gone: Canvas fills the screen with its own colour again", "yes"),
                        ("a program that gives master back and stays is noticed", "yes"),
                        ("and the desktop is back within a second with nothing typed or moved", "yes"),
-                       ("and typing reaches Canvas while it still runs", "1"),
                        ("a suspended Canvas wakes fewer than 20 times a second, a pointer moving over it", "yes"),
-                       ("a report reaches a program reading it within 250 us at the median, Canvas moving the cursor", "yes"),
-                       ("and a report reaches a program reading it within 250 us at the median, another program holding the card", "yes")):
+                       ("a report reaches a program reading it within 250 us at the median, another program holding the card", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
 
-#       Canvas off from its own terminal, then the kernel's console: a shell
-#       answers on it, a program takes the display from it and gives it back,
-#       Canvas comes back on with a terminal, and goes off and on twice more
-#       from the console with a terminal still answering afterwards.
-def vga_share(name):
-    width, height, data = load(name)
-    grid = [(y * width + x) * 3 for y in range(0, height, 8) for x in range(0, width, 8)]
-    levels = (0, 0x55, 0xaa, 0xff)
-    vga = sum(1 for at in grid if data[at] in levels and data[at + 1] in levels and data[at + 2] in levels)
-    white = sum(1 for at in grid if data[at:at + 3] == b"\xff\xff\xff")
-    return vga * 100 // len(grid), white * 100 // len(grid)
+#       Canvas off, then the kernel's console: a shell answers on it, a
+#       program takes the display from it and gives it back, Canvas comes back
+#       on, and goes off and on twice more with the serial shell answering
+#       afterwards. What is typed into the screen goes to the shell on tty1,
+#       which writes its answer to the serial port.
+def typed_to_serial(word):
+    type_text("echo " + word + "-")
+    chord("shift", "4")
+    chord("shift", "4")
+    type_text(" ")
+    chord("shift", "dot")
+    type_text(" /dev/tty")
+    chord("shift", "s")
+    type_text("0\n")
 
-def serial_count(pattern):
-    return len(re.findall(pattern, open(work + "/leak-serial", "rb").read()))
-
-def type_line_with_semicolons(line):
-    for piece_at, piece in enumerate(line.split(";")):
-        if piece_at:
-            key("semicolon")
-        type_text(piece)
-    type_text("\n")
-
-if switcher and holder:
-    type_text("moonwater canvas off\n")
+if holder:
+    shell.run("moonwater canvas off", 30)
     time.sleep(8)
     shot("canvas-off", 0.5)
     vga, white = vga_share("canvas-off")
     out.append(("canvas off leaves the kernel's text console on the screen",
                 "yes" if vga >= 98 else "%d%% of the screen in console colours" % vga, "yes"))
     typed_to_serial("tui")
-    time.sleep(3)
-    out.append(("and a shell there answers the keyboard", str(serial_count(rb"tui-(\d+)")), "1"))
-    type_text("/shell /mnt/state\n")
-    time.sleep(3)
-    out.append(("and moonwater canvas says it is off",
-                str(serial_count(rb"canvas-on-0-off-1")), "1"))
+    until(lambda: heard_count(rb"tui-(\d+)") >= 1, 10)
+    out.append(("and a shell there answers the keyboard", str(heard_count(rb"tui-(\d+)")), "1"))
+    out.append(("and moonwater canvas says it is off", "yes" if "Canvas is off" in canvas_text() else "no", "yes"))
 
-    masters = serial_count(rb"DRMHOLD master")
-    type_text("/mnt/drmhold 2 0 0 ")
-    chord("shift", "dot")
-    type_text(" /dev/tty")
-    chord("shift", "s")
-    type_text("0\n")
-    time.sleep(7)
-    out.append(("another program takes the display from the console",
-                str(serial_count(rb"DRMHOLD master") - masters), "1"))
+    tag = start_holder("2 0 0")
+    taken = holder_said(tag, "DRMHOLD master", 15)
+    holder_said(tag, "DRMHOLD done", 15)
+    time.sleep(3)
+    out.append(("another program takes the display from the console", "yes" if taken else "no", "yes"))
     shot("console-back", 0.5)
     vga, white = vga_share("console-back")
     out.append(("and the console has it again once that program exits",
                 "yes" if vga >= 98 and white < 50 else "%d%% console colours, %d%% white" % (vga, white), "yes"))
 
-    type_text("moonwater canvas on\n")
-    time.sleep(10)
+    shell.run("moonwater canvas on", 30)
+    time.sleep(8)
     shot("canvas-on", 0.5)
     vga, white = vga_share("canvas-on")
-    out.append(("canvas on brings the desktop back",
+    out.append(("canvas on brings Canvas's own colour back",
                 "yes" if vga < 80 else "%d%% of the screen in console colours" % vga, "yes"))
-    typed_to_serial("back")
-    time.sleep(3)
-    out.append(("with a terminal that has the keyboard", str(serial_count(rb"back-(\d+)")), "1"))
 
-    type_text("moonwater canvas off\n")
-    time.sleep(8)
-    type_line_with_semicolons("moonwater canvas on; sleep 6; moonwater canvas off; sleep 6; moonwater canvas on")
-    time.sleep(24)
-    typed_to_serial("again")
-    time.sleep(3)
-    out.append(("off and on twice more, and a terminal still answers",
-                str(serial_count(rb"again-(\d+)")), "1"))
-    type_text("/shell /mnt/state\n")
-    time.sleep(3)
-    out.append(("and moonwater canvas says it is on",
-                str(serial_count(rb"canvas-on-1-off-0")), "1"))
-    type_text("/shell /mnt/idlecheck\n")
-    time.sleep(16)
-    idle = re.findall(rb"idlecheck-([a-z]*)-(-?\d+)-(-?\d+)", open(work + "/leak-serial", "rb").read())
-    out.append(("an idle desktop holds no low-latency request", idle[-1][0].decode() if idle else "no answer", "idle"))
-    out.append(("and wakes neither its thread nor its frame timer",
-                "yes" if idle and int(idle[-1][1]) <= 40 and int(idle[-1][2]) <= 40 else
-                ("%s thread, %s frame wakes in 8 s" % (idle[-1][1].decode(), idle[-1][2].decode()) if idle else "no answer"), "yes"))
-    type_text("/shell /mnt/kcheck\n")
-    time.sleep(3)
-    warned = re.findall(rb"kernel-warnings-(\d+)", open(work + "/leak-serial", "rb").read())
-    out.append(("and the kernel warned about nothing on the way",
-                warned[-1].decode() if warned else "no answer", "0"))
+    shell.run("moonwater canvas off; sleep 6; moonwater canvas on; sleep 6; moonwater canvas off; sleep 6; moonwater canvas on", 90)
+    time.sleep(4)
+    out.append(("off and on twice more, and moonwater canvas says it is on",
+                "yes" if "Canvas is on" in canvas_text() else "no", "yes"))
+    warned = shell.number("dmesg | grep -c -E 'WARNING|BUG:|Oops|circular locking|possible recursive'", 20)
+    out.append(("and the kernel warned about nothing on the way", warned or "no answer", "0"))
 else:
     for name, want in (("canvas off leaves the kernel's text console on the screen", "yes"),
                        ("and a shell there answers the keyboard", "1"),
-                       ("and moonwater canvas says it is off", "1"),
-                       ("another program takes the display from the console", "1"),
+                       ("and moonwater canvas says it is off", "yes"),
+                       ("another program takes the display from the console", "yes"),
                        ("and the console has it again once that program exits", "yes"),
-                       ("canvas on brings the desktop back", "yes"),
-                       ("with a terminal that has the keyboard", "1"),
-                       ("off and on twice more, and a terminal still answers", "1"),
-                       ("and moonwater canvas says it is on", "1"),
-                       ("an idle desktop holds no low-latency request", "idle"),
-                       ("and wakes neither its thread nor its frame timer", "yes"),
+                       ("canvas on brings Canvas's own colour back", "yes"),
+                       ("off and on twice more, and moonwater canvas says it is on", "yes"),
                        ("and the kernel warned about nothing on the way", "0")):
         out.append((name, "not run: no static cc for the helpers", want))
 
 #       The way out of a display that nothing is working at, and the profiles
 #       that start one. Canvas drops every key while another program holds the
-#       card, so what is typed is of no use until it lets go: a compositor with
-#       no input, or no picture, would have left the machine with a keyboard
-#       and nothing to do with it.
-def wait_count(pattern, count, seconds):
-    stop = time.time() + seconds
-    while time.time() < stop:
-        if serial_count(pattern) >= count:
-            return True
-        time.sleep(0.2)
-    return False
-
-def type_symbols(line):
-    symbols = {">": "dot", "&": "7", "$": "4"}
-    for character in line:
-        if character in symbols:
-            chord("shift", symbols[character])
-        elif character.isupper():
-            chord("shift", character.lower())
-        else:
-            type_text(character)
-
-def windows_now():
-    type_text("/shell /mnt/windows\n")
-    time.sleep(3)
-    found = re.findall(rb"windows-(\d+)", open(work + "/leak-serial", "rb").read())
-    return found[-1].decode() if found else "no answer"
-
-way_names = ("Control-Shift-T typed at a program that holds the display starts no terminal",
-             "Control-Alt-Backspace ends a program that holds the display",
+#       card, so what is typed is of no use until it lets go: a program with no
+#       input, or no picture, would have left the machine with a keyboard and
+#       nothing to do with it.
+way_names = ("Control-Alt-Backspace ends a program that holds the display",
              "and the loop that starts it again with it, not only the one run",
              "moonwater desktop refuses a profile that is not installed, and takes one that is",
              "moonwater desktop boot starts the chosen profile, over Canvas",
              "and moonwater desktop says it is running",
              "moonwater desktop stop ends its session, and Canvas has the display back",
              "and moonwater desktop canvas puts the default back")
-if switcher and holder:
-    windows_before = windows_now()
-    masters = serial_count(rb"DRMHOLD master")
-    dones = serial_count(rb"DRMHOLD done")
-    run_holder("6 0 0")
-    held = wait_count(rb"DRMHOLD master", masters + 1, 15)
-    chord("ctrl", "shift", "t")
-    wait_count(rb"DRMHOLD done", dones + 1, 20)
-    time.sleep(3)
-    out.append((way_names[0], windows_now() if held else "the holder did not start", windows_before))
-
-    masters = serial_count(rb"DRMHOLD master")
-    type_text("setsid /shell /mnt/respawn ")
-    type_symbols("> /dev/ttyS0 2>&1 &\n")
-    started = wait_count(rb"DRMHOLD master", masters + 1, 15)
+if holder:
+    tag = start_holder("0", "setsid /shell /mnt/respawn")
+    started = holder_said(tag, "DRMHOLD master", 15)
     chord("ctrl", "alt", "backspace")
     time.sleep(3)
-    typed_to_serial("zapped")
-    time.sleep(3)
-    back = serial_count(rb"zapped-(\d+)")
+    back = "held by the desktop or another program" not in canvas_text()
     time.sleep(12)
-    out.append((way_names[1], str(back) if started else "the holder did not start", "1"))
-    out.append((way_names[2], str(serial_count(rb"DRMHOLD master") - masters)
-                if started else "the holder did not start", "1"))
+    masters = len(re.findall(r"DRMHOLD master", shell.run("cat %s" % tag, 10)[0]))
+    out.append((way_names[0], ("yes" if back else "no") if started else "the holder did not start", "yes"))
+    out.append((way_names[1], str(masters) if started else "the holder did not start", "1"))
 
-    masters = serial_count(rb"DRMHOLD master")
-    from_here = len(open(work + "/leak-serial", "rb").read())
-    type_text("/shell /mnt/desk\n")
-    finished = wait_count(rb"desk-done", 1, 60)
+    plain, status = shell.run("/shell /mnt/desk", 120)
     time.sleep(1)
-    typed_to_serial("deskback")
-    time.sleep(3)
-    plain = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"",
-                   open(work + "/leak-serial", "rb").read()[from_here:])
-    out.append((way_names[3], "yes" if b"is not installed" in plain and
-                b"desktop desktop, from the next start" in plain else "no: " + repr(plain[:400]), "yes"))
-    out.append((way_names[4], str(serial_count(rb"DRMHOLD master") - masters), "1"))
-    out.append((way_names[5], "yes" if b"desktop desktop, running" in plain else "no", "yes"))
-    out.append((way_names[6], "yes" if finished and b"desktop stopped" in plain and
-                serial_count(rb"deskback-(\d+)") == 1 else "no", "yes"))
-    out.append((way_names[7], "yes" if re.search(
-        rb"desktop stopped.*desktop desktop, not running.*desktop canvas, from the next start"
-        rb".*desktop canvas\r?\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
+    profile_said = shell.run("cat /tmp/profile.out", 10)[0]
+    out.append((way_names[2], "yes" if "is not installed" in plain and
+                "desktop desktop, from the next start" in plain else "no: " + repr(plain[:400]), "yes"))
+    out.append((way_names[3], str(len(re.findall(r"DRMHOLD master", profile_said))), "1"))
+    out.append((way_names[4], "yes" if "desktop desktop, running" in plain else "no", "yes"))
+    out.append((way_names[5], "yes" if "desktop stopped" in plain and
+                "held by the desktop or another program" not in canvas_text() else "no", "yes"))
+    out.append((way_names[6], "yes" if re.search(
+        r"desktop stopped.*desktop desktop, not running.*desktop canvas, from the next start"
+        r".*desktop canvas\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
 else:
-    for name, want in zip(way_names, ("1", "1", "1", "yes", "1", "yes", "yes", "yes")):
+    for name, want in zip(way_names, ("yes", "1", "yes", "1", "yes", "yes", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
 
 #       And the power button with Canvas up, which has its own input handler
 #       beside the button's: poweroff by default, so the machine goes.
 qcmd({"execute": "system_powerdown"})
 try:
-    leak_guest.wait(40)
+    guest.wait(40)
     powered = "yes"
 except Exception:
     powered = "no"
 out.append(("the power button powers off with Canvas up", powered, "yes"))
 
-if leak_guest.poll() is None:
-    leak_guest.quit()
+if guest.poll() is None:
+    guest.quit()
     time.sleep(1)
-    leak_guest.terminate()
+    guest.terminate()
     try:
-        leak_guest.wait(10)
+        guest.wait(10)
     except Exception:
-        leak_guest.kill()
+        guest.kill()
 
 #       The card firmware left, as the only one. A machine whose one display
 #       is the firmware's framebuffer (simpledrm, a VM without a driver for its
@@ -18808,74 +17561,59 @@ if leak_guest.poll() is None:
 #       the answer was "shell (pid N) holds the display" naming the caller
 #       itself, a process gone when anyone looked and a new one on every
 #       retry. Off and on three times, then on when it is on, off when it is
-#       off, and the commands' own words in the serial file: no refusal, no
-#       "another program", and the status after says on.
+#       off, and the commands' own words: no refusal, no "another program",
+#       and the status after says on.
 ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVMF/OVMF_CODE.fd",
                                "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
 fw_names = ("a firmware card is the only display", "canvas off and on three times with it",
             "with no refusal naming a holder", "on when it is on says so", "off when it is off says so",
             "and canvas on does not claim another program holds the display",
-            "and it says it is on at the end, the desktop is on the screen",
+            "and it says it is on at the end, Canvas's own colour is on the screen",
             "three off and on rounds over a serial console leave one shell on tty1")
 if ovmf:
-    shifted = {">": "dot", "$": "4", "?": "slash", "&": "7", "*": "8", "|": "backslash"}
-    def type_shell(line):
-        for character in line:
-            if character == ";":
-                key("semicolon")
-            elif character in shifted:
-                chord("shift", shifted[character])
-            elif character.isupper():
-                chord("shift", character.lower())
-            else:
-                type_text(character)
-        type_text("\n")
+    fw_ser = work + "/fw-ser"
     fw = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2"] +
                (["-cpu", "host", "-enable-kvm"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else ["-cpu", "Nehalem"]) + [
         "-kernel", image, "-vga", "none", "-device", "ramfb", "-bios", ovmf,
         "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
-        "-no-reboot", "-display", "none", "-serial", "file:" + work + "/fw-serial",
+        "-chardev", "socket,id=s0,path=" + fw_ser + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-no-reboot", "-display", "none",
         #   The console on the serial port: what moonwater canvas off finds is a
         #   console that is not a screen, and starts a shell on tty1 for.
         "-append", "console=ttyS0 moonwater.desktop=none"],
-        work + "/fw-qmp", work + "/fw-mon", work)
+        work + "/fw-qmp", work + "/fw-mon", work, sockets=(fw_ser,))
     time.sleep(40)
-    type_shell("moonwater canvas > /dev/ttyS0 2>&1")
-    time.sleep(2)
-    #       Off closes the terminal the line was typed into, and the keys go
-    #       to the console's shell after it, so each command is its own line.
+    fw_shell = Shell(fw_ser)
+    fw_shell.ready()
+    said = [fw_shell.run("moonwater canvas", 20)[0]]
+    codes = []
     for _ in range(3):
-        type_shell("moonwater canvas off")
+        fw_shell.run("moonwater canvas off", 30)
         time.sleep(6)
-        type_shell("moonwater canvas on > /dev/ttyS0 2>&1; echo fwrc-$? > /dev/ttyS0")
+        text, code = fw_shell.run("moonwater canvas on 2>&1", 40)
+        said.append(text)
+        codes.append(code)
         time.sleep(8)
-    type_shell("moonwater canvas on > /dev/ttyS0 2>&1; echo fwagain-$? > /dev/ttyS0")
-    time.sleep(4)
-    type_shell("moonwater canvas off")
+    again, again_code = fw_shell.run("moonwater canvas on 2>&1", 30)
+    fw_shell.run("moonwater canvas off", 30)
     time.sleep(6)
-    type_shell("moonwater canvas off > /dev/ttyS0 2>&1; echo fwtwice-$? > /dev/ttyS0")
-    time.sleep(4)
-    type_shell("moonwater canvas on")
+    twice, twice_code = fw_shell.run("moonwater canvas off 2>&1", 30)
+    fw_shell.run("moonwater canvas on", 30)
     time.sleep(8)
-    type_shell("moonwater canvas > /dev/ttyS0 2>&1; echo fwstate > /dev/ttyS0")
-    time.sleep(4)
-    type_shell("ls -l /proc/*/fd/0 2>/dev/null | grep -c tty1 > /dev/ttyS0; echo fwcount > /dev/ttyS0")
-    time.sleep(3)
+    state = fw_shell.run("moonwater canvas", 20)[0]
+    count = fw_shell.number("ls -l /proc/*/fd/0 2>/dev/null | grep -c tty1", 20)
     shot("fw-on", 0.5)
     vga, white = vga_share("fw-on")
-    fw_serial = open(work + "/fw-serial", "rb").read()
-    out.append((fw_names[0], "yes" if b"Canvas is on: simpledrm" in fw_serial else "no: " + repr(fw_serial[-200:]), "yes"))
-    out.append((fw_names[1], "yes" if fw_serial.count(b"fwrc-0") == 3 else "rc " + repr(re.findall(rb"fwrc-(\d+)", fw_serial)), "yes"))
-    out.append((fw_names[2], str(fw_serial.count(b"Canvas stays off")), "0"))
-    out.append((fw_names[3], "yes" if b"fwagain-1" in fw_serial and b"already on" in fw_serial else "no", "yes"))
-    out.append((fw_names[4], "yes" if b"fwtwice-1" in fw_serial and b"already off" in fw_serial else "no", "yes"))
-    out.append((fw_names[5], str(fw_serial.count(b"another program holds")), "0"))
-    out.append(("and it says it is on at the end, the desktop is on the screen",
-                "yes" if fw_serial.count(b"Canvas is on: simpledrm") >= 2 and vga < 80
-                else "%d status lines, %d%% console colours" % (fw_serial.count(b"Canvas is on: simpledrm"), vga), "yes"))
-    shells = re.findall(rb"(\d+)\s+fwcount", fw_serial.replace(b"\r", b""))
-    out.append(("three off and on rounds over a serial console leave one shell on tty1",
-                shells[-1].decode() if shells else "no count", "1"))
+    everything = "\n".join(said + [again, twice, state])
+    out.append((fw_names[0], "yes" if "Canvas is on: simpledrm" in said[0] else "no: " + repr(said[0][-200:]), "yes"))
+    out.append((fw_names[1], "yes" if codes == [0, 0, 0] else "rc " + repr(codes), "yes"))
+    out.append((fw_names[2], str(everything.count("Canvas stays off")), "0"))
+    out.append((fw_names[3], "yes" if again_code == 1 and "already on" in again else "no", "yes"))
+    out.append((fw_names[4], "yes" if twice_code == 1 and "already off" in twice else "no", "yes"))
+    out.append((fw_names[5], str(everything.count("another program holds")), "0"))
+    out.append((fw_names[6], "yes" if "Canvas is on: simpledrm" in state and vga < 80
+                else "status %r, %d%% console colours" % (state[:40], vga), "yes"))
+    out.append((fw_names[7], count or "no count", "1"))
     fw.quit()
     time.sleep(1)
     fw.terminate()
@@ -18886,79 +17624,6 @@ if ovmf:
 else:
     for name in fw_names:
         out.append((name, "not run: no OVMF", "0" if name in fw_names[2:3] + fw_names[5:6] else "1" if name == fw_names[7] else "yes"))
-
-#       A drag whose button comes up while another program holds the card.
-#       The release is dropped with the input while the card is taken, and
-#       the window must not go on following the pointer once the card is back
-#       with no button held. The holder is started from the terminal, which
-#       has the keyboard only while nothing holds the card.
-def leftmost_run(name):
-        lw_, lh_, lpx_ = load(name)
-        lbg = lpx_[((4 * lw_) + 4) * 3:((4 * lw_) + 4) * 3 + 3]
-        runs_, start_ = [], None
-        for x in range(lw_):
-                o = ((lh_ // 2) * lw_ + x) * 3
-                lit = lpx_[o:o + 3] != lbg
-                if lit and start_ is None:
-                        start_ = x
-                elif not lit and start_ is not None:
-                        if x - start_ > 40:
-                                runs_.append((start_, x - 1))
-                        start_ = None
-        return runs_[-1] if runs_ else None
-
-if holder:
-        lost_work = work + "/lost-release"
-        os.makedirs(lost_work, exist_ok=True)
-        lost = Guest(desktop(image) + [
-            "-device", "usb-mouse,id=xhcimouse",
-            "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
-            "-device", "usb-storage,drive=stick,removable=on",
-            "-no-reboot", "-display", "none", "-serial", "file:" + lost_work + "/serial",
-            "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
-            lost_work + "/qmp", lost_work + "/mon", lost_work)
-        time.sleep(25)
-        shot("lost-start")
-        win = leftmost_run("lost-start")
-        if win is None:
-                out.append(("a drag whose release the card swallowed ends with the button",
-                            "not run: no window found", "still"))
-        else:
-                lw_, lh_, lpx_ = load("lost-start")
-                mid = (win[0] + win[1]) // 2
-                bgc = lpx_[((4 * lw_) + 4) * 3:((4 * lw_) + 4) * 3 + 3]
-                top = next((y for y in range(lh_)
-                            if lpx_[(y * lw_ + mid) * 3:(y * lw_ + mid) * 3 + 3] != bgc), 0)
-                tx, ty = mid, top + 12
-                moveto(tx, ty)
-                send([{"type": "btn", "data": {"down": True, "button": "left"}}])
-                time.sleep(0.2)
-                for i in range(3):
-                        moveto(tx + 10 * (i + 1), ty)
-                        time.sleep(0.03)
-                type_text("mkdir -p /tmp/s")
-                key("ret")
-                type_text("mount -r /dev/sda1 /tmp/s")
-                key("ret")
-                type_text("/tmp/s/drmhold 4 1 2")
-                key("ret")
-                time.sleep(1.5)
-                send([{"type": "btn", "data": {"down": False, "button": "left"}}])
-                time.sleep(7.0)
-                shot("lost-after")
-                held = leftmost_run("lost-after")
-                for i in range(12):
-                        moveto(tx + 40 + 10 * i, ty + 4)
-                        time.sleep(0.05)
-                time.sleep(0.5)
-                shot("lost-moved")
-                moved = leftmost_run("lost-moved")
-                out.append(("a drag whose release the card swallowed ends with the button",
-                            "still" if held == moved else "moved %s" % (moved,), "still"))
-        lost.quit()
-        time.sleep(1)
-        if lost.poll() is None:
-                lost.kill()
 
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
@@ -18974,162 +17639,17 @@ fi
 while IFS='|' read -r name got want; do
         same "$name" "$want" "$got"
 done < "$work/answers"
-
-#       The cursor on its plane.
-#
-#       The boot above passes moonwater.cursor_plane=0, because QEMU's
-#       screendump holds the primary surface only: a cursor on virtio-gpu's
-#       cursor plane is composited by QEMU's display and appears in no
-#       screendump, so every pixel check above would count an empty desktop.
-#       Those checks are the software cursor's. This boot leaves the plane on
-#       and asks the kernel instead, through the pointer applet: that each
-#       output's plane is claimed and shown, that every move re-arms it, that
-#       none of those updates fails, and that after a titlebar drag -- the
-#       path that arms planes ahead of the window's repaint -- the last move
-#       is armed exactly where the tablet put the pointer.
-PYTHONPATH=$work python3 - "$image" > "$work/plane-answers" 2>"$work/plane-why" <<'PY'
-import os, re, sys, time
-from qmp_guest import *
-
-image = sys.argv[1]
-work = os.environ["MOONWATER_CANVAS_WORK"] + "/plane"
-os.makedirs(work, exist_ok=True)
-
-guest = Guest(desktop(image) + [
-    "-device", "usb-mouse,id=xhcimouse",
-    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none " + os.environ.get("CANVAS_APPEND", "")],
-    work + "/qmp", work + "/mon", work)
-
-# What the tablet reports for a point, and where pointer.c puts the pointer
-# for that report: offset * size / span, span 32767 on QEMU's tablet.
-def report(v, size):
-    return int(v * 32767 / size)
-
-def placed(v, size):
-    return report(v, size) * size // 32767
-
-def button(down):
-    send([{"type": "btn", "data": {"down": down, "button": "left"}}])
-    time.sleep(0.08)
-
-def sample():
-    type_text("pointer ")
-    chord("shift", "dot")
-    type_text(" /dev/tty")
-    chord("shift", "s")
-    type_text("0\n")
-    time.sleep(1.0)
-
-time.sleep(25)
-out = []
-
-sample()
-spots = [(700, 400), (1500, 700), (900, 300)]
-for x, y in spots:
-    moveto(x, y)
-    time.sleep(0.3)
-mice = [line.split("#")[1].split(":")[0] for line in monitor("info mice").splitlines()
-        if "HID Mouse" in line]
-for index in mice:
-    monitor("mouse_set " + index)
-    for step in range(20):
-        send([{"type": "rel", "data": {"axis": "x", "value": 4}},
-              {"type": "rel", "data": {"axis": "y", "value": 3}}])
-        time.sleep(0.01)
-    time.sleep(0.3)
-sample()
-
-# The terminal, found as the lane above finds it, and dragged by its titlebar.
-shot("drag")
-w, h, px = load("drag")
-
-def at(x, y):
-    o = (y * w + x) * 3
-    return px[o:o + 3]
-
-bg = at(4, 4)
-runs, start = [], None
-for x in range(w):
-    lit = at(x, h // 2) != bg
-    if lit and start is None:
-        start = x
-    elif not lit and start is not None:
-        if x - start > 40:
-            runs.append((start, x - 1))
-        start = None
-
-end = None
-if runs:
-    left, right = runs[-1]
-    cx = (left + right) // 2
-    top = next((y for y in range(h) if at(cx, y) != bg), 0)
-    gx, gy = cx, top + 6
-    moveto(gx, gy)
-    button(True)
-    for k in range(1, 7):
-        moveto(gx - 20 * k, gy + 10 * k)
-    end = (gx - 120, gy + 60)
-    button(False)
-    time.sleep(0.3)
-sample()
-
-serial = open(work + "/serial", "rb").read().decode("utf-8", "replace").lower()
-planes = re.findall(r"cursor planes +(\d+) active, (\d+) shown", serial)
-io = re.findall(r"cursor plane io +(\d+) updates, (\d+) failures", serial)
-sync = re.findall(r"cursor sync +(\d+) requested, (\d+) armed", serial)
-where = re.findall(r"cursor requested (-?\d+),(-?\d+) armed (-?\d+),(-?\d+)", serial)
-
-out.append(("the cursor rides a plane",
-            "%s active, %s shown" % planes[1] if len(planes) > 1 else "no pointer sample",
-            "1 active, 1 shown"))
-moves = len(spots) + len(mice)
-rearmed = int(io[1][0]) - int(io[0][0]) if len(io) > 1 else -1
-out.append(("every move re-arms the plane",
-            "yes" if rearmed >= moves else "%d updates for %d moves" % (rearmed, moves),
-            "yes"))
-out.append(("no plane update fails", io[-1][1] if io else "no pointer sample", "0"))
-if end is None or len(sync) < 3 or len(where) < 3:
-    drag = "not run: no window or no pointer sample"
-else:
-    wanted = (placed(end[0], W), placed(end[1], H))
-    armed = (int(where[-1][2]), int(where[-1][3]))
-    drag = ("yes" if sync[-1][0] == sync[-1][1] and int(sync[-1][0]) > 0 and armed == wanted
-            else "sync %s/%s armed %s wanted %s" % (sync[-1][0], sync[-1][1], armed, wanted))
-out.append(("a drag leaves the plane armed under the pointer", drag, "yes"))
-
-guest.quit()
-time.sleep(1)
-guest.terminate()
-try:
-    guest.wait(10)
-except Exception:
-    guest.kill()
-
-for name, got, want in out:
-    print("%s|%s|%s" % (name, got, want))
-PY
-
-if [ ! -s "$work/plane-answers" ]; then
-        same "the plane boot answered" "yes" "no"
-        sed 's/^/    /' "$work/plane-why" | tail -5
-else
-        while IFS='|' read -r name got want; do
-                same "$name" "$want" "$got"
-        done < "$work/plane-answers"
-fi
 fi
 
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = m1 ]; then
 #       The compositor in userspace (canvas milestone M1).
 #
-#       A script on a stick, typed into the boot terminal, starts
-#       /compositor, which takes the card from Canvas, and two /surface
-#       windows on it; then the screen is read. Nothing typed reaches a shell
-#       while the compositor holds the card -- Canvas drops every key then --
-#       so the script itself ends the compositor after a fixed time, and the
-#       clicks go in through the tablet in between. The boot terminal is the
-#       one that has the keyboard, so it has it again once the card is back.
+#       A script on a stick, started from the shell on the serial port of a
+#       boot with no desktop (moonwater.desktop=none), starts /compositor,
+#       which takes the card from Canvas, and two /surface windows on it; then
+#       the screen is read. The script itself ends the compositor after a
+#       fixed time, and the clicks go in through the tablet in between. What
+#       the scripts say comes back on the same serial line.
 #
 #       The first window is at (40, 40) and 320 by 200, its body rows 40 to
 #       239 and nothing around it; the second, at (240, 140), covers the
@@ -19299,7 +17819,7 @@ echo m12-done
 """)
 
 #   The hand: how far a mouse moves the pointer at a slow pace and at a fast
-#   one (the compositor's acceleration is the kernel desktop's curve), and the
+#   one (the compositor's own acceleration curve), and the
 #   wheel for the window under the pointer. The windows write what they are
 #   sent; the script counts it at the end.
 open(stick + "/m7", "w").write(r"""exec > /dev/ttyS0 2>&1
@@ -19423,16 +17943,36 @@ wait $c
 echo m13-done
 """)
 
+import socket
+
+ser = work + "/ser"
 guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
-    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
+    "-no-reboot", "-display", "none",
     "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
-    work + "/qmp", work + "/mon", work)
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt", 20)
+shell.sock.settimeout(0.2)
 
 def serial():
-    return open(work + "/serial", "rb").read()
+    # Everything the guest has said on the serial line since it booted, the scripts' own lines among it.
+    while True:
+        try:
+            chunk = shell.sock.recv(65536)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        shell.heard += chunk
+    return shell.heard
+
+def start_script(name):
+    shell.sock.sendall(("\nsh /mnt/%s &\n" % name).encode())
 
 def wait_for(marker, seconds):
     stop = time.time() + seconds
@@ -19498,11 +18038,7 @@ def tab_at(found, i):
 width, height, before = picture("m1-before")
 kernel_windows = windows(width, height, before)
 
-type_text("mkdir -p /mnt\n")
-time.sleep(1)
-type_text("mount -r -t vfat /dev/sda1 /mnt\n")
-time.sleep(2)
-type_text("sh /mnt/m1\n")
+start_script("m1")
 ready = wait_for(b"m1-ready", 30)
 time.sleep(0.5)
 
@@ -19529,10 +18065,10 @@ out.append(("M1.6 the press reaches the window as its button at buffer pixel (60
 done = wait_for(b"m1-done", 30)
 time.sleep(1)
 width, height, back = picture("m1-back")
-out.append(("M1.12 the compositor's exit leaves the kernel desktop on screen",
-            "yes" if ready and done and two(100, 100) == "336699" and kernel_windows and
-            windows(width, height, back) == kernel_windows and back(100, 100) != "336699"
-            else "kernel windows %d before, %d after; body %s then %s" % (
+out.append(("M1.12 the compositor's exit leaves Canvas's own picture on screen, as it was before",
+            "yes" if ready and done and two(100, 100) == "336699" and
+            windows(width, height, back) == kernel_windows and back(100, 100) == before(100, 100) != "336699"
+            else "windows %d before, %d after; body %s then %s" % (
                 kernel_windows, windows(width, height, back), two(100, 100), back(100, 100)), "yes"))
 handed = re.findall(rb"drawn again, microseconds after the card was let go: (\d+)", serial())
 #   M1.12 records the latency and does not pass on it (canvas spec 05 3.2);
@@ -19550,7 +18086,7 @@ type_text("0\n")
 out.append(("and the keyboard reaches the terminal again",
             "yes" if wait_for(b"m1-typed-", 10) else "no", "yes"))
 
-type_text("sh /mnt/m2\n")
+start_script("m2")
 ready2 = wait_for(b"m2-ready", 40)
 time.sleep(0.5)
 width, height, off = picture("m2-off")
@@ -19585,7 +18121,7 @@ out.append(("M2.4 the compositor outlives a client killed mid-flood and serves t
 #   compositor says in its first line) with nothing between them: a tab for
 #   each window, as wide as its title, and the tray, read off the screen by
 #   tabs_of() above.
-type_text("sh /mnt/m3\n")
+start_script("m3")
 ready3 = wait_for(b"m3-windows", 60)
 time.sleep(0.5)
 scale3 = [int(v) for v in re.findall(rb"\(scale (\d+)\)", serial())]
@@ -19657,7 +18193,7 @@ out.append(("M2.29 the compositor says what scale it draws at",
 #   The keyboard. The window of the m4 script is clicked for the keys and the
 #   keys are typed at it by their US names (QEMU's qcodes are the physical
 #   keys): the key that is the left bracket on a US board is the Swedish å.
-type_text("sh /mnt/m4\n")
+start_script("m4")
 ready4 = wait_for(b"m4-ready", 60)
 time.sleep(0.5)
 click(350, 300)
@@ -19707,7 +18243,7 @@ out.append(("K1.4 the layout set while the compositor runs is the layout it type
             typed("m4-de-dump", "m4-de-end"), "21:122 16:64 44:121"))
 
 #   The desktop's ink and the pointer, started with what was kept and changed while it runs.
-type_text("sh /mnt/m13\n")
+start_script("m13")
 wait_for(b"m13-ready", 60)
 click(1000, 600)
 
@@ -19742,7 +18278,7 @@ out.append(("D1.3 default and auto are the ink and the pointer of an unset machi
 #   the keys is lit (38383c) and the others' are not (000000); a window put away has
 #   only the outline of a button (the panel's own ink inside it) and is not on the
 #   screen (the desktop's ink in its place). The windows are at x 100, 500 and 900, y 100.
-type_text("sh /mnt/m6\n")
+start_script("m6")
 ready6 = wait_for(b"m6-ready", 60)
 time.sleep(0.5)
 lit = lambda at, n: "".join("L" if at(x, H - band // 2) == "38383c" else
@@ -19790,7 +18326,7 @@ out.append(("M6.6 Alt and Tab and F9 are the compositor's: of everything typed o
 #   the repeat and the release after the change. The window with the keys at the
 #   press gets the press, the repeat and the release the change sends it (three);
 #   the one Alt-Tab gives the keys to gets none of the key's events.
-type_text("sh /mnt/m12\n")
+start_script("m12")
 wait_for(b"m12-ready", 60)
 wait_for(b"m12-done", 60)
 sent12 = re.findall(r"m12 keys: two (\d+) one (\d+)", serial().decode("latin1"))
@@ -19806,7 +18342,7 @@ out.append(("M6.7 a key held across an Alt-Tab reaches the window it went to, an
 #   is where it was.
 qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hand1"}})
 time.sleep(1)
-type_text("sh /mnt/m7\n")
+start_script("m7")
 ready7 = wait_for(b"m7-ready", 60)
 time.sleep(3)
 def travel(x, y, pause):
@@ -19858,7 +18394,7 @@ out.append(("P1.4 the window under the pointer is sent the wheel turned down: -1
 #   a resize shape is 25 white and 40 black (15 by 9 across, 9 by 15 up) or 48 (13
 #   by 13, the corner at the top left of the box black for the one that leans
 #   left and not for the other).
-type_text("sh /mnt/m8\n")
+start_script("m8")
 ready8 = wait_for(b"m8-ready", 60)
 time.sleep(0.5)
 def cursor_at(at, x, y, height, width, base=None):
@@ -19919,7 +18455,7 @@ wait_for(b"m8-done", 90)
 #   Windows. Two windows were asked to be at the same place: the second is put
 #   twenty pixels down and across, and the pixel that tells is one the second
 #   would cover if it were where it asked and does not where it is.
-type_text("sh /mnt/m10\n")
+start_script("m10")
 ready10 = wait_for(b"m10-ready", 60)
 time.sleep(0.5)
 width, height, w0 = picture("m10-cascade")
@@ -20027,16 +18563,16 @@ for kind, count, average, worst in re.findall(r"compositor: (pointer to the plan
 guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
-    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial-plane",
+    "-no-reboot", "-display", "none", "-chardev", "socket,id=s1,path=" + ser + "2,server=on,wait=off", "-serial", "chardev:s1",
     "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none " + os.environ.get("CANVAS_APPEND", "")],
-    work + "/qmp2", work + "/mon2", work)
+    work + "/qmp2", work + "/mon2", work, sockets=(ser + "2",))
 time.sleep(25)
-serial_plane = lambda: open(work + "/serial-plane", "rb").read()
-type_text("mkdir -p /mnt\n")
-time.sleep(1)
-type_text("mount -r -t vfat /dev/sda1 /mnt\n")
-time.sleep(2)
-type_text("sh /mnt/m9\n")
+shell = Shell(ser + "2")
+shell.ready()
+shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt", 20)
+shell.sock.settimeout(0.2)
+serial_plane = serial
+start_script("m9")
 stop = time.time() + 60
 while b"m9-ready" not in serial_plane() and time.time() < stop:
     time.sleep(0.2)
@@ -20311,7 +18847,7 @@ for round_ in (1, 2):
     else:
         out.append(("R2.2 with nobody holding the card the same chord turns Canvas off, and nothing is left running",
                     "%s %s" % (canvas(), shell.number("ps | grep -c '[c]ompositor'")), "off 0"))
-        print("r2 Control-Alt-Shift-Backspace on the kernel's own desktop to Canvas off: %.2f s" % took, file=sys.stderr)
+        print("r2 Control-Alt-Shift-Backspace with Canvas holding the card to Canvas off: %.2f s" % took, file=sys.stderr)
 
 shell.run("moonwater canvas on")
 until(lambda: canvas() == "on", 10)
@@ -21300,16 +19836,33 @@ wait $c
 echo m5-done
 """)
 
+import socket
+
+ser = work + "/ser"
 guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
-    "-no-reboot", "-display", "none", "-serial", "file:" + work + "/serial",
+    "-no-reboot", "-display", "none",
     "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
-    work + "/qmp", work + "/mon", work)
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt", 20)
+shell.sock.settimeout(0.2)
 
 def serial():
-    return open(work + "/serial", "rb").read()
+    # Everything the guest has said on the serial line since it booted, the script's own lines among it.
+    while True:
+        try:
+            chunk = shell.sock.recv(65536)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        shell.heard += chunk
+    return shell.heard
 
 def wait_for(marker, seconds):
     stop = time.time() + seconds
@@ -21394,11 +19947,7 @@ def type_shell(line):
 def sizes():
     return re.findall(rb"(?<![0-9])(\d+) (\d+)\r?\n", serial()[serial().rfind(b"m5-idle-done"):])
 
-type_text("mkdir -p /mnt\n")
-time.sleep(1)
-type_text("mount -r -t vfat /dev/sda1 /mnt\n")
-time.sleep(2)
-type_text("sh /mnt/m5\n")
+shell.sock.sendall(b"\nsh /mnt/m5 &\n")
 ready = wait_for(b"m5-idle-done", 60)
 time.sleep(0.5)
 idle = re.findall(rb"m5 idle wakeups: (-?\d+)", serial())
@@ -21558,7 +20107,7 @@ if btop:
     time.sleep(1)
 
 done = wait_for(b"m5-done", 170)
-out.append(("M5 the compositor ends and the kernel desktop is back", "yes" if done else "no", "yes"))
+out.append(("M5 the compositor ends and Canvas has the card back", "yes" if done else "no", "yes"))
 
 try:
     guest.quit()
@@ -21910,23 +20459,17 @@ done < "$work/answers"
 counted
 )
 
-#       moonwater sleep, from a terminal, woken by a key.
+#       moonwater sleep, woken by a key, with the compositor holding the card.
 #
 #       The display is bochs, not virtio-gpu: bochs suspends through the same
 #       drm_mode_config_helper_suspend the atomic drivers use (amdgpu's
 #       dm_suspend saves the same drm_atomic_helper_suspend state), so the
 #       pipe really is turned off and restored, where virtio-gpu has no power
-#       management at all. Three guests: the plain one, one told by
-#       moonwater.pm_dark=1 to wake as a card that lost its pipe does (the
-#       screens turned off and a hotplug sent while asleep, and the card
-#       treated as a real one, which is what runs the hotplug rebind and the
-#       off and on cycle), and one with pm_dark=3, where the wake's own
-#       redraws are left undone so only what the hotplug finds can put the
-#       picture back. Each runs the verb from the Canvas terminal (its tty
-#       frozen with it) and is woken by a key: "awake again" must be said,
-#       the screen must have the desktop on it, a letter typed after the
-#       wake must reach the terminal, the log must name the steps, a lease
-#       must be back, and the kernel must have warned of nothing.
+#       management at all. The plain boot's compositor does not know the
+#       machine slept: it finds out from the clocks when the key that wakes
+#       it arrives. The verb is run from the shell on the serial line, and
+#       "awake again" must be said, the desktop and its panel must be on the
+#       screen again, and the kernel must have warned of nothing.
 lane_sleep()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -21963,122 +20506,7 @@ image = sys.argv[1]
 base = os.environ["MOONWATER_SLEEP_WORK"]
 out = []
 
-def lit(name):
-    """How many colours a screendump holds and what share is not the commonest: a blank screen is one colour."""
-    w, h, px = load(name)
-    seen = {}
-    for i in range(0, len(px) - 2, 21):
-        seen[px[i:i + 3]] = seen.get(px[i:i + 3], 0) + 1
-    return len(seen), 1 - max(seen.values()) / sum(seen.values())
-
-def drawn(name):
-    colours, share = lit(name)
-    return colours >= 5 and share > 0.05
-
-for label, extra in (("plain", ""), ("dark", "moonwater.pm_dark=5"), ("undone", "moonwater.pm_dark=3")):
-    # SLEEP_ONLY=compositor runs the last guest alone, for a parent and a fix compared in one sitting.
-    if os.environ.get("SLEEP_ONLY") and os.environ["SLEEP_ONLY"] != label:
-        continue
-    work = base + "/" + label
-    os.makedirs(work, exist_ok=True)
-    console = work + "/console"
-    guest = Guest(["qemu-system-x86_64", "-m", "2G", "-smp", "2", "-cpu", "host", "-enable-kvm",
-        "-kernel", image, "-vga", "std", "-no-reboot", "-display", "none", "-nic", "user,model=e1000",
-        "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
-        "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none " + extra],
-        work + "/qmp", work + "/mon", work, (console,), 0.1)
-    serial = socket.socket(socket.AF_UNIX)
-    serial.connect(console)
-    serial.settimeout(0.2)
-    transcript = bytearray()
-
-    def pump(seconds):
-        stop = time.time() + seconds
-        while time.time() < stop:
-            try:
-                chunk = serial.recv(65536)
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            if not chunk:
-                return
-            transcript.extend(chunk)
-
-    def wait_for(marker, seconds):
-        stop = time.time() + seconds
-        while marker.encode() not in transcript and time.time() < stop:
-            pump(0.3)
-        return marker.encode() in transcript
-
-    def say(line):
-        serial.sendall(line.encode() + b"\n")
-
-    #       The desktop first, read off the screen rather than waited for.
-    stop = time.time() + 60
-    up = False
-    while time.time() < stop and not up:
-        time.sleep(2)
-        shot("up", 1)
-        up = drawn("up")
-    #       And the terminal it opens, which is what the keys go to.
-    wait_for("canvas] terminal: 0", 60)
-    time.sleep(4)
-    say("echo READY-$((20+1))")
-    out.append((label + ": the serial shell answers", "yes" if wait_for("READY-21", 20) else "no", "yes"))
-
-    #       What the terminal will run: the verb with its words on the serial
-    #       line, then a read that only a delivered key can satisfy.
-    say("echo 'moonwater sleep > /dev/ttyS0 2>&1' > /tmp/w")
-    say("echo 'read k' >> /tmp/w")
-    say("echo 'echo KEY=$k > /dev/ttyS0' >> /tmp/w")
-    time.sleep(1)
-    shot("before", 1)
-    out.append((label + ": the desktop is up before the sleep", "yes" if drawn("before") else "no", "yes"))
-    mark = len(transcript)
-    type_text("sh /tmp/w\n")
-    out.append((label + ": the verb is sleeping", "yes" if wait_for("mem_sleep", 20) else "no", "yes"))
-    time.sleep(4)
-    shot("during", 1)
-    out.append((label + ": the screen is off while it sleeps", "yes" if not drawn("during") else "no", "yes"))
-    #       A modifier wakes it: a PS/2 controller's own resume flushes the
-    #       key that woke the machine, so a letter would be lost to the
-    #       hardware and prove nothing about Canvas.
-    key("shift")
-    out.append((label + ": a key wakes it", "yes" if wait_for("awake again", 40) else "no", "yes"))
-    time.sleep(5)
-    shot("after", 1)
-    out.append((label + ": the desktop is on the screen again", "yes" if drawn("after") else "no", "yes"))
-    key("a")
-    key("ret")
-    out.append((label + ": a key typed after the wake reaches the terminal", "yes" if wait_for("KEY=a", 10) else "no", "yes"))
-
-    say("cat /root/sleep.log; echo LOG-END")
-    wait_for("LOG-END\r\n", 10)
-    for line in (("woken by:", "kernel log lines:") if label == "undone" else
-                 ("woken by:", "kernel log lines:", "wake: ", "primary shows ours")):
-        out.append((label + ": the log says " + line.strip(), "yes" if line.encode() in transcript[mark:] else "no", "yes"))
-    if label != "plain":
-        out.append((label + ": the screens were turned off", "yes" if b"screens off: 0" in transcript[mark:] else "no", "yes"))
-    say("ip addr; echo IP-END")
-    wait_for("IP-END\r\n", 10)
-    out.append((label + ": the lease is back", "yes" if b"inet 10.0.2." in transcript[mark:] else "no", "yes"))
-    pump(1)
-    after = bytes(transcript[mark:])
-    bad = [word for word in ("WARNING:", "BUG:", "Oops", "Call Trace") if word.encode() in after]
-    out.append((label + ": the kernel says nothing is wrong", ",".join(bad) or "yes", "yes"))
-    if os.environ.get("SLEEP_KEEP"):
-        open(work + "/transcript", "wb").write(transcript)
-
-    guest.quit()
-    time.sleep(1)
-    guest.terminate()
-    try:
-        guest.wait(10)
-    except Exception:
-        guest.kill()
-
-#       And with the compositor in userspace holding the card, which nothing
+#       The compositor in userspace holding the card, which nothing
 #       tells that the machine slept: it finds out from the clocks when the
 #       key that wakes it arrives, says so in the machine's log, and draws the
 #       screen again. The plain boot starts it, with its panel and a terminal
