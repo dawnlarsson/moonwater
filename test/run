@@ -17916,10 +17916,10 @@ moonwater canvas cursor shake delay 3000
 moonwater mouse sensitivity default
 moonwater mouse acceleration on
 echo m14-set
-sleep 16
+sleep 24
 moonwater mouse sensitivity 50
 echo m14-slow
-sleep 7
+sleep 10
 moonwater canvas cursor shake default
 moonwater canvas cursor shake delay default
 moonwater mouse sensitivity default
@@ -18253,22 +18253,33 @@ out.append(("D1.3 default and auto are the ink and the pointer of an unset machi
 start_script("m14")
 wait_for(b"m14-ready", 60)
 
+def pointer_box(at):
+    # What the pointer's box holds, colour by colour, wherever the tablet's last report left it (the tablet
+    # says nothing of an axis that did not change, so a pointer a click does not move stays where it was).
+    found = {}
+    for y in range(400, 800):
+        for x in range(900, 1800):
+            pixel = at(x, y)
+            if pixel in ("ffffff", "000000"):
+                found[pixel] = found.get(pixel, 0) + 1
+    return "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+
 def shaken(name):
     # A shake of the hand, which ends where it began; what the pointer's box holds after it.
     for step in range(12):
         send([{"type": "rel", "data": {"axis": "x", "value": 12 if step % 2 == 0 else -12}}])
         time.sleep(0.03)
     width, height, at = picture(name)
-    found = pointer_pixels(at)
-    return "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+    return pointer_box(at)
 
 def tip(at):
     # The pointer's outline, its leftmost pixel.
-    xs = [x for y in range(596, 700) for x in range(990, 1400) if at(x, y) == "000000"]
+    xs = [x for y in range(400, 800) for x in range(900, 1800) if at(x, y) == "000000"]
     return min(xs) if xs else -1
 
 def travelled(name):
     # How far the pointer went when a hand of 100 counts slowly crossed from where a click put it.
+    moveto(1100, 700)
     click(1000, 600)
     width, height, at = picture(name + "-from")
     before = tip(at)
@@ -18278,20 +18289,23 @@ def travelled(name):
     width, height, at = picture(name)
     return tip(at) - before
 
+moveto(1100, 700)
 click(1000, 600)
 no_shake = shaken("m14-noshake")
 off_200 = travelled("m14-200")
 wait_for(b"m14-set", 30)
+moveto(1100, 700)
 click(1000, 600)
-large_now = shaken("m14-large")
-time.sleep(1)
-width, height, at = picture("m14-large-later")
-found = pointer_pixels(at)
-large_later = "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+# The pictures first, with the delay running (a picture is read for its pixels after), then what each holds.
+for step in range(12):
+    send([{"type": "rel", "data": {"axis": "x", "value": 12 if step % 2 == 0 else -12}}])
+    time.sleep(0.03)
+width, height, first = picture("m14-large")
+time.sleep(1.2)
+width, height, later = picture("m14-large-later")
 time.sleep(2)
-width, height, at = picture("m14-small-again")
-found = pointer_pixels(at)
-small_again = "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+width, height, last = picture("m14-small-again")
+large_now, large_later, small_again = pointer_box(first), pointer_box(later), pointer_box(last)
 standard = travelled("m14-100")
 wait_for(b"m14-slow", 60)
 slow = travelled("m14-50")
