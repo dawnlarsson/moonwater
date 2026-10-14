@@ -494,7 +494,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
 
         unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : 0x000000u;
         int half = frame->scale; // half the X's stroke
-        bool made = compositor_close_cover.side == side && compositor_close_cover.half == half;
+        int made = compositor_close_cover.side == side && compositor_close_cover.half == half;
 
         for (int py = y1; py < y2; py++)
                 for (int px = x1; px < x2; px++)
