@@ -138,7 +138,6 @@ static const struct rule baseline[] = {
 	{ "setarch", SPAWN, 1 },   /* SHELL: falls back to /bin/sh given no command */
 	{ "init", SPAWN, 1 },      /* SHELL: PID 1 starts everything; refusing it
 				      would refuse the machine */
-	{ "term", SPAWN, 1 },      /* SHELL: the window's own shell, likewise */
 	{ "moonwater", SPAWN, 1 }, /* NAMED: cp, spelled in the install itself */
 	{ "chroot", SPAWN, 1 },    /* NAMED */
 	{ "choom", SPAWN, 1 },     /* NAMED */

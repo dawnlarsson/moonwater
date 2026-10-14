@@ -863,10 +863,6 @@ config MOONWATER_TOOL_LAUNCHER
     bool "launcher"
     default MOONWATER_TOOLS_ALL
 
-config MOONWATER_TOOL_POINTER
-    bool "pointer"
-    default MOONWATER_TOOLS_ALL
-
 config MOONWATER_TOOL_SETTINGS
     bool "settings"
     default MOONWATER_TOOLS_ALL
@@ -881,14 +877,6 @@ config MOONWATER_TOOL_SURFACE
 
 config MOONWATER_TOOL_TERMINAL
     bool "terminal"
-    default MOONWATER_TOOLS_ALL
-
-config MOONWATER_TOOL_TEXT
-    bool "text"
-    default MOONWATER_TOOLS_ALL
-
-config MOONWATER_TOOL_WINDOW
-    bool "window"
     default MOONWATER_TOOLS_ALL
 
 endmenu
