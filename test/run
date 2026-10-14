@@ -19559,6 +19559,13 @@ def differing(one, two):
     first, second = load(one)[2], load(two)[2]
     return sum(1 for at in range(0, min(len(first), len(second)) - 2, 6) if first[at:at + 3] != second[at:at + 3])
 
+def differing_in(one, two, x0, y0, x1, y1):
+    # What differs inside a box of the screen: the settings window's rows, and not the kernel log that scrolls behind it.
+    wide, _, first = load(one)
+    second = load(two)[2]
+    return sum(1 for y in range(y0, y1) for x in range(x0, x1, 2)
+               if first[(y * wide + x) * 3:(y * wide + x) * 3 + 3] != second[(y * wide + x) * 3:(y * wide + x) * 3 + 3])
+
 type_text("nts")
 time.sleep(0.5)
 shot("r1-list-closed", 1)
@@ -19626,17 +19633,20 @@ out.append(("S1.5e the pointer's size is a choice found by its name, set from th
             "set back 1"))
 said("S1.5e")
 #   A group with a feed is kept up with while it is shown: the clock's row, in Time, is asked again every second,
-#   so the window's picture changes with the time and nobody pressed anything.
+#   so the window's picture changes with the time and nobody pressed anything. Time is the fourth group (Machine,
+#   Canvas, Mouse, Time), found from the first; the rows are looked at inside the window, over the terminal's black
+#   paper, where the kernel log that scrolls behind its left side is not.
 key("tab")
-key("down")
-key("down")
+key("home")
+for _ in range(3):
+    key("down")
 time.sleep(1.5)
 shot("r1-time-one", 1)
 time.sleep(2.5)
 shot("r1-time-two", 1)
-live = differing("r1-time-one", "r1-time-two")
-key("up")
-key("up")
+live = differing_in("r1-time-one", "r1-time-two", 1140, 300, 1620, 780)
+for _ in range(3):
+    key("up")
 key("ret")
 time.sleep(0.5)
 out.append(("S1.5d the group shown is kept up with: the clock in Time changes in the picture with nothing pressed",
