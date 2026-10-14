@@ -17324,16 +17324,20 @@ out.append(("and auto on a virtual display is one, whatever size it claims, and 
             "yes" if "scale 1, auto: no screen says a size that can be trusted" in said else "no: " + said[-80:], "yes"))
 
 #       A program takes the display, the way Weston does: master of the card,
-#       a mode of its own, held. Canvas does nothing about it, and has the
-#       card back, with its own colour on it, when the program is done.
+#       a mode of its own, held. Canvas says so, and has the card back, with
+#       its own colour on it, when the program is done.
 shot("foreign-before")
 before_w, before_h, before_px = load("foreign-before")
 if holder:
     tag = start_holder("8 0 0")
     held = holder_said(tag, "DRMHOLD master", 15)
+    said_held = "held by the desktop or another program" in canvas_text() if held else False
     finished = holder_said(tag, "DRMHOLD done", 20)
     time.sleep(2)
     out.append(("a program takes the display", "yes" if held and finished else "no", "yes"))
+    out.append(("and Canvas says the display is held while it has it", "yes" if said_held else "no", "yes"))
+    out.append(("and Canvas says no such thing once it exits",
+                "yes" if "held by the desktop or another program" not in canvas_text() else "no", "yes"))
     shot("foreign-after")
     after_w, after_h, after_px = load("foreign-after")
     out.append(("the desktop comes back the size it was",
@@ -17341,6 +17345,28 @@ if holder:
     vga, white = vga_share("foreign-after")
     out.append(("and the holder's picture is gone: Canvas fills the screen with its own colour again",
                 "yes" if white < 50 else "%d%% white" % white, "yes"))
+
+    #   A program that gives master back without exiting. Nothing closes
+    #   the card, so nothing tells Canvas; it looks at the card by itself,
+    #   four times a second.
+    tag = start_holder("3 1 8")
+    dropped = holder_said(tag, "DRMHOLD dropped", 20)
+    quiet = "no drop"
+    if dropped:
+        #   Nothing is typed or moved in this second and the holder writes
+        #   only to a file, so no key or pointer wakes Canvas: its colour
+        #   replaces the holder's white fill only if the loop looks at the
+        #   card again by itself.
+        time.sleep(1)
+        shot("dropped-quiet", 0.5)
+        quiet_w, quiet_h, quiet_px = load("dropped-quiet")
+        grid = [(y * quiet_w + x) * 3 for y in range(0, quiet_h, 8) for x in range(0, quiet_w, 8)]
+        white = sum(1 for at in grid if quiet_px[at:at + 3] == b"\xff\xff\xff")
+        quiet = "yes" if white * 2 < len(grid) else "%d of %d sampled pixels still white" % (white, len(grid))
+    out.append(("a program that gives master back and stays is noticed",
+                "yes" if dropped and holder_said(tag, "DRMHOLD done", 20) else "no", "yes"))
+    out.append(("and the desktop is back within a second with nothing typed or moved", quiet, "yes"))
+    time.sleep(2)
 
     #   How often Canvas wakes with a pointer moving over a card another
     #   program holds: not at all, and the most it may is four a second. What
@@ -17382,8 +17408,12 @@ if holder:
     time.sleep(2)
 else:
     for name, want in (("a program takes the display", "yes"),
+                       ("and Canvas says the display is held while it has it", "yes"),
+                       ("and Canvas says no such thing once it exits", "yes"),
                        ("the desktop comes back the size it was", "same"),
                        ("and the holder's picture is gone: Canvas fills the screen with its own colour again", "yes"),
+                       ("a program that gives master back and stays is noticed", "yes"),
+                       ("and the desktop is back within a second with nothing typed or moved", "yes"),
                        ("Canvas wakes fewer than 20 times a second, a pointer moving over a card another program holds", "yes"),
                        ("a report reaches a program reading it within 250 us at the median, another program holding the card", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
@@ -17865,6 +17895,7 @@ sleep 1
 sleep 1
 echo m1-ready
 sleep 10
+echo m1-mark > /dev/kmsg
 kill $c
 wait $c
 echo m1-done
@@ -17937,7 +17968,7 @@ guest = Guest(desktop(image) + [
     "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
     "-device", "usb-storage,drive=stick,removable=on",
     "-no-reboot", "-display", "none",
-    "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
+    "-append", "console=ttyS0 printk.time=1 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 " + os.environ.get("CANVAS_APPEND", "")],
     work + "/qmp", work + "/mon", work, sockets=(ser,))
 time.sleep(25)
 shell = Shell(ser)
@@ -17974,6 +18005,18 @@ def picture(name):
     def at(x, y):
         o = (y * width + x) * 3
         return "%02x%02x%02x" % (data[o], data[o + 1], data[o + 2])
+    return width, height, at
+
+def picture_when(name, reads, want, looks=8):
+    """The picture of what a press or a plug-in did, taken again (a guest on a host that is short of memory
+    draws a frame a second late) until what the row reads from it is what it wants or the looks are spent;
+    the last picture is what the row reads, so a row that never gets there still fails, and a late one says so."""
+    for look in range(looks):
+        width, height, at = picture(name)
+        if reads(at) == want:
+            break
+    if look and reads(at) == want:
+        print("m1 slow: %s was right at look %d of %d" % (name, look + 1, looks), file=sys.stderr)
     return width, height, at
 
 def windows(width, height, at):
@@ -18056,10 +18099,15 @@ out.append(("M1.12 the compositor's exit leaves Canvas's own picture on screen, 
             windows(width, height, back) == kernel_windows and back(100, 100) == before(100, 100) != "336699"
             else "windows %d before, %d after; body %s then %s" % (
                 kernel_windows, windows(width, height, back), two(100, 100), back(100, 100)), "yes"))
-handed = re.findall(rb"drawn again, microseconds after the card was let go: (\d+)", serial())
+#   The compositor does not time its own exit: the kernel's clock does, from the mark written just before
+#   it is told to go to the line Canvas prints when the card is its own again and the ground is drawn.
 #   M1.12 records the latency and does not pass on it (canvas spec 05 3.2);
 #   the frame target of 1.4 is what the number is compared against.
-print("m1 hand-back %s us" % (handed[-1].decode() if handed else "unknown"), file=sys.stderr)
+kernel_log = shell.run("dmesg", 20)[0]
+marks = [float(m.group(1)) for m in re.finditer(r"\[\s*(\d+\.\d+)\][^\n]*m1-mark$", kernel_log, re.M)]
+cards = [float(m.group(1)) for m in re.finditer(r"\[\s*(\d+\.\d+)\][^\n]*the card is Canvas's again", kernel_log, re.M)]
+handed = [c for c in cards if marks and c >= marks[-1]]
+print("m1 hand-back %s us" % ("%.0f" % ((handed[0] - marks[-1]) * 1e6) if handed else "unknown"), file=sys.stderr)
 
 start_script("m2")
 ready2 = wait_for(b"m2-ready", 40)
@@ -18122,8 +18170,16 @@ out.append(("M2.9 a window put away is not on the screen",
 #   button of the window the pointer is over. A mouse nobody opened
 #   leaves the press on the first window. QEMU takes input-send-event's
 #   device argument for a hot-plugged mouse by dying, so it is not used.
+def input_files():
+    # The evdev files the compositor holds open: a device it has not opened yet is a mouse that moves nothing.
+    return shell.number("p=$(grep -l '^compositor$' /proc/[0-9]*/comm | head -1 | cut -d/ -f3); "
+                        "ls -l /proc/$p/fd 2> /dev/null | grep -c input/event")
+had_inputs = int(input_files() or 0)
 qcmd({"execute": "device_add", "arguments": {"driver": "usb-mouse", "id": "hot1"}})
-time.sleep(3)
+heard_mouse, _ = until(lambda: int(input_files() or 0) > had_inputs, 30)
+if not heard_mouse:
+    print("m1 slow: the compositor opened no new input device in 30 s", file=sys.stderr)
+time.sleep(1)
 moveto(450, 210)
 for step in range(8):
     send([{"type": "rel", "data": {"axis": "x", "value": 50}}])
@@ -18132,11 +18188,13 @@ for down in (True, False):
     send([{"type": "btn", "data": {"down": down, "button": "left"}}])
     time.sleep(0.1)
 time.sleep(0.4)
-width, height, plugged = picture("m3-plugged")
+width, height, plugged = picture_when("m3-plugged", lambda at: "%s %s" % (at(button(1), H - band // 2), at(button(0), H - band // 2)),
+                                      "38383c 000000")
 out.append(("M2.11 a mouse plugged in after the compositor started presses: the window it pressed on is lit",
             "%s %s" % (plugged(button(1), H - band // 2), plugged(button(0), H - band // 2)), "38383c 000000"))
 click(400, 210)           # alpha: it has the keys and its button is lit
-width, height, lit = picture("m3-focus")
+width, height, lit = picture_when("m3-focus", lambda at: "%s %s" % (at(button(0), H - band // 2), at(button(1), H - band // 2)),
+                                  "38383c 000000")
 out.append(("M2.12 the window that was clicked has its button lit",
             "%s %s" % (lit(button(0), H - band // 2), lit(button(1), H - band // 2)), "38383c 000000"))
 click(button(-1), H - band // 2)     # the panel's tray, which no window is
@@ -18145,14 +18203,15 @@ width, height, after_panel = picture("m3-panel-click")
 out.append(("M2.13 a click on the panel does not move the keys: the window is still lit",
             after_panel(button(0), H - band // 2), "38383c"))
 click(button(1), H - band // 2)      # beta's button
-width, height, raised = picture("m3-button")
+tab_reads = lambda at: "%s %s %s %s" % (at(button(1) - 8, H - band // 2), at(button(0), H - band // 2), at(699, 260), at(750, 210))
+width, height, raised = picture_when("m3-button", tab_reads, "38383c 000000 4d4d4d 996633")
 #   A window with the keys has its tab lit, and its line is lit (4d4d4d) round it: beta's left line is at
 #   x 699. The tab is read beside where it was pressed, which is where the pointer is drawn.
 out.append(("M2.14 a window's tab brings its window up and gives it the keys: its tab and its line lit, the other's not",
             "%s %s %s %s" % (raised(button(1) - 8, H - band // 2), raised(button(0), H - band // 2), raised(699, 260),
                              raised(750, 210)), "38383c 000000 4d4d4d 996633"))
 click(button(2), H - band // 2)      # gamma's button: put away, and back
-width, height, restored = picture("m3-restore")
+width, height, restored = picture_when("m3-restore", lambda at: at(1250, 380), "55aa55")
 out.append(("M2.15 the button of a window that was put away brings it back",
             restored(1250, 380), "55aa55"))
 type_text("a")
@@ -18687,7 +18746,7 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/m1-answers"
-        sed -n 's/^m1 hand-back/  canvas       hand-back/p;s/^m1 compositor memory/  canvas       compositor memory/p;s/^m1 compositor latency/  canvas       compositor latency/p' "$work/m1-why"
+        sed -n 's/^m1 slow/  canvas       slow/p;s/^m1 hand-back/  canvas       hand-back/p;s/^m1 compositor memory/  canvas       compositor memory/p;s/^m1 compositor latency/  canvas       compositor latency/p' "$work/m1-why"
 fi
 fi
 
@@ -19534,8 +19593,9 @@ out.append(("S1.5c a choice opens a list on the screen: Escape leaves the value,
                                            differing("r1-list-closed", "r1-list-closed-again")), len(pids("settings"))),
             "kept set back drawn 1"))
 said("S1.5c")
-#   The pointer's size is a choice of canvas cursor size: found by its name, set from the list with the command
-#   saying so, and set back.
+#   The pointer's size is a choice of canvas cursor size: found by its name (a space is Space, which opens the
+#   row the keys are on, so the filter is the one word, and the size's row is the first of the two it lists), set
+#   from the list with the command saying so, and set back.
 sizes = ["auto", "1", "2", "3", "4"]
 
 def cursor_size():
@@ -19545,7 +19605,7 @@ def cursor_size():
 had_size = cursor_size()
 had_size = had_size if had_size in sizes else "auto"
 want_size = "3" if had_size != "3" else "2"
-type_text("cursor size")
+type_text("cursor")
 time.sleep(0.5)
 key("ret")
 key("home")
@@ -19689,21 +19749,37 @@ shot("l1-after", 1)
 bw, bh, before = load("l1-before")
 ow, oh, after = load("l1-open")
 cw, ch, closed = load("l1-after")
-x0 = y0 = None
-x1 = y1 = 0
-#   Blocks of 8 by 8 where most of the pixels are the launcher's: its glass changes the whole of it, the text beside it only here and there.
-for by in range(0, oh - 8, 8):
-    for bx in range(0, ow - 8, 8):
-        changed = 0
-        for y in range(by, by + 8, 2):
-            for x in range(bx, bx + 8, 2):
-                o = (y * ow + x) * 3
-                changed += after[o:o + 3] != before[o:o + 3] and before[o:o + 3] == closed[o:o + 3]
-        if changed >= 12:
-            x0 = bx if x0 is None else min(x0, bx)
-            y0 = by if y0 is None else min(y0, by)
-            x1 = max(x1, bx + 8)
-            y1 = max(y1, by + 8)
+#   What the launcher put on the screen is what differs with it up from before and after it, in each row and each column;
+#   its bounds are the longest run of rows and of columns where it did (its outline is in all of them, whatever is under
+#   its glass: black paper under it gives the glass nothing else to differ by), which leaves out the lines elsewhere that
+#   the keys moving to it relit.
+rows_changed = [0] * oh
+cols_changed = [0] * ow
+for y in range(oh):
+    first, last = y * ow * 3, (y + 1) * ow * 3
+    if after[first:last] == before[first:last]:
+        continue
+    for x in range(ow):
+        o = first + x * 3
+        if after[o:o + 3] != before[o:o + 3] and before[o:o + 3] == closed[o:o + 3]:
+            rows_changed[y] += 1
+            cols_changed[x] += 1
+
+def longest_run(counts, least):
+    best, start = (0, 0), None
+    for at in range(len(counts) + 1):
+        on = at < len(counts) and counts[at] >= least
+        if on and start is None:
+            start = at
+        elif not on and start is not None:
+            best = max(best, (at - start, start))
+            start = None
+    return (best[1], best[1] + best[0]) if best[0] else (None, 0)
+
+y0, y1 = longest_run(rows_changed, 200)
+x0, x1 = longest_run(cols_changed, 100)
+if y0 is None:
+    x0 = None
 where = "nothing changed" if x0 is None else "%d-%d,%d-%d of %dx%d" % (x0, x1, y0, y1, ow, oh)
 ow_mid, oh_mid = ((x0 + x1) // 2, y0 + 78) if x0 is not None else (1280, 400)
 middle = x0 is not None and abs((x0 + x1) / 2 - ow / 2) < ow * 0.03 and oh * 0.15 < y0 < oh * 0.40 and (x1 - x0) > ow * 0.1
@@ -20041,20 +20117,21 @@ if not box or box[1] is None:
 left, top, right, bottom = box
 # The grid has a third of a cell of paper round it, inside the window's round corners.
 first = lit(at, left, top, left + 120, top + 28)
-out.append(("M5.3 the terminal shows text: the prompt is drawn in its first row",
+out.append(("M5.3 the terminal shows text: its first row is drawn",
             "yes" if first > 12 else "%d lit pixels" % first, "yes"))
 out.append(("and its paper is black below it",
             "yes" if at(left + 20, top + 120) == (0, 0, 0) and at(right - 40, bottom - 10) == (0, 0, 0) else "no", "yes"))
 
 # Keys go to the surface with focus, which a click gives.
 click((left + right) // 2, (top + bottom) // 2)
-before = lit(at, left, top, left + 400, top + 28)
+#   The first rows are the two lines a live session says and then the prompt, where the typing goes.
+before = lit(at, left, top, left + 400, top + 80)
 type_text("echo m5-typed")
 # A slow guest is given a few looks: what is asked is that it gets there, and it is the
 # frames of the compositor that say how soon.
 for _ in range(4):
     w, h, at = picture("m5-typed")
-    after = lit(at, left, top, left + 400, top + 28)
+    after = lit(at, left, top, left + 400, top + 80)
     if after > before + 40:
         break
 out.append(("M5.3 a typed key's echo is on the screen",
