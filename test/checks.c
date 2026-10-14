@@ -107078,6 +107078,152 @@ static fn check_synthetic(const font_face address_to one, const font_face addres
 }
 
 /*
+        What a fit must hold, over every printable ASCII glyph of the faces
+        this tree ships at 8 to 32 px, as dark cells (fitted, snapped and
+        darkened), light cells (fitted and snapped) and drawn text (fitted and
+        snapped at a phase of three eighths):
+          flat     an outline segment level and a pixel or longer lies on a
+                   whole pixel (within 1/64);
+          counter  the hinted bitmap at half ink encloses as many regions of
+                   ground as the unhinted one;
+          cell     a hinted glyph stays in its cell where the unhinted one
+                   does.
+        Each is a count that may not grow: the ceilings are the counts when
+        the check was written (a32972a0), so a change to the fit that makes
+        any face worse on any of them is red, and one that makes them better
+        lowers them here. Before that commit, the same faces had 1,976 flat
+        edges off the grid as dark cells, where 570 are now.
+*/
+static font_engine invariant_engine;
+static p8 invariant_atlas[1 << 20];
+static p8 invariant_bitmap[256 * 256];
+static p8 invariant_seen[260 * 260];
+static b32 invariant_queue[260 * 260];
+
+//      Regions of ground the ink at half or more encloses, four-connected, the bitmap's border counting as outside.
+static b32 invariant_holes(b32 w, b32 h)
+{
+        b32 W = w + 2, H = h + 2, count = 0;
+
+        for (b32 y = 0; y < H; y++)
+                for (b32 x = 0; x < W; x++)
+                        invariant_seen[y * W + x] =
+                            x > 0 && y > 0 && x <= w && y <= h && invariant_bitmap[(y - 1) * w + (x - 1)] >= 128 ? 2 : 0;
+        for (b32 pass = 0; pass < 2; pass++)
+                for (b32 s = 0; s < W * H; s++)
+                {
+                        b32 sx = s % W, sy = s / W, head = 0, tail = 0;
+
+                        if (invariant_seen[s] || (!pass && sx && sy && sx < W - 1 && sy < H - 1))
+                                continue;
+                        count += pass;
+                        invariant_queue[tail++] = s;
+                        invariant_seen[s] = 1;
+                        while (head < tail)
+                        {
+                                b32 at = invariant_queue[head++], x = at % W, y = at / W;
+                                b32 next[4] = {x > 0 ? at - 1 : -1, x < W - 1 ? at + 1 : -1, y > 0 ? at - W : -1,
+                                               y < H - 1 ? at + W : -1};
+
+                                for (b32 k = 0; k < 4; k++)
+                                        if (next[k] >= 0 && !invariant_seen[next[k]])
+                                                invariant_seen[next[k]] = 1, invariant_queue[tail++] = next[k];
+                        }
+                }
+        return count;
+}
+
+static bool invariant_shape(const font_face address_to face, p32 glyph, p32 size, p32 phase, p32 style,
+                            font_bitmap address_to box)
+{
+        if (font_shape(&invariant_engine, face, glyph, size, phase, style, box) < 0 || box->width <= 0 ||
+            box->height <= 0 || box->width > 256 || box->width * box->height > 256 * 256)
+                return false;
+        memory_zero(invariant_bitmap, (positive)box->width * (positive)box->height);
+        font_raster(&invariant_engine, box->width, box->height, invariant_bitmap, (positive)box->width);
+        return true;
+}
+
+static fn check_invariants(void)
+{
+        static const string_address faces[4] = {"fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf",
+                                                 "fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf",
+                                                 "fonts/inter/Inter-Regular.ttf", "fonts/inter/Inter-Bold.ttf"};
+        //      Flat edges off the grid, counters lost, glyphs out of their cell: a face's dark cells, light
+        //      cells and drawn text.
+        static const p32 ceiling[4][3][3] = {
+            {{116, 26, 11}, {78, 22, 4}, {76, 24, 0}},
+            {{245, 28, 0}, {263, 25, 0}, {258, 28, 0}},
+            {{82, 11, 0}, {78, 14, 0}, {89, 13, 0}},
+            {{127, 27, 0}, {108, 16, 0}, {111, 17, 0}},
+        };
+        static const string_address paths[3] = {"dark cells", "light cells", "drawn text"};
+        static p8 file[1 << 20];
+
+        font_start(&invariant_engine, invariant_atlas, 1024, 1024);
+        for (p32 f = 0; f < 4; f++)
+        {
+                bipolar got = file_slurp_regular_at(AT_FDCWD, faces[f], file, sizeof(file), 0);
+                font_face face;
+
+                check("invariants: the face this tree ships loads", got > 0 && font_load(&face, file, (positive)got, 0) == 0);
+                if (got <= 0)
+                        continue;
+                for (p32 path = 0; path < 3; path++)
+                {
+                        p32 style = path ? 5 : 7, found[3] = {0, 0, 0};
+
+                        for (p32 px = 8; px <= 32; px++)
+                        {
+                                p32 size = px * 64;
+                                font_metrics grid = font_metrics_at(&face, size);
+
+                                for (p32 code = 0x21; code < 0x7f; code++)
+                                {
+                                        p32 glyph = font_glyph(&face, code);
+                                        b32 eighth = path == 2 ? 3
+                                                               : font_eighths(((grid.cell_width << 16) -
+                                                                               font_advance(&face, glyph, size)) / 2);
+                                        font_bitmap box, plain;
+
+                                        if (!glyph || !invariant_shape(&face, glyph, size, (p32)eighth & 7, style, &box))
+                                                continue;
+                                        p32 first = 0;
+                                        for (p32 c = 0; c < invariant_engine.contour_count;
+                                             first = invariant_engine.contour[c++].last + 1u)
+                                                for (p32 i = first; i <= invariant_engine.contour[c].last; i++)
+                                                {
+                                                        font_point a = invariant_engine.points[i];
+                                                        font_point b = invariant_engine.points[i == invariant_engine.contour[c].last ? first : i + 1];
+
+                                                        found[0] += a.y == b.y && (b.x - a.x >= FONT_ONE || a.x - b.x >= FONT_ONE) &&
+                                                                    !font_on_grid(a.y);
+                                                }
+                                        b32 hinted = invariant_holes(box.width, box.height);
+                                        b32 x0 = (eighth >> 3) + box.left, y0 = grid.baseline - box.top;
+                                        bool out = x0 < 0 || y0 < 0 || x0 + box.width > grid.cell_width ||
+                                                   y0 + box.height > grid.cell_height;
+
+                                        if (!invariant_shape(&face, glyph, size, (p32)eighth & 7, path ? 0 : 2, &plain))
+                                                continue;
+                                        b32 u0 = (eighth >> 3) + plain.left, v0 = grid.baseline - plain.top;
+                                        found[1] += hinted < invariant_holes(plain.width, plain.height);
+                                        found[2] += path < 2 && out &&
+                                                    !(u0 < 0 || v0 < 0 || u0 + plain.width > grid.cell_width ||
+                                                      v0 + plain.height > grid.cell_height);
+                                }
+                        }
+                        string_format(log, "  %s, %s: %p flat edges off the grid, %p counters lost, %p out of their cell\n",
+                                      faces[f], paths[path], (positive)found[0], (positive)found[1], (positive)found[2]);
+                        check("invariants: flat edges on the grid, no worse than the ceiling", found[0] <= ceiling[f][path][0]);
+                        check("invariants: counters kept, no worse than the ceiling", found[1] <= ceiling[f][path][1]);
+                        check("invariants: glyphs in their cells, no worse than the ceiling", found[2] <= ceiling[f][path][2]);
+                }
+        }
+        log_flush();
+}
+
+/*
         Darkening by default: a cell of black on white drawn as asked has
         more ink than with FONT_UNDARKENED, and one of white on black is the
         same pixels either way. Unhinted: hinted, the grown outline is fitted
@@ -108260,6 +108406,7 @@ b32 main()
         check_cells(&engine, &two);
         check_synthetic(&one, &two);
         check_polarity(&two);
+        check_invariants();
         check_cells(&small_engine, &two);
         check_translate();
         check_translate_planes();
