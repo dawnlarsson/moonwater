@@ -962,12 +962,6 @@ static unsigned int terminal_painters_ready(unsigned int bands)
 
 static void terminal_cells_draw(struct terminal_banding address_to banding, positive changed)
 {
-        // Cells in the screen's subpixels, where the compositor says the screen has them across.
-        unsigned int order = terminal.own.table ? terminal.own.table->subpixel : 0;
-
-        for (unsigned int at = 0; at < TERMINAL_BANDS; at++)
-                if (terminal_painters[at].engine)
-                        font_subpixels(terminal_painters[at].engine, order <= 2 ? order : 0);
         positive bytes = changed * terminal.cell_w * terminal.cell_h * 4, bands = parallel_width();
 
         bands = bands < TERMINAL_BANDS ? bands : TERMINAL_BANDS;

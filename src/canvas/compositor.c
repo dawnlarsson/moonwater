@@ -1741,7 +1741,6 @@ static struct
         unsigned int *scanout;
         unsigned long scanout_bytes, scanout_pitch; // pitch in bytes
         unsigned int fb, crtc;
-        unsigned int subpixel; // the connector's order, as DRM says it (1 unknown, 2 RGB, 3 BGR, 4-5 vertical, 6 none)
         // Where a store to the card is dear: slices of the scene composed apart, and what the card holds (mirror, words a row
         // mirror_pitch; the scanout itself where the card's memory is the machine's). changed: 0 not yet asked, 1 on,
         // -1 off. mirror_stale: the card may hold anything, so the next present stores all it composes.
@@ -4064,7 +4063,6 @@ static b32 compositor_card_open(void)
                         continue;
 
                 connector = connectors[at];
-                compositor.subpixel = probe.subpixel;
                 crtc = crtcs[0];
                 mode = modes[0];
                 have_mode = 1;
@@ -6170,12 +6168,6 @@ static int compositor_table(void)
         compositor.table->output_height = (unsigned int)compositor.height;
         compositor.table->stride = (unsigned int)compositor.width;
         compositor.table->scale = (unsigned int)compositor.scale;
-        // Text in the screen's subpixels where a drawn pixel is one of the screen's and they run across it: a screen
-        // that does not say is taken for red, green, blue, as nearly every LCD is.
-        compositor.table->subpixel = compositor.scale != 1 ? 0
-                                     : compositor.subpixel == 3 ? 2
-                                     : compositor.subpixel == 1 || compositor.subpixel == 2 ? 1
-                                                                                            : 0;
         compositor.table->period = (unsigned int)compositor.period;
         compositor.table->focus = WINDOWS;
         compositor.table->refused = compositor.memfd_failed;

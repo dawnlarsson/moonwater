@@ -599,9 +599,6 @@ struct windows
         // would not (1 no /dev/udmabuf, 2 udmabuf refused the buffer, 3 the card its import, 4 its framebuffer, 5 a flip;
         // the table is no memfd at 6 memfd_create, 8 its size, 9 its seals, 10 its mode, 11 the link to it).
         unsigned int scanned, refused;
-        // The screen's subpixels, which text in a window's own pixels can be drawn in: 0 none (or more than one
-        // screen pixel a drawn one), 1 red, green, blue left to right, 2 blue, green, red.
-        unsigned int subpixel;
         unsigned long pixels;  // where row 0's first buffer is, in bytes from the table
         unsigned long buffer;  // the bytes of one buffer
 
