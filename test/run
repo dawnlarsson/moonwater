@@ -17896,6 +17896,37 @@ wait $c
 echo m13-done
 """)
 
+#   The shake and the mouse, as the machine keeps them: the pointer is not made large by a shake when that
+#   is off; with it on a shake keeps it large for the delay and not for the standard 1200 ms; a slow hand
+#   of 100 counts goes 200 pixels at a sensitivity of 200 with no acceleration, 100 at the standard
+#   and 50 at a sensitivity of 50. The words are changed while the compositor runs, which takes them at once.
+open(stick + "/m14", "w").write(r"""exec > /dev/ttyS0 2>&1
+moonwater canvas cursor shake off
+moonwater mouse sensitivity 200
+moonwater mouse acceleration off
+/compositor &
+c=$!
+sleep 2
+echo m14-ready
+sleep 13
+moonwater canvas cursor shake on
+moonwater canvas cursor shake delay 3000
+moonwater mouse sensitivity default
+moonwater mouse acceleration on
+echo m14-set
+sleep 16
+moonwater mouse sensitivity 50
+echo m14-slow
+sleep 7
+moonwater canvas cursor shake default
+moonwater canvas cursor shake delay default
+moonwater mouse sensitivity default
+moonwater mouse acceleration default
+kill $c
+wait $c
+echo m14-done
+""")
+
 import socket
 
 ser = work + "/ser"
@@ -18215,6 +18246,62 @@ out.append(("D1.2 a new ink is drawn at once, and the pointer is four times, dar
             "336699 336699 736 880"))
 out.append(("D1.3 default and auto are the ink and the pointer of an unset machine",
             "%s %s %s" % (three(4, 4), default.get("ffffff", 0), default.get("000000", 0)), "1e1e1e 55 46"))
+
+#   The shake and the mouse, kept and changed while the compositor runs.
+start_script("m14")
+wait_for(b"m14-ready", 60)
+
+def shaken(name):
+    # A shake of the hand, which ends where it began; what the pointer's box holds after it.
+    for step in range(12):
+        send([{"type": "rel", "data": {"axis": "x", "value": 12 if step % 2 == 0 else -12}}])
+        time.sleep(0.03)
+    width, height, at = picture(name)
+    found = pointer_pixels(at)
+    return "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+
+def tip(at):
+    # The pointer's outline, its leftmost pixel.
+    xs = [x for y in range(596, 700) for x in range(990, 1400) if at(x, y) == "000000"]
+    return min(xs) if xs else -1
+
+def travelled(name):
+    # How far the pointer went when a hand of 100 counts slowly crossed from where a click put it.
+    click(1000, 600)
+    width, height, at = picture(name + "-from")
+    before = tip(at)
+    for step in range(10):
+        send([{"type": "rel", "data": {"axis": "x", "value": 10}}])
+        time.sleep(0.03)
+    width, height, at = picture(name)
+    return tip(at) - before
+
+click(1000, 600)
+no_shake = shaken("m14-noshake")
+off_200 = travelled("m14-200")
+wait_for(b"m14-set", 30)
+click(1000, 600)
+large_now = shaken("m14-large")
+time.sleep(1)
+width, height, at = picture("m14-large-later")
+found = pointer_pixels(at)
+large_later = "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+time.sleep(2)
+width, height, at = picture("m14-small-again")
+found = pointer_pixels(at)
+small_again = "%d %d" % (found.get("ffffff", 0), found.get("000000", 0))
+standard = travelled("m14-100")
+wait_for(b"m14-slow", 60)
+slow = travelled("m14-50")
+done14 = wait_for(b"m14-done", 60)
+out.append(("D2.1 with the shake off a shake of the hand leaves the pointer its size",
+            no_shake, "55 46"))
+out.append(("D2.2 at a sensitivity of 200 and no acceleration a slow hand of 100 counts goes 200 pixels",
+            str(off_200), "200"))
+out.append(("D2.3 with the shake on and a delay of 3000 ms the pointer is large when shaken, and still two seconds after, and not four",
+            "%s | %s | %s" % (large_now, large_later, small_again), "495 414 | 495 414 | 55 46"))
+out.append(("D2.4 at the standard sensitivity a slow hand of 100 counts goes 100 pixels, and at 50 it goes 50",
+            "%d %d" % (standard, slow), "100 50"))
 
 #   Alt-Tab and Alt-F9 on three windows. The button in the panel of the window that has
 #   the keys is lit (38383c) and the others' are not (000000); a window put away has
