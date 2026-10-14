@@ -109650,6 +109650,10 @@ static fn check_settings(string_address regular, string_address bold)
         }
         char value[SETTINGS_VALUE], next[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
+
+        // The window as it opens: the keys in the rows, no list open.
+        settings.pane = 1;
+        settings.menu = -1;
         int name = settings_row_named("Name"), keyboard = settings_row_named("Keyboard"),
             zone = settings_row_named("Time zone"), ntp = settings_row_named("Set the clock from the network"),
             clock = settings_row_named("Clock (Enter sets it now)"), wifi = settings_row_named("Wi-Fi"),
@@ -109755,13 +109759,7 @@ static fn check_settings(string_address regular, string_address bold)
         settings_next(&settings_rows[ntp], "on", 1, next, sizeof(next));
         check("settings: a switch on goes off", string_equals((string_address)next, (string_address) "off"));
         settings_next(&settings_rows[keyboard], "us", 1, next, sizeof(next));
-        check("settings: a choice goes to its next word", string_equals((string_address)next, (string_address) "uk"));
-        settings_next(&settings_rows[keyboard], "it", 1, next, sizeof(next));
-        check("settings: and from its last to its first", string_equals((string_address)next, (string_address) "us"));
-        settings_next(&settings_rows[keyboard], "us", -1, next, sizeof(next));
-        check("settings: and back from its first to its last", string_equals((string_address)next, (string_address) "it"));
-        settings_next(&settings_rows[keyboard], "xx", 1, next, sizeof(next));
-        check("settings: a value that is none of its words goes to the first", string_equals((string_address)next, (string_address) "us"));
+        check("settings: a choice is not moved a step at a time, it opens a list", !next[0]);
         settings_next(&settings_rows[bright], "50%", -1, next, sizeof(next));
         check("settings: a step back is its first word", string_equals((string_address)next, (string_address) "-10"));
 
@@ -110064,8 +110062,19 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.ui.scale = 1;
                 settings.editing = -1;
                 settings.filter_length = 0;
+                settings.group = 0;
+                settings.pane = 1;
                 settings_refilter();
-                check("settings: with nothing typed every row shows", settings.visible_count == settings_rows_count());
+                {
+                        b32 here = settings.visible_count != 0;
+
+                        for (positive at = 0; at < settings.visible_count; at++)
+                                here &= settings_group_of(settings.visible[at]) == 0;
+                        check("settings: with nothing typed the rows are those of the group chosen, and not every row",
+                              here && settings.visible_count < settings_rows_count() &&
+                                  string_equals((string_address)settings_group_name(0), (string_address) "Machine") &&
+                                  string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address) SETTINGS_ALL_HEADER));
+                }
                 settings_type_code('W');
                 settings_type_code('i');
                 settings_type_code('f');
@@ -110083,11 +110092,12 @@ static fn check_settings(string_address regular, string_address bold)
                         }
                         check("settings: the rows that show are those that mention it, the switch and the commands both", structured && generic && each);
                 }
-                check("settings: the focus goes to a row that shows", settings_pos(settings.focus) >= 0);
+                check("settings: the focus goes to the first row that shows", settings.focus == settings.visible[0]);
                 settings_press(SETTINGS_KEY_BACKSPACE);
                 check("settings: Backspace takes a letter off it", string_equals((string_address)settings.filter, (string_address) "wif"));
                 check("settings: Escape clears it and keeps the window", settings_press(SETTINGS_KEY_ESCAPE) && !settings.filter_length &&
-                                                                              settings.visible_count == settings_rows_count());
+                                                                              settings.visible_count < settings_rows_count() &&
+                                                                              settings_group_of(settings.visible[0]) == settings.group);
                 check("settings: and Escape with none typed closes it", !settings_press(SETTINGS_KEY_ESCAPE));
                 for (const char address_to letter = "zzzzqq"; *letter; letter++)
                         settings_type_code((unsigned int)*letter);
@@ -110095,6 +110105,103 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_press(SETTINGS_KEY_ESCAPE);
                 settings_type_code(' ');
                 check("settings: a blank is no letter of it", !settings.filter_length);
+
+                // The groups at the left, the rows at the right, and the keys between them.
+                settings.ui.scale = 1;
+                settings.width = SETTINGS_WIDTH;
+                settings.height = SETTINGS_HEIGHT;
+                settings.group = 0;
+                settings.pane = 1;
+                settings.editing = -1;
+                settings.child = 1;
+                settings.queued = 0;
+                settings_refilter();
+                {
+                        int canvas_group = 1, all = settings_groups() - 1, scale = settings_row_named("Scale");
+                        int first = settings.visible[0];
+
+                        check("settings: the first group is the first section, and its first row has the keys",
+                              settings.group == 0 && first == SETTINGS_NAME_ROW);
+                        settings_press(SETTINGS_KEY_TAB);
+                        check("settings: Tab goes to the column of groups", settings.pane == 0 && settings.group == 0);
+                        settings_press(SETTINGS_KEY_DOWN);
+                        check("settings: Down in the column chooses the next group, and its rows are at the right at once",
+                              settings.group == canvas_group && settings.visible[0] == scale && settings.focus == scale &&
+                                  settings.pane == 0 && string_equals((string_address)settings_group_name(settings.group), (string_address) "Canvas"));
+                        settings_press(SETTINGS_KEY_END);
+                        check("settings: End in the column chooses All commands, whose rows are the commands",
+                              settings.group == all && settings.visible[0] == SETTINGS_ANY);
+                        settings_press(SETTINGS_KEY_DOWN);
+                        check("settings: and Down at the last group stays", settings.group == all);
+                        settings_press(SETTINGS_KEY_HOME);
+                        settings_press(SETTINGS_KEY_UP);
+                        check("settings: Home and Up at the first group stay at it", settings.group == 0);
+                        settings_press(SETTINGS_KEY_PAGE_DOWN);
+                        check("settings: Page Down moves three groups", settings.group == 3);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter in the column goes to the rows, on the first", settings.pane == 1 && settings.focus == settings.visible[0] &&
+                                  settings_group_of(settings.focus) == 3);
+                        settings_press(SETTINGS_KEY_DOWN);
+                        check("settings: Down in the rows moves among the rows of the group only",
+                              settings.group == 3 && settings.focus == settings.visible[1]);
+                        settings.focus = settings_row_named("Name servers (auto for the network)");
+                        settings_press(SETTINGS_KEY_LEFT);
+                        check("settings: Left on a row with no Left of its own goes back to the column", settings.pane == 0 && settings.group == 3);
+                        settings_press(SETTINGS_KEY_RIGHT);
+                        check("settings: and Right in the column goes to the rows again", settings.pane == 1);
+                        settings_press(SETTINGS_KEY_TAB);
+                        settings_press(SETTINGS_KEY_TAB);
+                        check("settings: Tab twice is a way back to where it was", settings.pane == 1 && settings.group == 3);
+                        settings_press(SETTINGS_KEY_TAB);
+                        settings_type_code('a');
+                        check("settings: a letter typed in the column is the filter, and the keys are in the rows",
+                              settings.pane == 1 && settings.filter_length == 1 && settings.visible_count > settings_rows_count() / 4);
+                        settings_press(SETTINGS_KEY_TAB);
+                        settings_press(SETTINGS_KEY_UP);
+                        check("settings: moving in the column clears the filter and shows the group chosen",
+                              !settings.filter_length && settings.group == 2 && settings_group_of(settings.visible[0]) == 2);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        {
+                                int clock_row = settings_row_named("Set the clock from the network");
+
+                                settings.focus = clock_row;
+                                settings.state[clock_row] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[clock_row], (string_address) "on", SETTINGS_VALUE);
+                                settings_press(SETTINGS_KEY_LEFT);
+                                check("settings: Left on a switch throws it off and stays in the rows",
+                                      settings.pane == 1 && settings.queued == 1 && settings.queue[0].row == clock_row &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "off"));
+                        }
+                        settings.queued = 0;
+                        settings.child = 0;
+                        settings.pane = 1;
+                        settings_group_choose(0);
+                        settings.ui.scale = 1;
+                        {
+                                int side = settings_side(), where = settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() + 5),
+                                    second = settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() + settings_px(SETTINGS_GROUP_ROW) + 5);
+
+                                check("settings: a point on a group names it, and one past the column or past the groups none",
+                                      where == 0 && second == 1 &&
+                                          settings_group_hit(settings_px(UI_PAD) + side + 2, settings_list_top() + 5) == -1 &&
+                                          settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() - 1) == -1 &&
+                                          settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() + settings_groups() * settings_px(SETTINGS_GROUP_ROW)) == -1);
+                                check("settings: the column is a third of the window at most and the rows start after it",
+                                      side <= settings_px(SETTINGS_SIDE_MOST) && settings_pane_left() > settings_px(UI_PAD) + side &&
+                                          settings_hit(settings_pane_left() + 4, settings_list_top() + settings_px(SETTINGS_HEADER) + 4) == settings.visible[0] &&
+                                          settings_hit(settings_px(UI_PAD) + 4, settings_list_top() + settings_px(SETTINGS_HEADER) + 4) == -1);
+                        }
+                        // A narrow window keeps the column inside half of it, and the rows a place to the right of it.
+                        for (int width = WINDOW_MIN_WIDTH; width <= 400; width += 38)
+                        {
+                                settings.width = width;
+                                check("settings: a narrow window has its column within half and its rows right of it",
+                                      settings_side() <= width / 2 && settings_pane_left() >= settings_side() &&
+                                          settings_pane_right() == width - settings_px(UI_PAD));
+                        }
+                        settings.width = SETTINGS_WIDTH;
+                }
+                settings.child = 0;
         }
 
         // The pieces, drawn.
@@ -110241,6 +110348,128 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: Escape on it goes back to the list, and keeps the window",
                               settings_press(SETTINGS_KEY_ESCAPE) && !settings.view);
                         settings.card_scroll = 0;
+                }
+
+                // A choice opens a list of all its choices, and the list has every key.
+                {
+                        int kb = settings_row_named("Keyboard"), x, y, width, height, shown;
+                        struct window_event over = {WINDOW_EVENT_MOTION, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0};
+                        struct window_event wheel = {WINDOW_EVENT_WHEEL, 0, 120, 0};
+
+                        settings.width = SETTINGS_WIDTH;
+                        settings.height = SETTINGS_HEIGHT;
+                        settings.view = false;
+                        settings.editing = -1;
+                        settings.filter_length = 0;
+                        settings.filter[0] = 0;
+                        settings.group = 0;
+                        settings.pane = 1;
+                        settings.child = 1;
+                        settings.queued = 0;
+                        settings_refilter();
+                        settings.focus = kb;
+                        settings.state[kb] = SETTINGS_READ;
+                        string_copy_bounded((string_address)settings.value[kb], (string_address) "uk", SETTINGS_VALUE);
+
+                        settings_press(SETTINGS_KEY_LEFT);
+                        check("settings: Left on a closed choice goes back to the groups and does not move it",
+                              settings.pane == 0 && settings.queued == 0 && settings.menu < 0);
+                        settings.pane = 1;
+                        settings_press(SETTINGS_KEY_RIGHT);
+                        check("settings: and Right on it does nothing", settings.pane == 1 && settings.queued == 0 && settings.menu < 0);
+
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on a choice opens a list of every choice, the one it has now the one the keys are on",
+                              settings.menu == kb && settings.menu_count == 10 && settings.menu_at == 1 && settings.menu_top == 0 &&
+                                  settings_menu_box(&x, &y, &width, &height, &shown) && shown == 10);
+                        settings_press(SETTINGS_KEY_DOWN);
+                        check("settings: Down in the list goes to the next choice", settings.menu_at == 2);
+                        settings_press(SETTINGS_KEY_END);
+                        settings_press(SETTINGS_KEY_DOWN);
+                        check("settings: End goes to the last choice, and Down past it stays", settings.menu_at == 9);
+                        settings_press(SETTINGS_KEY_HOME);
+                        settings_press(SETTINGS_KEY_UP);
+                        check("settings: Home goes to the first, and Up past it stays", settings.menu_at == 0);
+                        settings_press(SETTINGS_KEY_PAGE_DOWN);
+                        check("settings: Page Down goes a list's height on, to the last when it all shows", settings.menu_at == 9);
+                        settings_press(SETTINGS_KEY_PAGE_UP);
+                        check("settings: and Page Up back to the first", settings.menu_at == 0);
+                        settings_type_code('d');
+                        check("settings: a letter goes to the next choice that starts with it (de)", settings.menu_at == 2);
+                        settings_type_code('D');
+                        check("settings: again, in either case, to the next (dk)", settings.menu_at == 5);
+                        settings_type_code('d');
+                        check("settings: and past the last one that starts with it, round to the first (de)", settings.menu_at == 2);
+                        settings_type_code('q');
+                        check("settings: a letter nothing starts with leaves the keys where they are", settings.menu_at == 2);
+                        settings_press(SETTINGS_KEY_TAB);
+                        settings_press(SETTINGS_KEY_LEFT);
+                        settings_type_code('a');
+                        check("settings: the list takes every key: no group is chosen, no row moved, nothing is typed as a filter",
+                              settings.menu == kb && settings.pane == 1 && settings.group == 0 && !settings.filter_length && settings.queued == 0);
+                        check("settings: Escape closes it and leaves the row as it was, and keeps the window",
+                              settings_press(SETTINGS_KEY_ESCAPE) && settings.menu < 0 && settings.queued == 0 &&
+                                  string_equals((string_address)settings.value[kb], (string_address) "uk"));
+
+                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_type_code('i');
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter on a choice sets it, as the verb is told, and closes the list",
+                              settings.menu < 0 && settings.queued == 1 && settings.queue[0].row == kb &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "it"));
+                        settings.queued = 0;
+                        settings_press(SETTINGS_KEY_SPACE);
+                        settings_press(SETTINGS_KEY_SPACE);
+                        check("settings: Space is Enter in the list, and the choice a row has already sends nothing",
+                              settings.menu < 0 && settings.queued == 0);
+
+                        // The mouse: a press on a choice sets it, a press elsewhere closes the list, and the wheel scrolls it.
+                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_menu_box(&x, &y, &width, &height, &shown);
+                        over.a = x + width / 2;
+                        over.b = y + settings_px(SETTINGS_MENU_PAD) + 3 * settings_px(SETTINGS_MENU_ITEM) + 4;
+                        settings_event(&over);
+                        check("settings: the pointer over a choice puts the keys on it", settings.menu_at == 3);
+                        settings_event(&press);
+                        check("settings: a press on a choice sets it and closes the list", settings.menu < 0 && settings.queued == 1 &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "se"));
+                        settings.queued = 0;
+                        settings_press(SETTINGS_KEY_ENTER);
+                        over.a = 2;
+                        over.b = 2;
+                        settings_event(&over);
+                        settings_event(&press);
+                        check("settings: a press anywhere else only closes the list: no change, no group chosen, nothing activated",
+                              settings.menu < 0 && settings.queued == 0 && settings.group == 0 && settings.pane == 1 && settings.editing < 0);
+
+                        // A list taller than the room is cut and scrolls: the keys' choice and the first in view go together.
+                        settings.height = 220;
+                        settings_refilter();
+                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_menu_box(&x, &y, &width, &height, &shown);
+                        check("settings: a list with less room than it needs shows what fits, within the window",
+                              shown >= 1 && shown < 10 && y >= 0 && y + height <= settings.height);
+                        settings_press(SETTINGS_KEY_END);
+                        check("settings: End on it scrolls to the last, which then shows", settings.menu_at == 9 && settings.menu_top == 10 - shown);
+                        settings_event(&wheel);
+                        check("settings: the wheel scrolls it a choice, and the keys' choice stays in view",
+                              settings.menu_top == 9 - shown && settings.menu_at < settings.menu_top + shown && settings.menu_at >= settings.menu_top);
+                        settings_press(SETTINGS_KEY_HOME);
+                        check("settings: Home scrolls back to the first", settings.menu_at == 0 && settings.menu_top == 0);
+                        settings_press(SETTINGS_KEY_ESCAPE);
+
+                        // Only a choice with a state to read opens, and a value that is none of its words starts the keys on the first.
+                        settings.height = SETTINGS_HEIGHT;
+                        settings.state[kb] = SETTINGS_ABSENT;
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: a choice the machine has none of opens no list", settings.menu < 0);
+                        settings.state[kb] = SETTINGS_READ;
+                        string_copy_bounded((string_address)settings.value[kb], (string_address) "xx", SETTINGS_VALUE);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: a value that is none of the choices starts the keys on the first", settings.menu == kb && settings.menu_at == 0);
+                        settings_press(SETTINGS_KEY_ESCAPE);
+                        settings.child = 0;
+                        settings.queued = 0;
                 }
                 compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
         }

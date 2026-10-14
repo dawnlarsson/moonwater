@@ -39,15 +39,44 @@
         when the same Enter is pressed again, and any other key asks again.
 
         It is glass (window.c, WINDOW_GLASS) drawn with the system's own
-        pieces (ui.c). The keys: Up and Down or Tab and Shift-Tab move, Enter
-        or Space changes a row (a switch is thrown, a choice moves on, a
-        field is typed in and Enter keeps it, Escape leaves it as it was),
-        Left and Right move a choice or a step either way, and Escape closes
-        the window, as Alt-F4 and its close button do. Any other key typed
-        with no field open is a filter: the rows that mention what is typed
-        are the ones listed, Backspace takes a letter off it, and Escape
-        clears it before it closes the window. A press on a row is Enter on
-        it, and the wheel scrolls.
+        pieces (ui.c). The groups are listed at the left, one for each
+        section of rows and All commands last, and the rows of the group
+        chosen are at the right, each section a header and its rows on the
+        glass with no box or rule round them. The column of groups is a
+        third of the window at most (it is never more than half of it, and
+        a name too long for it is cut with three dots), and the keys are
+        in it or in the rows, whichever the lit one is: the window opens
+        with them in the rows, on the first.
+
+        The keys. Tab and Shift-Tab go between the column and the rows.
+        Up, Down, Home, End, Page Up and Page Down move in whichever has the
+        keys, and moving in the column puts the rows of that group at the
+        right at once. Enter or Right in the column go to its rows, on the
+        first. In the rows, Enter or Space changes a row (a switch is
+        thrown, a choice opens its list, a field is typed in and Enter
+        keeps it, Escape leaves it as it was); Left and Right throw a
+        switch off and on and move a step either way, and on any other row
+        Left goes back to the column.
+        Escape closes the window, as Alt-F4 and its close button do. Any
+        other key typed with no field open is a filter: the rows that
+        mention what is typed are the ones listed, from every group, with
+        the keys on the first of them; Backspace takes a letter off it, and
+        Escape clears it before it closes the window. Choosing another group
+        clears it too. With the mouse, a press on a group chooses it, a
+        press on a row is Enter on it, and the wheel scrolls what is under
+        the pointer.
+
+        A choice opens a list of all its choices, under its row (over it
+        where there is more room there, and slid up where it fits the window
+        no other way; a list taller than the window scrolls), the one it
+        has now dotted and the keys on it. While the list is open it takes
+        every key: Up, Down, Home, End, Page Up and Page Down move the keys
+        in it, a letter or a digit goes to the next choice that starts with
+        it, Enter or Space sets the choice the keys are on (the verb is run
+        as for any row) and closes it, and Escape closes it with the row as
+        it was. A press on a choice sets it, a press anywhere else only
+        closes the list, the pointer over a choice puts the keys on it, and
+        the wheel scrolls it. A choice the machine has none of opens none.
 
         One window: a second start finds the first by the program's name and
         lifts it -- raised, brought back if it was put away, given the keys --
@@ -95,7 +124,15 @@
 #define SETTINGS_NONE 0xffffu
 
 // In logical pixels, times the scale.
-#define SETTINGS_WIDTH 520
+#define SETTINGS_WIDTH 700
+#define SETTINGS_HEIGHT 520
+#define SETTINGS_SIDE_MOST 170 // the groups' column, a third of the window at most
+#define SETTINGS_SIDE_LEAST 88
+#define SETTINGS_GROUP_ROW 34  // a group in that column
+#define SETTINGS_GUTTER 14     // between the column and the rows
+#define SETTINGS_MENU_ITEM 30  // a choice in the list a choice row opens
+#define SETTINGS_MENU_PAD 6    // above the first and under the last
+#define SETTINGS_MENU_LEAST 140 // the list's width, at least
 #define SETTINGS_TOP 60     // the title's band
 #define SETTINGS_HEADER 34  // a section's header over its card
 #define SETTINGS_GAP 10     // under a card
@@ -402,18 +439,15 @@ static b32 settings_word(const char address_to words, positive index, char addre
 }
 
 /*
-        What a switch, a choice or a step goes to from value, one way (1) or
-        the other (-1): a switch to the other of on and off (2 throws it on
-        and -2 off, whatever it said), a choice to the next or the last of
-        its words (from a value that is none of them, to the first or the
-        last), a step to its word for that way.
+        What a switch or a step goes to from value, one way (1) or the other
+        (-1): a switch to the other of on and off (2 throws it on and -2
+        off, whatever it said), a step to its word for that way. A choice is
+        not moved this way: it opens a list of its words, and a word of it is
+        what it goes to.
 */
 static fn settings_next(const struct settings_row address_to row, const char address_to value, int way, char address_to into,
                         positive room)
 {
-        char word[SETTINGS_VALUE];
-        positive count = 0, at;
-
         into[0] = 0;
         if (row->kind == SETTINGS_SWITCH)
         {
@@ -429,18 +463,6 @@ static fn settings_next(const struct settings_row address_to row, const char add
                 settings_word(row->choices, way > 0 ? 1 : 0, into, room);
                 return;
         }
-        if (row->kind != SETTINGS_CHOICE)
-                return;
-
-        while (settings_word(row->choices, count, word, sizeof(word)))
-                count++;
-        if (!count)
-                return;
-        for (at = 0; at < count; at++)
-                if (settings_word(row->choices, at, word, sizeof(word)) && string_equals((string_address)word, (string_address)value))
-                        break;
-        at = at == count ? (way > 0 ? count - 1 : 0) : at;
-        settings_word(row->choices, (at + count + (way > 0 ? 1 : count - 1)) % count, into, room);
 }
 
 /*
@@ -515,6 +537,11 @@ static struct
         int top[SETTINGS_ALL];
         int content;            // how tall the list is
         int focus, editing, scroll;
+        int group, group_scroll; // the group whose rows are at the right, and how far the column of groups is scrolled
+        b32 pane;                // where the keys are: 0 the column of groups, 1 the rows
+
+        // The list a choice opens: its row (none is -1), the choice the keys are on, the first in view, how many, how wide.
+        int menu, menu_at, menu_top, menu_count, menu_width;
         char filter[SETTINGS_FILTER];
         positive filter_length;
         char typed[SETTINGS_TYPED];
@@ -638,6 +665,42 @@ static const char address_to settings_section(int row)
         return row >= SETTINGS_ANY ? SETTINGS_ALL_HEADER : settings_rows[settings_section_start(row)].section;
 }
 
+/*
+        The groups: one for each header the rows start a section under, and
+        All commands last. A group is what the column at the left lists and
+        what the rows at the right are of.
+*/
+static int settings_groups(void)
+{
+        int count = 1;
+
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                count += settings_rows[at].section != null;
+        return count;
+}
+
+static const char address_to settings_group_name(int group)
+{
+        int seen = 0;
+
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].section && seen++ == group)
+                        return settings_rows[at].section;
+        return SETTINGS_ALL_HEADER;
+}
+
+// The group a row is in.
+static int settings_group_of(int row)
+{
+        int group = -1;
+
+        if (row >= SETTINGS_ANY)
+                return settings_groups() - 1;
+        for (int at = 0; at <= row; at++)
+                group += settings_rows[at].section != null;
+        return group;
+}
+
 // Where a row is in the rows that show, or -1.
 static int settings_pos(int row)
 {
@@ -703,6 +766,87 @@ static int settings_list_bottom(void)
         return settings.height - settings_px(SETTINGS_FOOT);
 }
 
+// The column of groups at the left: a third of the window, between a least and a most, and never more than half of it.
+static int settings_side(void)
+{
+        int side = settings.width * 30 / 100;
+
+        side = side < settings_px(SETTINGS_SIDE_LEAST) ? settings_px(SETTINGS_SIDE_LEAST) : side;
+        side = side > settings_px(SETTINGS_SIDE_MOST) ? settings_px(SETTINGS_SIDE_MOST) : side;
+        return side > settings.width / 2 ? settings.width / 2 : side;
+}
+
+// Where the rows are: from after the column to the window's margin.
+static int settings_pane_left(void)
+{
+        return settings_px(UI_PAD) + settings_side() + settings_px(SETTINGS_GUTTER);
+}
+
+static int settings_pane_right(void)
+{
+        return settings.width - settings_px(UI_PAD);
+}
+
+// How tall the column of groups is, and how far it can be scrolled.
+static int settings_side_height(void)
+{
+        return settings_groups() * settings_px(SETTINGS_GROUP_ROW);
+}
+
+static fn settings_side_scroll_to(int scroll)
+{
+        int most = settings_side_height() - (settings_list_bottom() - settings_list_top());
+
+        most = most < 0 ? 0 : most;
+        scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
+        if (scroll != settings.group_scroll)
+        {
+                settings.group_scroll = scroll;
+                settings.dirty = true;
+        }
+}
+
+// The chosen group kept in sight in a column that does not fit.
+static fn settings_side_reveal(void)
+{
+        int top = settings.group * settings_px(SETTINGS_GROUP_ROW), height = settings_px(SETTINGS_GROUP_ROW);
+        int room = settings_list_bottom() - settings_list_top();
+
+        if (top < settings.group_scroll)
+                settings_side_scroll_to(top);
+        else if (top + height > settings.group_scroll + room)
+                settings_side_scroll_to(top + height - room);
+        else
+                settings_side_scroll_to(settings.group_scroll);
+}
+
+/*
+        text at size cut to room at its end, with "..." in place of what is
+        cut: the text itself when it fits, else fitted, which has room for a
+        value or a label (SETTINGS_VALUE).
+*/
+static string_address settings_fit(struct ui address_to ui, string_address text, int size, int room, char address_to fitted,
+                                   positive capacity)
+{
+        positive length = string_length(text);
+
+        if (ui_measure(ui, text, size, false) <= room)
+                return text;
+        string_copy_bounded((string_address)fitted, text, capacity);
+        while (length > 1)
+        {
+                length--;
+                while (length > 1 && (((unsigned char)fitted[length]) & 0xc0) == 0x80)
+                        length--;
+                fitted[length] = 0;
+                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
+                if (ui_measure(ui, (string_address)fitted, size, false) <= room)
+                        break;
+                fitted[length] = 0;
+        }
+        return (string_address)fitted;
+}
+
 // How tall what scrolls is: the list, or the card of what a command said.
 static int settings_extent(void)
 {
@@ -751,10 +895,13 @@ static fn settings_refilter(void)
 {
         positive count = 0;
 
+        // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
         for (positive row = 0; row < settings_rows_count(); row++)
-                if (settings_matches((int)row))
+                if (settings.filter_length ? settings_matches((int)row) : settings_group_of((int)row) == settings.group)
                         settings.visible[count++] = (unsigned short)row;
         settings.visible_count = count;
+        if (settings.menu >= 0 && settings_pos(settings.menu) < 0)
+                settings.menu = -1;
         if (settings_pos(settings.focus) < 0 && count)
                 settings.focus = settings.visible[0];
         settings_layout();
@@ -1435,6 +1582,219 @@ static b32 settings_stop(void)
         return true;
 }
 
+/* ---- the list a choice opens ---- */
+
+/*
+        A choice row opens a list of all its choices under it, the one it
+        has now lit and the keys on it. The list takes every key and every
+        press until it is closed: Up, Down, Home, End, Page Up and Page Down
+        move the keys, a letter goes to the next choice that starts with it,
+        Enter or Space (or a press on a choice) sets the choice the keys
+        are on and closes it, Escape (or a press anywhere else) closes it
+        and leaves the row as it was, and the wheel scrolls it.
+*/
+
+// How many choices a row has.
+static positive settings_options(const struct settings_row address_to row)
+{
+        char word[SETTINGS_VALUE];
+        positive count = 0;
+
+        while (settings_word(row->choices, count, word, sizeof(word)))
+                count++;
+        return count;
+}
+
+static fn settings_menu_close(void)
+{
+        if (settings.menu < 0)
+                return;
+        settings.menu = -1;
+        settings_say((string_address) "");
+        settings.dirty = true;
+}
+
+/*
+        Where the list is: x, y, width, height, and how many choices show.
+        Under its row, right edges together, or over it when there is more
+        room there; a list taller than either is cut and scrolls. False
+        when its row is not in view.
+*/
+static b32 settings_menu_box(int address_to x, int address_to y, int address_to width, int address_to height, int address_to shown)
+{
+        int pos = settings_pos(settings.menu), item = settings_px(SETTINGS_MENU_ITEM), pad = settings_px(SETTINGS_MENU_PAD);
+        int row_top, below, above, most, count = settings.menu_count;
+
+        if (pos < 0)
+                return false;
+        row_top = settings_list_top() + settings.top[pos] - settings.scroll;
+        below = settings.height - settings_px(8) - (row_top + settings_px(UI_ROW) - settings_px(4));
+        above = row_top + settings_px(4) - settings_px(8);
+        // Under the row, or over it when there is more room there; with room on neither side for all of it, slid up over
+        // the row when it fits the window so, and else cut to the larger side.
+        most = (below >= above ? below : above) - 2 * pad;
+        most = most / item < 1 ? 1 : most / item;
+        if (count > most && count * item + 2 * pad <= settings.height - settings_px(16))
+                most = count;
+        address_to shown = count < most ? count : most;
+        address_to height = address_to shown * item + 2 * pad;
+        address_to width = settings.menu_width > settings.width - settings_px(16) ? settings.width - settings_px(16) : settings.menu_width;
+        address_to x = settings_pane_right() - settings_px(14) - address_to width;
+        address_to x = address_to x < settings_px(8) ? settings_px(8) : address_to x;
+        if (address_to height <= below)
+                address_to y = row_top + settings_px(UI_ROW) - settings_px(4);
+        else if (address_to height <= above)
+                address_to y = row_top + settings_px(4) - address_to height;
+        else
+        {
+                address_to y = settings.height - settings_px(8) - address_to height;
+                address_to y = address_to y < settings_px(8) ? settings_px(8) : address_to y;
+        }
+        return true;
+}
+
+// The choice under a point of the window, or -1.
+static int settings_menu_item(int px, int py)
+{
+        int x, y, width, height, shown, item = settings_px(SETTINGS_MENU_ITEM);
+
+        if (settings.menu < 0 || !settings_menu_box(&x, &y, &width, &height, &shown) || px < x || px >= x + width ||
+            py < y + settings_px(SETTINGS_MENU_PAD) || py >= y + height - settings_px(SETTINGS_MENU_PAD))
+                return -1;
+        return settings.menu_top + (py - y - settings_px(SETTINGS_MENU_PAD)) / item;
+}
+
+// The first choice in view moved to where the keys' choice shows, or by a wheel's steps.
+static fn settings_menu_scroll(int top)
+{
+        int x, y, width, height, shown, most;
+
+        if (!settings_menu_box(&x, &y, &width, &height, &shown))
+                return;
+        most = settings.menu_count - shown;
+        settings.menu_top = top > most ? most : top < 0 ? 0 : top;
+        // The keys' choice stays in view.
+        if (settings.menu_at < settings.menu_top)
+                settings.menu_at = settings.menu_top;
+        else if (settings.menu_at >= settings.menu_top + shown)
+                settings.menu_at = settings.menu_top + shown - 1;
+        settings.dirty = true;
+}
+
+// The keys on choice at, kept in view.
+static fn settings_menu_go(int at)
+{
+        int x, y, width, height, shown;
+
+        at = at < 0 ? 0 : at >= settings.menu_count ? settings.menu_count - 1 : at;
+        settings.menu_at = at;
+        if (settings_menu_box(&x, &y, &width, &height, &shown))
+        {
+                if (at < settings.menu_top)
+                        settings.menu_top = at;
+                else if (at >= settings.menu_top + shown)
+                        settings.menu_top = at - shown + 1;
+        }
+        settings.dirty = true;
+}
+
+static fn settings_menu_open(int row)
+{
+        const struct settings_row address_to which = &settings_rows[row];
+        char word[SETTINGS_VALUE];
+        int widest = 0;
+
+        settings.menu = row;
+        settings.focus = row;
+        settings.menu_count = (int)settings_options(which);
+        settings.menu_at = 0;
+        settings.menu_top = 0;
+        for (int at = 0; settings_word(which->choices, (positive)at, word, sizeof(word)); at++)
+        {
+                int wide = ui_measure(&settings.ui, (string_address)word, UI_TEXT, false);
+
+                widest = wide > widest ? wide : widest;
+                // The one the row has now is where the keys start; a value that is none of them starts at the first.
+                if (string_equals((string_address)word, (string_address)settings.value[row]))
+                        settings.menu_at = at;
+        }
+        settings.menu_width = widest + settings_px(12 + 6 + 10 + 18);
+        settings.menu_width = settings.menu_width < settings_px(SETTINGS_MENU_LEAST) ? settings_px(SETTINGS_MENU_LEAST) : settings.menu_width;
+        settings_reveal();
+        settings_menu_go(settings.menu_at);
+        settings_say((string_address) "Up and Down choose, Enter sets it, Escape leaves it");
+        settings.dirty = true;
+}
+
+// The choice the keys are on, set, and the list closed; a choice the row has already sends nothing.
+static fn settings_menu_apply(int at)
+{
+        const struct settings_row address_to which = &settings_rows[settings.menu];
+        char word[SETTINGS_VALUE];
+        int row = settings.menu;
+
+        settings_menu_close();
+        if (settings_word(which->choices, (positive)at, word, sizeof(word)) &&
+            !string_equals((string_address)word, (string_address)settings.value[row]))
+                settings_change(row, word);
+}
+
+// A key with the list open.
+static fn settings_menu_key(const struct window_event address_to event)
+{
+        int x, y, width, height, shown = 1;
+        unsigned int c = (unsigned int)event->b;
+
+        settings_menu_box(&x, &y, &width, &height, &shown);
+        switch (event->a)
+        {
+        case SETTINGS_KEY_ESCAPE:
+                settings_menu_close();
+                return;
+        case SETTINGS_KEY_ENTER:
+        case SETTINGS_KEY_ENTER_PAD:
+        case SETTINGS_KEY_SPACE:
+                settings_menu_apply(settings.menu_at);
+                return;
+        case SETTINGS_KEY_UP:
+                settings_menu_go(settings.menu_at - 1);
+                return;
+        case SETTINGS_KEY_DOWN:
+                settings_menu_go(settings.menu_at + 1);
+                return;
+        case SETTINGS_KEY_HOME:
+                settings_menu_go(0);
+                return;
+        case SETTINGS_KEY_END:
+                settings_menu_go(settings.menu_count - 1);
+                return;
+        case SETTINGS_KEY_PAGE_UP:
+                settings_menu_go(settings.menu_at - shown);
+                return;
+        case SETTINGS_KEY_PAGE_DOWN:
+                settings_menu_go(settings.menu_at + shown);
+                return;
+        }
+        // A letter or a digit: the next choice after the keys' that starts with it, round to the first.
+        if (c > ' ' && c < 0x7f && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
+        {
+                const struct settings_row address_to which = &settings_rows[settings.menu];
+                char word[SETTINGS_VALUE];
+
+                c = c >= 'A' && c <= 'Z' ? c + 32 : c;
+                for (int step = 1; step <= settings.menu_count; step++)
+                {
+                        int at = (settings.menu_at + step) % settings.menu_count;
+
+                        if (settings_word(which->choices, (positive)at, word, sizeof(word)) && (unsigned char)word[0] == c)
+                        {
+                                settings_menu_go(at);
+                                return;
+                        }
+                }
+        }
+}
+
 // A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
 static fn settings_activate(int row, int way)
 {
@@ -1463,6 +1823,9 @@ static fn settings_activate(int row, int way)
                 settings.editing = row;
                 string_copy_bounded((string_address)settings.typed, (string_address)settings.value[row], sizeof(settings.typed));
                 settings.dirty = true;
+                return;
+        case SETTINGS_CHOICE:
+                settings_menu_open(row);
                 return;
         case SETTINGS_ACTION:
                 // A set asked for while one is running or waiting is that set: the clock is set once for it.
@@ -1496,6 +1859,43 @@ static fn settings_move(int by)
                         settings_say((string_address) "");
         }
         settings_reveal();
+}
+
+/*
+        The rows of another group at the right, as the column of groups is
+        moved: what is typed is cleared (it listed the rows of every group),
+        and the focus goes to the first row, which is where the keys go
+        when the rows are entered.
+*/
+static fn settings_group_choose(int group)
+{
+        int last = settings_groups() - 1, before = settings.group;
+        b32 typed = settings.filter_length != 0;
+
+        group = group < 0 ? 0 : group > last ? last : group;
+        if (group == before && !typed)
+                return;
+        settings.group = group;
+        settings.filter[0] = 0;
+        settings.filter_length = 0;
+        settings.scroll = 0;
+        settings.confirm = 0;
+        settings_refilter();
+        if (settings.visible_count)
+                settings.focus = settings.visible[0];
+        settings_side_reveal();
+        settings_say((string_address)(settings.focus >= SETTINGS_ANY ? settings_text(settings.focus) : ""));
+        settings.dirty = true;
+}
+
+// The keys go to the rows of the group chosen.
+static fn settings_rows_enter(void)
+{
+        settings.pane = 1;
+        if (settings_pos(settings.focus) < 0 && settings.visible_count)
+                settings.focus = settings.visible[0];
+        settings_reveal();
+        settings.dirty = true;
 }
 
 // A key in a field being typed in: Enter keeps it, Escape leaves it, Backspace takes a character.
@@ -1585,14 +1985,20 @@ static fn settings_filter_key(const struct window_event address_to event)
                 settings.filter[settings.filter_length] = 0;
         }
         settings.scroll = 0;
+        settings.pane = 1;
         settings_refilter();
+        // The keys are on the first row that matches.
+        if (settings.visible_count)
+        {
+                settings.focus = settings.visible[0];
+                settings_reveal();
+        }
 }
 
-// Whether Left and Right mean something on a row: a switch, a choice or a step.
+// Whether Left and Right mean something on a row: a switch is thrown, a step moved.
 static b32 settings_turns(int row)
 {
-        return row < SETTINGS_ANY && (settings_rows[row].kind == SETTINGS_SWITCH || settings_rows[row].kind == SETTINGS_CHOICE ||
-                                      settings_rows[row].kind == SETTINGS_STEP);
+        return row < SETTINGS_ANY && (settings_rows[row].kind == SETTINGS_SWITCH || settings_rows[row].kind == SETTINGS_STEP);
 }
 
 // A key on the card of what a command said: it scrolls, and Escape, Enter, Space or Backspace go back to the list.
@@ -1633,10 +2039,14 @@ static fn settings_card_key(const struct window_event address_to event)
 // A key: false when it closes the window.
 static b32 settings_key(const struct window_event address_to event)
 {
-        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
-
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
+        // The list a choice opened has every key.
+        if (settings.menu >= 0)
+        {
+                settings_menu_key(event);
+                return true;
+        }
         if (settings.editing >= 0)
         {
                 settings_type(event);
@@ -1662,39 +2072,54 @@ static b32 settings_key(const struct window_event address_to event)
                         return true;
                 }
                 return settings_stop();
-        case SETTINGS_KEY_UP:
-                settings_move(-1);
-                break;
-        case SETTINGS_KEY_DOWN:
-                settings_move(1);
-                break;
         case SETTINGS_KEY_TAB:
-                settings_move(shift ? -1 : 1);
+                // Between the column of groups and the rows, whichever row or group is there.
+                settings.pane = !settings.pane;
+                if (settings.pane)
+                        settings_rows_enter();
+                settings.dirty = true;
                 break;
+        case SETTINGS_KEY_UP:
+        case SETTINGS_KEY_DOWN:
         case SETTINGS_KEY_HOME:
-                settings_move(-(int)settings.visible_count);
-                break;
         case SETTINGS_KEY_END:
-                settings_move((int)settings.visible_count);
-                break;
         case SETTINGS_KEY_PAGE_UP:
-                settings_move(-5);
-                break;
         case SETTINGS_KEY_PAGE_DOWN:
-                settings_move(5);
+        {
+                int whole = (int)settings.visible_count, by;
+
+                by = event->a == SETTINGS_KEY_UP ? -1 : event->a == SETTINGS_KEY_DOWN ? 1 : event->a == SETTINGS_KEY_HOME ? -whole
+                     : event->a == SETTINGS_KEY_END ? whole : event->a == SETTINGS_KEY_PAGE_UP ? -5 : 5;
+                if (settings.pane)
+                        settings_move(by);
+                else
+                        settings_group_choose(event->a == SETTINGS_KEY_HOME ? 0
+                                              : event->a == SETTINGS_KEY_END ? settings_groups() - 1
+                                                                             : settings.group + (by < 0 ? -1 : 1) * (by > 1 || by < -1 ? 3 : 1));
                 break;
+        }
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
         case SETTINGS_KEY_SPACE:
-                if (settings_pos(settings.focus) >= 0)
+                if (!settings.pane)
+                        settings_rows_enter();
+                else if (settings_pos(settings.focus) >= 0)
                         settings_activate(settings.focus, 1);
                 break;
         case SETTINGS_KEY_LEFT:
-                if (settings_turns(settings.focus))
+                // A switch or a step is turned; on any other row Left goes back to the groups.
+                if (settings.pane && settings_turns(settings.focus))
                         settings_activate(settings.focus, settings_rows[settings.focus].kind == SETTINGS_SWITCH ? -2 : -1);
+                else if (settings.pane)
+                {
+                        settings.pane = 0;
+                        settings.dirty = true;
+                }
                 break;
         case SETTINGS_KEY_RIGHT:
-                if (settings_turns(settings.focus))
+                if (!settings.pane)
+                        settings_rows_enter();
+                else if (settings_turns(settings.focus))
                         settings_activate(settings.focus, settings_rows[settings.focus].kind == SETTINGS_SWITCH ? 2 : 1);
                 break;
         default:
@@ -1708,13 +2133,23 @@ static int settings_hit(int x, int y)
 {
         int list = y - settings_list_top() + settings.scroll;
 
-        if (y < settings_list_top() || y >= settings_list_bottom() || x < settings_px(UI_PAD) ||
-            x >= settings.width - settings_px(UI_PAD))
+        if (y < settings_list_top() || y >= settings_list_bottom() || x < settings_pane_left() || x >= settings_pane_right())
                 return -1;
         for (positive at = 0; at < settings.visible_count; at++)
                 if (list >= settings.top[at] && list < settings.top[at] + settings_px(UI_ROW))
                         return settings.visible[at];
         return -1;
+}
+
+// The group under a point of the window, or -1.
+static int settings_group_hit(int x, int y)
+{
+        int group = (y - settings_list_top() + settings.group_scroll) / settings_px(SETTINGS_GROUP_ROW);
+
+        if (y < settings_list_top() || y >= settings_list_bottom() || x < settings_px(UI_PAD) ||
+            x >= settings_px(UI_PAD) + settings_side() || group >= settings_groups())
+                return -1;
+        return group;
 }
 
 static b32 settings_event(const struct window_event address_to event)
@@ -1724,19 +2159,51 @@ static b32 settings_event(const struct window_event address_to event)
         case WINDOW_EVENT_KEY:
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
+        {
+                int over;
+
                 settings.pointer_x = event->a;
                 settings.pointer_y = event->b;
+                // The pointer over a choice of the list puts the keys' choice there.
+                over = settings.menu >= 0 ? settings_menu_item(event->a, event->b) : -1;
+                if (over >= 0 && over != settings.menu_at && over < settings.menu_count)
+                {
+                        settings.menu_at = over;
+                        settings.dirty = true;
+                }
                 break;
+        }
         case WINDOW_EVENT_BUTTON:
         {
                 int row;
 
                 if (!(event->flags & WINDOW_KEY_DOWN) || event->a != SETTINGS_BUTTON_LEFT)
                         break;
+                // A press on a choice of the list sets it; a press anywhere else only closes the list.
+                if (settings.menu >= 0)
+                {
+                        int chosen = settings_menu_item(settings.pointer_x, settings.pointer_y);
+
+                        if (chosen >= 0 && chosen < settings.menu_count)
+                                settings_menu_apply(chosen);
+                        else
+                                settings_menu_close();
+                        break;
+                }
                 // A press on the card of what a command said is done with it.
                 if (settings.view)
                 {
                         settings_card_leave();
+                        break;
+                }
+                // A press on a group chooses it; the keys are then in the column, and Enter goes to its rows.
+                row = settings_group_hit(settings.pointer_x, settings.pointer_y);
+                if (row >= 0)
+                {
+                        settings.editing = -1;
+                        settings.pane = 0;
+                        settings_group_choose(row);
+                        settings.dirty = true;
                         break;
                 }
                 row = settings_hit(settings.pointer_x, settings.pointer_y);
@@ -1756,21 +2223,34 @@ static b32 settings_event(const struct window_event address_to event)
                                 settings_say((string_address) "");
                 }
                 settings.focus = row;
+                settings.pane = 1;
                 settings.dirty = true;
                 if (settings.editing != row)
                 {
-                        // A step or a choice pressed left of its value's middle goes back.
-                        int middle = settings.width - settings_px(UI_PAD + 14 + 40);
-                        unsigned char kind = settings_kind(row);
+                        // A step pressed left of its value's middle goes back.
+                        int middle = settings_pane_right() - settings_px(14 + 40);
 
-                        settings_activate(row, (kind == SETTINGS_STEP || kind == SETTINGS_CHOICE) && settings.pointer_x < middle
-                                                   ? -1
-                                                   : 1);
+                        settings_activate(row, settings_kind(row) == SETTINGS_STEP && settings.pointer_x < middle ? -1 : 1);
                 }
                 break;
         }
         case WINDOW_EVENT_WHEEL:
-                if (!event->b)
+                // The list scrolls under the wheel, and nothing else does while it is open.
+                if (settings.menu >= 0)
+                {
+                        if (!event->b)
+                        {
+                                // A notch is 120; a smaller turn is still a step.
+                                int notches = event->a / 120 ? event->a / 120 : event->a > 0 ? 1 : event->a < 0 ? -1 : 0;
+
+                                settings_menu_scroll(settings.menu_top - notches);
+                        }
+                        break;
+                }
+                // The column of groups or the rows, whichever is under the pointer; a card has all the window.
+                if (!event->b && !settings.view && settings.pointer_x < settings_pane_left() - settings_px(SETTINGS_GUTTER) / 2)
+                        settings_side_scroll_to(settings.group_scroll - event->a * settings_px(SETTINGS_GROUP_ROW) / 120);
+                else if (!event->b)
                         settings_scroll_to((settings.view ? settings.card_scroll : settings.scroll) -
                                            event->a * settings_px(UI_ROW) / 120);
                 break;
@@ -1783,16 +2263,17 @@ static b32 settings_event(const struct window_event address_to event)
 static fn settings_draw_row(struct ui address_to ui, int at, int y)
 {
         const struct settings_row address_to row = at < SETTINGS_ANY ? &settings_rows[at] : null;
-        int left = settings_px(UI_PAD), right = settings.width - settings_px(UI_PAD), inset = settings_px(14);
+        int left = settings_pane_left(), right = settings_pane_right(), inset = settings_px(14);
         int height = settings_px(UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT);
+        char cut[SETTINGS_VALUE];
         unsigned int state = row ? settings.state[at] : SETTINGS_READ;
         b32 usable = state == SETTINGS_READ || state == SETTINGS_FAILED;
         string_address shown = row ? (string_address)settings.value[at] : (string_address) "";
         int wide;
 
-        if (at == settings.focus)
+        if (at == settings.focus && (settings.pane || settings.filter_length))
                 ui_focus(ui, left + settings_px(3), y + settings_px(2), right - left - settings_px(6), height - settings_px(4),
-                         settings.focused);
+                         settings.focused && settings.pane);
 
         // A command being typed: its verb at the left, and the field after it for what follows.
         if (!row && at == settings.editing)
@@ -1808,7 +2289,9 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
                 }
                 else
                         string_copy_bounded((string_address)head, (string_address) "moonwater", sizeof(head));
-                wide = ui_text(ui, left + inset, baseline, (string_address)head, UI_TEXT, false, ui->ink, 255);
+                wide = ui_text(ui, left + inset, baseline,
+                               settings_fit(ui, (string_address)head, UI_TEXT, (right - left) / 3, cut, sizeof(cut)), UI_TEXT, false,
+                               ui->ink, 255);
                 x = left + inset + wide + settings_px(10);
                 width = right - inset - x;
                 if (width < settings_px(100))
@@ -1829,12 +2312,20 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
                 return;
         }
 
-        wide = ui_text(ui, left + inset, baseline, (string_address)settings_label(at), UI_TEXT, false, ui->ink, usable ? 255 : 130);
+        // A label leaves its value a third of the row at least: a long one is cut, and the value is not.
+        {
+                int room = right - left - 2 * inset - (row && row->kind == SETTINGS_SWITCH ? settings_px(UI_SWITCH_W) : (right - left) / 3);
+
+                wide = ui_text(ui, left + inset, baseline,
+                               settings_fit(ui, (string_address)settings_label(at), UI_TEXT, room < settings_px(40) ? settings_px(40) : room,
+                                            cut, sizeof(cut)),
+                               UI_TEXT, false, ui->ink, usable ? 255 : 130);
+        }
 
         if (!row)
         {
                 if (settings_row_asks(at))
-                        ui_value(ui, right - inset, baseline, (string_address) "asks first", false, true);
+                        ui_value(ui, right - inset, baseline, (string_address) "asks first", UI_VALUE_PLAIN, true);
                 return;
         }
 
@@ -1861,37 +2352,46 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         else
         {
                 // A value longer than the room the label leaves is cut at its end and says so.
-                char fitted[SETTINGS_VALUE];
                 int room = right - inset - (left + inset + wide + settings_px(16));
 
-                if (ui_measure(ui, shown, UI_TEXT, false) > room)
-                {
-                        positive length = string_length(shown);
-
-                        string_copy_bounded((string_address)fitted, shown, sizeof(fitted));
-                        while (length > 1)
-                        {
-                                length--;
-                                while (length > 1 && (((unsigned char)fitted[length]) & 0xc0) == 0x80)
-                                        length--;
-                                fitted[length] = 0;
-                                string_append_bounded((string_address)fitted, (string_address) "...", sizeof(fitted));
-                                if (ui_measure(ui, (string_address)fitted, UI_TEXT, false) <= room)
-                                        break;
-                                fitted[length] = 0;
-                        }
-                        shown = (string_address)fitted;
-                }
-                ui_value(ui, right - inset, baseline, shown, state == SETTINGS_READ &&
-                                                                 (row->kind == SETTINGS_CHOICE || row->kind == SETTINGS_STEP),
+                shown = settings_fit(ui, shown, UI_TEXT, room, cut, sizeof(cut));
+                ui_value(ui, right - inset, baseline, shown,
+                         state != SETTINGS_READ ? UI_VALUE_PLAIN : row->kind == SETTINGS_CHOICE ? UI_VALUE_LIST
+                                                                  : row->kind == SETTINGS_STEP   ? UI_VALUE_STEP
+                                                                                                 : UI_VALUE_PLAIN,
                          usable);
         }
 }
 
 // The list: the rows that show, a header to a section, drawn where they are in view.
+// The column of groups at the left: the chosen one lit, the rest plain on the glass.
+static fn settings_draw_side(struct ui address_to ui)
+{
+        int left = settings_px(UI_PAD), width = settings_side(), height = settings_px(SETTINGS_GROUP_ROW);
+        int inset = settings_px(12);
+        char cut[SETTINGS_VALUE];
+
+        ui->top = settings_list_top();
+        ui->bottom = settings_list_bottom();
+        for (int group = 0; group < settings_groups(); group++)
+        {
+                int y = settings_list_top() + group * height - settings.group_scroll;
+                // What is typed lists the rows of every group, so none is the chosen one.
+                b32 chosen = group == settings.group && !settings.filter_length;
+
+                if (y + height <= ui->top || y >= ui->bottom)
+                        continue;
+                if (chosen)
+                        ui_focus(ui, left, y + settings_px(2), width, height - settings_px(4), settings.focused && !settings.pane);
+                ui_text(ui, left + inset, ui_baseline(ui, y, height, UI_TEXT),
+                        settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT, width - 2 * inset, cut, sizeof(cut)),
+                        UI_TEXT, chosen, ui->ink, chosen ? 255 : 210);
+        }
+}
+
 static fn settings_draw_list(struct ui address_to ui)
 {
-        int left = settings_px(UI_PAD);
+        int left = settings_pane_left();
         int list_top = settings_list_top(), list_bottom = settings_list_bottom();
         positive at = 0;
 
@@ -1991,6 +2491,39 @@ static fn settings_draw_foot(struct ui address_to ui, int top)
                 UI_SMALL, false, ui->quiet, 255);
 }
 
+// The list a choice opened, over everything else: the choices in view, the keys' lit, the value's dotted.
+static fn settings_draw_menu(struct ui address_to ui)
+{
+        int x, y, width, height, shown, item = settings_px(SETTINGS_MENU_ITEM), pad = settings_px(SETTINGS_MENU_PAD);
+        const struct settings_row address_to which = &settings_rows[settings.menu];
+        char word[SETTINGS_VALUE];
+
+        if (!settings_menu_box(&x, &y, &width, &height, &shown))
+                return;
+        ui->top = 0;
+        ui->bottom = settings.height;
+        ui_menu(ui, x, y, width, height);
+        for (int at = 0; at < shown; at++)
+        {
+                int which_at = settings.menu_top + at;
+
+                if (!settings_word(which->choices, (positive)which_at, word, sizeof(word)))
+                        break;
+                ui_option(ui, x + settings_px(4), y + pad + at * item, width - settings_px(8), item, (string_address)word,
+                          which_at == settings.menu_at,
+                          string_equals((string_address)word, (string_address)settings.value[settings.menu]));
+        }
+        // More choices than show: a thin mark at the right edge, where the view is among them.
+        if (settings.menu_count > shown)
+        {
+                int track = height - 2 * pad, bar = track * shown / settings.menu_count;
+
+                bar = bar < settings_px(10) ? settings_px(10) : bar;
+                ui_round(ui, x + width - settings_px(5), y + pad + (track - bar) * settings.menu_top / (settings.menu_count - shown),
+                         settings_px(2), bar, settings_px(1), ui_tone(ui->ink, 110));
+        }
+}
+
 static fn settings_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &settings.ui;
@@ -2021,9 +2554,14 @@ static fn settings_draw(unsigned int address_to pixels)
         if (settings.view)
                 settings_draw_card(ui);
         else
+        {
+                settings_draw_side(ui);
                 settings_draw_list(ui);
+        }
 
         settings_draw_foot(ui, list_bottom);
+        if (settings.menu >= 0)
+                settings_draw_menu(ui);
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
@@ -2143,6 +2681,7 @@ static fn settings_size(unsigned int width, unsigned int height)
         }
         settings_layout();
         settings_scroll_to(settings.view ? settings.card_scroll : settings.scroll);
+        settings_side_reveal();
         if (settings.view)
                 settings_wrap();
         settings.dirty = true;
@@ -2162,6 +2701,8 @@ static b32 settings_main()
         settings.editing = -1;
         settings.shown = -1;
         settings.output = -1;
+        settings.pane = 1; // the keys start in the rows, on the first of them
+        settings.menu = -1;
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
         {
@@ -2208,7 +2749,7 @@ static b32 settings_main()
         settings.ui.scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
         settings_refilter();
         {
-                int width = settings_px(SETTINGS_WIDTH), height = settings_list_top() + settings.content + settings_px(SETTINGS_FOOT);
+                int width = settings_px(SETTINGS_WIDTH), height = settings_px(SETTINGS_HEIGHT);
                 int room = (int)table->output_height - settings_px(2 * (24 + 24));
 
                 settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));

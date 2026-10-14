@@ -16,9 +16,11 @@
             ring        round the row with the focus, and a field being typed in
 
         The pieces: a title, a section header, a row (a label at the left and
-        its value, a switch or a choice at the right), a switch, a choice, a
-        field to type in, and the ring round whatever has the focus. Rows
-        stand on the glass with space between sections: no box and no rule. Sizes are logical pixels, times the scale
+        its value, a switch or a choice at the right), a switch, a value that
+        is a step or a choice (a chevron), the list a choice opens over the
+        rows, a field to type in, and the ring round whatever has the focus. Rows
+        stand on the glass with space between sections: no box and no rule,
+        and the one panel is the list that floats over them. Sizes are logical pixels, times the scale
         the compositor draws at. Text is font.c's, Inter; a run is drawn as
         coverage into a scratch line and laid over the picture in the ink,
         so it is premultiplied like everything else and the glass shows
@@ -343,17 +345,45 @@ static fn ui_switch(struct ui address_to ui, int right, int middle, b32 on, b32 
                  on ? ui_tone(ui->ground, 255) : ui_tone(ui->ink, 230 * strength / 255));
 }
 
+// What a value says about itself: nothing, that Left and Right move it (a step), or that it opens a list (a choice).
+#define UI_VALUE_PLAIN 0
+#define UI_VALUE_STEP 1
+#define UI_VALUE_LIST 2
+
+/*
+        A chevron pointing down, centred on cx and cy, size to a side: the
+        mark of a value that opens a list of its choices.
+*/
+static fn ui_chevron(struct ui address_to ui, int cx, int cy, int size, unsigned int tone)
+{
+        int thick = ui->scale + 1;
+
+        for (int step = 0; step <= size; step++)
+        {
+                ui_fill(ui, cx - size + step, cy - size / 2 + step, thick, ui->scale, tone);
+                ui_fill(ui, cx + size - step - thick + 1, cy - size / 2 + step, thick, ui->scale, tone);
+        }
+}
+
 /*
         A value at the right of a row, its right edge at right: quiet, and
-        for a choice with the marks that say Left and Right move it. Answers
-        how wide it came to.
+        with marks that say what it is: a step has Left and Right marks
+        round it, a choice a chevron after it. Answers how wide it came to.
 */
-static int ui_value(struct ui address_to ui, int right, int baseline, string_address text, b32 choice, b32 enabled)
+static int ui_value(struct ui address_to ui, int right, int baseline, string_address text, int marks, b32 enabled)
 {
         unsigned int alpha = enabled ? 255 : 120;
         int width = ui_measure(ui, text, UI_TEXT, false), gap = 8 * ui->scale, mark = 0;
 
-        if (choice)
+        if (marks == UI_VALUE_LIST)
+        {
+                int size = 4 * ui->scale;
+
+                ui_chevron(ui, right - size, baseline - ui_capital(ui, UI_TEXT) / 2, size, ui_tone(ui->quiet, alpha));
+                ui_text(ui, right - 2 * size - gap - width, baseline, text, UI_TEXT, false, ui->ink, alpha);
+                return width + 2 * size + gap;
+        }
+        if (marks == UI_VALUE_STEP)
         {
                 mark = ui_measure(ui, (string_address) "\xe2\x80\xba", UI_TEXT, true);
                 ui_text(ui, right - mark, baseline, (string_address) "\xe2\x80\xba", UI_TEXT, true, ui->quiet, alpha);
@@ -361,8 +391,39 @@ static int ui_value(struct ui address_to ui, int right, int baseline, string_add
                         ui->quiet, alpha);
                 right -= mark + gap;
         }
-        ui_text(ui, right - width, baseline, text, UI_TEXT, false, choice ? ui->ink : ui->quiet, alpha);
-        return width + (choice ? 2 * (mark + gap) : 0);
+        ui_text(ui, right - width, baseline, text, UI_TEXT, false, marks ? ui->ink : ui->quiet, alpha);
+        return width + (marks ? 2 * (mark + gap) : 0);
+}
+
+/*
+        The panel of a list that opens over the rows, x, y, width by height:
+        the ground itself, so what is under it does not show through the
+        text, lit a little and with a faint line round it.
+*/
+static fn ui_menu(struct ui address_to ui, int x, int y, int width, int height)
+{
+        int radius = UI_RADIUS * ui->scale;
+
+        ui_round(ui, x, y, width, height, radius, ui_tone(ui->ground, 255));
+        ui_round(ui, x, y, width, height, radius, ui_tone(ui->ink, 22));
+        ui_outline(ui, x, y, width, height, radius, ui->scale, ui_tone(ui->ink, 70));
+}
+
+/*
+        One choice of such a list, x, y, width by height: lit when it is the
+        one the keys are on, a dot before it when it is the value now, its
+        text after, cut to the band's end.
+*/
+static fn ui_option(struct ui address_to ui, int x, int y, int width, int height, string_address text, b32 lit, b32 current)
+{
+        int dot = 6 * ui->scale, inset = 12 * ui->scale;
+
+        if (lit)
+                ui_round(ui, x, y, width, height, (UI_RADIUS - 2) * ui->scale, ui_tone(ui->ink, 56));
+        if (current)
+                ui_round(ui, x + inset, y + (height - dot) / 2, dot, dot, dot / 2, ui_tone(ui->ink, 235));
+        ui_run(ui, x + inset + dot + 10 * ui->scale, ui_baseline(ui, y, height, UI_TEXT), text, UI_TEXT, false, ui->ink, 255,
+               x, x + width - 6 * ui->scale);
 }
 
 /*

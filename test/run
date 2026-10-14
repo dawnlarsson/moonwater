@@ -20904,6 +20904,55 @@ out.append(("S1.5b the filter and the any row run a command typed in the window,
             "%s %s %d" % ("ran" if anyname else "not run", "back" if anyback else shell.run("moonwater name", 10)[0],
                           len(pids("settings"))), "ran back 1"))
 said("S1.5b")
+#   A choice opens a list of its choices: the row is found by what is typed (nts), Enter opens the list, Escape
+#   closes it with the value as it was, a way down it and Enter sets another choice and the command says so, and
+#   the list drawn is on the screen and gone again with it closed.
+words = ["on", "off", "only"]
+had_nts = re.search(r"ntp nts (\w+)", shell.run("moonwater ntp nts", 10)[0])
+had_nts = had_nts.group(1) if had_nts and had_nts.group(1) in words else "on"
+
+def nts_now():
+    found = re.search(r"ntp nts (\w+)", shell.run("moonwater ntp nts", 10)[0])
+    return found.group(1) if found else "?"
+
+def differing(one, two):
+    first, second = load(one)[2], load(two)[2]
+    return sum(1 for at in range(0, min(len(first), len(second)) - 2, 6) if first[at:at + 3] != second[at:at + 3])
+
+type_text("nts")
+time.sleep(0.5)
+shot("r1-list-closed", 1)
+key("ret")
+time.sleep(0.5)
+shot("r1-list-open", 1)
+key("end")
+key("esc")
+time.sleep(0.5)
+shot("r1-list-closed-again", 1)
+kept = nts_now()
+other = words[(words.index(had_nts) + 1) % 3]
+key("ret")
+key("home")
+for _ in range(words.index(other)):
+    key("down")
+key("ret")
+set_other, _ = until(lambda: nts_now() == other, 15)
+key("ret")
+key("home")
+for _ in range(words.index(had_nts)):
+    key("down")
+key("ret")
+back_nts, _ = until(lambda: nts_now() == had_nts, 15)
+key("esc")
+time.sleep(1)
+out.append(("S1.5c a choice opens a list on the screen: Escape leaves the value, a way down it and Enter sets another, and back",
+            "%s %s %s %s %d" % ("kept" if kept == had_nts else "moved to " + kept, "set" if set_other else "not set",
+                                "back" if back_nts else "not back", "drawn" if differing("r1-list-closed", "r1-list-open") > 400 and
+                                differing("r1-list-closed", "r1-list-closed-again") < 60 else
+                                "%d/%d" % (differing("r1-list-closed", "r1-list-open"),
+                                           differing("r1-list-closed", "r1-list-closed-again")), len(pids("settings"))),
+            "kept set back drawn 1"))
+said("S1.5c")
 shell.run("moonwater settings", 15)
 time.sleep(2)
 out.append(("S1.6 a second moonwater settings lifts the window that is up and makes no other",
