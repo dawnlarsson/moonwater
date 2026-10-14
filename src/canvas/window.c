@@ -555,6 +555,12 @@ struct windows
         // would not (1 no /dev/udmabuf, 2 udmabuf refused the buffer, 3 the card its import, 4 its framebuffer, 5 a flip;
         // the table is no memfd at 6 memfd_create, 8 its size, 9 its seals, 10 its mode, 11 the link to it).
         unsigned int scanned, refused;
+        // Why the top window was not shown straight at the last present: 0 it was; 1 no card; 2 the table is no memfd;
+        // 3 the pointer is drawn in software; 4 no window, or one dragged or resized; 5 it is glass; 6 it is not at the
+        // size it drew; 7 not wholly on the output; 8 too short past its corners and close button; 9 it meets the
+        // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
+        // refused the overlay's commit.
+        unsigned int unscanned;
         unsigned long pixels;  // where row 0's first buffer is, in bytes from the table
         unsigned long buffer;  // the bytes of one buffer
 

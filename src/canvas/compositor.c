@@ -3991,31 +3991,42 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         struct compositor_frame band;
         int row, bx, by, side, radius, top, bottom;
 
-        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor.cursor.soft ||
-            !windows || compositor.drag >= 0 || compositor.resize >= 0)
-                return -1;
+        unsigned int *why = &compositor.table->unscanned;
+
+        if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd)
+                return *why = compositor.card < 0 ? 1 : compositor.direct_refused ? 11 : 2, -1;
+        if (compositor.cursor.soft)
+                return *why = 3, -1;
+        if (!windows || compositor.drag >= 0 || compositor.resize >= 0)
+                return *why = 4, -1;
         row = rows[windows - 1];
         const struct compositor_frame *frame = &frames[windows - 1];
 
-        if (compositor.table->glass[row] || compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] ||
-            compositor.picture_h[row] != compositor.h[row] || frame->x < 0 || frame->y < 0 ||
-            frame->x + frame->width > compositor.width || frame->y + frame->height > compositor.height)
-                return -1;
+        if (compositor.table->glass[row])
+                return *why = 5, -1;
+        if (compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] ||
+            compositor.picture_h[row] != compositor.h[row])
+                return *why = 6, -1;
+        if (frame->x < 0 || frame->y < 0 || frame->x + frame->width > compositor.width ||
+            frame->y + frame->height > compositor.height)
+                return *why = 7, -1;
         radius = compositor_radius(frame);
         top = frame->y + radius;
         bottom = frame->y + frame->height - radius;
         if (compositor_close_box(frame, &bx, &by, &side))
                 top = by + side > top ? by + side : top;
         if (bottom - top < 64 * compositor.scale)
-                return -1;
+                return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
 
         compositor_band_frame(&band);
         if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] &&
             band.y + band.height > rect[1])
-                return -1;
+                return *why = 9, -1;
         // The card asked last: whether it has an overlay, then the window's framebuffer.
-        return compositor_overlay_ready() && compositor_window_fb(row, compositor.front[row]) ? row : -1;
+        if (!compositor_overlay_ready())
+                return *why = 10, -1;
+        return compositor_window_fb(row, compositor.front[row]) ? row : (*why = 11, -1);
 }
 
 // The damage less the rectangle the overlay shows; false when the pieces do not fit the list, which is then left whole.
@@ -4125,6 +4136,7 @@ static void compositor_present(void)
              compositor_present_direct(direct, frames + windows, count - windows)))
         {
                 // The overlay is the tabs' now, or nothing's.
+                compositor.table->unscanned = 0;
                 compositor.plane_row = -1;
                 compositor.plane_fb = 0;
                 return;
@@ -4171,6 +4183,7 @@ static void compositor_present(void)
                 if (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed))
                 {
                         // Refused: off the overlay for good, and the window composed whole from now.
+                        compositor.table->unscanned = 12;
                         compositor.overlay_state = -1;
                         compositor_overlay_off();
                         compositor.plane_row = compositor.direct_row = -1;
@@ -4179,6 +4192,7 @@ static void compositor_present(void)
                 else
                 {
                         compositor.plane_fb = fb;
+                        compositor.table->unscanned = 0;
                         compositor.plane_row = compositor.direct_row = plane;
                         compositor.direct_buffer = which;
                         memory_copy(compositor.plane_rect, planed, sizeof(planed));
