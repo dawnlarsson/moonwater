@@ -10100,7 +10100,6 @@ b32 shell_call_slot(positive slot, string_address name,
         string_address words[8];
         string_address address_to saved_argv = shell_argv;
         positive saved_argc = shell_argc;
-        positive at;
         b32 status;
 
         if (slot == positive_max)

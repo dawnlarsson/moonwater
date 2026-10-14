@@ -41954,7 +41954,6 @@ static bipolar sort_merge_temporary_some(positive first, positive count,
 static b32 sort_merge_inputs(string_address output)
 {
         positive count = (positive)text_input_count();
-        sort_writer out;
 
         if (!sort_entries_room_for(count))
                 return 2;

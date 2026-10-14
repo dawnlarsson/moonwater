@@ -5569,7 +5569,6 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                 left after that is a suffix it refuses, and each way of
                 failing has its sentence.
         */
-        positive numeric_length = 0;
         positive power = 0;
         positive base = 1;
         positive suffix_bytes = 0;
@@ -5643,7 +5642,6 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
         //      a thousands separator inside it counted.
         fraction_bytes = fraction_from && at > fraction_from ? at - fraction_from : 0;
         canon[canon_length] = end;
-        numeric_length = at;
 
         positive separator_length = numfmt.unit_separator
                                         ? string_length(numfmt.unit_separator) : 0;
@@ -30945,7 +30943,6 @@ static const tools_meta_rule tools_meta_rules[] = {
     {"nohup", "", TOOLS_META_FIRST, 125},
     {"pathchk", "", TOOLS_META_FIRST, 1},
     {"printenv", "", TOOLS_META_FIRST, 2},
-    {"runcon", "rtul", TOOLS_META_FIRST, 125},
     {"seq", "fs", TOOLS_META_FIRST, 1},
     {"stdbuf", "ioe", TOOLS_META_FIRST, 125},
     {"timeout", "ks", TOOLS_META_FIRST, 125},
@@ -30959,12 +30956,8 @@ static const tools_meta_rule tools_meta_rules[] = {
     {"dir", "ITw", TOOLS_META_PERMUTE, 2},
     {"vdir", "ITw", TOOLS_META_PERMUTE, 2},
     {"grep", "efmABCdD", TOOLS_META_PERMUTE, 2},
-    {"egrep", "efmABCdD", TOOLS_META_PERMUTE, 2},
-    {"fgrep", "efmABCdD", TOOLS_META_PERMUTE, 2},
     {"cmp", "in", TOOLS_META_PERMUTE, 2},
     {"diff", "CDFLSUWIxX", TOOLS_META_PERMUTE, 2},
-    {"diff3", "L", TOOLS_META_PERMUTE, 2},
-    {"sdiff", "oIwWFs", TOOLS_META_PERMUTE, 2},
     {"cut", "bcdfFO", TOOLS_META_PERMUTE, 1},
     {"head", "cn", TOOLS_META_PERMUTE, 1},
     {"tail", "cns", TOOLS_META_PERMUTE, 1},
@@ -31017,19 +31010,19 @@ static const tools_meta_rule tools_meta_rules[] = {
         asks this after, for the programs coreutils ships.
 */
 static const string_address tools_coreutils[] = {
-    "b2sum", "base32", "base64", "basename", "basenc", "cat", "chcon", "chgrp",
-    "chmod", "chown", "chroot", "cksum", "comm", "cp", "csplit", "cut", "date",
-    "dd", "df", "dir", "dircolors", "dirname", "du", "echo", "env", "expand",
-    "expr", "factor", "false", "fmt", "fold", "groups", "head", "hostid",
-    "hostname", "id", "install", "join", "kill", "link", "ln", "logname", "ls",
-    "md5sum", "mkdir", "mkfifo", "mknod", "mktemp", "mv", "nice", "nl", "nohup",
-    "nproc", "numfmt", "od", "paste", "pathchk", "pinky", "pr", "printenv",
-    "printf", "ptx", "pwd", "readlink", "realpath", "rm", "rmdir", "runcon",
-    "seq", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum",
-    "shred", "shuf", "sleep", "sort", "split", "stat", "stdbuf", "stty", "sum",
-    "sync", "tac", "tail", "tee", "test", "timeout", "touch", "tr", "true",
-    "truncate", "tsort", "tty", "uname", "unexpand", "uniq", "unlink",
-    "uptime", "users", "vdir", "wc", "who", "whoami", "yes", null};
+    "b2sum", "base32", "base64", "basename", "basenc", "cat", "chgrp", "chmod",
+    "chown", "chroot", "cksum", "comm", "cp", "csplit", "cut", "date", "dd",
+    "df", "dir", "dircolors", "dirname", "du", "env", "expand", "expr",
+    "factor", "false", "fmt", "fold", "groups", "head", "hostid", "hostname",
+    "id", "install", "join", "kill", "link", "ln", "logname", "ls", "md5sum",
+    "mkdir", "mkfifo", "mknod", "mktemp", "mv", "nice", "nl", "nohup", "nproc",
+    "numfmt", "od", "paste", "pathchk", "pinky", "pr", "printenv", "ptx",
+    "readlink", "realpath", "rm", "rmdir", "seq", "sha1sum", "sha224sum",
+    "sha256sum", "sha384sum", "sha512sum", "shred", "shuf", "sleep", "sort",
+    "split", "stat", "stdbuf", "stty", "sum", "sync", "tac", "tail", "tee",
+    "timeout", "touch", "tr", "true", "truncate", "tsort", "tty", "uname",
+    "unexpand", "uniq", "unlink", "users", "vdir", "wc", "who", "whoami", "yes",
+    null};
 
 static b32 tools_stderr_status(string_address name, b32 answered)
 {
@@ -32434,11 +32427,6 @@ static const p8 tools_help_unlink[] =
     "Remove FILE with the unlink call.\n"
     "\n"
     "\002\021\n";
-static const p8 tools_help_uptime[] =
-    "Usage: \001 [OPTION]... [FILE]\n"
-    "Print how long the system has run, the users and the load averages.\n"
-    "\n"
-    "\002\021\n";
 static const p8 tools_help_users[] =
     "Usage: \001 [OPTION]... [FILE]\n"
     "Print the users logged in, from FILE or /var/run/utmp.\n"
@@ -32606,7 +32594,6 @@ static const tools_help_entry tools_help[] = {
     {"unexpand", tools_help_unexpand},
     {"uniq", tools_help_uniq},
     {"unlink", tools_help_unlink},
-    {"uptime", tools_help_uptime},
     {"users", tools_help_users},
     {"vdir", tools_help_ls},
     {"wc", tools_help_wc},

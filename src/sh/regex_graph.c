@@ -1701,57 +1701,11 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
         return true;
 }
 
-/*
-        rx_compile for a caller that compiles above a mark and rewinds to it
-        after every use -- [[ =~ ]] in a loop is the same pattern each time --
-        and so builds the same program over again (5.8 thousand instructions
-        a run). What it built is still standing above the mark until the next
-        compile of any kind, and a compile that has not happened since is a
-        pool nobody has written to: the same pattern under the same terms
-        gets the same program back without a byte of the pool touched.
-*/
-static struct
-{
-        p8 key[256];
-        positive length;
-        p8 extended, icase, escapes, policy, valid;
-        p32 compiles;
-        rx_pool *pool;
-        regex_program program;
-} rx_again;
-
 static bool rx_compile(rx_pool *pool, regex_program *out, string_address pattern,
                        bool extended, bool icase, bool escapes, p8 policy)
 {
         return rx_compile_length(pool, out, pattern, string_length(pattern), extended,
                                  icase, escapes, policy);
-}
-
-static __attribute__((unused)) bool rx_compile_again(rx_pool *pool, regex_program *out, string_address pattern,
-                             positive length, bool extended, bool icase, bool escapes, p8 policy)
-{
-        if (rx_again.valid && rx_again.compiles == rx_compiles && rx_again.pool == pool &&
-            rx_again.length == length && rx_again.extended == extended &&
-            rx_again.icase == icase && rx_again.escapes == escapes &&
-            rx_again.policy == policy && !memory_compare(rx_again.key, pattern, length))
-        {
-                *out = rx_again.program;
-                regex_failure = 0;
-                return true;
-        }
-        bool made = rx_compile_length(pool, out, pattern, length, extended, icase, escapes, policy);
-        rx_again.valid = made && length < sizeof(rx_again.key);
-        if (rx_again.valid)
-        {
-                memory_copy_apart(rx_again.key, pattern, length);
-                rx_again.length = length;
-                rx_again.extended = extended, rx_again.icase = icase;
-                rx_again.escapes = escapes, rx_again.policy = policy;
-                rx_again.compiles = rx_compiles;
-                rx_again.pool = pool;
-                rx_again.program = *out;
-        }
-        return made;
 }
 
 /* Iterative graph execution. Continuations stay immutable while a choice can

@@ -3434,8 +3434,6 @@ static fn pd_trace_relative(pd_parser address_to pc, string_address item)
 
 // ---- The grammar ---------------------------------------------------------
 
-#define PD_FAIL false
-
 static bool pd_apply(pd_parser address_to pc, pd_relative rel, b64 factor)
 {
         bool over;
@@ -6051,9 +6049,7 @@ static positive locale_generation;
 #define LOCALE_TIME_D_T_FMT 40
 #define LOCALE_TIME_D_FMT 41
 #define LOCALE_TIME_T_FMT 42
-#define LOCALE_TIME_T_FMT_AMPM 43
 #define LOCALE_TIME_DATE_FMT 108
-#define LOCALE_TIME_ALT_MON 111
 
 static locale_category locale_categories[LOCALE_CATEGORIES];
 
@@ -12178,7 +12174,6 @@ static fn ls_print_long(string_address directory)
                 ls_frills_before(entry);
 
                 p8 letters[12];
-                p8 who[FILE_NAME_MAX];
 
                 if (!entry->known)
                 {

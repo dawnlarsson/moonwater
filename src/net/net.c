@@ -14042,7 +14042,6 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
                 byte_store_release(address_of fetched);
         for (;;)
         {
-                positive count = 0;
                 positive bytes = fetched.used;
                 tls_crl_held address_to oldest = null;
 
@@ -14056,7 +14055,6 @@ static COLD tls_crl_held address_to tls_crl_get(const p8 address_to url,
                                 slot = slot ? slot : held;
                                 continue;
                         }
-                        count++;
                         bytes += held->crl.used;
                         if (!oldest || held->age < oldest->age)
                                 oldest = held;

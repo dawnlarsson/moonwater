@@ -4110,7 +4110,6 @@ static p32 xz_optimum_next(xz_encoder address_to e, p32 address_to reps, p8 addr
 static fn xz_optimum_normal(xz_encoder address_to e, p32 address_to back_res,
                             p32 address_to len_res, p32 position)
 {
-        xz_optimal address_to opts = e->opts;
 
         if (e->opts_end != e->opts_current)
         {

@@ -2966,9 +2966,8 @@ static fn gzip_plan_counts(p32 address_to lit_freq, p32 address_to dist_freq, po
         p32 address_to cfreq = plan->cfreq;
         positive bits = 0, extra_bits = 0, fixed_bits = 3;
         positive chunks = length ? (length + 65534) / 65535 : 1;
-        positive i, run, nseq;
+        positive i, nseq;
         positive hlit = 286, hdist = 30, hclen = 19;
-        p8 here;
 
         plan->stored = length * 8 + chunks * 40 + ((8 - ((bitn + 3) & 7)) & 7) - 5;
         plan->dynamic = positive_max;
@@ -3074,8 +3073,7 @@ static fn gzip_block_emit(gzip_encoder address_to e, p8 address_to src, positive
         p32 lit_code[GZIP_MAXLIT];
         p32 dist_code[GZIP_MAXDIST];
         p32 ccode[19];
-        positive i, run;
-        p8 here;
+        positive i;
 
         gzip_block_plan(e, length, address_of plan);
         if (plan.stored <= plan.fixed && plan.stored <= plan.dynamic)

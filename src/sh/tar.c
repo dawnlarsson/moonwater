@@ -1131,7 +1131,6 @@ typedef struct
 
 static tar_seen_file address_to tar_seen;
 static positive tar_seen_slots;
-static positive tar_seen_room;
 static p8 address_to tar_seen_names;
 static positive tar_seen_names_room;
 static positive tar_seen_used;
@@ -6084,7 +6083,6 @@ static p64 address_to tar_archived_times;
 static positive address_to tar_archived_offsets;
 static positive tar_archived_count;
 static positive tar_archived_room;
-static bool tar_skip_header;
 static p64 tar_append_end;
 
 static bool tar_archived_note(string_address name, p64 time)

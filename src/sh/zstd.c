@@ -2336,7 +2336,6 @@ static positive zstd_par_scan(zstd_par_run address_to run, p8 address_to base, p
                 zstd_par_block address_to const b = run->block + count;
                 p8 address_to payload;
                 p32 header;
-                positive length;
                 positive used;
 
                 if (address_to at + 3 > size)
