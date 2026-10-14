@@ -29,8 +29,10 @@
         what was read: nothing is started for a key. Nothing here needs more than
         the rights the person has: a program is run as the launcher is.
 
-        Escape, the close button and losing the keys (a press on the desktop, a
-        window raised) close it, as the same chord that opened it does (-x). It is glass
+        Escape, a press anywhere but on it (the desktop, a tab, another window:
+        the compositor asks it to go, WINDOW_DISMISS) and losing the keys close
+        it, as the same chord that opened it does (-x). It has no close button
+        (WINDOW_NO_CLOSE). It is glass
         (window.c, WINDOW_GLASS), drawn with the system's pieces (ui.c) and
         nothing round them: the field is its text and a line under it, the
         rows are their text, and the row with the focus is lit. It is the one
@@ -946,7 +948,7 @@ static b32 launcher_main()
         table->x[row] = ((int)table->output_width - launcher.width) / 2;
         table->y[row] = (int)table->output_height / 3 - launcher_px(UI_PAD) - launcher_px(LAUNCHER_FIELD) / 2;
         string_copy((string_address)table->title[row], (string_address) "Launcher");
-        table->glass[row] = WINDOW_GLASS;
+        table->glass[row] = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS;
         launcher.ground = table->ground[row];
         ui_inks(&launcher.ui, launcher.ground ? launcher.ground : 0x101012u);
         launcher_frame();

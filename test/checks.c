@@ -109109,6 +109109,90 @@ static void check_compositor_look(void)
 }
 
 /*
+        A window that asked for no close button (WINDOW_NO_CLOSE) has none drawn or hit, and one that asked to be put
+        away by a press outside it (WINDOW_DISMISS) is asked to go by a press on the desktop or on another window, and
+        by none inside it.
+*/
+static void check_compositor_dismiss(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct compositor_frame frame;
+    int bx, by, side;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("dismiss: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    table->x[2] = 180;
+    table->y[2] = 140;
+    table->width[2] = 100;
+    table->height[2] = 60;
+    glass_paint(2, 0, 0, 100, 60, 0x404040u, true);
+    compositor_present();
+    compositor_focus(1);
+
+    compositor_frame_of(1, &frame);
+    check("dismiss: a window that asked for none has no close button", !compositor_close_box(&frame, &bx, &by, &side));
+    compositor_frame_of(2, &frame);
+    check("dismiss: and another has one", compositor_close_box(&frame, &bx, &by, &side));
+
+    compositor.pointer_x = 60;
+    compositor.pointer_y = 40;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("dismiss: a press on the window is not asked to go", !(table->state[1] & WINDOW_CLOSING));
+    compositor.pointer_x = 165;
+    compositor.pointer_y = 35;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("dismiss: nor is one on the corner where a close button would be", !(table->state[1] & WINDOW_CLOSING));
+    compositor.pointer_x = 5;
+    compositor.pointer_y = 5;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("dismiss: a press on the empty desktop asks it to go", (table->state[1] & WINDOW_CLOSING) && compositor.focus == 1);
+
+    table->state[1] = compositor.state[1] = 0;
+    compositor_focus(1);
+    compositor.pointer_x = 200;
+    compositor.pointer_y = 160;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("dismiss: and so does one on another window, which has the keys then",
+          (table->state[1] & WINDOW_CLOSING) && !(table->state[2] & WINDOW_CLOSING) && compositor.focus == 2);
+
+    table->state[1] = compositor.state[1] = 0;
+    compositor_focus(2);
+    compositor.pointer_x = 5;
+    compositor.pointer_y = 5;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("dismiss: a window that did not ask is not asked to go by a press elsewhere", !(table->state[1] & WINDOW_CLOSING) && !(table->state[2] & WINDOW_CLOSING));
+}
+
+/*
         The pointer's motion, as a window hears it. A window that said it wants
         none (windows_hover) is told nothing of a motion over it, and the program
         is not woken for it; one held down, or pressed over, is told all the same.
@@ -110853,6 +110937,7 @@ b32 main()
         check_compositor_partial();
         check_compositor_cycle();
         check_compositor_hover();
+        check_compositor_dismiss();
         check_launcher();
         check_compositor_look();
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),

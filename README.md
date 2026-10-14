@@ -89,7 +89,7 @@ the row as it was. Typing filters the rows of
 every group; a command that ends the session or throws away what is kept is run by a
 second Enter.
 
-On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord puts away.
+On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away.
 
 ## Layout
 

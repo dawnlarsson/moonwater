@@ -584,6 +584,10 @@ static inline int window_key(struct window *window, struct window_key *key)
 
 // glass: the window is frosted glass, its buffer premultiplied ARGB over it.
 #define WINDOW_GLASS 1u
+// The glass column's other bits: the window has no close button (none is drawn over it, none is hit), and a press
+// anywhere but on it asks it to go, as the close button would (the launcher has both).
+#define WINDOW_NO_CLOSE 2u
+#define WINDOW_DISMISS 4u
 
 struct windows
 {
@@ -612,7 +616,7 @@ struct windows
         // What the last picture changed: a width of 0 is all of it, and a height of 0 none.
         int damage_x[WINDOWS], damage_y[WINDOWS], damage_width[WINDOWS], damage_height[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
-        unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, read with the first picture
+        unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, WINDOW_NO_CLOSE and WINDOW_DISMISS, read with the first picture
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it

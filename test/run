@@ -21076,10 +21076,20 @@ for by in range(0, oh - 8, 8):
             x1 = max(x1, bx + 8)
             y1 = max(y1, by + 8)
 where = "nothing changed" if x0 is None else "%d-%d,%d-%d of %dx%d" % (x0, x1, y0, y1, ow, oh)
+ow_mid, oh_mid = ((x0 + x1) // 2, y0 + 78) if x0 is not None else (1280, 400)
 middle = x0 is not None and abs((x0 + x1) / 2 - ow / 2) < ow * 0.03 and oh * 0.15 < y0 < oh * 0.40 and (x1 - x0) > ow * 0.1
 out.append(("L1.2 Super and Space open one launcher, a bar in the middle a third of the way down",
             "%s %s" % ("opened" if opened else "not up", "centred" if middle else where), "opened centred"))
 said("L1.2")
+#   No close button: the corner of the bar where the compositor draws it on every other window has no bright pixel.
+bright = 0
+if x0 is not None:
+    for y in range(y0 + 4, y0 + 26):
+        for x in range(x1 - 30, x1 - 4):
+            o = (y * ow + x) * 3
+            bright += sum(after[o:o + 3]) > 450
+out.append(("L1.2b the launcher has no close button drawn over its corner", "none" if not bright else "%d bright pixels" % bright, "none"))
+said("L1.2b")
 super_space()
 until(launcher_up, 10)
 time.sleep(1)
@@ -21153,11 +21163,22 @@ time.sleep(1)
 shell.run("/launcher -f /usr/share/fonts/inter/Inter-Regular.ttf > /dev/null 2>&1", 20)
 time.sleep(1)
 lifted = len(pids("launcher"))
+#   A press inside the bar (on its field, away from the rows) leaves it up; one on the empty desktop, above the windows at the
+#   top right, puts it away at once, and so does one on another window.
+click(ow_mid, oh_mid - 40)
+time.sleep(1)
+inside = len(pids("launcher"))
+click(2450, 15)
+closed_desktop, _ = until(lambda: not pids("launcher"), 10)
+super_space()
+until(launcher_up, 10)
+time.sleep(1)
 click(120, 120)
-closed_click, _ = until(lambda: not pids("launcher"), 10)
-out.append(("L1.7 Escape, the same chord and a click on the desktop each put it away, and a second start makes no other",
-            "%s %s %s %d" % ("escape" if closed_escape else "open", "chord" if closed_chord else "open", "click" if closed_click else "open", lifted),
-            "escape chord click 1"))
+closed_window, _ = until(lambda: not pids("launcher"), 10)
+out.append(("L1.7 Escape, the same chord and a press on the empty desktop or on another window each put it away, a press inside it does not, and a second start makes no other",
+            "%s %s %s %s %d %d" % ("escape" if closed_escape else "open", "chord" if closed_chord else "open",
+                                   "desktop" if closed_desktop else "open", "window" if closed_window else "open", inside, lifted),
+            "escape chord desktop window 1 1"))
 said("L1.7")
 
 for name, got, want in out:

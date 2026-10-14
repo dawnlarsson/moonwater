@@ -1835,6 +1835,7 @@ static struct
                 goes to, and the ground it told its program. The scratch the blur is made in is shared.
         */
         unsigned int glassy[WINDOWS];
+        unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS)
         unsigned int *backdrop[WINDOWS], *tinted[WINDOWS], *composed[WINDOWS];
         int glass_blocks[WINDOWS][4]; // the first block kept of the small picture under it, across and down, and how many each way
         unsigned long glass_cut[WINDOWS];
@@ -2198,7 +2199,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            (unsigned long)compositor.width, 0, null, 0,
                                            line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
                                            row == compositor.focus ? COMPOSITOR_INK_LINE_LIT : COMPOSITOR_INK_LINE};
-        frame->close = 1;
+        frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         // Glass is shown as its picture over its backdrop, composed at its own width.
         if (compositor.glassy[row] && compositor.composed[row] && compositor.glass_made[row][2] == (int)compositor.w[row] &&
             compositor.glass_made[row][3] == (int)compositor.h[row])
@@ -2919,6 +2920,7 @@ static void compositor_glass_drop(int row)
         compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
         compositor.glass_cut[row] = 0;
         compositor.glassy[row] = 0;
+        compositor.asks[row] = 0;
         memory_zero(compositor.glass_made[row], sizeof(compositor.glass_made[row]));
         memory_zero(compositor.glass_blocks[row], sizeof(compositor.glass_blocks[row]));
         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
@@ -5135,6 +5137,7 @@ static void compositor_take(int row)
                 compositor.edges[row] = 0;
                 compositor.lifted[row] = table->lift[row];
                 compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
+                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS);
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
@@ -5814,6 +5817,15 @@ static void compositor_button(unsigned int code, int down)
                 compositor_release(code, 1);
                 return;
         }
+
+        // A window that asked to be put away by a press anywhere but on it (WINDOW_DISMISS) is asked to go by one on
+        // the desktop, a tab, another window or the tray alike; the press then goes on as it would have.
+        if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
+            !(compositor.pointer_x >= compositor.x[compositor.focus] &&
+              compositor.pointer_x < compositor.x[compositor.focus] + (int)compositor.w[compositor.focus] &&
+              compositor.pointer_y >= compositor.y[compositor.focus] &&
+              compositor.pointer_y < compositor.y[compositor.focus] + (int)compositor.h[compositor.focus]))
+                compositor_close(compositor.focus);
 
         // A press on a window's tab brings the window up, and a middle press asks it to go. The tray takes none.
         if (tab >= 0)
