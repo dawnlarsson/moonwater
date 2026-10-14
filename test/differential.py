@@ -41774,6 +41774,7 @@ def harness_dhcp_fuzz(argv):
 static positive clock_monotonic_nanoseconds(void) { return 0; }
 /* net_seconds reads CLOCK_BOOTTIME; here, as the monotonic clock above, it
    is a clock that will not answer. */
+#define CLOCK_BOOTTIME 7
 typedef struct { long tv_sec; long tv_nsec; } timespec;
 #define clock_gettime(which, at) ((void)(which), (void)(at), -1)
 """ + head + walk + clock + r"""
