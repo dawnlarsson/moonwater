@@ -18312,6 +18312,71 @@ static fn name_restore(void)
                                          "moonwater name changes it\n", name);
 }
 
+/*
+        moonwater debug: what the desktop is doing and why, read from the head
+        of the window table the compositor keeps -- its card, whether the
+        pointer has a plane, the overlay, how many frames the card showed
+        straight from a window's buffer, and why the top window was not at the
+        last present. The table is taken from /dev/spark, which hands it to
+        anyone, and else from its path; nothing in it is written, and no
+        window is taken.
+*/
+static b32 host_debug(string_address address_to arguments, positive count)
+{
+        static const string_address refusals[] = {
+            "nothing", "there is no /dev/udmabuf", "udmabuf refused a buffer", "the card refused a buffer's import",
+            "the card refused a buffer's framebuffer", "the card refused a flip", "the table is no memfd (memfd_create)",
+            "the table is no memfd", "the table is no memfd (its size)", "the table is no memfd (its seals)",
+            "the table is no memfd (its mode)", "the table is no memfd (its link)"};
+        static const string_address reasons[] = {
+            "shown straight", "no card", "the table is no memfd", "the pointer is drawn in software",
+            "no window, or one dragged or resized", "it is glass", "it is not at the size it drew",
+            "it is not wholly on the screen", "it is too short past its corners and close button", "it meets the tabs",
+            "the card has no overlay for it", "the card refused its framebuffer", "the card refused the overlay"};
+        const struct windows address_to table;
+        long spark, file = -1, mapped;
+        char driver[17];
+
+        (void)arguments;
+        return_if(count > 2, host_usage());
+        spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
+        if (spark >= 0)
+        {
+                file = window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0);
+                window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
+        }
+        if (file < 0)
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
+        if (file < 0)
+        {
+                host_say(log, "canvas\n  no compositor is running\n");
+                return 0;
+        }
+        // PROT_READ, MAP_SHARED
+        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 1, 1, file, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        if (mapped < 0 && mapped > -4096)
+                return host_fail("debug", (b32)mapped);
+        table = (const struct windows address_to)mapped;
+        memory_copy(driver, table->driver, sizeof(table->driver));
+        driver[16] = 0;
+        host_say(log, "canvas\n");
+        host_say(log, "  card            %s, %px%p, scale %p\n", driver[0] ? (string_address)driver : (string_address) "none",
+                 (positive)table->output_width, (positive)table->output_height, (positive)table->scale);
+        host_say(log, "  pointer         %s\n", table->pointer_plane ? (string_address) "on a plane of its own"
+                                                                    : (string_address) "drawn in software");
+        host_say(log, "  overlay         %s\n", table->overlay > 0    ? (string_address) "found"
+                                               : table->overlay < 0 ? (string_address) "none, or refused"
+                                                                    : (string_address) "not asked yet");
+        host_say(log, "  shown straight  %p frames\n", (positive)table->scanned);
+        host_say(log, "  refused         %s\n",
+                 table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
+        host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",
+                 table->unscanned < sizeof(reasons) / sizeof(reasons[0]) ? reasons[table->unscanned] : (string_address) "?");
+        window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
+        return 0;
+}
+
 static b32 host_name(string_address address_to arguments, positive count)
 {
         p8 name[NAME_ROOM];
@@ -19333,6 +19398,7 @@ static const host_row host_rows[] = {
     {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
+    {null, "debug", "what the desktop is doing and why: the card, the pointer, windows shown straight", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},
@@ -20075,6 +20141,7 @@ static b32 host_main()
             {"desktop", host_desktop, false},
             {"settings", host_settings_window, false},
             {"latency", host_latency, false},
+            {"debug", host_debug, true},
             {"bios", host_bios, false},
             {"airplane", tune_airplane, false},
             {"brightness", tune_brightness, false},

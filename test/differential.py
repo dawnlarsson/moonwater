@@ -45915,7 +45915,7 @@ def harness_moonwater_script(argv):
         ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 1), ("canvas off", 1),
         ("canvas scale 2", 0), ("canvas modes preferred", 0),
         ("desktop off", 0), ("desktop start", 0), ("desktop stop", 1), ("desktop boot", 0), ("desktop", 0),
-        ("latency", 1), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
+        ("latency", 1), ("debug", 0), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
         ("link add peer1 " + key, 0), ("link add peer1 " + key, 0), ("link allow peer1 run", 0),
         ("link allow peer1 run", 0), ("link group lab SECRETsecret1 allow run", 0),
         ("link group lab SECRETsecret1 allow run", 0), ("link group lab", 0), ("link", 0),

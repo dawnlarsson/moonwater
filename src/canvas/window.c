@@ -561,6 +561,11 @@ struct windows
         // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
         // refused the overlay's commit.
         unsigned int unscanned;
+        // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own,
+        // and the overlay: 1 found, -1 none or refused, 0 not yet asked.
+        char driver[16];
+        unsigned int pointer_plane;
+        int overlay;
         unsigned long pixels;  // where row 0's first buffer is, in bytes from the table
         unsigned long buffer;  // the bytes of one buffer
 

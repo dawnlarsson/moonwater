@@ -4081,6 +4081,11 @@ static void compositor_present(void)
         if (!compositor.damages)
                 return;
 
+        // What moonwater debug says of the card.
+        memory_copy(compositor.table->driver, compositor.driver, sizeof(compositor.table->driver));
+        compositor.table->pointer_plane = !compositor.cursor.soft;
+        compositor.table->overlay = compositor.overlay_state;
+
         for (unsigned int at = 0; at < compositor.stacked; at++)
                 if (compositor_visible(compositor.stack[at]))
                 {
