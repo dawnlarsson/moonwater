@@ -2592,7 +2592,9 @@ static void canvas_state(struct canvas_control *answer)
 
         rt_mutex_lock(&desktop.lock);
 
-        answer->suspended = desktop.suspended;
+        // Asked now and not as the thread last found it: a program that took
+        // the display a moment ago is held to be holding it.
+        answer->suspended = desktop_taken();
         answer->thread_passes = READ_ONCE(canvas_passes);
 
         answer->scale = desktop.scale;
