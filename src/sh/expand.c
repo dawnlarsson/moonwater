@@ -1046,9 +1046,7 @@ static PURE string_address glob_group_end(string_address at)
         the text. Every match that ends inside the budget is what it always
         was.
 */
-#ifndef GLOB_BUDGET
 #define GLOB_BUDGET ((positive)1 << 16)
-#endif
 
 typedef struct
 {

@@ -730,7 +730,6 @@ typedef struct
         positive batched;
         p8 batch_address[16];
         p16 batch_port;
-        p64 refused; // datagrams the socket would not take, for the stats line
 } link_service;
 
 static link_service link_self;
@@ -1038,7 +1037,6 @@ static bipolar link_send_to(p8 address_to bytes, positive length,
                 return -97; // EAFNOSUPPORT: no IPv6 here
         sent = socket_send((b32)link_self.socket, bytes, length, MSG_NOSIGNAL,
                            address_of to, size);
-        link_self.refused += sent < 0;
         return sent;
 }
 
@@ -2986,10 +2984,7 @@ static b32 link_serve(string_address ready_text)
         }
         link_nearby.socket = -1;
         link_self.server = true;
-        //      Segment runs unless told otherwise, which is how the cost of
-        //      sending one datagram at a time is measured. WATERLINK_NO_SEGMENTS
-        //      is a debug switch for whoever measures it by hand: no lane sets it.
-        link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
+        link_self.gso = true;
         link_self.state_dirty = true;
         link_stamps_load();
 
@@ -3026,14 +3021,6 @@ static b32 link_serve(string_address ready_text)
         }
 
         link_nearby_stop();
-        //      WATERLINK_STATS: debug, for whoever measures the link by hand; no lane sets it.
-        if (file_environment((string_address) "WATERLINK_STATS"))
-        {
-                string_format(log_error, "link: unsent %p\n",
-                              (positive)link_self.refused);
-                log_flush();
-        }
-
         //      Off: every session is told, and every command hung up on.
         for (positive at = 0; at < LINK_SESSIONS; at++)
                 if (link_self.session[at].used)
@@ -3295,8 +3282,7 @@ static b32 link_client_run(string_address name, p8 kind,
 
         link_self.socket = link_socket_open(0, false);
         return_if(link_self.socket < 0, host_fail("a socket", link_self.socket));
-        //      WATERLINK_NO_SEGMENTS: debug, by hand; no lane sets it.
-        link_self.gso = !file_environment((string_address) "WATERLINK_NO_SEGMENTS");
+        link_self.gso = true;
         //      The client greets nobody. Left at zero, the wait watched
         //      descriptor 0, standard input, as the greeting socket, and an
         //      input at its end or on a file woke it at once, every turn.
@@ -3530,23 +3516,6 @@ static b32 link_client_run(string_address name, p8 kind,
                         s->part[0] = 0;
                 else if (!answer)
                         answer = 1;
-        }
-        //      What the link did, for whoever is measuring it.
-        //      WATERLINK_STATS: debug, for whoever measures the link by hand; no lane sets it.
-        if (file_environment((string_address) "WATERLINK_STATS"))
-        {
-                struct waterlink_link address_to l = s->link;
-
-                string_format(log_error,
-                              "link: sent %p again %p lost %p timeouts %p "
-                              "delivered %p held %p spilled %p rtt %p us "
-                              "window %p unsent %p\n",
-                              (positive)l->sent, (positive)l->retransmitted,
-                              (positive)l->lost, (positive)l->timeouts,
-                              (positive)l->delivered, (positive)l->kept,
-                              (positive)l->spilled, (positive)l->smoothed,
-                              (positive)l->window, (positive)link_self.refused);
-                log_flush();
         }
         if (rekey_after < (p64)WATERLINK_REKEY_SECONDS * 1000000)
         {

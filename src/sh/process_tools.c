@@ -227,14 +227,6 @@ static bool stdbuf_bowl_root(string_address target, p8 address_to root)
 
 static bool stdbuf_find_library(string_address preferred_root)
 {
-        //      MOONWATER_STDBUF_LIBRARY is a debug switch, for pointing stdbuf at
-        //      a library by hand; no lane sets it.
-        string_address forced =
-            file_environment((string_address) "MOONWATER_STDBUF_LIBRARY");
-
-        if (forced)
-                return stdbuf_library_usable(forced);
-
         if (preferred_root && stdbuf_library_under(preferred_root))
                 return true;
 
@@ -497,9 +489,6 @@ static b32 process_stdbuf()
             words[0], target, sizeof(target), 1, false, path);
         bool has_bowl_root = target_found &&
                              stdbuf_bowl_root(target, bowl_root);
-        //      Debug, as in stdbuf_find_library: MOONWATER_STDBUF_LIBRARY.
-        string_address forced = file_environment(
-            (string_address) "MOONWATER_STDBUF_LIBRARY");
 
         /*
                 A statically linked target -- this shell's own programs among
@@ -511,10 +500,8 @@ static b32 process_stdbuf()
         bool preload = !(target_found && stdbuf_target_kind(target) == STDBUF_ELF_STATIC);
 
         if (preload && !stdbuf_find_library(has_bowl_root ? bowl_root : null))
-                return string_report(log_error, 125, forced
-                    ? "stdbuf: '%s' is not a compatible libstdbuf.so\n"
-                    : "stdbuf: no compatible libstdbuf.so found in the native or Bowl roots\n",
-                    forced);
+                return string_report(log_error, 125,
+                    "stdbuf: no compatible libstdbuf.so found in the native or Bowl roots\n");
 
         if (preload && !stdbuf_preload(stdbuf_library))
                 return string_report(log_error, 125, "stdbuf: environment is too large\n");
@@ -525,8 +512,6 @@ static b32 process_stdbuf()
         for (positive i = 0; inherited && inherited[i]; i++)
                 if (!env_put(inherited[i]))
                         return 125;
-
-        env_drop((string_address) "MOONWATER_STDBUF_LIBRARY");
 
         if (((modes & FILE_FLAG('i')) &&
              !env_put(stdbuf_input_assignment)) ||

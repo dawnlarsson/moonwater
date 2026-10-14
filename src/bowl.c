@@ -2883,9 +2883,9 @@ static fn bowl_room_after(bipolar handle, string_address root, p64 lowest)
         What stays root: a package manager and the isolated view, which mounts
         /dev and /sys and writes files for ids that are not the user's; the
         shell a bare `bowl ROOT` starts, which is the way in for administering
-        the bowl; the udev bowl starts; and anything run with --root or with
-        BOWL_ROOT set. A machine that will not make the namespace (none left,
-        a policy that refuses them) runs the program as root, as it did.
+        the bowl; the udev bowl starts; and anything run with --root. A machine that will
+        not make the namespace (none left, a policy that refuses them) runs
+        the program as root, as it did.
 */
 static bool bowl_as_root;
 /* Set where setup and a profile run a manager themselves: they expose what
@@ -8322,14 +8322,6 @@ static b32 bowl_main()
         }
         else if (arguments[1][0] == '-' && arguments[1][1] == '-')
                 return bowl_usage();
-
-        if (!bowl_as_root)
-        {
-                string_address asked =
-                    string_get_environment(file_environment_all(), "BOWL_ROOT");
-
-                bowl_as_root = asked && asked[0];
-        }
 
         return_if(root_at >= count, bowl_usage());
 

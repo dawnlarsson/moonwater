@@ -1594,12 +1594,7 @@ static login_terminal login_terminal_facts(string_address line)
    login, while wall retains each distinct terminal.  Keeping that policy in
    one visitor is important on systems where utmp is being rewritten while
    it is read; two independent walks can otherwise disagree about the same
-   broadcast.
-
-   MOONWATER_UTMP exists for namespace and controlled-PTY tests.  Like libc's
-   secure_getenv, it is ignored as soon as either effective identity differs
-   from the real one, so a conventionally setgid-tty installation cannot be
-   persuaded to trust an unprivileged login database. */
+   broadcast. */
 
 #define LOGIN_MESSAGE_WIDTH 79
 #define LOGIN_MESSAGE_TIMEOUT 300
@@ -1655,13 +1650,6 @@ static fn login_message_selection_clear()
                                     login_message_select.count);
         memory_fill(address_of login_message_select, 0,
                     sizeof(login_message_select));
-}
-
-static string_address login_message_utmp()
-{
-        //      MOONWATER_UTMP is test-only (see above): namespace and PTY fixtures
-        //      point it at their own database; no machine sets it.
-        return file_environment_override("MOONWATER_UTMP", LOGIN_UTMP_PATH);
 }
 
 /* A ut_line is relative to /dev.  Explicit write operands may use the full
@@ -2144,7 +2132,7 @@ static b32 tools_write()
                     program_argument((b32)taking.first + 1));
         }
 
-        bool read = login_records(login_message_utmp(), false, true,
+        bool read = login_records(LOGIN_UTMP_PATH, false, true,
                                   login_message_visit);
         if (!read || login_message_select.failed)
         {
@@ -2404,7 +2392,7 @@ static b32 tools_wall()
                 return text_done(1);
         }
 
-        if (!login_records(login_message_utmp(), false, true,
+        if (!login_records(LOGIN_UTMP_PATH, false, true,
                            login_message_visit) ||
             login_message_select.failed)
         {
