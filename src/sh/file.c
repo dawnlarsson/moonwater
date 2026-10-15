@@ -532,6 +532,12 @@ static bool file_mode_clauses(string_address specification, positive current,
         positive kept = directory ? 06000 : 0;
         positive changed = 0;
 
+        //      An empty specification is no mode at all. The loop below
+        //      would read it as zero clauses and answer with the current
+        //      mode, so chmod '' and find -perm '' took it as a success.
+        if (!string_get(specification))
+                return false;
+
         if (string_get(specification) >= '0' && string_get(specification) <= '7')
         {
                 string_address step = specification;
