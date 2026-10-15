@@ -4750,6 +4750,7 @@ static fn tar_read_members(tar_members address_to run)
         bool const seekable = run->seekable;
         positive const count = run->count;
         p8 address_to block;
+        p8 header_copy[TAR_BLOCK];
         p8 long_name[TAR_PATH];
         p8 long_link[TAR_PATH];
         bool have_long_name = false;
@@ -4778,6 +4779,11 @@ static fn tar_read_members(tar_members address_to run)
                 p8 kept_link[TAR_PATH];
                 p8 shown[TAR_PATH];
                 bool escaped;
+
+                /* The header is kept out of the record: a sparse map or a
+                   diff reads on, and a refill slides the record over it. */
+                memory_copy(header_copy, block, TAR_BLOCK);
+                block = header_copy;
 
                 p32 total = memory_sum_bytes(block, TAR_BLOCK);
 
