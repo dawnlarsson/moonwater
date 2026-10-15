@@ -96138,6 +96138,7 @@ PINNED = r"""
 {"case":{"argv":["-"],"fixture":"dash_file","tier":"pinned"},"domain":"text","list":"regression","utility":"rev"},
 {"case":{"argv":["-e",":a","-e","a x","-e","s/^x//","-e","ta"],"stdin":"x_run","tier":"pinned"},"domain":"text","list":"regression","utility":"sed"},
 {"case":{"argv":["-s","-n"],"env":[["LC_ALL","en_US.utf8"]],"stdin":"long_numbers","tier":"pinned"},"domain":"text","list":"regression","utility":"sort"},
+{"case":{"argv":["[:upper:]"],"env":[["LC_ALL","C.UTF-8"]],"tier":"pinned"},"domain":"text","list":"regression","utility":"tr"},
 {"case":{"argv":["-"],"fixture":"dash_file","tier":"pinned"},"domain":"text","list":"regression","utility":"ul"},
 {"case":{"argv":["-a"],"env":[["LC_ALL","C.UTF-8"]],"stdin":"wide_blanks","tier":"pinned"},"domain":"text","list":"regression","utility":"unexpand"},
 {"case":{"argv":["multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},

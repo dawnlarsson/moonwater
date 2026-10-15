@@ -342,8 +342,16 @@ static b32 text_operand_trouble(string_address what, string_address word,
 {
         text_flush();
         if (word)
-                string_format(writer_stderr, "%s: %s '%w'\n", text_name, what,
-                              writer_terminal_quoted_name, word);
+        {
+                //      quote()'s marks are the locale's, as in text_list_trouble.
+                string_address open = text_locale_utf8() ? (string_address) "\xe2\x80\x98"
+                                                         : (string_address) "'";
+                string_address close = text_locale_utf8() ? (string_address) "\xe2\x80\x99"
+                                                          : (string_address) "'";
+
+                string_format(writer_stderr, "%s: %s %s%w%s\n", text_name, what, open,
+                              writer_terminal_quoted_name, word, close);
+        }
         else
                 string_format(writer_stderr, "%s: %s\n", text_name, what);
         if (note)
