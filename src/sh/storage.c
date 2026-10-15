@@ -3918,9 +3918,9 @@ static bool storage_options_merge(storage_mount_options address_to into,
         the live flags first and apply only the options the caller mentioned;
         otherwise `remount,ro` quietly clears nosuid/nodev/noexec.
 */
-static bool storage_remount_options(string_address target,
-                                    storage_mount_options address_to asked,
-                                    storage_mount_options address_to effective)
+static bipolar storage_remount_options(string_address target,
+                                       storage_mount_options address_to asked,
+                                       storage_mount_options address_to effective)
 {
         storage_mount_table table;
         bool loaded;
@@ -3928,14 +3928,15 @@ static bool storage_remount_options(string_address target,
 
         memory_fill(effective, 0, sizeof(*effective));
         loaded = storage_mount_table_load(address_of table, null);
+        if (!loaded)
+                return -ERROR_INPUT_OUTPUT;
 
-        if (loaded)
+        /*      The table spells its targets absolutely, so a word
+                the caller wrote as `b` finds nothing there and the
+                remount then asks for flags the kernel locked when
+                it handed this mount over: EPERM, where the
+                reference keeps nosuid and nodev and succeeds. */
         {
-                /*      The table spells its targets absolutely, so a word
-                        the caller wrote as `b` finds nothing there and the
-                        remount then asks for flags the kernel locked when
-                        it handed this mount over: EPERM, where the
-                        reference keeps nosuid and nodev and succeeds. */
                 positive room = 0;
                 p8 address_to resolved = storage_word_path(target,
                                                            address_of room, 0);
@@ -3956,12 +3957,12 @@ static bool storage_remount_options(string_address target,
         if (!parsed || !storage_options_merge(effective, asked))
         {
                 storage_options_free(effective);
-                return false;
+                return -ERROR_NO_MEMORY;
         }
 
         effective->flags |= MS_REMOUNT;
         effective->mentioned |= MS_REMOUNT;
-        return true;
+        return 0;
 }
 
 static bipolar storage_source(string_address source,
@@ -4046,9 +4047,10 @@ static bipolar storage_mount_one(string_address source, string_address target,
         if ((options->flags & MS_REMOUNT) ||
             (bind && (options->mentioned & STORAGE_BIND_CHANGEABLE)))
         {
-                if (!storage_remount_options(target, options,
-                                             address_of effective))
-                        return -ERROR_NO_MEMORY;
+                answer = storage_remount_options(target, options,
+                                                 address_of effective);
+                if (answer < 0)
+                        return answer;
                 effective_live = true;
         }
 
