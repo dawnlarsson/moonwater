@@ -2,7 +2,7 @@
         Moonwater window
 
         What a program shares with the compositor, and the cells a terminal's
-        text lives in. It includes canvas_abi.h itself, and it needs the
+        text lives in. It includes canvas.c's ABI itself, and it needs the
         library before it (lib.c and lib.util.c, as the shell and the tests
         include them): the file uses the library's types and memory routines.
         Its own syscall entry is used only where the library does not supply
@@ -30,7 +30,9 @@
 #define WINDOW_INCLUDED
 
 // The numbers /dev/spark takes, which the compositor's ABI header holds.
-#include "canvas_abi.h"
+#define CANVAS_ABI_ONLY
+#include "canvas.c"
+#undef CANVAS_ABI_ONLY
 
 // O_RDWR | O_CLOEXEC, which are the same numbers on all three architectures.
 // A window is this program's, not whatever it goes on to exec.

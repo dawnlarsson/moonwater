@@ -1,5 +1,5 @@
 # Canvas is its own object, linked into the same image as the core and
-# called by name from it (src/canvas/canvas.h), so there is nothing here
+# called by name from it (src/canvas/canvas.c), so there is nothing here
 # that registers or loads. kbuild sees this directory through a symlink at
 # kernel/canvas, made by kernel/patch/apply beside kernel/moonwater.
 #

@@ -5,7 +5,7 @@
         image, so it cannot see a name the core keeps static. Everything it
         may reach is here, and everything here has the moonwater_ prefix
         because the kernel's names are one namespace. The other direction --
-        what the core asks of Canvas -- is src/canvas/canvas.h.
+        what the core asks of Canvas -- is src/canvas/canvas.c.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -48,7 +48,7 @@ void moonwater_bind_fire(unsigned int event);
 /*
         The flags of the settings this machine booted with, or those a later
         SET replaced them with; zero where there are none, which is every
-        default. The bits are spark.c's and canvas_abi.h's.
+        default. The bits are spark.c's and canvas.c's.
 */
 unsigned int moonwater_settings_flags(void);
 

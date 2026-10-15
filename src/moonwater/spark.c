@@ -183,7 +183,9 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
 
 // Canvas's requests, structs and bindings. A program reads them here as it
 // always did; the file they are in is the compositor's.
-#include "../canvas/canvas_abi.h"
+#define CANVAS_ABI_ONLY
+#include "../canvas/canvas.c"
+#undef CANVAS_ABI_ONLY
 
 // _IOR('s', 2, struct stats). Nanoseconds accumulated inside the kernel,
 // so the split between creating the task and loading the image is measured
@@ -381,7 +383,7 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 #define SPARK_BIND_MUTE 9u
 #define SPARK_BIND_BRIGHTNESS_UP 10u
 #define SPARK_BIND_BRIGHTNESS_DOWN 11u
-// 12 and 13, canvas on and canvas off: canvas_abi.h
+// 12 and 13, canvas on and canvas off: canvas.c
 #define SPARK_BIND_MICMUTE 14u
 #define SPARK_BIND_RFKILL 15u
 #define SPARK_BIND_TABLET_ON 16u
@@ -533,7 +535,7 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
 #define SPARK_SETTINGS_BIND_TEXT_MOST 255 // a bound command, without its terminator
 
 //      flags: each is the change from the default, so zero is as built.
-//      0x1u is Canvas's, canvas_abi.h
+//      0x1u is Canvas's, canvas.c
 #define SPARK_SETTINGS_MOUNT_OFF 0x2u    // boot keeps the disks' data unmounted
 #define SPARK_SETTINGS_STARTUP_SET 0x4u  // the startup list is the one written
 

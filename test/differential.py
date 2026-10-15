@@ -26068,6 +26068,13 @@ import types
 import unittest
 from unittest.mock import patch
 
+def canvas_abi_region(root):
+    """Canvas's ABI: the userspace-safe region at the top of canvas.c, which
+    window.c and spark.c take with CANVAS_ABI_ONLY and which includes nothing."""
+    source = (root / "src/canvas/canvas.c").read_text()
+    return source[source.index("#ifndef CANVAS_ABI_INCLUDED"):source.index("#ifndef CANVAS_ABI_ONLY")]
+
+
 def src_slice(text, first, following, where="a harness"):
     """text from first up to the next following after it, or ValueError naming where and the anchor.
 
@@ -26606,7 +26613,7 @@ def harness_core_state(argv):
     #   Canvas's ABI is a header spark.c includes; a cut of spark.c is cut
     #   out of the file it is in, so it is given the header's text instead.
     spark = (root / "src/moonwater/spark.c").read_text().replace(
-        '#include "../canvas/canvas_abi.h"', (root / "src/canvas/canvas_abi.h").read_text())
+        '#define CANVAS_ABI_ONLY\n#include "../canvas/canvas.c"\n#undef CANVAS_ABI_ONLY', canvas_abi_region(root))
     # The machine script this build bakes into the module. The scanner that
     # decides which rows the machine process owns is compiled here for real,
     # so the shipped file is scanned here for real as well: an edit to it that
@@ -26625,7 +26632,7 @@ def harness_core_state(argv):
         # what of window.c it reads: the keys' flags, the table's rows and
         # the contrast the close button's X is drawn in.
         (work / "compositor-backend.inc").write_text(
-            (root / "src/canvas/canvas_abi.h").read_text()
+            canvas_abi_region(root)
             + section(window, "#define WINDOW_KEYS 64", "struct window_key\n")
             + section(window, "#define WINDOWS_TABLE", "// Row row's buffer")
             + section(window, "// from, moved amount 256ths", "#define window_at(") + section(
@@ -36237,7 +36244,7 @@ def harness_canvas_scale(argv):
         print("canvas scale: NOT RUN -- needs a C compiler")
         return 2
     canvas = (root / "src/canvas/canvas.c").read_text()
-    abi = (root / "src/canvas/canvas_abi.h").read_text()
+    abi = canvas_abi_region(root)
     cut = lambda first, following: src_slice(canvas, first, following, "canvas_scale")
     rule = cut("static unsigned int canvas_scale_setting =", "// Read-only: a running desktop")
     rescale = cut("/*\n        The scale the desktop is drawn at, with desktop.lock held",
@@ -36597,6 +36604,7 @@ def harness_canvas_seam(argv):
     #      the core's tables carry them (the two events, their words, the
     #      pair a command line spells); the seam is the rest.
     allowed = {
+        'CANVAS_ABI_ONLY', 'CANVAS_DECLARE_ONLY',
         'SPARK_BIND_CANVAS_ON', 'SPARK_BIND_CANVAS_OFF',
         'SPARK_BIND_CANVAS_ON_NAME', 'SPARK_BIND_CANVAS_OFF_NAME',
         'canvas_is_on', 'canvas_boot', 'canvas_unload',
@@ -36605,8 +36613,8 @@ def harness_canvas_seam(argv):
         'LIBRARY_CANVAS_ELSEWHERE',
     }
     includes_wanted = {
-        'src/moonwater/core.c': {'../canvas/canvas.h'},
-        'src/moonwater/spark.c': {'../canvas/canvas_abi.h'},
+        'src/moonwater/core.c': {'../canvas/canvas.c'},
+        'src/moonwater/spark.c': {'../canvas/canvas.c'},
     }
     core_files = sorted((ROOT / 'src/moonwater').glob('*.[ch]'))
     for path in core_files:
@@ -36623,17 +36631,17 @@ def harness_canvas_seam(argv):
                                          re.sub(r'#\s*include[^\n]*', '', code(text, True)))}
         check(spelled <= {'canvas'},
               '%s spells Canvas in a string only as the pair a command names (%s)' % (name, sorted(spelled)))
-        check('CONFIG_MOONWATER_CANVAS' not in body and not any(t.endswith('.c') for t in taken),
+        check('CONFIG_MOONWATER_CANVAS' not in body and not any(t.endswith('.c') and t != '../canvas/canvas.c' for t in taken),
               '%s knows no Canvas configuration and includes no Canvas source' % name)
 
     #   2. What Canvas says about the core: its own headers and one of the
     #      core's, and of the core's names the ones seam.h gives it.
     canvas = read('src/canvas/canvas.c')
     seam = read('src/moonwater/seam.h')
-    header = read('src/canvas/canvas.h')
+    header = canvas[canvas.index('#ifndef CANVAS_DECLARED'):canvas.index('#ifndef CANVAS_DECLARE_ONLY')]
     check(re.findall(r'#\s*include\s+"([^"]*moonwater[^"]*)"', canvas) == ['../moonwater/seam.h'],
           'canvas.c includes seam.h and no other file of the core')
-    for name in ('window.c', 'term.c', 'screen.c', 'terminfo.c', 'canvas.h', 'canvas_abi.h'):
+    for name in ('window.c', 'term.c', 'screen.c', 'terminfo.c'):
         check(not re.search(r'#\s*include\s+"[^"]*moonwater[^"]*"', read('src/canvas/' + name)),
               '%s includes nothing of the core' % name)
     seam_names = set(re.findall(r'\b(moonwater_\w+)\s*\(', code(seam)))
@@ -36668,12 +36676,12 @@ def harness_canvas_seam(argv):
     stubbed = set(re.findall(r'\b(canvas_\w+)\s*\(', code(stubs)))
     defined = set(re.findall(r'^(?:_Bool|void|long|int)\s+(canvas_\w+)\s*\(', code(canvas), re.M))
     check(declared and declared <= defined,
-          'canvas.h declares only what canvas.c defines (%s)' % sorted(declared - defined))
+          'the declarations declare only what the body defines (%s)' % sorted(declared - defined))
     check(stubbed <= declared and not declared - stubbed,
           'with Canvas off every call the core makes is an empty inline (%s)' % sorted(declared - stubbed))
     wanted = set(re.findall(r'\b(canvas_\w+)\s*\(', code(read('src/moonwater/core.c') + read('src/moonwater/moonwater.c'))))
     check(wanted <= declared,
-          'the core calls only what canvas.h declares (%s)' % sorted(wanted - declared))
+          'the core calls only what the declarations declare (%s)' % sorted(wanted - declared))
     for name in sorted(seam_names):
         defines = [str(p.relative_to(ROOT)) for p in core_files
                    if re.search(r'^[\w\s\*]*\b%s\s*\([^;{]*\)\s*\n?\{' % name, code(p.read_text()), re.M)]
@@ -36703,19 +36711,19 @@ def harness_canvas_seam(argv):
 
     #   6. The ABI is a header a program includes alone: nothing but the C
     #      language under it, and every size it asserts holds.
-    abi = read('src/canvas/canvas_abi.h')
-    check(not re.search(r'#\s*include', abi), 'canvas_abi.h includes nothing')
+    abi = canvas_abi_region(ROOT)
+    check(not re.search(r'#\s*include', abi), 'the ABI region of canvas.c includes nothing')
     with tempfile.TemporaryDirectory(prefix='canvas-abi-') as temporary:
         unit = Path(temporary) / 'abi.c'
-        unit.write_text('#include "%s"\n'
+        unit.write_text(abi +
                         '_Static_assert(sizeof(struct canvas_control) == 232, "control");\n'
                         '_Static_assert(SPARK_IOCTL_CANVAS == 0xc0e8730au, "number");\n'
                         '_Static_assert(SPARK_BIND_CANVAS_OFF == SPARK_BIND_CANVAS_ON + 1, "pair");\n'
-                        'int main(void) { return 0; }\n' % (ROOT / 'src/canvas/canvas_abi.h'))
+                        'int main(void) { return 0; }\n')
         built = subprocess.run(shlex.split(os.environ.get('CC', 'cc')) +
                                ['-std=c11', '-pedantic', '-Wall', '-Wextra', '-Werror', '-fsyntax-only', str(unit)],
                                capture_output=True, text=True)
-        check(built.returncode == 0, 'canvas_abi.h compiles alone as strict C11 (%s)' % built.stderr[-300:])
+        check(built.returncode == 0, 'the ABI region compiles alone as strict C11 (%s)' % built.stderr[-300:])
 
     return check.verdict('canvas seam', 'canvas_seam')
 
@@ -70175,9 +70183,9 @@ def harness_machine_scan(argv):
 
     section = lambda source, first, following: src_slice(source, first, following, "machine_scan")
 
-    #   Canvas's two events and their names are canvas_abi.h's, which spark.c
-    #   includes and a cut of spark.c does not.
-    abi = (root / "src/canvas/canvas_abi.h").read_text()
+    #   Canvas's two events and their names are in the ABI at the top of
+    #   canvas.c, which spark.c includes and a cut of spark.c does not.
+    abi = canvas_abi_region(root)
     source = ("#include <stdio.h>\n#include <stdlib.h>\n#define MOONWATER_SCAN\n" + abi +
               section(spark, "#define SPARK_BIND_NAME_MAX", "#define SPARK_BIND_GET") +
               section(spark, "#define SPARK_BIND_POWEROFF", "static const unsigned char spark_bind_stop") +

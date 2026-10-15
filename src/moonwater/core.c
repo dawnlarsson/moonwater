@@ -7,7 +7,7 @@
         keeps to itself; the ioctl switch below is where they meet, because
         /dev/spark is one device and a caller does not care which of them
         answers. The compositor is a third, and not here: src/canvas builds
-        its own object, and src/canvas/canvas.h and seam.h beside this file
+        its own object, and src/canvas/canvas.c and seam.h beside this file
         are the whole of what passes between them.
 
         What is genuinely this file's: the mounts a Moonwater boot needs
@@ -88,7 +88,9 @@
 // What a kernel object built beside this one may call, and what this asks of
 // it. Plain kernel headers, so before the library's spellings below.
 #include "seam.h"
-#include "../canvas/canvas.h"
+#define CANVAS_DECLARE_ONLY
+#include "../canvas/canvas.c"
+#undef CANVAS_DECLARE_ONLY
 
 // Canvas's pixel loops are its own object's, not this one's: the library is
 // declared to it and emitted here, and these six are the other way round.
