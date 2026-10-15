@@ -28918,6 +28918,15 @@ b32 main()
 #endif /* CHECK_verify */
 
 #ifdef CHECK_exact
+/*
+        The wide tiers are raised here so the literal sizes below reach them:
+        the known-size copies and fills up to 256 bytes, and the running
+        windows up to 160. At the shipped 128 and 64 the 129 .. 160 literals
+        fall to the routine and never touch a rung past 96 bytes, so a rung
+        that drops bytes there is invisible to every lane.
+*/
+#define LIBRARY_SIZE_MAX 256
+#define LIBRARY_RUNNING_MAX 160
 #include "../src/lib.util.c"
 #define SHARED_sizes
 #include "checks.c"
@@ -29070,6 +29079,59 @@ static void reference_move(p8 address_to to, const p8 address_to from, positive 
                 }                                                             \
         } while (0)
 
+/*
+        Sizes known only at run time, which is what the running windows are
+        for: every size from 0 to 255, copied and filled at an offset so the
+        windows start unaligned, with a guard byte past each end that must
+        keep its value. running_zero keeps the size out of the compiler's
+        hands, so it cannot choose the literal tier for them.
+*/
+static volatile positive running_zero;
+
+static void running_sizes(void)
+{
+        static p8 source[272], target[272];
+
+        for (positive size = 0; size < 256; size++)
+        {
+                positive n = size + running_zero;
+                bool okay = true;
+
+                for (positive i = 0; i < sizeof(source); i++)
+                        source[i] = (p8)(i * 37 + size + 1);
+                memory_fill(target, 0xee, sizeof(target));
+                memory_copy(target + 8, source + 3, n);
+                for (positive i = 0; i < n; i++)
+                        okay &= target[8 + i] == source[3 + i];
+                for (positive i = 0; i < 8; i++)
+                        okay &= target[i] == 0xee;
+                for (positive i = 8 + n; i < sizeof(target); i++)
+                        okay &= target[i] == 0xee;
+                checks++;
+                if (!okay)
+                {
+                        failures++;
+                        fail((const p8 address_to)"running copy", size, (const p8 address_to)"bytes");
+                }
+
+                memory_fill(target, 0xee, sizeof(target));
+                memory_fill(target + 8, 0xab, n);
+                okay = true;
+                for (positive i = 0; i < n; i++)
+                        okay &= target[8 + i] == 0xab;
+                for (positive i = 0; i < 8; i++)
+                        okay &= target[i] == 0xee;
+                for (positive i = 8 + n; i < sizeof(target); i++)
+                        okay &= target[i] == 0xee;
+                checks++;
+                if (!okay)
+                {
+                        failures++;
+                        fail((const p8 address_to)"running fill", size, (const p8 address_to)"bytes");
+                }
+        }
+}
+
 //      Every size, once. Called once per tier below.
 static void sweep(void)
 {
@@ -29078,6 +29140,7 @@ static void sweep(void)
 #define CHECK_SIZE(K) CHECK_COPY(K); CHECK_FILL(K); CHECK_MOVE(K);
         EACH_SIZE(CHECK_SIZE)
 #undef CHECK_SIZE
+        running_sizes();
 }
 
 /*

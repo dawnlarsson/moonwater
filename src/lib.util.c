@@ -5018,6 +5018,19 @@ static inline fn digest_close(digest_state address_to digest, p8 address_to out)
 #endif
 #endif
 
+/*
+        The running windows are gap-free only up to 96 bytes: the 64-byte rung
+        loads, or stores, [0, 64) and the last 32 bytes, and those meet at 96.
+        A RUNNING_MAX above 97 would send 97 .. RUNNING_MAX-1 into that rung,
+        so past 96 the cut is the routine, as it already is at RUNNING_MAX.
+*/
+#define LIBRARY_WINDOW_MAX 96
+#if LIBRARY_RUNNING_MAX > LIBRARY_WINDOW_MAX + 1
+#define RUNNING_CUT(size) ((size) >= LIBRARY_RUNNING_MAX || (size) > LIBRARY_WINDOW_MAX)
+#else
+#define RUNNING_CUT(size) ((size) >= LIBRARY_RUNNING_MAX)
+#endif
+
 #define LIBRARY_SIZE_OK(size, cap)                                            \
         (__builtin_constant_p(size) && (positive)(size) <= (positive)(cap)     \
          && (positive)(size) >= (positive)LIBRARY_SIZE_FLOOR)
@@ -5554,7 +5567,7 @@ static inline INLINE address_any copy_running(address_any destination,
 #if !LIBRARY_INLINE_COPY
         return memory_copy(destination, source, size);
 #else
-        if (size >= LIBRARY_RUNNING_MAX)
+        if (RUNNING_CUT(size))
                 return memory_copy(destination, source, size);
 #if LIBRARY_RUNNING_MAX > 16
         if (size >= 16)
@@ -5794,7 +5807,7 @@ static inline INLINE address_any fill_running(address_any destination,
         p8 address_to to = (p8 address_to)destination;
         p64 wide;
 
-        if (size >= LIBRARY_RUNNING_MAX)
+        if (RUNNING_CUT(size))
                 return memory_fill(destination, value, size);
 #if LIBRARY_RUNNING_MAX > 16
         if (size >= 16)
