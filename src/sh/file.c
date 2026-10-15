@@ -15993,7 +15993,7 @@ static fn find_batch_add(find_node address_to node, string_address path)
            of 200 nested 250-byte names handed 50201 bytes to a memcpy into
            text[32768]. The walk already refuses a name it cannot join with
            the kernel's own word for it, and so does this. */
-        if (length + 1 > FIND_BATCH_BYTES)
+        if (length + 1 > find_batch_bytes())
         {
                 string_format(log_error, "find: '%w': %s\n",
                               writer_terminal_quoted_name, subject,
