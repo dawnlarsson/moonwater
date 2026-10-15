@@ -48670,6 +48670,8 @@ static b32 file_kill()
         bool needs_handler = false;
         positive milliseconds = 0;
         bipolar timeout_number = 0;
+        bool queued = false;
+        positive queue_value = 0;
         bool do_kill = false;
 
         /* util-linux parse_arguments: exact argv words, not getopt. --signal=X
@@ -48811,14 +48813,12 @@ static b32 file_kill()
                         index++;
                         {
                                 string_address value = program_argument((b32)index);
-                                positive queue;
-
                                 if (!string_digits_checked_exact(value, 10,
-                                                                 address_of queue))
+                                                                 address_of queue_value))
                                         return string_report(log_error, 1,
                                                       "kill: argument error: '%s'\n",
                                                       value);
-                                (void)queue;
+                                queued = true;
                         }
                         index++;
                         continue;
@@ -48879,6 +48879,19 @@ static b32 file_kill()
                 // util-linux answers 1; the shells' builtin answers 2.
                 return string_report(log_error, kill_shell_spelling ? 2 : 1,
                                      "kill: not enough arguments\n");
+        }
+
+        //      The record sigqueue(3) builds: the signal, SI_QUEUE, this
+        //      process's pid and uid, and the value at its offset in siginfo.
+        b32 queue_info[32] = {0};
+
+        if (queued)
+        {
+                queue_info[0] = number;
+                queue_info[2] = -1;
+                queue_info[4] = (b32)system_call(syscall(getpid));
+                queue_info[5] = (b32)system_call(syscall(getuid));
+                queue_info[6] = (b32)queue_value;
         }
 
         while (index < count)
@@ -48956,7 +48969,11 @@ static b32 file_kill()
 
                 bipolar done = timed
                                    ? system_call_4(syscall(pidfd_send_signal), (positive)handle,
-                                                   (positive)number, 0, 0)
+                                                   (positive)number,
+                                                   queued ? (positive)queue_info : 0, 0)
+                                   : queued
+                                   ? system_call_3(syscall(rt_sigqueueinfo), (positive)who,
+                                                   (positive)number, (positive)queue_info)
                                    : system_call_2(syscall(kill), (positive)who, (positive)number);
 
                 if (done < 0)
