@@ -14161,7 +14161,8 @@ static string_address file_exec_refusal(bipolar answer)
             ERROR_NOT_PERMITTED,
             ERROR_NOT_DIRECTORY, ERROR_IS_DIRECTORY, ERROR_ARGUMENT_LIST,
             ERROR_NAME_TOO_LONG, ERROR_NO_MEMORY, ERROR_LOOP,
-            ERROR_EXEC_FORMAT,
+            ERROR_EXEC_FORMAT, ERROR_TEXT_BUSY, ERROR_BAD_ADDRESS,
+            ERROR_INPUT_OUTPUT, ERROR_INVALID,
         };
         positive code = (positive)-answer;
 
