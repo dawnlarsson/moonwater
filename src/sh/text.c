@@ -30,7 +30,7 @@ enum
 // radix over bytes, and every other text tool clears it in text_begin.
 static bool sort_collating HOT_STATE;
 
-static PURE bipolar sort_compare_bytes(p8 address_to one,
+static bipolar sort_compare_bytes(p8 address_to one,
                                        positive one_length,
                                        p8 address_to two,
                                        positive two_length,
@@ -843,6 +843,21 @@ static bool text_open(string_address path)
         return false;
 }
 
+// Opens a named operand as a file, "-" included. rev, column and ul read a
+// file named - in the working directory, and stdin only when no name was
+// given at all.
+static bool text_open_named(string_address path)
+{
+        if (!path)
+                return text_open(path);
+
+        if (text_reader_open_at(address_of text_input, AT_FDCWD, path, path))
+                return true;
+
+        text_status = text_status ? text_status : 1;
+        return false;
+}
+
 static fn text_close()
 {
         text_close_handle(address_of text_input.opened, text_input.handle);
@@ -1412,6 +1427,9 @@ static string_address regex_failure_reason()
             [REGEX_FAILED_REFERENCE] = "Invalid back reference",
             [REGEX_FAILED_BRACKET] = "Unmatched [, [^, [:, [., or [=",
             [REGEX_FAILED_CLASS] = "Invalid character class name",
+            [REGEX_FAILED_PRECEDING] = "Invalid preceding regular expression",
+            [REGEX_FAILED_RANGE] = "Invalid range end",
+            [REGEX_FAILED_COLLATE] = "Invalid collation character",
         };
 
         return (string_address)(regex_failure < sizeof(reasons) / sizeof(reasons[0]) &&
@@ -8054,11 +8072,15 @@ static b32 text_sum()
         never all of it in this process's memory: `yes | tac` would otherwise
         take every byte of RAM the machine has in half a second.
 
-        A regular file is already somewhere. It is mapped, read where it lies
-        and never copied, and it is read from its start whatever the offset
-        of the descriptor: GNU seeks to the end for the size and reads back to
-        byte zero, so `{ read x; tac; } < file` reverses all of the file, not
-        the part after the line read.
+        A regular file is already somewhere, but it is read whole into this
+        process's memory (tac_map), not mapped: a mapping of a file another
+        process truncates faults with SIGBUS. That costs the file's size in
+        memory where GNU streams it backwards and holds the longest line; the
+        output is the same, and the difference is a memory limit, not a
+        result. The file is read from its start whatever the offset of the
+        descriptor: GNU seeks to the end for the size and reads back to byte
+        zero, so `{ read x; tac; } < file` reverses all of the file, not the
+        part after the line read.
 
         Anything else -- a pipe, a terminal, a file whose size the kernel will
         not say, as in /proc -- is read. What fits in TAC_HELD is kept here,
@@ -8602,16 +8624,7 @@ static b32 text_rev()
 
         for (b32 i = 0; i < inputs; i++)
         {
-                // util-linux reads no standard input by that name: - is a
-                // file, and there is none.
-                if (text_file_name(i) && string_equals(text_file_name(i), "-"))
-                {
-                        string_diagnostic(&text_diagnostic, 0, "-", "cannot open: No such file or directory");
-                        text_status = 1;
-                        continue;
-                }
-
-                if (!text_open(text_file_name(i)))
+                if (!text_open_named(text_file_name(i)))
                         continue;
 
                 p8 address_to line;
@@ -11912,7 +11925,8 @@ static b32 text_nl()
                         return text_done(string_diagnostic(&text_diagnostic, 1, null,
                                                            regex_failure_reason()));
 
-                regex_keep(nl_patterns + pattern_count);
+                if (!regex_keep_checked(nl_patterns + pattern_count))
+                        return text_done(string_diagnostic(&text_diagnostic, 2, null, "memory exhausted"));
                 patterns[k] = pattern_count++;
         }
 
@@ -12431,9 +12445,22 @@ static bool text_tab_next(positive column, positive address_to next,
         their own bytes, so that those not turned into a tab go out as they
         came. The first is the tab where the count asks for one.
 */
-static p8 text_unexpand_raw[1024];
+static p8 address_to text_unexpand_raw;
+static positive text_unexpand_raw_room;
 static positive text_unexpand_raw_used;
 static bool text_unexpand_raw_on;
+
+// The blanks of a run are kept whole until its tab or its end is known, so the
+// store grows with the run rather than holding a fixed amount and dropping the rest.
+static fn text_unexpand_raw_grow(positive more)
+{
+        if (!array_store_reserve(text_unexpand_raw, text_unexpand_raw_room,
+                                 text_unexpand_raw_used, text_unexpand_raw_used + more, 1024))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(4));
+        }
+}
 
 static fn text_unexpand_pending(positive count, bool first_tab)
 {
@@ -12676,22 +12703,21 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                 {
                                                         column += width;
 
-                                                        if (!(previous_blank && column == stop))
+                                                        if (!(previous_blank && column >= stop))
                                                         {
-                                                                if (column == stop)
+                                                                if (column >= stop)
                                                                         one_blank_before_stop = true;
                                                                 if (!text_unexpand_raw_on)
                                                                 {
+                                                                        text_unexpand_raw_grow(pending + got);
                                                                         text_unexpand_raw_on = true;
                                                                         text_unexpand_raw_used = 0;
-                                                                        for (positive k = 0; k < pending &&
-                                                                                             text_unexpand_raw_used < sizeof(text_unexpand_raw);
-                                                                             k++)
+                                                                        for (positive k = 0; k < pending; k++)
                                                                                 text_unexpand_raw[text_unexpand_raw_used++] = ' ';
                                                                 }
-                                                                for (positive k = 0; k < got &&
-                                                                                     text_unexpand_raw_used < sizeof(text_unexpand_raw);
-                                                                     k++)
+                                                                else
+                                                                        text_unexpand_raw_grow(got);
+                                                                for (positive k = 0; k < got; k++)
                                                                         text_unexpand_raw[text_unexpand_raw_used++] = data[at + k];
                                                                 pending += got;
                                                                 previous_blank = true;
@@ -12802,9 +12828,11 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                         one_blank_before_stop =
                                                                             true;
 
-                                                                if (text_unexpand_raw_on &&
-                                                                    text_unexpand_raw_used < sizeof(text_unexpand_raw))
+                                                                if (text_unexpand_raw_on)
+                                                                {
+                                                                        text_unexpand_raw_grow(1);
                                                                         text_unexpand_raw[text_unexpand_raw_used++] = ' ';
+                                                                }
                                                                 pending++;
                                                                 previous_blank = true;
                                                                 continue;
@@ -16178,18 +16206,23 @@ static bool ptx_failed;
 /* A whole-input view in the shared record arena.  ptx and column both need
    stable offsets after the 64 KiB reader refills; this is their one common
    bridge from the streaming reader, not a second input engine. */
-static bool text_blob_read(string_address path, byte_span address_to blob)
+static bool text_blob_read_as(string_address path, byte_span address_to blob, bool named)
 {
         if (path && !path[0])
                 path = null;
 
-        if (!text_open(path))
+        if (!(named ? text_open_named(path) : text_open(path)))
                 return false;
 
         blob->bytes = utility_arena_hold_rest(address_of blob->length);
         bool okay = blob->bytes && !text_input.failed;
         text_close();
         return okay;
+}
+
+static bool text_blob_read(string_address path, byte_span address_to blob)
+{
+        return text_blob_read_as(path, blob, false);
 }
 
 static positive ptx_count_lines(byte_span address_to text)
@@ -16699,7 +16732,7 @@ static positive ptx_scan_occurrences(bool fill)
         return made;
 }
 
-static PURE HOT bipolar ptx_compare(positive left, positive right)
+static HOT bipolar ptx_compare(positive left, positive right)
 {
         ptx_occurrence address_to one = ptx_occurrences + left;
         ptx_occurrence address_to two = ptx_occurrences + right;
@@ -18398,17 +18431,12 @@ static b32 text_column()
         {
                 string_address name = text_file_name((b32)file);
 
-                // util-linux reads no standard input by that name: - is a
-                // file, and there is none.
-                if (name && string_equals(name, "-"))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, name, "No such file or directory"));
-
                 column_files[file] = (byte_span){null, 0};
 
                 // A blob the arena could not hold whole is said "input too
                 // large" and has no bytes: walking the length it was left
                 // with read from null.
-                if (!text_blob_read(name, column_files + file) && !column_files[file].bytes)
+                if (!text_blob_read_as(name, column_files + file, true) && !column_files[file].bytes)
                 {
                         column_files[file].length = 0;
                         text_status = 1;
@@ -19853,10 +19881,7 @@ static b32 text_ul()
                 utility_arena.used = 0;
                 byte_span input = {null, 0};
 
-                if (text_file_name(file) && string_equals(text_file_name(file), "-"))
-                        return text_done(string_diagnostic(&text_diagnostic, 1, "-", "cannot open: No such file or directory"));
-
-                return_if(!text_blob_read(text_file_name(file), address_of input), text_done(1));
+                return_if(!text_blob_read_as(text_file_name(file), address_of input, true), text_done(1));
 
                 terminal_scan(address_of input, address_of state, true);
         }
@@ -25928,6 +25953,7 @@ static bool grep_set_gather(const regex_program address_to program, rx_ref node,
                 return grep_set_gather(program, nodes[node].left, icase, exact);
 
         positive start = set->used;
+        positive grown = 0;
 
         if (exact)
                 for (rx_ref at = node; at; at = nodes[at].next)
@@ -25939,21 +25965,21 @@ static bool grep_set_gather(const regex_program address_to program, rx_ref node,
                 }
         else
         {
-                positive size = 0;
-
                 if (set->used + RX_LITERAL_MAX > GREP_SET_BYTES)
                         return false;
 
-                rx_required(nodes, node, set->bytes + start, address_of size);
+                rx_required(nodes, node, set->bytes + start, address_of grown);
 
-                if (size < 2)
+                if (grown < 2)
                         return false;
-
-                set->used += size;
         }
 
+        // The string is kept only when the set has room for it, so a refusal
+        // leaves the set's bytes as they were.
         if (set->count == GREP_SET_MAX)
                 return false;
+
+        set->used += grown;
 
         set->at[set->count] = start;
         set->size[set->count] = set->used - start;
@@ -30971,6 +30997,8 @@ static b32 text_grep_run()
         // -s is about what grep says, including what the reader would have
         // said about a file that would not open.
         text_quiet_open = quietly;
+        //      A read that fails is silent under -s as an open is.
+        text_quiet_read = quietly;
         bool discarded = grep_output_discarded();
 
         /*
@@ -31267,6 +31295,8 @@ static positive sed_script_room;
 static positive sed_script_length;
 static positive sed_at;
 static bool sed_broken;
+// The label message was already said, so the generic invalid-script one is not.
+static bool sed_label_said;
 // A script that cannot be parsed is one, and a label nothing defines is four.
 static b32 sed_broken_status = 1;
 
@@ -31872,7 +31902,17 @@ static fn sed_put_reader_line(b32 which)
         text_quiet_read = false;
 
         if (!spilled)
+        {
+                //      R reads quietly, so a read that failed is said here, once,
+                //      with GNU's status 4. A file that is missing never gets here:
+                //      it is refused at open with status 0.
+                if (reader->error < 0)
+                {
+                        text_file_failed(reader->name, reader->error, true);
+                        text_status = 4;
+                }
                 return;
+        }
 
         sed_output_start();
         sed_stdio(length + 1);
@@ -32129,7 +32169,11 @@ static b32 sed_compile_regex(string_address pattern, positive length, bool icase
                 return 0;
         }
 
-        regex_keep(sed_programs + sed_program_count);
+        if (!regex_keep_checked(sed_programs + sed_program_count))
+        {
+                string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
+                exit(text_done(4));
+        }
         sed_program_end_only[sed_program_count] = length == 1 && pattern[0] == '$';
         return sed_program_count++;
 }
@@ -33093,7 +33137,11 @@ static fn sed_parse()
 
                 if (!found)
                 {
+                        text_flush();
+                        string_format(writer_stderr, "%s: can't find label for jump to '%s'\n",
+                                      text_name, want);
                         sed_broken = true;
+                        sed_label_said = true;
                         sed_broken_status = 4;
                         return;
                 }
@@ -34331,9 +34379,19 @@ static bool sed_option_seen(p8 letter, string_address value)
                 return true;
 
         // Four, not one: sed keeps its usage errors and its I/O failures
-        // apart, and a script file that is not there is the second kind.
-        if (!text_open(value))
+        // apart, and a script file that is not there is the second kind. GNU
+        // says it couldn't open the file, not that it can't read it.
+        bool quiet_open = text_quiet_open;
+
+        text_quiet_open = true;
+        bool opened = text_open(value);
+        text_quiet_open = quiet_open;
+
+        if (!opened)
         {
+                text_flush();
+                string_format(writer_stderr, "%s: couldn't open file %s: %s\n", text_name,
+                              value, file_reason(text_input.error));
                 sed_option_status = 4;
                 return false;
         }
@@ -34508,6 +34566,7 @@ static b32 text_sed()
         sed_have_script = false;
         sed_option_status = 1;
         sed_broken = false;
+        sed_label_said = false;
         sed_broken_status = 1;
         sed_io_failed = false;
         sed_failed = null;
@@ -34579,7 +34638,8 @@ static b32 text_sed()
         sed_parse();
 
         if (sed_broken)
-                return text_done(string_diagnostic(&text_diagnostic, sed_broken_status, null, "unsupported or invalid script"));
+                return sed_label_said ? text_done(sed_broken_status)
+                                      : text_done(string_diagnostic(&text_diagnostic, sed_broken_status, null, "unsupported or invalid script"));
 
         bool pieces_ok = !sed_null_data && sed_pieces_script();
 
@@ -35441,11 +35501,11 @@ static positive sort_number_localize(p8 address_to into, p8 address_to text, pos
         positive at = 0;
         positive used = 0;
 
-        while (at < length && used < SORT_LOCALIZED && sort_blanks[text[at]])
+        while (at < length && sort_blanks[text[at]])
                 into[used++] = text[at++];
-        if (at < length && used < SORT_LOCALIZED && text[at] == '-')
+        if (at < length && text[at] == '-')
                 into[used++] = text[at++];
-        while (at < length && used < SORT_LOCALIZED &&
+        while (at < length &&
                ((p8)(text[at] - '0') < 10 || (sort_thousands && text[at] == sort_thousands)))
         {
                 bool between = sort_thousands && text[at] == sort_thousands;
@@ -35458,17 +35518,30 @@ static positive sort_number_localize(p8 address_to into, p8 address_to text, pos
                         into[used++] = text[at];
                 at++;
         }
-        if (at < length && used < SORT_LOCALIZED)
+        if (at < length)
         {
                 p8 point = sort_point_byte ? sort_point_byte : '.';
 
                 into[used++] = text[at] == point ? '.' : text[at] == '.' ? ';' : text[at];
                 at++;
         }
-        while (at < length && used < SORT_LOCALIZED)
+        while (at < length)
                 into[used++] = text[at++];
 
         return used;
+}
+
+static bool sort_exhausted();
+
+// The room a localized copy of length bytes goes in: the caller's stack buffer
+// when it fits, else an allocation (the output is never longer than its input).
+// Null when the allocation fails, which the caller reports as memory exhausted.
+static p8 address_to sort_localize_room(p8 address_to small, positive length)
+{
+        if (length <= SORT_LOCALIZED)
+                return small;
+
+        return memory_take(length);
 }
 
 typedef struct
@@ -35569,23 +35642,43 @@ static PURE bipolar sort_compare_parsed(sort_number address_to a,
         return sign * answer;
 }
 
-static PURE bipolar sort_compare_number(p8 address_to a, positive la, p8 address_to b, positive lb)
+static PURE bipolar sort_compare_number_text(p8 address_to a, positive la, p8 address_to b, positive lb)
 {
-        p8 local_a[SORT_LOCALIZED];
-        p8 local_b[SORT_LOCALIZED];
-
-        if (sort_numeric_local)
-        {
-                la = sort_number_localize(local_a, a, la, false);
-                lb = sort_number_localize(local_b, b, lb, false);
-                a = local_a;
-                b = local_b;
-        }
-
         sort_number one = sort_number_of(a, la);
         sort_number two = sort_number_of(b, lb);
 
         return sort_compare_parsed(address_of one, address_of two);
+}
+
+static bipolar sort_compare_number(p8 address_to a, positive la, p8 address_to b, positive lb)
+{
+        if (!sort_numeric_local)
+                return sort_compare_number_text(a, la, b, lb);
+
+        p8 local_a[SORT_LOCALIZED];
+        p8 local_b[SORT_LOCALIZED];
+        p8 address_to room_a = sort_localize_room(local_a, la);
+        p8 address_to room_b = room_a ? sort_localize_room(local_b, lb) : null;
+        bipolar answer = 0;
+
+        if (!room_a || !room_b)
+        {
+                if (room_a && room_a != local_a)
+                        memory_give(room_a);
+                sort_exhausted();
+                return 0;
+        }
+
+        la = sort_number_localize(room_a, a, la, false);
+        lb = sort_number_localize(room_b, b, lb, false);
+        answer = sort_compare_number_text(room_a, la, room_b, lb);
+
+        if (room_a != local_a)
+                memory_give(room_a);
+        if (room_b != local_b)
+                memory_give(room_b);
+
+        return answer;
 }
 
 /*
@@ -35865,7 +35958,12 @@ static bipolar sort_compare_collated(p8 address_to a, positive la, p8 address_to
         p8 address_to room = small;
 
         if (la + lb > sizeof(small) && !(room = memory_take(la + lb)))
+        {
+                //      A tie here would be a wrong order; a failed allocation
+                //      is the sort's, and the sort says so and exits 2.
+                sort_exhausted();
                 return 0;
+        }
 
         positive ta = sort_translate(room, a, la, how);
         positive tb = sort_translate(room + ta, b, lb, how);
@@ -35877,7 +35975,7 @@ static bipolar sort_compare_collated(p8 address_to a, positive la, p8 address_to
         return answer;
 }
 
-static PURE bipolar sort_compare_bytes(p8 address_to a, positive la, p8 address_to b, positive lb,
+static bipolar sort_compare_bytes(p8 address_to a, positive la, p8 address_to b, positive lb,
                                   positive how)
 {
         if (sort_collating)
@@ -36047,7 +36145,7 @@ static bool sort_random_ready(string_address source)
         compares it: a copy with the ignored bytes gone and the rest folded,
         and the ordering run on the copies.
 */
-static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
+static bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
                                       p8 address_to b, positive lb);
 
 static positive sort_translate(p8 address_to into, p8 address_to from, positive length,
@@ -36075,7 +36173,12 @@ static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, p
         p8 address_to room = small;
 
         if (la + lb > sizeof(small) && !(room = memory_take(la + lb)))
+        {
+                //      A tie here would be a wrong order; a failed allocation
+                //      is the sort's, and the sort says so and exits 2.
+                sort_exhausted();
                 return 0;
+        }
 
         positive ta = sort_translate(room, a, la, how);
         positive tb = sort_translate(room + ta, b, lb, how);
@@ -36096,16 +36199,34 @@ static bipolar sort_compare_translated(p8 kind, positive how, p8 address_to a, p
         underneath decides between them. Measured: GNU sort -h leaves K6 after
         0, which no reading of "K is a thousand" produces on its own.
 */
+static bipolar sort_human_order_text(p8 address_to at, positive length);
+
 static bipolar sort_human_order(p8 address_to at, positive length)
 {
-        p8 plain[SORT_LOCALIZED];
+        if (!sort_numeric_local)
+                return sort_human_order_text(at, length);
 
-        if (sort_numeric_local)
+        p8 plain[SORT_LOCALIZED];
+        p8 address_to room = sort_localize_room(plain, length);
+        bipolar answer = 0;
+
+        if (!room)
         {
-                length = sort_number_localize(plain, at, length, true);
-                at = plain;
+                sort_exhausted();
+                return 0;
         }
 
+        length = sort_number_localize(room, at, length, true);
+        answer = sort_human_order_text(room, length);
+
+        if (room != plain)
+                memory_give(room);
+
+        return answer;
+}
+
+static bipolar sort_human_order_text(p8 address_to at, positive length)
+{
         positive scan = 0;
         bipolar sign = 1;
         bool nonzero = false;
@@ -36156,7 +36277,7 @@ static bipolar sort_human_order(p8 address_to at, positive length)
         }
 }
 
-static PURE bipolar sort_compare_human(p8 address_to a, positive la, p8 address_to b, positive lb)
+static bipolar sort_compare_human(p8 address_to a, positive la, p8 address_to b, positive lb)
 {
         bipolar one = sort_human_order(a, la);
         bipolar two = sort_human_order(b, lb);
@@ -36410,7 +36531,7 @@ static PURE bipolar sort_compare_version(p8 address_to a, positive la, p8 addres
         return sort_version_walk(a, la, b, lb);
 }
 
-static PURE bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
+static bipolar sort_compare_kind(p8 kind, positive how, p8 address_to a, positive la,
                                       p8 address_to b, positive lb)
 {
         if (!kind)
@@ -36664,7 +36785,7 @@ static inline INLINE p64 sort_window_load(p8 address_to at, positive length)
         return length >= 8 ? word : word & ~(~(p64)0 >> (length * 8));
 }
 
-static PURE HOT bipolar sort_compare_views_keys(sort_view address_to a,
+static HOT bipolar sort_compare_views_keys(sort_view address_to a,
                                                 sort_view address_to b,
                                                 b32 first)
 {
@@ -36691,7 +36812,7 @@ static PURE HOT bipolar sort_compare_views_keys(sort_view address_to a,
 // said the two were the same. -u drops what the keys called equal and -s
 // keeps their order, so both stop before it. A first stage past the last
 // resort has nothing left to ask.
-static PURE HOT bipolar sort_compare_views(sort_view address_to a,
+static HOT bipolar sort_compare_views(sort_view address_to a,
                                            sort_view address_to b, b32 first)
 {
         if (first > sort_key_count)
@@ -36721,7 +36842,7 @@ static PURE HOT bipolar sort_compare_views(sort_view address_to a,
         return sort_reverse ? -answer : answer;
 }
 
-static PURE HOT bipolar sort_compare_lines(p32 left, p32 right, b32 first)
+static HOT bipolar sort_compare_lines(p32 left, p32 right, b32 first)
 {
         sort_view a = sort_view_of(left);
         sort_view b = sort_view_of(right);
@@ -36753,16 +36874,39 @@ static inline INLINE p64 sort_window_fold(p64 word)
         windows are equal numbers only when both are exact -- every digit
         held and a width that did not saturate -- which the caller is told.
 */
+static p64 sort_number_window_text(p8 address_to text, positive length,
+                                  bool address_to exact);
+
 static p64 sort_number_window(p8 address_to text, positive length,
                               bool address_to exact)
 {
-        p8 plain[SORT_LOCALIZED];
+        if (!sort_numeric_local)
+                return sort_number_window_text(text, length, exact);
 
-        if (sort_numeric_local)
+        p8 plain[SORT_LOCALIZED];
+        p8 address_to room = sort_localize_room(plain, length);
+        p64 answer = 0;
+
+        if (!room)
         {
-                length = sort_number_localize(plain, text, length, false);
-                text = plain;
+                sort_exhausted();
+                if (exact)
+                        *exact = false;
+                return 0;
         }
+
+        length = sort_number_localize(room, text, length, false);
+        answer = sort_number_window_text(room, length, exact);
+
+        if (room != plain)
+                memory_give(room);
+
+        return answer;
+}
+
+static p64 sort_number_window_text(p8 address_to text, positive length,
+                                   bool address_to exact)
+{
 
         // A key carries no blanks or a few, and a minus is as common as a
         // digit, so every walk here is a table load a byte: a call to skip
@@ -36993,7 +37137,7 @@ static inline INLINE bipolar sort_windows_order(sort_item address_to a,
         takes up from there. Asked from the start, it loaded the first
         window again and compared the shared bytes over.
 */
-static PURE bipolar sort_compare_key_from(p32 left, p32 right, b32 stage, positive skip)
+static bipolar sort_compare_key_from(p32 left, p32 right, b32 stage, positive skip)
 {
         sort_view a = sort_view_of(left);
         sort_view b = sort_view_of(right);
@@ -42598,6 +42742,74 @@ static fn cmp_pass(text_reader address_to side, positive count)
 
 // A skip or a limit: head's count after blanks and a plus, without the b, m,
 // R and Q GNU cmp refuses.
+// A count written with a C radix: 0x and hex digits, or a leading zero and
+// octal digits. GNU cmp reads these with base 0, so 0x8 and 010 are 8 and 8.
+// Returns 1 when it read one, -1 when the radix form is malformed (an 8 in an
+// octal count), and 0 when the count is not written with a radix at all.
+static bipolar cmp_radix_of(string_address value, positive address_to result)
+{
+        positive base = 0;
+        string_address digits = value + 1;
+        positive total = 0;
+
+        if (value[0] != '0' || !value[1])
+                return 0;
+
+        if (value[1] == 'x' || value[1] == 'X')
+        {
+                base = 16;
+                digits = value + 2;
+        }
+        else
+                base = 8;
+
+        if (!*digits)
+                return 0;
+
+        //      The digits of the radix, then whatever follows them is a
+        //      suffix, read as a decimal count's would be: 0x10K is 16 K.
+        for (; *digits; digits++)
+        {
+                p8 lower = *digits | 0x20;
+                positive digit = byte_is_digit(*digits) ? (positive)(*digits - '0')
+                                 : (base == 16 && lower >= 'a' && lower <= 'f') ? (positive)(lower - 'a' + 10)
+                                 : (positive)base;
+
+                if (digit >= base)
+                        break;
+                if (total > (positive_max - digit) / base)
+                        return -1;
+
+                total = total * base + digit;
+        }
+
+        if (*digits == '\0')
+        {
+                address_to result = total;
+                return 1;
+        }
+
+        //      An octal count that names an 8 or a 9 is malformed, as GNU
+        //      refuses it, and anything else that is not a suffix is not a radix.
+        if (base == 8 && byte_is_digit(*digits))
+                return -1;
+        if (*digits == 'b' || *digits == 'm' || *digits == 'R' || *digits == 'Q')
+                return -1;
+
+        positive scale = 0;
+        p8 spelled[16] = {'1'};
+
+        for (positive k = 0; k < sizeof(spelled) - 2 && digits[k]; k++)
+                spelled[k + 1] = digits[k];
+
+        if (!text_count_suffixed((string_address)spelled, address_of scale) ||
+            (scale && total > positive_max / scale))
+                return -1;
+
+        address_to result = total * scale;
+        return 1;
+}
+
 static bool cmp_count_of(string_address value, positive address_to result)
 {
         if (!value)
@@ -42606,6 +42818,11 @@ static bool cmp_count_of(string_address value, positive address_to result)
         value += string_span(value, string_set_space);
 
         value += *value == '+';
+
+        bipolar radix = cmp_radix_of(value, result);
+
+        if (radix)
+                return radix > 0;
 
         string_address suffix = value;
 
@@ -42657,10 +42874,19 @@ static bool cmp_skip_of(string_address said)
         }
         else
         {
-                if (split >= sizeof(head))
-                        split = sizeof(head) - 1;
+                //      Leading zeros add no value, so a left part as long as
+                //      it likes is read from its first significant byte; only
+                //      what is left after them has to fit the head.
+                positive first = 0;
 
-                memory_copy_end(head, said, split);
+                while (split - first >= sizeof(head) && first + 1 < split &&
+                       said[first] == '0' && said[first + 1] == '0')
+                        first++;
+
+                if (split - first >= sizeof(head))
+                        return false;
+
+                memory_copy_end(head, said + first, split - first);
 
                 if (!split || !said[split + 1] ||
                     !cmp_count_of(head, address_of left) ||
@@ -42962,8 +43188,9 @@ static b32 text_cmp()
         worked on the decimal digits and kept as its decimal string.
 
         Status is not the usual one. Zero means the value is neither empty nor
-        zero, one means it is, two means the expression was not one, and
-        three that the regular expression matcher failed.
+        zero, one means it is, and two means the expression was not one, or a
+        regular expression would not compile, as GNU's expr says. Status three
+        is never produced: a pattern GNU reports as a failure is status two.
 */
 typedef struct
 {

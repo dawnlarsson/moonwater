@@ -3360,9 +3360,16 @@ static bool rx_keep(rx_pool *pool, const regex_program *program, regex_program *
         return true;
 }
 
+// The program is kept, or the allocation failed and the caller says so: grep
+// and sed exit with their own memory status, as they do for every other.
+static bool regex_keep_checked(regex_program *into)
+{
+        return rx_keep(&regex_pool, &regex_current, into);
+}
+
 static fn regex_keep(regex_program *into)
 {
-        if (!rx_keep(&regex_pool, &regex_current, into))
+        if (!regex_keep_checked(into))
         {
                 string_diagnostic(&text_diagnostic, 0, null, "memory exhausted");
                 exit(1);
