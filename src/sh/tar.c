@@ -1810,7 +1810,7 @@ static bipolar tar_open_beneath_same(string_address path,
         {
                 if (handle >= 0)
                         (void)system_close(handle);
-                return looked < 0 ? looked : -ERROR_AGAIN;
+                return looked < 0 ? looked : -ERROR_BUSY;
         }
         return handle;
 }
