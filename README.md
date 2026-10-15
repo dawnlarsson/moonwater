@@ -79,6 +79,8 @@ moonwater power [performance|balanced|powersave]  profile and CPU governor, kept
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
 moonwater charge [limit N|limit off]   where the battery stops charging, 20 to 100
+moonwater battery [NAME|auto|none]     which battery the Battery row reads:
+                                       auto is the first present one, none is no battery [auto]
 moonwater bind init canvas [on|off]    start Canvas at boot [on]
 moonwater bind init mount [on|off]     mount kept disks at boot [on]
 moonwater sleep | hibernate            suspend to RAM or to disk

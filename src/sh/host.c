@@ -19495,6 +19495,7 @@ static const host_row host_rows[] = {
     {null, "@cpu", null, 'r'},
     {null, "cpu online|offline N", "hotplug one processor", 'b'},
     {null, "@charge", null, 'r'},
+    {null, "@battery", null, 'r'},
     {"sleep hibernate", "sleep | hibernate", "suspend to RAM or to disk", 'b'},
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
     {null, "@wired", null, 'r'},
@@ -19647,7 +19648,7 @@ static fn host_page_write(writer out)
         host_say(out,
                  "\n"
                  TERM_DIM "  Settings stay in the image this session started from.\n"
-                 "  install takes this session's; update keeps the disk's.\n"
+                 "  install takes the settings of this session; update keeps those of the disk.\n"
                  "  The machine script overwrites bind, init and exit.\n"
                  "  " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
 }
