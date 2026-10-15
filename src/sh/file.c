@@ -22691,6 +22691,21 @@ static const argument_option chmod_options[] = {
     {null},
 };
 
+/* The command-line word a pointer into it is inside. An option's value is
+   the rest of its word, so the whole word is what a mode spelled as one
+   option names -- chmod -fwx is the word "-fwx", not what follows its w. */
+static string_address file_argument_holding(string_address at)
+{
+        for (positive i = 1; i < (positive)program_argument_count(); i++)
+        {
+                string_address word = program_argument((b32)i);
+
+                if (word && at >= word && at <= word + string_length(word))
+                        return word;
+        }
+        return null;
+}
+
 static b32 file_chmod()
 {
         positive count = (positive)program_argument_count();
@@ -22763,7 +22778,9 @@ static b32 file_chmod()
                 string_address rest = file_option_value(address_of taking, string_get(letter));
 
                 if (rest)
-                        minus_mode = rest - 2;
+                        minus_mode = file_argument_holding(rest)
+                                         ? file_argument_holding(rest)
+                                         : rest - 2;
                 else
                 {
                         chmod_taken[0] = '-';
@@ -22822,8 +22839,11 @@ static b32 file_chmod()
 
         if (!chmod_referenced &&
             !file_mode_of(chmod_specification, 0, false, address_of mode_probe))
-                return string_report(log_error, 1, "chmod: invalid mode: '%w'\n",
-                                     writer_terminal_quoted_name, chmod_specification);
+        {
+                string_format(log_error, "chmod: invalid mode: '%w'\n",
+                              writer_terminal_quoted_name, chmod_specification);
+                return file_try_help((string_address)"chmod", 1);
+        }
 
         chmod_umask = file_umask();
 
