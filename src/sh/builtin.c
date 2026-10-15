@@ -5516,6 +5516,8 @@ COLD bool shell_dynamic_assign(const_string name, positive length,
                 shell_seconds_origin =
                     shell_clock_seconds(CLOCK_MONOTONIC, null) -
                     (p64)asked;
+                shell_started_seconds =
+                    shell_clock_seconds(CLOCK_REALTIME, null);
 
                 return true;
         }
