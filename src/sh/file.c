@@ -31755,6 +31755,7 @@ static b32 file_hardlink()
                 {
                         string_format(log_error, "hardlink: cannot get realpath: %w: %s\n",
                                       writer_terminal_name, path, file_reason(there));
+                        hardlink_status = 1;
                         continue;
                 }
 
@@ -31913,7 +31914,7 @@ static b32 file_hardlink()
         if (!hardlink_quiet)
                 hardlink_print_stats(started);
         log_flush();
-        return 0;
+        return hardlink_status;
 }
 
 // shred ------------------------------------------------------------
