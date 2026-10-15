@@ -14620,6 +14620,8 @@ static positive find_node_room;
 static positive find_used;
 static b32 find_root = -1;
 static bool find_bad;
+// The last error a -fprint, -fprint0 or -fprintf file write got back.
+static bipolar find_write_error;
 static bool find_has_action;
 
 static find_batch address_to find_batches;
@@ -16457,13 +16459,22 @@ static fn find_name_write(bipolar handle, string_address name)
                 if (at > plain)
                 {
                         if (handle >= 0)
-                                system_write_all((positive)handle, name + plain,
-                                                 at - plain);
+                        {
+                                system_write_result wrote = system_write_all_checked(
+                                    (positive)handle, name + plain, at - plain);
+                                if (wrote.error)
+                                        find_write_error = wrote.error;
+                        }
                         else
                                 log(name + plain, at - plain);
                 }
                 if (handle >= 0)
-                        system_write_all((positive)handle, "?", 1);
+                {
+                        system_write_result wrote = system_write_all_checked(
+                            (positive)handle, "?", 1);
+                        if (wrote.error)
+                                find_write_error = wrote.error;
+                }
                 else
                         log("?", 1);
                 at += step;
@@ -16472,8 +16483,12 @@ static fn find_name_write(bipolar handle, string_address name)
         if (length > plain)
         {
                 if (handle >= 0)
-                        system_write_all((positive)handle, name + plain,
-                                         length - plain);
+                {
+                        system_write_result wrote = system_write_all_checked(
+                            (positive)handle, name + plain, length - plain);
+                        if (wrote.error)
+                                find_write_error = wrote.error;
+                }
                 else
                         log(name + plain, length - plain);
         }
@@ -16716,7 +16731,12 @@ static struct
 static fn find_out_flush(void)
 {
         if (find_out.handle >= 0)
-                system_write_all((positive)find_out.handle, find_out.block, find_out.used);
+        {
+                system_write_result wrote = system_write_all_checked(
+                    (positive)find_out.handle, find_out.block, find_out.used);
+                if (wrote.error)
+                        find_write_error = wrote.error;
+        }
         else if (find_out.used)
                 log(find_out.block, find_out.used);
         find_out.used = 0;
@@ -17304,17 +17324,27 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
         case 'e':
                 if (node->output >= 0)
                 {
-                        if (node->comparison == '0')
-                                system_write_all((positive)node->output, find_path,
-                                                 string_length(find_path));
-                        else
-                                find_name_write(node->output, find_path);
-                        system_write_all((positive)node->output,
-                                         node->comparison == '0' ? "" : "\n",
-                                         node->comparison == '0' ? 0 : 1);
+                        system_write_result wrote = {0, 0};
 
                         if (node->comparison == '0')
-                                system_write_all((positive)node->output, "", 1);
+                                wrote = system_write_all_checked((positive)node->output, find_path,
+                                                                 string_length(find_path));
+                        else
+                                find_name_write(node->output, find_path);
+                        if (wrote.error)
+                                find_write_error = wrote.error;
+                        wrote = system_write_all_checked((positive)node->output,
+                                                         node->comparison == '0' ? "" : "\n",
+                                                         node->comparison == '0' ? 0 : 1);
+                        if (wrote.error)
+                                find_write_error = wrote.error;
+
+                        if (node->comparison == '0')
+                        {
+                                wrote = system_write_all_checked((positive)node->output, "", 1);
+                                if (wrote.error)
+                                        find_write_error = wrote.error;
+                        }
                 }
                 return true;
 
@@ -18448,6 +18478,13 @@ static b32 file_find()
         // says it, and the answer is 1 whatever the walk found.
         if (!file_output_told((string_address)"find"))
                 find_status = 1;
+
+        if (find_write_error)
+        {
+                string_format(log_error, "find: write error: %s\n",
+                              file_reason(find_write_error));
+                find_status = 1;
+        }
 
         return find_status;
 }
