@@ -280,6 +280,8 @@ static fn checksum_base64_put(p8 address_to digest, positive length)
 static const checksum_algorithm address_to checksum_algorithm_find(
     string_address name, bool type)
 {
+        if (!name || !*name)
+                return null;
         for (positive i = 0; i < array_count(checksum_algorithms); i++)
                 if (string_equals(name, type ? checksum_algorithms[i].type
                                              : checksum_algorithms[i].command))
