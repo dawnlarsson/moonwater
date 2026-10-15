@@ -8918,8 +8918,38 @@ typedef struct
         //      GNU's does, so it is not walked to again by name.
         bipolar handle;
 } file_parent_record;
-static file_parent_record file_parent_records[64];
+/* One record per directory the copy made or met on the way, so there is one
+   for every level of the destination that is new or kept: the table grows
+   with the depth of the path, from the utility arena, and a tree nested past
+   any fixed count gets its attributes all the same. The descriptors held
+   are one per record, and a path cannot have more levels than PATH_MAX
+   allows, so they are bounded by the path and not by a count of ours. */
+static file_parent_record address_to file_parent_records;
 static positive file_parent_record_count;
+static positive file_parent_record_room;
+
+static file_parent_record address_to file_parent_record_add(void)
+{
+        if (file_parent_record_count == file_parent_record_room)
+        {
+                positive grown = file_parent_record_room
+                                     ? file_parent_record_room * 2
+                                     : 64;
+                file_parent_record address_to table =
+                    (file_parent_record address_to)utility_arena_take(
+                        grown * sizeof(file_parent_record));
+
+                if (!table)
+                        return null;
+                if (file_parent_record_count)
+                        memory_copy(table, file_parent_records,
+                                    file_parent_record_count *
+                                        sizeof(file_parent_record));
+                file_parent_records = table;
+                file_parent_record_room = grown;
+        }
+        return file_parent_records + file_parent_record_count++;
+}
 
 static fn file_parent_records_release(void)
 {
@@ -9049,10 +9079,10 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
 
                 file_parent_record address_to record = null;
 
-                if ((missing || (keeps && next >= 0)) &&
-                    file_parent_record_count < array_count(file_parent_records))
+                if (missing || (keeps && next >= 0))
+                        record = file_parent_record_add();
+                if (record)
                 {
-                        record = file_parent_records + file_parent_record_count++;
                         record->depth = depth;
                         record->source = source;
                         record->restore = false;
@@ -9121,7 +9151,19 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
                 else if (next < 0)
                         return next;
                 if (record)
+                {
+                        //      A directory whose handle cannot be kept gets
+                        //      no attributes after the copy, so the copy says
+                        //      why rather than go on without them.
                         record->handle = system_open_at(next, (string_address) ".", flags);
+                        if (record->handle < 0)
+                        {
+                                bipolar why = record->handle;
+
+                                system_close(next);
+                                return why;
+                        }
+                }
                 system_close(held);
                 held = next;
         }
