@@ -146,7 +146,7 @@ HOT fn shell_signals_settle(bool interactive)
 // was already in the middle of.
 fn trap_signal_caught(b32 number);
 
-#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__)
+#if X64 || ARM64
 
 /*
         Where the handler goes when it is done.
@@ -816,10 +816,10 @@ fn shell_restricted_enter()
         environment table in builtin.c, which is the only place that knows how
         a name is looked up in the first place.
 */
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if ARM64
 #define MOONWATER_HOSTTYPE "aarch64"
 #define MOONWATER_MACHTYPE "aarch64-unknown-linux-gnu"
-#elif defined(__riscv)
+#elif RISCV64
 #define MOONWATER_HOSTTYPE "riscv64"
 #define MOONWATER_MACHTYPE "riscv64-unknown-linux-gnu"
 #else
@@ -1498,8 +1498,7 @@ DEAD_END fn shell_thread_instance_mode(bool preserve_ignored)
            bash names the file it tried, dash the command and "not found"
            for a file that is not there. A file that vanished after it was
            found -- a stale hashed path -- is not found, 127; anything else
-           the kernel refused is 126. This wrote "failed with error: ..." to
-           standard output and left 126 either way. */
+           the kernel refused is 126. */
         {
                 bipolar code = exec_result < 0 ? -exec_result : exec_result;
                 string_address why = system_error_message(code);
@@ -1888,10 +1887,9 @@ fn shell_execute_command()
                 // No spark device, or it refused the request: fall back to the
                 // portable path so the shell still works on a stock kernel.
                 //
-                // clone takes (flags, child_stack, ...). Passing only flags
-                // left child_stack as whatever happened to be in the second
-                // argument register, so the child started on a garbage stack
-                // and execve was handed an empty path.
+                // An allowed launch forks at once. Any other decision goes
+                // through shell_clone, which first prepares the parser's
+                // source state for the child and then forks the same way.
                 child = policy == FLOODLIGHT_LAUNCH_ALLOW
                             ? shell_clone_raw() : shell_clone();
 
@@ -1931,8 +1929,7 @@ fn shell_execute_command()
                 */
         }
         else
-                string_format(log_error, "failed with error: %s\n",
-                              file_reason(child));
+                string_format(log_error, "fork: %s\n", file_reason(child));
 
         log_flush();
 }
@@ -2056,8 +2053,6 @@ bool shell_reading_more()
 {
         return shell_more;
 }
-
-/* Defined above the included readers, which trace under it. */
 
 /*
         A syntax error drops what was parsed and moves the generation, which
