@@ -6242,8 +6242,11 @@ static bipolar tar_scan_end(bipolar handle)
                 offset += TAR_BLOCK;
                 positive data = (positive)((size + TAR_BLOCK - 1) / TAR_BLOCK * TAR_BLOCK);
 
-                if (type == 'L' && size < TAR_PATH)
+                if (type == 'L')
                 {
+                        // A name the extraction would refuse is not listed.
+                        if (size >= TAR_PATH)
+                                return -1;
                         if (system_read_retry((positive)handle, long_name, (positive)size) != (bipolar)size)
                                 return -1;
                         long_name[size] = end;
