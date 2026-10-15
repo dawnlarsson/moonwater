@@ -787,6 +787,11 @@ struct ui_app
         long (*tick)(long timeout, long address_to other);         // the app's timer; 0 runs the loop again now; other: a descriptor
         void (*ready)(void);            // other is readable
         void (*close)(void);            // before the window is left
+        // Added for the terminal, which is an app on this loop. Each is optional, and none set is the loop above.
+        void (*pass)(void);             // runs at the top of each pass, before the events
+        void (*closing)(void);          // the window is closing: runs each pass, and the loop goes on; unset, the loop ends
+        b32 (*done)(void);              // checked after tick: true ends the loop before the wait
+        b32 own_faces;                  // the app opens its engine and loads its faces in open; the runner loads neither
 };
 
 // Every row is due: the picture, and the app's changed hook when it has one.
@@ -813,16 +818,19 @@ static int ui_app_run(struct ui_app address_to app)
         table = app->own->table;
         row = app->own->row;
         app->ui->scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
-        if (!ui_engine_open(app->ui) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
+        if (!app->own_faces)
         {
-                compositor_kmsg(app->nofont, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
-                windows_leave(app->own);
-                return 1;
+                if (!ui_engine_open(app->ui) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
+                {
+                        compositor_kmsg(app->nofont, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
+                        windows_leave(app->own);
+                        return 1;
+                }
+                app->ui->regular = &app->ui->faces[0];
+                app->ui->bold = !app->no_bold && ui_face_load(&app->ui->faces[1], app->bold ? app->bold : (string_address)UI_FONT_BOLD)
+                                    ? &app->ui->faces[1] : null;
         }
-        app->ui->regular = &app->ui->faces[0];
-        app->ui->bold = !app->no_bold && ui_face_load(&app->ui->faces[1], app->bold ? app->bold : (string_address)UI_FONT_BOLD)
-                            ? &app->ui->faces[1] : null;
-        string_copy((string_address)table->title[row], app->title);
+        string_copy_bounded((string_address)table->title[row], app->title, WINDOWS_TITLE);
         table->glass[row] = app->glass;
         *app->ground = table->ground[row];
         ui_inks(app->ui, *app->ground ? *app->ground : 0x101012u);
@@ -839,12 +847,19 @@ static int ui_app_run(struct ui_app address_to app)
                 struct window_event event;
                 long timeout = -1, other = -1, ready;
 
+                if (app->pass)
+                        app->pass();
                 while (running && windows_event(app->own, &event))
                         if (!app->event(&event))
                                 running = false;
 
                 if (table->state[row] & WINDOW_CLOSING)
-                        running = false;
+                {
+                        if (app->closing)
+                                app->closing();
+                        else
+                                running = false;
+                }
 
                 if ((table->focus == row) != *app->focused)
                 {
@@ -878,6 +893,8 @@ static int ui_app_run(struct ui_app address_to app)
                         if (timeout == 0)
                                 continue;
                 }
+                if (app->done && app->done())
+                        break;
 
                 ready = windows_wait(app->own, other, timeout);
                 if (ready < 0)

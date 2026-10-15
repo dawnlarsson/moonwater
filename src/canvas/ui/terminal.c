@@ -54,6 +54,10 @@
 #ifndef MOONWATER_CANVAS_TERMINAL
 #define MOONWATER_CANVAS_TERMINAL
 
+// The runner and the drawing primitives the window's engines are made with. ui.c has its own guard, and the shell
+// includes it under the features' switches, which the terminal does not have: it is always built with this.
+#include "ui.c"
+
 // Lines kept at least: what is on the screen and what has scrolled off it, as the kernel's window kept
 // them, and never fewer than two screens of the tallest window the output could hold.
 #define TERMINAL_HISTORY 512
@@ -112,14 +116,20 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 
 typedef unsigned long long __attribute__((may_alias)) terminal_word;
 
+// The loop's phases: the shell's output and keys (running); the shell gone, with what it said left on the screen until a
+// key or the close (staying); and over (done), which is when the runner leaves.
+#define TERMINAL_RUNNING 0
+#define TERMINAL_STAYING 1
+#define TERMINAL_DONE 2
+
 static struct
 {
         struct window_row own; // its row of the compositor's table
+        struct ui ui;          // the main engine's: the atlas and the picture's inks, as every window's
         font_face face[TERMINAL_FACE_SLOTS];
         const font_face *plain[TERMINAL_FACES];
         const font_face *bold[TERMINAL_FACES];
         unsigned int plain_count, bold_count;
-        font_engine *engine;
         font_metrics grid;
         unsigned int size; // in 26.6, which is what font.c takes
         // The paper round the grid: margin at least on every side, at the left (pad), at the right (bar),
@@ -128,6 +138,7 @@ static struct
         unsigned int cell_w, cell_h, bar, pad, pad_y, margin;
         unsigned int width, height; // the window, in pixels
         unsigned int pitch;         // pixels a row of a buffer, which is the output's width
+        unsigned int ground;        // the window's ground as the runner last saw it (the terminal draws its own paper)
 
         /*
                 What each buffer shows, as the cells that made it, and the
@@ -157,7 +168,6 @@ static struct
         b32 pressed;
         int wheel_remainder;
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
-        unsigned int asked_w, asked_h; // the newest size the compositor asked for
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
@@ -169,7 +179,21 @@ static struct
         b32 modes_fresh, title_owed;
         // Per buffer: the top margin was drawn over by what the compositor wrote, and is drawn again.
         b32 margin_spoiled[2];
-} terminal = {.shown = -1, .view = TERMINAL_LIVE};
+
+        /*
+                The loop, as the runner's hooks see it. dirty: a picture is due. changed: the cells changed since the
+                frame last looked (a drain or the cells the pass touched); the frame's settle and the title read it.
+                hold_timeout: how long a due frame is held, as the frame found it. The rest is what the loop was
+                keeping in its locals: the pty and the far end's state, the timers, and the staying phase.
+        */
+        b32 dirty, changed, reading, gone, hung, keyed;
+        int phase;
+        bipolar child;
+        b32 master;
+        positive oom_kills, sync_since, stalled_since, last_frame, settle_since, idle_since;
+        b32 sync_held;
+        long hold_timeout;
+} terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1};
 
 static unsigned int terminal_colour[256];
 
@@ -616,7 +640,7 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
 
 struct terminal_painter
 {
-        font_engine address_to engine;
+        struct ui ui;     // only its engine is used: the painter's own atlas, or the terminal's for the first band
         p32 codes[FONT_RUN];
 };
 
@@ -657,7 +681,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 while (trail < glyphs && painter->codes[glyphs - 1 - trail] == ' ')                    \
                         trail++;                                                                       \
                 if (glyphs > trail)                                                                    \
-                        font_cells(painter->engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
+                        font_cells(painter->ui.engine, glyphs_heavy ? terminal.bold : terminal.plain,     \
                                    glyphs_heavy ? terminal.bold_count : terminal.plain_count,          \
                                    painter->codes, glyphs - trail, &terminal.grid, terminal.size,      \
                                    glyphs_flags, &target, (b32)(glyphs_from * terminal.cell_w), y,     \
@@ -755,7 +779,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 {
                         b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
 
-                        font_cell(painter->engine, heavy ? terminal.bold : terminal.plain,
+                        font_cell(painter->ui.engine, heavy ? terminal.bold : terminal.plain,
                                   heavy ? terminal.bold_count : terminal.plain_count, cell->character,
                                   cells, &terminal.grid, terminal.size, terminal_style(cell), &target,
                                   (b32)(at * terminal.cell_w), y, ink, paper);
@@ -1092,23 +1116,10 @@ static unsigned int terminal_painters_ready(unsigned int bands)
 {
         for (unsigned int at = 1; at < bands; at++)
         {
-                long engine, atlas;
-
-                if (terminal_painters[at].engine)
+                if (terminal_painters[at].ui.engine)
                         continue;
-                engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
-                atlas = compositor_call(syscall(mmap), 0, TERMINAL_ATLAS * TERMINAL_ATLAS, 3, 0x22, (positive)-1, 0);
-                if ((engine < 0 && engine > -4096) || (atlas < 0 && atlas > -4096))
-                {
-                        // Whichever was mapped is given back: the next frame asks again, and would map it again.
-                        if (!(engine < 0 && engine > -4096))
-                                compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
-                        if (!(atlas < 0 && atlas > -4096))
-                                compositor_call(syscall(munmap), (positive)atlas, TERMINAL_ATLAS * TERMINAL_ATLAS, 0, 0, 0, 0);
+                if (!ui_engine_open_sized(&terminal_painters[at].ui, TERMINAL_ATLAS))
                         return at;
-                }
-                terminal_painters[at].engine = (font_engine address_to)engine;
-                font_start(terminal_painters[at].engine, (p8 address_to)atlas, TERMINAL_ATLAS, TERMINAL_ATLAS);
         }
         return bands;
 }
@@ -1332,23 +1343,19 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
                           unsigned int size)
 {
         unsigned int faces = 0;
-        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
-        long atlas = compositor_call(syscall(mmap), 0, TERMINAL_ATLAS * TERMINAL_ATLAS, 3, 0x22, (positive)-1, 0);
 
-        if ((engine < 0 && engine > -4096) || (atlas < 0 && atlas > -4096))
+        if (!ui_engine_open_sized(&terminal.ui, TERMINAL_ATLAS))
                 return false;
 
         for (unsigned int at = 0; at <= count && faces < TERMINAL_FACE_SLOTS; at++)
         {
                 string_address path = at < count ? paths[at] : bold;
-                positive length = 0;
-                positive bytes = path ? compositor_map_file(path, &length) : 0;
 
                 if (!path)
                         continue;
 
                 // Said where the machine's log is, with the file: this program's own output goes nowhere.
-                if (!bytes || font_load(&terminal.face[faces], (const p8 address_to)bytes, length, 0) != 0)
+                if (!ui_face_load(&terminal.face[faces], path))
                 {
                         static p8 said[128] = " cannot use the font ";
                         positive at = 21;
@@ -1375,9 +1382,7 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
                 for (unsigned int at = 0; at < terminal.plain_count && terminal.bold_count < TERMINAL_FACES; at++)
                         terminal.bold[terminal.bold_count++] = terminal.plain[at];
 
-        terminal.engine = (font_engine address_to)engine;
-        font_start(terminal.engine, (p8 address_to)atlas, TERMINAL_ATLAS, TERMINAL_ATLAS);
-        terminal_painters[0].engine = terminal.engine;
+        terminal_painters[0].ui.engine = terminal.ui.engine;
         terminal.size = size << 6;
         terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
         terminal.cell_w = (unsigned int)terminal.grid.cell_width;
@@ -1408,18 +1413,15 @@ static unsigned int terminal_rows(unsigned int height)
 
 /*
         The window this program draws in, as large as a share of the output holds in whole cells, and where that
-        share puts it: a row of the compositor's table taken, which says what the output is. The shares are
-        percents, which is what lets one rule size a window on any screen; the compositor keeps it on the output.
-        Never larger than the output, which is as large as a buffer is.
+        share puts it: the row the runner took, which says what the output is. The shares are percents, which is
+        what lets one rule size a window on any screen; the compositor keeps it on the output. Never larger than
+        the output, which is as large as a buffer is.
 */
-static b32 terminal_open(unsigned int wide, unsigned int high, unsigned int left, unsigned int top,
-                         unsigned int address_to columns, unsigned int address_to rows, const unsigned int address_to cells)
+static void terminal_open(unsigned int wide, unsigned int high, unsigned int left, unsigned int top,
+                          unsigned int address_to columns, unsigned int address_to rows, const unsigned int address_to cells)
 {
         struct windows address_to table;
         unsigned int display_w, display_h, pixels_w, pixels_h;
-
-        if (windows_take(&terminal.own) < 0)
-                return false;
 
         // A shell at its prompt has no use for the pointer's motion, and each report of it is a wakeup: asked for
         // only while a program has a mouse mode (the loop says when that changes).
@@ -1456,7 +1458,6 @@ static b32 terminal_open(unsigned int wide, unsigned int high, unsigned int left
                                                           : (int)(display_w * left / 100);
         table->y[terminal.own.row] = cells[0] && cells[1] ? ((int)display_h - (int)terminal.height) / 2
                                                           : (int)(display_h * top / 100);
-        return true;
 }
 
 /*
@@ -1503,25 +1504,6 @@ static void terminal_configure(b32 master, unsigned int width, unsigned int heig
         terminal_frames();
         terminal.width = pixels_w;
         terminal.height = pixels_h;
-}
-
-/*
-        The window was asked for another size and has not been given it: the grid is cut to it, the pty told
-        and the picture drawn again. Answers whether it was asked for.
-*/
-static b32 terminal_asked(b32 master)
-{
-        struct windows address_to table = terminal.own.table;
-        unsigned int own = terminal.own.row;
-
-        if (!table->want_width[own] || !table->want_height[own] ||
-            (table->want_width[own] == terminal.asked_w && table->want_height[own] == terminal.asked_h))
-                return false;
-
-        terminal.asked_w = table->want_width[own];
-        terminal.asked_h = table->want_height[own];
-        terminal_configure(master, terminal.asked_w, terminal.asked_h);
-        return true;
 }
 
 /*
@@ -1686,28 +1668,6 @@ static void terminal_zoom(b32 master, int by)
         // This terminal only; the file is where the next one starts.
         terminal_size_write(terminal_steps[next]);
         terminal_text_set(master, terminal_steps[next]);
-}
-
-/*
-        windows_wait with the far end in it: the compositor's knock and the far end in one sleep, and nothing
-        else, so an idle terminal wakes for neither. -1 once the compositor has gone.
-*/
-static long terminal_wait(long other, long nanoseconds)
-{
-        struct window_poll wanted[2] = {{(int)terminal.own.wake, 1, 0}, {(int)other, 1, 0}};
-        long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000};
-        long ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, 2, nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
-
-        if (ready == -4) // EINTR
-                return 0;
-
-        if (ready > 0 && wanted[0].returned)
-        {
-                windows_drain(terminal.own.wake);
-                if (wanted[0].returned & 16) // POLLHUP
-                        return -1;
-        }
-        return ready;
 }
 
 // A key from the compositor, as the window's key ring would have had it.
@@ -2023,6 +1983,511 @@ static b32 terminal_key_pressed(const struct window_event address_to event)
 
 static b32 klog_drain(b32 far, b32 address_to gone, positive budget);
 static b32 klog_receive(const struct window_event address_to event, b32 address_to dirty);
+static void terminal_leave(b32 show);
+
+// The program's arguments, read before the runner takes the window and used when it opens.
+static string_address terminal_paths[TERMINAL_FACES];
+static string_address terminal_bold_path, terminal_ready_path;
+static unsigned int terminal_face_count, terminal_size_asked;
+static unsigned int terminal_cells[2];
+
+/*
+        The loop, as the runner drives it. The runner waits on the compositor and on the pty, and each pass takes the
+        compositor's events, the table's asks, and a picture when one is due; the hooks below are that body in its
+        order: the pass's start (the cells touched and the far end's modes), the events, the focus, the size, the
+        closing, the frame and its holds, then the far end's report, the title, the synchronized frame's hold, the bar's
+        fade, and the timers that say how long the wait may be.
+*/
+
+// The far end's output, read: what is read is a change, and the frame is due. Waited on after every pass, as the loop read it.
+static void terminal_on_ready(void)
+{
+        b32 drew = terminal.reading ? klog_drain(terminal.master, &terminal.gone, TERMINAL_BUDGET)
+                                    : term_drain(terminal.master, &terminal.gone, TERMINAL_BUDGET);
+
+        if (touched_bottom > touched_top)
+                drew = true;
+        if (drew)
+        {
+                terminal.changed = true;
+                terminal.dirty = true;
+        }
+}
+
+// The top of a pass: what the pty will say first, and the far end's modes read at most once a frame period, before a key is taken.
+static void terminal_on_pass(void)
+{
+        if (terminal.phase != TERMINAL_RUNNING)
+                return;
+
+        // A held frame keeps the rows it has touched until it is let go.
+        if (!synchronized_output)
+        {
+                touched_top = ROWS;
+                touched_bottom = 0;
+        }
+
+        terminal.modes_fresh = false;
+        if (!terminal.reading)
+        {
+                positive read_now = clock_monotonic_nanoseconds();
+
+                if (read_now - terminal.modes_at >= terminal_period())
+                        terminal_modes_read(terminal.master, read_now);
+        }
+}
+
+// One event from the compositor: zoom keys, then the keys and pointer of the shell (or the log's keys). A staying window
+// leaves on a key, when the shell was a program that was asked for.
+static b32 terminal_on_event(const struct window_event address_to event)
+{
+        int zoom = terminal_zoom_key(event);
+
+        if (zoom)
+        {
+                terminal_zoom(terminal.master, zoom);
+                terminal.dirty = true;
+                return true;
+        }
+        if (terminal.phase == TERMINAL_STAYING)
+        {
+                if (terminal.keyed && terminal_key_pressed(event))
+                        terminal.phase = TERMINAL_DONE;
+                return true;
+        }
+        if (terminal.phase == TERMINAL_RUNNING &&
+            !(terminal.reading ? klog_receive(event, &terminal.dirty) : terminal_receive(terminal.master, event, &terminal.dirty)))
+                terminal.gone = true;
+        return true;
+}
+
+// The keys came or went: the far end is told, where the shell asked to hear of it.
+static b32 terminal_on_focus(b32 focused)
+{
+        if (terminal.phase == TERMINAL_RUNNING && !terminal.reading)
+        {
+                term_focus(focused);
+                if (!term_send(terminal.master))
+                        terminal.gone = true;
+        }
+        return true;
+}
+
+// The table asked for a size: the grid is cut to it, the pty told, and the picture due again.
+static void terminal_on_size(unsigned int width, unsigned int height)
+{
+        terminal_configure(terminal.master, width, height);
+        terminal.dirty = true;
+}
+
+// The window is closing: the shell is hung up on, once, and the loop goes on until the shell has gone. A log has no
+// shell, so it is over. A staying window is over as well.
+static void terminal_on_closing(void)
+{
+        if (terminal.phase == TERMINAL_STAYING)
+        {
+                terminal.phase = TERMINAL_DONE;
+                return;
+        }
+        if (terminal.phase != TERMINAL_RUNNING)
+                return;
+        if (terminal.reading)
+                terminal.gone = true;
+        else if (!terminal.gone)
+                term_hang_up(terminal.child, &terminal.hung);
+}
+
+/*
+        The far end's output is drawn when it is due and not held: a frame is held while the output that has just ended a
+        line settles, for the rest of a period after the last frame, and while the far end holds a synchronized frame open.
+        A picture the compositor has not let go of waits; after TERMINAL_STALL_NANOSECONDS it is drawn regardless.
+        Answers whether the picture is made; a held one leaves its wait in terminal.hold_timeout.
+*/
+static b32 terminal_pass_frame(void)
+{
+        positive now;
+
+        terminal.hold_timeout = -1;
+        if (terminal.phase == TERMINAL_RUNNING)
+        {
+                if (synchronized_output)
+                        return false;
+
+                now = clock_monotonic_nanoseconds();
+                if (terminal.changed && !terminal.reading && !column)
+                {
+                        terminal.settle_since = terminal.settle_since ? terminal.settle_since : now;
+                        if (now - terminal.settle_since < (positive)TERMINAL_SETTLE_NANOSECONDS)
+                                terminal.hold_timeout = (long)(TERMINAL_SETTLE_NANOSECONDS - (now - terminal.settle_since));
+                }
+                if (terminal.last_frame)
+                {
+                        positive period = terminal_period();
+                        positive since = now - terminal.last_frame;
+
+                        if (since < period)
+                                terminal.hold_timeout = (long)(period - since);
+                }
+                if (terminal.hold_timeout >= 0)
+                        return false;
+                cursor_show();
+        }
+
+        if (terminal_frame())
+        {
+                terminal.dirty = false;
+                if (terminal.phase == TERMINAL_RUNNING)
+                        terminal.last_frame = clock_monotonic_nanoseconds();
+                return true;
+        }
+
+        now = clock_monotonic_nanoseconds();
+        if (!terminal.stalled_since)
+                terminal.stalled_since = now;
+        else if (now - terminal.stalled_since >= (positive)TERMINAL_STALL_NANOSECONDS)
+        {
+                // Waited for the compositor to take the last picture, and it has not: the buffer is taken.
+                terminal.forced = true;
+                terminal.stalled_since = 0;
+        }
+        return false;
+}
+
+/*
+        The far end is gone: what the pty still holds is read once more, and drawn if it changed anything, and the window
+        stays for what the shell said or leaves (terminal_leave).
+*/
+static void terminal_end(void)
+{
+        b32 drew = terminal.reading ? klog_drain(terminal.master, &terminal.gone, TERMINAL_BUDGET)
+                                    : term_drain(terminal.master, &terminal.gone, TERMINAL_BUDGET);
+
+        if (drew || touched_bottom > touched_top)
+        {
+                cursor_show();
+                terminal_frame();
+        }
+        terminal_leave(true);
+}
+
+/*
+        The end of the shell, as the loop used to leave it: the pty is closed for a log, and the shell is finished with. A
+        program that was asked for, or a shell that asks to stay, keeps the window until a key is pressed or its X; otherwise
+        the loop is over.
+*/
+static void terminal_leave(b32 show)
+{
+        b32 stays;
+
+        if (terminal.reading)
+                system_close(terminal.master);
+
+        stays = !terminal.reading && term_finish(terminal.child, terminal.master, terminal.hung, terminal.oom_kills);
+
+        // A program that was asked for ends in a window that waits for a key, unless the X sent the end.
+        if (!terminal.reading && term_program_count && !terminal.hung)
+        {
+                terminal_exit_said();
+                stays = terminal.keyed = true;
+        }
+
+        if (stays && show)
+        {
+                // What is left of a window whose shell is gone: its cells, and what said how it ended, drawn until the
+                // compositor has taken them.
+                cursor_show();
+                terminal.dirty = !terminal_frame();
+                terminal.phase = TERMINAL_STAYING;
+                return;
+        }
+        terminal.phase = TERMINAL_DONE;
+}
+
+/*
+        The rest of a pass, after the frame: the modes and the title, the report the far end is owed, the synchronized frame's
+        hold, the bar's fade, and the timers. The answer is the wait's timeout: -1 for ever, else the longest the wait may
+        last; 0 when a frame is due now and not held, so the loop runs again before it waits. The pty the wait is on is set
+        too: none while the window stays.
+*/
+static long terminal_tick(long timeout, long address_to other)
+{
+        b32 was = terminal.dirty, again = false;
+        long hold = terminal.hold_timeout;
+        positive now;
+
+        (void)timeout;
+        terminal.hold_timeout = -1;
+
+        if (terminal.phase == TERMINAL_RUNNING && terminal.gone)
+                terminal_end();
+        if (terminal.phase == TERMINAL_DONE)
+        {
+                *other = -1;
+                return -1;
+        }
+        if (terminal.phase == TERMINAL_STAYING)
+        {
+                *other = -1;
+                return terminal.dirty ? TERMINAL_STALL_NANOSECONDS : -1;
+        }
+        *other = terminal.master;
+
+        // The mouse modes say whether the pointer's motion is wanted: a press, a held button and a wheel all say where it is.
+        if (!terminal.reading && (mouse_mode != 0) != terminal.hovering)
+        {
+                terminal.hovering = mouse_mode != 0;
+                windows_hover(&terminal.own, terminal.hovering);
+        }
+
+        // The title is read when the far end has said something, at most once a frame period; a title a program sets is read as it is set.
+        if (!terminal.reading && !terminal.gone && (terminal.changed || terminal.title_owed))
+        {
+                positive title_now = clock_monotonic_nanoseconds();
+
+                if (title_now - terminal.title_at >= terminal_period() || title_said != terminal.title_seen)
+                {
+                        terminal_title(terminal.master, terminal.child);
+                        terminal.title_at = title_now;
+                        terminal.title_owed = false;
+                }
+                else
+                        terminal.title_owed = true;
+        }
+
+        if (!terminal.gone && !term_send(terminal.master))
+                terminal.gone = true;
+
+        if (touched_bottom > touched_top)
+                terminal.changed = true;
+
+        timeout = -1;
+        if (synchronized_output)
+        {
+                now = clock_monotonic_nanoseconds();
+                terminal.sync_since = terminal.sync_held ? terminal.sync_since : now;
+                terminal.sync_held = true;
+
+                if (terminal.gone || now - terminal.sync_since >= (positive)TERMINAL_SYNC_NANOSECONDS)
+                {
+                        synchronized_output = false;
+                        terminal.changed = true;
+                }
+                else
+                        timeout = (long)(TERMINAL_SYNC_NANOSECONDS - (now - terminal.sync_since));
+        }
+        else
+                terminal.sync_held = false;
+
+        terminal.dirty |= terminal.changed;
+
+        // The bar: seen while the view is scrolled back or the bar is held, and faded out over a quarter of a second once the
+        // view is back at the live end, a frame a step.
+        {
+                unsigned int level = 256;
+
+                if (terminal.view != TERMINAL_LIVE || terminal.bar_grab >= 0)
+                        terminal.bar_fading = 0;
+                else if (!terminal.bar_level)
+                        level = 0;
+                else
+                {
+                        now = clock_monotonic_nanoseconds();
+                        terminal.bar_fading = terminal.bar_fading ? terminal.bar_fading : now;
+                        level = now - terminal.bar_fading >= (positive)TERMINAL_FADE_NANOSECONDS
+                                    ? 0
+                                    : (unsigned int)(256 - 256 * (now - terminal.bar_fading) / TERMINAL_FADE_NANOSECONDS);
+                        terminal.bar_fading = level ? terminal.bar_fading : 0;
+                }
+                if (level != terminal.bar_level)
+                {
+                        terminal.bar_level = level;
+                        terminal.dirty = true;
+                }
+                if (terminal.bar_fading)
+                        timeout = timeout < 0 || timeout > (long)TERMINAL_FRAME_NANOSECONDS ? (long)TERMINAL_FRAME_NANOSECONDS : timeout;
+        }
+
+        if (hold >= 0 && (timeout < 0 || hold < timeout))
+                timeout = hold;
+
+        if (terminal.title_owed)
+        {
+                positive due = terminal.title_at + terminal_period(), owed_now = clock_monotonic_nanoseconds();
+                long left = due > owed_now ? (long)(due - owed_now) : 0;
+
+                timeout = timeout < 0 || left < timeout ? left : timeout;
+        }
+
+        /*
+                Asleep until a key, a resize or the shell's output; and, with a picture waiting for a buffer, until the compositor has
+                let one go. With nothing to do and a spare buffer held, the spare is given back after the time it takes to be sure nothing
+                is coming, and then the sleep is for ever: an idle terminal wakes no more.
+        */
+        {
+                b32 spare = !terminal.dirty && !synchronized_output && terminal.shown >= 0 && terminal.valid[1 - terminal.shown] &&
+                            windows_ready(&terminal.own);
+                b32 stalled = terminal.dirty && !synchronized_output && terminal.shown >= 0 && !windows_ready(&terminal.own);
+
+                if (spare && timeout < 0)
+                {
+                        // A spare is one the compositor has taken the last picture from; until it has, nothing is to be discarded.
+                        now = clock_monotonic_nanoseconds();
+                        terminal.idle_since = terminal.idle_since ? terminal.idle_since : now;
+                        if (now - terminal.idle_since >= (positive)TERMINAL_IDLE_NANOSECONDS)
+                        {
+                                terminal_discard();
+                                terminal.idle_since = 0;
+                        }
+                        else
+                                timeout = (long)(TERMINAL_IDLE_NANOSECONDS - (now - terminal.idle_since));
+                }
+                else
+                {
+                        terminal.idle_since = 0;
+                        if (stalled && timeout < 0)
+                                timeout = TERMINAL_STALL_NANOSECONDS;
+                }
+        }
+
+        if (!terminal.dirty)
+                terminal.stalled_since = terminal.settle_since = 0;
+
+        // A frame that became due in this pass, and is not held, is drawn by the next pass before any wait.
+        again = !was && terminal.dirty && hold < 0 && !synchronized_output;
+        if (!again)
+                terminal.changed = false;
+        return again ? 0 : timeout;
+}
+
+// The runner ends its loop on this, after a tick: the far end is gone and what it said is seen to, or it is over.
+static b32 terminal_done(void)
+{
+        return terminal.phase == TERMINAL_DONE;
+}
+
+// The runner stopped its loop on the compositor's going: the shell is hung up on, and what is left is seen out.
+static void terminal_on_close(void)
+{
+        if (terminal.phase == TERMINAL_RUNNING)
+        {
+                if (!terminal.gone)
+                        term_hang_up(terminal.child, &terminal.hung);
+                terminal_leave(false);
+        }
+        terminal.phase = TERMINAL_DONE;
+}
+
+/*
+        The window's start, after the runner took it: the faces, the grid the window has room for, the ring, the pty or the
+        log, and the first picture. Answers the runner's status when it fails, or -1 to run the loop.
+*/
+static int terminal_start(void)
+{
+        unsigned int size = terminal_size_asked, columns, rows, max_columns;
+        struct windows address_to table = terminal.own.table;
+
+        // -s is the size asked for here; without it, the step the last zoom left, and the default.
+        size = size ? size : terminal_size_read();
+        size = size ? size : TERMINAL_SIZE;
+        size = size < terminal_steps[0] ? terminal_steps[0] : size > terminal_steps[TERMINAL_STEPS - 1] ? terminal_steps[TERMINAL_STEPS - 1] : size;
+
+        if (!terminal_fonts(terminal_paths, terminal_face_count, terminal_bold_path, size))
+        {
+                terminal_said(terminal.reading, " has no font to draw with (-f FONT.ttf)");
+                return 1;
+        }
+
+        for (unsigned int at = 0; at < 256; at++)
+                terminal_colour[at] = window_cell_colour(at);
+        term_palette = terminal_palette;
+
+        term_cell_w = terminal.cell_w;
+        term_cell_h = terminal.cell_h;
+
+        // Shares of the output, in percent: the log at the left and the terminal across from it, over the log's right edge.
+        terminal_open(terminal.reading ? TERMINAL_LOG_WIDE : TERMINAL_WIDE, terminal.reading ? TERMINAL_LOG_HIGH : TERMINAL_HIGH,
+                      terminal.reading ? TERMINAL_LOG_LEFT : TERMINAL_LEFT, terminal.reading ? TERMINAL_LOG_TOP : TERMINAL_TOP,
+                      &columns, &rows, terminal_cells);
+        terminal.bar_grab = -1;
+
+        // The ring is cut for the smallest text a zoom reaches, so that every size after this one has room in it.
+        font_metrics least = font_metrics_at(terminal.plain[0], terminal_steps[0] << 6);
+
+        max_columns = (table->output_width > TERMINAL_CEILING ? table->output_width : TERMINAL_CEILING) /
+                      (unsigned int)least.cell_width;
+        {
+                unsigned int tallest = (table->output_height > TERMINAL_CEILING * 9 / 16 ? table->output_height
+                                                                                       : TERMINAL_CEILING * 9 / 16) /
+                                       (unsigned int)least.cell_height;
+
+                unsigned int history = terminal.reading ? TERMINAL_LOG_HISTORY : TERMINAL_HISTORY;
+
+                window = window_grid_open(columns, rows, max_columns, tallest * 2 + 1 > history ? tallest * 2 + 1 : history);
+        }
+
+        if (window)
+                grid_take();
+
+        if (!window || !terminal_frames())
+        {
+                terminal_said(terminal.reading, " has no memory for its cells");
+                return 1;
+        }
+
+        full_reset();
+
+        if (terminal.reading)
+        {
+                // Not a terminal's cursor, and nothing to follow but the log: read without waiting, and waited for
+                // with the compositor's events, which is what makes an idle log wake nothing.
+                cursor_visible = false;
+                terminal.master = (b32)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+                terminal.child = (bipolar)terminal.master;
+        }
+        else
+                terminal.child = term_session(&terminal.master, &terminal.oom_kills);
+
+        if (terminal.child < 0)
+        {
+                terminal_said(terminal.reading, " cannot open its far end");
+                return 1;
+        }
+
+        cursor_show();
+        terminal_frame();
+        terminal.last_frame = clock_monotonic_nanoseconds();
+
+        terminal_text_said(terminal.reading);
+
+        // The first picture is committed: whoever is starting windows in an order may start the next.
+        if (terminal_ready_path)
+                system_close(system_open_at(AT_FDCWD, terminal_ready_path, FILE_WRITE | O_CLOEXEC));
+
+        terminal.dirty = true;
+        terminal.phase = TERMINAL_RUNNING;
+        return -1;
+}
+
+static struct ui_app terminal_app = {
+        .own = &terminal.own,
+        .ui = &terminal.ui,
+        .glass = 0,
+        .dirty = &terminal.dirty,
+        .focused = &terminal.focused,
+        .ground = &terminal.ground,
+        .own_faces = true,
+        .open = terminal_start,
+        .frame = terminal_pass_frame,
+        .event = terminal_on_event,
+        .focus = terminal_on_focus,
+        .size = terminal_on_size,
+        .tick = terminal_tick,
+        .ready = terminal_on_ready,
+        .close = terminal_on_close,
+        .pass = terminal_on_pass,
+        .closing = terminal_on_closing,
+        .done = terminal_done,
+};
 
 /*
         The program, which is a shell on a pty, or with reading the kernel's log on /dev/kmsg (klog.c): the same
@@ -2030,20 +2495,6 @@ static b32 klog_receive(const struct window_event address_to event, b32 address_
 */
 static b32 terminal_run(b32 reading)
 {
-        string_address paths[TERMINAL_FACES];
-        string_address bold = null, ready_file = null;
-        unsigned int cells[2] = {0, 0};
-        unsigned int count = 0, size = 0, columns, rows;
-        unsigned int max_columns;
-        b32 hung = reading;
-        b32 master, gone = false, dirty = true, closing = false, held = false, paced;
-        positive oom_kills = 0, sync_since = 0, stalled_since = 0, last_frame = 0, settle_since = 0;
-        bipolar child = 0;
-        struct windows address_to table;
-        unsigned int own;
-
-        claim_standard_descriptors();
-
         for (positive at = 1; at < program_argument_count(); at++)
         {
                 string_address option = program_argument(at);
@@ -2060,55 +2511,23 @@ static b32 terminal_run(b32 reading)
                         break;
                 }
                 at++;
-                if (option[1] == 'f' && count < TERMINAL_FACES)
-                        paths[count++] = value;
+                if (option[1] == 'f' && terminal_face_count < TERMINAL_FACES)
+                        terminal_paths[terminal_face_count++] = value;
                 else if (option[1] == 'b')
-                        bold = value;
+                        terminal_bold_path = value;
                 else if (option[1] == 's')
-                        size = (unsigned int)compositor_number(value, 0);
+                        terminal_size_asked = (unsigned int)compositor_number(value, 0);
                 else if (option[1] == 'w')
-                        ready_file = value;
+                        terminal_ready_path = value;
                 else if (option[1] == 'g')
                 {
                         // COLUMNSxROWS
-                        cells[0] = (unsigned int)compositor_number(value, 0);
+                        terminal_cells[0] = (unsigned int)compositor_number(value, 0);
                         for (positive at_x = 0; value[at_x]; at_x++)
                                 if (value[at_x] == 'x')
-                                        cells[1] = (unsigned int)compositor_number(value + at_x + 1, 0);
+                                        terminal_cells[1] = (unsigned int)compositor_number(value + at_x + 1, 0);
                 }
         }
-
-        // -s is the size asked for here; without it, the step the last zoom left, and the default.
-        size = size ? size : terminal_size_read();
-        size = size ? size : TERMINAL_SIZE;
-        size = size < terminal_steps[0] ? terminal_steps[0] : size > terminal_steps[TERMINAL_STEPS - 1] ? terminal_steps[TERMINAL_STEPS - 1] : size;
-
-        if (!terminal_fonts(paths, count, bold, size))
-        {
-                terminal_said(reading, " has no font to draw with (-f FONT.ttf)");
-                return 1;
-        }
-
-        for (unsigned int at = 0; at < 256; at++)
-                terminal_colour[at] = window_cell_colour(at);
-        term_palette = terminal_palette;
-
-        term_cell_w = terminal.cell_w;
-        term_cell_h = terminal.cell_h;
-
-        // Shares of the output, in percent: the log at the left and the terminal across from it, over the
-        // log's right edge, so that the log's lines can be read and the terminal is the one in front.
-        if (!(reading ? terminal_open(TERMINAL_LOG_WIDE, TERMINAL_LOG_HIGH, TERMINAL_LOG_LEFT, TERMINAL_LOG_TOP,
-                                      &columns, &rows, cells)
-                      : terminal_open(TERMINAL_WIDE, TERMINAL_HIGH, TERMINAL_LEFT, TERMINAL_TOP, &columns, &rows, cells)))
-        {
-                terminal_said(reading, " has no window: no compositor, or no row free in its table");
-                return 1;
-        }
-
-        table = terminal.own.table;
-        own = terminal.own.row;
-        terminal.bar_grab = -1;
 
         // Named, because two untitled terminals are a guessing game.
         if (term_program_count)
@@ -2120,366 +2539,12 @@ static b32 terminal_run(b32 reading)
                                      ? term_program_words[2]
                                      : slash ? slash + 1 : term_program_words[0];
         }
-        string_copy_bounded((string_address)table->title[own],
-                            (string_address)(reading ? "kernel log" : terminal_label), WINDOWS_TITLE);
 
-        // The ring is cut for the smallest text a zoom reaches, so that every size after this one has room in it.
-        font_metrics least = font_metrics_at(terminal.plain[0], terminal_steps[0] << 6);
-
-        max_columns = (table->output_width > TERMINAL_CEILING ? table->output_width : TERMINAL_CEILING) /
-                      (unsigned int)least.cell_width;
-        {
-                unsigned int tallest = (table->output_height > TERMINAL_CEILING * 9 / 16 ? table->output_height
-                                                                                       : TERMINAL_CEILING * 9 / 16) /
-                                       (unsigned int)least.cell_height;
-
-                unsigned int history = reading ? TERMINAL_LOG_HISTORY : TERMINAL_HISTORY;
-
-                window = window_grid_open(columns, rows, max_columns, tallest * 2 + 1 > history ? tallest * 2 + 1 : history);
-        }
-
-        if (window)
-                grid_take();
-
-        if (!window || !terminal_frames())
-        {
-                terminal_said(reading, " has no memory for its cells");
-                windows_leave(&terminal.own);
-                return 1;
-        }
-
-        full_reset();
-
-        if (reading)
-        {
-                // Not a terminal's cursor, and nothing to follow but the log: read without waiting, and waited for
-                // with the compositor's events, which is what makes an idle log wake nothing.
-                cursor_visible = false;
-                master = (b32)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
-                child = (bipolar)master;
-        }
-        else
-                child = term_session(&master, &oom_kills);
-
-        if (child < 0)
-        {
-                terminal_said(reading, " cannot open its far end");
-                windows_leave(&terminal.own);
-                return 1;
-        }
-
-        cursor_show();
-        terminal_frame();
-        last_frame = clock_monotonic_nanoseconds();
-
-        terminal_text_said(reading);
-
-        // The first picture is committed: whoever is starting windows in an order may start the next.
-        if (ready_file)
-                system_close(system_open_at(AT_FDCWD, ready_file, FILE_WRITE | O_CLOEXEC));
-
-        for (;;)
-        {
-                struct window_event event;
-                long timeout = -1;
-                positive now;
-                b32 changed;
-
-                // What the pty will say first; a held frame keeps its rows until it is let go.
-                if (!synchronized_output)
-                {
-                        touched_top = ROWS;
-                        touched_bottom = 0;
-                }
-
-                terminal.modes_fresh = false;
-                if (!reading)
-                {
-                        positive read_now = clock_monotonic_nanoseconds();
-
-                        if (read_now - terminal.modes_at >= terminal_period())
-                                terminal_modes_read(master, read_now);
-                }
-
-                // The zoom keys are the terminal's, whichever window it is: the kernel's log follows them too.
-                while (windows_event(&terminal.own, &event))
-                {
-                        int zoom = terminal_zoom_key(&event);
-
-                        if (zoom)
-                        {
-                                terminal_zoom(master, zoom);
-                                dirty = true;
-                                continue;
-                        }
-                        if (!(reading ? klog_receive(&event, &dirty) : terminal_receive(master, &event, &dirty)))
-                                gone = true;
-                }
-
-                // What the table says: whether this window has the keys, a size asked for, a close asked for.
-                if (!reading && (table->focus == own) != terminal.focused)
-                {
-                        terminal.focused = table->focus == own;
-                        term_focus(terminal.focused);
-                        if (!term_send(master))
-                                gone = true;
-                }
-
-                if (terminal_asked(master))
-                        dirty = true;
-
-                closing |= (table->state[own] & WINDOW_CLOSING) != 0;
-
-                // The far end's own report.
-                if (!gone && !term_send(master))
-                        gone = true;
-
-                changed = reading ? klog_drain(master, &gone, TERMINAL_BUDGET) : term_drain(master, &gone, TERMINAL_BUDGET);
-
-                // Any mouse mode wants the motion: a press, a held button and a wheel's report all say where the
-                // pointer is. Without one only what a held button needs is sent.
-                if (!reading && (mouse_mode != 0) != terminal.hovering)
-                {
-                        terminal.hovering = mouse_mode != 0;
-                        windows_hover(&terminal.own, terminal.hovering);
-                }
-                // The title is read when the far end has said something, at most once a frame; a title a program sets
-                // is read as it is set. A reading that waited is owed, and is made at the frame's end, so the title that
-                // came with the last output is not left until the next.
-                if (!reading && !gone && (changed || terminal.title_owed))
-                {
-                        positive title_now = clock_monotonic_nanoseconds();
-
-                        if (title_now - terminal.title_at >= terminal_period() || title_said != terminal.title_seen)
-                        {
-                                terminal_title(master, child);
-                                terminal.title_at = title_now;
-                                terminal.title_owed = false;
-                        }
-                        else
-                                terminal.title_owed = true;
-                }
-
-                if (!gone && !term_send(master))
-                        gone = true;
-
-                // Being asked to go (the close button, Alt-F4 or a middle press on the tab) is the line hanging up, once, to the group.
-                if (!gone && closing)
-                        term_hang_up(child, &hung);
-
-                if (touched_bottom > touched_top)
-                        changed = true;
-
-                if (synchronized_output)
-                {
-                        now = clock_monotonic_nanoseconds();
-                        sync_since = held ? sync_since : now;
-                        held = true;
-
-                        if (gone || now - sync_since >= (positive)TERMINAL_SYNC_NANOSECONDS)
-                        {
-                                synchronized_output = false;
-                                changed = true;
-                        }
-                        else
-                                timeout = (long)(TERMINAL_SYNC_NANOSECONDS - (now - sync_since));
-                }
-                else
-                        held = false;
-
-                dirty |= changed;
-
-                // The bar: seen while the view is scrolled back or the bar is held, and faded out over a
-                // quarter of a second once the view is back at the live end, a frame a step.
-                {
-                        unsigned int level = 256;
-
-                        if (terminal.view != TERMINAL_LIVE || terminal.bar_grab >= 0)
-                                terminal.bar_fading = 0;
-                        else if (!terminal.bar_level)
-                                level = 0;
-                        else
-                        {
-                                now = clock_monotonic_nanoseconds();
-                                terminal.bar_fading = terminal.bar_fading ? terminal.bar_fading : now;
-                                level = now - terminal.bar_fading >= (positive)TERMINAL_FADE_NANOSECONDS
-                                            ? 0
-                                            : (unsigned int)(256 - 256 * (now - terminal.bar_fading) / TERMINAL_FADE_NANOSECONDS);
-                                terminal.bar_fading = level ? terminal.bar_fading : 0;
-                        }
-                        if (level != terminal.bar_level)
-                        {
-                                terminal.bar_level = level;
-                                dirty = true;
-                        }
-                        if (terminal.bar_fading)
-                                timeout = timeout < 0 || timeout > (long)TERMINAL_FRAME_NANOSECONDS ? (long)TERMINAL_FRAME_NANOSECONDS
-                                                                                                   : timeout;
-                }
-
-                /*
-                        A frame is made at most once an output frame: more are made over
-                        before they are shown, and a stream of output would be drawn six
-                        hundred times a second where sixty are seen. The first after a quiet
-                        time is made at once, so a key's echo does not wait; what comes
-                        sooner than a frame after the last waits out the rest of it.
-                */
-                paced = false;
-
-                /*
-                        Output that has just ended a line -- the cursor at the
-                        start of a row -- is most often the moment before the
-                        shell's prompt, which comes a fraction of a millisecond
-                        later in a write of its own: Enter's newline and then
-                        the prompt. The frame waits a moment for it, so the
-                        cursor is not seen at the left edge and then moved.
-                        Typing never leaves the cursor there, so an echo is
-                        not held.
-                */
-                if (dirty && !reading && changed && !column && !synchronized_output)
-                {
-                        now = clock_monotonic_nanoseconds();
-                        settle_since = settle_since ? settle_since : now;
-                        if (now - settle_since < (positive)TERMINAL_SETTLE_NANOSECONDS)
-                        {
-                                long left = (long)(TERMINAL_SETTLE_NANOSECONDS - (now - settle_since));
-
-                                paced = true;
-                                timeout = timeout < 0 || left < timeout ? left : timeout;
-                        }
-                }
-                if (dirty && !synchronized_output && last_frame)
-                {
-                        positive period = terminal_period();
-                        positive since = clock_monotonic_nanoseconds() - last_frame;
-
-                        if (since < period)
-                        {
-                                paced = true;
-                                timeout = (long)(period - since);
-                        }
-                }
-
-                if (dirty && !synchronized_output && !paced)
-                {
-                        cursor_show();
-
-                        if (terminal_frame())
-                        {
-                                dirty = false;
-                                last_frame = clock_monotonic_nanoseconds();
-                        }
-                        else if (!stalled_since)
-                                stalled_since = clock_monotonic_nanoseconds();
-                        else if (clock_monotonic_nanoseconds() - stalled_since >= TERMINAL_STALL_NANOSECONDS)
-                        {
-                                // Waited for the compositor to take the last picture, and it has not: the buffer is taken.
-                                terminal.forced = true;
-                                stalled_since = 0;
-                        }
-                }
-
-                if (!dirty)
-                        stalled_since = settle_since = 0;
-
-                // Being asked to go ends a log, which has no shell to hang up on.
-                if (reading && closing)
-                        gone = true;
-
-                if (gone)
-                        break;
-
-                if (terminal.title_owed)
-                {
-                        positive due = terminal.title_at + terminal_period(), owed_now = clock_monotonic_nanoseconds();
-                        long left = due > owed_now ? (long)(due - owed_now) : 0;
-
-                        timeout = timeout < 0 || left < timeout ? left : timeout;
-                }
-
-                /*
-                        Asleep until a key, a resize or the shell's output; and, with a frame
-                        waiting for a buffer, until the compositor has let one go. With
-                        nothing to do and a spare buffer held, once, for the time it takes
-                        to be sure nothing is coming, after which the spare is given back and
-                        the sleep is for ever: an idle terminal wakes no more.
-
-                        The compositor having gone is the screen having gone: the shell is
-                        hung up on, as it is when the window is closed, and what is left is
-                        to see it out.
-                */
-                {
-                        // A spare is one the compositor has taken the last picture from: until it has, the other
-                        // buffer is the one it reads, and nothing is to be discarded.
-                        b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
-                                    terminal.valid[1 - terminal.shown] && windows_ready(&terminal.own);
-                        b32 stalled = dirty && !synchronized_output && terminal.shown >= 0 && !windows_ready(&terminal.own);
-                        long ready = terminal_wait(master, spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS
-                                                          : stalled && timeout < 0 ? TERMINAL_STALL_NANOSECONDS
-                                                                                   : timeout);
-
-                        if (ready < 0)
-                        {
-                                if (!gone)
-                                        term_hang_up(child, &hung);
-                                closing = true;
-                                break;
-                        }
-
-                        if (!ready && spare && timeout < 0)
-                                terminal_discard();
-                }
-        }
-
-        if (reading)
-                system_close(master);
-
-        b32 stays = !reading && term_finish(child, master, hung, oom_kills), keyed = false;
-
-        // A program that was asked for ends in a window that waits for a key, unless the X sent the end.
-        if (!reading && term_program_count && !hung)
-        {
-                terminal_exit_said();
-                stays = keyed = true;
-        }
-
-        if (stays)
-        {
-                // What is left of a window whose shell is gone: its cells, and what said how it ended, until
-                // the X (or, for a program asked for, a key). Drawn again until the compositor has taken it, and at a
-                // new size or text size.
-                cursor_show();
-                b32 owed = !terminal_frame(), pressed = false;
-
-                while (!pressed && !(table->state[own] & WINDOW_CLOSING))
-                {
-                        struct window_event event;
-                        long ready = windows_wait(&terminal.own, -1, owed ? TERMINAL_STALL_NANOSECONDS : -1);
-
-                        if (ready < 0)
-                                break;
-                        terminal.forced |= owed && !ready;
-                        while (windows_event(&terminal.own, &event))
-                        {
-                                int zoom = terminal_zoom_key(&event);
-
-                                if (zoom)
-                                {
-                                        terminal_zoom(master, zoom);
-                                        owed = true;
-                                }
-                                else if (keyed && terminal_key_pressed(&event))
-                                        pressed = true;
-                        }
-                        if (terminal_asked(master))
-                                owed = true;
-                        if (owed)
-                                owed = !terminal_frame();
-                }
-        }
-
-        windows_leave(&terminal.own);
-        return 0;
+        terminal.reading = reading;
+        terminal_app.title = reading ? (string_address) "kernel log" : (string_address)terminal_label;
+        terminal_app.missing = reading ? (string_address) "klog: no window: no compositor, or no row free in its table\n"
+                                       : (string_address) "terminal: no window: no compositor, or no row free in its table\n";
+        return ui_app_run(&terminal_app);
 }
 
 static b32 terminal_main()
