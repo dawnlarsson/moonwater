@@ -14774,7 +14774,16 @@ static COLD string_address exec_pretty_ansi(exec_function_text address_to made,
                 if (length == 1 && out[0] == '\'')
                         exec_function_text_literal(made, "'\\''");
                 else if (length == 1 && !out[0])
+                {
+                        // A NUL ends the string as bash's parser has it: the
+                        // rest is skipped to the closing quote, an escaped
+                        // quote inside it included.
+                        while (string_get(at) && string_not(at, '\''))
+                                at += string_is(at, '\\') && string_get(at + 1)
+                                          ? 2
+                                          : 1;
                         break;
+                }
                 else
                         exec_function_text_add(made, (const_string)out, length);
         }
