@@ -11,7 +11,7 @@
 #ifndef MOONWATER_UI_FEATURES
 #define MOONWATER_UI_FEATURES
 
-// The start button and the space it opens: the search bar, the programs and their keys.
+// The launcher: the search bar, the programs and their keys.
 #ifndef MOONWATER_UI_LAUNCHER
 #define MOONWATER_UI_LAUNCHER 1
 #endif

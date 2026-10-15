@@ -22,7 +22,7 @@
 #define TASKBAR_LEFT 2u
 #define TASKBAR_RIGHT 3u
 
-// What a point of the band is over: a tab's number (0 up), -2 the tray, or this.
+// What a point of the band is over: a tab's number (0 up), -2 the tray, or TASKBAR_HIT_NONE for neither.
 #define TASKBAR_HIT_NONE (-3)
 
 // The kept settings the battery is named in (the battery verb keeps "battery NAME" there), and the name of that file in

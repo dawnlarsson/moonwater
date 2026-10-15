@@ -17,11 +17,12 @@
 
         The pieces: a title, a section header, a row (a label at the left and
         its value, a switch or a choice at the right), a switch, a value that
-        is a step or a choice (a chevron), the list a choice opens over the
-        rows, a field to type in, and the ring round whatever has the focus. Rows
-        stand on the glass with space between sections: no box and no rule,
-        and the one panel is the list that floats over them. Sizes are logical pixels, times the scale
-        the compositor draws at. Text is font.c's, Inter; a run is drawn as
+        is a step or a choice (a chevron), the bars of a signal, the list a
+        choice opens over the rows, a field to type in, and the ring round
+        whatever has the focus. Rows stand on the glass with space between
+        sections: no box and no rule, and the one panel is the list that
+        floats over them. Sizes are logical pixels, times the scale the
+        compositor draws at. Text is font.c's, Inter; a run is drawn as
         coverage into a scratch line and laid over the picture in the ink,
         so it is premultiplied like everything else and the glass shows
         between the strokes.

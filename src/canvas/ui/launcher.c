@@ -523,7 +523,7 @@ static b32 launcher_start(string_address address_to words, positive count)
                 if (system_fork())
                         system_call_1(syscall(exit_group), 0);
                 system_call(syscall(setsid));
-                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE);
+                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
                 for (positive at = 0; quiet >= 0 && at < 3; at++)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);
                 (void)shell_exec_file(words[0], words, count, program_environment_list());
@@ -853,8 +853,7 @@ static b32 launcher_other(b32 toggle)
         return false;
 }
 
-// The face the bar is drawn in, and the engine and atlas for it, mapped here and not in the image's bss.
-// The names' storage, and the scratch line the text is drawn through: mapped, as the picture's size is known.
+// The names of PATH, their directories, the hash table and the scan's buffer: one mapping, not in the image's bss.
 static b32 launcher_memory(void)
 {
         positive names = (positive)LAUNCHER_NAMES * LAUNCHER_NAME, from = LAUNCHER_NAMES,

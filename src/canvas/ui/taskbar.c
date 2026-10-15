@@ -487,8 +487,14 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                 ground = taskbar_glass_tab(view, rect[0], rect[1], gw, lay.bx, lay.by, lay.bw, x, y, width, height, -2, 0);
                 ink = window_contrast(ground);
+                // On a bottom or top band the clock has the tray's right slot, past the battery's when one is shown.
                 if (!lay.vertical)
-                        taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, clock, ink, ground);
+                {
+                        int cx, cy, cw, ch;
+
+                        if (taskbar_slot(view, -3, &cx, &cy, &cw, &ch))
+                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
+                }
                 if (taskbar.battery_item)
                 {
                         int ax, ay, aw, ah;
