@@ -51,6 +51,7 @@
 #define SETTINGS_SPLIT 2u // what is set is the value's words, one each, and not one word
 #define SETTINGS_TICK 4u  // the value changes by itself: it is asked again while its group is shown
 #define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
+#define SETTINGS_BATTERIES 16u // a choice of the batteries the machine has: auto, each name from the kernel, and none
 
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
@@ -203,6 +204,8 @@ static const struct settings_row settings_rows[] = {
     {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null,
      .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices"},
     {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
+    {null, "Battery shown", SETTINGS_CHOICE, 1, SETTINGS_BATTERIES, {"battery"}, "battery ", null, {"battery"}, null, 0, null,
+     .usage = "battery [NAME|auto|none]", .help = "which battery the Battery row reads: auto is the first present one, none is no battery [auto]"},
     {null, "Power profile", SETTINGS_CHOICE, 1, 0, {"power"}, "power ", "profile ", {"power"},
      "balanced performance powersave", 0, null,
      .usage = "power [performance|balanced|powersave]", .help = "profile and CPU governor, kept across boots"},

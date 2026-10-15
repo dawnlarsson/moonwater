@@ -13819,6 +13819,54 @@ static fn tune_restore(void)
                 (void)radio_rfkill(0, true);
 }
 
+/* moonwater battery [NAME|auto|none]: the battery the settings window's Battery row reads. auto (the default) is the
+   first present battery; none is no battery; NAME is a battery or UPS the kernel names under power_supply. It is kept
+   in /root/tune like the charge limit, with auto kept as nothing. */
+static b32 tune_battery_verb(string_address address_to arguments, positive count)
+{
+        p8 text[512];
+        p8 value[72];
+        bipolar got;
+        string_address name;
+        string_address stored;
+
+        if (count == 1)
+        {
+                got = tune_load(text, sizeof(text));
+                if (got > 0 && tune_find(text, (positive)got, "battery", value, sizeof(value)) && value[0])
+                        host_say(log, host_label "battery %s\n", (string_address)value);
+                else
+                        host_say(log, host_label "battery auto\n");
+                return 0;
+        }
+        if (count != 2)
+                return host_usage();
+
+        name = arguments[1];
+        if (string_equals(name, (string_address) "auto"))
+                stored = (string_address) "";
+        else if (string_equals(name, (string_address) "none"))
+                stored = (string_address) "none";
+        else
+        {
+                positive at = 0;
+
+                // A name is one directory entry: no slash, no dot-name, and a battery or a UPS under the kernel's power_supply.
+                while (name[at] && name[at] != '/' && at < 64)
+                        at++;
+                if (!at || name[0] == '.' || name[at] || at >= 64 ||
+                    !(tune_says((string_address)TUNE_SYS_BATTERY, name, (string_address) "/type", (string_address) "Battery") ||
+                      tune_says((string_address)TUNE_SYS_BATTERY, name, (string_address) "/type", (string_address) "UPS")))
+                        return host_refuse("this machine has no battery called %s\n", name);
+                stored = name;
+        }
+        host_need_root();
+        if (tune_remember("battery", stored))
+                return 1;
+        host_say(log, host_label "battery %s\n", name);
+        return 0;
+}
+
 /* sleep and hibernate take no words, and differ in what they ask the kernel for. */
 static b32 tune_sleep_verb(string_address address_to arguments, positive count)
 {
@@ -20146,6 +20194,7 @@ static b32 host_main()
             {"airplane", tune_airplane, false},
             {"brightness", tune_brightness, false},
             {"charge", tune_charge, false},
+            {"battery", tune_battery_verb, false},
             {"power", tune_power, false},
             {"cpu", tune_cpu, false},
             {"sleep", tune_sleep_verb, false},

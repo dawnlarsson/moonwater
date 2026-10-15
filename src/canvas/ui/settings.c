@@ -66,9 +66,9 @@
         right at once. Enter or Right in the column go to its rows, on the
         first. In the rows, Enter or Space changes a row (a switch is
         thrown, a choice opens its list, a field is typed in and Enter
-        keeps it, Escape leaves it as it was); Left and Right throw a
-        switch off and on and move a step either way, and on any other row
-        Left goes back to the column.
+        keeps it, Escape leaves it as it was); Enter or Space throws a switch
+        over, Left and Right move a step either way, and on a switch or any
+        other row Left goes back to the column and Right does nothing.
         Escape closes the window, as Alt-F4 and its close button do. Any
         other key typed with no field open is a filter: the rows that
         mention what is typed are the ones listed, from every group, with
@@ -124,6 +124,9 @@
 */
 #ifndef MOONWATER_CANVAS_SETTINGS
 #define MOONWATER_CANVAS_SETTINGS
+
+// The machine's batteries, read from the kernel by battery.c: the Battery row's value is one of them.
+#include "battery.c"
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
 #define SETTINGS_UNREAD 0u
@@ -389,6 +392,17 @@ static b32 settings_absent(const char address_to line, positive length)
                settings_find(line, length, "no wireless hardware") < length;
 }
 
+// Whether a line says a row has none, for this row. "this battery has no charge limit" is the charge limit's none only: a line that
+// also says this row's own key (the battery's percent) is a value of this row and does not take it away.
+static b32 settings_lacks(const char address_to line, positive length, const struct settings_row address_to row)
+{
+        if (settings_find(line, length, "this battery has no") < length && settings_find(line, length, "this machine has no") >= length &&
+            settings_find(line, length, "no wireless hardware") >= length && row->key && row->key[0] &&
+            settings_find(line, length, row->key) < length)
+                return false;
+        return settings_absent(line, length);
+}
+
 // Whether a value goes on past the character c: a word ends at a blank, a comma, a semicolon or a bracket, a line only at its stop.
 static b32 settings_goes_on(const struct settings_row address_to row, char c)
 {
@@ -417,7 +431,7 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
 
                 if (!size)
                         continue;
-                absent |= settings_absent(line, size);
+                absent |= settings_lacks(line, size, row);
 
                 for (positive which = 0; which < 2 && !found; which++)
                 {
@@ -456,15 +470,61 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
 }
 
 /*
+        The Battery row is the machine's battery as battery.c reads it: the
+        first one present, its percent and whether it charges. A machine with
+        none, or with none present, has none. The verb's words are not used
+        for it, so a battery without a charge limit is still a battery.
+*/
+static unsigned int settings_battery(string_address chosen, char address_to value, positive room)
+{
+        struct battery_state battery;
+        p8 digits[16];
+
+        value[0] = 0;
+        // none is no battery. A chosen name is read as it is; only a name that has gone (no longer a battery) falls back to the first present one.
+        if (chosen && string_equals(chosen, (string_address) "none"))
+                return SETTINGS_ABSENT;
+        if (!chosen || !chosen[0] || string_equals(chosen, (string_address) "auto"))
+                battery_read(null, &battery);
+        else if (!battery_read(chosen, &battery))
+                battery_read(null, &battery);
+        if (!battery.present)
+                return SETTINGS_ABSENT;
+        if (battery.percent < 0)
+                string_copy_bounded((string_address)value, (string_address) "unknown", room);
+        else
+        {
+                positive_into_string(digits, (positive)battery.percent);
+                string_copy_bounded((string_address)value, (string_address)digits, room);
+                string_append_bounded((string_address)value, (string_address) "%", room);
+        }
+        if (battery.charging == BATTERY_CHARGING)
+                string_append_bounded((string_address)value, (string_address) ", Charging", room);
+        else if (battery.charging == BATTERY_DISCHARGING)
+                string_append_bounded((string_address)value, (string_address) ", Discharging", room);
+        else if (battery.charging == BATTERY_FULL)
+                string_append_bounded((string_address)value, (string_address) ", Full", room);
+        else if (battery.charging == BATTERY_NOT_CHARGING)
+                string_append_bounded((string_address)value, (string_address) ", Not charging", room);
+        return SETTINGS_READ;
+}
+
+/*
         What a row reads as from its verb's output and how the verb ended. A
         verb that said nothing and failed did not run (no moonwater where it
         was asked for, or it died before it said anything): that is not a
         machine that has none of the thing, so a row it lacks is unknown then.
 */
+static const char address_to settings_battery_choice(void);
+
 static unsigned int settings_read(const struct settings_row address_to row, const char address_to said, positive length,
                                   char address_to value, positive room, b32 failed)
 {
-        unsigned int state = settings_parse(row, said, length, value, room);
+        unsigned int state;
+
+        if (row->label && string_equals((string_address)row->label, (string_address) "Battery"))
+                return settings_battery((string_address)settings_battery_choice(), value, room);
+        state = settings_parse(row, said, length, value, room);
 
         if (state == SETTINGS_READ && (row->flags & SETTINGS_INK) && value[0] == '#')
                 for (positive at = 0; at < sizeof(settings_inks) / sizeof(settings_inks[0]); at++)
@@ -606,6 +666,8 @@ static struct
 
         // The list a choice opens: its row (none is -1), the choice the keys are on, the first in view, how many, how wide.
         int menu, menu_at, menu_top, menu_count, menu_width;
+        struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
+        positive battery_menu_count;
         char filter[SETTINGS_FILTER];
         positive filter_length;
         char typed[SETTINGS_TYPED];
@@ -2375,13 +2437,55 @@ static b32 settings_stop(void)
         and leaves the row as it was, and the wheel scrolls it.
 */
 
+/*
+        The words of a choice: the row's own, or for the Battery picker auto
+        (the first present battery, the default), then each battery the list
+        was taken with, then none. The list is taken when the list opens and
+        kept, so drawing it reads no kernel file.
+*/
+static b32 settings_choice(const struct settings_row address_to row, positive index, char address_to into, positive room)
+{
+        positive names = settings.battery_menu_count < BATTERY_LIST ? settings.battery_menu_count : BATTERY_LIST;
+
+        if (!(row->flags & SETTINGS_BATTERIES))
+                return settings_word(row->choices, index, into, room);
+        if (index == 0)
+                string_copy_bounded((string_address)into, (string_address) "auto", room);
+        else if (index <= names)
+                string_copy_bounded((string_address)into, (string_address)settings.battery_menu[index - 1].text, room);
+        else if (index == names + 1)
+                string_copy_bounded((string_address)into, (string_address) "none", room);
+        else
+                return false;
+        return true;
+}
+
+// The Battery picker's row, or -1.
+static int settings_picker(void)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].flags & SETTINGS_BATTERIES)
+                        return (int)at;
+        return -1;
+}
+
+// What the Battery row reads: the picker's value, which is auto until the picker has been read with one.
+static const char address_to settings_battery_choice(void)
+{
+        int picker = settings_picker();
+
+        if (picker < 0 || settings.state[picker] != SETTINGS_READ || !settings.value[picker][0])
+                return "auto";
+        return settings.value[picker];
+}
+
 // How many choices a row has.
 static positive settings_options(const struct settings_row address_to row)
 {
         char word[SETTINGS_VALUE];
         positive count = 0;
 
-        while (settings_word(row->choices, count, word, sizeof(word)))
+        while (settings_choice(row, count, word, sizeof(word)))
                 count++;
         return count;
 }
@@ -2485,12 +2589,14 @@ static fn settings_menu_open(int row)
         char word[SETTINGS_VALUE];
         int widest = 0;
 
+        if (which->flags & SETTINGS_BATTERIES)
+                settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
         settings.menu = row;
         settings.focus = row;
         settings.menu_count = (int)settings_options(which);
         settings.menu_at = 0;
         settings.menu_top = 0;
-        for (int at = 0; settings_word(which->choices, (positive)at, word, sizeof(word)); at++)
+        for (int at = 0; settings_choice(which, (positive)at, word, sizeof(word)); at++)
         {
                 int wide = ui_measure(&settings.ui, (string_address)word, UI_TEXT, false);
 
@@ -2515,7 +2621,7 @@ static fn settings_menu_apply(int at)
         int row = settings.menu;
 
         settings_menu_close();
-        if (settings_word(which->choices, (positive)at, word, sizeof(word)) &&
+        if (settings_choice(which, (positive)at, word, sizeof(word)) &&
             !string_equals((string_address)word, (string_address)settings.value[row]))
                 settings_change(row, word);
 }
@@ -2567,7 +2673,7 @@ static fn settings_menu_key(const struct window_event address_to event)
                 {
                         int at = (settings.menu_at + step) % settings.menu_count;
 
-                        if (settings_word(which->choices, (positive)at, word, sizeof(word)) && (unsigned char)word[0] == c)
+                        if (settings_choice(which, (positive)at, word, sizeof(word)) && (unsigned char)word[0] == c)
                         {
                                 settings_menu_go(at);
                                 return;
@@ -2916,10 +3022,10 @@ static fn settings_filter_key(const struct window_event address_to event)
         }
 }
 
-// Whether Left and Right mean something on a row: a switch is thrown, a step moved.
-static b32 settings_turns(int row)
+// Whether Left and Right move a row: a step does. A switch is turned by Enter or Space only, so the arrows never change it.
+static b32 settings_steps(int row)
 {
-        return row < SETTINGS_ANY && (settings_rows[row].kind == SETTINGS_SWITCH || settings_rows[row].kind == SETTINGS_STEP);
+        return row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_STEP;
 }
 
 // A key on the card of what a command said: it scrolls, and Escape, Enter, Space or Backspace go back to the list.
@@ -3034,9 +3140,9 @@ static b32 settings_key(const struct window_event address_to event)
                         settings_forget();
                 break;
         case SETTINGS_KEY_LEFT:
-                // A switch or a step is turned; on any other row Left goes back to the groups.
-                if (settings.pane && settings_turns(settings.focus))
-                        settings_activate(settings.focus, settings_rows[settings.focus].kind == SETTINGS_SWITCH ? -2 : -1);
+                // A step moves; on a switch and on any other row Left goes back to the column.
+                if (settings.pane && settings_steps(settings.focus))
+                        settings_activate(settings.focus, -1);
                 else if (settings.pane)
                 {
                         settings.pane = 0;
@@ -3046,8 +3152,8 @@ static b32 settings_key(const struct window_event address_to event)
         case SETTINGS_KEY_RIGHT:
                 if (!settings.pane)
                         settings_rows_enter();
-                else if (settings_turns(settings.focus))
-                        settings_activate(settings.focus, settings_rows[settings.focus].kind == SETTINGS_SWITCH ? 2 : 1);
+                else if (settings_steps(settings.focus))
+                        settings_activate(settings.focus, 1);
                 break;
         default:
                 settings_filter_key(event);
@@ -3518,7 +3624,7 @@ static fn settings_draw_menu(struct ui address_to ui)
         {
                 int which_at = settings.menu_top + at;
 
-                if (!settings_word(which->choices, (positive)which_at, word, sizeof(word)))
+                if (!settings_choice(which, (positive)which_at, word, sizeof(word)))
                         break;
                 ui_option(ui, x + settings_px(4), y + pad + at * item, width - settings_px(8), item, (string_address)word,
                           which_at == settings.menu_at,

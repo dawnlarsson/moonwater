@@ -110786,9 +110786,8 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.state[clock_row] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[clock_row], (string_address) "on", SETTINGS_VALUE);
                                 settings_press(SETTINGS_KEY_LEFT);
-                                check("settings: Left on a switch throws it off and stays in the rows",
-                                      settings.pane == 1 && settings.queued == 1 && settings.queue[0].row == clock_row &&
-                                          string_equals((string_address)settings.queue[0].value, (string_address) "off"));
+                                check("settings: Left on a switch goes back to the column and throws nothing",
+                                      settings.pane == 0 && settings.queued == 0);
                         }
                         settings.queued = 0;
                         settings.child = 0;
@@ -111488,6 +111487,338 @@ static fn check_settings(string_address regular, string_address bold)
 }
 #endif
 
+#if MOONWATER_UI_SETTINGS
+/*
+        The arrow keys on the settings window's rows, as the window receives
+        them. Up and Down move the focus between the rows of the group and
+        turn nothing; Left and Right throw the focused switch off and on, and
+        Space and Enter turn it over. The verb is not run: a change the window
+        asks for is in its queue, and the value the verb would give is put
+        back by the check the way the window's reading puts it.
+*/
+static b32 settings_turned(int row, const char address_to want)
+{
+        b32 turned = settings.queued == 1 && settings.queue[0].row == row &&
+                     string_equals((string_address)settings.queue[0].value, (string_address)want);
+
+        settings.queued = 0;
+        if (turned)
+                string_copy_bounded((string_address)settings.value[row], (string_address)want, SETTINGS_VALUE);
+        return turned;
+}
+
+static fn check_settings_keys(void)
+{
+        int wired = settings_row_named("Wired"), at = 0, below = 0;
+
+        settings.ui.scale = 1;
+        settings.width = SETTINGS_WIDTH;
+        settings.height = SETTINGS_HEIGHT;
+        settings.pane = 1;
+        settings.filter_length = 0;
+        settings.filter[0] = 0;
+        settings.editing = -1;
+        settings.menu = -1;
+        settings.view = 0;
+        //      A feed left running by an earlier check would be finished by a change: this one is not a feed.
+        settings.child = 1;
+        settings.job = 0;
+        settings.job_sets = false;
+        settings.queued = 0;
+        settings.confirm = 0;
+        settings.group = settings_group_of(wired);
+        settings_refilter();
+        while (at < (int)settings.visible_count && settings.visible[at] != wired)
+                at++;
+        below = at + 1 < (int)settings.visible_count ? settings.visible[at + 1] : wired;
+
+        //      A switch: Down and Up move between rows and turn nothing; Right does nothing and Left goes back to the column;
+        //      Enter or Space turns it over (Right in the column goes to the rows again).
+        settings.focus = wired;
+        settings.state[wired] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[wired], (string_address)"off", SETTINGS_VALUE);
+        check("settings keys: the Wired switch has a row below it in its group", below != wired);
+
+        settings_press(SETTINGS_KEY_DOWN);
+        check("settings keys: Down moves the focus to the row below and turns nothing",
+              settings.focus == below && !settings.queued && string_equals((string_address)settings.value[wired], (string_address)"off"));
+        settings_press(SETTINGS_KEY_UP);
+        check("settings keys: Up moves the focus back to the switch and turns nothing",
+              settings.focus == wired && !settings.queued && string_equals((string_address)settings.value[wired], (string_address)"off"));
+        settings_press(SETTINGS_KEY_RIGHT);
+        check("settings keys: Right on the switch turns nothing and keeps the focus and the rows",
+              settings.focus == wired && settings.pane == 1 && !settings.queued &&
+                  string_equals((string_address)settings.value[wired], (string_address)"off"));
+        settings_press(SETTINGS_KEY_LEFT);
+        check("settings keys: Left on the switch goes back to the column and turns nothing",
+              settings.pane == 0 && settings.focus == wired && !settings.queued &&
+                  string_equals((string_address)settings.value[wired], (string_address)"off"));
+        settings_press(SETTINGS_KEY_RIGHT);
+        check("settings keys: Right in the column goes to the rows, on the switch", settings.pane == 1 && settings.focus == wired && !settings.queued);
+        settings_press(SETTINGS_KEY_SPACE);
+        check("settings keys: Space turns the switch on and keeps the focus", settings_turned(wired, "on") && settings.focus == wired);
+        settings_press(SETTINGS_KEY_ENTER);
+        check("settings keys: Enter turns the switch off again and keeps the focus", settings_turned(wired, "off") && settings.focus == wired);
+        settings_press(SETTINGS_KEY_DOWN);
+        check("settings keys: and Down leaves the switch after all of them", settings.focus == below && !settings.queued);
+
+        //      The Battery row's words are the battery's: a charge limit the battery has none of does not take the row away.
+        {
+                char value[SETTINGS_VALUE];
+                unsigned int state = settings_parsed((unsigned int)settings_row_named("Battery"),
+                                                     "[Moonwater] battery 90%, Full; this battery has no charge limit\n", value);
+
+                check("settings: the Battery row keeps its value when the verb says the battery has no charge limit",
+                      state == SETTINGS_READ && string_equals((string_address)value, (string_address)"90%, Full"));
+        }
+
+        settings.child = 0;
+        settings.queued = 0;
+        settings.group = 0;
+        settings.pane = 1;
+        settings_refilter();
+}
+
+// A fresh directory for a fake power supply tree, under /tmp.
+static b32 battery_fresh(p8 address_to root)
+{
+        string_copy_bounded(root, (string_address)"/tmp/battery-XXXXXX", 64);
+        return !is_null(mkdtemp((char *)root));
+}
+
+static fn fresh_failed(void)
+{
+        check("battery: a temporary tree can be made", false);
+}
+
+// The fake tree's own directories and files, kept so that they are taken away again: the term lane builds without sensors.
+static p8 battery_dirs[8][96];
+static p8 battery_files[32][160];
+static positive battery_dir_count, battery_file_count;
+
+static fn battery_put(string_address root, string_address name, string_address leaf, string_address text)
+{
+        p8 directory[96], path[160];
+        bipolar handle;
+        b32 known = false;
+
+        string_join(directory, sizeof(directory), root, "/", name);
+        for (positive at = 0; at < battery_dir_count; at++)
+                known |= string_equals((string_address)battery_dirs[at], (string_address)directory);
+        if (!known && battery_dir_count < 8)
+        {
+                string_copy_bounded((string_address)battery_dirs[battery_dir_count++], (string_address)directory, sizeof(battery_dirs[0]));
+                system_make_directory_at(AT_FDCWD, directory, 0755);
+        }
+        string_join(path, sizeof(path), directory, leaf);
+        //      A file is made with its mode: openat without one takes whatever the register holds.
+        handle = system_open_at_mode(AT_FDCWD, path, FILE_CREATE | FILE_WRITE | O_CLOEXEC, 0644);
+        if (handle >= 0)
+        {
+                system_call_3(syscall(write), (positive)handle, (positive)text, string_length(text));
+                system_close((positive)handle);
+        }
+        if (battery_file_count < 32)
+                string_copy_bounded((string_address)battery_files[battery_file_count++], (string_address)path, sizeof(battery_files[0]));
+}
+
+static fn battery_clear(string_address root)
+{
+        for (positive at = 0; at < battery_file_count; at++)
+                system_remove_at(AT_FDCWD, (string_address)battery_files[at], 0);
+        for (positive at = 0; at < battery_dir_count; at++)
+                system_remove_at(AT_FDCWD, (string_address)battery_dirs[at], AT_REMOVEDIR);
+        battery_file_count = 0;
+        battery_dir_count = 0;
+        system_remove_at(AT_FDCWD, root, AT_REMOVEDIR);
+}
+
+static b32 battery_listed(struct battery_name address_to names, positive count, string_address name)
+{
+        for (positive at = 0; at < count && at < BATTERY_LIST; at++)
+                if (string_equals((string_address)names[at].text, name))
+                        return true;
+        return false;
+}
+
+static fn check_battery(void)
+{
+        p8 root[64];
+        struct battery_state state;
+        struct battery_name names[BATTERY_LIST];
+        positive count;
+        b32 found;
+        char value[SETTINGS_VALUE];
+        int battery_row = settings_row_named("Battery");
+
+        //      Two batteries, both reading capacity: each by its name, and the default one present.
+        if (!battery_fresh(root))
+                {
+                        fresh_failed();
+                        return;
+                }
+        battery_put(root, "BAT0", "/type", "Battery\n");
+        battery_put(root, "BAT0", "/present", "1\n");
+        battery_put(root, "BAT0", "/capacity", "73\n");
+        battery_put(root, "BAT0", "/status", "Discharging\n");
+        battery_put(root, "BAT1", "/type", "Battery\n");
+        battery_put(root, "BAT1", "/present", "1\n");
+        battery_put(root, "BAT1", "/capacity", "40\n");
+        battery_put(root, "BAT1", "/status", "Charging\n");
+        battery_root = (string_address)root;
+        count = battery_list(names, BATTERY_LIST);
+        check("battery: BAT0 and BAT1 are both listed", count == 2 && battery_listed(names, count, "BAT0") && battery_listed(names, count, "BAT1"));
+        found = battery_read("BAT1", &state);
+        check("battery: BAT1 is read by its name, 40 percent and charging",
+              found && state.present && state.percent == 40 && state.charging == BATTERY_CHARGING && string_equals((string_address)state.name, (string_address)"BAT1"));
+        found = battery_read("BAT0", &state);
+        check("battery: BAT0 is read by its name, 73 percent and discharging",
+              found && state.present && state.percent == 73 && state.charging == BATTERY_DISCHARGING);
+        found = battery_read(null, &state);
+        check("battery: with no name the default is a present battery",
+              found && state.present && (string_equals((string_address)state.name, (string_address)"BAT0") ||
+                                         string_equals((string_address)state.name, (string_address)"BAT1")));
+        battery_clear(root);
+
+        //      No capacity file: the percent is charge over full charge, or energy over full energy, and nothing else.
+        if (!battery_fresh(root))
+                {
+                        fresh_failed();
+                        return;
+                }
+        battery_put(root, "BAT0", "/type", "Battery\n");
+        battery_put(root, "BAT0", "/present", "1\n");
+        battery_put(root, "BAT0", "/charge_now", "300000\n");
+        battery_put(root, "BAT0", "/charge_full", "1000000\n");
+        battery_put(root, "BAT0", "/status", "Not charging\n");
+        battery_put(root, "BAT1", "/type", "Battery\n");
+        battery_put(root, "BAT1", "/present", "1\n");
+        battery_put(root, "BAT1", "/energy_now", "1\n");
+        battery_put(root, "BAT1", "/energy_full", "3\n");
+        battery_root = (string_address)root;
+        found = battery_read("BAT0", &state);
+        check("battery: with no capacity, charge_now over charge_full is the percent (30), and Not charging is its state",
+              found && state.present && state.percent == 30 && state.charging == BATTERY_NOT_CHARGING);
+        found = battery_read("BAT1", &state);
+        check("battery: with no capacity or charge, energy over full energy is the percent (33), and no status is unknown",
+              found && state.present && state.percent == 33 && state.charging == BATTERY_UNKNOWN);
+        battery_clear(root);
+
+        //      The settings row takes the same reading, as its words.
+        if (!battery_fresh(root))
+                {
+                        fresh_failed();
+                        return;
+                }
+        battery_put(root, "BAT0", "/type", "Battery\n");
+        battery_put(root, "BAT0", "/present", "1\n");
+        battery_put(root, "BAT0", "/charge_now", "300000\n");
+        battery_put(root, "BAT0", "/charge_full", "1000000\n");
+        battery_put(root, "BAT0", "/status", "Not charging\n");
+        battery_root = (string_address)root;
+        check("settings: the Battery row reads a battery with no capacity file, as 30 percent and Not charging",
+              settings_read(&settings_rows[battery_row], "", 0, value, SETTINGS_VALUE, false) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address)"30%, Not charging"));
+        check("settings: a chosen battery of none is absent",
+              settings_battery((string_address)"none", value, SETTINGS_VALUE) == SETTINGS_ABSENT);
+        check("settings: a chosen battery that is gone falls back to the first present one",
+              settings_battery((string_address)"BATX", value, SETTINGS_VALUE) == SETTINGS_READ &&
+                  string_equals((string_address)value, (string_address)"30%, Not charging"));
+        check("battery: none is not a battery", !battery_read((string_address)"none", &state) && !state.present);
+        {
+                int picker = settings_row_named("Battery shown");
+                char pick[SETTINGS_VALUE], word[SETTINGS_VALUE];
+                unsigned int state = settings_parsed((unsigned int)picker, "[Moonwater] battery BAT1\n", pick);
+
+                check("settings: the Battery picker reads the battery the verb keeps", state == SETTINGS_READ && string_equals((string_address)pick, (string_address)"BAT1"));
+                state = settings_parsed((unsigned int)picker, "[Moonwater] battery auto\n", pick);
+                check("settings: and auto when nothing is kept", state == SETTINGS_READ && string_equals((string_address)pick, (string_address)"auto"));
+                settings.battery_menu_count = 1;
+                string_copy_bounded((string_address)settings.battery_menu[0].text, (string_address)"BAT0", sizeof(settings.battery_menu[0].text));
+                check("settings: the picker's choices are auto, each battery listed, then none",
+                      settings_options(&settings_rows[picker]) == 3 && settings_choice(&settings_rows[picker], 0, word, SETTINGS_VALUE) &&
+                          string_equals((string_address)word, (string_address)"auto") &&
+                          settings_choice(&settings_rows[picker], 1, word, SETTINGS_VALUE) &&
+                          string_equals((string_address)word, (string_address)"BAT0") &&
+                          settings_choice(&settings_rows[picker], 2, word, SETTINGS_VALUE) &&
+                          string_equals((string_address)word, (string_address)"none") &&
+                          !settings_choice(&settings_rows[picker], 3, word, SETTINGS_VALUE));
+                settings.battery_menu_count = 0;
+        }
+        battery_clear(root);
+
+        //      A machine with no battery: an empty tree, and one with only a mains supply.
+        if (!battery_fresh(root))
+                {
+                        fresh_failed();
+                        return;
+                }
+        battery_root = (string_address)root;
+        check("battery: an empty directory lists no batteries", battery_list(names, BATTERY_LIST) == 0);
+        found = battery_read(null, &state);
+        check("battery: with none, the default is not present and reads no percent",
+              !found && !state.present && state.percent == -1 && state.charging == BATTERY_UNKNOWN);
+        check("settings: the Battery row is absent on a machine with no battery",
+              settings_read(&settings_rows[battery_row], "", 0, value, SETTINGS_VALUE, false) == SETTINGS_ABSENT);
+        battery_put(root, "AC", "/type", "Mains\n");
+        battery_put(root, "AC", "/online", "1\n");
+        check("battery: a mains supply is not a battery", battery_list(names, BATTERY_LIST) == 0 && !battery_read((string_address)"AC", &state));
+        battery_clear(root);
+
+        //      A Deck-style tree: the mains and USB entries, a mouse's battery (scope Device), a UPS, a battery not present, and
+        //      the one present, whichever order the directory gives them in.
+        if (!battery_fresh(root))
+        {
+                fresh_failed();
+                return;
+        }
+        battery_put(root, "AC", "/type", "Mains\n");
+        battery_put(root, "AC", "/online", "1\n");
+        battery_put(root, "ucsi-source", "/type", "USB\n");
+        battery_put(root, "hid-mouse", "/type", "Battery\n");
+        battery_put(root, "hid-mouse", "/scope", "Device\n");
+        battery_put(root, "hid-mouse", "/present", "1\n");
+        battery_put(root, "hid-mouse", "/capacity", "55\n");
+        battery_put(root, "ups0", "/type", "UPS\n");
+        battery_put(root, "ups0", "/present", "1\n");
+        battery_put(root, "ups0", "/capacity", "90\n");
+        battery_put(root, "ups0", "/status", "Discharging\n");
+        battery_put(root, "BATX", "/type", "Battery\n");
+        battery_put(root, "BATX", "/present", "0\n");
+        battery_put(root, "BAT1", "/type", "Battery\n");
+        battery_put(root, "BAT1", "/present", "1\n");
+        battery_put(root, "BAT1", "/capacity", "80\n");
+        battery_put(root, "BAT1", "/status", "Discharging\n");
+        battery_root = (string_address)root;
+        count = battery_list(names, BATTERY_LIST);
+        check("battery: the Device-scope mouse battery, the UPS, BATX and BAT1 are all listed (four, each once)",
+              count == 4 && battery_listed(names, count, "hid-mouse") && battery_listed(names, count, "ups0") &&
+                  battery_listed(names, count, "BATX") && battery_listed(names, count, "BAT1") && !battery_listed(names, count, "AC"));
+        check("battery: the UPS is listed as a UPS and the batteries as batteries",
+              names[0].kind != BATTERY_KIND_NONE && battery_kind("ups0") == BATTERY_KIND_UPS && battery_kind("BAT1") == BATTERY_KIND_BATTERY &&
+                  battery_kind("hid-mouse") == BATTERY_KIND_BATTERY && battery_kind("AC") == BATTERY_KIND_NONE);
+        found = battery_read(null, &state);
+        check("battery: the default is a present battery of type Battery, the mouse's or BAT1, and never BATX or the UPS",
+              found && state.present &&
+                  (string_equals((string_address)state.name, (string_address)"BAT1") || string_equals((string_address)state.name, (string_address)"hid-mouse")));
+        found = battery_read("BAT1", &state);
+        check("battery: BAT1 by its name is 80 percent and discharging", found && state.present && state.percent == 80 && state.charging == BATTERY_DISCHARGING);
+        found = battery_read("hid-mouse", &state);
+        check("battery: a Device-scope mouse battery is read by its name, 55 percent", found && state.present && state.percent == 55);
+        found = battery_read("ups0", &state);
+        check("battery: a UPS is read by its name, with capacity as its percent (90)", found && state.present && state.percent == 90 &&
+                  state.charging == BATTERY_DISCHARGING);
+        found = battery_read("BATX", &state);
+        check("battery: BATX is a battery that is not present, with no percent", found && !state.present && state.percent == -1);
+        check("battery: a name with a slash does not leave the directory", !battery_read("../AC", &state));
+        check("battery: a mains supply is not read as a battery", !battery_read("AC", &state));
+        battery_clear(root);
+
+        battery_root = (string_address)BATTERY_ROOT;
+        return;
+}
+#endif
+
 // A code point as UTF-8, into bytes; the count of bytes it takes.
 static positive render_glyph(p8 address_to bytes, p32 code)
 {
@@ -111874,6 +112205,8 @@ b32 main()
 #if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
+        check_settings_keys();
+        check_battery();
 #endif
 
         // What the terminal says its paper and ink are is what it paints them with.
