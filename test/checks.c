@@ -112170,7 +112170,7 @@ b32 main()
 
                                 if (bytes && !font_glyph(&other, 0xad))
                                 {
-                                        font_find(terminal.engine, (const font_face *const[]){&other}, 1, 0xad, &face, &glyph);
+                                        font_find(terminal.ui.engine, (const font_face *const[]){&other}, 1, 0xad, &face, &glyph);
                                         soft = soft && face == FONT_DRAWN;
                                 }
                         }
