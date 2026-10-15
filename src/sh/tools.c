@@ -162,6 +162,7 @@ typedef struct
         bool no_action;
         bool socket_errors;
         bool lost;
+        bool stop;
         bool skip_empty;
         bool priority_prefix;
         bool rfc_time;
@@ -440,6 +441,41 @@ static bool logger_sd_put(string_address text)
         return true;
 }
 
+/* A parameter is name="value": a name with no quote in it, an equals sign,
+   then a quoted value whose only escapes are \" \\ and \], with no bracket
+   or quote left unescaped before the closing quote, which ends the text. */
+static bool logger_sd_param_valid(string_address text)
+{
+        string_address equal = string_first_of(text, '=');
+
+        if (!equal || equal == text)
+                return false;
+        for (string_address at = text; at < equal; at++)
+                if (string_get(at) == '"')
+                        return false;
+        if (string_get(equal + 1) != '"')
+                return false;
+        for (string_address at = equal + 2;; at++)
+        {
+                p8 byte = string_get(at);
+
+                if (!byte)
+                        return false;
+                if (byte == '"')
+                        return !string_get(at + 1);
+                if (byte == ']')
+                        return false;
+                if (byte == '\\')
+                {
+                        p8 escaped = string_get(at + 1);
+
+                        if (escaped != '"' && escaped != '\\' && escaped != ']')
+                                return false;
+                        at++;
+                }
+        }
+}
+
 static bool logger_header(logger_control address_to control,
                           p8 address_to into, positive room,
                           positive priority, positive address_to length)
@@ -563,6 +599,110 @@ typedef struct
 
 static bool logger_port_unknown;
 
+/* A service name, as getaddrinfo resolves it: the entry in /etc/services whose
+   name or alias is the word, for the protocol the socket speaks. The file is
+   read into the arena and given back, so a reconnect can ask again. */
+static bool logger_service_port(string_address name, bool stream,
+                                positive address_to port)
+{
+#if defined(LINUX) && !defined(KERNEL_MODE)
+        bipolar handle = text_open_handle((string_address)"/etc/services",
+                                          FILE_READ, 0);
+        if (handle < 0)
+                return false;
+
+        positive mark = utility_arena.used;
+        positive length = 0;
+        bool failed = false;
+        p8 address_to text = utility_arena_read_all((positive)handle, 65536,
+                                                    address_of length,
+                                                    address_of failed);
+        system_close((positive)handle);
+
+        bool found = false;
+        positive wanted = string_length(name);
+        string_address protocol = stream ? (string_address)"tcp"
+                                         : (string_address)"udp";
+        positive at = 0;
+        while (text && !failed && !found && at < length)
+        {
+                positive stop = at;
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+
+                //      Fields are the name, then port/protocol, then aliases,
+                //      and a # starts a comment. The name matches the first
+                //      field or any alias; the port field gives the number.
+                positive walk = at;
+                positive fields = 0;
+                positive first_begin = 0, first_end = 0;
+                positive second_begin = 0, second_end = 0;
+                bool named = false;
+                while (walk < stop && text[walk] != '#')
+                {
+                        while (walk < stop && byte_is_space(text[walk]))
+                                walk++;
+                        if (walk >= stop || text[walk] == '#')
+                                break;
+                        positive begin = walk;
+                        while (walk < stop && !byte_is_space(text[walk]) &&
+                               text[walk] != '#')
+                                walk++;
+                        if (fields == 0)
+                                first_begin = begin, first_end = walk;
+                        else if (fields == 1)
+                                second_begin = begin, second_end = walk;
+                        else if (walk - begin == wanted &&
+                                 !memory_compare(text + begin, name, wanted))
+                                named = true;
+                        fields++;
+                }
+
+                if (fields >= 2)
+                {
+                        if (second_end - second_begin > 0 &&
+                            first_end - first_begin == wanted &&
+                            !memory_compare(text + first_begin, name, wanted))
+                                named = true;
+
+                        positive slash = second_begin;
+                        while (slash < second_end && text[slash] != '/')
+                                slash++;
+                        if (named && slash < second_end &&
+                            second_end - slash - 1 == 3 &&
+                            !memory_compare(text + slash + 1, protocol, 3))
+                        {
+                                positive number = 0;
+                                bool digits = slash > second_begin;
+
+                                for (positive d = second_begin; d < slash && digits; d++)
+                                {
+                                        if (text[d] < '0' || text[d] > '9' ||
+                                            number > 6553)
+                                                digits = false;
+                                        else
+                                                number = number * 10 + (text[d] - '0');
+                                }
+                                if (digits && number && number <= 65535)
+                                {
+                                        *port = number;
+                                        found = true;
+                                }
+                        }
+                }
+                at = stop < length ? stop + 1 : length;
+        }
+
+        utility_arena.used = mark;
+        return found;
+#else
+        (void)name;
+        (void)stream;
+        (void)port;
+        return false;
+#endif
+}
+
 static bipolar logger_connect_kind(logger_control address_to control,
                                    p8 transport)
 {
@@ -588,15 +728,27 @@ static bipolar logger_connect_kind(logger_control address_to control,
                 bipolar host = (bipolar)found;
 
                 positive port = transport == LOGGER_TRANSPORT_STREAM ? 601 : 514;
-                if (control->port &&
-                    (!string_digits_checked_exact(control->port, 10, address_of port) ||
-                     !port || port > 65535))
+                if (control->port)
                 {
-                        //      A port that is neither a number nor a service
-                        //      name is a lookup that failed, and the
-                        //      reference says so in those words.
-                        logger_port_unknown = true;
-                        return -ERROR_INVALID;
+                        //      A port is a number or a service name, and a
+                        //      name the services file does not give for this
+                        //      protocol is a lookup that failed, which the
+                        //      reference says in those words.
+                        positive given = 0;
+                        bool numeric = string_digits_checked_exact(control->port, 10,
+                                                                   address_of given);
+                        bool known = numeric
+                            ? given && given <= 65535
+                            : logger_service_port(control->port,
+                                                  transport == LOGGER_TRANSPORT_STREAM,
+                                                  address_of port);
+                        if (numeric && known)
+                                port = given;
+                        if (!known)
+                        {
+                                logger_port_unknown = true;
+                                return -ERROR_INVALID;
+                        }
                 }
 
                 socket_address_internet where = {
@@ -690,8 +842,14 @@ static bool logger_send_once(logger_control address_to control,
                 return !control->lost;
 
         if (control->transport == LOGGER_TRANSPORT_DGRAM)
-                return socket_send((b32)control->handle, bytes, length,
-                                   MSG_NOSIGNAL, null, 0) == (bipolar)length;
+        {
+                bipolar sent = socket_send((b32)control->handle, bytes, length,
+                                           MSG_NOSIGNAL, null, 0);
+                if (sent == (bipolar)length)
+                        return true;
+                control->last_error = sent < 0 ? sent : -ERROR_INPUT_OUTPUT;
+                return false;
+        }
 
         /*      The socket's send timeout bounds one call, not the line: a
                 peer taking a byte every few seconds would hold the logger
@@ -705,6 +863,8 @@ static bool logger_emit(logger_control address_to control,
                         positive length, positive priority)
 {
 #if defined(LINUX) && !defined(KERNEL_MODE)
+        if (control->stop)
+                return false;
         p8 address_to content = control->workspace + LOGGER_FRAME_ROOM;
         positive header_length;
 
@@ -731,14 +891,48 @@ static bool logger_emit(logger_control address_to control,
         else if (control->transport == LOGGER_TRANSPORT_STREAM)
                 wire[wire_length++] = '\n';
 
-        bool sent = logger_send_once(control, wire, wire_length);
-        if (!sent)
+        if (!logger_send_once(control, wire, wire_length))
         {
+                /*      With socket errors on, the reference names the socket
+                        and its reason, and stops at this line: it reads no
+                        more of its input and exits as a failure. */
+                //      A network peer that refuses a datagram is not reported,
+                //      nor does it stop the run: the reference sends on to the
+                //      end of its input and exits as it would have.
+                if (control->server)
+                        return true;
+                if (control->socket_errors)
+                {
+                        text_flush();
+                        string_report(writer_stderr, false,
+                            "logger: socket %s: %s\n",
+                            control->socket_path ? control->socket_path
+                                                 : (string_address)"/dev/log",
+                            file_reason(control->last_error));
+                        control->stop = true;
+                        return false;
+                }
+
+                /*      With socket errors off the reference says once that
+                        a connected send failed, with the descriptor's own
+                        words, and goes on: each later line reconnects, and
+                        a line sent while nothing is listening is dropped
+                        without a word. Its exit status stays zero. */
+                bool spell = !control->lost;
+                bool sent = false;
+
                 control->lost = true;
                 if (logger_connect(control))
                         sent = logger_send_once(control, wire, wire_length);
-                if (!sent)
-                        string_diagnostic(&text_diagnostic, 0, null, "send message failed");
+                if (sent)
+                        control->lost = false;
+                else if (spell)
+                {
+                        text_flush();
+                        string_report(writer_stderr, false,
+                            "logger: send message failed: %s\n",
+                            file_reason(-ERROR_BAD_DESCRIPTOR));
+                }
         }
 
         if (control->standard_error)
@@ -751,7 +945,7 @@ static bool logger_emit(logger_control address_to control,
                 text_out_to(1);
         }
 
-        return sent;
+        return true;
 #else
         (void)control;
         (void)length;
@@ -801,7 +995,7 @@ static bool logger_stream(logger_control address_to control,
         bool answer = true;
         positive base_priority = control->priority;
         positive default_priority = control->priority;
-        while (text_line_next(text_line, 0))
+        while (!control->stop && text_line_next(text_line, 0))
         {
                 positive from = 0;
                 positive priority = default_priority;
@@ -847,7 +1041,7 @@ static bool logger_stream(logger_control address_to control,
                         continue;
                 }
 
-                while (available)
+                while (available && !control->stop)
                 {
                         positive take = min(available, control->maximum);
                         memory_copy(control->body, text_line + from, take);
@@ -869,11 +1063,14 @@ static bool logger_operands(logger_control address_to control)
         positive used = 0;
         bool answer = true;
 
-        for (positive index = 0; index < count; index++)
+        for (positive index = 0; index < count && !control->stop; index++)
         {
                 string_address word = file_operand_at(index);
                 positive length = string_length(word);
 
+                /*      An operand longer than --size is cut to its first
+                        maximum bytes and the rest is dropped, as the reference
+                        does: the stream is the path that splits. */
                 if (length > control->maximum)
                 {
                         if (used)
@@ -882,14 +1079,9 @@ static bool logger_operands(logger_control address_to control)
                                                       control->priority);
                                 used = 0;
                         }
-                        for (positive from = 0; from < length;)
-                        {
-                                positive take = min(length - from, control->maximum);
-
-                                memory_copy(control->body, word + from, take);
-                                answer &= logger_emit(control, take, control->priority);
-                                from += take;
-                        }
+                        memory_copy(control->body, word, control->maximum);
+                        answer &= logger_emit(control, control->maximum,
+                                              control->priority);
                         continue;
                 }
 
@@ -905,7 +1097,7 @@ static bool logger_operands(logger_control address_to control)
                 used += length;
         }
 
-        if (used)
+        if (used && !control->stop)
                 answer &= logger_emit(control, used, control->priority);
         return answer;
 }
@@ -1188,6 +1380,17 @@ static bool logger_option_seen(p8 letter, string_address value)
         }
         if (letter == 'X' && value)
         {
+                //      The reference writes a parameter as it was given, once
+                //      it is spelled name="value" with the value's escapes
+                //      right; anything else is refused where it stands, and
+                //      that is said before a missing --sd-id is.
+                if (!logger_sd_param_valid(value))
+                {
+                        text_flush();
+                        return string_report(writer_stderr, false,
+                            "logger: invalid structured data parameter: '%s'\n",
+                            value);
+                }
                 if (!logger_seen_sd_id)
                 {
                         text_flush();
@@ -1195,37 +1398,10 @@ static bool logger_option_seen(p8 letter, string_address value)
                             "logger: --sd-id was not specified for --sd-param %s\n",
                             value);
                 }
-                string_address equal = string_first_of(value, '=');
-                if (!equal)
-                {
-                        text_flush();
-                        return string_report(writer_stderr, false,
-                            "logger: --sd-param %s is not name=value\n", value);
-                }
-                //      A parameter is spelled name="value", and the value
-                //      escapes its quote, its backslash and its closing bracket.
-                p8 piece[3] = {0, 0, end};
                 bool failed = (!logger_seen_sd_open &&
                                (!logger_sd_put(logger_seen_sd.used ? "][" : "[") ||
                                 !logger_sd_put(logger_seen_sd_id))) ||
-                              !logger_sd_put(" ");
-
-                for (string_address at = value; !failed && at < equal; at++)
-                {
-                        piece[0] = string_get(at);
-                        failed = !logger_sd_put((string_address)piece);
-                }
-                failed = failed || !logger_sd_put("=\"");
-                for (string_address at = equal + 1; !failed && string_get(at); at++)
-                {
-                        p8 byte = string_get(at);
-
-                        piece[0] = byte;
-                        failed = ((byte == '"' || byte == '\\' || byte == ']') &&
-                                  !logger_sd_put("\\")) ||
-                                 !logger_sd_put((string_address)piece);
-                }
-                failed = failed || !logger_sd_put("\"");
+                              !logger_sd_put(" ") || !logger_sd_put(value);
                 if (failed)
                 {
                         text_flush();
@@ -3315,17 +3491,13 @@ static b32 tools_last()
         if (loaded < 0)
                 return text_done(string_diagnostic(&text_diagnostic, 1, path, file_reason(loaded)));
 
-        // util-linux warns about a directory and goes on to say when the
-        // (empty) database begins.
+        // A directory is read as an empty database, and the reference says
+        // nothing about it: it goes on to say when that database begins.
         file_facts kind;
         if (file_look(reader.handle, (string_address)"", AT_EMPTY_PATH,
                       address_of kind) &&
             (kind.mode & MODE_FORMAT) == MODE_DIRECTORY)
-        {
-                string_format(writer_stderr, "last: cannot read %s: Is a directory\n",
-                              path);
                 reader.records = 0;
-        }
 
         login_record record;
         for (positive at = reader.records; at; at--)
@@ -16163,6 +16335,14 @@ static bool ps_format_list(string_address list,
                         which = PS_FIELD_COMM;
                         alias_header = "CMD";
                 }
+                else if (string_equals(name, "ni"))
+                {
+                        //      procps spells the nice column both ways, and
+                        //      its header is the same.
+                        which = string_table_find((string_address)"nice", ps_columns,
+                                                  sizeof(ps_columns[0]),
+                                                  PS_FIELD_COUNT);
+                }
                 else
                 {
                         which = string_table_find(name, ps_columns,
@@ -16671,6 +16851,12 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
 
         p8 address_to at = bytes;
         p8 address_to stop = bytes + length;
+
+        //      The reference drops the NUL bytes the input starts with, ahead
+        //      of the first record's priority and clock. Later records keep
+        //      theirs, and show them escaped.
+        while (first && at < stop && !*at)
+                at++;
         if (at < stop && *at == '<')
         {
                 positive priority;
@@ -16687,7 +16873,10 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                 record->continuation = true;
 
         p8 address_to stamp = at;
-        if (at < stop && *at == '[')
+        //      The reference reads a bracketed clock from the first record,
+        //      and from a later one only when that one has a priority: a
+        //      later line with no priority is text, brackets and all.
+        if (at < stop && *at == '[' && (first || record->priority_known))
         {
                 at++;
                 at += memory_span_byte(at, ' ', (positive)(stop - at));
@@ -16713,8 +16902,6 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                                 digits++;
                                 at++;
                         }
-                        for (positive padded = min(digits, 6); padded < 6; padded++)
-                                fraction *= 10;
                 }
                 if (any && at < stop && *at == ']')
                 {
@@ -16917,11 +17104,22 @@ static fn tools_dmesg_calendar(tools_dmesg_state address_to state,
 static fn tools_dmesg_message(p8 address_to bytes, positive length,
                               bool noescape)
 {
-        // util-linux escapes every byte that is not printable ASCII.
+        // util-linux escapes every byte that is not printable ASCII, except
+        // that a vertical tab, a form feed and a carriage return go out as
+        // they are: the reference writes them raw.
         if (noescape)
                 text_put(bytes, length);
         else
-                writer_hex_escaped(text_put, bytes, length, HEX_CONTROL | HEX_HIGH);
+                for (positive at = 0; at < length; at++)
+                {
+                        p8 byte = bytes[at];
+
+                        if (byte == '\v' || byte == '\f' || byte == '\r')
+                                text_put_character(byte);
+                        else
+                                writer_hex_escaped(text_put, bytes + at, 1,
+                                                   HEX_CONTROL | HEX_HIGH);
+                }
 }
 
 static fn tools_dmesg_emit(tools_dmesg_state address_to state,
@@ -17495,7 +17693,7 @@ static bipolar ul_identity(string_address text, positive maximum, bool group)
 
 /* taskset, chrt and uclampset all give -a the same meaning. */
 static b32 ul_tasks(b32 pid, bool all, ul_task_action action,
-                    address_any context)
+                    address_any context, bipolar address_to listing)
 {
         if (!all)
                 return action(pid, context);
@@ -17507,8 +17705,14 @@ static b32 ul_tasks(b32 pid, bool all, ul_task_action action,
         file_walk walk;
 
         if (!file_walk_open(address_of walk, AT_FDCWD, path))
-                return string_report(log_error, 1, "%s: cannot list the tasks of pid %b\n",
-                                     program_argument(0), (bipolar)pid);
+        {
+                //      A process that has gone has no tasks, and taskset and
+                //      chrt say nothing about it. The reason goes back to a
+                //      caller that asks for it, as uclampset does.
+                if (listing)
+                        *listing = walk.error;
+                return 0;
+        }
 
         b32 failed = 0;
         struct linux_dirent64 address_to entry;
@@ -18064,22 +18268,49 @@ static bool ul_size(string_address text, positive address_to value)
 
         if (fraction)
         {
-                //      The fraction times scale, from its least significant
-                //      digit up: each digit's share is divided once, so the
-                //      truncation is that of the whole product, not of each
-                //      digit's share. Leading zeros shrink it by ten each.
-                positive total = 0;
+                //      util-linux's arithmetic, digit by digit: each digit's
+                //      share is the scale over its place value over the digit,
+                //      which truncates before it multiplies. So 1.6K is 2048,
+                //      and fallocate and the other size readers agree with it.
+                positive divisor = 10;
+                positive place = 1;
 
-                while (fraction)
+                while (divisor < fraction)
                 {
-                        total = (scale * (fraction % 10) + total) / 10;
-                        fraction /= 10;
+                        if (divisor <= positive_max / 10)
+                                divisor *= 10;
+                        else
+                                fraction /= 10;
                 }
-                for (; fraction_zeros && total; fraction_zeros--)
-                        total /= 10;
-                if (whole > positive_max - total)
-                        return false;
-                whole += total;
+                while (fraction_zeros--)
+                {
+                        if (divisor <= positive_max / 10)
+                                divisor *= 10;
+                        else
+                                fraction /= 10;
+                }
+
+                do
+                {
+                        positive digit = fraction % 10;
+                        positive represented = divisor / place;
+
+                        fraction /= 10;
+                        if (digit)
+                        {
+                                positive add = scale / (represented / digit);
+
+                                if (whole > positive_max - add)
+                                        return false;
+                                whole += add;
+                        }
+                        if (fraction)
+                        {
+                                if (place > positive_max / 10)
+                                        return false;
+                                place *= 10;
+                        }
+                } while (fraction);
         }
 
         address_to value = whole;
@@ -18287,7 +18518,7 @@ static b32 util_linux_taskset()
                 if (!pid)
                         pid = (b32)system_call_1(syscall(getpid), 0);
 
-                answer = ul_tasks(pid, all, ul_taskset_one, address_of work);
+                answer = ul_tasks(pid, all, ul_taskset_one, address_of work, null);
                 log_flush();
                 return answer;
         }
@@ -19023,7 +19254,7 @@ static b32 util_linux_chrt()
         if (by_pid && !scheduling_option)
         {
                 ul_chrt_work query = {.setting = false, .verbose = true};
-                answer = ul_tasks(pid, all, ul_chrt_one, address_of query);
+                answer = ul_tasks(pid, all, ul_chrt_one, address_of query, null);
                 log_flush();
                 return answer;
         }
@@ -19056,7 +19287,7 @@ static b32 util_linux_chrt()
                         address_to parameters[at].into = (p64)got;
         }
 
-        if (ul_tasks(pid, all, ul_chrt_one, address_of work))
+        if (ul_tasks(pid, all, ul_chrt_one, address_of work, null))
         {
                 log_flush();
                 return 1;
@@ -19257,19 +19488,31 @@ static b32 util_linux_uclampset()
         }
 
         b32 pid = 0;
+        //      With -p the operands are not a command, and the reference
+        //      carries on to the process named; -a without -p names no
+        //      process at all.
         if (pid_text)
         {
-                if (taking.first < count ||
-                    !ul_pid(pid_text, "uclampset", "PID", address_of pid))
+                if (!ul_pid(pid_text, "uclampset", "PID", address_of pid))
                         return 1;
         }
-        else if (taking.first >= count || all)
+        else if (all)
+                return string_report(log_error, 1, "%s: %s\n", "uclampset",
+                                     "missing -p option: Invalid argument");
+        else if (taking.first >= count)
                 return string_report(log_error, 1, "%s: %s\n", "uclampset", "bad usage");
 
-        if (ul_tasks(pid, all, ul_uclamp_one, address_of work))
+        bipolar listing = 0;
+        if (ul_tasks(pid, all, ul_uclamp_one, address_of work, address_of listing))
         {
                 log_flush();
                 return 1;
+        }
+        if (listing < 0)
+        {
+                log_flush();
+                return string_report(log_error, 1, "%s: cannot obtain the list of tasks: %s\n",
+                                     "uclampset", file_reason(listing));
         }
         log_flush();
         return pid_text ? 0 : ul_exec(taking.first, "uclampset");

@@ -549,7 +549,6 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
 {
         bipolar uid = -1;
         bipolar gid = -1;
-        positive list[64];
         positive listed = 0;
 
         if (userspec && userspec[0])
@@ -575,18 +574,27 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
         }
         if (groups && groups[0])
         {
+                //      The list is as long as the names given. The kernel is
+                //      what refuses more groups than it keeps, as it does for
+                //      the reference, and a name is looked up at its own length.
+                positive entries = 1;
+                for (string_address at = groups; *at; at++)
+                        entries += *at == ',';
+                positive address_to list = utility_arena_take(entries * sizeof(positive));
+
+                if (!list)
+                        return string_report(log_error, 125, "chroot: out of memory\n");
                 for (string_address at = groups; *at;)
                 {
-                        p8 text[64];
                         string_address comma = string_first_of(at, ',');
                         positive length = comma ? (positive)(comma - at) : string_length(at);
 
                         if (length)
                         {
-                                if (length >= sizeof(text))
-                                        return string_report(log_error, 125, "chroot: invalid group\n");
-                                if (listed == array_count(list))
-                                        return string_report(log_error, 125, "chroot: too many groups\n");
+                                p8 address_to text = utility_arena_take(length + 1);
+
+                                if (!text)
+                                        return string_report(log_error, 125, "chroot: out of memory\n");
                                 memory_copy(text, at, length);
                                 text[length] = end;
                                 bipolar id = file_identity_of((string_address)text, true);
