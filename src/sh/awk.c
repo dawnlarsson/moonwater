@@ -364,6 +364,21 @@ static string_address awk_not_finite_name(decimal value, bool capitals)
         The text is terminated at length: a field always is, and the program
         source is given one before the lexer starts.
 */
+// The value of one hexadecimal digit, or -1 for any other byte.
+static b32 awk_hex_value(p8 character)
+{
+        if (byte_is_digit(character))
+                return character - '0';
+
+        if (character >= 'a' && character <= 'f')
+                return character - 'a' + 10;
+
+        if (character >= 'A' && character <= 'F')
+                return character - 'A' + 10;
+
+        return -1;
+}
+
 static decimal awk_scan_number(string_address text, positive length, positive address_to used)
 {
         positive at = 0;
@@ -1007,6 +1022,23 @@ static positive awk_global_slot(string_address name, positive length)
         return slot;
 }
 
+// The global of this name, or -1 when there is none. Nothing is made.
+static b32 awk_global_lookup(string_address name, positive length)
+{
+        if (!awk_global_hashed)
+        {
+                for (b32 i = 0; i < awk_global_count; i++)
+                        if (awk_text_is(awk_global_names[i], name, length))
+                                return i;
+
+                return -1;
+        }
+
+        positive slot = awk_global_slot(name, length);
+
+        return awk_global_slots[slot] ? (b32)awk_global_slots[slot] - 1 : -1;
+}
+
 static b32 awk_global_find(string_address name, positive length)
 {
         if (!awk_global_hashed)
@@ -1046,10 +1078,16 @@ static awk_cell address_to awk_cell_of(b32 index)
                          : address_of awk_globals[index];
 }
 
+//      A name is an array or a scalar at run time, as the reference decides
+//      it: each use that needs the other kind is refused where it happens.
+//      A scalar used as an array, or an array read or written as a scalar.
 static awk_array address_to awk_cell_array(awk_cell address_to cell)
 {
         while (cell->link)
                 cell = cell->link;
+
+        if (cell->kind == AWK_CELL_SCALAR)
+                awk_die(null, (string_address) "attempt to use scalar as an array");
 
         if (!cell->array)
         {
@@ -1059,6 +1097,27 @@ static awk_array address_to awk_cell_array(awk_cell address_to cell)
 
         cell->kind = AWK_CELL_ARRAY;
         return cell->array;
+}
+
+static void awk_read_scalar(b32 index)
+{
+        awk_cell address_to cell = awk_cell_of(index);
+
+        while (cell->link)
+                cell = cell->link;
+
+        if (cell->kind == AWK_CELL_ARRAY)
+                awk_die(null, (string_address) "attempt to use array in a scalar context");
+}
+
+static void awk_write_scalar(b32 index)
+{
+        awk_cell address_to cell = awk_cell_of(index);
+
+        awk_read_scalar(index);
+
+        if (cell->kind == AWK_CELL_UNKNOWN)
+                cell->kind = AWK_CELL_SCALAR;
 }
 
 static string_address awk_global_string(b32 which)
@@ -3514,6 +3573,34 @@ static fn awk_next_token()
         {
                 positive used;
 
+                // A hexadecimal constant in the program text, which the
+                // reference reads (0x1A is 26). A 0x with no digit after it
+                // is the zero and a name, as before.
+                if (character == '0' && awk_source_at + 2 < awk_source_length &&
+                    (awk_source[awk_source_at + 1] == 'x' || awk_source[awk_source_at + 1] == 'X') &&
+                    awk_hex_value(awk_source[awk_source_at + 2]) >= 0)
+                {
+                        positive at = awk_source_at + 2;
+                        decimal value = 0;
+
+                        while (at < awk_source_length && awk_hex_value(awk_source[at]) >= 0)
+                                value = value * 16 + awk_hex_value(awk_source[at++]);
+
+                        // The reference reads a hexadecimal fraction only
+                        // with an exponent, and refuses one without.
+                        if (at < awk_source_length && awk_source[at] == '.')
+                        {
+                                string_diagnostic(&text_diagnostic, 2, null,
+                                                  (string_address) "hexadecimal floating point constants require an exponent");
+                                awk_leave(2);
+                        }
+
+                        awk_source_at = at;
+                        awk_token_number = value;
+                        awk_token = T_NUMBER;
+                        return;
+                }
+
                 awk_token_number = awk_scan_number(awk_source + awk_source_at,
                                                    awk_source_length - awk_source_at,
                                                    address_of used);
@@ -4281,9 +4368,11 @@ static awk_node address_to awk_primary()
                 node->index = which;
                 awk_skip_newlines();
 
-                while (awk_token != T_CLOSE)
-                        if (!awk_expression_list_one(node, address_of last))
-                                break;
+                // A comma must be followed by an argument: f(1,) is a syntax
+                // error, as it is in the reference.
+                if (awk_token != T_CLOSE)
+                        while (awk_expression_list_one(node, address_of last))
+                                ;
 
                 awk_print_depth = kept;
                 awk_expect(T_CLOSE, "expected ) after arguments");
@@ -4312,9 +4401,9 @@ static awk_node address_to awk_primary()
                 awk_next_token();
                 awk_skip_newlines();
 
-                while (awk_token != T_CLOSE)
-                        if (!awk_expression_list_one(node, address_of last))
-                                break;
+                if (awk_token != T_CLOSE)
+                        while (awk_expression_list_one(node, address_of last))
+                                ;
 
                 awk_print_depth = kept;
                 awk_expect(T_CLOSE, "expected ) after arguments");
@@ -5198,7 +5287,10 @@ static awk_text address_to awk_eval_text(awk_node address_to node)
 static inline INLINE awk_value address_to awk_borrowed(awk_node address_to node)
 {
         if (node->kind == N_VARIABLE)
+        {
+                awk_read_scalar(node->index);
                 return address_of awk_cell_of(node->index)->value;
+        }
 
         if (node->kind == N_FIELD && node->sub && node->index > 0 && node->index <= awk_nf)
                 return address_of awk_fields[node->index];
@@ -5297,6 +5389,7 @@ static decimal awk_eval_number(awk_node address_to node)
         case N_NUMBER:
                 return node->number;
         case N_VARIABLE:
+                awk_read_scalar(node->index);
                 return awk_to_number(address_of awk_cell_of(node->index)->value);
         case N_FIELD:
                 if (node->sub && node->index > 0 && node->index <= awk_nf)
@@ -5403,6 +5496,7 @@ static fn awk_target_of(awk_node address_to node, awk_target address_to into)
         switch (node->kind)
         {
         case N_VARIABLE:
+                awk_write_scalar(node->index);
                 into->kind = LV_CELL;
                 into->index = node->index;
                 into->cell = awk_cell_of(node->index);
@@ -5569,6 +5663,7 @@ static fn awk_eval(awk_node address_to node, awk_value address_to out)
         }
 
         case N_VARIABLE:
+                awk_read_scalar(node->index);
                 awk_value_copy(out, address_of awk_cell_of(node->index)->value);
                 return;
 
@@ -5750,6 +5845,8 @@ static fn awk_call(awk_node address_to node, awk_value address_to out)
 
                         if (source->kind != AWK_CELL_SCALAR)
                                 cell->link = source;
+                        else
+                                cell->kind = AWK_CELL_SCALAR;
 
                         if (source->kind != AWK_CELL_ARRAY)
                                 awk_value_copy(address_of cell->value, address_of source->value);
@@ -5758,6 +5855,20 @@ static fn awk_call(awk_node address_to node, awk_value address_to out)
                         awk_eval(argument, address_of cell->value);
 
                 argument = argument->next;
+        }
+
+        // An argument past the declared parameters is evaluated, for what
+        // it does, and dropped, with a warning: the reference does the same.
+        if (argument)
+                string_diagnostic(&text_diagnostic, 0, which->name->text,
+                                  (string_address) "called with more arguments than declared");
+
+        for (; argument; argument = argument->next)
+        {
+                awk_value spare;
+                awk_value_start(spare);
+                awk_eval(argument, address_of spare);
+                awk_value_done(address_of spare);
         }
 
         awk_frame = base;
@@ -5959,6 +6070,9 @@ static fn awk_builtin(awk_node address_to node, awk_value address_to out)
                                 awk_set_number(out, (decimal)cell->array->count);
                                 return;
                         }
+
+                        if (cell->kind == AWK_CELL_UNKNOWN)
+                                cell->kind = AWK_CELL_SCALAR;
                 }
 
                 awk_text address_to text = awk_eval_text(first);
@@ -7589,12 +7703,10 @@ static b32 text_awk()
         // A name is a function or a variable, not both, and a use as a
         // variable anywhere in the program has made a global of it.
         for (b32 i = 0; i < awk_function_count; i++)
-                if (awk_functions[i].defined)
-                        for (b32 g = 0; g < awk_global_count; g++)
-                                if (awk_text_is(awk_global_names[g],
-                                                awk_functions[i].name->text,
-                                                awk_functions[i].name->length))
-                                        awk_syntax("function name used as a variable");
+                if (awk_functions[i].defined &&
+                    awk_global_lookup(awk_functions[i].name->text,
+                                      awk_functions[i].name->length) >= 0)
+                        awk_syntax("function name used as a variable");
 
         awk_parsing = false;
 

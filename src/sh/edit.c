@@ -3000,6 +3000,7 @@ static fn edit_copy(bool cut)
         positive taken = 0;
         positive claimed;
         bool lines = true;
+        bool stored = true;
 
         edit_step_seal();
 
@@ -3046,13 +3047,26 @@ static fn edit_copy(bool cut)
 
                 block = edit_span_take(from, to, address_of length);
 
-                if (block && !edit_clip_add(block, length))
-                        memory_give(block);
+                //      A piece that is not in the clipboard is not cut out of
+                //      the file either: the text stays where it was.
+                if (!block || !edit_clip_add(block, length))
+                {
+                        if (block)
+                                memory_give(block);
+                        stored = false;
+                }
         }
 
         if (!cut)
         {
-                edit_status_say((string_address) "copied");
+                edit_status_say(stored ? (string_address) "copied"
+                                       : (string_address) "copy failed");
+                return;
+        }
+
+        if (!stored)
+        {
+                edit_status_say((string_address) "cut failed");
                 return;
         }
 

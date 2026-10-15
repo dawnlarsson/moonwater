@@ -2018,17 +2018,24 @@ static fn job_death_long(bipolar child, positive number, bool dumped,
         log_error(str("\n"));
 }
 
-#define CHILD_DEATH_QUEUE 4
-
+/*
+        A child that dies inside a lastpipe compound is told when the compound
+        ends, as bash tells it at the next line, with the command it was started
+        with: the job's row may be gone by then. Each one keeps a copy of its
+        command.
+*/
 static struct
 {
         bipolar child;
         positive raw;
         bool foreground;
-} child_death_queue[CHILD_DEATH_QUEUE];
+        p8 address_to command;
+} *child_death_queue;
 static positive child_death_queued;
+static positive child_death_room;
 
-static fn job_death_write(bipolar child, positive raw, bool foreground)
+static fn job_death_write(bipolar child, positive raw, bool foreground,
+                          string_address command)
 {
         positive number = raw & 0x7f;
         bool dumped = (raw & 0x80) != 0;
@@ -2042,8 +2049,7 @@ static fn job_death_write(bipolar child, positive raw, bool foreground)
                         return;
 
                 if (listed)
-                        job_death_long(child, number, dumped,
-                                       job_death_command(child));
+                        job_death_long(child, number, dumped, command);
                 else
                         job_death_short(number, dumped);
         }
@@ -2055,12 +2061,18 @@ static fn job_death_write(bipolar child, positive raw, bool foreground)
 
 static fn shell_child_death_flush()
 {
-        positive at;
+        for (positive at = 0; at < child_death_queued; at++)
+        {
+                p8 address_to command = child_death_queue[at].command;
 
-        for (at = 0; at < child_death_queued; at++)
                 job_death_write(child_death_queue[at].child,
                                 child_death_queue[at].raw,
-                                child_death_queue[at].foreground);
+                                child_death_queue[at].foreground,
+                                command ? (string_address)command : (string_address) "");
+
+                if (command)
+                        memory_give(command);
+        }
 
         child_death_queued = 0;
 }
@@ -2093,23 +2105,39 @@ fn shell_child_death(bipolar child, positive raw, bool foreground)
                 if (!foreground && shell_is_interactive)
                         return;
 
+                //      A lastpipe compound runs in this shell, which only happens
+                //      without job control. The child is told when the compound
+                //      ends, not here.
                 if (exec_lastpipe_live && exec_compound_depth)
                 {
-                        if (child_death_queued < CHILD_DEATH_QUEUE)
+                        string_address text = job_death_command(child);
+                        positive length = string_length(text);
+                        p8 address_to copy = (p8 address_to)memory_take(length + 1);
+
+                        if (!shell_array_room(child_death_queue, child_death_room,
+                                              child_death_queued + 1))
                         {
-                                child_death_queue[child_death_queued].child =
-                                    child;
-                                child_death_queue[child_death_queued].raw = raw;
-                                child_death_queue[child_death_queued]
-                                    .foreground = foreground;
-                                child_death_queued++;
+                                if (copy)
+                                        memory_give(copy);
+                                return;
                         }
 
+                        if (copy)
+                        {
+                                memory_copy(copy, text, length);
+                                copy[length] = end;
+                        }
+
+                        child_death_queue[child_death_queued].child = child;
+                        child_death_queue[child_death_queued].raw = raw;
+                        child_death_queue[child_death_queued].foreground = foreground;
+                        child_death_queue[child_death_queued].command = copy;
+                        child_death_queued++;
                         return;
                 }
         }
 
-        job_death_write(child, raw, foreground);
+        job_death_write(child, raw, foreground, job_death_command(child));
 }
 
 /*
@@ -2525,11 +2553,47 @@ static bool shell_argv_joined(positive from, byte_store address_to store)
         return true;
 }
 
+/*
+        The words of a command line the parser reads again, each one quoted, so
+        that the second reading gives back exactly these words. jobs -x runs its
+        arguments as the words they already are: bash runs argv[0] as a name, so
+        a word with a blank or a dollar sign in it is one word, not text.
+*/
+static byte_store address_to shell_quoted_into;
+static bool shell_quoted_failed;
+
+static fn shell_quoted_write(address_any bytes, positive length)
+{
+        if (!shell_bytes_add(shell_quoted_into, bytes, length))
+                shell_quoted_failed = true;
+}
+
+static bool shell_argv_quoted(positive from, byte_store address_to store)
+{
+        store->used = 0;
+        if (!shell_bytes_add(store, (string_address) "", 0))
+                return false;
+
+        shell_quoted_into = store;
+        shell_quoted_failed = false;
+
+        for (positive at = from; at < shell_argc; at++)
+        {
+                if (at > from && !shell_bytes_byte(store, ' '))
+                        return false;
+
+                shell_single_quote_write(shell_quoted_write, shell_argv[at],
+                                         string_length(shell_argv[at]));
+        }
+
+        return !shell_quoted_failed;
+}
+
 static COLD fn shell_jobs_replaced(positive at)
 {
         static byte_store joined;
 
-        if (!shell_argv_joined(at, address_of joined))
+        if (!shell_argv_quoted(at, address_of joined))
                 return shell_answered(2, "%s: no room\n", "jobs");
 
         //      Nested the way eval and fc nest: the parser is standing in
@@ -6670,8 +6734,10 @@ fn shell_fc(writer write)
         if (!editor || !string_get(editor))
                 editor = env_get((const_string) "EDITOR");
 
+        // With neither FCEDIT nor EDITOR set, bash runs vi. POSIX names ed,
+        // and dash runs ed.
         if (!editor || !string_get(editor))
-                editor = (string_address) "ed";
+                editor = (string_address) (shell_bash_compat && !shell_posix_on() ? "vi" : "ed");
 
         shell_answer(history_edit(write, editor, first, last));
 }
@@ -16055,8 +16121,6 @@ static b32 coproc_kept(b32 descriptor)
         return (b32)moved;
 }
 
-#define EXEC_COPROC_LIVE 8
-
 typedef struct
 {
         p8 name[EXEC_COPROC_NAME + 1];
@@ -16064,7 +16128,10 @@ typedef struct
         bipolar pid;
 } exec_coproc_slot;
 
-static exec_coproc_slot exec_coprocs[EXEC_COPROC_LIVE];
+// As many coprocesses as the shell is given, as bash keeps them: the table
+// grows, and each one's variables are let go when it has ended.
+static exec_coproc_slot address_to exec_coprocs;
+static positive exec_coproc_room;
 
 static fn exec_coproc_child()
 {
@@ -16150,7 +16217,7 @@ static fn exec_coproc_remember(string_address name, positive name_length,
 {
         exec_coproc_slot address_to slot;
 
-        if (exec_coproc_count >= EXEC_COPROC_LIVE)
+        if (!shell_array_room(exec_coprocs, exec_coproc_room, exec_coproc_count + 1))
                 return;
 
         slot = exec_coprocs + exec_coproc_count++;
@@ -17605,6 +17672,7 @@ static b32 exec_node_kind(b32 index)
 
         if (shell_bash_compat && exec_compound_depth == 0)
                 shell_child_death_flush();
+
         /* Bash leaves process-substitution write ends open after a
            brace group. `>(sed > file)` has not seen EOF, so a later cat of
            that file is still empty; the writer finishes when this shell

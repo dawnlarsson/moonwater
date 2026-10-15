@@ -120041,6 +120041,118 @@ int main(void)
 #endif /* CHECK_native_reserve */
 
 
+#ifdef CHECK_edit_regressions
+/*
+        The editor's fixes that the edit lane has no row for: each caret takes
+        its own tab stop, Up and Down on the first and last line keep the column
+        the cursor remembers, a go-to-line number past the overflow goes to the
+        last line, and a cut whose clipboard add fails leaves the text where it
+        was. Keys go in through edit_key as a terminal sends them. The clipboard
+        refusal is injected where memory_resize would refuse it, as the edit
+        lane does for its own cases.
+
+            gcc ... -DCHECK_edit_regressions -fwhole-program test/checks.c
+*/
+#include "../src/lib.util.c"
+#include "../src/moonwater/spark.c"
+#include "../src/canvas/window.c"
+#include "../src/sh/pty.c"
+#include "../src/canvas/term.c"
+#define EDIT_NO_DRIVER
+static positive edit_check_requests;
+static positive edit_check_failure;
+#define memory_resize_growth(...) \
+        (++edit_check_requests == edit_check_failure ? null : memory_resize_growth(__VA_ARGS__))
+#include "../src/sh/edit.c"
+#undef memory_resize_growth
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+static bool edit_check_line(positive at, string_address want)
+{
+        positive length = string_length(want);
+
+        if (at >= edit_line_count || edit_lines[at].length != length)
+                return false;
+
+        for (positive i = 0; i < length; i++)
+                if (edit_lines[at].text[i] != (p8)want[i])
+                        return false;
+
+        return true;
+}
+
+static void edit_check_carets(positive count, positive *lines, positive *columns)
+{
+        edit_cursors_room_for(count);
+        edit_cursor_count = count;
+
+        for (positive at = 0; at < count; at++)
+        {
+                edit_cursors[at].line = lines[at];
+                edit_cursors[at].column = columns[at];
+                edit_cursors[at].anchor_line = lines[at];
+                edit_cursors[at].anchor_column = columns[at];
+                edit_cursors[at].wanted = columns[at];
+                edit_cursors[at].selecting = false;
+        }
+}
+
+int main(void)
+{
+        positive lines[2], columns[2];
+
+        // Tab with two carets on different lines: caret one at column 0 takes
+        // eight spaces, caret two at column 4 takes four.
+        edit_load((string_address)"ab\ncdef", 7);
+        lines[0] = 0; columns[0] = 0;
+        lines[1] = 1; columns[1] = 4;
+        edit_check_carets(2, lines, columns);
+        edit_key(EDIT_KEY_TAB);
+        check("tab: first caret takes eight spaces", edit_check_line(0, "        ab"));
+        check("tab: second caret takes the spaces to its own stop",
+              edit_check_line(1, "cdef    "));
+
+        // Up on the first line, then Down: the remembered column of 5 is kept.
+        edit_load((string_address)"abcdefgh\nabcdefgh\nab", 21);
+        lines[0] = 0; columns[0] = 5;
+        edit_check_carets(1, lines, columns);
+        edit_key(EDIT_KEY_UP);
+        check("up on the first line goes to column zero",
+              edit_cursors[0].line == 0 && edit_cursors[0].column == 0);
+        edit_key(EDIT_KEY_DOWN);
+        check("down after that keeps the remembered column",
+              edit_cursors[0].line == 1 && edit_cursors[0].column == 5);
+
+        // A line number past the overflow goes to the last line.
+        edit_load((string_address)"a\nb\nc\nd", 7);
+        lines[0] = 0; columns[0] = 0;
+        edit_check_carets(1, lines, columns);
+        edit_key('g' | EDIT_KEY_CONTROL);
+        //      2^64 + 2 wraps to line 2 in a 64-bit count, which is what the
+        //      unchecked digit loop used to reach.
+        for (string_address digit = (string_address)"18446744073709551618"; *digit; digit++)
+                edit_key((positive)(*digit));
+        edit_key(EDIT_KEY_ENTER);
+        check("a line number past the overflow goes to the last line",
+              edit_cursors[0].line == 3);
+
+        // A cut whose clipboard add fails leaves the selection in the file.
+        edit_load((string_address)"abc", 3);
+        lines[0] = 0; columns[0] = 0;
+        edit_check_carets(1, lines, columns);
+        edit_key('a' | EDIT_KEY_CONTROL);
+        edit_check_failure = edit_check_requests + 1;
+        edit_key('x' | EDIT_KEY_CONTROL);
+        edit_check_failure = 0;
+        check("a cut the clipboard refuses keeps the text", edit_check_line(0, "abc"));
+        check("a cut the clipboard refuses stores nothing", edit_clip_count == 0);
+
+        return test_report(null);
+}
+#endif
+
 #ifdef CHECK_lexer_spans
 /* Counted lexer views borrow input; parser text must survive its reuse.
    Build with `build freestanding` or the shell lane's freestanding-checks runner. */
