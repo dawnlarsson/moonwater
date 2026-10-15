@@ -134,6 +134,8 @@ static writer net_out = log;
 
 static COLD fn net_kmsg_close(void)
 {
+        if (net_kmsg_used)
+                net_kmsg_record();
         if (net_kmsg_handle >= 0)
                 (void)system_close(net_kmsg_handle);
         net_kmsg_handle = -1;
