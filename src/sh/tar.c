@@ -2958,7 +2958,8 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                                 tar_write_failure = 0;
                                 if (got < 0)
                                         tar_refuse("cannot read archive");
-                                tar_refuse("Unexpected EOF in archive");
+                                else
+                                        tar_refuse("Unexpected EOF in archive");
                                 return false;
                         }
                         if (out >= 0)
@@ -2981,11 +2982,18 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                    nothing is left to read past, and a failed write before it
                    must not send the caller on to skip padding that is not
                    there. */
-                if (tar_at >= tar_have && tar_fill(archive) <= 0)
+                if (tar_at >= tar_have)
                 {
-                        tar_write_failure = 0;
-                        tar_refuse("Unexpected EOF in archive");
-                        return false;
+                        bipolar filled = tar_fill(archive);
+
+                        // A failed read has been said by tar_fill already.
+                        if (filled <= 0)
+                        {
+                                tar_write_failure = 0;
+                                if (!filled)
+                                        tar_refuse("Unexpected EOF in archive");
+                                return false;
+                        }
                 }
 
                 have = tar_have - tar_at;
@@ -3512,10 +3520,17 @@ static bool tar_read_payload(bipolar handle, p64 size, p8 address_to into,
                 positive have;
                 positive take;
 
-                if (tar_at >= tar_have && tar_fill(handle) <= 0)
+                if (tar_at >= tar_have)
                 {
-                        tar_refuse("Unexpected EOF in archive");
-                        return false;
+                        bipolar filled = tar_fill(handle);
+
+                        // A failed read has been said by tar_fill already.
+                        if (filled <= 0)
+                        {
+                                if (!filled)
+                                        tar_refuse("Unexpected EOF in archive");
+                                return false;
+                        }
                 }
 
                 have = tar_have - tar_at;
@@ -4437,10 +4452,17 @@ static bool tar_diff_bytes(bipolar archive, bipolar file, p64 offset,
 
         while (size)
         {
-                if (tar_at >= tar_have && tar_fill(archive) <= 0)
+                if (tar_at >= tar_have)
                 {
-                        tar_refuse("Unexpected EOF in archive");
-                        return false;
+                        bipolar filled = tar_fill(archive);
+
+                        // A failed read has been said by tar_fill already.
+                        if (filled <= 0)
+                        {
+                                if (!filled)
+                                        tar_refuse("Unexpected EOF in archive");
+                                return false;
+                        }
                 }
                 positive take = tar_have - tar_at;
                 if (take > size)
