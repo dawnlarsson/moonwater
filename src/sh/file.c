@@ -31465,10 +31465,10 @@ static bool hardlink_clone(hardlink_file address_to keep, hardlink_file address_
         bipolar source = destination < 0 ? -1
                                          : system_open_at(AT_FDCWD, from, FILE_READ | O_CLOEXEC);
         bool done = destination >= 0 && source >= 0 &&
-                    file_change_mode_handle(destination, keep->facts.mode & 07777) >= 0 &&
+                    file_change_mode_handle(destination, duplicate->facts.mode & 07777) >= 0 &&
                     system_call_3(syscall(fchown), (positive)destination,
-                                  (positive)keep->facts.owner,
-                                  (positive)keep->facts.group) >= 0 &&
+                                  (positive)duplicate->facts.owner,
+                                  (positive)duplicate->facts.group) >= 0 &&
                     system_call_3(syscall(ioctl), (positive)destination, 0x40049409u,
                                   (positive)source) >= 0 &&
                     system_rename_at(AT_FDCWD, (string_address)temporary, AT_FDCWD, to, 0) >= 0;
