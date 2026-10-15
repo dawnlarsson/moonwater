@@ -37572,7 +37572,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                     : file_open_same(source_directory, source,
                                      address_of facts, O_PATH | O_CLOEXEC | O_NOFOLLOW);
                 if (pinned < 0)
+                {
+                        file_path_failed(program, "cannot open", writer_shell_quoted_name,
+                                         source_shown, pinned, 0);
                         return false;
+                }
 
                 bipolar length = kind == MODE_LINK
                     ? system_read_link_at(pinned, (string_address)"", target,
@@ -37581,7 +37585,11 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 if (known_source_handle < 0)
                         system_close(pinned);
                 if (length < 0 || (positive)length >= sizeof(target))
+                {
+                        file_path_failed(program, "cannot read symbolic link", writer_shell_quoted_name,
+                                         source_shown, length < 0 ? length : -ERROR_NAME_TOO_LONG, 0);
                         return false;
+                }
                 target[length] = end;
                 file_stage_expectation expected = {
                     .kind = kind,
@@ -37595,17 +37603,16 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                     destination, 0, -1, address_of expected);
                 if (made < 0)
                 {
-                        if (kind == MODE_LINK)
-                        {
-                                if (!moving)
-                                        string_format(log_error,
-                                            "cp: cannot create link %w\n",
-                                            writer_shell_quoted_name,
-                                            destination_shown);
-                        }
+                        if (kind == MODE_LINK && !moving)
+                                string_format(log_error,
+                                    "cp: cannot create link %w\n",
+                                    writer_shell_quoted_name,
+                                    destination_shown);
                         else
                         {
-                                file_path_failed(program, "cannot create special file",
+                                file_path_failed(program,
+                                                 kind == MODE_LINK ? "cannot create symbolic link"
+                                                                   : "cannot create special file",
                                                  writer_shell_quoted_name, destination_shown, made,
                                                  0);
                                 mv_across_said |= moving;
