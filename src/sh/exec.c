@@ -14749,8 +14749,17 @@ static COLD string_address exec_pretty_ansi(exec_function_text address_to made,
                                     string_digits_hexadecimal_escape_max(
                                         at, 2, address_of used);
 
-                                at += used;
-                                out[0] = used ? (p8)number : (p8)0;
+                                if (used)
+                                {
+                                        at += used;
+                                        out[0] = (p8)number;
+                                }
+                                else
+                                {
+                                        out[0] = '\\';
+                                        out[1] = next;
+                                        length = 2;
+                                }
                         }
                         else if (next == 'u' || next == 'U')
                         {
@@ -14759,9 +14768,18 @@ static COLD string_address exec_pretty_ansi(exec_function_text address_to made,
                                         at, next == 'u' ? 4 : 8,
                                         address_of used);
 
-                                at += used;
-                                length = memory_utf8_encode(out, sizeof(out),
-                                                            code);
+                                if (used)
+                                {
+                                        at += used;
+                                        length = memory_utf8_encode(
+                                            out, sizeof(out), code);
+                                }
+                                else
+                                {
+                                        out[0] = '\\';
+                                        out[1] = next;
+                                        length = 2;
+                                }
                         }
                         else if (next == 'c' && string_get(at))
                                 out[0] = (p8)(string_get(at++) & 31);
