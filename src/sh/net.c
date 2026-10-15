@@ -997,6 +997,8 @@ static b32 net_wget(void)
         if (!http_url_escape(url, string_length(url), true, escaped,
                              sizeof escaped))
                 url = (string_address)escaped;
+        if (string_length(url) >= sizeof where)
+                return string_report(log_error, WGET_GENERIC, "wget: URL too long\n");
         quiet = (taking.flags & FILE_FLAG('q')) != 0;
         check_cert = (taking.flags & FILE_FLAG('K')) == 0;
         output = file_option_value(address_of taking, 'O');
