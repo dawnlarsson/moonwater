@@ -8565,7 +8565,9 @@ static COLD bool nl80211_associated(void)
 
         if (nl80211_open(address_of session) < 0)
                 return false;
-        if (!nl80211_interface(address_of session, address_of iface))
+        if (nl80211_interface(address_of session, address_of iface) < 0)
+                up = true;
+        else
                 up = nl80211_station(address_of session, iface.index, mac) != 0;
         nl80211_close(address_of session);
         return up;
