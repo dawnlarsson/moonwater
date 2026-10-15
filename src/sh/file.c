@@ -22185,6 +22185,15 @@ static fn chmod_report(string_address shown, chmod_outcome address_to out)
                                       file_reason(out->error));
                 chmod_status = 1;
                 return;
+
+        case CHMOD_UNREAD:
+                //      -f takes the word away and leaves the answer: the
+                //      reference is silent and still answers 1.
+                if (!chmod_quiet)
+                        file_path_failed("chmod", "cannot read directory", writer_shell_quoted_name,
+                                         shown, out->error, 0);
+                chmod_status = 1;
+                return;
         }
 
         chmod_said(shown, out->was, out->wanted | (out->was & MODE_FORMAT));
@@ -22195,17 +22204,6 @@ static fn chmod_report(string_address shown, chmod_outcome address_to out)
         // what the mode looked like it asked for, and answers 1 -- but only
         // for a mode given as that kind of word, which is the one that reads
         // like an option and surprises.
-        if (out->kind == CHMOD_UNREAD)
-        {
-                //      -f takes the word away and leaves the answer: the
-                //      reference is silent and still answers 1.
-                if (!chmod_quiet)
-                        file_path_failed("chmod", "cannot read directory", writer_shell_quoted_name,
-                                         shown, out->error, 0);
-                chmod_status = 1;
-                return;
-        }
-
         if (chmod_surprising && (out->wanted & ~out->naive))
         {
                 p8 set[12];
