@@ -4408,6 +4408,7 @@ static const argument_option address_to argument_option_long(
     positive length, bool prefix)
 {
         const argument_option address_to candidate = null;
+        bool ambiguous = false;
         if (!length)
                 return null;
         for (; options && options->name; options++)
@@ -4419,11 +4420,11 @@ static const argument_option address_to argument_option_long(
                 if (prefix)
                 {
                         if (candidate)
-                                return null;
+                                ambiguous = true;
                         candidate = options;
                 }
         }
-        return candidate;
+        return ambiguous ? null : candidate;
 }
 
 typedef struct
@@ -4509,8 +4510,8 @@ __asm__(
     "16: cmpb $0, (%r11,%r10)\n   je 12f\n   test %r14b, %r14b\n   jz 13b\n   test %rbx, %rbx\n   jnz 14f\n"
     "mov %rdx, %rbx\n   jmp 13b\n"
     "12: mov %rdx, %rbx\n   jmp 20f\n"
-    "14: xor %ebx, %ebx\n"
-    "20: test %rbx, %rbx\n   jz 92f\n   movzbl 8(%rbx), %eax\n   mov %al, 10(%r13)\n   jmp 50f\n"
+    "14: mov $1, %ebx\n   jmp 13b\n"
+    "20: cmp $1, %rbx\n   jbe 92f\n   movzbl 8(%rbx), %eax\n   mov %al, 10(%r13)\n   jmp 50f\n"
     // A short letter: its own row, or a row that groups it.
     // A lettered row that is not it costs one branch back; a grouping row
     // is searched out of the way.
@@ -4567,8 +4568,8 @@ __asm__(
     "11: ldrb w5, [x11, x14]\n   ldrb w6, [x8, x14]\n   cmp w5, w6\n   b.ne 13b\n   add x14, x14, #1\n   cmp x14, x10\n   b.lo 11b\n"
     "16: ldrb w5, [x11, x10]\n   cbz w5, 12f\n   cbz w2, 13b\n   cbnz x12, 14f\n   mov x12, x13\n   b 13b\n"
     "12: mov x12, x13\n   b 20f\n"
-    "14: mov x12, #0\n"
-    "20: cbz x12, 92f\n   ldrb w5, [x12, #8]\n   strb w5, [x3, #10]\n   b 50f\n"
+    "14: mov x12, #1\n   b 13b\n"
+    "20: cmp x12, #1\n   b.ls 92f\n   ldrb w5, [x12, #8]\n   strb w5, [x3, #10]\n   b 50f\n"
     // A short letter: its own row, or a row that groups it.
     "40: strb w5, [x3, #10]\n   mov x13, x1\n"
     "41: ldr x11, [x13]\n   cbz x11, 92f\n   ldrb w6, [x13, #8]\n   cmp w6, w5\n   b.eq 44f\n   cbz w6, 42f\n"
@@ -4623,8 +4624,8 @@ __asm__(
     "add a5, t1, t5\n   lbu a5, 0(a5)\n   beqz a5, 12f\n   beqz a2, 13f\n   bnez a7, 14f\n   mv a7, t6\n"
     "13: addi t6, t6, 16\n   j 10b\n"
     "12: mv a7, t6\n   j 20f\n"
-    "14: li a7, 0\n"
-    "20: beqz a7, 92f\n   lbu a5, 8(a7)\n   sb a5, 10(a3)\n   j 50f\n"
+    "14: li a7, 1\n   j 13b\n"
+    "20: sltiu t0, a7, 2\n   bnez t0, 92f\n   lbu a5, 8(a7)\n   sb a5, 10(a3)\n   j 50f\n"
     // A short letter: its own row, or a row that groups it.
     "40: sb a5, 10(a3)\n   mv t6, a1\n"
     "41: ld t1, 0(t6)\n   beqz t1, 92f\n   lbu a6, 8(t6)\n   beq a6, a5, 44f\n   bnez a6, 43f\n"
