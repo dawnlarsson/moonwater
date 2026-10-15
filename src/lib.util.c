@@ -2376,7 +2376,8 @@ static inline const p8 address_to byte_reader_take(byte_reader address_to reader
 static inline bool byte_reader_skip(byte_reader address_to reader,
                                     positive count)
 {
-        return byte_reader_take(reader, count) != null;
+        byte_reader_take(reader, count);
+        return !reader->failed;
 }
 
 /* The unread bytes, for handing to code that copies or hashes them whole. */
@@ -2442,7 +2443,7 @@ static inline byte_reader byte_reader_window(byte_reader address_to reader,
 {
         const p8 address_to at = byte_reader_take(reader, count);
 
-        return at ? byte_reader_open(at, count) : byte_reader_dead();
+        return reader->failed ? byte_reader_dead() : byte_reader_open(at, count);
 }
 
 /* A vector: its length in one, two or three bytes, then that many bytes. */
