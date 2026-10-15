@@ -32157,7 +32157,7 @@ static b32 address_to sed_open_blocks;
 static positive sed_limit_blocks, sed_open_blocks_room;
 static p8 address_to sed_append_kind;
 static b32 address_to sed_append_which;
-static positive sed_limit_appends, sed_append_kind_room, sed_append_which_room;
+static positive sed_append_kind_room, sed_append_which_room;
 
 /*
         The escapes GNU sed reads in a regular expression, a replacement, a y
@@ -32497,7 +32497,8 @@ static fn sed_stores_hold()
         positive maps = n / 4 + 2 < SED_MAPS_MAX ? n / 4 + 2 : SED_MAPS_MAX;
         positive blocks = n < SED_BLOCKS_MAX ? n : SED_BLOCKS_MAX;
         //      Appends queued in one cycle are not bounded by the script, a
-        //      loop queues one a turn, so the least is what they always had.
+        //      loop queues one a turn, so the least is what they always had,
+        //      and the queue grows past it when a cycle needs more.
         positive appends = n < SED_APPENDS_MAX ? n : SED_APPENDS_MAX;
 
         if (appends < 4096)
@@ -32506,7 +32507,6 @@ static fn sed_stores_hold()
         sed_limit_text = text;
         sed_limit_maps = maps;
         sed_limit_blocks = blocks;
-        sed_limit_appends = appends;
         sed_limit_piece = n + 1;
 
 #define SED_HOLD(array, want, first) array_store_reserve(array, array##_room, 0, (want), (first))
@@ -34878,13 +34878,18 @@ static b32 text_sed()
                                 case 'R':
                                 case 'r':
                                 case 'a':
-                                        if (append_count < sed_limit_appends)
+                                        if (!array_store_reserve(sed_append_kind, sed_append_kind_room,
+                                                                 append_count, append_count + 1, 16) ||
+                                            !array_store_reserve(sed_append_which, sed_append_which_room,
+                                                                 append_count, append_count + 1, 16))
                                         {
-                                                sed_append_kind[append_count] = kind;
-                                                sed_append_which[append_count++] =
-                                                    kind == 'R' ? command->writer
-                                                                : command->text;
+                                                string_diagnostic(&text_diagnostic, 4, null, "memory exhausted");
+                                                exit(4);
                                         }
+                                        sed_append_kind[append_count] = kind;
+                                        sed_append_which[append_count++] =
+                                            kind == 'R' ? command->writer
+                                                        : command->text;
                                         break;
                                 case 'b':
                                 case 't':
