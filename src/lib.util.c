@@ -1175,9 +1175,11 @@ static HOT p32 system_effective_user(void)
 }
 
 /* Some private workspaces must have an exact owner mode even under a caller's
-   restrictive umask.  The shell is single-threaded while builtins run, and
-   its signal handlers only record state, so the process mask can be restored
-   immediately around the one creation syscall. A mask held by the command
+   restrictive umask.  The directory is made under the umask, which can only
+   take bits away, and the exact mode is then set on a descriptor for it. The
+   process umask is never changed: copy and remove walk on several threads,
+   and a umask of zero for the length of one call would give a file another
+   thread creates beside this one the wrong mode. A mask held by the command
    that says it does not touch the mode is not asked for again. */
 static COLD bipolar system_make_directory_exact_at(
     bipolar directory, string_address path, positive mode)
@@ -1185,15 +1187,23 @@ static COLD bipolar system_make_directory_exact_at(
         if (system_state_held && !(system_state_mask & mode))
                 return system_make_directory_at(directory, path, mode);
 
-        bipolar mask = system_call_1(syscall(umask), 0);
-
-        if (mask < 0)
-                return mask;
-
         bipolar made = system_make_directory_at(directory, path, mode);
-        bipolar restored = system_call_1(syscall(umask), (positive)mask);
 
-        return made < 0 ? made : restored < 0 ? restored : made;
+        if (made < 0)
+                return made;
+
+        bipolar handle = system_open_at(
+            directory, path, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+        if (handle < 0)
+                return handle;
+
+        bipolar set = system_call_4(
+            syscall(fchmodat2), (positive)handle,
+            (positive)(string_address)"", mode & 01777, AT_EMPTY_PATH);
+
+        system_close(handle);
+        return set < 0 ? set : made;
 }
 
 /* Return an owned parent descriptor and a bounded final component. Each

@@ -53542,9 +53542,104 @@ static fn lock_lines(void)
 
 //      -- the lane ----------------------------------------------------------
 
+/*
+        A directory made with an exact mode while another thread creates
+        files. The mode is set after the umask has taken its bits; a version
+        that moved the process umask to zero for the length of the call would
+        hand a file the other thread creates in that window its full 0666
+        instead of 0600. The maker thread makes exact 0700 directories under
+        a umask of 0077 while this thread creates files: each file must be
+        0600 when its mode is read back.
+*/
+#define LOCK_UMASK_ROUNDS 4000
+
+static positive lock_umask_name(char address_to into, char tag, positive value)
+{
+        char digits[24];
+        positive count = 0, at;
+
+        do
+        {
+                digits[count++] = (char)('0' + value % 10);
+                value /= 10;
+        } while (value);
+        into[0] = tag;
+        for (at = 0; at < count; at++)
+                into[1 + at] = digits[count - 1 - at];
+        into[1 + count] = 0;
+        return count + 1;
+}
+
+static fn lock_umask_maker(address_any argument)
+{
+        char name[32];
+
+        (void)argument;
+        for (positive i = 0; i < LOCK_UMASK_ROUNDS; i++)
+        {
+                lock_umask_name(name, 'd', i);
+                system_make_directory_exact_at(AT_FDCWD, (string_address)name, 0700);
+        }
+}
+
+static fn lock_umask(void)
+{
+        positive saved = system_call_1(syscall(umask), 0077);
+        positive made = 0, wrong = 0;
+        thread address_to handle = thread_start(lock_umask_maker, null);
+        char name[32];
+
+        for (positive i = 0; i < LOCK_UMASK_ROUNDS; i++)
+        {
+                system_path_identity found;
+                lock_umask_name(name, 'f', i);
+                bipolar fd = system_call_4(syscall(openat), (positive)AT_FDCWD,
+                                           (positive)name,
+                                           O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0666);
+                if (fd < 0)
+                        continue;
+                system_close(fd);
+                made++;
+                if (system_path_identity_at(AT_FDCWD, (string_address)name, 0,
+                                            SYSTEM_PATH_STATX_IDENTITY, address_of found) < 0 ||
+                    (found.mode & 07777) != 0600)
+                        wrong++;
+        }
+
+        if (handle)
+                thread_join(handle);
+        check("a file created beside exact directories keeps the umask's mode", made > 0 && wrong == 0);
+
+        for (positive i = 0; i < LOCK_UMASK_ROUNDS; i++)
+        {
+                lock_umask_name(name, 'f', i);
+                system_remove_at(AT_FDCWD, (string_address)name, 0);
+                lock_umask_name(name, 'd', i);
+                system_remove_at(AT_FDCWD, (string_address)name, AT_REMOVEDIR);
+        }
+        system_call_1(syscall(umask), saved);
+}
+
+/*
+        A walk's identity for a handle the kernel refuses. The fstat fails, and
+        the answer must say so and leave the identity the caller held alone;
+        a version that ignored the failed fstat stored device 0 and inode 0,
+        which a later pin then compared against.
+*/
+static fn lock_facts(void)
+{
+        positive device = 0x1111, inode = 0x2222;
+        (void)parallel_tree_facts(-1, address_of device, address_of inode);
+
+        check("a failed fstat leaves the identity the caller held",
+              device == 0x1111 && inode == 0x2222);
+}
+
 b32 main(void)
 {
         lock_runtime();
+        lock_facts();
+        lock_umask();
         lock_storm();
         lock_exclusion();
         lock_allocator();
