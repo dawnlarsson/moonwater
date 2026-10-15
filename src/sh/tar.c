@@ -7077,7 +7077,7 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
                 if (!used || value[used] || !options->blocking ||
                     options->blocking > (positive)1 << 20)
                 {
-                        string_format(log_error, "tar: %s: Invalid blocking factor\n", value);
+                        string_format(log_error, "tar: %w: Invalid blocking factor\n", writer_terminal_name, value);
                         tar_status = 2;
                         return tar_usage_hint();
                 }
