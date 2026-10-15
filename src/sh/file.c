@@ -31969,11 +31969,15 @@ typedef struct
 typedef p64 shred_random_word_type
     __attribute__((aligned(1), may_alias));
 
-static bool file_random_seed(file_random_state address_to state)
+static bipolar file_random_seed(file_random_state address_to state)
 {
-        return !system_random_fill(state, sizeof(state->words), 0) &&
-               (state->words[0] || state->words[1] || state->words[2] ||
-                state->words[3]);
+        bipolar filled = system_random_fill(state, sizeof(state->words), 0);
+
+        if (filled < 0)
+                return filled;
+        if (state->words[0] || state->words[1] || state->words[2] || state->words[3])
+                return 1;
+        return -ERROR_INVALID;
 }
 
 static inline INLINE p64 file_random_rotate(p64 value, positive shift)
@@ -32926,9 +32930,14 @@ static b32 file_shred()
                 }
                 shred_random.handle = source;
         }
-        else if (!file_random_seed(address_of shred_random.state))
-                return string_report(log_error, 1, "shred: getrandom: %s\n",
-                                     file_reason(-ERROR_INVALID));
+        else
+        {
+                bipolar seeded = file_random_seed(address_of shred_random.state);
+
+                if (seeded < 0)
+                        return string_report(log_error, 1, "shred: getrandom: %s\n",
+                                             file_reason(seeded));
+        }
 
         positive flags = taking.flags;
         shred_how how = {
@@ -33849,7 +33858,7 @@ static b32 file_shuf()
         bool need_random = !source_name && count > 1 && (!limited || wanted);
         file_random_state random;
 
-        if (need_random && !file_random_seed(address_of random))
+        if (need_random && file_random_seed(address_of random) < 0)
         {
                 log_error("shuf: kernel randomness unavailable\n", 0);
                 utility_arena.used = 0;
