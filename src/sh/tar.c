@@ -3352,8 +3352,12 @@ static bool tar_flush(bipolar handle)
         if (!tar_at)
                 return true;
 
-        if (!tar_write_bytes(handle, tar_record, tar_at))
+        bipolar wrote = tar_encoder ? (tar_write_bytes(handle, tar_record, tar_at) ? 0 : -ERROR_INPUT_OUTPUT)
+                                    : tar_write_reason(handle, tar_record, tar_at);
+
+        if (wrote < 0)
         {
+                tar_write_failure = wrote;
                 tar_refuse("cannot write archive");
                 tar_create_fatal = true;
                 return false;
@@ -6635,10 +6639,12 @@ dereferenced:;
                 return tar_status;
         }
 
+        tar_write_failure = 0;
         if (!(sparse ? tar_put_extents(archive, handle, member)
                      : tar_put_file(archive, handle, (p64)facts.size, member)))
         {
-                tar_fail(member, -ERROR_INPUT_OUTPUT);
+                tar_fail(member, tar_write_failure ? tar_write_failure
+                                                   : -ERROR_INPUT_OUTPUT);
                 tar_create_fatal = true;
         }
         else
