@@ -2005,13 +2005,6 @@ static PURE string_address expand_ifs()
         return value ? value : (string_address) " \t\n";
 }
 
-/*
-        IFS as one byte per byte value, built once a word.
-
-        Splitting asks about every byte it walks over and the answer is the same
-        every time; asking env_get for it each time turned a field into a linear
-        walk of the environment per character.
-*/
 // Read at startup, from where nothing has forked yet.
 positive expand_shell_pid;
 bipolar shell_background_last;
@@ -2050,6 +2043,13 @@ static p8 expand_ifs_mb[8][4];
 static b8 expand_ifs_mb_len[8];
 static positive expand_ifs_mb_count;
 
+/*
+        IFS as one byte per byte value, built once a word.
+
+        Splitting asks about every byte it walks over and the answer is the same
+        every time; asking env_get for it each time turned a field into a linear
+        walk of the environment per character.
+*/
 static fn expand_ifs_prepare()
 {
         string_address ifs = expand_ifs();
@@ -2216,6 +2216,9 @@ static HOT string_address expand_value_of(expand_reference reference, p8 address
 
         if (reference.key)
         {
+                //      Both return values are ignored on purpose: the calls
+                //      make the name exist (a call-stack or dynamic
+                //      variable) so the read below finds it.
                 shell_frames_wanted(name, reference.name_length);
                 shell_dynamic_wanted(name, reference.name_length);
                 string_address value = shell_array_get(name, reference.name_length,
@@ -2226,7 +2229,18 @@ static HOT string_address expand_value_of(expand_reference reference, p8 address
 
         if (byte_is_digit(first))
         {
-                positive which = string_digits(name, null);
+                positive which = 0;
+                string_address digits = name;
+
+                //      A number too big for the type is no parameter, so it
+                //      is unset. The wrapping read gave $0 for 2^64, the
+                //      shell's own name, and $1 for 2^64+1.
+                if (!string_digits_checked(address_of digits, 10,
+                                           address_of which))
+                {
+                        address_to present = false;
+                        return null;
+                }
 
                 if (!which)
                 {
@@ -2441,7 +2455,6 @@ static COLD fn expand_assign_refused(expand_reference reference)
                                           : "%s: is read only\n",
                       name);
 }
-static COLD fn expand_slice_error();
 static string_address expand_tilde(string_address step, bool assignment);
 
 /*
@@ -5159,6 +5172,16 @@ static fn expand_run(string_address command, bool quoted)
 
         if (system_pipe(address_of channel, SHELL_PIPE_CLOSE_ON_EXEC) < 0)
         {
+                //      Dash calls a failed pipe fatal to the command and
+                //      says "Pipe call failed" with status 2; bash says it
+                //      cannot make the pipe and goes on with status 0.
+                if (!shell_bash_compat)
+                {
+                        expand_where();
+                        writer_stderr_once(str("Pipe call failed\n"));
+                        expand_fatal_status(2);
+                        return;
+                }
                 expand_where();
                 writer_stderr_once(str("cannot make pipe for command substitution\n"));
                 return;
@@ -5282,6 +5305,19 @@ static bool expand_command_file(string_address text, bool quoted)
 
         if (opened < 0)
         {
+                //      Bash names the file and the reason on stderr, the
+                //      way a redirection that fails does; the status alone
+                //      said nothing.
+                bipolar code = -opened;
+                string_address why = system_error_message(code);
+
+                if (!why)
+                        why = (string_address) "No such file or directory";
+                expand_where();
+                writer_stderr_once(path, string_length(path));
+                writer_stderr_once(str(": "));
+                writer_stderr_once(why, string_length(why));
+                writer_stderr_once(str("\n"));
                 expand_substitution_done(1);
                 return true;
         }
@@ -7059,8 +7095,8 @@ static fn expand_case_change(expand_reference reference, string_address pattern_
         than against the buffer it will be written back into.
 */
 
-// An immutable scanner set for the double-quote writer, for the form
-// escape_categories has no category for: $, backquote and ".
+// An immutable scanner set for the double-quote writer: printable ASCII that
+// needs no escape there. $, backquote, " and backslash are left out.
 static const b8 shell_quote_double[STRING_SET_BYTES] = {
         [32 ... 33] = 1, [35] = 1, [37 ... 91] = 1,
         [93 ... 95] = 1, [97 ... 126] = 1
@@ -8057,8 +8093,6 @@ static COLD bool expand_assign_named(expand_reference reference, string_address 
             : env_assign(reference.name, value);
 }
 
-/* Scalar and per-element forms share the same modifier dispatch. The
-   replacement separator is restored because array elements reuse the word. */
 /*
         What ${x?} says when the script wrote no words of its own.
 
@@ -8368,6 +8402,8 @@ static COLD fn expand_positional_each(p8 form, p8 operation,
         }
 }
 
+/* Scalar and per-element forms share the same modifier dispatch. The
+   replacement separator is restored because array elements reuse the word. */
 static fn expand_modifier(expand_reference reference, p8 operation, bool doubled,
                            string_address word, bool quoted, b32 parameter_mode)
 {
@@ -8595,7 +8631,9 @@ static shell_array_item address_to expand_array_items_take(
 {
         shell_array_item address_to items;
 
-        address_to held = shell_store_mark(address_of expand_store);
+        //      The mark is written through the out-parameter; the caller
+        //      rewinds the store to it once the list is done.
+        *held = shell_store_mark(address_of expand_store);
         if (count > positive_max / sizeof(items[0]) ||
             !(items = (shell_array_item address_to)shell_store_take_aligned(
                   address_of expand_store, count * sizeof(items[0]))))
@@ -8657,6 +8695,8 @@ static COLD fn expand_array_whole_transform(string_address name, positive length
         shell_array_item address_to items;
         p8 written[32];
 
+        //      The result is discarded: the call creates a dynamic name
+        //      (GROUPS, BASH_VERSINFO) so the attributes below see it.
         shell_dynamic_wanted(name, length);
         attributes = shell_array_attributes(name, length);
         keyed = (attributes & SHELL_ARRAY_ASSOCIATIVE) != 0;
@@ -8766,6 +8806,9 @@ static COLD fn expand_array_whole_transform(string_address name, positive length
         not null as @, whose join is a blank, where this called any list of
         empty elements null and a single "" set.
 */
+//      Set false only by the indirect `${!name}` path that re-enters
+//      expand_braced_body (the toggle is beside that call); every other
+//      read of a list's nullness sees true. The two are one decision.
 static bool expand_list_null_direct = true;
 
 //      Whether a list of count elements can be null at all, before anyone
@@ -9481,6 +9524,12 @@ static string_address expand_braced_body_run(string_address step,
             (want_length && (operation || name_list)))
         {
                 expand_bad_substitution(whole, close);
+                //      The message above is the bad substitution one. The
+                //      status and unwind come from the arithmetic handler,
+                //      which is the same policy this error takes: a slice
+                //      unwind in bash, the nounset status elsewhere. The
+                //      name says arithmetic only because that is where the
+                //      policy is written.
                 expand_arithmetic_error();
 
                 return close + 1;
