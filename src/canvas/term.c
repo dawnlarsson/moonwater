@@ -2882,6 +2882,10 @@ static b32 line_editing;
 static p8 address_to line;
 static positive line_room, line_length, line_point;
 
+// Set once a character of more than one byte is in the line. Until then
+// every character is one byte and one cell, and the walks below are skipped.
+static b32 line_wide;
+
 static p8 address_to history[LINE_HISTORY];
 static positive history_room[LINE_HISTORY];
 static positive history_length[LINE_HISTORY];
@@ -2907,6 +2911,160 @@ static unsigned int line_anchor_row()
 static fn line_erase(b32 shorten);
 
 /*
+        The line is UTF-8 and holds whole characters only: line_insert stores an
+        encoding and every edit moves over one, so a byte that is 10xxxxxx is
+        never a place to stop.
+*/
+static positive line_prev(positive at)
+{
+        if (at)
+                at--;
+
+        while (at && (line[at] & 0xc0) == 0x80)
+                at--;
+
+        return at;
+}
+
+static positive line_next(positive at)
+{
+        if (at < line_length)
+                at++;
+
+        while (at < line_length && (line[at] & 0xc0) == 0x80)
+                at++;
+
+        return at;
+}
+
+// The byte at or before at that begins a character. A view kept from before an
+// edit may now point into one, and drawing from its tail would draw nothing.
+static positive line_snap(positive at)
+{
+        if (at > line_length)
+                at = line_length;
+
+        while (at && at < line_length && (line[at] & 0xc0) == 0x80)
+                at--;
+
+        return at;
+}
+
+static b32 line_ascii()
+{
+        for (positive at = 0; at < line_length; at++)
+                if (line[at] & 0x80)
+                        return false;
+
+        return true;
+}
+
+// The scalar of the character that begins at at, and where the next one
+// begins. The line's own bytes always decode; the fallback keeps a walk moving.
+static positive line_decode(positive at, unsigned int address_to character)
+{
+        memory_utf8_state state = {0, 0, 0};
+        positive stop = at;
+
+        while (stop < line_length)
+        {
+                b32 whole = memory_utf8_feed(address_of state, line[stop++]);
+
+                if (whole > 0)
+                {
+                        address_to character = state.value;
+                        return stop;
+                }
+
+                if (whole < 0)
+                        break;
+        }
+
+        address_to character = line[at];
+        return at + 1;
+}
+
+// The cells a character takes, as put() counts them: one below U+0300, and a
+// mark takes none.
+static unsigned int line_width(unsigned int character)
+{
+        unsigned int width = character < 0x300
+                                 ? 1
+                                 : (unsigned int)unicode_width(character, UNICODE_WIDTH_TERMINAL);
+
+        return width > COLUMNS ? 1 : width;
+}
+
+// Where a character of width cells starts when the cells before it end at f.
+// One that does not fit on what is left of its row wraps whole to the next,
+// leaving the last cell blank, which is what put_cells does with autowrap on.
+static positive line_place(positive f, unsigned int width)
+{
+        positive column = f % COLUMNS;
+
+        return width && column + width > COLUMNS ? f - column + COLUMNS : f;
+}
+
+// The cells after the characters from at up to to, given that the first one
+// starts at cell f. Every cell is counted from the anchor's column.
+static positive line_walk(positive at, positive to, positive f)
+{
+        if (!line_wide)
+                return f + (to - at);
+
+        while (at < to)
+        {
+                unsigned int character;
+                positive next = line_decode(at, address_of character);
+                unsigned int width = line_width(character);
+
+                f = line_place(f, width) + width;
+                at = next;
+        }
+
+        return f;
+}
+
+// Where the character at at starts, its cells after f being where the one
+// before it ended. The end of the line starts nothing.
+static positive line_start(positive at, positive f)
+{
+        unsigned int character;
+
+        if (!line_wide || at >= line_length)
+                return f;
+
+        line_decode(at, address_of character);
+        return line_place(f, line_width(character));
+}
+
+// The first character that starts at or past cell target, with cells counted
+// from the anchor's column.
+static positive line_at(positive target)
+{
+        positive at = 0, f = line_anchor_column;
+
+        if (!line_wide)
+                return target > f ? min(target - f, line_length) : 0;
+
+        while (at < line_length)
+        {
+                unsigned int character;
+                positive next = line_decode(at, address_of character);
+                unsigned int width = line_width(character);
+                positive start = line_place(f, width);
+
+                if (start >= target)
+                        break;
+
+                f = start + width;
+                at = next;
+        }
+
+        return at;
+}
+
+/*
         The line, on the screen, wherever it now is.
 
         Everything is written again from the anchor: it is at most a screenful
@@ -2916,7 +3074,7 @@ static fn line_erase(b32 shorten);
 */
 static fn line_show()
 {
-        positive at, capacity, caret, first, drawn;
+        positive at, caret, caret_cells, view, first, cursor, limit, f;
         bipolar anchor_row;
         unsigned int top;
 
@@ -2933,17 +3091,22 @@ static fn line_show()
                 the insertion point visible, and draw no more than the screen
                 can hold.  Moving Home reveals the beginning again without
                 losing a byte of the command.
+
+                Everything here is in cells, counted from the anchor's column,
+                because a character of two bytes can be one cell and a wide one
+                two. The caret is the character under the cursor, or the last
+                one at the end of the line.
         */
-        caret = line_point < line_length ? line_point
-                                        : (line_point ? line_point - 1 : 0);
+        caret = line_point < line_length ? line_point : line_prev(line_point);
+        caret_cells = line_start(caret, line_walk(0, caret, line_anchor_column));
+        view = line_snap(line_view);
 
         line_erase(false);
         line_drawn = 0;
 
         /* Advance the real ring only when the insertion cell first crosses
            its bottom.  A redraw at the same point must never scroll again. */
-        while ((positive)line_anchor +
-                   (line_anchor_column + caret) / COLUMNS >= window->head)
+        while ((positive)line_anchor + caret_cells / COLUMNS >= window->head)
                 ring_scroll();
 
         if (alternate)
@@ -2952,24 +3115,23 @@ static fn line_show()
         top = window->head - ROWS;
         anchor_row = (bipolar)line_anchor - (bipolar)top;
 
-        if (line_view && caret >= line_view &&
-            caret - line_view < (positive)ROWS * COLUMNS)
+        if (view && caret >= view &&
+            caret_cells - line_walk(0, view, line_anchor_column) < (positive)ROWS * COLUMNS)
         {
-                first = line_view;
+                first = view;
                 line_screen_anchor = top;
                 line_screen_column = 0;
         }
         else if (anchor_row < 0)
         {
-                bipolar hidden = -anchor_row * (bipolar)COLUMNS -
-                                 (bipolar)line_anchor_column;
+                positive hidden = (positive)(-anchor_row) * COLUMNS;
 
-                first = hidden > 0 ? (positive)hidden : 0;
+                first = line_at(hidden);
 
                 // Home and a long run of Lefts deliberately page back into
                 // the part which has already scrolled out of the live ring.
                 if (caret < first)
-                        first = caret - caret % COLUMNS;
+                        first = line_at(caret_cells - caret_cells % COLUMNS);
 
                 line_screen_anchor = top;
                 line_screen_column = 0;
@@ -2981,30 +3143,87 @@ static fn line_show()
                 line_screen_column = line_anchor_column;
         }
 
-        if (first > line_length)
-                first = line_length;
+        // The cells the ring has from the screen anchor's row to its bottom.
+        limit = ((positive)window->head - line_screen_anchor) * COLUMNS;
+        cursor = line_point < first ? line_screen_column : limit;
+        f = line_screen_column;
 
-        capacity = ((positive)window->head - line_screen_anchor) * COLUMNS -
-                   line_screen_column;
-        drawn = line_length - first;
+        if (!line_wide)
+        {
+                // Every character is one byte and one cell here, so the cursor
+                // is found by its offset and the rows are filled a run at a time.
+                positive count = min(line_length - first, limit - f);
+                unsigned int r = line_screen_anchor - top;
+                unsigned int c = line_screen_column;
 
-        if (drawn > capacity)
-                drawn = capacity;
+                if (line_point >= first && line_point - first <= count)
+                        cursor = f + (line_point - first);
 
-        row = line_screen_anchor - top;
-        column = line_screen_column;
+                // A row at a time: put_cells moves the column along it.
+                for (at = 0; at < count;)
+                {
+                        positive take;
 
-        // The editor counts a column to a character.
-        for (at = 0; at < drawn; at++)
-                put_cells(line[first + at], 1);
+                        if (c >= COLUMNS)
+                        {
+                                c -= COLUMNS;
+                                r++;
+                        }
+
+                        take = min(count - at, COLUMNS - c);
+                        row = r;
+                        column = c;
+
+                        for (positive k = 0; k < take; k++)
+                                put_cells(line[first + at + k], 1);
+
+                        at += take;
+                        r++;
+                        c = 0;
+                }
+
+                f += count;
+                at = first + count;
+        }
+
+        else
+        {
+                // A line with a wide character or a mark: a wide character
+                // takes two cells, a mark none, and put_cells is told where
+                // each one starts.
+                for (at = first; at < line_length;)
+                {
+                        unsigned int character;
+                        positive next = line_decode(at, address_of character);
+                        unsigned int width = line_width(character);
+                        positive start = line_place(f, width);
+
+                        if (at == line_point)
+                                cursor = start;
+
+                        if (start + width > limit)
+                                break;
+
+                        if (width)
+                        {
+                                row = line_screen_anchor - top + (unsigned int)(start / COLUMNS);
+                                column = (unsigned int)(start % COLUMNS);
+                                put_cells(character, width);
+                        }
+
+                        f = start + width;
+                        at = next;
+                }
+        }
+
+        if (line_point == line_length && at == line_length)
+                cursor = f;
 
         line_view = first;
-        line_drawn = drawn;
+        line_drawn = f - line_screen_column;
 
-        at = line_point > first ? line_point - first : 0;
-        row = line_screen_anchor - (window->head - ROWS) +
-              (unsigned int)((line_screen_column + at) / COLUMNS);
-        column = (unsigned int)((line_screen_column + at) % COLUMNS);
+        row = line_screen_anchor - top + (unsigned int)(cursor / COLUMNS);
+        column = (unsigned int)(cursor % COLUMNS);
 
         if (row >= ROWS)
         {
@@ -3077,15 +3296,27 @@ static fn line_erase(b32 shorten)
 
 static fn line_insert(unsigned int character)
 {
-        if (!array_store_reserve(line, line_room, line_length,
-                                 line_length + 1, 64))
+        p8 bytes[4];
+        positive size = memory_utf8_encode(bytes, sizeof(bytes), character);
+        positive at;
+
+        // A value that is no scalar, a surrogate or past U+10FFFF, is no
+        // character and is refused, as emit_character refuses it.
+        if (!size || !array_store_reserve(line, line_room, line_length,
+                                          line_length + size, 64))
                 return;
 
-        memory_copy(line + line_point + 1, line + line_point,
+        memory_copy(line + line_point + size, line + line_point,
                     line_length - line_point);
 
-        line[line_point++] = (p8)character;
-        line_length++;
+        for (at = 0; at < size; at++)
+                line[line_point + at] = bytes[at];
+
+        line_point += size;
+        line_length += size;
+
+        if (size > 1)
+                line_wide = true;
 }
 
 static fn line_take(positive from, positive to)
@@ -3096,6 +3327,9 @@ static fn line_take(positive from, positive to)
 
         line_length -= gone;
         line_point = from;
+
+        if (line_wide)
+                line_wide = !line_ascii();
 }
 
 // The word before the cursor is the run of spaces then the run that is not.
@@ -3127,6 +3361,7 @@ static fn line_from_history()
 
         line_length = length;
         line_point = length;
+        line_wide = !line_ascii();
 }
 
 static fn line_remember()
@@ -3201,6 +3436,7 @@ static fn line_reset()
 {
         line_length = 0;
         line_point = 0;
+        line_wide = false;
         history_at = history_count;
         history_held_length = 0;
         line_forget();
@@ -3299,7 +3535,7 @@ static b32 line_key(unsigned int character, unsigned int code)
                 break;
         case KEY_DELETE:
                 if (line_point < line_length)
-                        line_take(line_point, line_point + 1);
+                        line_take(line_point, line_next(line_point));
                 return true;
         case KEY_UP:
         {
@@ -3353,19 +3589,19 @@ static b32 line_key(unsigned int character, unsigned int code)
                 return true;
         case 2:
                 if (line_point)
-                        line_point--;
+                        line_point = line_prev(line_point);
                 return true;
         case 5:
                 line_point = line_length;
                 return true;
         case 6:
                 if (line_point < line_length)
-                        line_point++;
+                        line_point = line_next(line_point);
                 return true;
         case 8:
         case 127:
                 if (line_point)
-                        line_take(line_point - 1, line_point);
+                        line_take(line_prev(line_point), line_point);
                 return true;
         case 4:
                 /*
@@ -3380,7 +3616,7 @@ static b32 line_key(unsigned int character, unsigned int code)
                 if (line_length)
                 {
                         if (line_point < line_length)
-                                line_take(line_point, line_point + 1);
+                                line_take(line_point, line_next(line_point));
 
                         return true;
                 }

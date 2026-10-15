@@ -8270,6 +8270,20 @@ static const struct
     {"pgup", 104}, {"f1", 59}, {"enter", 28}, {"kpenter", 96},
 };
 
+// The hex digits of <uXXXX>, which hand over one scalar as a keymap does.
+static b32 hex_digits(string_address text, positive count)
+{
+        for (positive i = 0; i < count; i++)
+        {
+                unsigned int c = (unsigned char)text[i];
+
+                if (!((c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'f')))
+                        return false;
+        }
+
+        return count > 0;
+}
+
 static fn feed_keys(string_address text)
 {
         positive at = 0;
@@ -8300,6 +8314,25 @@ static fn feed_keys(string_address text)
                         if (begin + 1 == stop)
                         {
                                 term_key_modified(text[begin], 0, modifiers);
+                                at = text[stop] ? stop + 1 : stop;
+                                continue;
+                        }
+
+                        // <u00e9>: one scalar by its hex digits, as a keymap
+                        // hands over a letter that is more than a byte.
+                        if (text[begin] == 'u' && begin + 1 < stop &&
+                            hex_digits(text + begin + 1, stop - begin - 1))
+                        {
+                                unsigned int scalar = 0;
+
+                                for (positive digit = begin + 1; digit < stop; digit++)
+                                {
+                                        unsigned int c = (unsigned char)text[digit];
+
+                                        scalar = scalar * 16 + (c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+                                }
+
+                                term_key_modified(scalar, 0, modifiers);
                                 at = text[stop] ? stop + 1 : stop;
                                 continue;
                         }
@@ -9770,6 +9803,43 @@ same 'unbound control' '[abc\x0a]'               20 3 edit on keys 'ab^Xc\r' sen
 same 'escape alone'  '[abc\x0a]'                 20 3 edit on keys 'ab\ec\r' sent
 same 'ctrl z still goes' '[\x1a]'                20 3 edit on keys 'ab^Z' sent
 same 'tab in the line' '[a\x09b\x0a]'           20 3 edit on keys 'a\tb\r' sent
+#       Canonical mode is read by the program as bytes, so a character that is
+#       more than one byte goes into the line whole. It used to be stored as
+#       its low byte: E9 for e-acute and AC for the euro sign, neither of which
+#       is UTF-8.
+group scalars
+same 'e-acute is UTF-8'      '[\xc3\xa9\x0a]'          20 3 edit on keys '<u00e9>\r' sent
+same 'euro is UTF-8'         '[\xe2\x82\xac\x0a]'      20 3 edit on keys '<u20ac>\r' sent
+same 'emoji is UTF-8'        '[\xf0\x9f\x98\x80\x0a]'  20 3 edit on keys '<u1f600>\r' sent
+same 'mixed with ascii'      '[a\xc3\xa9b\xe2\x82\xacc\x0a]' 20 3 edit on keys 'a<u00e9>b<u20ac>c\r' sent
+same 'ascii unchanged'       '[abc\x0a]'               20 3 edit on keys 'abc\r' sent
+#       Backspace and Delete take a whole character and the cursor steps over
+#       one, so no edit leaves the start of a character in the line.
+same 'backspace takes one'   '[\xc3\xa9\x0a]'         20 3 edit on keys '<u00e9><u20ac>\x7f\r' sent
+same 'left steps over one'   '[aX\xc3\xa9b\x0a]'      20 3 edit on keys 'a<u00e9>b<left><left>X\r' sent
+same 'right steps over one'  '[a\xe2\x82\xacXb\x0a]'  20 3 edit on keys 'a<u20ac>b<home><right><right>X\r' sent
+same 'delete takes one'      '[b\x0a]'                 20 3 edit on keys '<u00e9>b<home><del>\r' sent
+same 'ctrl k from a letter'  '[\xc3\xa9\x0a]'          20 3 edit on keys '<u00e9>ab^A<right>^K\r' sent
+same 'ctrl w over a letter'  '[caf\xc3\xa9 \x0a]'      20 3 edit on keys 'caf<u00e9> x^W\r' sent
+#       Each character is drawn in the cells it takes: one for a letter, two
+#       for an ideograph, and the cursor is counted in cells as well.
+same 'drawn a cell each'     '[> <00e9>b]'             20 3 edit on in '> ' keys '<u00e9>b' row 0
+same 'cursor counts cells'   '0,3'                     20 3 edit on in '> ' keys '<u00e9>' cursor
+same 'left counts cells'     '0,2'                     20 3 edit on in '> ' keys '<u00e9><left>' cursor
+same 'ideograph takes two'   '[> <4e2d>x]'             20 3 edit on in '> ' keys '<u4e2d>x' row 0
+same 'cursor after ideograph' '0,4'                    20 3 edit on in '> ' keys '<u4e2d>x<left>' cursor
+#       An ideograph that does not fit on what is left of a row goes to the next
+#       one whole, leaving the last cell blank, as the screen draws it.
+same 'euro drawn'            '[> <20ac>b]'             20 3 edit on in '> ' keys '<u20ac>b' row 0
+same 'emoji takes two'       '[> <1f600>x]'            20 3 edit on in '> ' keys '<u1f600>x' row 0
+same 'cursor after emoji'    '0,4'                     20 3 edit on in '> ' keys '<u1f600>x<left>' cursor
+same 'left across emoji'     '0,2'                     20 3 edit on in '> ' keys '<u1f600><left>' cursor
+same 'backspace over emoji'  '[> a  ]'                 20 3 edit on in '> ' keys 'a<u1f600>\x7f' row 0
+same 'backspace emoji sent'  '[a\x0a]'                 20 3 edit on keys 'a<u1f600>\x7f\r' sent
+same 'ideograph wraps whole' '1,2|[<4e2d>]'            10 3 edit on in '> ' keys '<u00e9><u00e9><u00e9><u00e9><u00e9><u00e9><u00e9><u4e2d>' cursor row 1
+#       A value that is no scalar is refused, as emit_character refuses it.
+same 'surrogate refused'     '[a\x0a]'                 20 3 edit on keys '<udc00>a\r' sent
+same 'past U+10FFFF refused' '[a\x0a]'                 20 3 edit on keys 'a<u110000>\r' sent
 
 group screen
 #       Ctrl-L clears the screen and puts the prompt back. What is to the

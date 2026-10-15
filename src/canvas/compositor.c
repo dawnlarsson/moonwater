@@ -2526,6 +2526,25 @@ static const unsigned int *compositor_grain_row(unsigned int light, int x, int y
         return compositor_grains[light ? 1 : 0][y & 3] + (x & 15);
 }
 
+// The per-pixel grain the rows are made with, kept as the reference the tests compare them against (memory_glass_over_u32
+// is the same operation over a row); the glass itself no longer calls it.
+// Whatever grain a pixel has: what memory_glass_over_u32 gives a clear pixel over ground at x, y.
+static unsigned int compositor_grained(unsigned int ground, unsigned int light, int x, int y)
+{
+        unsigned int out = 0;
+        const unsigned int *grain = compositor_grain_row(light, x, y);
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                int c = (int)(ground >> shift & 255) + (int)(grain[0] >> shift & 255);
+
+                c = c > 255 ? 255 : c;
+                c -= (int)(grain[64] >> shift & 255);
+                out |= (unsigned int)(c < 0 ? 0 : c) << shift;
+        }
+        return out;
+}
+
 /*
         The blurred small picture of the scene, the small pixels from sx, sy
         (in blocks of the output) sw by sh, into into (pitch words a row):
