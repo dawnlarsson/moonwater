@@ -38809,8 +38809,12 @@ static bool cp_words_read(string_address option, string_address value,
         {
                 positive length = 0;
 
-                while (value[at] && value[at] != ',' && length + 1 < sizeof(one))
-                        one[length++] = value[at++];
+                while (value[at] && value[at] != ',')
+                {
+                        if (length + 1 < sizeof(one))
+                                one[length++] = value[at];
+                        at++;
+                }
 
                 one[length] = end;
 
