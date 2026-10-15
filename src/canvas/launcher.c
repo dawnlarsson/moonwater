@@ -136,6 +136,12 @@ static struct
         const char address_to dirs[LAUNCHER_DIRS];
         positive dir_count;
 
+        // The names of PATH the last plain word named (every one, in the order they were read), the word, and the
+        // count of names then: a word that extends it names no other name, so the next search reads only these.
+        unsigned short named[LAUNCHER_NAMES];
+        positive named_count, named_length, named_names;
+        char named_text[LAUNCHER_TEXT];
+
         int width, height, shown;
         unsigned int asked_w, asked_h, ground;
         int pointer_x, pointer_y;
@@ -247,6 +253,7 @@ static fn launcher_search(void)
 
         if (!length)
         {
+                launcher.named_length = 0;
                 for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
                 {
                         launcher.entry[at].kind = LAUNCHER_WINDOW;
@@ -278,15 +285,26 @@ static fn launcher_search(void)
                                 launcher.entry[count++].index = (unsigned short)at;
                         }
 
-        // The names of PATH: the room left under the desktop's, less the command row.
+        // The names of PATH: the room left under the desktop's, less the command row. A word that extends the last
+        // one searched reads only the names that one named (a name that starts with or contains the longer word
+        // starts with or contains the shorter), and the names it names are kept for the next word.
         if (!line)
-                for (positive at = 0; at < launcher.count; at++)
+        {
+                b32 narrowed = launcher.named_length && length > launcher.named_length && launcher.named_names == launcher.count &&
+                               !memory_compare(launcher.text, launcher.named_text, launcher.named_length);
+                positive total = narrowed ? launcher.named_count : launcher.count, kept = 0;
+
+                for (positive seen = 0; seen < total; seen++)
                 {
+                        positive at = narrowed ? launcher.named[seen] : seen;
                         const char address_to name = launcher_name(at);
                         unsigned int rank = launcher_rank(launcher.text, length, name, string_length((string_address)name));
                         positive room = count + 1 < LAUNCHER_ROWS ? LAUNCHER_ROWS - 1 - count : 0, place = found;
 
-                        if (!rank || !room)
+                        if (!rank)
+                                continue;
+                        launcher.named[kept++] = (unsigned short)at;
+                        if (!room)
                                 continue;
                         if (found == room && !launcher_before(rank, name, ranks[found - 1], launcher_name(best[found - 1])))
                                 continue;
@@ -303,6 +321,14 @@ static fn launcher_search(void)
                         ranks[place] = rank;
                         best[place] = (unsigned short)at;
                 }
+                launcher.named_count = kept;
+                launcher.named_length = length;
+                launcher.named_names = launcher.count;
+                memory_copy(launcher.named_text, launcher.text, length + 1);
+        }
+        else
+                launcher.named_length = 0;
+
         for (positive at = 0; at < found; at++)
         {
                 launcher.entry[count].kind = LAUNCHER_PROGRAM;
@@ -433,6 +459,8 @@ static fn launcher_scan(const char address_to variable)
 {
         char address_to buffer = (char address_to)launcher.hashed + LAUNCHER_HASH * sizeof(unsigned short);
         positive size = string_length((string_address)variable);
+
+        launcher.named_length = 0;
 
         size = size >= LAUNCHER_PATH ? LAUNCHER_PATH - 1 : size;
         memory_copy(launcher.path, variable, size);
@@ -942,7 +970,6 @@ static b32 launcher_main()
         }
 
         launcher.ui.scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
-        launcher_scan(launcher_path_variable());
         launcher_size((unsigned int)launcher_px(LAUNCHER_WIDTH), 0);
         launcher_changed();
         table->x[row] = ((int)table->output_width - launcher.width) / 2;
@@ -952,6 +979,10 @@ static b32 launcher_main()
         launcher.ground = table->ground[row];
         ui_inks(&launcher.ui, launcher.ground ? launcher.ground : 0x101012u);
         launcher_frame();
+
+        // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not
+        // change with the scan and needs no second frame; a key read after this sees every name.
+        launcher_scan(launcher_path_variable());
 
         while (running)
         {
