@@ -2526,23 +2526,6 @@ static const unsigned int *compositor_grain_row(unsigned int light, int x, int y
         return compositor_grains[light ? 1 : 0][y & 3] + (x & 15);
 }
 
-// Whatever grain a pixel has: what memory_glass_over_u32 gives a clear pixel over ground at x, y.
-static unsigned int compositor_grained(unsigned int ground, unsigned int light, int x, int y)
-{
-        unsigned int out = 0;
-        const unsigned int *grain = compositor_grain_row(light, x, y);
-
-        for (unsigned int shift = 0; shift < 24; shift += 8)
-        {
-                int c = (int)(ground >> shift & 255) + (int)(grain[0] >> shift & 255);
-
-                c = c > 255 ? 255 : c;
-                c -= (int)(grain[64] >> shift & 255);
-                out |= (unsigned int)(c < 0 ? 0 : c) << shift;
-        }
-        return out;
-}
-
 /*
         The blurred small picture of the scene, the small pixels from sx, sy
         (in blocks of the output) sw by sh, into into (pitch words a row):
@@ -2768,6 +2751,13 @@ static unsigned int compositor_vivid(unsigned int pixel)
         return (unsigned int)(r << 16 | g << 8 | b);
 }
 
+// A tab's row is tinted a chunk at a time into this, and grained over no picture at all (memory_glass_over_u32 with
+// the clear picture: alpha 0 gives the ground back, grained). The grain is the same per pixel as compositor_grain_row
+// gives it at the pixel's x: the grain repeats every four pixels, and the call's pattern every sixteen.
+#define COMPOSITOR_TAB_CHUNK 256
+static unsigned int compositor_tab_tint[COMPOSITOR_TAB_CHUNK];
+static const unsigned int compositor_tab_clear[COMPOSITOR_TAB_CHUNK];
+
 /*
         One tab of glass, its rectangle x, y, width, height in the band, from
         the glass gw wide whose column 0 is the band's x0: made vivid and
@@ -2786,9 +2776,16 @@ static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y
                 const unsigned int *from = compositor.glass + (long)row * gw + (x - x0);
                 unsigned int *into = compositor.band + (long)row * pitch + x;
 
-                for (int column = 0; column < width; column++)
-                        into[column] = compositor_grained(window_mix(compositor_vivid(from[column]), target, amount),
-                                                          target != 0, x + column, row);
+                for (int at = 0; at < width; at += COMPOSITOR_TAB_CHUNK)
+                {
+                        int count = width - at < COMPOSITOR_TAB_CHUNK ? width - at : COMPOSITOR_TAB_CHUNK;
+
+                        for (int column = 0; column < count; column++)
+                                compositor_tab_tint[column] =
+                                    window_mix(compositor_vivid(from[at + column]), target, amount);
+                        memory_glass_over_u32(into + at, compositor_tab_clear, compositor_tab_tint, (positive)count,
+                                              compositor_grain_row(target != 0, x + at, row));
+                }
         }
         return window_mix(middle, target, amount);
 }
@@ -2796,7 +2793,8 @@ static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y
 /*
         The band drawn over what is under it: the windows composed into it as
         the scene has them, blurred, each tab made glass, each window's title
-        on its own and the time in the tray.
+        on its own and the time in the tray. Only the tabs redo names are made
+        again, and only their span is damaged.
 */
 /*
         The span of the band's glass: from the first tab (or the tray, with no
@@ -2813,10 +2811,62 @@ static int compositor_band_span(const struct compositor_frame *band, int *first,
         return 1;
 }
 
-static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count)
+// A tabs' redo mask: bit at for the tab at, and the tray's clock on its own bit past the tabs.
+#define COMPOSITOR_TABS_ALL (~0ul)
+
+static unsigned long compositor_tab_bit(int which)
+{
+        return which < 0 ? 1ul << WINDOWS : 1ul << which;
+}
+
+/*
+        The tabs the damage meets, with the blur's reach round each: a change
+        in the scene under a tab, or under its reach, is one to its glass.
+*/
+static unsigned long compositor_band_meets(const struct compositor_frame *band)
+{
+        unsigned long redo = 0;
+
+        for (int which = -2; which < (int)band->mark_count; which++)
+        {
+                int x, y, width, height, reach[4];
+
+                if (!compositor_panel_slot(band, which, &x, &y, &width, &height))
+                        continue;
+                reach[0] = x - COMPOSITOR_GLASS_REACH;
+                reach[1] = band->y - COMPOSITOR_GLASS_REACH;
+                reach[2] = x + width + COMPOSITOR_GLASS_REACH;
+                reach[3] = band->y + band->height + COMPOSITOR_GLASS_REACH;
+                for (unsigned int at = 0; at < compositor.damages; at++)
+                {
+                        int meet[4];
+
+                        memory_copy(meet, compositor.damage[at], sizeof(meet));
+                        compositor_meet(meet, reach);
+                        if (meet[2] > meet[0] && meet[3] > meet[1])
+                        {
+                                redo |= compositor_tab_bit(which);
+                                break;
+                        }
+                }
+        }
+        return redo;
+}
+
+// The output's band over x, width, from y down its height: what the tabs redone wrote, for the composition to show.
+static void compositor_band_damage(int x, int y, int width, int height)
+{
+        compositor.damage_by = COMPOSITOR_OVER;
+        compositor_damage(x, y, width, height);
+        compositor.damage_by = 0;
+}
+
+// Redoes the tabs redo names: the glass is made over their span and the blur's reach, and the band is damaged over that span.
+static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count, unsigned long redo)
 {
         struct compositor_frame band;
-        int x, y, width, height, glass_width = 0, glass_left = 0;
+        int x, y, width, height, first = 0, last = 0, top, glass_width = 0, glass_left = 0;
+        int any = 0;
         timespec now = {0, 0};
         time_t seconds;
         tm broken;
@@ -2826,23 +2876,29 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
                 return;
 
         compositor_band_frame(&band);
-        band.x = band.y = 0;
-        {
-                int first, last;
-
-                // The span of the tabs, which is all the glass is made under.
-                if (!compositor_band_span(&band, &first, &last))
-                        return;
-                compositor_band_frame(&band);
-                glass_width = compositor_glass_make(windows, count, first, last, &band);
-                glass_left = first;
-                band.x = band.y = 0;
-        }
-        if (!glass_width)
+        for (int which = -2; which < (int)band.mark_count; which++)
+                if ((redo & compositor_tab_bit(which)) && compositor_panel_slot(&band, which, &x, &y, &width, &height))
+                {
+                        if (!any || x < first)
+                                first = x;
+                        if (!any || x + width > last)
+                                last = x + width;
+                        any = 1;
+                }
+        if (!any)
                 return;
+        glass_width = compositor_glass_make(windows, count, first, last, &band);
+        glass_left = first;
+        top = band.y;
+        band.x = band.y = 0;
+        if (!glass_width)
+        {
+                compositor_band_damage(first, top, last - first, band.height);
+                return;
+        }
 
         for (unsigned int at = 0; at < band.mark_count; at++)
-                if (compositor_panel_slot(&band, (int)at, &x, &y, &width, &height))
+                if ((redo & compositor_tab_bit((int)at)) && compositor_panel_slot(&band, (int)at, &x, &y, &width, &height))
                 {
                         unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height,
                                                                    (int)at, band.marks[at]);
@@ -2858,7 +2914,8 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
         compositor.minute = compositor_minute();
         clock_gettime(CLOCK_REALTIME, address_of now);
         seconds = now.tv_sec;
-        if (compositor_panel_slot(&band, -2, &x, &y, &width, &height) && localtime_r(&seconds, &broken))
+        if ((redo & compositor_tab_bit(-2)) && compositor_panel_slot(&band, -2, &x, &y, &width, &height) &&
+            localtime_r(&seconds, &broken))
         {
                 char clock[6] = {(char)('0' + broken.tm_hour / 10), (char)('0' + broken.tm_hour % 10), ':',
                                  (char)('0' + broken.tm_min / 10), (char)('0' + broken.tm_min % 10), 0};
@@ -2866,6 +2923,8 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 
                 compositor_band_text(band.width, x, y, width, height, clock, window_contrast(ground), ground);
         }
+
+        compositor_band_damage(first, top, last - first, band.height);
 }
 
 /*
@@ -4113,26 +4172,13 @@ static void compositor_present(void)
         // What is under the tabs changed, or what they say: the glass is made again over it, and shown. The glass
         // is made from the scene over the tabs' span and the blur's reach round it, so only a change there is one.
         compositor_band_frame(&band);
-        if (compositor.band && compositor_band_span(&band, &band_first, &band_last))
         {
-                int reach[4] = {band_first - COMPOSITOR_GLASS_REACH, band.y - COMPOSITOR_GLASS_REACH,
-                                band_last + COMPOSITOR_GLASS_REACH, band.y + band.height + COMPOSITOR_GLASS_REACH};
+                unsigned long redo = compositor.band_stale ? COMPOSITOR_TABS_ALL : 0;
 
-                for (unsigned int at = 0; at < compositor.damages; at++)
-                {
-                        int meet[4];
-
-                        memory_copy(meet, compositor.damage[at], sizeof(meet));
-                        compositor_meet(meet, reach);
-                        compositor.band_stale |= meet[2] > meet[0] && meet[3] > meet[1];
-                }
-        }
-        if (compositor.band_stale)
-        {
-                compositor_band_draw(frames, windows);
-                compositor.damage_by = COMPOSITOR_OVER;
-                compositor_damage(band.x, band.y, band.width, band.height);
-                compositor.damage_by = 0;
+                if (!redo && compositor.band && compositor_band_span(&band, &band_first, &band_last))
+                        redo = compositor_band_meets(&band);
+                if (redo)
+                        compositor_band_draw(frames, windows, redo);
         }
 
         compositor_band_frame(&band);
@@ -4622,12 +4668,13 @@ static int compositor_virtual(void)
 // How far ahead of the clock that stops in a sleep the one that does not is, in nanoseconds.
 static positive compositor_slept_clock(void)
 {
-        long boot[2] = {0, 0}, mono[2] = {0, 0};
+        timespec boot = {0, 0}, mono = {0, 0};
         long long ahead;
 
-        compositor_call(syscall(clock_gettime), 7, (positive)boot, 0, 0, 0, 0);
-        compositor_call(syscall(clock_gettime), 1, (positive)mono, 0, 0, 0, 0);
-        ahead = ((long long)boot[0] - mono[0]) * 1000000000ll + (boot[1] - mono[1]);
+        clock_gettime(CLOCK_BOOTTIME, address_of boot);
+        clock_gettime(CLOCK_MONOTONIC, address_of mono);
+        ahead = ((long long)boot.tv_sec - (long long)mono.tv_sec) * 1000000000ll +
+                ((long long)boot.tv_nsec - (long long)mono.tv_nsec);
         return ahead < 0 ? 0 : (positive)ahead;
 }
 
