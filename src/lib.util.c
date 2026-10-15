@@ -5237,17 +5237,19 @@ static inline INLINE address_any copy_known(address_any destination,
                 }
 #endif
 #if KNOWN_SIZE_MAX > 96
-                KNOWN_WIDE_ASM("   vmovdqu (%[from]), %%ymm0\n"
-                               "   vmovdqu 32(%[from]), %%ymm1\n"
-                               "   vmovdqu 64(%[from]), %%ymm2\n"
-                               "   vmovdqu %c[back](%[from]), %%ymm3\n"
-                               "   vmovdqu %%ymm0, (%[to])\n"
-                               "   vmovdqu %%ymm1, 32(%[to])\n"
-                               "   vmovdqu %%ymm2, 64(%[to])\n"
-                               "   vmovdqu %%ymm3, %c[back](%[to])\n",
-                               size, size - 32,
-                               "xmm0", "xmm1", "xmm2", "xmm3");
-                return destination;
+                if (size <= 128) {
+                        KNOWN_WIDE_ASM("   vmovdqu (%[from]), %%ymm0\n"
+                                       "   vmovdqu 32(%[from]), %%ymm1\n"
+                                       "   vmovdqu 64(%[from]), %%ymm2\n"
+                                       "   vmovdqu %c[back](%[from]), %%ymm3\n"
+                                       "   vmovdqu %%ymm0, (%[to])\n"
+                                       "   vmovdqu %%ymm1, 32(%[to])\n"
+                                       "   vmovdqu %%ymm2, 64(%[to])\n"
+                                       "   vmovdqu %%ymm3, %c[back](%[to])\n",
+                                       size, size - 32,
+                                       "xmm0", "xmm1", "xmm2", "xmm3");
+                        return destination;
+                }
 #endif
         }
 #endif
@@ -5321,22 +5323,24 @@ static inline INLINE address_any copy_known(address_any destination,
                 }
 #endif
 #if KNOWN_SIZE_MAX > 96
-                __asm__("ldp q0, q1, [%[from]]\n"
-                        "ldp q2, q3, [%[from], #32]\n"
-                        "ldp q4, q5, [%[from], #64]\n"
-                        "ldr q6, [%[from], %[lo]]\n"
-                        "ldr q7, [%[from], %[hi]]\n"
-                        "stp q0, q1, [%[to]]\n"
-                        "stp q2, q3, [%[to], #32]\n"
-                        "stp q4, q5, [%[to], #64]\n"
-                        "str q6, [%[to], %[lo]]\n"
-                        "str q7, [%[to], %[hi]]\n"
-                        : "=m"(*(p8(address_to)[size])(destination))
-                        : [from] "r"(source), [to] "r"(destination),
-                          [lo] "r"(size - 32), [hi] "r"(size - 16),
-                          "m"(*(const p8(address_to)[size])(source))
-                        : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7");
-                return destination;
+                if (size <= 128) {
+                        __asm__("ldp q0, q1, [%[from]]\n"
+                                "ldp q2, q3, [%[from], #32]\n"
+                                "ldp q4, q5, [%[from], #64]\n"
+                                "ldr q6, [%[from], %[lo]]\n"
+                                "ldr q7, [%[from], %[hi]]\n"
+                                "stp q0, q1, [%[to]]\n"
+                                "stp q2, q3, [%[to], #32]\n"
+                                "stp q4, q5, [%[to], #64]\n"
+                                "str q6, [%[to], %[lo]]\n"
+                                "str q7, [%[to], %[hi]]\n"
+                                : "=m"(*(p8(address_to)[size])(destination))
+                                : [from] "r"(source), [to] "r"(destination),
+                                  [lo] "r"(size - 32), [hi] "r"(size - 16),
+                                  "m"(*(const p8(address_to)[size])(source))
+                                : "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7");
+                        return destination;
+                }
 #endif
         }
 #endif
@@ -5846,12 +5850,14 @@ static inline INLINE address_any fill_known(address_any destination,
                 }
 #endif
 #if KNOWN_SIZE_MAX > 96
-                KNOWN_FILL_ASM("   vmovdqu %%ymm0, (%[to])\n"
-                               "   vmovdqu %%ymm0, 32(%[to])\n"
-                               "   vmovdqu %%ymm0, 64(%[to])\n"
-                               "   vmovdqu %%ymm0, %c[back](%[to])\n",
-                               size, size - 32, "xmm0");
-                return destination;
+                if (size <= 128) {
+                        KNOWN_FILL_ASM("   vmovdqu %%ymm0, (%[to])\n"
+                                       "   vmovdqu %%ymm0, 32(%[to])\n"
+                                       "   vmovdqu %%ymm0, 64(%[to])\n"
+                                       "   vmovdqu %%ymm0, %c[back](%[to])\n",
+                                       size, size - 32, "xmm0");
+                        return destination;
+                }
 #endif
         }
 #endif
@@ -5894,13 +5900,15 @@ static inline INLINE address_any fill_known(address_any destination,
                 }
 #endif
 #if KNOWN_SIZE_MAX > 96
-                KNOWN_FILL_NEON("   stp q0, q0, [%[to]]\n"
-                                "   stp q0, q0, [%[to], #32]\n"
-                                "   stp q0, q0, [%[to], #64]\n"
-                                "   str q0, [%[to], %[lo]]\n"
-                                "   str q0, [%[to], %[hi]]\n",
-                                size, [lo] "r"(size - 32), [hi] "r"(size - 16));
-                return destination;
+                if (size <= 128) {
+                        KNOWN_FILL_NEON("   stp q0, q0, [%[to]]\n"
+                                        "   stp q0, q0, [%[to], #32]\n"
+                                        "   stp q0, q0, [%[to], #64]\n"
+                                        "   str q0, [%[to], %[lo]]\n"
+                                        "   str q0, [%[to], %[hi]]\n",
+                                        size, [lo] "r"(size - 32), [hi] "r"(size - 16));
+                        return destination;
+                }
 #endif
         }
 #endif
