@@ -5984,7 +5984,7 @@ bool shell_cd_walk(bool physical, bool address_to say,
                (shell_cd_target[1] == '.' &&
                 (shell_cd_target[2] == end || shell_cd_target[2] == '/')))))
         {
-                p8 search[1024];
+                static p8 search[4096];
                 /* Bash leaves inherited CDPATH text visible in privileged
                    mode but does not let cd interpret it until set +p. Keep
                    the value in the shared environment engine and gate only
@@ -5993,7 +5993,10 @@ bool shell_cd_walk(bool physical, bool address_to say,
                                            ? null
                                            : env_get("CDPATH");
 
-                if (value && string_get(value))
+                //      A value that does not fit is left out whole: cut, its
+                //      last entry would be a different directory.
+                if (value && string_get(value) &&
+                    string_length(value) < sizeof(search))
                 {
                         path_walk walk = {search, null, 0, false};
                         static p8 under[4096];
