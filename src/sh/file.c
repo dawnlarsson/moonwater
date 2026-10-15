@@ -30710,7 +30710,12 @@ static fn hardlink_walk(bipolar directory, string_address name,
         walk.at = 0;
 
         if (walk.handle < 0)
+        {
+                string_format(log_error, "hardlink: cannot access '%w': %s\n",
+                              writer_terminal_quoted_name, shown, file_reason(walk.handle));
+                hardlink_status = 1;
                 return;
+        }
 
         struct linux_dirent64 address_to entry;
 
