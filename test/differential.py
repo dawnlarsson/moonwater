@@ -2069,9 +2069,19 @@ def main(argv=None):
                     if key.split("/")[0] not in DOMAIN_FLOOR or key in check_keys)
     unfloored_passed = sum(count for key, count in passed.items()
                            if key.split("/")[0] not in DOMAIN_FLOOR or key in check_keys)
+    #       A regression row is a reproducer of a fixed bug, and it counts
+    #       whatever domain it is in. Inside a floored domain the rows are
+    #       otherwise absorbed by the floor's slack, so one that came back
+    #       would not fail the lane. A row fails with "regression" in its
+    #       differences, which is how the failure was filed above.
+    regression_failures = sum(count for tally in failures.values()
+                              for sig, count in tally.items()
+                              if len(sig) == 3 and "regression" in sig[2])
+    if regression_failures:
+        print(f"  regression rows failing: {regression_failures} -- a fixed bug came back")
     if args.replay or selected or modes or families or args.budget:
-        return 1 if all_passed != all_total or invalid else 0
-    return 1 if unfloored_passed != unfloored else 0
+        return 1 if all_passed != all_total or invalid or regression_failures else 0
+    return 1 if unfloored_passed != unfloored or regression_failures else 0
 
 
 # ----------------------------------------------------------------------------
@@ -11689,11 +11699,349 @@ def shell_start_placement(farm):
     return passed, len(SHELL_START_WRITERS), notes
 
 
+def files_pair(farm, name, args, setup, env=None, full=False, collect=None):
+    """One command under the reference and under ours, each in its own fresh
+    directory made by setup. Returns the two answers: the status, the standard
+    output (empty when full), the standard error, and what collect reads from
+    the directory afterwards."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    answers = []
+    for program in (shutil.which(name, path=os.defpath), str(Path(farm) / name)):
+        root = Path(tempfile.mkdtemp(prefix="files-check-"))
+        try:
+            setup(root)
+            sink = open("/dev/full", "w") if full else subprocess.PIPE
+            #       Both sides in the C locale, so the quotes are the same,
+            #       and each told its own name as argv[0], so "chmod: ..." and
+            #       "Try 'chmod --help'" read the same on both.
+            run_env = dict(env if env is not None else os.environ, LC_ALL="C", LANG="C")
+            try:
+                run = subprocess.run([name, *args], executable=program, cwd=root,
+                                     env=run_env, stdout=sink, stderr=subprocess.PIPE,
+                                     timeout=60)
+            finally:
+                if full:
+                    sink.close()
+            out = "" if full else sorted(run.stdout.decode(errors="replace").splitlines())
+            answers.append((run.returncode, out, run.stderr.decode(errors="replace"),
+                            collect(root) if collect else None))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    return answers
+
+
+def files_tree_listing(root):
+    """Every name under root, with its kind, sorted: what a copy left behind."""
+    listed = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            path = os.path.relpath(os.path.join(dirpath, name), root)
+            listed.append(path + ("/" if os.path.isdir(os.path.join(dirpath, name)) else ""))
+    return sorted(listed)
+
+
+def files_daystart_zones(farm):
+    """find -daystart counts the day in the zone the process runs in, and cuts
+    it at that zone's midnight. The two midnights (the zone's and UTC's) differ
+    in every zone away from UTC, and between them lies a stretch of the day
+    that is today in one reading and yesterday in the other. Each zone gets a
+    file stamped in the middle of that stretch, measured against the reference
+    under the same TZ, with -mtime 0 and -mtime 1."""
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = time.time()
+    passed = total = 0
+    notes = []
+    for zone in ("Asia/Kolkata", "America/New_York", "Pacific/Chatham", "Europe/Stockholm"):
+        local = datetime.fromtimestamp(now, ZoneInfo(zone))
+        local_midnight = datetime(local.year, local.month, local.day,
+                                  tzinfo=ZoneInfo(zone)).timestamp()
+        utc_midnight = (now // 86400) * 86400
+        low, high = sorted((local_midnight, utc_midnight))
+        if high - low < 3600:
+            continue
+        stamp = int((low + high) / 2)
+
+        def setup(root, stamp=stamp):
+            (root / "edge").write_text("edge\n")
+            os.utime(root / "edge", (stamp, stamp))
+            (root / "now").write_text("now\n")
+
+        env = dict(os.environ, TZ=zone)
+        for days in ("0", "1"):
+            answers = files_pair(farm, "find", [".", "-daystart", "-mtime", days, "-print"],
+                                 setup, env=env)
+            total += 1
+            if answers[0][:3] == answers[1][:3]:
+                passed += 1
+            else:
+                notes.append(f"{zone} -daystart -mtime {days}: reference {answers[0][1]} ours {answers[1][1]}")
+    if total == 0:
+        notes.append("no zone with its midnight away from UTC at this time of day")
+    return passed, total, notes
+
+
+def files_statfs_names(farm):
+    """stat -f -c '%t %T' on every mount the machine has, against the reference.
+    The names are the reference's table and the unknown spelling is its own;
+    the mounts are the machine's, so the check holds on any machine."""
+    import subprocess
+
+    mounts = []
+    for line in Path("/proc/mounts").read_text().splitlines():
+        field = line.split()
+        if len(field) > 1 and field[1] not in mounts:
+            mounts.append(field[1])
+    passed = total = 0
+    notes = []
+    for mount in mounts:
+        answers = []
+        for program in (shutil.which("stat", path=os.defpath), str(Path(farm) / "stat")):
+            run = subprocess.run([program, "-f", "-c", "%t %T", mount],
+                                 capture_output=True, text=True, timeout=30)
+            answers.append((run.returncode, run.stdout, run.stderr))
+        total += 1
+        if answers[0] == answers[1]:
+            passed += 1
+        else:
+            notes.append(f"{mount}: reference {answers[0][1].strip()!r} ours {answers[1][1].strip()!r}")
+    return passed, total, notes
+
+
+def files_deep_walks(farm):
+    """A tree nested far deeper than the old fixed ceiling, walked by the
+    serial find (an -execdir forces it) and by the parallel one. Both have to
+    list the one file at the bottom, as the reference does."""
+    depth = 300
+    path = "T" + "/d" * depth
+
+    def setup(root):
+        os.makedirs(root / path)
+        (root / path / "x").write_text("x\n")
+
+    passed = total = 0
+    notes = []
+    for args in (["T", "-name", "x"], ["T", "-name", "x", "-execdir", "echo", "{}", ";"]):
+        answers = files_pair(farm, "find", args, setup)
+        total += 1
+        if answers[0][:3] == answers[1][:3] and answers[1][0] == 0 and answers[1][1]:
+            passed += 1
+        else:
+            notes.append(f"find {' '.join(args)}: reference {answers[0][:2]} ours {answers[1][:2]}")
+    return passed, total, notes
+
+
+def files_parents_deep(farm):
+    """cp --parents of a file a hundred levels down: a hundred destination
+    directories have to be made, each of which keeps its attributes. Compared
+    with the reference on the status and on the tree left behind."""
+    levels = 100
+    source = "S" + "/q" * levels
+
+    def setup(root):
+        os.makedirs(root / source)
+        (root / source / "leaf").write_text("leaf\n")
+        (root / "dst").mkdir()
+
+    answers = files_pair(farm, "cp", ["--parents", source + "/leaf", "dst"], setup,
+                         collect=files_tree_listing)
+    ok = answers[0][:3] == answers[1][:3]
+    return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][0]} ours {answers[1][0]}"])
+
+
+def files_write_error_stdout(farm):
+    """A write error on standard output: the reference says what failed and
+    exits 1. Each tool here writes to /dev/full and must say so on standard
+    error and exit with the same status as the reference."""
+    def setup(root):
+        (root / "a.txt").write_text("a\n")
+        (root / "ln").symlink_to("a.txt")
+
+    cases = (("stat", ["-c", "%s", "a.txt"]), ("basename", ["a.txt"]),
+             ("dirname", ["x/a.txt"]), ("realpath", ["a.txt"]), ("df", ["."]),
+             ("mkdir", ["-v", "d"]), ("readlink", ["ln"]))
+    passed = total = 0
+    notes = []
+    for name, args in cases:
+        answers = files_pair(farm, name, args, setup, full=True)
+        total += 1
+        if answers[0][0] == answers[1][0] and answers[0][2] == answers[1][2] and answers[1][0] != 0:
+            passed += 1
+        else:
+            notes.append(f"{name} > /dev/full: reference {answers[0][0]} {answers[0][2][:60]!r} ours {answers[1][0]} {answers[1][2][:60]!r}")
+    return passed, total, notes
+
+
+def files_find_write_error(farm):
+    """find's own output files (-fprint, -fprint0, -fprintf) on a full device:
+    the reference reports the write and exits 1."""
+    def setup(root):
+        (root / "a.txt").write_text("a\n")
+
+    cases = (["-fprint", "/dev/full"], ["-fprint0", "/dev/full"],
+             ["-fprintf", "/dev/full", "%p\\n"])
+    passed = total = 0
+    notes = []
+    for extra in cases:
+        answers = files_pair(farm, "find", [".", *extra], setup)
+        total += 1
+        if answers[0][0] == answers[1][0] and answers[0][2] == answers[1][2] and answers[1][0] != 0:
+            passed += 1
+        else:
+            notes.append(f"find . {' '.join(extra)}: reference {answers[0][0]} {answers[0][2][:60]!r} ours {answers[1][0]} {answers[1][2][:60]!r}")
+    return passed, total, notes
+
+
+def files_exec_refusals(farm):
+    """find -exec of a file that is no program: the kernel answers ENOEXEC
+    (no shebang line), and the reference names that and exits as it does."""
+    def setup(root):
+        (root / "noexec").write_text("not a program\n")
+        os.chmod(root / "noexec", 0o755)
+
+    answers = files_pair(farm, "find", [".", "-name", "noexec", "-exec", "./{}", ";"], setup)
+    ok = answers[0][0] == answers[1][0] and answers[0][2] == answers[1][2]
+    return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][0]} {answers[0][2]!r} ours {answers[1][0]} {answers[1][2]!r}"])
+
+
+def files_regex_switch(farm):
+    """Two -regex tests in one expression: each path is matched by the pattern
+    of the test it reaches, so the compiled pattern is not carried over from
+    the other one."""
+    def setup(root):
+        (root / "t").mkdir()
+        (root / "t" / "a.c").write_text("a\n")
+        (root / "t" / "b.h").write_text("b\n")
+        (root / "t" / "c.c").write_text("c\n")
+
+    answers = files_pair(farm, "find", ["t", "-regex", ".*\\.c", "-o", "-regex", ".*\\.h"], setup)
+    ok = answers[0][:3] == answers[1][:3]
+    return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][1]} ours {answers[1][1]}"])
+
+
+def files_codec_operands(farm):
+    """A codec goes on to the operands after one that cannot be opened, and
+    keeps the failure in its status (the reference: gzip -k a missing b
+    compresses a and b, names missing, exits 1). And a name that is only its
+    suffix is refused as an unknown suffix, which leaves the file and makes no
+    empty name; the reference's wording and status for that are gzip's own and
+    are not compared here."""
+    import gzip as gzip_module
+
+    def setup_operands(root):
+        (root / "a.txt").write_text("alpha\n")
+        (root / "b.txt").write_text("beta\n")
+
+    answers = files_pair(farm, "gzip", ["-k", "a.txt", "missing.txt", "b.txt"], setup_operands,
+                         collect=files_tree_listing)
+    notes = []
+    passed = total = 1
+    if answers[0][0] != answers[1][0] or answers[0][3] != answers[1][3]:
+        passed = 0
+        notes.append(f"gzip -k over a missing operand: reference {answers[0][0]} {answers[0][3]} "
+                     f"ours {answers[1][0]} {answers[1][3]}")
+
+    def setup_suffix(root):
+        (root / ".gz").write_bytes(gzip_module.compress(b"x\n", mtime=0))
+
+    answers = files_pair(farm, "gunzip", [".gz"], setup_suffix, collect=files_tree_listing)
+    total += 1
+    if answers[1][3] == answers[0][3] and answers[1][3] == [".gz"]:
+        passed += 1
+    else:
+        notes.append(f"gunzip .gz: reference {answers[0][3]} ours {answers[1][3]}")
+    return passed, total, notes
+
+
+def files_mode_words(farm):
+    """A mode that is no mode is refused with the reference's words, and the
+    word named is the whole word on the command line: an empty mode (chmod,
+    find -perm) and a word that begins with a minus and a mode letter (chmod
+    -fwx) are both refused, the chmod ones with the help line the reference
+    adds. Each is compared on status and standard error."""
+    def setup(root):
+        (root / "a.txt").write_text("a\n")
+
+    cases = (("chmod", ["", "a.txt"]), ("chmod", ["-fwx", "a.txt"]),
+             ("find", [".", "-perm", ""]), ("find", [".", "-perm", "-fwx"]),
+             ("mkdir", ["-m", "", "d"]))
+    passed = total = 0
+    notes = []
+    for name, args in cases:
+        answers = files_pair(farm, name, args, setup)
+        total += 1
+        if answers[0][0] == answers[1][0] and answers[0][2] == answers[1][2] and answers[1][0] != 0:
+            passed += 1
+        else:
+            notes.append(f"{name} {args}: reference {answers[0][0]} {answers[0][2]!r} ours {answers[1][0]} {answers[1][2]!r}")
+    return passed, total, notes
+
+
+def files_chmod_unreadable_report(farm):
+    """chmod -Rv over a tree with a directory that cannot be read: the report
+    is the one line the reference gives, with no mode printed for the
+    directory, and the status it leaves."""
+    def setup(root):
+        (root / "T" / "sub").mkdir(parents=True)
+        (root / "T" / "sub" / "f").write_text("f\n")
+        (root / "T" / "sub").chmod(0)
+
+    def collect(root):
+        #       chmod -R 644 took the search bit off T as well, so both are
+        #       given theirs back before the listing and before the removal.
+        (root / "T").chmod(0o755)
+        (root / "T" / "sub").chmod(0o755)
+        return files_tree_listing(root)
+
+    answers = files_pair(farm, "chmod", ["-Rv", "644", "T"], setup, collect=collect)
+    ok = answers[0][:3] == answers[1][:3]
+    return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][:3]!r} ours {answers[1][:3]!r}"])
+
+
+def files_whereis_directories_option(farm):
+    """whereis -B takes the directories after it up to the next option, and
+    -f must follow them: with none, the reference refuses "option -f is
+    missing", and with one it searches it and goes on. Both compared."""
+    def setup(root):
+        (root / "usr").mkdir()
+
+    passed = total = 0
+    notes = []
+    for args in (["-B", "-f", "ls"], ["-B", "usr", "-f", "ls"]):
+        answers = files_pair(farm, "whereis", args, setup)
+        total += 1
+        if answers[0][:3] == answers[1][:3]:
+            passed += 1
+        else:
+            notes.append(f"whereis {' '.join(args)}: reference {answers[0][:3]!r} ours {answers[1][:3]!r}")
+    return passed, total, notes
+
+
+def files_du_long_name_list(farm):
+    """du --files0-from with one name longer than the largest path: the
+    reference reports it and goes on; the name is not held past the limit."""
+    def setup(root):
+        (root / "list").write_bytes(b"a" * 4100 + b"\0")
+
+    answers = files_pair(farm, "du", ["--files0-from=list"], setup)
+    ok = answers[0][:3] == answers[1][:3]
+    return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][0]} {answers[0][2][:80]!r} ours {answers[1][0]} {answers[1][2][:80]!r}"])
+
+
 FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap, files_kill_bash_word, files_tar_short_archive, files_find_write_error, files_ls_address_cap,
-                files_floor_address_cap)
+                files_floor_address_cap, files_daystart_zones, files_statfs_names,
+                files_deep_walks, files_parents_deep, files_write_error_stdout,
+                files_find_write_error, files_exec_refusals, files_regex_switch,
+                files_codec_operands, files_mode_words, files_chmod_unreadable_report,
+                files_whereis_directories_option, files_du_long_name_list)
 
 # ---- domain: misc (from spec_misc.py) ----
 
