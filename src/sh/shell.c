@@ -2146,7 +2146,7 @@ static COLD bool shell_substitution_parses_fresh(string_address body,
         {
                 copy = null;
                 if (!shell_array_room(copy, room, length + 1))
-                        return true;
+                        return false;
         }
         for (positive at = 0; at < length; at++)
         {
