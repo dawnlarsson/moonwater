@@ -14,10 +14,11 @@
         What it draws is what the kernel's cells draw: the same palette, the
         same folding of a stored line at the width it is drawn in, a bar down
         the right that is the scrollback, seen while the view is scrolled
-        back, and the wheel and a drag on the bar to move over it. It owes the shell what the kernel's window
-        owed it -- keys, the pointer when a program has asked for it, a
-        window size on the pty before SIGWINCH, the hangup when the X is
-        pressed -- and those come through the same functions in screen.c.
+        back, and the wheel and a drag on the bar to move over it. It owes
+        the shell what the kernel's window owed it -- keys, the pointer when
+        a program has asked for it, a window size on the pty before SIGWINCH,
+        the hangup when the X is pressed -- and those come through the same
+        functions in screen.c.
 
         Two buffers, and the rule that comes with two. A buffer the compositor
         may still be reading is not drawn into: the cells go into the emulator
@@ -37,12 +38,15 @@
         The font is a path: the image carries IBM Plex Mono under
         /usr/share/fonts, and the machine script names it.
 
-            terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf] [-g COLUMNSxROWS] [-x PROGRAM [WORD]...]
+            terminal [-s PIXELS] [-f FONT.ttf]... [-b BOLD.ttf] [-g COLUMNSxROWS] [-w READY] [-x PROGRAM [WORD]...]
 
         -x runs a program on the pty in place of the shell (everything after it
         is the program's words), which is how the launcher shows a command's
         output: the window says how the program ended and stays, its text where
         it was, until a key is pressed or its X.
+
+        -w READY creates the file READY once the first picture is shown, which
+        is how whoever starts windows in an order knows the next one may go.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -873,9 +877,10 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
         if (!gutter || x + gutter > terminal.width || total <= shown || !terminal.bar_level)
                 return;
 
-        thumb = (unsigned int)((unsigned long)track * shown / total);
-        thumb = thumb < terminal.cell_h ? terminal.cell_h : thumb;
-        at = (unsigned int)((unsigned long)track * first / total);
+        // The thumb and its top are the ones the pointer is tested against (terminal_thumb, terminal_thumb_top): the
+        // two must agree when the thumb is made taller than its share, or a press on the thumb is not on it.
+        thumb = terminal_thumb(shown, total);
+        at = terminal_thumb_top(first, shown, total);
         at = at + thumb > track ? track - thumb : at;
 
         inset = gutter / 4 ? gutter / 4 : 1;
@@ -1094,7 +1099,14 @@ static unsigned int terminal_painters_ready(unsigned int bands)
                 engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
                 atlas = compositor_call(syscall(mmap), 0, TERMINAL_ATLAS * TERMINAL_ATLAS, 3, 0x22, (positive)-1, 0);
                 if ((engine < 0 && engine > -4096) || (atlas < 0 && atlas > -4096))
+                {
+                        // Whichever was mapped is given back: the next frame asks again, and would map it again.
+                        if (!(engine < 0 && engine > -4096))
+                                compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
+                        if (!(atlas < 0 && atlas > -4096))
+                                compositor_call(syscall(munmap), (positive)atlas, TERMINAL_ATLAS * TERMINAL_ATLAS, 0, 0, 0, 0);
                         return at;
+                }
                 terminal_painters[at].engine = (font_engine address_to)engine;
                 font_start(terminal_painters[at].engine, (p8 address_to)atlas, TERMINAL_ATLAS, TERMINAL_ATLAS);
         }
@@ -2006,8 +2018,7 @@ static fn terminal_exit_said(void)
 static b32 terminal_key_pressed(const struct window_event address_to event)
 {
         return event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && !(event->flags & WINDOW_KEY_REPEAT) &&
-               event->a != 29 && event->a != 42 && event->a != 54 && event->a != 56 && event->a != 97 && event->a != 100 &&
-               event->a != 125 && event->a != 126;
+               !terminal_modifier_key(event->a);
 }
 
 static b32 klog_drain(b32 far, b32 address_to gone, positive budget);
@@ -2341,7 +2352,7 @@ static b32 terminal_run(b32 reading)
                 }
                 if (dirty && !synchronized_output && last_frame)
                 {
-                        positive period = table->period ? table->period : TERMINAL_FRAME_NANOSECONDS;
+                        positive period = terminal_period();
                         positive since = clock_monotonic_nanoseconds() - last_frame;
 
                         if (since < period)
@@ -2400,9 +2411,9 @@ static b32 terminal_run(b32 reading)
                         to see it out.
                 */
                 {
-                        // A spare is one the compositor has taken the last picture from: until it has, the other buffer is the
-                // one it reads, and nothing is to be discarded.
-                b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
+                        // A spare is one the compositor has taken the last picture from: until it has, the other
+                        // buffer is the one it reads, and nothing is to be discarded.
+                        b32 spare = !dirty && !synchronized_output && terminal.shown >= 0 &&
                                     terminal.valid[1 - terminal.shown] && windows_ready(&terminal.own);
                         b32 stalled = dirty && !synchronized_output && terminal.shown >= 0 && !windows_ready(&terminal.own);
                         long ready = terminal_wait(master, spare && timeout < 0     ? TERMINAL_IDLE_NANOSECONDS

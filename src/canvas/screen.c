@@ -202,36 +202,6 @@ static void term_hang_up(bipolar child, b32 address_to hung)
 }
 
 /*
-        What is left of a window whose shell is gone: its cells, until the X.
-        Keys and the pointer are taken and dropped, since nothing is there to
-        send them to, and a resize is still drawn. It sleeps in between: the
-        compositor wakes it for a key, a new grid and the close request.
-*/
-static fn term_linger(void)
-{
-        struct window_key dropped;
-
-        cursor_show();
-        window_damage(window, 0, ROWS);
-        window_flush(window);
-
-        while (!window_closing(window))
-        {
-                while (window_key(window, address_of dropped))
-                        ;
-
-                if (window->columns != COLUMNS || window->rows != ROWS)
-                {
-                        regrid(-1);
-                        window_damage(window, 0, ROWS);
-                        window_flush(window);
-                }
-
-                window_wait(window, -1, -1);
-        }
-}
-
-/*
         What the pty's far end runs when it is not the shell: a program and its
         words, set by a terminal that was asked for one (terminal.c, -x). Null
         is the shell, as it always was.
@@ -248,8 +218,7 @@ static positive term_exit_status;
         Answers the shell's pid, with the pty's master in master and the
         count of processes the kernel had killed for want of memory in
         oom_kills, or a negative number after saying why not and with nothing
-        left open. The window the caller draws in, the kernel's or a compositor's, is its own to
-        close then.
+        left open. The window the caller draws in is its own to close then.
 
         Waiting for the other end to exist.
 
@@ -365,9 +334,9 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
 /*
         A key or a pointer report, as the bytes it is for.
 
-        The kernel window's key ring and a compositor window's events both come through here as
-        a window_key, so what a Return, a Ctrl+C and a click turn into is
-        one rule. False when the pty will take no more.
+        A compositor window's events come through here as a window_key, so
+        what a Return, a Ctrl+C and a click turn into is one rule. False when
+        the pty will take no more.
 */
 static b32 term_input(b32 master, const struct window_key address_to key)
 {
@@ -517,8 +486,8 @@ static b32 spark_report_close(b32 device, b32 result)
         What the kernel spends starting a program, per phase.
 
         The module has kept these counters since the spark loader was
-        written and nothing has ever read them, so the cost of a spawn has
-        only ever been visible from outside as wall clock. The phases are
+        written, and until this report read them the cost of a spawn was
+        only visible from outside as wall clock. The phases are
         nested: task is user_mode_thread, exec is the whole of
         kernel_execve, loader is our binary format handler inside it, and
         map is the three region mappings inside that. What exec has that
