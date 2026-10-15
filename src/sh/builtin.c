@@ -25621,10 +25621,9 @@ fn shell_ulimit(writer write)
                         //      A negative limit is no number to either
                         //      shell; dash reads only digits there.
                         if (!good || asked < 0 ||
-                            (shell_bash_compat &&
-                             ((positive)asked >
-                                  (UL_LIMIT_INFINITE - 1) /
-                                      shell_limit_step(chosen))))
+                            (positive)asked >
+                                (UL_LIMIT_INFINITE - 1) /
+                                    shell_limit_step(chosen))
                         {
                                 shell_answer(shell_bash_compat ? 1 : 2);
 
