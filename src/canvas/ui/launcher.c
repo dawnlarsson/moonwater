@@ -732,27 +732,17 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
 static fn launcher_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &launcher.ui;
-        int pad = ui_px(&launcher.ui, UI_PAD), inset = ui_px(&launcher.ui, 14);
+        int pad = ui_px(&launcher.ui, UI_PAD), inset = ui_px(&launcher.ui, UI_INSET);
         int field = ui_px(&launcher.ui, LAUNCHER_FIELD), row = ui_px(&launcher.ui, LAUNCHER_ROW);
         int top = pad + field + ui_px(&launcher.ui, LAUNCHER_GAP), width = launcher.width - 2 * pad;
 
-        ui->pixels = pixels;
-        ui->pitch = launcher.own.table->stride;
-        ui->width = launcher.width;
-        ui->height = launcher.height;
-        ui->top = 0;
-        ui->bottom = launcher.height;
-        ui_clear(ui);
+        ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
 
         // The field is its text, a caret and one line under it: no well and no ring.
         {
                 int left = pad + inset, right = pad + width - inset, baseline = ui_baseline(ui, pad, field, LAUNCHER_TEXT_SIZE);
-                int measured = ui_measure(ui, (string_address)launcher.text, LAUNCHER_TEXT_SIZE, false) + 2 * ui->scale;
-                int shift = measured > right - left ? measured - (right - left) : 0, drawn, capital = ui_capital(ui, LAUNCHER_TEXT_SIZE);
 
-                drawn = ui_run(ui, left - shift, baseline, (string_address)launcher.text, LAUNCHER_TEXT_SIZE, false, ui->ink, 255, left, right);
-                ui_fill(ui, left - shift + drawn + ui->scale, baseline - capital - 2 * ui->scale, ui->scale, capital + 4 * ui->scale,
-                        ui_tone(ui->ink, 255));
+                ui_field_text(ui, left, right, baseline, (string_address)launcher.text, LAUNCHER_TEXT_SIZE, true);
                 if (!launcher.text[0])
                         ui_text(ui, left + 3 * ui->scale, baseline, (string_address) "Search programs, or type a command", LAUNCHER_TEXT_SIZE,
                                 false, ui->quiet, 255);
@@ -917,18 +907,13 @@ static b32 launcher_focus(b32 focused)
         return true;
 }
 
-static fn launcher_repaint(void)
-{
-        launcher.dirty = true;
-}
-
 static struct ui_app launcher_app = {
         .own = &launcher.own,
         .ui = &launcher.ui,
         .missing = (string_address) "launcher: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Launcher",
         .glass = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS,
-        .plain = true,
+        .no_bold = true,
         .nofont = (string_address) "launcher: no font to draw with (-f FONT.ttf), pid ",
         .dirty = &launcher.dirty,
         .focused = &launcher.focused,
@@ -937,7 +922,6 @@ static struct ui_app launcher_app = {
         .frame = launcher_frame,
         .event = launcher_event,
         .focus = launcher_focus,
-        .changed = launcher_repaint,
         .size = launcher_size,
 };
 
@@ -945,7 +929,6 @@ static b32 launcher_main()
 {
         string_address regular = (string_address) UI_FONT_REGULAR;
 
-        claim_standard_descriptors();
         memory_zero(&launcher, sizeof(launcher));
         launcher.shown = -1;
 

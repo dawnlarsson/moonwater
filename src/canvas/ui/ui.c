@@ -38,6 +38,7 @@
 #define UI_TITLE 20    // the window's title
 #define UI_ROW 40      // a row
 #define UI_PAD 16      // the window's margin
+#define UI_INSET 14    // the inset of a panel's content from its edge
 #define UI_RADIUS 8    // a focused row's and a field's corners, as the windows'
 #define UI_SWITCH_W 36 // a switch
 #define UI_SWITCH_H 20
@@ -164,6 +165,18 @@ static fn ui_clear(struct ui address_to ui)
         if (bottom > top)
                 memory_fill_u32_rect(ui->pixels + (unsigned long)top * ui->pitch, (positive)ui->pitch, (positive)ui->width,
                                      (positive)(bottom - top), 0);
+}
+
+// The picture of a whole window, width by height, its rows pitch pixels apart, cleared to the glass.
+static fn ui_begin(struct ui address_to ui, unsigned int address_to pixels, unsigned long pitch, int width, int height)
+{
+        ui->pixels = pixels;
+        ui->pitch = pitch;
+        ui->width = width;
+        ui->height = height;
+        ui->top = 0;
+        ui->bottom = height;
+        ui_clear(ui);
 }
 
 static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, unsigned int tone)
@@ -597,6 +610,31 @@ static fn ui_option(struct ui address_to ui, int x, int y, int width, int height
 }
 
 /*
+        A run of text in a field, from left to right on baseline, at size. Typed
+        in, a text wider than the well shows its end, the caret after it: the
+        start is cut off at the well's edge.
+*/
+static fn ui_field_text(struct ui address_to ui, int left, int right, int baseline, string_address text, int size, b32 typing)
+{
+        int shift = 0, drawn;
+
+        if (typing)
+        {
+                int measured = ui_measure(ui, text, size, false) + 2 * ui->scale;
+
+                shift = measured > right - left ? measured - (right - left) : 0;
+        }
+        drawn = ui_run(ui, left - shift, baseline, text, size, false, ui->ink, 255, left, right);
+        if (typing)
+        {
+                int capital = ui_capital(ui, size);
+
+                ui_fill(ui, left - shift + drawn + ui->scale, baseline - capital - 2 * ui->scale, ui->scale,
+                        capital + 4 * ui->scale, ui_tone(ui->ink, 255));
+        }
+}
+
+/*
         A field to type in, x, y, width by height: a faint well, ringed while
         it is typed in, the text at its left and, while typed in, the caret
         after the text.
@@ -605,26 +643,11 @@ static fn ui_field(struct ui address_to ui, int x, int y, int width, int height,
 {
         int radius = (UI_RADIUS - 2) * ui->scale, pad = 8 * ui->scale;
         int baseline = ui_baseline(ui, y, height, UI_TEXT);
-        int left = x + pad, right = x + width - pad, shift = 0, drawn;
 
         ui_round(ui, x, y, width, height, radius, ui_tone(ui->ink, typing ? 30 : 18));
         if (typing)
                 ui_outline(ui, x, y, width, height, radius, UI_RING * ui->scale, ui->ring);
-        // Typed in, a text wider than the well shows its end, the caret after it: the start is cut off at the well's edge.
-        if (typing)
-        {
-                int measured = ui_measure(ui, text, UI_TEXT, false) + 2 * ui->scale;
-
-                shift = measured > right - left ? measured - (right - left) : 0;
-        }
-        drawn = ui_run(ui, left - shift, baseline, text, UI_TEXT, false, ui->ink, 255, left, right);
-        if (typing)
-        {
-                int capital = ui_capital(ui, UI_TEXT);
-
-                ui_fill(ui, left - shift + drawn + ui->scale, baseline - capital - 2 * ui->scale, ui->scale,
-                        capital + 4 * ui->scale, ui_tone(ui->ink, 255));
-        }
+        ui_field_text(ui, x + pad, x + width - pad, baseline, text, UI_TEXT, typing);
 }
 
 // A logical size in pixels at the window's scale.
@@ -639,18 +662,23 @@ static long ui_map(positive size)
         return compositor_call(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
 }
 
-// A font engine and its atlas, as one mapping: a static atlas is 256 KiB of the image's address space in every program that
-// links this, a shell under a 12 MiB cap among them. False when the memory is not there.
-static b32 ui_engine_open(struct ui address_to ui)
+// A font engine and its atlas, atlas pixels a side, as one mapping. The default, 512, is 256 KiB of the image's address space
+// in every program that links this, a shell under a 12 MiB cap among them. False when the memory is not there.
+static b32 ui_engine_open_sized(struct ui address_to ui, positive atlas)
 {
         positive atlas_at = (sizeof(font_engine) + 4095) & ~(positive)4095;
-        long engine = ui_map(atlas_at + 512 * 512);
+        long engine = ui_map(atlas_at + atlas * atlas);
 
         if (engine < 0 && engine > -4096)
                 return false;
         ui->engine = (font_engine address_to)engine;
-        font_start(ui->engine, (p8 address_to)(engine + atlas_at), 512, 512);
+        font_start(ui->engine, (p8 address_to)(engine + atlas_at), (p32)atlas, (p32)atlas);
         return true;
+}
+
+static b32 ui_engine_open(struct ui address_to ui)
+{
+        return ui_engine_open_sized(ui, 512);
 }
 
 // A face from a font file, loaded into the engine's face. False when there is no path, the file, or a font in it.
@@ -684,9 +712,10 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 }
 
 /*
-        One app's window and loop. The runner takes the window, sets its title,
-        glass, scale and ground, and calls open. Then it runs the loop: events,
-        closing, focus, ground, the size asked for by the hand, a due picture,
+        One app's window and loop. The runner claims the standard descriptors,
+        takes the window, sets its title, glass, scale and ground, and calls
+        open. Then it runs the loop: events, closing, focus, ground, the size
+        asked for by the hand, a due picture,
         the app's tick and its one descriptor, and the wait. An app keeps its
         state and its pictures; it does not repeat the loop.
 */
@@ -701,19 +730,27 @@ struct ui_app
         b32 address_to focused;         // the app's own: the keys are its
         unsigned int address_to ground; // the app's own: the window's ground, as the loop last saw it
         unsigned int asked_w, asked_h;  // the size the hand last asked for
-        string_address font, bold;      // the faces to draw in, or the UI_FONT defaults; bold is none when plain
-        b32 plain;
+        string_address font, bold;      // the faces to draw in, or the UI_FONT defaults
+        b32 no_bold;                    // true: no bold face is loaded; the default is the bold face
         string_address nofont;          // logged, with the pid, when the faces do not load
         int (*open)(void);              // the app's own start; -1 runs the loop, else the status to leave with
         b32 (*frame)(void);             // paints the due picture; false: it is due again in 50 ms
         b32 (*event)(const struct window_event address_to event); // false: quit
         b32 (*focus)(b32 focused);      // the keys came or went, optional; false: quit
-        void (*changed)(void);          // every row is due, after a ground change or a focus change
+        void (*changed)(void);          // optional: run after a ground or focus change, which also makes the picture due
         void (*size)(unsigned int width, unsigned int height);     // the hand asked for this size
         long (*tick)(long timeout, long address_to other);         // the app's timer; 0 runs the loop again now; other: a descriptor
         void (*ready)(void);            // other is readable
         void (*close)(void);            // before the window is left
 };
+
+// Every row is due: the picture, and the app's changed hook when it has one.
+static fn ui_app_changed(struct ui_app address_to app)
+{
+        *app->dirty = true;
+        if (app->changed)
+                app->changed();
+}
 
 static int ui_app_run(struct ui_app address_to app)
 {
@@ -722,6 +759,7 @@ static int ui_app_run(struct ui_app address_to app)
         int status;
         b32 running = true;
 
+        claim_standard_descriptors();
         if (windows_take(app->own) < 0)
         {
                 log_direct((address_any)app->missing, string_length((const_string)app->missing));
@@ -737,7 +775,7 @@ static int ui_app_run(struct ui_app address_to app)
                 return 1;
         }
         app->ui->regular = &app->ui->faces[0];
-        app->ui->bold = !app->plain && ui_face_load(&app->ui->faces[1], app->bold ? app->bold : (string_address)UI_FONT_BOLD)
+        app->ui->bold = !app->no_bold && ui_face_load(&app->ui->faces[1], app->bold ? app->bold : (string_address)UI_FONT_BOLD)
                             ? &app->ui->faces[1] : null;
         string_copy((string_address)table->title[row], app->title);
         table->glass[row] = app->glass;
@@ -766,7 +804,7 @@ static int ui_app_run(struct ui_app address_to app)
                 if ((table->focus == row) != *app->focused)
                 {
                         *app->focused = table->focus == row;
-                        app->changed();
+                        ui_app_changed(app);
                         if (app->focus && !app->focus(*app->focused))
                                 running = false;
                 }
@@ -774,7 +812,7 @@ static int ui_app_run(struct ui_app address_to app)
                 {
                         *app->ground = table->ground[row];
                         ui_inks(app->ui, *app->ground);
-                        app->changed();
+                        ui_app_changed(app);
                 }
                 if (table->want_width[row] && table->want_height[row] &&
                     (table->want_width[row] != app->asked_w || table->want_height[row] != app->asked_h))
