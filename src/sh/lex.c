@@ -41,8 +41,8 @@ static bool shell_stack_within(positive percent)
         {
                 positive limits[2] = {0, 0};
 
-                // The soft limit, kept to what the kernel leaves room below the stack
-                // for whatever the limit was when it started the program.
+                // The soft stack limit the program started with, or 8 MiB
+                // when the kernel reports less than 1 MiB of it.
                 if (system_call_4(syscall(prlimit64), 0, 3, 0, (positive)limits) < 0 ||
                     limits[0] < ((positive)1 << 20))
                         limits[0] = (positive)8 << 20;
@@ -735,17 +735,6 @@ static string_address lex_quote_end_kind(string_address at, p8 quote,
         return step;
 }
 
-/*
-        Past a nesting that a word carries whole.
-
-        $( ), ${ } and a backtick pair hold whatever is between them, blanks and
-        operators included, because what is in there is a command or a name and
-        not this line's business.
-
-        Returns where the nesting ends, one past its closing byte, or where it
-        started when there is no closing byte at all -- an unfinished one is the
-        parser's to complain about, the same as an unfinished quote.
-*/
 /* Whether the operator after a parameter name is # or %, the two POSIX
    pattern-removal forms whose words retain single-quote handling inside an
    outer double quote. */
@@ -937,6 +926,17 @@ static bool lex_cases_operator(lex_cases address_to cases, string_address at,
         return false;
 }
 
+/*
+        Past a nesting that a word carries whole.
+
+        $( ), ${ } and a backtick pair hold whatever is between them, blanks and
+        operators included, because what is in there is a command or a name and
+        not this line's business.
+
+        Returns where the nesting ends, one past its closing byte, or where it
+        started when there is no closing byte at all -- an unfinished one is the
+        parser's to complain about, the same as an unfinished quote.
+*/
 static string_address lex_nesting_at(string_address at, positive nesting,
                                      bool posix_double)
 {
@@ -1146,13 +1146,6 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                     lex_dless_candidate(line, step))
                         maybe_here = true;
 
-                // A backtick pair has the same byte at both ends, so it
-                // opens on the first one and closes on the next.
-                // `${...}` ends at the first unquoted `}`: nested
-                // substitutions are walked above, and a bare `{` is not
-                // another expansion. The opening brace still counts
-                // (depth is 0 only on that first byte). Parentheses in
-                // `$( )` / `$(( ))` keep nesting.
                 if (commands && depth && lex_operator[c] &&
                     lex_cases_operator(&cases, step, depth))
                 {
@@ -1160,6 +1153,13 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                         fresh = true;
                         continue;
                 }
+                // A backtick pair has the same byte at both ends, so it
+                // opens on the first one and closes on the next.
+                // `${...}` ends at the first unquoted `}`: nested
+                // substitutions are walked above, and a bare `{` is not
+                // another expansion. The opening brace still counts
+                // (depth is 0 only on that first byte). Parentheses in
+                // `$( )` / `$(( ))` keep nesting.
                 if (open == close)
                 {
                         if (c == open)
@@ -1494,14 +1494,6 @@ HOT b32 lex_unfinished(string_address line)
 }
 
 /*
-        One word, quotes and all.
-
-        A run of ordinary bytes is taken whole by string_span; anything else is
-        one byte of decision and then another run. A quote swallows to its
-        partner, a backslash swallows the byte after it, and both stay in the
-        text for the expander to deal with in its own order.
-*/
-/*
         Whether what has been read so far is the left of an assignment.
 
         This is the only question that makes a=(x y z) one word rather than a
@@ -1565,6 +1557,16 @@ static bool lex_compound_body_legal(string_address open)
                 if (lex_is_space(c))
                 {
                         at++;
+                        continue;
+                }
+
+                //      A # that begins a word is a comment to the end of
+                //      the line, as it is in the rest of a list: its quotes,
+                //      parentheses and operators are not the list's.
+                if (c == '#' && (at == open + 1 || lex_is_space(at[-1])))
+                {
+                        while (string_get(at) && string_not(at, '\n'))
+                                at++;
                         continue;
                 }
 
@@ -1689,6 +1691,14 @@ static bool lex_subscript_unclosed(string_address at)
         return true;
 }
 
+/*
+        One word, quotes and all.
+
+        A run of ordinary bytes is taken whole by string_span; anything else is
+        one byte of decision and then another run. A quote swallows to its
+        partner, a backslash swallows the byte after it, and both stay in the
+        text for the expander to deal with in its own order.
+*/
 static HOT KEEP b32 lex_word(string_address address_to at)
 {
         string_address step = address_to at;
