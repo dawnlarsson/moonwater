@@ -18014,45 +18014,22 @@ static bool ul_size(string_address text, positive address_to value)
 
         if (fraction)
         {
-                positive divisor = 10;
-                positive place = 1;
+                //      The fraction times scale, from its least significant
+                //      digit up: each digit's share is divided once, so the
+                //      truncation is that of the whole product, not of each
+                //      digit's share. Leading zeros shrink it by ten each.
+                positive total = 0;
 
-                while (divisor < fraction)
+                while (fraction)
                 {
-                        if (divisor <= positive_max / 10)
-                                divisor *= 10;
-                        else
-                                fraction /= 10;
-                }
-                while (fraction_zeros--)
-                {
-                        if (divisor <= positive_max / 10)
-                                divisor *= 10;
-                        else
-                                fraction /= 10;
-                }
-
-                do
-                {
-                        positive digit = fraction % 10;
-                        positive represented = divisor / place;
-
+                        total = (scale * (fraction % 10) + total) / 10;
                         fraction /= 10;
-                        if (digit)
-                        {
-                                positive add = scale / (represented / digit);
-
-                                if (whole > positive_max - add)
-                                        return false;
-                                whole += add;
-                        }
-                        if (fraction)
-                        {
-                                if (place > positive_max / 10)
-                                        return false;
-                                place *= 10;
-                        }
-                } while (fraction);
+                }
+                for (; fraction_zeros && total; fraction_zeros--)
+                        total /= 10;
+                if (whole > positive_max - total)
+                        return false;
+                whole += total;
         }
 
         address_to value = whole;
