@@ -96466,6 +96466,43 @@ static fn reuse_stable_arena(void)
               !memory_arena_read_tail(&arena, (positive)-1, 16, 16, 16,
                                        &used, &read_failed) &&
               read_failed && !used && arena.used == 16);
+
+        /*
+                A room that is not a multiple of the alignment: 83 bytes with
+                16 taken, so 67 are left, and the block that fits is the
+                aligned floor, 64. The first read size of 20 grows to 40, and
+                the next step asked for 80, which was cut to the 67 left and
+                rounded past the room, so the read failed with 50 bytes that
+                fit.
+        */
+        {
+                p8 roomy[160] __attribute__((aligned(32)));
+                p8 tail[50];
+                b32 pipe[2];
+                positive length = sizeof(tail), roomy_used = 0;
+                bool roomy_failed = false;
+
+                for (positive at = 0; at < sizeof(tail); at++)
+                        tail[at] = (p8)(at + 1);
+                memory_fill(roomy, 0xa5, sizeof(roomy));
+                memory_arena roomy_arena = {roomy, 83, 16};
+                if (system_call_2(syscall(pipe2), (positive)pipe, 0) < 0)
+                {
+                        check("arena fixture opens its pipe", false);
+                        return;
+                }
+                bool sent = system_call_3(syscall(write), pipe[1],
+                                           (positive)tail, length) == (bipolar)length;
+                system_close(pipe[1]);
+                p8 address_to answer = memory_arena_read_tail(
+                    &roomy_arena, pipe[0], 16, 20, 16, &roomy_used, &roomy_failed);
+                system_close(pipe[0]);
+                check("arena read takes the aligned floor of an unaligned room",
+                      sent && answer == roomy + 16 && !roomy_failed &&
+                      roomy_used == length && !answer[length] &&
+                      !memory_compare(answer, tail, length) &&
+                      roomy_arena.used == 16 + 64);
+        }
 }
 
 static p8 reuse_hex(p8 value)
@@ -97051,9 +97088,9 @@ b32 main(void)
               nice_adjustment("-18446744073709551616", &number) && number == -39 &&
               !nice_adjustment("18446744073709551616x", &number));
         check("chmod rejects octal overflow",
-              !file_mode_adjust("2000000000000000000000", 0, false, 0, false, &mode));
+              !file_mode_adjust("2000000000000000000000", 0, false, 0, false, &mode, false));
         check("chmod keeps explicit leading-zero policy",
-              file_mode_adjust("0000755", 06000, true, 0, false, &mode) && mode == 0755);
+              file_mode_adjust("0000755", 06000, true, 0, false, &mode, false) && mode == 0755);
         check("replay refuses nanosecond ceil-add overflow",
               !process_replay_sleep(18446744055453255927ull, 999999999, true, 0));
         positive duration;

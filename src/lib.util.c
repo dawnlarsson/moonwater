@@ -2540,10 +2540,15 @@ static p8 address_to memory_arena_read_tail(
                 {
                         positive larger = room < positive_max
                             ? memory_growth(room, room + 1, first) : 0;
-                        positive available = arena->room - mark;
+                        //      memory_arena_take rounds a size up to alignment,
+                        //      so the largest block that fits past the mark is
+                        //      the aligned floor of what is left; and a block
+                        //      no larger than the room already held is no
+                        //      progress.
+                        positive available = (arena->room - mark) & ~(alignment - 1);
                         if (larger > available)
-                                larger = room < available ? available : 0;
-                        if (!larger)
+                                larger = available;
+                        if (larger <= room)
                                 goto failed;
                         arena->used = mark;
                         bytes = memory_arena_take(arena, larger, alignment);
