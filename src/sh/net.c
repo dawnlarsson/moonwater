@@ -2857,7 +2857,8 @@ static COLD fn net_sysctl(string_address path, string_address value)
         system_close((positive)handle);
 }
 
-//      "directory/name/leaf" into `to`, cut short when it would not fit.
+//      "directory/name/leaf" into `to`, or the empty path when it would not
+//      fit: the open of that path then fails, and nothing is written.
 static COLD fn net_sysctl_path(p8 address_to to, positive size,
                                string_address directory, string_address name,
                                string_address leaf)
