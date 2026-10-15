@@ -1864,12 +1864,12 @@ static b32 host_place_written(string_address system, string_address running,
         if (!host_image_is(next, source, carry))
                 return host_refuse("%s is not the image it was copied from\n", next);
 
+        if (!host_image_build(next, build, sizeof(build)) ||
+            !string_equals(build, running))
+                return host_refuse("%s did not read back as this build\n", next);
+
         failed = system_rename_at(AT_FDCWD, next, AT_FDCWD, image, 0);
         return_if(failed < 0, host_fail(image, failed));
-
-        if (!host_image_build(image, build, sizeof(build)) ||
-            !string_equals(build, running))
-                return host_refuse("%s did not read back as this build\n", image);
 
         {
                 bipolar directory = system_open_at(AT_FDCWD, system,
