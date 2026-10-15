@@ -139,6 +139,14 @@ static positive term_oom_kills(void)
 }
 
 /*
+        What the pty's far end runs when it is not the shell: a program and its
+        words, set by a terminal that was asked for one (terminal.c, -x). Null
+        is the shell, as it always was.
+*/
+static string_address address_to term_program_words;
+static positive term_program_count;
+
+/*
         The shell went by a signal this window did not send.
 
         A window that closed then could not be told from one that crashed, and
@@ -162,7 +170,9 @@ static fn term_child_killed(positive signal, string_address name,
         term_line_editing(false);
         term_bytes(restore, sizeof(restore) - 1);
 
-        string_copy(line, (string_address) "[shell killed by signal ");
+        // A -x program is what ended, not a shell.
+        string_copy(line, term_program_count ? (string_address) "[program killed by signal "
+                                             : (string_address) "[shell killed by signal ");
         at = string_length(line);
         at += positive_into_string(line + at, signal);
 
@@ -200,14 +210,6 @@ static void term_hang_up(bipolar child, b32 address_to hung)
         system_call_2(syscall(kill), (positive)(-child), SIGHUP);
         *hung = 1;
 }
-
-/*
-        What the pty's far end runs when it is not the shell: a program and its
-        words, set by a terminal that was asked for one (terminal.c, -x). Null
-        is the shell, as it always was.
-*/
-static string_address address_to term_program_words;
-static positive term_program_count;
 
 // How the program that ended did, as wait4 said it: set by term_finish.
 static positive term_exit_status;

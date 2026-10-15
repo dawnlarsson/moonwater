@@ -4133,8 +4133,9 @@ fn regrid(b32 master)
                 which the cursor could remain absent until some later input.
                 Publish the new grid, put the cursor into that grid, damage
                 it, and synchronously commit before returning. master is -1
-                where the caller paints the cells itself: the emulator harness,
-                and the resize paths in screen.c and terminal.c.
+                where the caller paints the cells itself and there is no pty to
+                tell: the emulator harness, and the resize in terminal.c, which
+                tells the pty itself after this.
         */
         if (master >= 0 || cursor_was_shown)
                 cursor_show();
@@ -4151,5 +4152,6 @@ fn regrid(b32 master)
                 touched_bottom = 0;
         }
 
-        grid_tell(master);
+        if (master >= 0)
+                grid_tell(master);
 }

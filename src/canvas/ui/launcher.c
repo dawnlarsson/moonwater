@@ -18,7 +18,7 @@
                                  new terminal window.
 
         A terminal that was started for a program shows what it wrote and says
-        how it ended, then stays until a key is pressed (terminal.c, -x). A text
+        how it ended, then stays until a key is pressed (ui/terminal.c, -x). A text
         that is a command line (a blank, a pipe, a redirect, a quote, anything a
         shell reads as more than one plain word) or that no program is named
         by is what the highlighted row starts as, the command row, so Enter on it

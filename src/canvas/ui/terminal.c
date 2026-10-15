@@ -58,8 +58,8 @@
 // them, and never fewer than two screens of the tallest window the output could hold.
 #define TERMINAL_HISTORY 512
 #define TERMINAL_FACES 4
-// The words of a program a terminal runs in place of the shell (-x), the program's own among them.
-#define TERMINAL_PROGRAM_WORDS 16
+// Every face the options can name: each -f font, and the -b face after them.
+#define TERMINAL_FACE_SLOTS (TERMINAL_FACES + 1)
 // The window of each on a plain boot, as percents of the output: the width and height it takes and where its top left
 // corner goes. The log is behind and the terminal in front, over the log's right edge; the compositor keeps both on the
 // work area, which the shares leave room for at any scale a panel takes.
@@ -115,7 +115,7 @@ typedef unsigned long long __attribute__((may_alias)) terminal_word;
 static struct
 {
         struct window_row own; // its row of the compositor's table
-        font_face face[TERMINAL_FACES];
+        font_face face[TERMINAL_FACE_SLOTS];
         const font_face *plain[TERMINAL_FACES];
         const font_face *bold[TERMINAL_FACES];
         unsigned int plain_count, bold_count;
@@ -1338,7 +1338,7 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
         if ((engine < 0 && engine > -4096) || (atlas < 0 && atlas > -4096))
                 return false;
 
-        for (unsigned int at = 0; at <= count && faces < TERMINAL_FACES; at++)
+        for (unsigned int at = 0; at <= count && faces < TERMINAL_FACE_SLOTS; at++)
         {
                 string_address path = at < count ? paths[at] : bold;
                 positive length = 0;
@@ -2031,7 +2031,6 @@ static b32 klog_receive(const struct window_event address_to event, b32 address_
 static b32 terminal_run(b32 reading)
 {
         string_address paths[TERMINAL_FACES];
-        string_address program_words[TERMINAL_PROGRAM_WORDS];
         string_address bold = null, ready_file = null;
         unsigned int cells[2] = {0, 0};
         unsigned int count = 0, size = 0, columns, rows;
@@ -2055,10 +2054,9 @@ static b32 terminal_run(b32 reading)
                 // The rest is the program's own words, whatever they look like.
                 if (option[1] == 'x' && !reading)
                 {
-                        for (; at + 1 < program_argument_count() && term_program_count + 1 < TERMINAL_PROGRAM_WORDS; at++)
-                                program_words[term_program_count++] = program_argument(at + 1);
-                        program_words[term_program_count] = null;
-                        term_program_words = program_words;
+                        // The words are the kernel's argv from here on, every one of them, ended by its null as always.
+                        term_program_words = program_argument_list() + at + 1;
+                        term_program_count = (positive)program_argument_count() - (at + 1);
                         break;
                 }
                 at++;

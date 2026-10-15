@@ -916,12 +916,12 @@ static bool floodlight_parent_supervised;
 #ifndef SHELL_UTILITY_PROGRAM
 #include "../canvas/font.c"
 #include "../canvas/compositor.c"
-#include "../canvas/terminal.c"
-#include "../canvas/klog.c"
 #include "../canvas/ui/features.h"
 #if MOONWATER_UI_ANY
 #include "../canvas/ui/ui.c"
 #endif
+#include "../canvas/ui/terminal.c"
+#include "../canvas/klog.c"
 #if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
 #include "../canvas/ui/battery.c"
 #endif

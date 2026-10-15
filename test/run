@@ -10137,7 +10137,7 @@ if [ -z "${TEST_RUNNER:-}" ] && command -v python3 > /dev/null 2>&1; then
         fi
 fi
 
-#       The terminal that draws its own pixels (src/canvas/terminal.c): a frame
+#       The terminal that draws its own pixels (src/canvas/ui/terminal.c): a frame
 #       draws only the cells that changed in the buffer it has and tells the
 #       compositor only the rows it has to read again. The check keeps a model
 #       of the compositor's screen, runs the emulator through a stream of

@@ -108574,11 +108574,11 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/screen.c"
 #include "../src/canvas/font.c"
 #include "../src/canvas/compositor.c"
-#include "../src/canvas/terminal.c"
 #include "../src/canvas/ui/features.h"
 #if MOONWATER_UI_ANY
 #include "../src/canvas/ui/ui.c"
 #endif
+#include "../src/canvas/ui/terminal.c"
 #if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
 #include "../src/canvas/ui/battery.c"
 #endif

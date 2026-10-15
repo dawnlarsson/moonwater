@@ -1,7 +1,7 @@
 /*
         The kernel log, as a window on the compositor in userspace.
 
-        `klog` is the terminal (terminal.c) with a far end that is the kernel's
+        `klog` is the terminal (ui/terminal.c) with a far end that is the kernel's
         ring instead of a shell: the same cells, the same text engine, the same
         bar and wheel, and a window that is sized as the terminal's is. It
         opens /dev/kmsg without waiting and reads it from the first record the
