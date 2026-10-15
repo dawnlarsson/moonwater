@@ -36033,7 +36033,7 @@ static fn process_execute_shell(string_address path,
                 memory_copy(words + 2, arguments + 1,
                             (count - 1) * sizeof(*arguments));
 
-        words[count + 1] = null;
+        words[count > 1 ? count + 1 : 2] = null;
 
         execve(words[0], words, environment);
 }
