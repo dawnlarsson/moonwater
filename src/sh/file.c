@@ -39563,13 +39563,9 @@ static bool install_strip_run(string_address name)
                 return false;
         }
         refuse_if(waited < 0, false, "install: waiting for strip: %s\n", file_reason(waited));
-        if (status & 0x7f)
+        if ((status & 0x7f) || wait_status_code(status))
                 return string_report(log_error, false,
                                      "install: strip process terminated abnormally\n");
-        if (wait_status_code(status))
-                return string_report(log_error, false,
-                                     "install: strip process exited with status %p\n",
-                                     (positive)wait_status_code(status));
         return true;
 }
 
