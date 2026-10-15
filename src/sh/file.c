@@ -28465,18 +28465,8 @@ static b32 file_split()
             .stage = {.directory = -1, .handle = -1},
         };
 
-        //      Writes to a filter that has gone are EPIPE, not a signal, and
-        //      the commands get SIGPIPE's disposition back if it was the
-        //      default.
         split_status = 0;
 
-        positive pipe_before[4] = {0};
-
-        if (filter)
-        {
-                system_signal_install(13, 1, 0, 0, pipe_before);
-                split_pipe_default = pipe_before[0] == 0;
-        }
         memory_fill(output.suffix, output.radix ? '0' : 'a', suffix_length);
 
         string_address first_suffix = split_suffix_start;
@@ -28547,6 +28537,18 @@ static b32 file_split()
         if (mode == 'n' && chunk.kind == SPLIT_CHUNK_RR && !chunk.k &&
             chunk.n > SPLIT_COUNT_MAX / 32)
                 return string_report(log_error, 1, "split: memory exhausted\n");
+
+        //      Writes to a filter that has gone are EPIPE, not a signal, and
+        //      the commands get SIGPIPE's disposition back if it was the
+        //      default. The checks above return, so the install is made only
+        //      once nothing can return before the restore below.
+        positive pipe_before[4] = {0};
+
+        if (filter)
+        {
+                system_signal_install(13, 1, 0, 0, pipe_before);
+                split_pipe_default = pipe_before[0] == 0;
+        }
 
         bool complete = false;
 
