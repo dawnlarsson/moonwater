@@ -3752,53 +3752,6 @@ static b32 settings_frame(void)
 
 /* ---- the program ---- */
 
-// Whether a process is this program: its name.
-static b32 settings_is(unsigned int pid)
-{
-        p8 path[40] = "/proc/", name[16] = {0};
-        bipolar handle;
-
-        path[6 + positive_into_string(path + 6, (positive)pid)] = 0;
-        string_copy((string_address)path + string_length((string_address)path), (string_address) "/comm");
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
-        if (handle < 0)
-                return false;
-        system_read_once((b32)handle, name, sizeof(name) - 1);
-        system_close(handle);
-        return !memory_compare(name, "settings\n", 9);
-}
-
-/*
-        Another settings window already up -- one that has shown a picture --
-        is lifted, and this one goes: true when that is what happened.
-*/
-static b32 settings_lift_other(void)
-{
-        struct windows address_to table = settings.own.table;
-
-        for (unsigned int row = 0; row < WINDOWS; row++)
-        {
-                unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
-                char name[48];
-                bipolar door;
-
-                if (row == settings.own.row || !pid || !__atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE) ||
-                    !settings_is(pid))
-                        continue;
-
-                __atomic_add_fetch(&table->lift[row], 1, __ATOMIC_RELEASE);
-                windows_door_name(name, row, 0);
-                door = system_open_at(AT_FDCWD, (string_address)name, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-                if (door >= 0)
-                {
-                        system_write_once((b32)door, "", 1);
-                        system_close(door);
-                }
-                return true;
-        }
-        return false;
-}
-
 // The size the window is drawn at: its own, or what the compositor asked, never past the output.
 static fn settings_size(unsigned int width, unsigned int height)
 {
@@ -3821,7 +3774,7 @@ static int settings_open(void)
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
 
-        if (settings_lift_other())
+        if (ui_lift_other(&settings.own, (string_address) "settings", false))
                 return 0;
 
         settings_refilter();
@@ -3830,8 +3783,7 @@ static int settings_open(void)
                 int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
 
                 settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
-                table->x[row] = ((int)table->output_width - settings.width) / 2;
-                table->y[row] = ((int)table->output_height - settings.height) / 2 - ui_px(&settings.ui, 12);
+                ui_centre(table, row, settings.width, settings.height, ui_px(&settings.ui, 12));
         }
         settings_say((string_address) "");
 
@@ -3925,16 +3877,17 @@ static b32 settings_main()
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
         {
-                string_address option = program_argument(at);
+                string_address value;
 
-                if (option[0] != '-' || !option[1] || option[2])
+                if ((value = ui_argument(at, (string_address) "-f")))
+                        settings_app.font = value;
+                else if ((value = ui_argument(at, (string_address) "-b")))
+                        settings_app.bold = value;
+                else if ((value = ui_argument(at, (string_address) "-m")))
+                        settings.moonwater = value;
+                else
                         continue;
-                if (option[1] == 'f')
-                        settings_app.font = program_argument(++at);
-                else if (option[1] == 'b')
-                        settings_app.bold = program_argument(++at);
-                else if (option[1] == 'm')
-                        settings.moonwater = program_argument(++at);
+                at++;
         }
 
         if (!settings_map())

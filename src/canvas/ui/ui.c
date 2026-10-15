@@ -892,4 +892,89 @@ static int ui_app_run(struct ui_app address_to app)
         return 0;
 }
 
+/*
+        The value of an option of the command line: the argument after the one at at, when the argument at at is name
+        exactly ("-f", "-m" and the like), or null when it is not, or no argument follows it. The caller moves past
+        the value when it takes one.
+*/
+static string_address ui_argument(positive at, string_address name)
+{
+        string_address argument;
+
+        if (at + 1 >= (positive)program_argument_count())
+                return null;
+        argument = program_argument(at);
+        for (positive i = 0;; i++)
+        {
+                if (argument[i] != name[i])
+                        return null;
+                if (!argument[i])
+                        return program_argument(at + 1);
+        }
+}
+
+/*
+        A window's place in the table, centred on the output: x by its width, and y by its height, raised offset
+        pixels above the middle (offset 0 for the middle itself).
+*/
+static void ui_centre(struct windows address_to table, unsigned int row, int width, int height, int offset)
+{
+        table->x[row] = ((int)table->output_width - width) / 2;
+        table->y[row] = ((int)table->output_height - height) / 2 - offset;
+}
+
+// Whether a process is the program name: its command name is name and a newline, as /proc/PID/comm has it.
+static b32 ui_is_program(unsigned int pid, string_address name)
+{
+        p8 path[40] = "/proc/", comm[16] = {0};
+        bipolar handle;
+        positive length = string_length(name);
+
+        path[6 + positive_into_string(path + 6, (positive)pid)] = 0;
+        string_copy((string_address)path + string_length((string_address)path), (string_address) "/comm");
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        if (handle < 0)
+                return false;
+        system_read_once((b32)handle, comm, sizeof(comm) - 1);
+        system_close(handle);
+        return length < sizeof(comm) - 1 && !memory_compare(comm, name, length) && comm[length] == '\n';
+}
+
+/*
+        Another window of the program name that has shown a picture is lifted: the compositor is told to raise it, as a
+        second start asks. With put_away, the program is sent SIGTERM instead, and the compositor sees its door close as
+        it does any program's end. The window own is not another. True when there was one.
+*/
+static b32 ui_lift_other(const struct window_row address_to own, string_address name, b32 put_away)
+{
+        struct windows address_to table = own->table;
+
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
+                char door_name[48];
+                bipolar door;
+
+                if (row == own->row || !pid || !__atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE) ||
+                    !ui_is_program(pid, name))
+                        continue;
+
+                if (put_away)
+                {
+                        system_call_2(syscall(kill), (positive)pid, SIGTERM);
+                        return true;
+                }
+                __atomic_add_fetch(&table->lift[row], 1, __ATOMIC_RELEASE);
+                windows_door_name(door_name, row, 0);
+                door = system_open_at(AT_FDCWD, (string_address)door_name, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+                if (door >= 0)
+                {
+                        system_write_once((b32)door, "", 1);
+                        system_close(door);
+                }
+                return true;
+        }
+        return false;
+}
+
 #endif // MOONWATER_CANVAS_UI

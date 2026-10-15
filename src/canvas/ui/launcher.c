@@ -789,60 +789,6 @@ static b32 launcher_frame(void)
 
 /* ---- the program ---- */
 
-// Whether a process is this program: its name.
-static b32 launcher_is(unsigned int pid)
-{
-        p8 path[40] = "/proc/", name[16] = {0};
-        bipolar handle;
-
-        path[6 + positive_into_string(path + 6, (positive)pid)] = 0;
-        string_copy((string_address)path + string_length((string_address)path), (string_address) "/comm");
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
-        if (handle < 0)
-                return false;
-        system_read_once((b32)handle, name, sizeof(name) - 1);
-        system_close(handle);
-        return !memory_compare(name, "launcher\n", 9);
-}
-
-/*
-        Another launcher up -- one that has shown a picture -- is lifted, or
-        with toggle put away (it is ended, and the compositor sees its door
-        close as it does any program's end); and this one goes: true when there
-        was one.
-*/
-static b32 launcher_other(b32 toggle)
-{
-        struct windows address_to table = launcher.own.table;
-
-        for (unsigned int row = 0; row < WINDOWS; row++)
-        {
-                unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
-                char name[48];
-                bipolar door;
-
-                if (row == launcher.own.row || !pid || !__atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE) ||
-                    !launcher_is(pid))
-                        continue;
-
-                if (toggle)
-                {
-                        system_call_2(syscall(kill), (positive)pid, SIGTERM);
-                        return true;
-                }
-                __atomic_add_fetch(&table->lift[row], 1, __ATOMIC_RELEASE);
-                windows_door_name(name, row, 0);
-                door = system_open_at(AT_FDCWD, (string_address)name, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-                if (door >= 0)
-                {
-                        system_write_once((b32)door, "", 1);
-                        system_close(door);
-                }
-                return true;
-        }
-        return false;
-}
-
 // The names of PATH, their directories, the hash table and the scan's buffer: one mapping, not in the image's bss.
 static b32 launcher_memory(void)
 {
@@ -874,7 +820,7 @@ static int launcher_open(void)
         struct windows address_to table = launcher.own.table;
         unsigned int row = launcher.own.row;
 
-        if (launcher_other(launcher.toggle))
+        if (ui_lift_other(&launcher.own, (string_address) "launcher", launcher.toggle))
                 return 0;
 
         if (!launcher_memory())
@@ -886,7 +832,8 @@ static int launcher_open(void)
 
         launcher_size((unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         launcher_changed();
-        table->x[row] = ((int)table->output_width - launcher.width) / 2;
+        // The bar is centred across, and sits a third of the way down: its y is not the middle, so it is set after.
+        ui_centre(table, row, launcher.width, 0, 0);
         table->y[row] = (int)table->output_height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, LAUNCHER_FIELD) / 2;
         launcher_frame();
 
@@ -934,18 +881,22 @@ static b32 launcher_main()
 
         for (positive at = 1; at < (positive)program_argument_count(); at++)
         {
-                string_address option = program_argument(at);
+                string_address option = program_argument(at), value;
 
-                if (option[0] != '-' || !option[1] || option[2])
-                        continue;
-                if (option[1] == 'x')
+                if (option[0] == '-' && option[1] == 'x' && !option[2])
+                {
                         launcher.toggle = true;
-                else if (at + 1 < (positive)program_argument_count() && option[1] == 'f')
-                        regular = program_argument(++at);
-                else if (at + 1 < (positive)program_argument_count() && option[1] == 'm')
-                        launcher.mono = (const char address_to)program_argument(++at);
-                else if (at + 1 < (positive)program_argument_count() && option[1] == 'M')
-                        launcher.mono_bold = (const char address_to)program_argument(++at);
+                        continue;
+                }
+                if ((value = ui_argument(at, (string_address) "-f")))
+                        regular = value;
+                else if ((value = ui_argument(at, (string_address) "-m")))
+                        launcher.mono = (const char address_to)value;
+                else if ((value = ui_argument(at, (string_address) "-M")))
+                        launcher.mono_bold = (const char address_to)value;
+                else
+                        continue;
+                at++;
         }
         launcher.regular = (const char address_to)regular;
         launcher_app.font = regular;
