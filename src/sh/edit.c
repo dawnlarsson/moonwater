@@ -2213,7 +2213,7 @@ static struct edit_place edit_motion(p8 kind,
                 if (!place.line)
                 {
                         place.column = 0;
-                        break;
+                        return place;
                 }
 
                 place.line--;
@@ -2224,7 +2224,7 @@ static struct edit_place edit_motion(p8 kind,
                 if (place.line + 1 >= edit_line_count)
                 {
                         place.column = edit_lines[place.line].length;
-                        break;
+                        return place;
                 }
 
                 place.line++;
