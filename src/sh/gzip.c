@@ -4990,15 +4990,31 @@ static bipolar gzip_decode_read(p8 address_to dst, positive n)
         if (!gzip_pull_one)
                 return -1;
         got = gzip_pull_read(gzip_pull_one, dst, n);
-        gzip_why = gzip_pull_one->why;
+        gzip_why = gzip_pull_one->why ? gzip_pull_one->why + (gzip_note_shape(gzip_pull_one->why) ? 1 : 0) : null;
         return got;
 }
 
+/* The text is copied out before the decoder is freed, since a failure built
+   in pieces lives inside it, and the shape character is left off for tar. */
 static bool gzip_decode_end(void)
 {
         if (gzip_pull_one)
         {
-                gzip_why = gzip_pull_one->why;
+                string_address why = gzip_pull_one->why;
+                positive at = 0;
+
+                if (why)
+                {
+                        while (why[at] && at < sizeof(gzip_note_text) - 1)
+                        {
+                                gzip_note_text[at] = (p8)why[at];
+                                at++;
+                        }
+                        gzip_note_text[at] = 0;
+                        gzip_why = gzip_note_text + (gzip_note_shape(gzip_note_text) ? 1 : 0);
+                }
+                else
+                        gzip_why = null;
                 gzip_pull_close(gzip_pull_one);
                 gzip_pull_one = null;
         }
