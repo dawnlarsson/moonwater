@@ -2253,7 +2253,8 @@ static COLD bool shell_substitutions_parse(positive from, positive to)
         {
                 parse_token address_to token = parse_tokens + at;
 
-                if ((token->kind != PT_WORD && token->kind != PT_CONDITIONAL) ||
+                if ((token->kind != PT_WORD && token->kind != PT_CONDITIONAL &&
+                     token->kind != PT_ARITHMETIC) ||
                     !token->text ||
                     (!memory_first_of(token->text, '(', token->length) &&
                      !memory_first_of(token->text, '`', token->length)))
