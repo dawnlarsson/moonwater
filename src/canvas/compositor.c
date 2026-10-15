@@ -1808,6 +1808,8 @@ static struct
         unsigned int glassy[WINDOWS];
         unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS)
         unsigned int *backdrop[WINDOWS], *tinted[WINDOWS], *composed[WINDOWS];
+        unsigned int *boosted[WINDOWS]; // compositor_vivid of each backdrop cell, as the cell last was
+        unsigned long glass_sum[WINDOWS][3]; // per channel, the sums of boosted over the blocks: the side's mean
         int glass_blocks[WINDOWS][4]; // the first block kept of the small picture under it, across and down, and how many each way
         unsigned long glass_cut[WINDOWS];
         int glass_made[WINDOWS][4], stale[WINDOWS][4], dirty[WINDOWS][4];
@@ -2685,9 +2687,10 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 #define COMPOSITOR_GLASS_UNSIDED 2u
 #define COMPOSITOR_GLASS_MARGIN 3 // the blocks kept round a window: what the rise reads past its edge
 
-static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int side)
+// The tint of a pixel already made more vivid (compositor_vivid), so a caller holding that value does not boost it again.
+static unsigned int compositor_glass_tone(unsigned int boosted, unsigned int side)
 {
-        unsigned int pixel = window_mix(compositor_vivid(blurred), side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT);
+        unsigned int pixel = window_mix(boosted, side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT);
         unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
         unsigned int most = r > g ? r : g, least = r < g ? r : g;
 
@@ -2706,6 +2709,11 @@ static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int sid
                 b = 255 - (255 - b) * (255 - COMPOSITOR_GLASS_LIGHTEST) / (255 - least);
         }
         return r << 16 | g << 8 | b;
+}
+
+static unsigned int compositor_glass_tint(unsigned int blurred, unsigned int side)
+{
+        return compositor_glass_tone(compositor_vivid(blurred), side);
 }
 
 // The picture over the risen, tinted glass and its grain, inside c (x1, y1, x2, y2 on the output, inside the window):
@@ -2737,23 +2745,32 @@ static int compositor_glass_compose(int row, const int *c)
 }
 
 /*
+        A block's boosted pixel went from was to now: the channel sums take
+        the new in and the old out. The old is in the sums already, so the
+        subtraction never takes them below zero.
+*/
+static void compositor_glass_sum_change(unsigned long *sum, unsigned int was, unsigned int now)
+{
+        sum[0] += now >> 16 & 255;
+        sum[0] -= was >> 16 & 255;
+        sum[1] += now >> 8 & 255;
+        sum[1] -= was >> 8 & 255;
+        sum[2] += now & 255;
+        sum[2] -= was & 255;
+}
+
+/*
         The side a glass window's tint goes to, from the mean of its blocks,
         and the ground that comes to: what its program's inks stand out from.
-        Answers whether the side changed.
+        The mean is the sums compositor_glass_pass keeps as the blocks change,
+        so it is a division here and no block is boosted again. Answers whether
+        the side changed.
 */
 static int compositor_glass_side(int row)
 {
-        unsigned long sum[3] = {0, 0, 0}, count = (unsigned long)compositor.glass_blocks[row][2] * compositor.glass_blocks[row][3];
+        unsigned long *sum = compositor.glass_sum[row], count = (unsigned long)compositor.glass_blocks[row][2] * compositor.glass_blocks[row][3];
         unsigned int was = compositor.glass_side[row], mean, light, ground;
 
-        for (unsigned long at = 0; at < count; at++)
-        {
-                unsigned int pixel = compositor_vivid(compositor.backdrop[row][at]);
-
-                sum[0] += pixel >> 16 & 255;
-                sum[1] += pixel >> 8 & 255;
-                sum[2] += pixel & 255;
-        }
         if (!count)
                 return 0;
 
@@ -2802,9 +2819,10 @@ static void compositor_glass_drop(int row)
                 compositor_call(syscall(madvise), (positive)compositor.frost, compositor.frost_bytes, 4, 0, 0, 0);
         if (!left && compositor.rise)
                 compositor_call(syscall(madvise), (positive)compositor.rise, compositor.rise_bytes, 4, 0, 0, 0);
-        compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
+        compositor.backdrop[row] = compositor.tinted[row] = compositor.boosted[row] = compositor.composed[row] = null;
         compositor.glass_cut[row] = 0;
         compositor.glassy[row] = 0;
+        memory_zero(compositor.glass_sum[row], sizeof(compositor.glass_sum[row]));
         memory_zero(compositor.glass_made[row], sizeof(compositor.glass_made[row]));
         memory_zero(compositor.glass_blocks[row], sizeof(compositor.glass_blocks[row]));
         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
@@ -2830,8 +2848,8 @@ static int compositor_glass_room(int row)
         blocks[2] = compositor_ceil_shift(x + w, shift) + margin - blocks[0];
         blocks[3] = compositor_ceil_shift(y + h, shift) + margin - blocks[1];
         cells = (unsigned long)blocks[2] * (unsigned long)blocks[3];
-        need = ((cells * 2 + pixels) * 4 + 4095) & ~4095ul;
-        most = ((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 2 +
+        need = ((cells * 3 + pixels) * 4 + 4095) & ~4095ul;
+        most = ((unsigned long)((compositor.width >> shift) + 2 * margin + 2) * (unsigned long)((compositor.height >> shift) + 2 * margin + 2) * 3 +
                 (unsigned long)compositor.width * (unsigned long)compositor.height) * 4;
         most = (most + 4095) & ~4095ul;
         need = need > most ? need : most;
@@ -2841,7 +2859,7 @@ static int compositor_glass_room(int row)
                 if (compositor.backdrop[row])
                         compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
                 mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
-                compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
+                compositor.backdrop[row] = compositor.tinted[row] = compositor.boosted[row] = compositor.composed[row] = null;
                 compositor.glass_cut[row] = 0;
                 if (mapped < 0 && mapped > -4096)
                         return 0;
@@ -2849,7 +2867,8 @@ static int compositor_glass_room(int row)
                 compositor.glass_cut[row] = need;
         }
         compositor.tinted[row] = compositor.backdrop[row] + cells;
-        compositor.composed[row] = compositor.tinted[row] + cells;
+        compositor.boosted[row] = compositor.tinted[row] + cells;
+        compositor.composed[row] = compositor.boosted[row] + cells;
         return 1;
 }
 
@@ -2876,6 +2895,11 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                 continue;
                         }
                         memory_copy(made, place, sizeof(place));
+                        // The blocks are new, so none of the old ones count: their boosted values and sums are zero,
+                        // and the change below (every block, which the clip takes in whole) adds each one in.
+                        for (long cell = 0; cell < (long)blocks[2] * blocks[3]; cell++)
+                                compositor.boosted[row][cell] = 0;
+                        memory_zero(compositor.glass_sum[row], sizeof(compositor.glass_sum[row]));
                         // Every block.
                         stale[0] = blocks[0] * block, stale[1] = blocks[1] * block;
                         stale[2] = (blocks[0] + blocks[2]) * block, stale[3] = (blocks[1] + blocks[3]) * block;
@@ -2904,9 +2928,12 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                         for (int bx = bx0; bx < bx1; bx++)
                                         {
                                                 long cell = (long)(by - blocks[1]) * blocks[2] + (bx - blocks[0]);
+                                                unsigned int now = compositor_vivid(compositor.backdrop[row][cell]);
 
-                                                compositor.tinted[row][cell] =
-                                                    compositor_glass_tint(compositor.backdrop[row][cell], compositor.glass_side[row]);
+                                                // The one boost of the cell: its sum moves, and its tint comes from it.
+                                                compositor_glass_sum_change(compositor.glass_sum[row], compositor.boosted[row][cell], now);
+                                                compositor.boosted[row][cell] = now;
+                                                compositor.tinted[row][cell] = compositor_glass_tone(now, compositor.glass_side[row]);
                                         }
                                 compositor.blurred += (positive)(bx1 - bx0) * (positive)(by1 - by0);
 
@@ -2917,9 +2944,9 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                 compositor_union(compositor.dirty[row], shown);
                                 if (compositor_glass_side(row))
                                 {
+                                        // Every cell's boosted pixel is current (the sums were kept as the cells changed), so the flip boosts none.
                                         for (long cell = 0; cell < (long)blocks[2] * blocks[3]; cell++)
-                                                compositor.tinted[row][cell] =
-                                                    compositor_glass_tint(compositor.backdrop[row][cell], compositor.glass_side[row]);
+                                                compositor.tinted[row][cell] = compositor_glass_tone(compositor.boosted[row][cell], compositor.glass_side[row]);
                                         memory_copy(compositor.dirty[row], box, sizeof(box));
                                 }
                         }
