@@ -352,6 +352,7 @@ static string_address parse_want[PARSE_WANT_ROOM];
 static string_address parse_want_opener[PARSE_WANT_ROOM];
 static positive parse_want_line[PARSE_WANT_ROOM];
 static positive parse_want_used HOT_STATE;
+static positive parse_want_over HOT_STATE;
 
 //      A closer waited for, with the command waiting and its line, which
 //      is what bash names when the input ends before it is closed.
@@ -377,28 +378,32 @@ static HOT fn parse_want_push_for(string_address word, b32 index)
                 parse_want_line[parse_want_used] = parse_nodes[index].line;
                 parse_want[parse_want_used++] = word;
         }
+        else
+                parse_want_over++;
 }
 
 static fn parse_want_pop()
 {
-        if (parse_want_used)
+        if (parse_want_over)
+                parse_want_over--;
+        else if (parse_want_used)
                 parse_want_used--;
 }
 
 //      The command the innermost unfinished construct began with, or null.
 PURE string_address parse_want_opener_now()
 {
-        return parse_want_used ? parse_want_opener[parse_want_used - 1] : null;
+        return parse_want_used && !parse_want_over ? parse_want_opener[parse_want_used - 1] : null;
 }
 
 PURE positive parse_want_line_now()
 {
-        return parse_want_used ? parse_want_line[parse_want_used - 1] : 0;
+        return parse_want_used && !parse_want_over ? parse_want_line[parse_want_used - 1] : 0;
 }
 
 static PURE string_address parse_want_now()
 {
-        return parse_want_used ? parse_want[parse_want_used - 1] : null;
+        return parse_want_used && !parse_want_over ? parse_want[parse_want_used - 1] : null;
 }
 
 static PURE positive parse_pending_start_line()
@@ -439,6 +444,7 @@ HOT fn parse_reset()
         parse_pending_used = 0;
         parse_pending_line = 0;
         parse_want_used = 0;
+        parse_want_over = 0;
         parse_token_count = parse_token_base;
         shell_store_rewind(address_of parse_store, parse_text_base);
         here_wanted = 0;
@@ -3552,6 +3558,7 @@ HOT b32 parse_program()
         }
 
         parse_want_used = 0;
+        parse_want_over = 0;
 
         if (!parse_node_top && !parse_arenas())
         {
