@@ -254,6 +254,12 @@ static fn rm_leading_hyphen_hint(string_address address_to argv, positive argc);
 #define ERROR_NOT_CONNECTED 107
 #define ERROR_CONNECTION_REFUSED 111
 #define ERROR_OVER_QUOTA 122
+#define ERROR_INTERRUPTED 4
+#define ERROR_BAD_ADDRESS 14
+#define ERROR_ILLEGAL_BYTES 84
+#define ERROR_OVERFLOW 75
+#define ERROR_CONNECTION_RESET 104
+#define ERROR_TIMED_OUT 110
 
 #define STATX_BASIC 0x7ff
 #define STATX_BIRTH 0x800
@@ -7084,6 +7090,9 @@ PURE RETURNS_NONNULL string_address file_reason(bipolar code)
                listener says which of those two it was; logger, write and
                wall all report it. */
             ERROR_PROTOCOL_TYPE, ERROR_CONNECTION_REFUSED,
+            ERROR_EXEC_FORMAT, ERROR_NO_DATA, ERROR_INTERRUPTED,
+            ERROR_BAD_ADDRESS, ERROR_ILLEGAL_BYTES, ERROR_OVERFLOW,
+            ERROR_CONNECTION_RESET, ERROR_TIMED_OUT,
         };
         positive magnitude = code < 0 ? (positive)0 - (positive)code
                                       : (positive)code;
