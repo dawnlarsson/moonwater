@@ -625,4 +625,118 @@ static fn ui_field(struct ui address_to ui, int x, int y, int width, int height,
         }
 }
 
+/*
+        One app's window and loop. The runner takes the window, sets its title,
+        glass, scale and ground, and calls open. Then it runs the loop: events,
+        closing, focus, ground, the size asked for by the hand, a due picture,
+        the app's tick and its one descriptor, and the wait. An app keeps its
+        state and its pictures; it does not repeat the loop.
+*/
+struct ui_app
+{
+        struct window_row address_to own;
+        struct ui address_to ui;
+        string_address missing;         // logged when the desktop has no window for it
+        string_address title;
+        unsigned int glass;
+        b32 address_to dirty;           // a picture is due: frame paints it
+        b32 address_to focused;         // the app's own: the keys are its
+        unsigned int address_to ground; // the app's own: the window's ground, as the loop last saw it
+        unsigned int asked_w, asked_h;  // the size the hand last asked for
+        int (*open)(void);              // the app's own start; -1 runs the loop, else the status to leave with
+        b32 (*frame)(void);             // paints the due picture; false: it is due again in 50 ms
+        b32 (*event)(const struct window_event address_to event); // false: quit
+        b32 (*focus)(b32 focused);      // the keys came or went, optional; false: quit
+        void (*changed)(void);          // every row is due, after a ground change or a focus change
+        void (*size)(unsigned int width, unsigned int height);     // the hand asked for this size
+        long (*tick)(long timeout, long address_to other);         // the app's timer; 0 runs the loop again now; other: a descriptor
+        void (*ready)(void);            // other is readable
+        void (*close)(void);            // before the window is left
+};
+
+static int ui_app_run(struct ui_app address_to app)
+{
+        struct windows address_to table;
+        unsigned int row;
+        int status;
+        b32 running = true;
+
+        if (windows_take(app->own) < 0)
+        {
+                log_direct((address_any)app->missing, string_length((const_string)app->missing));
+                return 1;
+        }
+        table = app->own->table;
+        row = app->own->row;
+        app->ui->scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
+        string_copy((string_address)table->title[row], app->title);
+        table->glass[row] = app->glass;
+        *app->ground = table->ground[row];
+        ui_inks(app->ui, *app->ground ? *app->ground : 0x101012u);
+        *app->focused = false;
+        status = app->open();
+        if (status >= 0)
+        {
+                windows_leave(app->own);
+                return status;
+        }
+
+        while (running)
+        {
+                struct window_event event;
+                long timeout = -1, other = -1, ready;
+
+                while (running && windows_event(app->own, &event))
+                        if (!app->event(&event))
+                                running = false;
+
+                if (table->state[row] & WINDOW_CLOSING)
+                        running = false;
+
+                if ((table->focus == row) != *app->focused)
+                {
+                        *app->focused = table->focus == row;
+                        app->changed();
+                        if (app->focus && !app->focus(*app->focused))
+                                running = false;
+                }
+                if (table->ground[row] && table->ground[row] != *app->ground)
+                {
+                        *app->ground = table->ground[row];
+                        ui_inks(app->ui, *app->ground);
+                        app->changed();
+                }
+                if (table->want_width[row] && table->want_height[row] &&
+                    (table->want_width[row] != app->asked_w || table->want_height[row] != app->asked_h))
+                {
+                        app->asked_w = table->want_width[row];
+                        app->asked_h = table->want_height[row];
+                        app->size(app->asked_w, app->asked_h);
+                }
+
+                if (!running)
+                        break;
+
+                if (*app->dirty && !app->frame())
+                        timeout = 50000000;
+                if (app->tick)
+                {
+                        timeout = app->tick(timeout, &other);
+                        if (timeout == 0)
+                                continue;
+                }
+
+                ready = windows_wait(app->own, other, timeout);
+                if (ready < 0)
+                        break;
+                if (other >= 0)
+                        app->ready();
+        }
+
+        if (app->close)
+                app->close();
+        windows_leave(app->own);
+        return 0;
+}
+
 #endif // MOONWATER_CANVAS_UI

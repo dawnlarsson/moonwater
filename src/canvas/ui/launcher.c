@@ -143,7 +143,7 @@ static struct
         char named_text[LAUNCHER_TEXT];
 
         int width, height, shown;
-        unsigned int asked_w, asked_h, ground;
+        unsigned int ground;
         int pointer_x, pointer_y;
         b32 focused, had_focus, dirty;
 } launcher;
@@ -919,16 +919,13 @@ static fn launcher_size(unsigned int width, unsigned int height)
         launcher.dirty = true;
 }
 
-static b32 launcher_main()
+// The launcher's start, once its window is taken: the lift, the fonts and the first picture. -1 runs the loop.
+static int launcher_open(void)
 {
         string_address regular = (string_address) "/usr/share/fonts/inter/Inter-Regular.ttf";
-        struct windows address_to table;
-        unsigned int row;
-        b32 running = true, toggle = false;
-
-        claim_standard_descriptors();
-        memory_zero(&launcher, sizeof(launcher));
-        launcher.shown = -1;
+        struct windows address_to table = launcher.own.table;
+        unsigned int row = launcher.own.row;
+        b32 toggle = false;
 
         for (positive at = 1; at < (positive)program_argument_count(); at++)
         {
@@ -947,93 +944,67 @@ static b32 launcher_main()
         }
         launcher.regular = (const char address_to)regular;
 
-        if (windows_take(&launcher.own) < 0)
-        {
-                log_direct(str("launcher: no window: the compositor's desktop is not up\n"));
-                return 1;
-        }
-        table = launcher.own.table;
-        row = launcher.own.row;
-
         if (launcher_other(toggle))
-        {
-                windows_leave(&launcher.own);
                 return 0;
-        }
 
         if (!launcher_fonts(regular) || !launcher_memory())
         {
                 compositor_kmsg((string_address) "launcher: no font to draw with (-f FONT.ttf), pid ",
                                 (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
-                windows_leave(&launcher.own);
                 return 1;
         }
 
-        launcher.ui.scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
         launcher_size((unsigned int)launcher_px(LAUNCHER_WIDTH), 0);
         launcher_changed();
         table->x[row] = ((int)table->output_width - launcher.width) / 2;
         table->y[row] = (int)table->output_height / 3 - launcher_px(UI_PAD) - launcher_px(LAUNCHER_FIELD) / 2;
-        string_copy((string_address)table->title[row], (string_address) "Launcher");
-        table->glass[row] = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS;
-        launcher.ground = table->ground[row];
-        ui_inks(&launcher.ui, launcher.ground ? launcher.ground : 0x101012u);
         launcher_frame();
 
         // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not
         // change with the scan and needs no second frame; a key read after this sees every name.
         launcher_scan(launcher_path_variable());
+        return -1;
+}
 
-        while (running)
-        {
-                struct window_event event;
-                long timeout = -1;
+// The keys going elsewhere (a click on the desktop, another window raised) puts the bar away; before they came here it had
+// never had them.
+static b32 launcher_focus(b32 focused)
+{
+        if (focused)
+                launcher.had_focus = true;
+        else if (launcher.had_focus)
+                return false;
+        return true;
+}
 
-                while (running && windows_event(&launcher.own, &event))
-                        if (!launcher_event(&event))
-                                running = false;
+static fn launcher_repaint(void)
+{
+        launcher.dirty = true;
+}
 
-                if (table->state[row] & WINDOW_CLOSING)
-                        running = false;
+static struct ui_app launcher_app = {
+        .own = &launcher.own,
+        .ui = &launcher.ui,
+        .missing = (string_address) "launcher: no window: the compositor's desktop is not up\n",
+        .title = (string_address) "Launcher",
+        .glass = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS,
+        .dirty = &launcher.dirty,
+        .focused = &launcher.focused,
+        .ground = &launcher.ground,
+        .open = launcher_open,
+        .frame = launcher_frame,
+        .event = launcher_event,
+        .focus = launcher_focus,
+        .changed = launcher_repaint,
+        .size = launcher_size,
+};
 
-                // The keys going elsewhere (a click on the desktop, another window raised) puts the bar away; before
-                // they came here it had never had them.
-                if ((table->focus == row) != launcher.focused)
-                {
-                        launcher.focused = table->focus == row;
-                        launcher.dirty = true;
-                        if (launcher.focused)
-                                launcher.had_focus = true;
-                        else if (launcher.had_focus)
-                                running = false;
-                }
-                if (table->ground[row] && table->ground[row] != launcher.ground)
-                {
-                        launcher.ground = table->ground[row];
-                        ui_inks(&launcher.ui, launcher.ground);
-                        launcher.dirty = true;
-                }
-                // A size asked for by the hand: drawn at it, the list laid out from the top.
-                if (table->want_width[row] && table->want_height[row] &&
-                    (table->want_width[row] != launcher.asked_w || table->want_height[row] != launcher.asked_h))
-                {
-                        launcher.asked_w = table->want_width[row];
-                        launcher.asked_h = table->want_height[row];
-                        launcher_size(launcher.asked_w, launcher.asked_h);
-                }
-
-                if (!running)
-                        break;
-
-                if (launcher.dirty && !launcher_frame())
-                        timeout = 50000000;
-
-                if (windows_wait(&launcher.own, -1, timeout) < 0)
-                        break;
-        }
-
-        windows_leave(&launcher.own);
-        return 0;
+static b32 launcher_main()
+{
+        claim_standard_descriptors();
+        memory_zero(&launcher, sizeof(launcher));
+        launcher.shown = -1;
+        return ui_app_run(&launcher_app);
 }
 
 #endif // MOONWATER_CANVAS_LAUNCHER

@@ -673,7 +673,7 @@ static struct
         char typed[SETTINGS_TYPED];
         char status[SETTINGS_STATUS];
         int width, height, shown;
-        unsigned int asked_w, asked_h, ground;
+        unsigned int ground;
         int pointer_x, pointer_y;
         b32 focused, dirty;
 
@@ -3867,13 +3867,105 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings_dirty();
 }
 
+// The settings' start, once its window is taken: the lift, the layout and the first picture. -1 runs the loop.
+static int settings_open(void)
+{
+        struct windows address_to table = settings.own.table;
+        unsigned int row = settings.own.row;
+
+        if (settings_lift_other())
+                return 0;
+
+        settings_refilter();
+        {
+                int width = settings_px(SETTINGS_WIDTH), height = settings_px(SETTINGS_HEIGHT);
+                int room = (int)table->output_height - settings_px(2 * (24 + 24));
+
+                settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
+                table->x[row] = ((int)table->output_width - settings.width) / 2;
+                table->y[row] = ((int)table->output_height - settings.height) / 2 - settings_px(12);
+        }
+        settings_say((string_address) "");
+
+        settings_ask_all();
+        settings.help = 1;
+        settings_next_job();
+        settings_frame();
+        return -1;
+}
+
+// The settings' timers: a verb's time, the due reading of a feed, and the descriptor of a verb running. 0 runs the loop again.
+static long settings_tick(long timeout, long address_to other)
+{
+        if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
+        {
+                positive now = clock_monotonic_nanoseconds(), left;
+                positive most = settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
+                                : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
+                                                                   : (positive)SETTINGS_WAIT_NS;
+
+                if (now - settings.began >= most)
+                {
+                        settings_finished(true);
+                        return 0;
+                }
+                left = most - (now - settings.began);
+                timeout = timeout < 0 || (positive)timeout > left ? (long)left : timeout;
+        }
+        else if (settings.child <= 0)
+        {
+                // What the group shown keeps up with, when it is due; otherwise how long till it is.
+                long wait = settings_feed_tick();
+
+                if (wait >= 0 && (timeout < 0 || wait < timeout))
+                        timeout = wait;
+                if (settings.child > 0)
+                        return 0;
+        }
+        *other = settings.child > 0 ? settings.output : -1;
+        return timeout;
+}
+
+static fn settings_ready(void)
+{
+        settings_drain();
+}
+
+// A verb still running when the window closes is stopped.
+static fn settings_close(void)
+{
+        if (settings.child > 0)
+        {
+                positive status = 0;
+
+                system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
+                system_wait4_retry(settings.child, address_of status, 0, null);
+        }
+}
+
+static struct ui_app settings_app = {
+        .own = &settings.own,
+        .ui = &settings.ui,
+        .missing = (string_address) "settings: no window: the compositor's desktop is not up\n",
+        .title = (string_address) "Settings",
+        .glass = WINDOW_GLASS,
+        .dirty = &settings.dirty,
+        .focused = &settings.focused,
+        .ground = &settings.ground,
+        .open = settings_open,
+        .frame = settings_frame,
+        .event = settings_event,
+        .changed = settings_dirty,
+        .size = settings_size,
+        .tick = settings_tick,
+        .ready = settings_ready,
+        .close = settings_close,
+};
+
 static b32 settings_main()
 {
         string_address regular = (string_address) "/usr/share/fonts/inter/Inter-Regular.ttf",
                        bold = (string_address) "/usr/share/fonts/inter/Inter-Bold.ttf";
-        struct windows address_to table;
-        unsigned int row;
-        b32 running = true;
 
         claim_standard_descriptors();
         memory_zero(&settings, sizeof(settings));
@@ -3913,122 +4005,7 @@ static b32 settings_main()
                 return 1;
         }
 
-        if (windows_take(&settings.own) < 0)
-        {
-                log_direct(str("settings: no window: the compositor's desktop is not up\n"));
-                return 1;
-        }
-        table = settings.own.table;
-        row = settings.own.row;
-
-        if (settings_lift_other())
-        {
-                windows_leave(&settings.own);
-                return 0;
-        }
-
-        settings.ui.scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
-        settings_refilter();
-        {
-                int width = settings_px(SETTINGS_WIDTH), height = settings_px(SETTINGS_HEIGHT);
-                int room = (int)table->output_height - settings_px(2 * (24 + 24));
-
-                settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
-                table->x[row] = ((int)table->output_width - settings.width) / 2;
-                table->y[row] = ((int)table->output_height - settings.height) / 2 - settings_px(12);
-        }
-        string_copy((string_address)table->title[row], (string_address) "Settings");
-        table->glass[row] = WINDOW_GLASS;
-        settings.ground = table->ground[row];
-        ui_inks(&settings.ui, settings.ground ? settings.ground : 0x101012u);
-        settings_say((string_address) "");
-
-        settings_ask_all();
-        settings.help = 1;
-        settings_next_job();
-        settings_frame();
-
-        while (running)
-        {
-                struct window_event event;
-                long timeout = -1, ready;
-
-                while (windows_event(&settings.own, &event))
-                        if (!settings_event(&event))
-                                running = false;
-
-                if (table->state[row] & WINDOW_CLOSING)
-                        running = false;
-
-                if ((table->focus == row) != settings.focused)
-                {
-                        settings.focused = table->focus == row;
-                        settings_dirty();
-                }
-                if (table->ground[row] && table->ground[row] != settings.ground)
-                {
-                        settings.ground = table->ground[row];
-                        ui_inks(&settings.ui, settings.ground);
-                        settings_dirty();
-                }
-                if (table->want_width[row] && table->want_height[row] &&
-                    (table->want_width[row] != settings.asked_w || table->want_height[row] != settings.asked_h))
-                {
-                        settings.asked_w = table->want_width[row];
-                        settings.asked_h = table->want_height[row];
-                        settings_size(settings.asked_w, settings.asked_h);
-                }
-
-                if (!running)
-                        break;
-
-                if (settings.dirty && !settings_frame())
-                        timeout = 50000000;
-
-                // A verb that reads or sets a row is given a time (a feed's reading a short one, a join a long one); a command
-                // of All commands runs until it ends or is stopped.
-                if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
-                {
-                        positive now = clock_monotonic_nanoseconds(), left;
-                        positive most = settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
-                                        : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
-                                                                           : (positive)SETTINGS_WAIT_NS;
-
-                        if (now - settings.began >= most)
-                        {
-                                settings_finished(true);
-                                continue;
-                        }
-                        left = most - (now - settings.began);
-                        timeout = timeout < 0 || (positive)timeout > left ? (long)left : timeout;
-                }
-                else if (settings.child <= 0)
-                {
-                        // What the group shown keeps up with, when it is due; otherwise how long till it is.
-                        long wait = settings_feed_tick();
-
-                        if (wait >= 0 && (timeout < 0 || wait < timeout))
-                                timeout = wait;
-                        if (settings.child > 0)
-                                continue;
-                }
-
-                ready = windows_wait(&settings.own, settings.child > 0 ? settings.output : -1, timeout);
-                if (ready < 0)
-                        break;
-                if (settings.child > 0)
-                        settings_drain();
-        }
-
-        if (settings.child > 0)
-        {
-                positive status = 0;
-
-                system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
-                system_wait4_retry(settings.child, address_of status, 0, null);
-        }
-        windows_leave(&settings.own);
-        return 0;
+        return ui_app_run(&settings_app);
 }
 
 #endif // MOONWATER_CANVAS_SETTINGS
