@@ -31925,13 +31925,24 @@ static bool hardlink_clone(hardlink_file address_to keep, hardlink_file address_
 // file_link: every path of the second becomes the first's, one at a time.
 static void hardlink_link_all(positive master_at, positive other_at, bool clone)
 {
+        //      Each file of the other node is tried once. A duplicate that
+        //      cannot be linked goes to the back of its node, where the
+        //      outer loop finds it later as a master, as util-linux's pairwise
+        //      walk does: four -> two and four -> one fail, then two -> one.
+        positive pending = 0;
+
+        for (positive file = hardlink_nodes[other_at].head; file;
+             file = hardlink_files[file - 1].next)
+                pending++;
+
         for (;;)
         {
                 hardlink_node address_to master = hardlink_nodes + master_at;
                 hardlink_node address_to other = hardlink_nodes + other_at;
 
-                if (!other->head)
+                if (!other->head || !pending)
                         return;
+                pending--;
 
                 hardlink_file address_to keep = hardlink_files + master->head - 1;
                 hardlink_file address_to duplicate = hardlink_files + other->head - 1;
@@ -31967,7 +31978,22 @@ static void hardlink_link_all(positive master_at, positive other_at, bool clone)
                                                       writer_terminal_name, hardlink_path(keep),
                                                       writer_terminal_name, hardlink_path(duplicate),
                                                       file_reason(-ERROR_NOT_SUPPORTED));
+
+                                //      Move the duplicate to the back of its node.
+                                positive failed = other->head;
+
                                 other->head = duplicate->next;
+                                duplicate->next = 0;
+                                if (!other->head)
+                                        other->head = failed;
+                                else
+                                {
+                                        positive tail = other->head;
+
+                                        while (hardlink_files[tail - 1].next)
+                                                tail = hardlink_files[tail - 1].next;
+                                        hardlink_files[tail - 1].next = failed;
+                                }
                                 continue;
                         }
                 }

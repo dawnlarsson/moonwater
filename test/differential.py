@@ -9234,7 +9234,12 @@ FILES_UTILITIES = (
                                  Option("-y", ("sha256", "memcmp", "crc32c", "bogus", "sha1", "xxh128"), None), Option("--method", ("memcmp",), True)),
             operands=(("dup",), (".",), ("a.txt", "b.txt"), ("dup", "dir"), ("missing",), (), ("dup/one", "dup/two"), ("dup/one", "dup/three"),
                       ("twin", "b.txt"), ("shut",), ("two words", "dup"), ("dangling", "dup"), ("dup", "dup"), ("link", "a.txt")),
-            stdin=("empty",), fixture="files", stderr="exact", normalize=files_normal(files_hide_duration, files_hide_now, files_hide_pointer)),
+            stdin=("empty",), fixture="files", stderr="exact", normalize=files_normal(files_hide_duration, files_hide_now, files_hide_pointer),
+            #       A clone the filesystem refuses, in a group of equal files:
+            #       each refused duplicate is compared again later, so the
+            #       group is walked as util-linux walks it (three attempts,
+            #       four files compared).
+            extra=(("--prioritize-trees", "-c", "--reflink=always", "--mount", "--minimize", "-s", "5", "dup", "dir"),)),
     Utility("namei", options=(Option("-x"), Option("-m"), Option("-o"), Option("-l"), Option("-n"), Option("-v"), Option("--mountpoints"),
                               Option("--modes"), Option("--owners"), Option("--long"), Option("--nosymlinks"), Option("--vertical")),
             operands=(("a.txt",), ("dir/sub/deep",), ("link",), ("dirlink/inside",), ("dangling",), ("loop",), ("missing",), ("/",),
@@ -95221,6 +95226,7 @@ PINNED = r"""
 {"case":{"argv":["-bx","dup"],"fixture":"files","stdin":"empty","tier":"singles"},"domain":"files","list":"regression","utility":"hardlink"},
 {"case":{"argv":["-r1","dup"],"fixture":"files","stdin":"empty","tier":"singles"},"domain":"files","list":"regression","utility":"hardlink"},
 {"case":{"argv":["-ycrc32c","dup"],"fixture":"files","stdin":"empty","tier":"singles"},"domain":"files","list":"regression","utility":"hardlink"},
+{"case":{"argv":["--prioritize-trees","-c","--reflink=always","--mount","--minimize","-s","5","dup","dir"],"fixture":"files","stdin":"empty","tier":"extra"},"domain":"files","list":"regression","utility":"hardlink"},
 {"case":{"argv":["-ymemcmp","dup"],"fixture":"files","stdin":"empty","tier":"singles"},"domain":"files","list":"regression","utility":"hardlink"},
 {"case":{"argv":["--mount","dup"],"fixture":"files","stdin":"empty","tier":"singles"},"domain":"files","list":"regression","utility":"hardlink"},
 {"case":{"argv":["-s","5","dup"],"fixture":"files","stdin":"empty","tier":"singles"},"domain":"files","list":"regression","utility":"hardlink"},
@@ -96252,6 +96258,9 @@ PINNED = r"""
 {"case":{"argv":["-e",":a","-e","a x","-e","s/^x//","-e","ta"],"stdin":"x_run","tier":"pinned"},"domain":"text","list":"regression","utility":"sed"},
 {"case":{"argv":["multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},
 {"case":{"argv":["-o","value","-s","TYPE","multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},
+{"case":{"argv":["-c","[ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab]."],"env":[["LC_ALL","C.UTF-8"]],"stdin":"ab_run_x","tier":"pinned"},"domain":"text","list":"regression","utility":"grep"},
+{"case":{"argv":["a","-1","3"],"tier":"pinned"},"domain":"text","list":"regression","utility":"join"},
+{"case":{"argv":["-e",":a","-e","a x","-e","s/^x//","-e","ta"],"stdin":"x_run","tier":"pinned"},"domain":"text","list":"regression","utility":"sed"},
 {"case":{"argv":["--getalignoff","-v","--getdiscardzeroes","dir"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},
 {"case":{"argv":["-v","--setro","/dev/null"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},
 {"case":{"argv":["-v"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},
