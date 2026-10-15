@@ -2317,6 +2317,8 @@ static HOT string_address expand_value_of(expand_reference reference, p8 address
                 {
                         string_address ifs = expand_ifs();
                         p8 between = string_get(ifs);
+                        positive cut = between >= 0x80 && shell_utf8_on()
+                                           ? expand_character_step(ifs) : 1;
                         positive room = 1;
                         positive used = 0;
                         positive at;
@@ -2326,13 +2328,13 @@ static HOT string_address expand_value_of(expand_reference reference, p8 address
                         {
                                 positive run = string_length(shell_parameter[at]);
 
-                                if (room > (positive)-1 - run - (at && between ? 1 : 0))
+                                if (room > (positive)-1 - run - (at && between ? cut : 0))
                                 {
                                         address_to present = false;
                                         return null;
                                 }
 
-                                room += run + (at && between ? 1 : 0);
+                                room += run + (at && between ? cut : 0);
                         }
 
                         into = shell_store_take(address_of expand_store, room);
@@ -2348,7 +2350,10 @@ static HOT string_address expand_value_of(expand_reference reference, p8 address
                                 positive run = string_length(shell_parameter[at]);
 
                                 if (at && between)
-                                        into[used++] = between;
+                                {
+                                        memory_copy_apart(into + used, ifs, cut);
+                                        used += cut;
+                                }
 
                                 memory_copy_apart(into + used, shell_parameter[at], run);
                                 used += run;
@@ -2528,6 +2533,12 @@ static inline INLINE fn expand_sequence_between(bool fields, p8 between, p8 mark
 {
         if (fields)
                 expand_push(' ', mark == MARK_QUOTED ? MARK_BREAK : MARK_SEPARATE);
+        else if (between >= 0x80 && shell_utf8_on())
+        {
+                string_address ifs = expand_ifs();
+
+                expand_push_run(ifs, string_get(ifs) ? expand_character_step(ifs) : 0, mark);
+        }
         else if (between)
                 expand_push(between, mark);
 }
@@ -7683,7 +7694,13 @@ static COLD fn expand_positional_transform(p8 which, p8 form, bool quoted)
                 expand_push_run((string_address) "set -- ", 7, lead);
                 for (at = 0; at < shell_parameter_count; at++)
                 {
-                        if (at && between)
+                        if (at && between >= 0x80 && shell_utf8_on())
+                        {
+                                string_address ifs = expand_ifs();
+
+                                expand_push_run(ifs, string_get(ifs) ? expand_character_step(ifs) : 0, lead);
+                        }
+                        else if (at && between)
                                 expand_push(between, lead);
                         transform_quoted(shell_parameter[at],
                                          string_length(shell_parameter[at]),
@@ -7859,7 +7876,13 @@ static fn expand_push_names(string_address prefix, positive prefix_length,
 
         for (positive at = 0; at < count; at++)
         {
-                if (at && between)
+                if (at && between >= 0x80 && shell_utf8_on())
+                {
+                        string_address ifs = expand_ifs();
+
+                        expand_push_run(ifs, string_get(ifs) ? expand_character_step(ifs) : 0, mark);
+                }
+                else if (at && between)
                         expand_push(between,
                                     form == '@' ? MARK_BREAK : mark);
 
