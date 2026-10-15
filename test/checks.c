@@ -113650,6 +113650,20 @@ static fn keccak_check_all(p8 address_to limit)
         check("sha512_blocks agrees with the textbook rounds at every 16 byte offset", aligned == 0);
 }
 
+/*
+        A program name that is empty or missing names no algorithm. An empty
+        argv[0] used to match the first row with no command, sha3-224, and ran
+        as that; the rows are matched by their whole name, and the name of a
+        row is never empty.
+*/
+static void checksum_names_check(void)
+{
+        check("an empty program name names no checksum", checksum_algorithm_find((string_address)"", false) == null);
+        check("a missing program name names no checksum", checksum_algorithm_find(null, false) == null);
+        check("an empty type name names no checksum", checksum_algorithm_find((string_address)"", true) == null);
+        check("md5sum still names its algorithm", checksum_algorithm_find((string_address)"md5sum", false) != null);
+}
+
 b32 main(void)
 {
         positive page = system_page_size();
@@ -113664,6 +113678,7 @@ b32 main(void)
         hash_check_all(bytes + 8192);
         crc_check_all(bytes);
         crc32c_check_all(bytes);
+        checksum_names_check();
 #if ARM64
         check("hash_crc32, hash_crc32c and hash_crc64 keep the caller's v8 to v15", crc_check_registers(bytes) == 0);
 #endif
