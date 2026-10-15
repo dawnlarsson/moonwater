@@ -1685,7 +1685,12 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
         case WINDOW_EVENT_WHEEL:
         {
+                //      A wheel event is at most a screen: a delta of 2^30 notches is one from a hostile client
+                //      or a bad driver, and it used to be a write per notch (17.9M of them) or 160 MB of
+                //      arrows queued on the alternate screen.
                 int steps = event->b ? 0 : event->a;
+
+                steps = steps > ROWS * 120 ? ROWS * 120 : steps < -ROWS * 120 ? -ROWS * 120 : steps;
 
                 // A program that asked for the pointer is owed the wheel as buttons 64 and 65, one a notch:
                 // a wheel that reports in fifteenths of a notch is the same notches as one that reports whole.
@@ -1694,6 +1699,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         b32 sent = true;
 
                         terminal.wheel_notches += steps;
+                        terminal.wheel_notches = terminal.wheel_notches > ROWS * 120 ? ROWS * 120
+                                                 : terminal.wheel_notches < -ROWS * 120 ? -ROWS * 120
+                                                                                        : terminal.wheel_notches;
                         terminal.wheel_remainder = 0;
                         while (sent && (terminal.wheel_notches >= 120 || terminal.wheel_notches <= -120))
                         {
@@ -1707,6 +1715,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 long scaled = (long)steps * TERMINAL_WHEEL_LINES + terminal.wheel_remainder;
                 int lines = (int)(scaled / 120);
+
+                lines = lines > ROWS ? ROWS : lines < -ROWS ? -ROWS : lines;
 
                 terminal.wheel_remainder = (int)(scaled % 120);
 

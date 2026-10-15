@@ -388,6 +388,11 @@ static b32 term_input(b32 master, const struct window_key address_to key)
         reading that as nothing waiting left this spinning on a dead pty
         forever, with a zombie behind it and a window nothing could dismiss.
 */
+//      Budget a repeated cell costs, in bytes: one write of a cell is some
+//      tens of nanoseconds, so 64 bytes of budget a cell keeps a pass to a few
+//      milliseconds of repeats.
+#define TERM_REPEAT_CHARGE 64
+
 static b32 term_drain(b32 master, b32 address_to gone, positive budget)
 {
         p8 from_shell[4096];
@@ -400,6 +405,8 @@ static b32 term_drain(b32 master, b32 address_to gone, positive budget)
 
                 if (got > 0)
                 {
+                        positive repeated = term_repeated;
+
                         if (!changed)
                                 cursor_hide();
 
@@ -407,6 +414,8 @@ static b32 term_drain(b32 master, b32 address_to gone, positive budget)
 
                         changed = true;
                         budget = budget > (positive)got ? budget - (positive)got : 0;
+                        repeated = term_repeated - repeated;
+                        budget = budget > repeated * TERM_REPEAT_CHARGE ? budget - repeated * TERM_REPEAT_CHARGE : 0;
 
                         if (!budget)
                                 return changed;

@@ -652,6 +652,10 @@ static fn put_cells(unsigned int character, unsigned int width)
         here, before the call: a byte at a time, the ASCII consume() hands
         put() costs a compare and not a call.
 */
+// Cells written by repeats (CSI b) since the drain last asked: a repeat of a whole screen is 1920 writes for nine
+// bytes, so term_drain charges them, or a few kilobytes of them held the window for most of a second.
+static positive term_repeated;
+
 static fn put(unsigned int character)
 {
         unsigned int width =
@@ -1849,6 +1853,7 @@ static fn csi_final(unsigned int final)
                         // show, and the count is as hostile as the tabs'.
                         for (n = 0; n < a && n < ROWS * COLUMNS; n++)
                                 put(last_character);
+                        term_repeated += n;
                 }
                 break;
         case 'q':
