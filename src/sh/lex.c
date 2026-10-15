@@ -120,6 +120,12 @@ typedef struct
                 the outer count comes back when it ends.
         */
         positive line;
+        /*
+                The offset lex_at held when the frame was entered. Nested
+                input overwrites lex_at, so the outer word's offset comes back
+                from here when the nest ends.
+        */
+        positive at;
 } lex_frame;
 
 _Static_assert(sizeof(lex_token) == 32, "lex_line_floor stores 32-byte tokens");
@@ -141,6 +147,8 @@ _Static_assert(__builtin_offsetof(lex_frame, line) == 24, "line");
         program optimization.
 */
 KEEP __attribute__((externally_visible)) lex_frame lex_context;
+
+static KEEP positive lex_at HOT_STATE;
 
 #define lex_tokens lex_context.tokens
 #define lex_token_room lex_context.token_room
@@ -183,6 +191,7 @@ static positive lex_spare_room;
 
 static fn lex_nest_enter(lex_frame address_to frame)
 {
+        lex_context.at = lex_at;
         address_to frame = lex_context;
         lex_context = (lex_frame){0};
         lex_tokens = lex_spare;
@@ -206,6 +215,7 @@ static fn lex_nest_leave(lex_frame address_to frame)
                 memory_free(lex_tokens, lex_token_room * sizeof(lex_token));
 
         lex_context = address_to frame;
+        lex_at = lex_context.at;
 }
 
 /*
@@ -307,8 +317,6 @@ HOT fn lex_prepare()
 
         lex_ready = true;
 }
-
-static KEEP positive lex_at HOT_STATE;
 
 static HOT KEEP b32 lex_add(b32 kind, b32 op, string_address text, positive length)
 {
