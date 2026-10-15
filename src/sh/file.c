@@ -6319,7 +6319,7 @@ static HOT locale_category address_to locale_open(positive category)
                 {
                         p32 address_to head = (p32 address_to)(address_any)one->file.bytes;
 
-                        if (one->file.used >= 8 && head[1] * 4 + 8 <= one->file.used)
+                        if (one->file.used >= 8 && (p64)head[1] * 4 + 8 <= one->file.used)
                         {
                                 one->count = head[1];
                                 one->have = true;
