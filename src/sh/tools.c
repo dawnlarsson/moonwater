@@ -1030,7 +1030,17 @@ static bool logger_journald(logger_control address_to control,
         control->socket_errors = true;
         if (!logger_connect(control))
                 return false;
-        return logger_send_once(control, entry, length);
+
+        //      The journal reads a datagram of fields that each end in a
+        //      newline, the last one included, so the collection is sent with
+        //      its newline made in a copy.
+        p8 address_to datagram = (p8 address_to)utility_arena_take(collected + 1);
+        if (!datagram)
+                return string_report(writer_stderr, false,
+                    "logger: journald entry could not be written\n");
+        memory_copy(datagram, entry, collected);
+        datagram[collected] = '\n';
+        return logger_send_once(control, datagram, collected + 1);
 #else
         (void)control;
         (void)path;
