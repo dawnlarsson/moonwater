@@ -31355,10 +31355,20 @@ static bool hardlink_xattrs_equal(hardlink_file address_to one, hardlink_file ad
         positive count_one = 0;
         positive count_two = 0;
 
-        for (positive at = 0; at < length_one && count_one < 256; at += string_length((string_address)names_one + at) + 1)
+        //      A list too long for the table is not compared in part and
+        //      called equal: it is not equal to anything.
+        for (positive at = 0; at < length_one; at += string_length((string_address)names_one + at) + 1)
+        {
+                if (count_one == 256)
+                        return false;
                 list_one[count_one++] = (string_address)names_one + at;
-        for (positive at = 0; at < length_two && count_two < 256; at += string_length((string_address)names_two + at) + 1)
+        }
+        for (positive at = 0; at < length_two; at += string_length((string_address)names_two + at) + 1)
+        {
+                if (count_two == 256)
+                        return false;
                 list_two[count_two++] = (string_address)names_two + at;
+        }
         if (count_one != count_two)
                 return false;
 
