@@ -5364,7 +5364,7 @@ static bipolar numfmt_wide_integer(seq_wide value)
 
         if (magnitude > ((p128)1 << 63) || (magnitude == ((p128)1 << 63) && !value.negative))
                 return (bipolar)((positive)1 << 63);
-        return value.negative ? -(bipolar)magnitude : (bipolar)magnitude;
+        return value.negative ? (bipolar)((positive)0 - (positive)magnitude) : (bipolar)magnitude;
 }
 
 static seq_wide numfmt_wide_from(bipolar integer)
