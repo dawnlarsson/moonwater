@@ -39588,11 +39588,12 @@ static COLD fn install_pair(string_address source, string_address destination)
                     (from.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         string_format(log_error, "install: omitting directory %w\n",
                                       writer_shell_quoted_name, source);
-                else
+                else if (looked < 0)
                         string_format(log_error, "install: cannot stat %w: %s\n",
-                                      writer_shell_quoted_name, source,
-                                      looked < 0 ? file_reason(looked)
-                                                 : (string_address) "Not a regular file");
+                                      writer_shell_quoted_name, source, file_reason(looked));
+                else
+                        string_format(log_error, "install: cannot install %w: Not a regular file\n",
+                                      writer_shell_quoted_name, source);
                 install_status = 1;
                 return;
         }
