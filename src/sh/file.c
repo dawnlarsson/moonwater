@@ -14743,8 +14743,46 @@ typedef struct
 // The serial walk recurses on the stack, about 8.5 kB and one descriptor a
 // level, so it stops at a depth the stack and the descriptor table hold. The
 // parallel walk has no such limit.
-#define FIND_MAX_DEPTH 256
-static find_ancestor find_ancestors[FIND_MAX_DEPTH + 1];
+/* One level of the serial walk. What a level holds -- its path and name
+   buffers, the directory it reads and its identity for the loop check -- is
+   on the utility arena, one frame per depth, reused by every sibling at that
+   depth. A level therefore costs memory and not a frame of the C stack, so the
+   walk goes as deep as the memory the process has and as the descriptors it
+   can hold, which is the bound the reference find has too. */
+typedef struct find_frame
+{
+        struct find_frame address_to parent;
+        struct find_frame address_to child;
+        find_ancestor self;
+        bool self_set;
+        p8 below[FILE_PATH_MAX];
+        p8 held[FILE_NAME_MAX];
+        file_walk walk;
+} find_frame;
+
+static find_frame address_to find_top;
+
+static find_frame address_to find_child_frame(find_frame address_to frame)
+{
+        if (!frame->child)
+        {
+                find_frame address_to made =
+                    (find_frame address_to)utility_arena_take(sizeof(find_frame));
+
+                if (!made)
+                        return null;
+                made->parent = frame;
+                frame->child = made;
+        }
+        return frame->child;
+}
+
+static find_frame address_to find_top_frame()
+{
+        if (!find_top)
+                find_top = (find_frame address_to)utility_arena_take(sizeof(find_frame));
+        return find_top;
+}
 
 static string_address find_path;
 static string_address find_root_path;
@@ -17478,7 +17516,8 @@ static __attribute__((noinline)) bool find_true_test(find_node address_to node)
 }
 
 static fn find_walk(string_address path, string_address name, positive depth, bool named,
-                    bipolar parent, string_address entry, p8 type)
+                    bipolar parent, string_address entry, p8 type,
+                    find_frame address_to frame)
 {
         file_facts facts;
         bool follow = find_follow || (find_follow_named && named);
@@ -17499,6 +17538,7 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
         find_facts_follow = follow;
         find_facts_named = named;
         find_pruned = false;
+        frame->self_set = false;
 
         /* Roots have no dirent hint. Unknown types and followed links also
            need the kernel's answer before descent can be decided. */
@@ -17513,16 +17553,16 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
 
         bool directory = (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 
-        if (directory && follow && depth <= FIND_MAX_DEPTH)
+        if (directory && follow)
         {
                 if (!find_facts_ready())
                         return;
 
                 p64 device = file_device_key(facts.device_major, facts.device_minor);
 
-                for (positive above = 0; above < depth; above++)
-                        if (find_ancestors[above].device == device &&
-                            find_ancestors[above].inode == facts.inode)
+                for (find_frame address_to up = frame->parent; up; up = up->parent)
+                        if (up->self_set && up->self.device == device &&
+                            up->self.inode == facts.inode)
                         {
                                 string_format(log_error, "find: File system loop detected; the following directory is part of the cycle: '%w'\n",
                                               writer_terminal_quoted_name, path);
@@ -17530,8 +17570,9 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
                                 return;
                         }
 
-                find_ancestors[depth].device = device;
-                find_ancestors[depth].inode = facts.inode;
+                frame->self.device = device;
+                frame->self.inode = facts.inode;
+                frame->self_set = true;
         }
 
         bool wanted = depth >= find_minimum && depth <= find_maximum;
@@ -17553,73 +17594,66 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
 
         if (descend)
         {
-                file_walk walk;
+                find_frame address_to child = find_child_frame(frame);
+                file_walk address_to walk = &frame->walk;
 
-                walk.handle = file_open_same(
+                if (!child)
+                {
+                        string_format(log_error, "find: '%w': %s\n", writer_terminal_quoted_name,
+                                      path, file_reason(-ERROR_NO_MEMORY));
+                        find_status = 1;
+                        return;
+                }
+
+                walk->handle = file_open_same(
                     parent, entry, address_of facts,
                     FILE_READ | O_DIRECTORY | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW));
-                walk.error = walk.handle < 0 ? walk.handle : 0;
-                walk.have = 0;
-                walk.at = 0;
-                bool opened = walk.handle >= 0;
+                walk->error = walk->handle < 0 ? walk->handle : 0;
+                walk->have = 0;
+                walk->at = 0;
+                bool opened = walk->handle >= 0;
 
                 if (!opened)
                 {
                         string_format(log_error, "find: '%w': %s\n", writer_terminal_quoted_name,
-                                      path, file_reason(walk.handle));
+                                      path, file_reason(walk->handle));
                         find_status = 1;
                 }
                 else
                 {
                         struct linux_dirent64 address_to entry;
 
-                        while (!find_quit && (entry = file_walk_next(address_of walk)))
+                        while (!find_quit && (entry = file_walk_next(walk)))
                         {
                                 if (file_is_dot(entry->d_name))
                                         continue;
 
-                                // Every level spends a descriptor and a frame
-                                // with a getdents block in it, which is what
-                                // a tree this deep would run out of; the
-                                // first entry found past the ceiling is
-                                // what says the walk is not complete.
-                                if (depth >= FIND_MAX_DEPTH)
-                                {
-                                        string_format(log_error, "find: '%w' is nested too deep\n",
-                                                      writer_terminal_quoted_name, path);
-                                        find_status = 1;
-                                        break;
-                                }
-
-                                p8 below[FILE_PATH_MAX];
-                                p8 held[FILE_NAME_MAX];
-
-                                string_copy_max_end(held, entry->d_name,
+                                string_copy_max_end(frame->held, entry->d_name,
                                                     FILE_NAME_MAX - 1);
 
-                                if (!file_path_join(below, path, held))
+                                if (!file_path_join(frame->below, path, frame->held))
                                 {
                                         string_format(log_error, "find: cannot access '%w/%w': %s\n",
                                                       writer_terminal_quoted_name, path,
-                                                      writer_terminal_quoted_name, held,
+                                                      writer_terminal_quoted_name, frame->held,
                                                       file_reason(-ERROR_NAME_TOO_LONG));
                                         find_status = 1;
                                         continue;
                                 }
 
-                                find_walk(below, held, depth + 1, false,
-                                          walk.handle, held, entry->d_type);
+                                find_walk(frame->below, frame->held, depth + 1, false,
+                                          walk->handle, frame->held, entry->d_type, child);
                         }
 
-                        if (walk.error < 0)
+                        if (walk->error < 0)
                         {
                                 string_format(log_error, "find: '%w': %s\n",
                                               writer_terminal_quoted_name, path,
-                                              file_reason(walk.error));
+                                              file_reason(walk->error));
                                 find_status = 1;
                         }
 
-                        file_walk_close(address_of walk);
+                        file_walk_close(walk);
                 }
         }
 
@@ -18398,7 +18432,14 @@ static fn find_walk_root(string_address root)
         if (find_tree_usable())
                 find_tree_root(root, name, parent, entry);
         else
-                find_walk(root, name, 0, true, parent, entry, 0);
+        {
+                find_frame address_to top = find_top_frame();
+
+                if (top)
+                        find_walk(root, name, 0, true, parent, entry, 0, top);
+                else
+                        find_status = 1;
+        }
         system_close(parent);
 }
 
