@@ -352,6 +352,8 @@ static string_address parse_want[PARSE_WANT_ROOM];
 static string_address parse_want_opener[PARSE_WANT_ROOM];
 static positive parse_want_line[PARSE_WANT_ROOM];
 static positive parse_want_used HOT_STATE;
+//      Outer constructs that no longer fit in the stack. The top entry is
+//      still the innermost unfinished construct, whatever this counts.
 static positive parse_want_over HOT_STATE;
 
 //      A closer waited for, with the command waiting and its line, which
@@ -372,38 +374,50 @@ static HOT fn parse_want_push_for(string_address word, b32 index)
         default: break;
         }
 
-        if (parse_want_used < PARSE_WANT_ROOM)
+        //      Full, the oldest construct goes, not the newest: the held
+        //      entries are always the innermost ones, so the top is the
+        //      construct the input is still inside and a pop removes that
+        //      one. Dropping the new entry instead made the pop that closed
+        //      it remove an outer one, and the end of input named that line.
+        if (parse_want_used == PARSE_WANT_ROOM)
         {
-                parse_want_opener[parse_want_used] = opener;
-                parse_want_line[parse_want_used] = parse_nodes[index].line;
-                parse_want[parse_want_used++] = word;
-        }
-        else
+                memory_copy(parse_want, parse_want + 1,
+                            (PARSE_WANT_ROOM - 1) * sizeof(parse_want[0]));
+                memory_copy(parse_want_opener, parse_want_opener + 1,
+                            (PARSE_WANT_ROOM - 1) * sizeof(parse_want_opener[0]));
+                memory_copy(parse_want_line, parse_want_line + 1,
+                            (PARSE_WANT_ROOM - 1) * sizeof(parse_want_line[0]));
+                parse_want_used--;
                 parse_want_over++;
+        }
+
+        parse_want_opener[parse_want_used] = opener;
+        parse_want_line[parse_want_used] = parse_nodes[index].line;
+        parse_want[parse_want_used++] = word;
 }
 
 static fn parse_want_pop()
 {
-        if (parse_want_over)
-                parse_want_over--;
-        else if (parse_want_used)
+        if (parse_want_used)
                 parse_want_used--;
+        else if (parse_want_over)
+                parse_want_over--;
 }
 
 //      The command the innermost unfinished construct began with, or null.
 PURE string_address parse_want_opener_now()
 {
-        return parse_want_used && !parse_want_over ? parse_want_opener[parse_want_used - 1] : null;
+        return parse_want_used ? parse_want_opener[parse_want_used - 1] : null;
 }
 
 PURE positive parse_want_line_now()
 {
-        return parse_want_used && !parse_want_over ? parse_want_line[parse_want_used - 1] : 0;
+        return parse_want_used ? parse_want_line[parse_want_used - 1] : 0;
 }
 
 static PURE string_address parse_want_now()
 {
-        return parse_want_used && !parse_want_over ? parse_want[parse_want_used - 1] : null;
+        return parse_want_used ? parse_want[parse_want_used - 1] : null;
 }
 
 static PURE positive parse_pending_start_line()
