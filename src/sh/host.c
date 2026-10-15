@@ -5164,6 +5164,7 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 system_signal_install(1, 1, 0, 0, null);
 
                 failed = host_canvas_request(SPARK_CANVAS_OFF, address_of control);
+                system_signal_install(1, 0, 0, 0, null);
                 if (failed == -EPERM)
                         return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
                 if (failed == -EALREADY)
