@@ -9474,6 +9474,7 @@ static p8 ls_time_key;    // m modified, a accessed, c changed, b born
 static p8 ls_time_style;  // d default, f full-iso, + a format (the other ISO styles are formats)
 static string_address ls_time_format_old;
 static string_address ls_time_format_recent;
+static p8 ls_time_style_text[FILE_PATH_MAX];
 static p8 ls_quoting;     // L literal, s shell, S shell-always, e shell-escape,
                           // E shell-escape-always, c C, b escape, o locale
 static bool ls_hide_controls;
@@ -13729,7 +13730,7 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                 if (string_has_prefix(style, "posix-"))
                         style = (string_address) "locale";
 
-                if (string_is(style, '+'))
+                if (string_is(style, '+') && string_length(style) < sizeof(ls_time_style_text))
                 {
                         string_address newline = string_first_of(style + 1, '\n');
 
@@ -13741,8 +13742,12 @@ static b32 file_ls_as(string_address program, p8 default_format, p8 default_quot
                         {
                                 // Two formats on either side of the newline:
                                 // the first for old files, the second for
-                                // recent ones. The word is cut in place.
-                                address_to newline = end;
+                                // recent ones. The first is copied out to be
+                                // ended there, because the value may be the
+                                // environment's and is not ours to cut.
+                                memory_copy_apart_end(ls_time_style_text, style + 1,
+                                                      (positive)(newline - style - 1));
+                                ls_time_format_old = ls_time_style_text;
                                 ls_time_format_recent = newline + 1;
                         }
                 }
@@ -20822,7 +20827,7 @@ static b32 file_du()
         {
                 string_address style = (flags & FILE_FLAG('Y'))
                                            ? file_option_value(address_of taking, 'Y')
-                                           : getenv((string_address) "TIME_STYLE");
+                                           : file_environment((string_address) "TIME_STYLE");
 
                 if (style && string_get(style) && !du_time_style_read(style))
                         return 1;
