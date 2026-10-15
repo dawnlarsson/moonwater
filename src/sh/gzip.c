@@ -5027,8 +5027,10 @@ static fn gzip_say(string_address why)
                 string_format(log_error, "\ngzip: %s: %s\n", file_codec_display, why + 1);
         else if (shape == ':')
                 string_format(log_error, "gzip: %s: %s\n", file_codec_display, why + 1);
-        else
+        else if (shape == ' ')
                 string_format(log_error, "gzip: %s %s\n", file_codec_display, why + 1);
+        else
+                string_format(log_error, "gzip: %s: %s\n", file_codec_display, why + (!string_compare_max(why, "gzip ", 5) ? 5 : 0));
 }
 
 static b32 gzip_stream(bipolar in, bipolar out, bool decode, p8 level)
