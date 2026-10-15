@@ -16713,6 +16713,8 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                                 digits++;
                                 at++;
                         }
+                        for (positive padded = min(digits, 6); padded < 6; padded++)
+                                fraction *= 10;
                 }
                 if (any && at < stop && *at == ']')
                 {
