@@ -2744,14 +2744,37 @@ static fn edit_tab(bool back)
         }
 
         {
-                p8 spaces[EDIT_TAB];
-                positive width;
-                positive column = edit_display_column(edit_primary_place.line,
-                                                      edit_primary_place.column);
+                positive index = edit_primary_index();
 
-                width = EDIT_TAB - column % EDIT_TAB;
-                memory_fill(spaces, ' ', width);
-                edit_insert(spaces, width, EDIT_STEP_OTHER);
+                edit_step_seal();
+
+                for (positive cursor = 0; cursor < edit_cursor_count; cursor++)
+                {
+                        p8 spaces[EDIT_TAB];
+                        struct edit_place from = edit_cursor_caret(cursor);
+                        struct edit_place to = from;
+                        struct edit_place after;
+                        positive width;
+
+                        if (edit_cursor_has_selection(cursor))
+                        {
+                                from = edit_selection_start(cursor);
+                                to = edit_selection_end(cursor);
+                        }
+
+                        width = EDIT_TAB -
+                                edit_display_column(from.line, from.column) %
+                                    EDIT_TAB;
+                        memory_fill(spaces, ' ', width);
+                        after = edit_change(from, to, spaces, width,
+                                            EDIT_STEP_OTHER);
+                        edit_cursor_place(cursor, after, false);
+                        edit_cursors[cursor].wanted =
+                            edit_display_column(after.line, after.column);
+                }
+
+                edit_settle(index);
+                edit_step_seal();
         }
 }
 
