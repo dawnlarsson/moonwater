@@ -4464,6 +4464,16 @@ def text_cut_long_lines():
 
 
 INPUTS["cut_long"] = text_cut_long_lines()
+
+#       One line of 256 letters a and b and then an x: a pattern of 256
+#       bracket sets and a dot matches it. A dot whose set index was cut to a
+#       byte matched with an earlier set, and so found no x to match.
+INPUTS["ab_run_x"] = ("ab" * 128 + "x\n").encode("latin-1")
+
+#       Five thousand x and a newline: a loop that takes one x off the front
+#       of the line a turn queues an append a turn in one cycle, which is
+#       more than the append queue held at first.
+INPUTS["x_run"] = b"x" * 5000 + b"\n"
 TEXT_CASE_UTF8 = (("LC_ALL", "C.UTF-8"),)
 TEXT_CASE_PATTERNS = ("\u00c9", "\u00e9", "[\u00e9]", "[\u00c9x]+", "(\u00c9|X)+$", "\u00e0\u00f1", "\u03c3", "\u03a3\u03af",
                       "\u03c2", "\u0436", "[\u0416\u0434]", "\u01c5", "\u01c4", "\u01c6 ", "\u00ff", "\u00d8\u00e5",
@@ -94062,6 +94072,9 @@ PINNED = r"""
 {"case":{"argv":["-f","-i","--detach-loop","-A","--all-targets","--fake","/proc"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"umount"},
 {"case":{"argv":["-R","--no-mtab","-n","-v","--internal-only","--types=proc","/"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"umount"},
 {"case":{"argv":["--internal-only","--read-only","--detach-loop","-q","-n","--fake","dir"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"umount"},
+{"case":{"argv":["-c","[ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab][ab]."],"env":[["LC_ALL","C.UTF-8"]],"stdin":"ab_run_x","tier":"pinned"},"domain":"text","list":"regression","utility":"grep"},
+{"case":{"argv":["a","-1","3"],"tier":"pinned"},"domain":"text","list":"regression","utility":"join"},
+{"case":{"argv":["-e",":a","-e","a x","-e","s/^x//","-e","ta"],"stdin":"x_run","tier":"pinned"},"domain":"text","list":"regression","utility":"sed"},
 {"domain":"misc","id":"004d6f821da8e6ae","list":"unstable","reason_id":"h35302","utility":"ps"},
 {"domain":"misc","id":"5f2a25bff3e1e616","list":"unstable","reason_id":"h35302","utility":"ps"},
 {"domain":"misc","id":"886693ef78a06c2f","list":"unstable","reason_id":"h35302","utility":"ps"},
