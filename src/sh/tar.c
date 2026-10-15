@@ -3359,8 +3359,18 @@ static bool tar_flush(bipolar handle)
         if (!tar_at)
                 return true;
 
-        bipolar wrote = tar_encoder ? (tar_write_bytes(handle, tar_record, tar_at) ? 0 : -ERROR_INPUT_OUTPUT)
-                                    : tar_write_reason(handle, tar_record, tar_at);
+        bipolar wrote = 0;
+
+        if (tar_encoder)
+                wrote = tar_write_bytes(handle, tar_record, tar_at) ? 0 : -ERROR_INPUT_OUTPUT;
+        else
+        {
+                system_write_result written = system_write_all_checked(
+                    (positive)handle, tar_record, tar_at);
+
+                if (written.bytes != tar_at)
+                        wrote = written.error < 0 ? written.error : -ERROR_INPUT_OUTPUT;
+        }
 
         if (wrote < 0)
         {
