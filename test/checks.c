@@ -107011,6 +107011,55 @@ static fn check_cells(font_engine address_to with, const font_face address_to tw
         }
 }
 
+static p8 chain_atlas[512 * 512];
+static font_engine chain_engine, chain_fresh;
+static p32 chain_one[64 * 400], chain_two[64 * 400];
+
+/*
+        A cell is found in the chain of faces it is drawn with, and the cache
+        of drawn cells is keyed on the whole chain and on how many cells the
+        code spans. A code only the second face has is drawn from that face
+        in [one, two]; in [one, one], the same first face and the same length,
+        it must draw nothing, as it does in an engine of its own. And two
+        cells of a code are not three cells of it.
+*/
+static fn check_chains(const font_face address_to one, const font_face address_to two)
+{
+        const font_face address_to both[2] = {one, two}, address_to alone[2] = {one, one};
+        font_metrics grid = font_metrics_at(one, 18 * 64);
+        font_target first = {chain_one, 400, 400, 64}, second = {chain_two, 400, 400, 64};
+        p32 code = 0;
+
+        for (p32 c = 0x20; c < 0x3000 && !code; c++)
+                if (!font_glyph(one, c) && font_glyph(two, c))
+                        code = c;
+        check("chains: a code only the second face has", code != 0);
+        if (!code)
+                return;
+
+        font_start(&chain_engine, chain_atlas, 512, 512);
+        memory_fill_u32(chain_one, sizeof(chain_one) / 4, 0xabcdef);
+        font_cell(&chain_engine, both, 2, code, 1, &grid, 18 * 64, 0, &first, 3, 5, 0xdfe7ef, 0x303030);
+        memory_fill_u32(chain_one, sizeof(chain_one) / 4, 0xabcdef);
+        font_cell(&chain_engine, alone, 2, code, 1, &grid, 18 * 64, 0, &first, 3, 5, 0xdfe7ef, 0x303030);
+        font_start(&chain_fresh, chain_atlas, 512, 512);
+        memory_fill_u32(chain_two, sizeof(chain_two) / 4, 0xabcdef);
+        font_cell(&chain_fresh, alone, 2, code, 1, &grid, 18 * 64, 0, &second, 3, 5, 0xdfe7ef, 0x303030);
+        check("chains: [one, two] then [one, one] draws what [one, one] draws in an engine of its own",
+              memory_compare(chain_one, chain_two, sizeof(chain_one)) == 0);
+
+        font_start(&chain_engine, chain_atlas, 512, 512);
+        memory_fill_u32(chain_one, sizeof(chain_one) / 4, 0xabcdef);
+        font_cell(&chain_engine, both, 2, code, 2, &grid, 18 * 64, 0, &first, 3, 5, 0xdfe7ef, 0x303030);
+        memory_fill_u32(chain_one, sizeof(chain_one) / 4, 0xabcdef);
+        font_cell(&chain_engine, both, 2, code, 3, &grid, 18 * 64, 0, &first, 3, 5, 0xdfe7ef, 0x303030);
+        font_start(&chain_fresh, chain_atlas, 512, 512);
+        memory_fill_u32(chain_two, sizeof(chain_two) / 4, 0xabcdef);
+        font_cell(&chain_fresh, both, 2, code, 3, &grid, 18 * 64, 0, &second, 3, 5, 0xdfe7ef, 0x303030);
+        check("chains: three cells after two of a code draw what three cells draw in an engine of their own",
+              memory_compare(chain_one, chain_two, sizeof(chain_one)) == 0);
+}
+
 /*
         Drawn cells stay in their cell: every box, block, shape and braille
         code at small cell sizes, where a dot or a shape is only a pixel or
@@ -108471,6 +108520,7 @@ b32 main()
         check_drawn_bounds();
         check_drawing(&one, &two);
         check_cells(&engine, &two);
+        check_chains(&one, &two);
         check_synthetic(&one, &two);
         check_polarity(&two);
         check_invariants();

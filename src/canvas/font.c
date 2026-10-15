@@ -343,7 +343,9 @@ typedef struct
 //      (see font_face_measure), kept per face id in the engine's own table
 //      of FONT_MEASURES, so the glyph memo's churn cannot evict them.
 #define FONT_ZONES 6
-#define FONT_MEASURES 16
+//      Sixty-four, so faces whose ids differ by 16 do not evict each other's
+//      measure on every glyph (ids run in the order the faces load).
+#define FONT_MEASURES 64
 
 typedef struct
 {
@@ -352,13 +354,39 @@ typedef struct
         b32 standard, zones[FONT_ZONES];
 } font_measure;
 
-//      A cell drawn lately: what it was (face, code, size, flags, width) and
-//      the grid it was drawn on, the atlas generation it was found in, and
-//      the bitmap and its place from the cell's corner.
+//      The coverage curve for one pair of colours and a strength, as
+//      font_ramp makes it: the table of 256 coverages, and the plain share.
+#define FONT_RAMPS 8
+
 typedef struct
 {
-        p64 key, grid;
+        p32 colour, ground, contrast, plain;
+        bool ready;
+        p8 table[256];
+} font_ramp_set;
+
+//      The identities of drawn cells that the recent cells name by index: the
+//      faces a cell is found in, the grid it lies on and how many cells it
+//      spans. A new identity takes the next slot in turn, and the recent
+//      cells drawn against the slot it takes go stale with it.
+#define FONT_IDENTS 8
+
+typedef struct
+{
+        p64 chain, grid;
+        p32 spans;
+        bool used;
+} font_ident;
+
+//      A cell drawn lately: what it was (face, code, size, flags, width) and
+//      the identity it was drawn with (an index into the engine's identities),
+//      the atlas generation it was found in, and the bitmap and its place
+//      from the cell's corner.
+typedef struct
+{
+        p64 key;
         p32 generation;
+        p8 ident;
         b16 dx, dy, top, bottom;
         font_bitmap box;
 } font_recent;
@@ -378,7 +406,7 @@ typedef struct
         //      each; the caches, which a program fills as it goes, last.
         p8 address_to atlas;
         p32 atlas_width, atlas_height, shelf_count, shelf_bottom, slot_count;
-        bool started, scratched, clip, gather, overflow, track, mark, direct, ramp_ready;
+        bool started, scratched, clip, gather, overflow, track, mark, direct;
         p32 pair_turns, generation;
         p32 point_count, contour_count, components;
         b32 left_side;
@@ -386,8 +414,9 @@ typedef struct
         b32 cell_x, cell_y;
         p32 cover, area, gathered, used[5];
         b32 floor_y, height_y, wide_x;
-        p8 ramp[256];
-        p32 ramp_colour, ramp_ground, ramp_contrast, plain;
+        font_ramp_set ramps[FONT_RAMPS], address_to ramp_now;
+        p8 address_to ramp;
+        p32 ramp_turn, plain;
         p64 shared[FONT_EDGE / 64 + 1];
         font_shelf shelves[FONT_SHELVES];
 
@@ -402,6 +431,8 @@ typedef struct
         font_memo glyph_memo[FONT_MEMO], kern_memo[FONT_MEMO];
         font_measure measures[FONT_MEASURES];
         font_recent recent[FONT_RECENT];
+        font_ident idents[FONT_IDENTS];
+        p32 ident_turn, ident_last;
 
         //      A run of cells on its way to the target: each cell's bitmap,
         //      then their coverage rows side by side.
@@ -4246,8 +4277,26 @@ fn font_start(font_engine address_to e, p8 address_to atlas, p32 width, p32 heig
 //      meant for dark text and read 1.23 to 1.41 at 8 to 11 px.
 static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 strength)
 {
-        if (e->ramp_ready && e->ramp_colour == colour && e->ramp_ground == background && e->ramp_contrast == strength)
+        font_ramp_set address_to set = e->ramp_now;
+
+        if (set && set->colour == colour && set->ground == background && set->contrast == strength)
                 return;
+        for (p32 w = 0; w < FONT_RAMPS; w++)
+        {
+                set = &e->ramps[w];
+                if (set->ready && set->colour == colour && set->ground == background && set->contrast == strength)
+                {
+                        e->ramp_now = set;
+                        e->ramp = set->table;
+                        e->plain = set->plain;
+                        return;
+                }
+        }
+
+        //      On a ground not known, text whose colour alternates made a new
+        //      table of 256 floats for every glyph; the last FONT_RAMPS are kept.
+        set = &e->ramps[e->ramp_turn];
+        e->ramp_turn = (e->ramp_turn + 1) % FONT_RAMPS;
 
         f32 light = font_luma(colour) / 65280.0f;
         f32 ground = background & FONT_UNKNOWN ? (light < 0.5f ? 1 : 0) : font_luma(background) / 65280.0f;
@@ -4261,17 +4310,20 @@ static fn font_ramp(font_engine address_to e, p32 colour, p32 background, p32 st
         //      it is sRGB 128, a fifth of the light, and the diagonals of m,
         //      w, M, W and # at 8 to 14 px were grey smudges. Half and half
         //      reads a little heavier and draws them as strokes.
-        e->plain = (p32)(32 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
+        set->plain = (p32)(32 * (bright < 0 ? 0 : bright > 1 ? 1 : bright) + 0.5f);
         for (p32 a = 0; a < 256; a++)
         {
                 f32 x = a / 255.0f;
 
-                e->ramp[a] = (p8)(255 * x * (k + 1) / (x * k + 1) + 0.5f);
+                set->table[a] = (p8)(255 * x * (k + 1) / (x * k + 1) + 0.5f);
         }
-        e->ramp_colour = colour;
-        e->ramp_ground = background;
-        e->ramp_contrast = strength;
-        e->ramp_ready = true;
+        set->colour = colour;
+        set->ground = background;
+        set->contrast = strength;
+        set->ready = true;
+        e->ramp_now = set;
+        e->ramp = set->table;
+        e->plain = set->plain;
 }
 
 //      One pixel: back and fore mixed by a of 255, channel by channel, in
@@ -4497,7 +4549,6 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
 {
         positive placed = 0, at = 0;
         b64 pen = 0;
-        font_metrics cell = count ? font_metrics_at(faces[0], size) : (font_metrics){0};
 
         while (at < length && placed < room && count)
         {
@@ -4509,7 +4560,7 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
                     !(flags & FONT_UNKERNED))
                         pen += font_kern(e, faces[face], out[placed - 1].glyph, glyph, size);
 
-                b64 advance = face == FONT_DRAWN ? (b64)cell.cell_width << 16
+                b64 advance = face == FONT_DRAWN ? (b64)font_metrics_at(faces[0], size).cell_width << 16
                                                  : font_advance(faces[face], glyph, size);
                 out[placed++] = (font_place){glyph, face, pen, advance};
                 pen += advance;
@@ -4525,7 +4576,6 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
         positive at = 0;
         b64 pen = 0;
         font_place last = {0, FONT_DRAWN, 0, 0};
-        font_metrics cell = count ? font_metrics_at(faces[0], size) : (font_metrics){0};
 
         flags = font_polarity(flags, colour, background);
         p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
@@ -4548,6 +4598,7 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
                 b32 eighth = font_eighths((b64)x + pen);
                 if (place.face == FONT_DRAWN)
                 {
+                        font_metrics cell = font_metrics_at(faces[0], size);
                         font_bitmap box = font_cached(e, null, place.glyph,
                                                       (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
                         place.advance = cell.cell_width << 16;
@@ -4586,6 +4637,47 @@ static inline INLINE p64 font_cell_base(const font_face address_to const address
                (p64)(flags & 31) << 1;
 }
 
+//      The faces a cell is found in, every id of them, 16 bits an id: the
+//      cell's glyph is the first of them that has its code, so two chains
+//      that agree on the first face and their length can draw different
+//      glyphs. Zero when the chain is longer than four, or a cell wider
+//      than 16 bits, which is found every time and kept nowhere.
+static inline p64 font_chain(const font_face address_to const address_to faces, p32 count, p32 cells)
+{
+        p64 chain = 0;
+
+        if (count < 1 || count > 4 || cells > 0xffff)
+                return 0;
+        for (p32 i = 0; i < count; i++)
+                chain |= (p64)(faces[i]->id & 0xffff) << (16 * i);
+        return chain;
+}
+
+//      The index of a cell identity, plus one, for the recent cells to name:
+//      the last one found first, then the table. Zero is never an index.
+static p8 font_identify(font_engine address_to e, p64 chain, p64 grid, p32 spans)
+{
+        p32 last = e->ident_last;
+
+        if (last < FONT_IDENTS && e->idents[last].used && e->idents[last].chain == chain &&
+            e->idents[last].grid == grid && e->idents[last].spans == spans)
+                return (p8)(last + 1);
+        for (p32 i = 0; i < FONT_IDENTS; i++)
+                if (e->idents[i].used && e->idents[i].chain == chain && e->idents[i].grid == grid &&
+                    e->idents[i].spans == spans)
+                        return (p8)(e->ident_last = i) + 1;
+
+        //      A new identity: the cells drawn against the slot it takes are
+        //      stale, which the generation moving on makes them.
+        p32 i = e->ident_turn;
+
+        e->ident_turn = (i + 1) % FONT_IDENTS;
+        e->idents[i] = (font_ident){chain, grid, spans, true};
+        e->ident_last = i;
+        e->generation++;
+        return (p8)(i + 1);
+}
+
 //      The grid it lies on, and how many cells and faces.
 static inline INLINE p64 font_cell_shape(const font_metrics address_to grid, p32 count, p32 cells)
 {
@@ -4600,7 +4692,7 @@ static inline INLINE p64 font_cell_shape(const font_metrics address_to grid, p32
 //      forward and most of a cell's cost).
 static COLD __attribute__((noinline)) font_bitmap
 font_cell_find(font_engine address_to e, const font_face address_to const address_to faces, p32 count, p32 code,
-               p32 cells, const font_metrics address_to grid, p32 size, p32 flags, p64 key, p64 shape,
+               p32 cells, const font_metrics address_to grid, p32 size, p32 flags, p64 key, p32 ident,
                font_recent address_to recent, b32 address_to dx, b32 address_to dy)
 {
         b32 width = (b32)(cells ? cells : 1) * grid->cell_width, height = grid->cell_height;
@@ -4654,7 +4746,9 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
         //      A bitmap drawn into the atlas's scratch is gone with the next
         //      glyph, so it is not kept.
         if (!e->scratched)
-                *recent = (font_recent){key, shape, e->generation, (b16)*dx, (b16)*dy, (b16)top, (b16)bottom, box};
+                *recent = (font_recent){.key = key, .generation = e->generation, .ident = (p8)ident,
+                                        .dx = (b16)*dx, .dy = (b16)*dy, .top = (b16)top, .bottom = (b16)bottom,
+                                        .box = box};
         else
                 recent->key = 0;
         return box;
@@ -4669,13 +4763,22 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
 */
 static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const font_face address_to const address_to faces,
                                                p32 count, p32 code, p32 cells, const font_metrics address_to grid,
-                                               p32 size, p32 flags, p64 base, p64 shape, b32 address_to dx,
+                                               p32 size, p32 flags, p64 base, p32 ident, b32 address_to dx,
                                                b32 address_to dy, b16 address_to ink)
 {
         p64 key = base | (p64)(code & 0x1fffff) << 26;
         font_recent address_to recent = &e->recent[(key * 0x9e3779b97f4a7c15ull) >> 56];
 
-        if (recent->key == key && recent->grid == shape && recent->generation == e->generation)
+        if (!ident)
+        {
+                font_recent kept = {0};
+                font_bitmap box = font_cell_find(e, faces, count, code, cells, grid, size, flags, key, 0, &kept, dx,
+                                                 dy);
+                ink[0] = kept.top;
+                ink[1] = kept.bottom;
+                return box;
+        }
+        if (recent->key == key && recent->ident == ident && recent->generation == e->generation)
         {
                 *dx = recent->dx;
                 *dy = recent->dy;
@@ -4683,7 +4786,7 @@ static inline INLINE font_bitmap font_cell_box(font_engine address_to e, const f
                 ink[1] = recent->bottom;
                 return recent->box;
         }
-        font_bitmap box = font_cell_find(e, faces, count, code, cells, grid, size, flags, key, shape, recent, dx, dy);
+        font_bitmap box = font_cell_find(e, faces, count, code, cells, grid, size, flags, key, ident, recent, dx, dy);
         ink[0] = recent->top;
         ink[1] = recent->bottom;
         return box;
@@ -4709,9 +4812,10 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         b16 ink[2];
 
         flags = font_polarity(flags, colour, background);
+        p64 chain = font_chain(faces, count, cells);
+        p32 ident = chain ? font_identify(e, chain, font_cell_shape(grid, count, cells), cells << 3 | count) : 0;
         font_bitmap box = font_cell_box(e, faces, count, code, cells, grid, size, flags,
-                                        font_cell_base(faces, count, size, flags), font_cell_shape(grid, count, cells),
-                                        &dx, &dy, ink);
+                                        font_cell_base(faces, count, size, flags), ident, &dx, &dy, ink);
         b32 gx = x + dx, gy = y + dy;
 
         if (background & FONT_UNKNOWN)
@@ -4725,7 +4829,6 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         b32 top = y < 0 ? 0 : y, bottom = y + height > target->height ? target->height : y + height;
         b32 from = gx > left ? gx : left, to = gx + box.width < right ? gx + box.width : right;
         b32 above = gy > top ? gy : top, below = gy + box.height < bottom ? gy + box.height : bottom;
-        const p32 address_to pixel = font_tones(e, colour, background, font_strength(e, size, flags));
 
         if (left >= right || top >= bottom)
                 return;
@@ -4738,7 +4841,8 @@ fn font_cell(font_engine address_to e, const font_face address_to const address_
         if (from < to)
                 memory_translate_u32_rect(target->pixels + (positive)above * target->stride + from, target->stride,
                                           box.coverage + (positive)(above - gy) * box.stride + (from - gx),
-                                          box.stride, (positive)(to - from), (positive)(below - above), pixel);
+                                          box.stride, (positive)(to - from), (positive)(below - above),
+                                          font_tones(e, colour, background, font_strength(e, size, flags)));
 }
 
 //      Rows from to from + rows of one cell's coverage, width bytes each,
@@ -4806,10 +4910,14 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
         flags = font_polarity(flags, colour, background);
         if (!(background & FONT_UNKNOWN) && n && n <= FONT_RUN && width > 0 && height > 0 && x >= 0 && y >= 0 &&
             x + (b64)across <= target->width && y + height <= target->height && across + 16 <= FONT_STRIP)
+        {
+                p64 chain = font_chain(faces, count, 1);
+                p32 ident = chain ? font_identify(e, chain, font_cell_shape(grid, count, 1), 1 << 3 | count) : 0;
+
                 for (p32 attempt = 0; attempt < 2 && !found; attempt++)
                 {
                         p32 generation = e->generation;
-                        p64 base = font_cell_base(faces, count, size, flags), shape = font_cell_shape(grid, count, 1);
+                        p64 base = font_cell_base(faces, count, size, flags);
 
                         found = true;
                         for (p32 i = 0; i < n && found; i++)
@@ -4818,7 +4926,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
 
                                 b16 ink[2];
 
-                                e->run[i] = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, base, shape,
+                                e->run[i] = font_cell_box(e, faces, count, codes[i], 1, grid, size, flags, base, ident,
                                                           &dx, &dy, ink);
                                 e->run_dx[i] = (b16)dx;
                                 e->run_dy[i] = (b16)dy;
@@ -4828,6 +4936,7 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                         }
                         found = found && e->generation == generation;
                 }
+        }
         if (!found)
         {
                 for (p32 i = 0; i < n; i++)
@@ -4858,7 +4967,6 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
 
         //      Strip rows are 16 bytes longer than the run, for the last
         //      cell's word.
-        const p32 address_to pixel = font_tones(e, colour, background, font_strength(e, size, flags));
         positive stride = across + 16;
         const p8 address_to limit = e->atlas + (positive)e->atlas_width * e->atlas_height;
         b32 band = (b32)(FONT_STRIP / stride);
@@ -4872,7 +4980,8 @@ fn font_cells(font_engine address_to e, const font_face address_to const address
                         font_lay_cell(e->strip + (positive)i * (positive)width, stride, &e->run[i], e->run_dx[i],
                                       e->run_dy[i], width, height, from, rows, limit);
                 memory_translate_u32_rect(target->pixels + (positive)(y + from) * target->stride + (positive)x,
-                                          target->stride, e->strip, stride, across, (positive)rows, pixel);
+                                          target->stride, e->strip, stride, across, (positive)rows,
+                                          font_tones(e, colour, background, font_strength(e, size, flags)));
         }
 }
 
