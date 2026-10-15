@@ -14781,7 +14781,8 @@ static COLD string_address exec_pretty_ansi(exec_function_text address_to made,
                                         length = 2;
                                 }
                         }
-                        else if (next == 'c' && string_get(at))
+                        else if (next == 'c' && string_get(at) &&
+                                 string_not(at, '\''))
                                 out[0] = (p8)(string_get(at++) & 31);
                         else if (next == 'e' || next == 'E')
                                 out[0] = 27;
