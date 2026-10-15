@@ -106457,6 +106457,34 @@ static fn check_tables(const font_face address_to one, const font_face address_t
                                                      font_kerning(two, 2, 1, size) == 16896);
 }
 
+/*
+        A run past 32768 pixels of advance: its pen is 16.16 and was 32 bits, so
+        the 4000th glyph of a line of M was placed where the wrap put it. Each
+        glyph's x must be its index times the advance, through the whole run.
+*/
+static font_place long_run[4000];
+
+static fn check_long_run(const font_face address_to two)
+{
+        const font_face address_to chain[1] = {two};
+        p8 text[4000];
+        positive placed;
+        b64 advance, steps = 0;
+        bool exact = true;
+
+        for (positive i = 0; i < sizeof(text); i++)
+                text[i] = 'M';
+        placed = font_layout(&engine, chain, 1, text, sizeof(text), 16 * 64, FONT_UNKERNED, long_run, 4000);
+        advance = long_run[1].x - long_run[0].x;
+        for (positive i = 0; i < placed; i++)
+        {
+                exact = exact && long_run[i].x == (b64)i * advance;
+                steps++;
+        }
+        check("layout: a run of 4000 glyphs past 32768 px places every glyph where its advance puts it",
+              placed == 4000 && advance > 0 && exact && steps == 4000 && long_run[3999].x > 0x80000000ll);
+}
+
 static fn check_layout(const font_face address_to one, const font_face address_to two)
 {
         const font_face address_to chain[2] = {one, two};
@@ -108368,7 +108396,7 @@ static fn check_edges(font_face address_to one, font_face address_to two)
         font_metrics zero = font_metrics_at(one, 0);
         font_target target = {edge_frames[1], 48, 48, 32};
         p8 pair[2] = {'A', 'B'};
-        p32 pen;
+        b64 pen;
 
         for (positive i = 0; i < 48 * 32; i++)
                 edge_frames[1][i] = 0x123456;
@@ -108396,6 +108424,7 @@ b32 main()
         check_tables(&one, &two);
         check_outlines(&one, &two);
         check_layout(&one, &two);
+        check_long_run(&two);
         check_light();
         check_drawn();
         check_shapes();

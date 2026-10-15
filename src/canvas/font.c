@@ -162,7 +162,7 @@
                 glyph from the first face of the chain that has it, its pen
                 position and advance. Answers how many it placed.
 
-        b32 font_draw(font_engine *engine, const font_face *const *faces,
+        b64 font_draw(font_engine *engine, const font_face *const *faces,
                       p32 count, const p8 *text, positive length, p32 size,
                       p32 flags, const font_target *target, b32 x, b32 baseline,
                       p32 colour, p32 background)
@@ -286,7 +286,7 @@ typedef struct
 typedef struct
 {
         p32 glyph, face;
-        b32 x, advance;
+        b64 x, advance;     // 16.16: a run of a few thousand glyphs is past 32 bits
 } font_place;
 
 typedef struct
@@ -4483,7 +4483,7 @@ static b32 font_kern(font_engine address_to e, const font_face address_to face, 
 }
 
 //      The pen in eighths of a pixel, to the nearest, halves right.
-static inline b32 font_eighths(b32 pen)
+static inline b32 font_eighths(b64 pen)
 {
         return (b32)(((b64)pen * FONT_PHASES + 0x8000) >> 16);
 }
@@ -4493,7 +4493,7 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
                      p32 flags, font_place address_to out, positive room)
 {
         positive placed = 0, at = 0;
-        b32 pen = 0;
+        b64 pen = 0;
         font_metrics cell = count ? font_metrics_at(faces[0], size) : (font_metrics){0};
 
         while (at < length && placed < room && count)
@@ -4506,7 +4506,7 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
                     !(flags & FONT_UNKERNED))
                         pen += font_kern(e, faces[face], out[placed - 1].glyph, glyph, size);
 
-                b32 advance = face == FONT_DRAWN ? cell.cell_width << 16
+                b64 advance = face == FONT_DRAWN ? (b64)cell.cell_width << 16
                                                  : font_advance(faces[face], glyph, size);
                 out[placed++] = (font_place){glyph, face, pen, advance};
                 pen += advance;
@@ -4514,13 +4514,13 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
         return placed;
 }
 
-b32 font_draw(font_engine address_to e, const font_face address_to const address_to faces,
+b64 font_draw(font_engine address_to e, const font_face address_to const address_to faces,
               p32 count, const p8 address_to text, positive length, p32 size, p32 flags,
               const font_target address_to target, b32 x, b32 baseline, p32 colour,
               p32 background)
 {
         positive at = 0;
-        b32 pen = 0;
+        b64 pen = 0;
         font_place last = {0, FONT_DRAWN, 0, 0};
         font_metrics cell = count ? font_metrics_at(faces[0], size) : (font_metrics){0};
 
@@ -4542,7 +4542,7 @@ b32 font_draw(font_engine address_to e, const font_face address_to const address
                 if (place.face != FONT_DRAWN && last.face == place.face && !(flags & FONT_UNKERNED))
                         pen += font_kern(e, faces[place.face], last.glyph, place.glyph, size);
 
-                b32 eighth = font_eighths(x + pen);
+                b32 eighth = font_eighths((b64)x + pen);
                 if (place.face == FONT_DRAWN)
                 {
                         font_bitmap box = font_cached(e, null, place.glyph,
