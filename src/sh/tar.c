@@ -2958,8 +2958,7 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                                 tar_write_failure = 0;
                                 if (got < 0)
                                         tar_refuse("cannot read archive");
-                                else
-                                        tar_refuse("Unexpected EOF in archive");
+                                tar_refuse("Unexpected EOF in archive");
                                 return false;
                         }
                         if (out >= 0)
