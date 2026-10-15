@@ -58,6 +58,7 @@ struct ui
         int scratch_width;
         // A repaint's rows, when band_bottom > band_top: nothing else is written. Last, so the positional initialisers of a ui stay.
         int band_top, band_bottom;
+        font_face faces[2];             // the regular and the bold, loaded by the runner
 };
 
 /*
@@ -625,6 +626,62 @@ static fn ui_field(struct ui address_to ui, int x, int y, int width, int height,
         }
 }
 
+// A logical size in pixels at the window's scale.
+static int ui_px(const struct ui address_to ui, int logical)
+{
+        return logical * ui->scale;
+}
+
+// Anonymous memory for an app's own state, or a negative errno.
+static long ui_map(positive size)
+{
+        return compositor_call(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
+}
+
+// A font engine and its atlas, as one mapping: a static atlas is 256 KiB of the image's address space in every program that
+// links this, a shell under a 12 MiB cap among them. False when the memory is not there.
+static b32 ui_engine_open(struct ui address_to ui)
+{
+        positive atlas_at = (sizeof(font_engine) + 4095) & ~(positive)4095;
+        long engine = ui_map(atlas_at + 512 * 512);
+
+        if (engine < 0 && engine > -4096)
+                return false;
+        ui->engine = (font_engine address_to)engine;
+        font_start(ui->engine, (p8 address_to)(engine + atlas_at), 512, 512);
+        return true;
+}
+
+// A face from a font file, loaded into the engine's face. False when there is no path, the file, or a font in it.
+static b32 ui_face_load(font_face address_to face, string_address path)
+{
+        positive size = 0, bytes = path ? compositor_map_file(path, &size) : 0;
+
+        return bytes && font_load(face, (const p8 address_to)bytes, size, 0) == 0;
+}
+
+// The fonts an app draws in when it names none.
+#define UI_FONT_REGULAR "/usr/share/fonts/inter/Inter-Regular.ttf"
+#define UI_FONT_BOLD "/usr/share/fonts/inter/Inter-Bold.ttf"
+
+// The scratch line the text is drawn through is at least this wide: it is mapped again only when it must grow.
+static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
+{
+        unsigned int scratch = width + 8u * (unsigned int)ui->scale;
+        long mapped;
+
+        if (scratch <= (unsigned int)ui->scratch_width)
+                return;
+        mapped = ui_map((positive)scratch * UI_SCRATCH_ROWS * (positive)ui->scale * 4);
+        if (mapped < 0 && mapped > -4096)
+                return;
+        if (ui->scratch)
+                compositor_call(syscall(munmap), (positive)ui->scratch,
+                                (positive)ui->scratch_width * UI_SCRATCH_ROWS * (positive)ui->scale * 4, 0, 0, 0, 0);
+        ui->scratch = (unsigned int address_to)mapped;
+        ui->scratch_width = (int)scratch;
+}
+
 /*
         One app's window and loop. The runner takes the window, sets its title,
         glass, scale and ground, and calls open. Then it runs the loop: events,
@@ -643,6 +700,9 @@ struct ui_app
         b32 address_to focused;         // the app's own: the keys are its
         unsigned int address_to ground; // the app's own: the window's ground, as the loop last saw it
         unsigned int asked_w, asked_h;  // the size the hand last asked for
+        string_address font, bold;      // the faces to draw in, or the UI_FONT defaults; bold is none when plain
+        b32 plain;
+        string_address nofont;          // logged, with the pid, when the faces do not load
         int (*open)(void);              // the app's own start; -1 runs the loop, else the status to leave with
         b32 (*frame)(void);             // paints the due picture; false: it is due again in 50 ms
         b32 (*event)(const struct window_event address_to event); // false: quit
@@ -669,6 +729,15 @@ static int ui_app_run(struct ui_app address_to app)
         table = app->own->table;
         row = app->own->row;
         app->ui->scale = table->scale >= 1 && table->scale <= 8 ? (int)table->scale : 1;
+        if (!ui_engine_open(app->ui) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
+        {
+                compositor_kmsg(app->nofont, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
+                windows_leave(app->own);
+                return 1;
+        }
+        app->ui->regular = &app->ui->faces[0];
+        app->ui->bold = !app->plain && ui_face_load(&app->ui->faces[1], app->bold ? app->bold : (string_address)UI_FONT_BOLD)
+                            ? &app->ui->faces[1] : null;
         string_copy((string_address)table->title[row], app->title);
         table->glass[row] = app->glass;
         *app->ground = table->ground[row];

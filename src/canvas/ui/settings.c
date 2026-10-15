@@ -635,7 +635,6 @@ static struct
 {
         struct window_row own;
         struct ui ui;
-        font_face face[2];
         string_address moonwater;
         char value[SETTINGS_ROWS][SETTINGS_VALUE];
         unsigned char state[SETTINGS_ROWS];
@@ -752,16 +751,11 @@ static b32 settings_map(void)
 
         if (settings_large)
                 return true;
-        mapped = compositor_call(syscall(mmap), 0, (sizeof(struct settings_large) + 4095) & ~(positive)4095, 3, 0x22, (positive)-1, 0);
+        mapped = ui_map((sizeof(struct settings_large) + 4095) & ~(positive)4095);
         if (mapped < 0 && mapped > -4096)
                 return false;
         settings_large = (struct settings_large address_to)mapped;
         return true;
-}
-
-static int settings_px(int logical)
-{
-        return logical * settings.ui.scale;
 }
 
 // Rows [from, to) added to the rows [top, bottom) (empty when bottom <= top): the union, the empty one none.
@@ -983,23 +977,23 @@ static fn settings_layout(void)
                 int start = settings_section_start(settings.visible[at]);
 
                 if (!at || settings_section_start(settings.visible[at - 1]) != start)
-                        y += settings_px(SETTINGS_HEADER);
+                        y += ui_px(&settings.ui, SETTINGS_HEADER);
                 settings.top[at] = y;
-                y += settings_px(UI_ROW);
+                y += ui_px(&settings.ui, UI_ROW);
                 if (at + 1 == settings.visible_count || settings_section_start(settings.visible[at + 1]) != start)
-                        y += settings_px(SETTINGS_GAP);
+                        y += ui_px(&settings.ui, SETTINGS_GAP);
         }
         settings.content = y;
 }
 
 static int settings_list_top(void)
 {
-        return settings_px(SETTINGS_TOP);
+        return ui_px(&settings.ui, SETTINGS_TOP);
 }
 
 static int settings_list_bottom(void)
 {
-        return settings.height - settings_px(SETTINGS_FOOT);
+        return settings.height - ui_px(&settings.ui, SETTINGS_FOOT);
 }
 
 // The column of groups at the left: a third of the window, between a least and a most, and never more than half of it.
@@ -1007,26 +1001,26 @@ static int settings_side(void)
 {
         int side = settings.width * 30 / 100;
 
-        side = side < settings_px(SETTINGS_SIDE_LEAST) ? settings_px(SETTINGS_SIDE_LEAST) : side;
-        side = side > settings_px(SETTINGS_SIDE_MOST) ? settings_px(SETTINGS_SIDE_MOST) : side;
+        side = side < ui_px(&settings.ui, SETTINGS_SIDE_LEAST) ? ui_px(&settings.ui, SETTINGS_SIDE_LEAST) : side;
+        side = side > ui_px(&settings.ui, SETTINGS_SIDE_MOST) ? ui_px(&settings.ui, SETTINGS_SIDE_MOST) : side;
         return side > settings.width / 2 ? settings.width / 2 : side;
 }
 
 // Where the rows are: from after the column to the window's margin.
 static int settings_pane_left(void)
 {
-        return settings_px(UI_PAD) + settings_side() + settings_px(SETTINGS_GUTTER);
+        return ui_px(&settings.ui, UI_PAD) + settings_side() + ui_px(&settings.ui, SETTINGS_GUTTER);
 }
 
 static int settings_pane_right(void)
 {
-        return settings.width - settings_px(UI_PAD);
+        return settings.width - ui_px(&settings.ui, UI_PAD);
 }
 
 // How tall the column of groups is, and how far it can be scrolled.
 static int settings_side_height(void)
 {
-        return settings_groups() * settings_px(SETTINGS_GROUP_ROW);
+        return settings_groups() * ui_px(&settings.ui, SETTINGS_GROUP_ROW);
 }
 
 static fn settings_side_scroll_to(int scroll)
@@ -1045,7 +1039,7 @@ static fn settings_side_scroll_to(int scroll)
 // The chosen group kept in sight in a column that does not fit.
 static fn settings_side_reveal(void)
 {
-        int top = settings.group * settings_px(SETTINGS_GROUP_ROW), height = settings_px(SETTINGS_GROUP_ROW);
+        int top = settings.group * ui_px(&settings.ui, SETTINGS_GROUP_ROW), height = ui_px(&settings.ui, SETTINGS_GROUP_ROW);
         int room = settings_list_bottom() - settings_list_top();
 
         if (top < settings.group_scroll)
@@ -1167,7 +1161,7 @@ static string_address settings_fit(struct ui address_to ui, string_address text,
 // How tall what scrolls is: the list, or the card of what a command said.
 static int settings_extent(void)
 {
-        return settings.view ? settings.card_lines * settings_px(SETTINGS_CARD_LINE) + 2 * settings_px(SETTINGS_CARD_PAD)
+        return settings.view ? settings.card_lines * ui_px(&settings.ui, SETTINGS_CARD_LINE) + 2 * ui_px(&settings.ui, SETTINGS_CARD_PAD)
                              : settings.content;
 }
 
@@ -1190,7 +1184,7 @@ static fn settings_scroll_to(int scroll)
 static fn settings_reveal(void)
 {
         int at = settings_pos(settings.focus);
-        int top, height = settings_px(UI_ROW), room = settings_list_bottom() - settings_list_top();
+        int top, height = ui_px(&settings.ui, UI_ROW), room = settings_list_bottom() - settings_list_top();
 
         if (at < 0 || settings.view)
                 return;
@@ -1198,8 +1192,8 @@ static fn settings_reveal(void)
         // A section's first row brings its header with it.
         if (!at || settings_section_start(settings.visible[at - 1]) != settings_section_start(settings.focus))
         {
-                top -= settings_px(SETTINGS_HEADER);
-                height += settings_px(SETTINGS_HEADER);
+                top -= ui_px(&settings.ui, SETTINGS_HEADER);
+                height += ui_px(&settings.ui, SETTINGS_HEADER);
         }
         if (top < settings.scroll)
                 settings_scroll_to(top);
@@ -1555,7 +1549,7 @@ static int settings_run_width(struct ui address_to ui, struct settings_run addre
 */
 static fn settings_wrap(void)
 {
-        int room = settings.width - 2 * settings_px(UI_PAD) - 2 * settings_px(14);
+        int room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, 14);
         positive at = 0;
 
         if (settings.wrap_made && settings.wrap_width == settings.width && settings.wrap_scale == settings.ui.scale &&
@@ -2507,33 +2501,33 @@ static fn settings_menu_close(void)
 */
 static b32 settings_menu_box(int address_to x, int address_to y, int address_to width, int address_to height, int address_to shown)
 {
-        int pos = settings_pos(settings.menu), item = settings_px(SETTINGS_MENU_ITEM), pad = settings_px(SETTINGS_MENU_PAD);
+        int pos = settings_pos(settings.menu), item = ui_px(&settings.ui, SETTINGS_MENU_ITEM), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
         int row_top, below, above, most, count = settings.menu_count;
 
         if (pos < 0)
                 return false;
         row_top = settings_list_top() + settings.top[pos] - settings.scroll;
-        below = settings.height - settings_px(8) - (row_top + settings_px(UI_ROW) - settings_px(4));
-        above = row_top + settings_px(4) - settings_px(8);
+        below = settings.height - ui_px(&settings.ui, 8) - (row_top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4));
+        above = row_top + ui_px(&settings.ui, 4) - ui_px(&settings.ui, 8);
         // Under the row, or over it when there is more room there; with room on neither side for all of it, slid up over
         // the row when it fits the window so, and else cut to the larger side.
         most = (below >= above ? below : above) - 2 * pad;
         most = most / item < 1 ? 1 : most / item;
-        if (count > most && count * item + 2 * pad <= settings.height - settings_px(16))
+        if (count > most && count * item + 2 * pad <= settings.height - ui_px(&settings.ui, 16))
                 most = count;
         address_to shown = count < most ? count : most;
         address_to height = address_to shown * item + 2 * pad;
-        address_to width = settings.menu_width > settings.width - settings_px(16) ? settings.width - settings_px(16) : settings.menu_width;
-        address_to x = settings_pane_right() - settings_px(14) - address_to width;
-        address_to x = address_to x < settings_px(8) ? settings_px(8) : address_to x;
+        address_to width = settings.menu_width > settings.width - ui_px(&settings.ui, 16) ? settings.width - ui_px(&settings.ui, 16) : settings.menu_width;
+        address_to x = settings_pane_right() - ui_px(&settings.ui, 14) - address_to width;
+        address_to x = address_to x < ui_px(&settings.ui, 8) ? ui_px(&settings.ui, 8) : address_to x;
         if (address_to height <= below)
-                address_to y = row_top + settings_px(UI_ROW) - settings_px(4);
+                address_to y = row_top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4);
         else if (address_to height <= above)
-                address_to y = row_top + settings_px(4) - address_to height;
+                address_to y = row_top + ui_px(&settings.ui, 4) - address_to height;
         else
         {
-                address_to y = settings.height - settings_px(8) - address_to height;
-                address_to y = address_to y < settings_px(8) ? settings_px(8) : address_to y;
+                address_to y = settings.height - ui_px(&settings.ui, 8) - address_to height;
+                address_to y = address_to y < ui_px(&settings.ui, 8) ? ui_px(&settings.ui, 8) : address_to y;
         }
         return true;
 }
@@ -2541,12 +2535,12 @@ static b32 settings_menu_box(int address_to x, int address_to y, int address_to 
 // The choice under a point of the window, or -1.
 static int settings_menu_item(int px, int py)
 {
-        int x, y, width, height, shown, item = settings_px(SETTINGS_MENU_ITEM);
+        int x, y, width, height, shown, item = ui_px(&settings.ui, SETTINGS_MENU_ITEM);
 
         if (settings.menu < 0 || !settings_menu_box(&x, &y, &width, &height, &shown) || px < x || px >= x + width ||
-            py < y + settings_px(SETTINGS_MENU_PAD) || py >= y + height - settings_px(SETTINGS_MENU_PAD))
+            py < y + ui_px(&settings.ui, SETTINGS_MENU_PAD) || py >= y + height - ui_px(&settings.ui, SETTINGS_MENU_PAD))
                 return -1;
-        return settings.menu_top + (py - y - settings_px(SETTINGS_MENU_PAD)) / item;
+        return settings.menu_top + (py - y - ui_px(&settings.ui, SETTINGS_MENU_PAD)) / item;
 }
 
 // The first choice in view moved to where the keys' choice shows, or by a wheel's steps.
@@ -2605,8 +2599,8 @@ static fn settings_menu_open(int row)
                 if (string_equals((string_address)word, (string_address)settings.value[row]))
                         settings.menu_at = at;
         }
-        settings.menu_width = widest + settings_px(12 + 6 + 10 + 18);
-        settings.menu_width = settings.menu_width < settings_px(SETTINGS_MENU_LEAST) ? settings_px(SETTINGS_MENU_LEAST) : settings.menu_width;
+        settings.menu_width = widest + ui_px(&settings.ui, 12 + 6 + 10 + 18);
+        settings.menu_width = settings.menu_width < ui_px(&settings.ui, SETTINGS_MENU_LEAST) ? ui_px(&settings.ui, SETTINGS_MENU_LEAST) : settings.menu_width;
         settings_reveal();
         settings_menu_go(settings.menu_at);
         settings_say((string_address) "Up and Down choose, Enter sets it, Escape leaves it");
@@ -2835,7 +2829,7 @@ static fn settings_row_changed(int row)
                 settings_changed(0, 0);
         else
                 settings_changed(settings_list_top() + settings.top[at] - settings.scroll,
-                                 settings_list_top() + settings.top[at] - settings.scroll + settings_px(UI_ROW));
+                                 settings_list_top() + settings.top[at] - settings.scroll + ui_px(&settings.ui, UI_ROW));
 }
 
 // The list a choice opens, where the keys' choice moved: its box.
@@ -3031,7 +3025,7 @@ static b32 settings_steps(int row)
 // A key on the card of what a command said: it scrolls, and Escape, Enter, Space or Backspace go back to the list.
 static fn settings_card_key(const struct window_event address_to event)
 {
-        int line = settings_px(SETTINGS_CARD_LINE), page = settings_list_bottom() - settings_list_top();
+        int line = ui_px(&settings.ui, SETTINGS_CARD_LINE), page = settings_list_bottom() - settings_list_top();
 
         switch (event->a)
         {
@@ -3169,7 +3163,7 @@ static int settings_hit(int x, int y)
         if (y < settings_list_top() || y >= settings_list_bottom() || x < settings_pane_left() || x >= settings_pane_right())
                 return -1;
         for (positive at = 0; at < settings.visible_count; at++)
-                if (list >= settings.top[at] && list < settings.top[at] + settings_px(UI_ROW))
+                if (list >= settings.top[at] && list < settings.top[at] + ui_px(&settings.ui, UI_ROW))
                         return settings.visible[at];
         return -1;
 }
@@ -3177,10 +3171,10 @@ static int settings_hit(int x, int y)
 // The group under a point of the window, or -1.
 static int settings_group_hit(int x, int y)
 {
-        int group = (y - settings_list_top() + settings.group_scroll) / settings_px(SETTINGS_GROUP_ROW);
+        int group = (y - settings_list_top() + settings.group_scroll) / ui_px(&settings.ui, SETTINGS_GROUP_ROW);
 
-        if (y < settings_list_top() || y >= settings_list_bottom() || x < settings_px(UI_PAD) ||
-            x >= settings_px(UI_PAD) + settings_side() || group >= settings_groups())
+        if (y < settings_list_top() || y >= settings_list_bottom() || x < ui_px(&settings.ui, UI_PAD) ||
+            x >= ui_px(&settings.ui, UI_PAD) + settings_side() || group >= settings_groups())
                 return -1;
         return group;
 }
@@ -3258,7 +3252,7 @@ static b32 settings_event(const struct window_event address_to event)
                 if (settings.editing != row)
                 {
                         // A step pressed left of its value's middle goes back.
-                        int middle = settings_pane_right() - settings_px(14 + 40);
+                        int middle = settings_pane_right() - ui_px(&settings.ui, 14 + 40);
 
                         settings_activate(row, settings_kind(row) == SETTINGS_STEP && settings.pointer_x < middle ? -1 : 1);
                 }
@@ -3278,11 +3272,11 @@ static b32 settings_event(const struct window_event address_to event)
                         break;
                 }
                 // The column of groups or the rows, whichever is under the pointer; a card has all the window.
-                if (!event->b && !settings.view && settings.pointer_x < settings_pane_left() - settings_px(SETTINGS_GUTTER) / 2)
-                        settings_side_scroll_to(settings.group_scroll - event->a * settings_px(SETTINGS_GROUP_ROW) / 120);
+                if (!event->b && !settings.view && settings.pointer_x < settings_pane_left() - ui_px(&settings.ui, SETTINGS_GUTTER) / 2)
+                        settings_side_scroll_to(settings.group_scroll - event->a * ui_px(&settings.ui, SETTINGS_GROUP_ROW) / 120);
                 else if (!event->b)
                         settings_scroll_to((settings.view ? settings.card_scroll : settings.scroll) -
-                                           event->a * settings_px(UI_ROW) / 120);
+                                           event->a * ui_px(&settings.ui, UI_ROW) / 120);
                 break;
         }
         return true;
@@ -3299,22 +3293,22 @@ static b32 settings_event(const struct window_event address_to event)
 */
 static fn settings_draw_item(struct ui address_to ui, int at, int y, const struct settings_item address_to item)
 {
-        int left = settings_pane_left(), right = settings_pane_right(), inset = settings_px(14);
-        int height = settings_px(UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT), edge = right - inset, gap = settings_px(10);
+        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, 14);
+        int height = ui_px(&settings.ui, UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT), edge = right - inset, gap = ui_px(&settings.ui, 10);
         int text_left = left + inset;
         char cut[SETTINGS_ITEM_LABEL], mask[SETTINGS_ITEM_LABEL * 3 + 1];
         const char address_to words;
 
         if (at == settings.editing)
         {
-                int width = settings_px(SETTINGS_FIELD_W), wide;
+                int width = ui_px(&settings.ui, SETTINGS_FIELD_W), wide;
                 string_address label = item->kind == SETTINGS_ADD ? (string_address) "Name of the device" : (string_address)settings.joining;
                 positive dots = 0;
 
                 wide = ui_text(ui, text_left, baseline,
                                settings_fit(ui, label, UI_TEXT, (right - left) / 2, cut, sizeof(cut)), UI_TEXT, false, ui->ink, 255);
                 width = width > right - inset - (text_left + wide + gap) ? right - inset - (text_left + wide + gap) : width;
-                width = width < settings_px(100) ? settings_px(100) : width;
+                width = width < ui_px(&settings.ui, 100) ? ui_px(&settings.ui, 100) : width;
                 // A passphrase is shown as a dot for each character, and never as it is.
                 if (item->kind == SETTINGS_NETWORK)
                 {
@@ -3326,7 +3320,7 @@ static fn settings_draw_item(struct ui address_to ui, int at, int y, const struc
                                 }
                         mask[dots * 3] = 0;
                 }
-                ui_field(ui, edge - width, y + settings_px(7), width, height - settings_px(14),
+                ui_field(ui, edge - width, y + ui_px(&settings.ui, 7), width, height - ui_px(&settings.ui, 14),
                          item->kind == SETTINGS_NETWORK ? (string_address)mask : (string_address)settings.typed, true);
                 return;
         }
@@ -3338,7 +3332,7 @@ static fn settings_draw_item(struct ui address_to ui, int at, int y, const struc
                 if (item->flags & SETTINGS_ITEM_HEARD)
                 {
                         ui_signal(ui, edge, y + height / 2, item->bars);
-                        edge -= settings_px(18) + gap;
+                        edge -= ui_px(&settings.ui, 18) + gap;
                 }
                 if (item->security[0])
                 {
@@ -3351,9 +3345,9 @@ static fn settings_draw_item(struct ui address_to ui, int at, int y, const struc
                                         UI_SMALL, false, item->flags & SETTINGS_ITEM_JOINED ? ui->ink : ui->quiet, 255) + gap;
                 if (item->flags & SETTINGS_ITEM_JOINED)
                 {
-                        ui_round(ui, text_left, y + (height - settings_px(7)) / 2, settings_px(7), settings_px(7), settings_px(3),
+                        ui_round(ui, text_left, y + (height - ui_px(&settings.ui, 7)) / 2, ui_px(&settings.ui, 7), ui_px(&settings.ui, 7), ui_px(&settings.ui, 3),
                                  ui_tone(ui->ink, 235));
-                        text_left += settings_px(17);
+                        text_left += ui_px(&settings.ui, 17);
                 }
                 ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
                         UI_TEXT, false, ui->ink, alpha);
@@ -3374,8 +3368,8 @@ static fn settings_draw_item(struct ui address_to ui, int at, int y, const struc
 static fn settings_draw_row(struct ui address_to ui, int at, int y)
 {
         const struct settings_row address_to row = at < SETTINGS_ANY ? &settings_rows[at] : null;
-        int left = settings_pane_left(), right = settings_pane_right(), inset = settings_px(14);
-        int height = settings_px(UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT);
+        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, 14);
+        int height = ui_px(&settings.ui, UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT);
         char cut[SETTINGS_VALUE];
         unsigned int state = row ? settings.state[at] : SETTINGS_READ;
         b32 usable = state == SETTINGS_READ || state == SETTINGS_FAILED;
@@ -3383,7 +3377,7 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         int wide;
 
         if (at == settings.focus && (settings.pane || settings.filter_length))
-                ui_focus(ui, left + settings_px(3), y + settings_px(2), right - left - settings_px(6), height - settings_px(4),
+                ui_focus(ui, left + ui_px(&settings.ui, 3), y + ui_px(&settings.ui, 2), right - left - ui_px(&settings.ui, 6), height - ui_px(&settings.ui, 4),
                          settings.focused && settings.pane);
 
         if (settings_item(at))
@@ -3409,32 +3403,32 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
                 wide = ui_text(ui, left + inset, baseline,
                                settings_fit(ui, (string_address)head, UI_TEXT, (right - left) / 3, cut, sizeof(cut)), UI_TEXT, false,
                                ui->ink, 255);
-                x = left + inset + wide + settings_px(10);
+                x = left + inset + wide + ui_px(&settings.ui, 10);
                 width = right - inset - x;
-                if (width < settings_px(100))
+                if (width < ui_px(&settings.ui, 100))
                 {
-                        width = settings_px(100);
+                        width = ui_px(&settings.ui, 100);
                         x = right - inset - width;
                 }
-                ui_field(ui, x, y + settings_px(7), width, height - settings_px(14), (string_address)settings.typed, true);
+                ui_field(ui, x, y + ui_px(&settings.ui, 7), width, height - ui_px(&settings.ui, 14), (string_address)settings.typed, true);
                 if (!settings.typed[0])
                 {
                         const char address_to hint = generic ? settings_large->pool + generic->command + generic->verb : "VERB [ARGUMENTS]";
 
                         while (*hint == ' ')
                                 hint++;
-                        ui_run(ui, x + settings_px(8), baseline, (string_address)hint, UI_TEXT, false, ui->quiet, 150,
-                               x + settings_px(8), x + width - settings_px(8));
+                        ui_run(ui, x + ui_px(&settings.ui, 8), baseline, (string_address)hint, UI_TEXT, false, ui->quiet, 150,
+                               x + ui_px(&settings.ui, 8), x + width - ui_px(&settings.ui, 8));
                 }
                 return;
         }
 
         // A label leaves its value a third of the row at least: a long one is cut, and the value is not.
         {
-                int room = right - left - 2 * inset - (row && row->kind == SETTINGS_SWITCH ? settings_px(UI_SWITCH_W) : (right - left) / 3);
+                int room = right - left - 2 * inset - (row && row->kind == SETTINGS_SWITCH ? ui_px(&settings.ui, UI_SWITCH_W) : (right - left) / 3);
 
                 wide = ui_text(ui, left + inset, baseline,
-                               settings_fit(ui, (string_address)settings_label(at), UI_TEXT, room < settings_px(40) ? settings_px(40) : room,
+                               settings_fit(ui, (string_address)settings_label(at), UI_TEXT, room < ui_px(&settings.ui, 40) ? ui_px(&settings.ui, 40) : room,
                                             cut, sizeof(cut)),
                                UI_TEXT, false, ui->ink, usable ? 255 : 130);
         }
@@ -3455,11 +3449,11 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
 
         if (at == settings.editing)
         {
-                int width = settings_px(SETTINGS_FIELD_W), room = right - inset - (left + inset + wide + settings_px(10));
+                int width = ui_px(&settings.ui, SETTINGS_FIELD_W), room = right - inset - (left + inset + wide + ui_px(&settings.ui, 10));
 
                 // A long label leaves the field what room it has.
-                width = width > room ? (room < settings_px(100) ? settings_px(100) : room) : width;
-                ui_field(ui, right - inset - width, y + settings_px(7), width, height - settings_px(14),
+                width = width > room ? (room < ui_px(&settings.ui, 100) ? ui_px(&settings.ui, 100) : room) : width;
+                ui_field(ui, right - inset - width, y + ui_px(&settings.ui, 7), width, height - ui_px(&settings.ui, 14),
                          (string_address)settings.typed, true);
                 return;
         }
@@ -3469,7 +3463,7 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         else
         {
                 // A value longer than the room the label leaves is cut at its end and says so.
-                int room = right - inset - (left + inset + wide + settings_px(16));
+                int room = right - inset - (left + inset + wide + ui_px(&settings.ui, 16));
 
                 shown = settings_fit(ui, shown, UI_TEXT, room, cut, sizeof(cut));
                 ui_value(ui, right - inset, baseline, shown,
@@ -3484,8 +3478,8 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
 // The column of groups at the left: the chosen one lit, the rest plain on the glass.
 static fn settings_draw_side(struct ui address_to ui)
 {
-        int left = settings_px(UI_PAD), width = settings_side(), height = settings_px(SETTINGS_GROUP_ROW);
-        int inset = settings_px(12);
+        int left = ui_px(&settings.ui, UI_PAD), width = settings_side(), height = ui_px(&settings.ui, SETTINGS_GROUP_ROW);
+        int inset = ui_px(&settings.ui, 12);
         char cut[SETTINGS_VALUE];
 
         ui->top = settings_list_top();
@@ -3499,7 +3493,7 @@ static fn settings_draw_side(struct ui address_to ui)
                 if (y + height <= ui->top || y >= ui->bottom)
                         continue;
                 if (chosen)
-                        ui_focus(ui, left, y + settings_px(2), width, height - settings_px(4), settings.focused && !settings.pane);
+                        ui_focus(ui, left, y + ui_px(&settings.ui, 2), width, height - ui_px(&settings.ui, 4), settings.focused && !settings.pane);
                 ui_text(ui, left + inset, ui_baseline(ui, y, height, UI_TEXT),
                         settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT, width - 2 * inset, cut, sizeof(cut)),
                         UI_TEXT, chosen, ui->ink, chosen ? 255 : 210);
@@ -3516,7 +3510,7 @@ static fn settings_draw_list(struct ui address_to ui)
         ui->bottom = list_bottom;
         if (!settings.visible_count)
         {
-                ui_text(ui, left + settings_px(14), ui_baseline(ui, list_top, settings_px(UI_ROW), UI_TEXT),
+                ui_text(ui, left + ui_px(&settings.ui, 14), ui_baseline(ui, list_top, ui_px(&settings.ui, UI_ROW), UI_TEXT),
                         (string_address) "Nothing matches what is typed", UI_TEXT, false, ui->quiet, 255);
                 return;
         }
@@ -3528,17 +3522,17 @@ static fn settings_draw_list(struct ui address_to ui)
 
                 while (last + 1 < settings.visible_count && settings_section_start(settings.visible[last + 1]) == start)
                         last++;
-                rows = (int)(last - at + 1) * settings_px(UI_ROW);
+                rows = (int)(last - at + 1) * ui_px(&settings.ui, UI_ROW);
                 // A section with some of it in view: its header and the rows of it in view, plain on the glass.
-                if (y + rows > list_top - settings_px(SETTINGS_HEADER) && y - settings_px(SETTINGS_HEADER) < list_bottom)
+                if (y + rows > list_top - ui_px(&settings.ui, SETTINGS_HEADER) && y - ui_px(&settings.ui, SETTINGS_HEADER) < list_bottom)
                 {
-                        ui_header(ui, left + settings_px(6), y - settings_px(SETTINGS_HEADER), settings_px(SETTINGS_HEADER),
+                        ui_header(ui, left + ui_px(&settings.ui, 6), y - ui_px(&settings.ui, SETTINGS_HEADER), ui_px(&settings.ui, SETTINGS_HEADER),
                                   (string_address)settings_section(settings.visible[at]));
                         for (positive each = at; each <= last; each++)
                         {
                                 int row_y = list_top + settings.top[each] - settings.scroll;
 
-                                if (row_y + settings_px(UI_ROW) <= list_top || row_y >= list_bottom)
+                                if (row_y + ui_px(&settings.ui, UI_ROW) <= list_top || row_y >= list_bottom)
                                         continue;
                                 settings_draw_row(ui, settings.visible[each], row_y);
                         }
@@ -3550,8 +3544,8 @@ static fn settings_draw_list(struct ui address_to ui)
 // What a command said, as the lines of the card.
 static fn settings_draw_card(struct ui address_to ui)
 {
-        int left = settings_px(UI_PAD);
-        int line = settings_px(SETTINGS_CARD_LINE), pad = settings_px(SETTINGS_CARD_PAD);
+        int left = ui_px(&settings.ui, UI_PAD);
+        int line = ui_px(&settings.ui, SETTINGS_CARD_LINE), pad = ui_px(&settings.ui, SETTINGS_CARD_PAD);
         int top = settings_list_top() - settings.card_scroll;
         char text[SETTINGS_PROBE];
 
@@ -3567,7 +3561,7 @@ static fn settings_draw_card(struct ui address_to ui)
                 size = size >= sizeof(text) ? sizeof(text) - 1 : size;
                 memory_copy(text, settings_large->card + settings_large->card_at[at], size);
                 text[size] = 0;
-                ui_text(ui, left + settings_px(14), ui_baseline(ui, y, line, UI_TEXT), (string_address)text, UI_TEXT, false, ui->ink,
+                ui_text(ui, left + ui_px(&settings.ui, 14), ui_baseline(ui, y, line, UI_TEXT), (string_address)text, UI_TEXT, false, ui->ink,
                         255);
         }
 }
@@ -3575,8 +3569,8 @@ static fn settings_draw_card(struct ui address_to ui)
 // The status line, or two where it does not fit one.
 static fn settings_draw_foot(struct ui address_to ui, int top)
 {
-        int left = settings_px(UI_PAD) + settings_px(6), room = settings.width - left - settings_px(UI_PAD);
-        int half = settings_px(SETTINGS_FOOT) / 2;
+        int left = ui_px(&settings.ui, UI_PAD) + ui_px(&settings.ui, 6), room = settings.width - left - ui_px(&settings.ui, UI_PAD);
+        int half = ui_px(&settings.ui, SETTINGS_FOOT) / 2;
         char first[SETTINGS_STATUS];
         positive length = string_length((string_address)settings.status), cut = 0;
 
@@ -3584,7 +3578,7 @@ static fn settings_draw_foot(struct ui address_to ui, int top)
         ui->bottom = settings.height;
         if (ui_measure(ui, (string_address)settings.status, UI_SMALL, false) <= room)
         {
-                ui_text(ui, left, ui_baseline(ui, top, settings_px(SETTINGS_FOOT), UI_SMALL), (string_address)settings.status,
+                ui_text(ui, left, ui_baseline(ui, top, ui_px(&settings.ui, SETTINGS_FOOT), UI_SMALL), (string_address)settings.status,
                         UI_SMALL, false, ui->quiet, 255);
                 return;
         }
@@ -3611,7 +3605,7 @@ static fn settings_draw_foot(struct ui address_to ui, int top)
 // The list a choice opened, over everything else: the choices in view, the keys' lit, the value's dotted.
 static fn settings_draw_menu(struct ui address_to ui)
 {
-        int x, y, width, height, shown, item = settings_px(SETTINGS_MENU_ITEM), pad = settings_px(SETTINGS_MENU_PAD);
+        int x, y, width, height, shown, item = ui_px(&settings.ui, SETTINGS_MENU_ITEM), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
         const struct settings_row address_to which = &settings_rows[settings.menu];
         char word[SETTINGS_VALUE];
 
@@ -3626,7 +3620,7 @@ static fn settings_draw_menu(struct ui address_to ui)
 
                 if (!settings_choice(which, (positive)which_at, word, sizeof(word)))
                         break;
-                ui_option(ui, x + settings_px(4), y + pad + at * item, width - settings_px(8), item, (string_address)word,
+                ui_option(ui, x + ui_px(&settings.ui, 4), y + pad + at * item, width - ui_px(&settings.ui, 8), item, (string_address)word,
                           which_at == settings.menu_at,
                           string_equals((string_address)word, (string_address)settings.value[settings.menu]));
         }
@@ -3635,9 +3629,9 @@ static fn settings_draw_menu(struct ui address_to ui)
         {
                 int track = height - 2 * pad, bar = track * shown / settings.menu_count;
 
-                bar = bar < settings_px(10) ? settings_px(10) : bar;
-                ui_round(ui, x + width - settings_px(5), y + pad + (track - bar) * settings.menu_top / (settings.menu_count - shown),
-                         settings_px(2), bar, settings_px(1), ui_tone(ui->ink, 110));
+                bar = bar < ui_px(&settings.ui, 10) ? ui_px(&settings.ui, 10) : bar;
+                ui_round(ui, x + width - ui_px(&settings.ui, 5), y + pad + (track - bar) * settings.menu_top / (settings.menu_count - shown),
+                         ui_px(&settings.ui, 2), bar, ui_px(&settings.ui, 1), ui_tone(ui->ink, 110));
         }
 }
 
@@ -3645,7 +3639,7 @@ static fn settings_draw_menu(struct ui address_to ui)
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
 {
         struct ui address_to ui = &settings.ui;
-        int left = settings_px(UI_PAD);
+        int left = ui_px(&settings.ui, UI_PAD);
         int list_top = settings_list_top(), list_bottom = settings_list_bottom();
 
         ui->pixels = pixels;
@@ -3657,18 +3651,18 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         ui->band_top = band_bottom > band_top ? band_top : 0;
         ui->band_bottom = band_bottom > band_top ? band_bottom : 0;
         ui_clear(ui);
-        ui_title(ui, left + settings_px(6), settings_px(8), list_top - settings_px(8),
+        ui_title(ui, left + ui_px(&settings.ui, 6), ui_px(&settings.ui, 8), list_top - ui_px(&settings.ui, 8),
                  settings.view ? (string_address)settings.card_title : (string_address) "Settings");
 
         // The filter, at the right of the title and under where the window is taken hold of.
         if (!settings.view)
         {
-                int width = settings_px(SETTINGS_FILTER_W), x = settings.width - left - width, y = settings_px(24);
+                int width = ui_px(&settings.ui, SETTINGS_FILTER_W), x = settings.width - left - width, y = ui_px(&settings.ui, 24);
 
-                ui_field(ui, x, y, width, settings_px(28), (string_address)settings.filter, settings.editing < 0 && settings.filter_length);
+                ui_field(ui, x, y, width, ui_px(&settings.ui, 28), (string_address)settings.filter, settings.editing < 0 && settings.filter_length);
                 if (!settings.filter_length)
-                        ui_run(ui, x + settings_px(8), ui_baseline(ui, y, settings_px(28), UI_TEXT), (string_address) "Type to filter",
-                               UI_TEXT, false, ui->quiet, 150, x + settings_px(8), x + width - settings_px(8));
+                        ui_run(ui, x + ui_px(&settings.ui, 8), ui_baseline(ui, y, ui_px(&settings.ui, 28), UI_TEXT), (string_address) "Type to filter",
+                               UI_TEXT, false, ui->quiet, 150, x + ui_px(&settings.ui, 8), x + width - ui_px(&settings.ui, 8));
         }
 
         if (settings.view)
@@ -3812,53 +3806,14 @@ static b32 settings_lift_other(void)
         return false;
 }
 
-static b32 settings_fonts(string_address regular, string_address bold)
-{
-        //      The engine and its atlas are one mapping, made here: a static atlas is 256 KiB of the image's
-        //      address space in every program that links this, a shell under a 12 MiB cap among them.
-        positive size = 0, bytes = regular ? compositor_map_file(regular, &size) : 0;
-        positive atlas_at = (sizeof(font_engine) + 4095) & ~(positive)4095;
-        long engine = compositor_call(syscall(mmap), 0, atlas_at + 512 * 512, 3, 0x22, (positive)-1, 0);
-
-        if (!bytes || (engine < 0 && engine > -4096) || font_load(&settings.face[0], (const p8 address_to)bytes, size, 0) != 0)
-                return false;
-        settings.ui.engine = (font_engine address_to)engine;
-        settings.fit_generation++;
-        font_start(settings.ui.engine, (p8 address_to)(engine + atlas_at), 512, 512);
-        settings.ui.regular = &settings.face[0];
-        settings.ui.bold = null;
-
-        bytes = bold ? compositor_map_file(bold, &size) : 0;
-        if (bytes && font_load(&settings.face[1], (const p8 address_to)bytes, size, 0) == 0)
-                settings.ui.bold = &settings.face[1];
-        return true;
-}
-
 // The size the window is drawn at: its own, or what the compositor asked, never past the output.
 static fn settings_size(unsigned int width, unsigned int height)
 {
         struct windows address_to table = settings.own.table;
-        unsigned int scratch = width + 8u * (unsigned int)settings.ui.scale;
 
         settings.width = (int)(width > table->output_width ? table->output_width : width);
         settings.height = (int)(height > table->output_height ? table->output_height : height);
-        if (scratch > (unsigned int)settings.ui.scratch_width)
-        {
-                long mapped = compositor_call(syscall(mmap), 0,
-                                              (positive)scratch * UI_SCRATCH_ROWS * (positive)settings.ui.scale * 4, 3, 0x22,
-                                              (positive)-1, 0);
-
-                if (!(mapped < 0 && mapped > -4096))
-                {
-                        if (settings.ui.scratch)
-                                compositor_call(syscall(munmap), (positive)settings.ui.scratch,
-                                                (positive)settings.ui.scratch_width * UI_SCRATCH_ROWS *
-                                                    (positive)settings.ui.scale * 4,
-                                                0, 0, 0, 0);
-                        settings.ui.scratch = (unsigned int address_to)mapped;
-                        settings.ui.scratch_width = (int)scratch;
-                }
-        }
+        ui_scratch_fit(&settings.ui, width);
         settings_layout();
         settings_scroll_to(settings.view ? settings.card_scroll : settings.scroll);
         settings_side_reveal();
@@ -3878,12 +3833,12 @@ static int settings_open(void)
 
         settings_refilter();
         {
-                int width = settings_px(SETTINGS_WIDTH), height = settings_px(SETTINGS_HEIGHT);
-                int room = (int)table->output_height - settings_px(2 * (24 + 24));
+                int width = ui_px(&settings.ui, SETTINGS_WIDTH), height = ui_px(&settings.ui, SETTINGS_HEIGHT);
+                int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
 
                 settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
                 table->x[row] = ((int)table->output_width - settings.width) / 2;
-                table->y[row] = ((int)table->output_height - settings.height) / 2 - settings_px(12);
+                table->y[row] = ((int)table->output_height - settings.height) / 2 - ui_px(&settings.ui, 12);
         }
         settings_say((string_address) "");
 
@@ -3949,6 +3904,8 @@ static struct ui_app settings_app = {
         .missing = (string_address) "settings: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Settings",
         .glass = WINDOW_GLASS,
+        .font = null,
+        .nofont = (string_address) "settings: no font to draw with (-f FONT.ttf), pid ",
         .dirty = &settings.dirty,
         .focused = &settings.focused,
         .ground = &settings.ground,
@@ -3964,9 +3921,6 @@ static struct ui_app settings_app = {
 
 static b32 settings_main()
 {
-        string_address regular = (string_address) "/usr/share/fonts/inter/Inter-Regular.ttf",
-                       bold = (string_address) "/usr/share/fonts/inter/Inter-Bold.ttf";
-
         claim_standard_descriptors();
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
@@ -3984,18 +3938,11 @@ static b32 settings_main()
                 if (option[0] != '-' || !option[1] || option[2])
                         continue;
                 if (option[1] == 'f')
-                        regular = program_argument(++at);
+                        settings_app.font = program_argument(++at);
                 else if (option[1] == 'b')
-                        bold = program_argument(++at);
+                        settings_app.bold = program_argument(++at);
                 else if (option[1] == 'm')
                         settings.moonwater = program_argument(++at);
-        }
-
-        if (!settings_fonts(regular, bold))
-        {
-                compositor_kmsg((string_address) "settings: no font to draw with (-f FONT.ttf), pid ",
-                                (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
-                return 1;
         }
 
         if (!settings_map())

@@ -117,7 +117,7 @@ static struct
 {
         struct window_row own;
         struct ui ui;
-        font_face face;
+        b32 toggle;
         const char address_to regular; // the faces: the bar's, the terminals', and their bold
         const char address_to mono;
         const char address_to mono_bold;
@@ -147,11 +147,6 @@ static struct
         int pointer_x, pointer_y;
         b32 focused, had_focus, dirty;
 } launcher;
-
-static int launcher_px(int logical)
-{
-        return logical * launcher.ui.scale;
-}
 
 /* ---- the model: what a text names, and what a row starts ---- */
 
@@ -559,8 +554,8 @@ static fn launcher_changed(void)
         int height;
 
         launcher_search();
-        height = launcher_px(UI_PAD) * 2 + launcher_px(LAUNCHER_FIELD) +
-                 (launcher.entries ? launcher_px(LAUNCHER_GAP) + (int)launcher.entries * launcher_px(LAUNCHER_ROW) : 0);
+        height = ui_px(&launcher.ui, UI_PAD) * 2 + ui_px(&launcher.ui, LAUNCHER_FIELD) +
+                 (launcher.entries ? ui_px(&launcher.ui, LAUNCHER_GAP) + (int)launcher.entries * ui_px(&launcher.ui, LAUNCHER_ROW) : 0);
         launcher.height = height > (int)launcher.own.table->output_height ? (int)launcher.own.table->output_height : height;
         launcher.dirty = true;
 }
@@ -664,10 +659,10 @@ static b32 launcher_key(const struct window_event address_to event)
 // The row under a point of the window, or -1.
 static int launcher_hit(int x, int y)
 {
-        int top = launcher_px(UI_PAD) + launcher_px(LAUNCHER_FIELD) + launcher_px(LAUNCHER_GAP);
-        int row = (y - top) / launcher_px(LAUNCHER_ROW);
+        int top = ui_px(&launcher.ui, UI_PAD) + ui_px(&launcher.ui, LAUNCHER_FIELD) + ui_px(&launcher.ui, LAUNCHER_GAP);
+        int row = (y - top) / ui_px(&launcher.ui, LAUNCHER_ROW);
 
-        if (y < top || x < launcher_px(UI_PAD) || x >= launcher.width - launcher_px(UI_PAD) || row >= (int)launcher.entries)
+        if (y < top || x < ui_px(&launcher.ui, UI_PAD) || x >= launcher.width - ui_px(&launcher.ui, UI_PAD) || row >= (int)launcher.entries)
                 return -1;
         return row;
 }
@@ -737,9 +732,9 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
 static fn launcher_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &launcher.ui;
-        int pad = launcher_px(UI_PAD), inset = launcher_px(14);
-        int field = launcher_px(LAUNCHER_FIELD), row = launcher_px(LAUNCHER_ROW);
-        int top = pad + field + launcher_px(LAUNCHER_GAP), width = launcher.width - 2 * pad;
+        int pad = ui_px(&launcher.ui, UI_PAD), inset = ui_px(&launcher.ui, 14);
+        int field = ui_px(&launcher.ui, LAUNCHER_FIELD), row = ui_px(&launcher.ui, LAUNCHER_ROW);
+        int top = pad + field + ui_px(&launcher.ui, LAUNCHER_GAP), width = launcher.width - 2 * pad;
 
         ui->pixels = pixels;
         ui->pitch = launcher.own.table->stride;
@@ -858,33 +853,13 @@ static b32 launcher_other(b32 toggle)
         return false;
 }
 
-static long launcher_map(positive size)
-{
-        return compositor_call(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
-}
-
 // The face the bar is drawn in, and the engine and atlas for it, mapped here and not in the image's bss.
-static b32 launcher_fonts(string_address regular)
-{
-        positive size = 0, bytes = regular ? compositor_map_file(regular, &size) : 0;
-        positive atlas_at = (sizeof(font_engine) + 4095) & ~(positive)4095;
-        long engine = launcher_map(atlas_at + 512 * 512);
-
-        if (!bytes || (engine < 0 && engine > -4096) || font_load(&launcher.face, (const p8 address_to)bytes, size, 0) != 0)
-                return false;
-        launcher.ui.engine = (font_engine address_to)engine;
-        font_start(launcher.ui.engine, (p8 address_to)(engine + atlas_at), 512, 512);
-        launcher.ui.regular = &launcher.face;
-        launcher.ui.bold = null;
-        return true;
-}
-
 // The names' storage, and the scratch line the text is drawn through: mapped, as the picture's size is known.
 static b32 launcher_memory(void)
 {
         positive names = (positive)LAUNCHER_NAMES * LAUNCHER_NAME, from = LAUNCHER_NAMES,
                  hashed = (positive)LAUNCHER_HASH * sizeof(unsigned short);
-        long mapped = launcher_map(names + from + hashed + LAUNCHER_DIRENTS);
+        long mapped = ui_map(names + from + hashed + LAUNCHER_DIRENTS);
 
         if (mapped < 0 && mapped > -4096)
                 return false;
@@ -897,67 +872,33 @@ static b32 launcher_memory(void)
 static fn launcher_size(unsigned int width, unsigned int height)
 {
         struct windows address_to table = launcher.own.table;
-        unsigned int scratch = width + 8u * (unsigned int)launcher.ui.scale;
 
         launcher.width = (int)(width > table->output_width ? table->output_width : width);
         launcher.height = (int)(height > table->output_height ? table->output_height : height);
-        if (scratch > (unsigned int)launcher.ui.scratch_width)
-        {
-                long mapped = launcher_map((positive)scratch * UI_SCRATCH_ROWS * (positive)launcher.ui.scale * 4);
-
-                if (!(mapped < 0 && mapped > -4096))
-                {
-                        if (launcher.ui.scratch)
-                                compositor_call(syscall(munmap), (positive)launcher.ui.scratch,
-                                                (positive)launcher.ui.scratch_width * UI_SCRATCH_ROWS *
-                                                    (positive)launcher.ui.scale * 4,
-                                                0, 0, 0, 0);
-                        launcher.ui.scratch = (unsigned int address_to)mapped;
-                        launcher.ui.scratch_width = (int)scratch;
-                }
-        }
+        ui_scratch_fit(&launcher.ui, width);
         launcher.dirty = true;
 }
 
 // The launcher's start, once its window is taken: the lift, the fonts and the first picture. -1 runs the loop.
 static int launcher_open(void)
 {
-        string_address regular = (string_address) "/usr/share/fonts/inter/Inter-Regular.ttf";
         struct windows address_to table = launcher.own.table;
         unsigned int row = launcher.own.row;
-        b32 toggle = false;
 
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
-        {
-                string_address option = program_argument(at);
-
-                if (option[0] != '-' || !option[1] || option[2])
-                        continue;
-                if (option[1] == 'x')
-                        toggle = true;
-                else if (at + 1 < (positive)program_argument_count() && option[1] == 'f')
-                        regular = program_argument(++at);
-                else if (at + 1 < (positive)program_argument_count() && option[1] == 'm')
-                        launcher.mono = (const char address_to)program_argument(++at);
-                else if (at + 1 < (positive)program_argument_count() && option[1] == 'M')
-                        launcher.mono_bold = (const char address_to)program_argument(++at);
-        }
-        launcher.regular = (const char address_to)regular;
-
-        if (launcher_other(toggle))
+        if (launcher_other(launcher.toggle))
                 return 0;
 
-        if (!launcher_fonts(regular) || !launcher_memory())
+        if (!launcher_memory())
         {
-                compositor_kmsg((string_address) "launcher: no font to draw with (-f FONT.ttf), pid ",
+                compositor_kmsg((string_address) "launcher: no memory, pid ",
                                 (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
 
-        launcher_size((unsigned int)launcher_px(LAUNCHER_WIDTH), 0);
+        launcher_size((unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         launcher_changed();
         table->x[row] = ((int)table->output_width - launcher.width) / 2;
-        table->y[row] = (int)table->output_height / 3 - launcher_px(UI_PAD) - launcher_px(LAUNCHER_FIELD) / 2;
+        table->y[row] = (int)table->output_height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, LAUNCHER_FIELD) / 2;
         launcher_frame();
 
         // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not
@@ -988,6 +929,8 @@ static struct ui_app launcher_app = {
         .missing = (string_address) "launcher: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Launcher",
         .glass = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS,
+        .plain = true,
+        .nofont = (string_address) "launcher: no font to draw with (-f FONT.ttf), pid ",
         .dirty = &launcher.dirty,
         .focused = &launcher.focused,
         .ground = &launcher.ground,
@@ -1001,9 +944,29 @@ static struct ui_app launcher_app = {
 
 static b32 launcher_main()
 {
+        string_address regular = (string_address) UI_FONT_REGULAR;
+
         claim_standard_descriptors();
         memory_zero(&launcher, sizeof(launcher));
         launcher.shown = -1;
+
+        for (positive at = 1; at < (positive)program_argument_count(); at++)
+        {
+                string_address option = program_argument(at);
+
+                if (option[0] != '-' || !option[1] || option[2])
+                        continue;
+                if (option[1] == 'x')
+                        launcher.toggle = true;
+                else if (at + 1 < (positive)program_argument_count() && option[1] == 'f')
+                        regular = program_argument(++at);
+                else if (at + 1 < (positive)program_argument_count() && option[1] == 'm')
+                        launcher.mono = (const char address_to)program_argument(++at);
+                else if (at + 1 < (positive)program_argument_count() && option[1] == 'M')
+                        launcher.mono_bold = (const char address_to)program_argument(++at);
+        }
+        launcher.regular = (const char address_to)regular;
+        launcher_app.font = regular;
         return ui_app_run(&launcher_app);
 }
 

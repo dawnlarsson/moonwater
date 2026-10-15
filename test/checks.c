@@ -110795,18 +110795,18 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_group_choose(0);
                         settings.ui.scale = 1;
                         {
-                                int side = settings_side(), where = settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() + 5),
-                                    second = settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() + settings_px(SETTINGS_GROUP_ROW) + 5);
+                                int side = settings_side(), where = settings_group_hit(ui_px(&settings.ui, UI_PAD) + 5, settings_list_top() + 5),
+                                    second = settings_group_hit(ui_px(&settings.ui, UI_PAD) + 5, settings_list_top() + ui_px(&settings.ui, SETTINGS_GROUP_ROW) + 5);
 
                                 check("settings: a point on a group names it, and one past the column or past the groups none",
                                       where == 0 && second == 1 &&
-                                          settings_group_hit(settings_px(UI_PAD) + side + 2, settings_list_top() + 5) == -1 &&
-                                          settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() - 1) == -1 &&
-                                          settings_group_hit(settings_px(UI_PAD) + 5, settings_list_top() + settings_groups() * settings_px(SETTINGS_GROUP_ROW)) == -1);
+                                          settings_group_hit(ui_px(&settings.ui, UI_PAD) + side + 2, settings_list_top() + 5) == -1 &&
+                                          settings_group_hit(ui_px(&settings.ui, UI_PAD) + 5, settings_list_top() - 1) == -1 &&
+                                          settings_group_hit(ui_px(&settings.ui, UI_PAD) + 5, settings_list_top() + settings_groups() * ui_px(&settings.ui, SETTINGS_GROUP_ROW)) == -1);
                                 check("settings: the column is a third of the window at most and the rows start after it",
-                                      side <= settings_px(SETTINGS_SIDE_MOST) && settings_pane_left() > settings_px(UI_PAD) + side &&
-                                          settings_hit(settings_pane_left() + 4, settings_list_top() + settings_px(SETTINGS_HEADER) + 4) == settings.visible[0] &&
-                                          settings_hit(settings_px(UI_PAD) + 4, settings_list_top() + settings_px(SETTINGS_HEADER) + 4) == -1);
+                                      side <= ui_px(&settings.ui, SETTINGS_SIDE_MOST) && settings_pane_left() > ui_px(&settings.ui, UI_PAD) + side &&
+                                          settings_hit(settings_pane_left() + 4, settings_list_top() + ui_px(&settings.ui, SETTINGS_HEADER) + 4) == settings.visible[0] &&
+                                          settings_hit(ui_px(&settings.ui, UI_PAD) + 4, settings_list_top() + ui_px(&settings.ui, SETTINGS_HEADER) + 4) == -1);
                         }
                         // A narrow window keeps the column inside half of it, and the rows a place to the right of it.
                         for (int width = WINDOW_MIN_WIDTH; width <= 400; width += 38)
@@ -110814,7 +110814,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.width = width;
                                 check("settings: a narrow window has its column within half and its rows right of it",
                                       settings_side() <= width / 2 && settings_pane_left() >= settings_side() &&
-                                          settings_pane_right() == width - settings_px(UI_PAD));
+                                          settings_pane_right() == width - ui_px(&settings.ui, UI_PAD));
                         }
                         settings.width = SETTINGS_WIDTH;
                 }
@@ -110955,7 +110955,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.said_length = sizeof(wide) - 1;
                         settings_card_fill();
                         settings_wrap();
-                        room = settings.width - 2 * settings_px(UI_PAD) - 2 * settings_px(14);
+                        room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, 14);
                         for (int at = 0; at < settings.card_lines; at++)
                                 within &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
                         check("settings: a line wider than the window is cut into more, each within it", settings.card_lines >= 3 && within);
@@ -111044,7 +111044,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(SETTINGS_KEY_ENTER);
                         settings_menu_box(&x, &y, &width, &height, &shown);
                         over.a = x + width / 2;
-                        over.b = y + settings_px(SETTINGS_MENU_PAD) + 3 * settings_px(SETTINGS_MENU_ITEM) + 4;
+                        over.b = y + ui_px(&settings.ui, SETTINGS_MENU_PAD) + 3 * ui_px(&settings.ui, SETTINGS_MENU_ITEM) + 4;
                         settings_event(&over);
                         check("settings: the pointer over a choice puts the keys on it", settings.menu_at == 3);
                         settings_event(&press);
