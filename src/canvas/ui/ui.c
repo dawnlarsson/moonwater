@@ -236,6 +236,51 @@ static unsigned int ui_inside(int x, int y, int width, int height, int radius)
         return (inside * 255 + 8) / 16;
 }
 
+/*
+        A corner's cover depends on its radius alone: the radius is already in device pixels, and ui_inside reads no
+        other input. Its sample points are symmetric about the middle of the corner's square, so a pixel of any corner
+        samples the same circle as the pixel mirrored across that middle into the top left quarter. That quarter is made
+        once for each radius, the first time the radius is drawn, and kept: radius r at the sum of the squares below it,
+        so the masks of every radius up to UI_CORNER_MOST take UI_CORNER_BYTES (22140), and a larger radius is not kept
+        (ui_inside answers it, as before). A radius is one slot, so no two radii share one.
+*/
+#define UI_CORNER_MOST 40
+#define UI_CORNER_BYTES (UI_CORNER_MOST * (UI_CORNER_MOST + 1) * (2 * UI_CORNER_MOST + 1) / 6)
+static unsigned char ui_corner_masks[UI_CORNER_BYTES];
+static unsigned char ui_corner_made[UI_CORNER_MOST + 1];
+
+static const unsigned char address_to ui_corner_mask(int radius)
+{
+        unsigned char address_to mask = ui_corner_masks + (unsigned long)(radius - 1) * radius * (2 * radius - 1) / 6;
+
+        if (!ui_corner_made[radius])
+        {
+                // The quarter of a corner of radius, read from ui_inside itself: its square is 2 radius across.
+                for (int y = 0; y < radius; y++)
+                        for (int x = 0; x < radius; x++)
+                                mask[y * radius + x] = (unsigned char)ui_inside(x, y, 2 * radius, 2 * radius, radius);
+                ui_corner_made[radius] = 1;
+        }
+        return mask;
+}
+
+// ui_inside, read from a corner's mask where the pixel is in a corner's square. A pixel left of the middle or above it
+// is its own place in the top left quarter; one to the right or below is mirrored across the middle.
+static unsigned int ui_inside_cached(int x, int y, int width, int height, int radius)
+{
+        int mx, my;
+
+        if (radius < 1 || radius > UI_CORNER_MOST)
+                return ui_inside(x, y, width, height, radius);
+        if (x < 0 || y < 0 || x >= width || y >= height)
+                return 0;
+        if ((x >= radius && x < width - radius) || (y >= radius && y < height - radius))
+                return 255;
+        mx = x < radius ? x : width - 1 - x;
+        my = y < radius ? y : height - 1 - y;
+        return ui_corner_mask(radius)[my * radius + mx];
+}
+
 // A rounded rectangle, filled.
 static fn ui_round(struct ui address_to ui, int x, int y, int width, int height, int radius, unsigned int tone)
 {
@@ -265,7 +310,7 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
                                 column = width - radius - 1;
                                 continue;
                         }
-                        cover = ui_inside(column, row, width, height, radius);
+                        cover = ui_inside_cached(column, row, width, height, radius);
 
                         if (cover)
                                 ui_dot(ui, x + column, y + row, ui_cover(tone, cover));
@@ -296,8 +341,8 @@ static fn ui_outline(struct ui address_to ui, int x, int y, int width, int heigh
                                 column = width - thickness - inner - 1;
                                 continue;
                         }
-                        outer_cover = ui_inside(column, row, width, height, radius);
-                        inner_cover = ui_inside(column - thickness, row - thickness, width - 2 * thickness,
+                        outer_cover = ui_inside_cached(column, row, width, height, radius);
+                        inner_cover = ui_inside_cached(column - thickness, row - thickness, width - 2 * thickness,
                                                 height - 2 * thickness, inner);
                         if (outer_cover > inner_cover)
                                 ui_dot(ui, x + column, y + row, ui_cover(tone, outer_cover - inner_cover));
