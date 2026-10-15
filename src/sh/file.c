@@ -14637,7 +14637,11 @@ typedef struct
         p64 inode;
 } find_ancestor;
 
-static find_ancestor find_ancestors[FILE_MAX_DEPTH + 1];
+// The serial walk recurses on the stack, about 8.5 kB and one descriptor a
+// level, so it stops at a depth the stack and the descriptor table hold. The
+// parallel walk has no such limit.
+#define FIND_MAX_DEPTH 256
+static find_ancestor find_ancestors[FIND_MAX_DEPTH + 1];
 
 static string_address find_path;
 static string_address find_root_path;
@@ -17376,7 +17380,7 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
 
         bool directory = (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
 
-        if (directory && follow && depth <= FILE_MAX_DEPTH)
+        if (directory && follow && depth <= FIND_MAX_DEPTH)
         {
                 if (!find_facts_ready())
                         return;
@@ -17446,7 +17450,7 @@ static fn find_walk(string_address path, string_address name, positive depth, bo
                                 // a tree this deep would run out of; the
                                 // first entry found past the ceiling is
                                 // what says the walk is not complete.
-                                if (depth >= FILE_MAX_DEPTH)
+                                if (depth >= FIND_MAX_DEPTH)
                                 {
                                         string_format(log_error, "find: '%w' is nested too deep\n",
                                                       writer_terminal_quoted_name, path);
