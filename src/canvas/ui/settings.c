@@ -324,16 +324,17 @@ static positive settings_keep(const char address_to said, positive length, posit
                 address_to at += 1;
                 if (c == '\t')
                         c = ' ';
-                // An escape sequence: its introducer, its parameters and its final letter.
+                // An escape sequence: its introducer, its parameters and its final letter. The end of a line is never taken into one.
                 if (c == 0x1b)
                 {
                         if (address_to at < length && said[address_to at] == '[')
                         {
                                 address_to at += 1;
-                                while (address_to at < length && (said[address_to at] < 0x40 || said[address_to at] > 0x7e))
+                                while (address_to at < length && said[address_to at] != '\n' &&
+                                       (said[address_to at] < 0x40 || said[address_to at] > 0x7e))
                                         address_to at += 1;
                         }
-                        address_to at += address_to at < length;
+                        address_to at += address_to at < length && said[address_to at] != '\n';
                         continue;
                 }
                 if ((unsigned char)c < ' ' || c == 0x7f || made + 1 >= room)
@@ -470,8 +471,8 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
 }
 
 /*
-        The Battery row is the machine's battery as battery.c reads it: the
-        first one present, its percent and whether it charges. A machine with
+        The Battery row is the battery the Battery picker row chose, as
+        battery.c reads it: its percent and whether it charges. A machine with
         none, or with none present, has none. The verb's words are not used
         for it, so a battery without a charge limit is still a battery.
 */
@@ -691,7 +692,7 @@ static struct
         b32 output;
         positive said_length, began;
         int job;
-        b32 job_sets, stopped;
+        b32 job_sets;
         char job_value[SETTINGS_TYPED];
         positive unread;  // rows to ask, a bit each
         struct settings_change queue[SETTINGS_QUEUE]; // changes to make once the verb running is done, in order
@@ -705,8 +706,8 @@ static struct
         b32 change_all;
         int stale_top[2], stale_bottom[2];
         b32 stale_all[2];
-        // What the cuts and the wrapped lines were made for: the fonts, the card, the width and the scale.
-        unsigned int fit_generation, card_generation;
+        // What the wrapped lines were made for: the card, the width and the scale.
+        unsigned int card_generation;
         b32 wrap_made;
         int wrap_width, wrap_scale;
         unsigned int wrap_card;
@@ -723,7 +724,6 @@ struct settings_cut
         char text[SETTINGS_VALUE];
         positive length, cut, capacity;
         int size, room, scale;
-        unsigned int generation;
         unsigned char kind;
 };
 
@@ -1055,8 +1055,8 @@ static fn settings_side_reveal(void)
         character, that with "..." after it fits, found by a search over the
         prefixes (a prefix's width grows with it), and where none fits, the
         first character alone. The text itself when it fits. The cut is kept
-        with its text, size, room, scale and capacity, and the fonts it was
-        made in, so a text drawn again is not laid out again.
+        with its text, size, room, scale and capacity, so a text drawn again
+        is not laid out again.
 */
 static unsigned int settings_cut_slot(string_address text, positive length, int size, int room, int scale)
 {
@@ -1126,7 +1126,7 @@ static string_address settings_fit(struct ui address_to ui, string_address text,
         {
                 memo = &settings_large->cuts[settings_cut_slot(text, length, size, room, ui->scale)];
                 if (memo->kind && memo->length == length && memo->size == size && memo->room == room && memo->scale == ui->scale &&
-                    memo->capacity == capacity && memo->generation == settings.fit_generation && !memory_compare(memo->text, text, length))
+                    memo->capacity == capacity && !memory_compare(memo->text, text, length))
                 {
                         kind = memo->kind;
                         cut = memo->cut;
@@ -1144,7 +1144,6 @@ static string_address settings_fit(struct ui address_to ui, string_address text,
                         memo->room = room;
                         memo->scale = ui->scale;
                         memo->capacity = capacity;
-                        memo->generation = settings.fit_generation;
                         memo->cut = cut;
                         memo->kind = kind;
                 }
@@ -1559,7 +1558,8 @@ static fn settings_wrap(void)
         while (at <= settings.card_length && settings.card_lines < SETTINGS_CARD_LINES)
         {
                 positive over = at, start = at;
-                struct settings_run run = {0, 0, {0, 0, 0, 0}};
+                // No run is started yet: the first width laid out starts the pen, even for a line that begins at byte 0.
+                struct settings_run run = {~(positive)0, 0, {0, 0, 0, 0}};
                 b32 plain;
 
                 while (over < settings.card_length && settings_large->card[over] != '\n')
@@ -2263,7 +2263,6 @@ static fn settings_finished(b32 killed)
                         else
                                 settings_say((string_address)(wait_status_code(status) ? "moonwater refused" : "done"));
                 }
-                settings.stopped = false;
                 // What was done to a row of a list is seen at once in the list; any other change may move another row.
                 if (row == SETTINGS_JOB_ACT)
                         settings.feed_due = 0;
@@ -2414,7 +2413,6 @@ static b32 settings_stop(void)
 {
         if (settings.child <= 0 || !settings.job_sets || settings.job < SETTINGS_ANY)
                 return false;
-        settings.stopped = true;
         settings_finished(true);
         return true;
 }
@@ -2667,7 +2665,8 @@ static fn settings_menu_key(const struct window_event address_to event)
                 {
                         int at = (settings.menu_at + step) % settings.menu_count;
 
-                        if (settings_choice(which, (positive)at, word, sizeof(word)) && (unsigned char)word[0] == c)
+                        if (settings_choice(which, (positive)at, word, sizeof(word)) &&
+                            (unsigned char)(word[0] >= 'A' && word[0] <= 'Z' ? word[0] + 32 : word[0]) == c)
                         {
                                 settings_menu_go(at);
                                 return;
@@ -2676,7 +2675,6 @@ static fn settings_menu_key(const struct window_event address_to event)
         }
 }
 
-// A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
 /*
         What is done to a network or a device, as a change for the verb:
         a letter (j joins a network, f forgets it, a keeps a device, d
@@ -2768,6 +2766,7 @@ static fn settings_forget(void)
         settings_act(item->kind == SETTINGS_NETWORK ? 'f' : 'd', item->label, null);
 }
 
+// A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
 static fn settings_activate(int row, int way)
 {
         const struct settings_item address_to item = settings_item(row);
@@ -3474,17 +3473,16 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         }
 }
 
-// The list: the rows that show, a header to a section, drawn where they are in view.
 // The column of groups at the left: the chosen one lit, the rest plain on the glass.
 static fn settings_draw_side(struct ui address_to ui)
 {
         int left = ui_px(&settings.ui, UI_PAD), width = settings_side(), height = ui_px(&settings.ui, SETTINGS_GROUP_ROW);
-        int inset = ui_px(&settings.ui, 12);
+        int inset = ui_px(&settings.ui, 12), groups = settings_groups();
         char cut[SETTINGS_VALUE];
 
         ui->top = settings_list_top();
         ui->bottom = settings_list_bottom();
-        for (int group = 0; group < settings_groups(); group++)
+        for (int group = 0; group < groups; group++)
         {
                 int y = settings_list_top() + group * height - settings.group_scroll;
                 // What is typed lists the rows of every group, so none is the chosen one.
@@ -3500,6 +3498,7 @@ static fn settings_draw_side(struct ui address_to ui)
         }
 }
 
+// The list: the rows that show, a header to a section, drawn where they are in view.
 static fn settings_draw_list(struct ui address_to ui)
 {
         int left = settings_pane_left();
@@ -3676,11 +3675,6 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         settings_draw_foot(ui, list_bottom);
         if (settings.menu >= 0)
                 settings_draw_menu(ui);
-}
-
-static fn settings_draw(unsigned int address_to pixels)
-{
-        settings_draw_rows(pixels, 0, 0);
 }
 
 /*
