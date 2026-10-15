@@ -446,7 +446,7 @@ static rx_fragment rx_character(rx_compiler *c, b32 ascii)
                 minimum), so that the walk can tell this one from any other
                 and decide a character that is one byte without a choice.
         */
-        rx_fragment character = rx_either(c, rx_one(c, RX_SET, (p8)ascii), wide);
+        rx_fragment character = rx_either(c, rx_one(c, RX_SET, ascii), wide);
 
         if (character.first)
                 c->pool->nodes[character.first].minimum = 1;
