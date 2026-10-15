@@ -2561,7 +2561,7 @@ static const storage_column_descriptor storage_column_table[] = {
 
 typedef struct
 {
-        p8 columns[STORAGE_COLUMN_MAX];
+        p8 columns[NAME_LIST_SELECT_MAX];
         positive count;
         string_address operand;
         /*  A relative or symlinked spelling names the same mount as its
@@ -3201,7 +3201,7 @@ COLD b32 storage_findmnt(positive argc, string_address address_to argv,
         storage_mount_table table;
         positive query_id = 0;
         bool have_query_id = false;
-        positive widths[STORAGE_COLUMN_MAX] = {0};
+        positive widths[NAME_LIST_SELECT_MAX] = {0};
         argument_cursor taking = {.argc = argc, .argv = argv, .at = 1};
         string_address value;
         b32 option;

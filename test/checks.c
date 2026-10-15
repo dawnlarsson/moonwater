@@ -38257,11 +38257,30 @@ static fn name_list_checks(void)
                   array_count(definitions), selected, address_of count,
                   null, 0) == NAME_LIST_EMPTY && count == 1);
         count = 0;
-        check("column capacity reports the overflowing valid name",
+        check("column repeats take an entry each, as util-linux's lsblk -o NAME,NAME does",
               name_list_columns("alpha,alpha,Beta,gamma", definitions,
                   sizeof(definitions[0]), array_count(definitions), selected,
-                  address_of count, unknown, sizeof(unknown)) == NAME_LIST_UNKNOWN &&
-              count == 3 && string_equals(unknown, "gamma"));
+                  address_of count, unknown, sizeof(unknown)) == NAME_LIST_OK &&
+              count == 4 && selected[0] == 0 && selected[1] == 0 &&
+              selected[2] == 1 && selected[3] == 2);
+        {
+                static p8 wide[256];
+                static char long_list[256 * 6 + 8];
+                positive at = 0;
+
+                for (positive n = 0; n < 256; n++)
+                {
+                        memory_copy_apart(long_list + at, "alpha,", 6);
+                        at += 6;
+                }
+                memory_copy_apart(long_list + at, "Beta", 5);
+                count = 0;
+                check("column capacity refuses the name past the selection's room",
+                      name_list_columns(long_list, definitions, sizeof(definitions[0]),
+                          array_count(definitions), wide, address_of count,
+                          unknown, sizeof(unknown)) == NAME_LIST_UNKNOWN &&
+                      count == 256 && string_equals(unknown, "Beta"));
+        }
 
         p8 lock_fields[] = "  1\tPOSIX\vowner";
         p8 address_to field_at = lock_fields;

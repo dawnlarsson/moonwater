@@ -4061,6 +4061,12 @@ static COLD bool name_list_select(
 
 enum { NAME_LIST_OK, NAME_LIST_EMPTY, NAME_LIST_UNKNOWN };
 
+/* A column list may name a column more than once, and every name takes its
+   own entry in the selection, so the selection is sized for the most names a
+   list may hold rather than for the number of columns there are. A caller's
+   selection array must hold this many entries. */
+#define NAME_LIST_SELECT_MAX 256
+
 /* Column-list policy: retain repeats and trailing commas, reject an empty
    argument even with a seeded prefix, and report the first rejected span. */
 static COLD b32 name_list_columns(
@@ -4074,7 +4080,7 @@ static COLD b32 name_list_columns(
                 return NAME_LIST_EMPTY;
         name_list_error error;
         if (name_list_select(text, definitions, stride, definition_count,
-                             selected, selected_count, definition_count, 0,
+                             selected, selected_count, NAME_LIST_SELECT_MAX, 0,
                              address_of error))
                 return NAME_LIST_OK;
         if (room)

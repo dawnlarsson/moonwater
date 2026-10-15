@@ -19031,7 +19031,7 @@ static b32 util_linux_prlimit()
         if (command)
                 return ul_exec(taking.first, "prlimit");
 
-        p8 columns[UL_LIMIT_COLUMNS] = {
+        p8 columns[NAME_LIST_SELECT_MAX] = {
             UL_LIMIT_RESOURCE, UL_LIMIT_DESCRIPTION, UL_LIMIT_SOFT,
             UL_LIMIT_HARD, UL_LIMIT_UNITS,
         };
@@ -21090,7 +21090,7 @@ static b32 ul_table_column_list(
         defaults it falls back to and the name it complains as. */
 #define ul_columns_take(program, definitions, maximum, defaults, \
                         default_count, text) \
-        p8 columns[maximum]; \
+        p8 columns[NAME_LIST_SELECT_MAX]; \
         positive column_count = 0; \
         p8 unknown[UL_COLUMN_NAME]; \
         { \
@@ -21183,7 +21183,7 @@ static fn ul_table_out_mode(address_any rows, positive row_size, positive count,
     p8 address_to columns, positive column_count, bool headings, bool raw,
     ul_table_field field_of, p8 layout)
 {
-        positive widths[64];
+        positive widths[NAME_LIST_SELECT_MAX];
         if (!count || definition_count > array_count(widths)) return;
         ul_table_data data = {rows, row_size, definitions, field_of, raw};
         table_view view = {.output = log, .context = &data, .cell = ul_table_cell,
