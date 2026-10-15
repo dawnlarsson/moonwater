@@ -1709,7 +1709,10 @@ static bool file_codec_name(string_address input, p8 address_to output,
                                    from))
                         continue;
                 positive prefix = length - from;
-                if (prefix > room || to >= room - prefix)
+                /* A name that is only its suffix has no name to decode to,
+                   and the reference refuses it as an unknown suffix (gunzip
+                   .gz, gunzip .tgz); an empty output name is never made. */
+                if (prefix == 0 || prefix > room || to >= room - prefix)
                         return false;
                 memory_copy(output, input, prefix);
                 memory_copy_end(output + prefix, suffixes[i].decoded, to);
