@@ -1725,132 +1725,152 @@ static b32 file_codec_paths(file_codec_cli address_to codec, positive first,
                             positive count)
 {
         p8 output_name[FILE_PATH_MAX];
+        b32 failed = 0;
+        //      Read once for the command, as the comment at file_umask asks.
+        positive umask_now = file_umask();
 
-        for (positive at = first; at < count && !*codec->status; at++)
+        /*
+                Each operand is its own job, as the reference codecs run them:
+                a missing or refused operand says so, sets the exit status,
+                and the rest are still done. Each run resets the codec's
+                status when it starts, so the status is taken per operand and
+                the failure is kept across them here.
+        */
+        for (positive at = first; at < count; at++)
         {
-                string_address path = program_argument((b32)at);
-                system_path_file input, passthrough;
-                file_staged_name output;
-                file_facts input_facts;
-                p8 output_leaf[SYSTEM_PATH_LEAF_ROOM];
-                string_address output_display = null;
-                bipolar in = 0;
-                bipolar out = codec->test ? -1 : 1;
-                bool named_output = false;
-
-                system_path_file_reset(address_of input);
-                system_path_file_reset(address_of passthrough);
-                if (!string_equals(path, "-"))
+                *codec->status = 0;
+                do
                 {
-                        in = system_path_file_open(address_of input, path, false,
-                                                   false, 0);
-                        if (in < 0)
-                        {
-                                string_format(log_error, "%s: %w: %s\n", codec->name,
-                                              writer_terminal_name, path, file_reason(in));
-                                *codec->status = 1;
-                                break;
-                        }
+                    string_address path = program_argument((b32)at);
+                    system_path_file input, passthrough;
+                    file_staged_name output;
+                    file_facts input_facts;
+                    p8 output_leaf[SYSTEM_PATH_LEAF_ROOM];
+                    string_address output_display = null;
+                    bipolar in = 0;
+                    bipolar out = codec->test ? -1 : 1;
+                    bool named_output = false;
 
-                        if (!codec->test && !codec->stdout_out)
-                        {
-                                string_address named = codec->output_path;
-                                bipolar base = AT_FDCWD;
+                    system_path_file_reset(address_of input);
+                    system_path_file_reset(address_of passthrough);
+                    if (!string_equals(path, "-"))
+                    {
+                            in = system_path_file_open(address_of input, path, false,
+                                                       false, 0);
+                            if (in < 0)
+                            {
+                                    string_format(log_error, "%s: %w: %s\n", codec->name,
+                                                  writer_terminal_name, path, file_reason(in));
+                                    *codec->status = 1;
+                                    break;
+                            }
 
-                                if (named)
-                                        output_display = named;
-                                else if (!file_codec_name(
-                                             path, output_name,
-                                             sizeof(output_name), codec->suffixes,
-                                             codec->suffix_count,
-                                             codec->decompress) ||
-                                         !file_codec_name(
-                                             (string_address)input.leaf,
-                                             output_leaf, sizeof(output_leaf),
-                                             codec->suffixes,
-                                             codec->suffix_count,
-                                             codec->decompress))
-                                {
-                                        string_format(
-                                            log_error, "%s: %s\n", codec->name,
-                                            codec->decompress
-                                                ? codec->decode_suffix_error
-                                                : codec->encode_suffix_error);
-                                        *codec->status = 1;
-                                        system_path_file_release(address_of input);
-                                        break;
-                                }
-                                else
-                                {
-                                        // A sibling is named in the directory
-                                        // the input was pinned in.
-                                        output_display = (string_address)output_name;
-                                        named = (string_address)output_leaf;
-                                        base = input.directory;
-                                }
+                            if (!codec->test && !codec->stdout_out)
+                            {
+                                    string_address named = codec->output_path;
+                                    bipolar base = AT_FDCWD;
 
-                                out = file_look_code(in, (string_address)"", AT_EMPTY_PATH,
-                                                     address_of input_facts);
-                                if (out >= 0 && (input_facts.mask & STATX_BASIC) != STATX_BASIC)
-                                        out = -ERROR_INPUT_OUTPUT;
-                                if (out >= 0)
-                                        out = file_staged_name_open_at(
-                                            address_of output, base, named,
-                                            0666 & ~file_umask(),
-                                            FILE_STAGED_REGULAR_ONLY |
-                                                (codec->replace ? 0 : FILE_STAGED_NO_REPLACE),
-                                            address_of input_facts);
+                                    if (named)
+                                            output_display = named;
+                                    else if (!file_codec_name(
+                                                 path, output_name,
+                                                 sizeof(output_name), codec->suffixes,
+                                                 codec->suffix_count,
+                                                 codec->decompress) ||
+                                             !file_codec_name(
+                                                 (string_address)input.leaf,
+                                                 output_leaf, sizeof(output_leaf),
+                                                 codec->suffixes,
+                                                 codec->suffix_count,
+                                                 codec->decompress))
+                                    {
+                                            string_format(
+                                                log_error, "%s: %s\n", codec->name,
+                                                codec->decompress
+                                                    ? codec->decode_suffix_error
+                                                    : codec->encode_suffix_error);
+                                            *codec->status = 1;
+                                            system_path_file_release(address_of input);
+                                            break;
+                                    }
+                                    else
+                                    {
+                                            // A sibling is named in the directory
+                                            // the input was pinned in.
+                                            output_display = (string_address)output_name;
+                                            named = (string_address)output_leaf;
+                                            base = input.directory;
+                                    }
 
-                                if (out < 0)
-                                {
-                                        string_format(log_error, "%s: %w: %s\n", codec->name,
-                                                      writer_terminal_name, output_display,
-                                                      file_reason(out));
-                                        *codec->status = 1;
-                                        system_path_file_release(address_of input);
-                                        break;
-                                }
-                                named_output = true;
-                        }
-                }
+                                    out = file_look_code(in, (string_address)"", AT_EMPTY_PATH,
+                                                         address_of input_facts);
+                                    if (out >= 0 && (input_facts.mask & STATX_BASIC) != STATX_BASIC)
+                                            out = -ERROR_INPUT_OUTPUT;
+                                    if (out >= 0)
+                                            out = file_staged_name_open_at(
+                                                address_of output, base, named,
+                                                0666 & ~umask_now,
+                                                FILE_STAGED_REGULAR_ONLY |
+                                                    (codec->replace ? 0 : FILE_STAGED_NO_REPLACE),
+                                                address_of input_facts);
 
-                bool had_input = input.handle >= 0;
-                file_codec_display = path && !string_equals(path, "-") ? (string_address)path : (string_address)"stdin";
-                codec->run(in, out, codec->decompress, codec->level);
-                bipolar finished;
-                string_address finish_display = path;
+                                    if (out < 0)
+                                    {
+                                            string_format(log_error, "%s: %w: %s\n", codec->name,
+                                                          writer_terminal_name, output_display,
+                                                          file_reason(out));
+                                            *codec->status = 1;
+                                            system_path_file_release(address_of input);
+                                            break;
+                                    }
+                                    named_output = true;
+                            }
+                    }
 
-                if (named_output)
-                {
-                        bipolar output_finished = file_staged_name_finish(
-                            address_of output, !*codec->status, 0);
-                        finished = output_finished;
-                        if (output_finished >= 0 && !*codec->status &&
-                            codec->remove_source && had_input)
-                                finished = system_path_file_remove(
-                                    address_of input);
-                        (void)system_path_file_close_handle(address_of input);
-                        system_path_file_release(address_of input);
-                        if (output_finished < 0 && !*codec->status)
-                                finish_display = output_display;
-                }
-                else
-                        finished = system_path_file_finish(
-                            address_of input, address_of passthrough,
-                            !*codec->status,
-                            codec->remove_source && had_input);
+                    bool had_input = input.handle >= 0;
+                    file_codec_display = path && !string_equals(path, "-") ? (string_address)path : (string_address)"stdin";
+                    if (codec->run(in, out, codec->decompress, codec->level))
+                            *codec->status = 1;
+                    bipolar finished;
+                    string_address finish_display = path;
 
-                if (finished < 0 && !*codec->status)
-                {
-                        string_format(log_error, "%s: %w: %s\n", codec->name, writer_terminal_name,
-                                      finish_display, file_reason(finished));
-                        *codec->status = 1;
-                }
+                    if (named_output)
+                    {
+                            bipolar output_finished = file_staged_name_finish(
+                                address_of output, !*codec->status, 0);
+                            finished = output_finished;
+                            if (output_finished >= 0 && !*codec->status &&
+                                codec->remove_source && had_input)
+                                    finished = system_path_file_remove(
+                                        address_of input);
+                            (void)system_path_file_close_handle(address_of input);
+                            system_path_file_release(address_of input);
+                            if (output_finished < 0 && !*codec->status)
+                                    finish_display = output_display;
+                    }
+                    else
+                            finished = system_path_file_finish(
+                                address_of input, address_of passthrough,
+                                !*codec->status,
+                                codec->remove_source && had_input);
+
+                    if (finished < 0 && !*codec->status)
+                    {
+                            string_format(log_error, "%s: %w: %s\n", codec->name, writer_terminal_name,
+                                          finish_display, file_reason(finished));
+                            *codec->status = 1;
+                    }
+                } while (0);
+                //      A break above ends this operand only; the next one is
+                //      still done, and the codec's status is for it alone.
                 codec->output_path = null;
+                if (*codec->status)
+                        failed = 1;
         }
 
         log_flush();
-        return *codec->status;
+        *codec->status = failed;
+        return failed;
 }
 
 static b32 file_codec_main(file_codec_cli address_to codec)
