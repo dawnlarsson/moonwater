@@ -8584,10 +8584,14 @@ static COLD bool nl80211_associated(void)
 
         if (nl80211_open(address_of session) < 0)
                 return false;
-        if (nl80211_interface(address_of session, address_of iface) < 0)
-                up = true;
-        else
+        bipolar asked = nl80211_interface(address_of session, address_of iface);
+
+        //      No card at all is no station; a question that failed for
+        //      another reason counts as one.
+        if (asked == 0)
                 up = nl80211_station(address_of session, iface.index, mac) != 0;
+        else
+                up = asked != -ERROR_NO_DEVICE;
         nl80211_close(address_of session);
         return up;
 }
