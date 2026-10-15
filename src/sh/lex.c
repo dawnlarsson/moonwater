@@ -1160,9 +1160,6 @@ static string_address lex_nesting_at(string_address at, positive nesting,
                         fresh = true;
                         continue;
                 }
-                if (commands && c == '\n')
-                        cases.command = true;
-
                 if (open == close)
                 {
                         if (c == open)
