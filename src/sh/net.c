@@ -1121,6 +1121,8 @@ static b32 net_wget(void)
 //      plain file and never waited for, so a FIFO planted at its name on the
 //      data partition cannot stop the watcher.
 static bipolar host_read_word(string_address path, p8 address_to into, positive room);
+static bipolar host_read_state(string_address path, p8 address_to into, positive room);
+static bipolar host_word_end(p8 address_to into, bipolar got);
 
 /*
         /etc/resolv.conf: what the network handed out, or what was kept.
@@ -1189,9 +1191,17 @@ static COLD bool net_dns_usable(bipolar host)
 static COLD positive net_dns_kept_at(string_address path, p32 address_to into)
 {
         p8 text[96];
-        bipolar got = host_read_word(path, text, sizeof(text));
+        bipolar got = host_read_state(path, text, sizeof(text));
         positive count = 0;
         positive at = 0;
+
+        if (got < 0)
+                got = 0;
+        //      A file that fills the buffer may be longer than it, and what
+        //      the cut keeps is not the whole of the file.
+        if (got >= (bipolar)sizeof(text) - 1)
+                return 0;
+        got = host_word_end(text, got);
 
         while (got > 0 && at < (positive)got)
         {
