@@ -1067,7 +1067,7 @@ static b32 net_wget(void)
                         output = numbered;
                 }
                 if (dest < 0)
-                        return named ? string_report(log_error, WGET_GENERIC,
+                        return named ? string_report(log_error, WGET_FILE,
                                                      "%w: %s\n",
                                                      writer_terminal_quoted_name,
                                                      output, file_reason(dest))
