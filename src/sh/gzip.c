@@ -608,6 +608,8 @@ static bool gzip_inflate_dynamic(gzip_inflater address_to z)
 
         if (hlit < 0 || hdist < 0 || hclen < 0)
                 return false;
+        if (hlit > 29 || hdist > 29)
+                return gzip_inflate_fail(z, GZIP_WHY_FORMAT);
         nlit = (positive)hlit + 257;
         ndist = (positive)hdist + 1;
         memory_fill(clen, 0, sizeof(clen));
