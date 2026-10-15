@@ -3074,6 +3074,12 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         }
 
         failed = system_random_fill(random, sizeof(random), 0);
+        if (failed)
+        {
+                system_close(handle);
+                host_unmount(HOST_MEDIUM);
+                return host_fail(device, failed);
+        }
 
         memory_copy(identity.uuid, random, 16);
         memory_copy(identity.hash_seed, random + 16, 16);
