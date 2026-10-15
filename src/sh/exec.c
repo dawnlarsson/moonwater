@@ -7116,6 +7116,7 @@ static bool exec_helper_collect(bipolar child, b32 reading, positive start,
 {
         positive filled = 0;
         positive raw_status = 0;
+        bool overflow = false;
 
         //      A here-document is as long as it is. Take another page of
         //      room whenever the last one filled, rather than deciding in
@@ -7127,6 +7128,7 @@ static bool exec_helper_collect(bipolar child, b32 reading, positive start,
                 if (!token_room(start + filled + 4096))
                 {
                         token_overflow = true;
+                        overflow = true;
                         break;
                 }
 
@@ -7144,6 +7146,13 @@ static bool exec_helper_collect(bipolar child, b32 reading, positive start,
         system_wait4_retry(child, address_of raw_status, 0, null);
 
         exec_redirect_status = wait_status_code(raw_status);
+
+        if (overflow)
+        {
+                log_error(str("Here-document too long\n"));
+                exec_redirect_status = 2;
+                return false;
+        }
 
         if (exec_redirect_status)
                 return false;
