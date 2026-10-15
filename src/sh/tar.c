@@ -3305,7 +3305,12 @@ static bool tar_deliver_sparse(bipolar archive, bipolar out, p64 size,
                 if (start < 0)
                 {
                         if (!tar_write_zeros(out, offset - cursor))
+                        {
+                                tar_write_failure = -ERROR_INPUT_OUTPUT;
+                                (void)tar_skip(archive, tar_padded(size) - copied,
+                                               seekable);
                                 return false;
+                        }
                 }
                 else if (offset > (p64)bipolar_max - (p64)start)
                         moved = -ERROR_FILE_TOO_LARGE;
@@ -3324,7 +3329,16 @@ static bool tar_deliver_sparse(bipolar archive, bipolar out, p64 size,
                 }
 
                 if (!tar_copy_n(archive, out, tar_sparse[at].bytes, seekable))
+                {
+                        // The span was read past; the spans after it and the
+                        // padding are passed over as well.
+                        if (tar_write_failure)
+                                (void)tar_skip(archive,
+                                               tar_padded(size) - copied -
+                                                   tar_sparse[at].bytes,
+                                               seekable);
                         return false;
+                }
 
                 copied += tar_sparse[at].bytes;
                 cursor = offset + tar_sparse[at].bytes;
