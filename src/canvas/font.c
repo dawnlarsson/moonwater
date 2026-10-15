@@ -2,10 +2,10 @@
         The text engine: TrueType outlines into coverage, coverage into pixels.
 
         One engine for every surface that draws text -- the terminal, the
-        panel, the control panel -- in userspace, inside the program that
-        includes it after lib.util.c. The kernel's fallback console keeps its
-        8x16 face. No outline code is ever in ring 0, and this file refuses to
-        compile there.
+        taskbar, the launcher and settings, the compositor's surface text --
+        in userspace, inside the program that includes it after lib.util.c.
+        The kernel's fallback console keeps its 8x16 face. No outline code
+        is ever in ring 0, and this file refuses to compile there.
 
         A font is attacker input. It is read in place from the caller's bytes
         and never trusted: every read is bounded by the file, every count by
@@ -19,7 +19,7 @@
                         offsets scaled or not, point matching), loca short
                         and long, cmap formats 4 and 12, hmtx and hhea, head,
                         maxp, OS/2 metrics (typo metrics when USE_TYPO_METRICS
-                        says so, hhea otherwise), post's isFixedPitch
+                        says so, hhea otherwise), post's underline and thickness
             coverage    exact area: the signed area and cover of every edge
                         in every cell it crosses, a running sum along each
                         row, nonzero by the magnitude clamped at full
@@ -178,6 +178,15 @@
                 blocks and braille drawn to the cell, never kerned, and the
                 whole cell's rectangle written in its background.
 
+        fn font_cells(font_engine *engine, const font_face *const *faces,
+                      p32 count, const p32 *codes, p32 n, const font_metrics *grid,
+                      p32 size, p32 flags, const font_target *target, b32 x,
+                      b32 y, p32 colour, p32 background)
+                font_cell for n code points in a row from x, y: the same
+                pixels. On a known ground, inside the target, with the glyphs
+                in the atlas at once, the run goes through the strip in one
+                pass; otherwise it is drawn a cell at a time.
+
         background is the colour the text lies on when the caller knows it,
         which is what makes a glyph one table lookup a pixel; FONT_UNKNOWN
         reads every pixel under the glyph and blends with it instead.
@@ -258,7 +267,7 @@ typedef struct
         positive glyf, glyf_size, loca, hmtx, cmap, lookup_list, kern;
         p32 glyphs, metrics, units, id;
         p16 lookups[FONT_LOOKUPS];
-        p8 lookup_count, long_loca, cmap_format, symbol, fixed;
+        p8 lookup_count, long_loca, cmap_format, symbol;
         b16 ascent, descent, gap, x_height, cap_height, underline, thickness;
         p16 em_advance;
 } font_face;
@@ -704,7 +713,6 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
         {
                 face->underline = (b16)font_i16(face, at[POST] + 8);
                 face->thickness = (b16)font_i16(face, at[POST] + 10);
-                face->fixed = font_u32(face, at[POST] + 12) != 0;
         }
 
         //      The character map. Ranked so that a later, better subtable
@@ -1392,8 +1400,9 @@ static fn font_embolden(font_engine address_to e, f32 strength, bool across)
         of the x-height tall (FONT_ROUND_RUN), so serifs and the vertical
         tangents of curves are left to the stretch. The standard is measured
         from stems of a third of the x-height, which are straight ones.
-        Which side of it the ink is on comes from the glyph's own winding (TrueType's outer contours run clockwise and
-        put the ink on the right of travel, but a converted font may not). A
+        Which side of it the ink is on comes from the glyph's own winding
+        (TrueType's outer contours run clockwise and put the ink on the right
+        of travel, but a converted font may not). A
         stem is a left edge and the nearest right edge across from it that
         overlaps it by half, no wider than a quarter of the em.
 
@@ -1556,9 +1565,7 @@ static p32 font_stems(font_run address_to run, p32 runs, b64 widest, b64 address
         return count;
 }
 
-static font_memo address_to font_recall(font_memo address_to memo, p64 key);
-
-//      The face's standard stem in font units times 2^14, or 0 for none.
+//      The face's measure slot, cleared when another face held it.
 static font_measure address_to font_measured(font_engine address_to e, const font_face address_to face)
 {
         font_measure address_to m = &e->measures[face->id & (FONT_MEASURES - 1)];
@@ -1568,6 +1575,7 @@ static font_measure address_to font_measured(font_engine address_to e, const fon
         return m;
 }
 
+//      The face's standard stem in font units times 2^14, or 0 for none.
 static b32 font_stem_standard(font_engine address_to e, const font_face address_to face)
 {
         font_measure address_to m = font_measured(e, face);
@@ -1680,7 +1688,7 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
         }
 
         //      Overshoots are small: one past an eighth of the em is not an
-        //      overshoot, and is left alone.
+        //      overshoot, and is taken as none.
         for (p32 k = 0; k < 3; k++)
                 out[k] = out[k] > (b32)face->units / 8 ? 0 : out[k];
 
@@ -1730,8 +1738,9 @@ static fn font_face_measure(font_engine address_to e, const font_face address_to
 //      grey rows of every E, F, H, T, e, t, f and z.
 #define FONT_BAR_WHOLE (FONT_ONE / 2)
 
-//      Whether a gap between two edges of the map is kept by their moves: in order, and one of half a pixel or more
-//      still a pixel, so no counter is shut (a gap under half a pixel may close).
+//      Whether a gap between two edges of the map is kept by their moves:
+//      in order, and one of half a pixel or more still a pixel, so no counter
+//      is shut (a gap under half a pixel may close).
 static inline bool font_gap_kept(b64 was, b64 now)
 {
         return now >= 0 && (was < FONT_ONE / 2 || now >= FONT_ONE);
@@ -1887,8 +1896,8 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         //      from a stem stretches or shrinks rather than riding the stem's
         //      move into the next cell (the arms of [ and ] would otherwise
         //      meet across the cell boundary).
-        //      Two edges to a stem, room for the sixteen fixed lines and the glyph's two ends, and the edges no stem
-        //      took.
+        //      Two edges to a stem, room for the sixteen fixed lines and the
+        //      glyph's two ends, and the edges no stem took.
         b64 from[4 * FONT_STEMS + 18], onto[4 * FONT_STEMS + 18];
         b64 lowest = (b64)1 << 62, highest = -lowest;
         p32 edges = 0;
@@ -2000,8 +2009,9 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
 //      so a round letter's sides are black columns as a straight one's are.
 #define FONT_ROUND_RUN 6
 
-//      What a stem under three quarters of a pixel is thickened across to: just past the three quarters that
-//      snap whole, so the stems are a pixel and the diagonals and bowls gain as little as that takes.
+//      What a stem under three quarters of a pixel is thickened across to:
+//      just past the three quarters that snap whole, so the stems are a pixel
+//      and the diagonals and bowls gain as little as that takes.
 #define FONT_THIN_TO (FONT_ONE * 13 / 16)
 
 //      Vertical stems, for a cell's whole-pixel pen. heavier is what a
@@ -2034,8 +2044,9 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
 */
 #define FONT_DOTS 16
 
-//      Whether another contour's box holds this one's: the dot of a dotted zero, which whole pixels would set off its
-//      centre (at 10 px it lies between two columns) and the zero would read as a ring.
+//      Whether another contour's box holds this one's: the dot of a dotted
+//      zero, which whole pixels would set off its centre (at 10 px it lies
+//      between two columns) and the zero would read as a ring.
 static bool font_dot_inside(const font_engine address_to e, p32 contour, b64 left, b64 bottom, b64 right, b64 top)
 {
         p32 first = 0;
@@ -3583,8 +3594,8 @@ static fn font_quarter(font_engine address_to e, f32 cx, f32 cy, f32 radius,
         Shapes that no face the terminal draws with has: the squares, triangles,
         diamonds and circles of U+25A0-25FF that programs draw (btop's meters
         and sort marks among them), and U+21B5 and U+2717. Each is outlined
-        about the middle of the cell with a half size of a third of the width
-        or a fifth of the height, whichever is less, and a small one half of
+        about the middle of the cell with a half size of 0.36 of the width
+        or 0.2 of the height, whichever is less, and a small one half of
         that; a hollow one has a light line's stroke inside its outline. Every
         contour of a shape is wound the same way, so the parts of one shape add
         and a hollow one is a hole. Entries are the shape, HOLLOW or SMALL.
@@ -4364,7 +4375,7 @@ static p32 font_mix(const font_engine address_to e, p32 back, p32 fore, p32 a)
 
 /*
         Text on a ground of one colour, which is nearly all text: a terminal
-        paints each cell's background, a panel its own. Every coverage level
+        paints each cell's background, a window its own. Every coverage level
         then has one answer, so the 256 pixels for the pair of colours are
         made once -- contrast curve, linear light and all -- and a glyph is a
         lookup a pixel: the pair's 256 tones, and after them the same tones
