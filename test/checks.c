@@ -96953,8 +96953,8 @@ static fn reuse_utility_numbers(void)
                 check("file reasons preserve accepted error text and both signs",
                       string_equals(file_reason(sign * ERROR_ACCESS), "Permission denied") &&
                       string_equals(file_reason(sign * ERROR_OVER_QUOTA), "Disk quota exceeded"));
-                check("file reasons retain the narrower utility error set",
-                      string_equals(file_reason(sign * EINTR), "Error") &&
+                check("file reasons name EINTR as GNU does and leave unlisted errors as Error",
+                      string_equals(file_reason(sign * EINTR), "Interrupted system call") &&
                       string_equals(file_reason(sign * EDOM), "Error"));
         }
         check("file reasons bound magnitudes before narrowing to a byte",
