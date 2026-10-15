@@ -48637,6 +48637,7 @@ static b32 file_kill()
         bool timed = false;
         bool needs_handler = false;
         positive milliseconds = 0;
+        bipolar timeout_number = 0;
         bool do_kill = false;
 
         /* util-linux parse_arguments: exact argv words, not getopt. --signal=X
@@ -48811,8 +48812,8 @@ static b32 file_kill()
                         {
                                 string_address wanted = program_argument((b32)index);
 
-                                number = kill_signal_of(wanted);
-                                if (number < 0)
+                                timeout_number = kill_signal_of(wanted);
+                                if (timeout_number < 0)
                                 {
                                         string_format(log_error,
                                                       "kill: unknown signal %s; valid signals:\n",
@@ -48840,8 +48841,6 @@ static b32 file_kill()
                 do_kill = true;
                 index++;
         }
-
-        (void)milliseconds;
 
         if (index >= count)
         {
@@ -48904,11 +48903,13 @@ static b32 file_kill()
                         log_flush();
                 }
 
+                bipolar handle = -1;
+
                 if (timed)
                 {
                         // The wait needs a handle on the process, and a
                         // process that is not there has none to give.
-                        bipolar handle = system_call_2(KILL_PIDFD_OPEN, (positive)who, 0);
+                        handle = system_call_2(KILL_PIDFD_OPEN, (positive)who, 0);
 
                         if (handle < 0)
                         {
@@ -48919,11 +48920,12 @@ static b32 file_kill()
                                 kill_err++;
                                 continue;
                         }
-
-                        system_close(handle);
                 }
 
-                bipolar done = system_call_2(syscall(kill), (positive)who, (positive)number);
+                bipolar done = timed
+                                   ? system_call_4(syscall(pidfd_send_signal), (positive)handle,
+                                                   (positive)number, 0, 0)
+                                   : system_call_2(syscall(kill), (positive)who, (positive)number);
 
                 if (done < 0)
                 {
@@ -48936,7 +48938,34 @@ static b32 file_kill()
                         kill_err++;
                 }
                 else
+                {
                         kill_ok++;
+                        if (timed)
+                        {
+                                //      The first signal is out. If the process has not ended
+                                //      when the timeout runs out, the --timeout signal follows.
+                                timespec span = {(p64)milliseconds / 1000,
+                                                 ((p64)milliseconds % 1000) * 1000000};
+                                system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_READ, 0};
+
+                                if (system_poll_wait(address_of waited, 1, address_of span, null) == 0)
+                                {
+                                        bipolar late = system_call_4(syscall(pidfd_send_signal),
+                                                                     (positive)handle,
+                                                                     (positive)timeout_number, 0, 0);
+
+                                        if (late < 0 && late != -ERROR_NO_PROCESS)
+                                        {
+                                                string_format(log_error, "kill: sending signal to %s failed: %s\n",
+                                                              word, file_reason(late));
+                                                kill_err++;
+                                        }
+                                }
+                        }
+                }
+
+                if (timed)
+                        system_close(handle);
         }
 
         log_flush();
