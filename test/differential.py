@@ -45176,6 +45176,8 @@ while True:
                   "echo 10.9.8.7 > /run/moonwater/dns.lease\n" + step("auto", "dns auto") +
                   "rm -f /run/moonwater/dns.lease\n" + step("auto none", "dns auto") +
                   "printf 'junk words\\n' > /root/dns\n" + step("junk", "dns") +
+                  "printf '9.9.9.9\\t8.8.8.8\\n' > /root/dns\n" + step("tab", "dns") +
+                  "printf '9.9.9.9 8.8.8.8 1.0.0.1%200s\\n' '' > /root/dns\n" + step("padded", "dns") +
                   "printf '9.9.9.9\\n' > /root/dns\nchmod 000 /root\n")
         lines, finished = session(script)
         more, done = session(step("shut", "dns") + step("shut status", "status"), nobody=True)
@@ -45218,6 +45220,14 @@ while True:
               "and with no lease the public one, alone", repr(files.get("auto none")))
         check("(the network's)" in text("junk"),
               "a /root/dns that is not servers is no choice and is not said to be one", text("junk"))
+        #       A tab ends a word as a space does, and a file longer than its
+        #       read is refused whole rather than cut and the cut read.
+        check("(kept)" in text("tab") and "(the network's)" not in text("tab"),
+              "a tab between two DNS servers ends the word, as a space does",
+              text("tab")[:200])
+        check("(the network's)" in text("padded") and "(kept)" not in text("padded"),
+              "a /root/dns longer than the read is refused, not read as cut",
+              text("padded")[:200])
         check("(needs root)" in text("shut") and "(kept)" not in text("shut") and
               "(needs root)" in text("shut status"),
               "a caller who cannot read /root is not told whose choice the servers are",
@@ -53267,6 +53277,11 @@ def harness_wget_hostile(argv):
              "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
         case("DELIBERATE: a %00 in a Location is refused", hop(b"/a%00b"),
              "http://127.0.0.1:PORT/x", [GET(b"/x")], code=1, refs=(), saved=None),
+        #   A URL with a space that the escape cannot fit is used as typed:
+        #   past the copy buffer it overran the stack; now it is refused first.
+        case("DELIBERATE: a URL too long for its copy is refused unsent",
+             answer(ok()), "http://127.0.0.1:PORT/" + "a" * 2100 + " x", [],
+             code=1, refs=(), saved=None, message=b"URL too long"),
     ]
     #   inet_aton's spellings of 127.0.0.1 reach it with the dotted quad in
     #   Host, as curl sends it (GNU wget sends the spelling; both connect).
