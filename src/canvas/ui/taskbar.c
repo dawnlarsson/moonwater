@@ -37,6 +37,12 @@ static struct taskbar_state
 static unsigned int taskbar_tint[TASKBAR_TAB_CHUNK];
 static const unsigned int taskbar_clear[TASKBAR_TAB_CHUNK];
 
+// What the band takes from compositor.c, which comes before this file in every build and defines them: the meet of two
+// rectangles, the grain a glass row is made with, and a colour made more vivid.
+static void compositor_meet(int *into, const int *other);
+static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
+static unsigned int compositor_vivid(unsigned int pixel);
+
 // The band's geometry as one struct: computed once for a call, from the view and the state.
 struct taskbar_layout
 {

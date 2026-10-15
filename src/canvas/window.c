@@ -22,8 +22,8 @@
         and maximum sizes are the older per-window protocol. No code outside
         this file names them now, since struct windows (below) carries the
         live window state. They stay because the page's layout is asserted
-        further down. The title and the state are still read: the terminal
-        takes its title from the page, and window_closing reads the state.
+        further down. The title is still read: the terminal takes its title
+        from the page.
 */
 
 #ifndef WINDOW_INCLUDED
@@ -130,7 +130,7 @@ struct window
         char title[WINDOW_TITLE_MAX];
 
         // The compositor writes these.
-        unsigned int state;         // WINDOW_CLOSING, read by window_closing
+        unsigned int state;         // WINDOW_CLOSING and the rest, as the compositor writes them
         unsigned int pitch;         // pixels per row of the contents
         unsigned int max_width;     // what the mapping actually holds
         unsigned int max_height;
@@ -201,13 +201,6 @@ struct window
 
         unsigned int want;
 };
-
-// Whether the compositor has asked this window to close. A program that draws
-// in a loop reads this where it reads its keys.
-static inline int window_closing(const struct window *window)
-{
-        return (int)(window->state & WINDOW_CLOSING);
-}
 
 static inline void window_damage(struct window *window, unsigned int row,
                                  unsigned int rows)
@@ -747,15 +740,6 @@ struct window_poll
         short returned;
 };
 
-static long window_wait(struct window *window, long other, long nanoseconds)
-{
-        struct window_poll wanted[2] = {{(int)window->handle, 1, 0}, {(int)other, 1, 0}};
-        long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000};
-
-        return window_call(WINDOW_SYS_PPOLL, (long)wanted, other >= 0 ? 2 : 1,
-                           nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
-}
-
 /*
         Bumping sequence is what says a window changed, and the program that
         holds the page itself has no compositor to tell: the bump is the whole
@@ -943,7 +927,9 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->want_width[row] = table->want_height[row] = 0;
         table->buffer_index[row] = 0;
         table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
-        table->title[row][0] = 0;
+        // The whole title: compositor_take reads all of it, so what the row held past a shorter title must go too.
+        for (unsigned int at = 0; at < WINDOWS_TITLE; at++)
+                table->title[row][at] = 0;
         table->glass[row] = 0;
         table->ground[row] = 0;
         __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);

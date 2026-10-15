@@ -36,6 +36,26 @@
 #define BATTERY_NAME 32
 #endif
 
+// The band's size and ink, which compositor.c draws with as well as taskbar.c: the panel's height in logical pixels,
+// the ink of the panel and of a tab (black, lighter while its window has the keys, a little off black while it is put
+// away) for a tab drawn without a font, and each tab's mark.
+#define COMPOSITOR_PANEL 24
+#define COMPOSITOR_INK_PANEL 0x141416u
+#define COMPOSITOR_INK_BUTTON 0x000000u
+#define COMPOSITOR_INK_BUTTON_LIT 0x38383cu
+// A window's tab: lit while it has the keys, dim while it is put away.
+#define COMPOSITOR_TAB_LIT 1u
+#define COMPOSITOR_TAB_AWAY 2u
+// The blur under the tabs: the glass is halved this many times, a block of the output a side, and the small blur's reach
+// in blocks. Its reach is what a change of the band reaches through the blur and the rise, in device pixels.
+#define COMPOSITOR_GLASS_LEVELS 3
+#define COMPOSITOR_GLASS_BLOCK (1 << COMPOSITOR_GLASS_LEVELS)
+#define COMPOSITOR_GLASS_SPREAD 3 // the small blur's reach, in small pixels: two rounds of a box of four
+#define COMPOSITOR_GLASS_REACH ((COMPOSITOR_GLASS_SPREAD + 3) * COMPOSITOR_GLASS_BLOCK)
+// The glass under the tabs, half its width and half its height in logical pixels.
+#define COMPOSITOR_GLASS_ACROSS 8
+#define COMPOSITOR_GLASS_DOWN 4
+
 // What the compositor shows the taskbar: the output, the windows that have a tab and the buffers the band is
 // drawn into (none when there is no font, and the tabs are shapes the compositor draws).
 struct taskbar_view
@@ -45,7 +65,6 @@ struct taskbar_view
         unsigned int *pixels;            // the band's pixels, or none
         unsigned long band_bytes;        // how much memory pixels has
         unsigned int *glass;             // the blurred scene under the tabs
-        unsigned long glass_bytes;
         font_face *face;                 // the face the tabs are written in
         font_engine *engine;             // and its engine
         unsigned int count;              // the windows with a tab, in the order they are shown

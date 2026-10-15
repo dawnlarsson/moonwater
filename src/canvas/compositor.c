@@ -60,13 +60,9 @@
 
 /* ---- backend: the look on the CPU ---- */
 
-// The palette, neutral greys and no hue: the desktop, the tabs drawn without a font (black, lighter while
-// their window has the keys, a little off black while it is put away), and the black line round a window.
-// With a font the tabs are glass, inked from what is under them.
+// The palette, neutral greys and no hue: the desktop, and the black line round a window. The band's inks are in
+// taskbar.h, with the tabs drawn without a font; with a font the tabs are glass, inked from what is under them.
 #define COMPOSITOR_INK_DESKTOP 0x1e1e1eu
-#define COMPOSITOR_INK_PANEL 0x141416u
-#define COMPOSITOR_INK_BUTTON 0x000000u
-#define COMPOSITOR_INK_BUTTON_LIT 0x38383cu
 #define COMPOSITOR_INK_LINE 0x000000u
 // The line of the window with the keys: white at 30%.
 #define COMPOSITOR_INK_LINE_LIT 0x4d4d4du
@@ -75,9 +71,8 @@
 // where no window is, and behind a window's round corners. The tabs' glass is made from what is on the screen.
 static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 
-// The panel's height, the radius of a window's corners and the width of the line round it, in logical
-// pixels; and the largest radius in device pixels, which is what the corners' scratch is made for.
-#define COMPOSITOR_PANEL 24
+// The radius of a window's corners and the width of the line round it, in logical pixels; and the largest
+// radius in device pixels, which is what the corners' scratch is made for. (The panel's height is in taskbar.h.)
 #define COMPOSITOR_RADIUS 8
 #define COMPOSITOR_LINE 1
 // The top of a window that is a titlebar with nothing drawn -- a press there takes the window whatever is
@@ -179,10 +174,6 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
                             source + (unsigned long)(row - y) * pitch + (unsigned long)(x1 - x),
                             (unsigned long)(x2 - x1) * 4);
 }
-
-// A window's tab: lit while it has the keys, dim while it is put away.
-#define COMPOSITOR_TAB_LIT 1u
-#define COMPOSITOR_TAB_AWAY 2u
 
 // A title's length in characters, the bytes that begin one, to its end or the listing's.
 static unsigned char compositor_title_length(const char *title, unsigned int most)
@@ -1963,12 +1954,7 @@ static void compositor_meet(int *into, const int *other)
 }
 
 
-// Glass (compositor_frost): halved this many times, a block of the output a side, and the small blur's reach in blocks.
-#define COMPOSITOR_GLASS_LEVELS 3
-#define COMPOSITOR_GLASS_BLOCK (1 << COMPOSITOR_GLASS_LEVELS)
-#define COMPOSITOR_GLASS_SPREAD 3 // the small blur's reach, in small pixels: two rounds of a box of four
-// How far a change reaches through the blur and the rise, in device pixels: the tent's blocks and the rise's one more.
-#define COMPOSITOR_GLASS_REACH ((COMPOSITOR_GLASS_SPREAD + 3) * COMPOSITOR_GLASS_BLOCK)
+// The glass's blur constants (the block, the spread and the reach) are in taskbar.h, where the band reads them too.
 
 // The rectangle of a window's contents, x1, y1, x2, y2, on the output and in it.
 static void compositor_contents_box(int row, int *box)
@@ -2253,7 +2239,6 @@ static struct taskbar_view compositor_taskbar_view(void)
         view.pixels = compositor.band;
         view.band_bytes = compositor.band_bytes;
         view.glass = compositor.glass;
-        view.glass_bytes = compositor.glass_bytes;
         view.face = &compositor.face;
         view.engine = compositor.engine;
         view.count = compositor.listing;
@@ -2297,9 +2282,6 @@ static void compositor_tabs_changed(void)
         compositor_damage(x, y, width, height);
         compositor.damage_by = 0;
 }
-
-#define COMPOSITOR_GLASS_ACROSS 8 // half the blur's width, in logical pixels
-#define COMPOSITOR_GLASS_DOWN 4   // and half its height
 
 // How far the blur reaches, at the scale: a power of two, which the passes' steps add up to less one.
 static int compositor_glass_reach(int logical)
@@ -5339,6 +5321,10 @@ static void compositor_take(int row)
         {
                 int x = table->x[row], y = table->y[row];
 
+                // Bounded to WINDOW_COORD_MAX, so the sums in compositor_first_place cannot wrap (a place of INT_MAX made
+                // tx + w overflow). compositor_place keeps the window on the output either way.
+                x = x > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : x < -WINDOW_COORD_MAX ? -WINDOW_COORD_MAX : x;
+                y = y > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : y < -WINDOW_COORD_MAX ? -WINDOW_COORD_MAX : y;
                 compositor.w[row] = compositor.picture_w[row] = width;
                 compositor.h[row] = compositor.picture_h[row] = height;
                 compositor.asking[row] = 0;

@@ -26645,6 +26645,9 @@ def harness_core_state(argv):
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- pointer: what a hand means ---- */",
             "/* ---- end of the pointer ---- */"))
+        # The backend's taskbar constants come from ui/taskbar.h, which the extract includes.
+        (work / "ui").mkdir(exist_ok=True)
+        (work / "ui" / "taskbar.h").write_text((root / "src/canvas/ui/taskbar.h").read_text())
         # The renderer's own assembly bodies. lib.c assembles them only into
         # a kernel build with Canvas, so they are lifted out of it rather than linked.
         target = work / "canvas.S"
