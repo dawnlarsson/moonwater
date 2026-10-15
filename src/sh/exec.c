@@ -5406,11 +5406,13 @@ fn history_remember(string_address line)
                                 memory_copy(made + used, line, length);
                                 used += length;
                                 made[used] = end;
-                                history_drop(history_used - 1, 1);
-                                history_hold(made, used);
+                                if (history_hold(made, used))
+                                {
+                                        history_drop(history_used - 2, 1);
+                                        history_open_entry = true;
+                                        history_current_recorded = true;
+                                }
                                 memory_free(made, kept + length + 3);
-                                history_open_entry = true;
-                                history_current_recorded = true;
                                 return;
                         }
                 }
@@ -5429,7 +5431,9 @@ fn history_remember(string_address line)
                 if (!history_wanted(held, length))
                         return;
 
-                history_hold(held, length);
+                if (!history_hold(held, length))
+                        return;
+
                 history_open_entry = true;
                 history_current_recorded = true;
         }
