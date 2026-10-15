@@ -46471,8 +46471,8 @@ static b32 file_env()
         bipolar answer =
             file_exec_path_try_in(name, arguments, env_list, path);
 
-        string_format(log_error, "env: '%w%s", writer_terminal_quoted_name, name,
-                      answer == -ERROR_ACCESS ? (string_address)"': Permission denied\n" : (string_address)"': No such file or directory\n");
+        string_format(log_error, "env: '%w': %s\n", writer_terminal_quoted_name, name,
+                      file_reason(answer));
 
         if (answer != -ERROR_ACCESS)
         {
@@ -46484,7 +46484,7 @@ static b32 file_env()
                         }
         }
 
-        return answer == -ERROR_ACCESS ? 126 : 127;
+        return answer == -ERROR_NO_ENTRY ? 127 : 126;
 }
 
 // printenv -------------------------------------------------------
