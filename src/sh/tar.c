@@ -4147,8 +4147,9 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                                 made = -ERROR_ACCESS;
                         /*      A directory where the target was: link()
                                 meets the name already there first, and the
-                                reference takes that away and tries again
-                                before the kernel refuses the directory. */
+                                reference takes that away; the kernel then
+                                refuses the directory, so no second link is
+                                tried. */
                         if (made == -ERROR_ACCESS && source_handle >= 0 &&
                             (source_facts.mask & STATX_BASIC) == STATX_BASIC &&
                             (source_facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
