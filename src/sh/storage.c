@@ -4156,7 +4156,14 @@ static b32 storage_mount_fstab(string_address wanted, bool all, storage_mount_op
                 return 1;
 
         if (all)
-                have_active = storage_mount_table_load(address_of active, null);
+        {
+                have_active = storage_mount_table_load(address_of active, diagnostic);
+                if (!have_active)
+                {
+                        storage_fstab_table_release(address_of table);
+                        return 1;
+                }
+        }
 
         for (positive at = 0; at < table.count; at++)
         {
