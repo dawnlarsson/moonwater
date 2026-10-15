@@ -25175,7 +25175,7 @@ static b32 file_whereis()
 
                                 whereis_forget_kind(kind);
 
-                                for (positive next = ++i; next < count; next++)
+                                for (positive next = i + 1; next < count; next++)
                                 {
                                         string_address dir =
                                             program_argument((b32)next);
