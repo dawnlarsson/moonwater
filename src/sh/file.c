@@ -31471,7 +31471,7 @@ static bool hardlink_clone(hardlink_file address_to keep, hardlink_file address_
 }
 
 // file_link: every path of the second becomes the first's, one at a time.
-static bool hardlink_link_all(positive master_at, positive other_at, bool clone)
+static void hardlink_link_all(positive master_at, positive other_at, bool clone)
 {
         for (;;)
         {
@@ -31479,7 +31479,7 @@ static bool hardlink_link_all(positive master_at, positive other_at, bool clone)
                 hardlink_node address_to other = hardlink_nodes + other_at;
 
                 if (!other->head)
-                        return true;
+                        return;
 
                 hardlink_file address_to keep = hardlink_files + master->head - 1;
                 hardlink_file address_to duplicate = hardlink_files + other->head - 1;
@@ -31503,15 +31503,21 @@ static bool hardlink_link_all(positive master_at, positive other_at, bool clone)
                         if (file_look_link(hardlink_path(duplicate), address_of now) &&
                             hardlink_link_same(address_of duplicate->facts, address_of now))
                                 duplicate->facts = now;
-                        if (clone ? !hardlink_clone(keep, duplicate)
-                                  : !hardlink_replace(keep, duplicate))
+                        bool linked = clone ? hardlink_clone(keep, duplicate)
+                                            : hardlink_replace(keep, duplicate);
+
+                        if (!linked && clone && hardlink_reflink_mode != 'A')
+                                linked = hardlink_replace(keep, duplicate);
+                        if (!linked)
                         {
                                 if (clone && hardlink_reflink_mode == 'A')
                                         string_format(log_error, "hardlink: cannot link %w to %w.hardlink-temporary: %s\n",
                                                       writer_terminal_name, hardlink_path(keep),
                                                       writer_terminal_name, hardlink_path(duplicate),
                                                       file_reason(-ERROR_NOT_SUPPORTED));
-                                return false;
+                                hardlink_status = 1;
+                                other->head = duplicate->next;
+                                continue;
                         }
                 }
 
@@ -31892,7 +31898,7 @@ static b32 file_hardlink()
                                                              writer_terminal_name, hardlink_path(two));
                                                 continue;
                                         }
-                                        (void)hardlink_link_all(master, other, clone);
+                                        hardlink_link_all(master, other, clone);
                                 }
                         }
                         first = after;
