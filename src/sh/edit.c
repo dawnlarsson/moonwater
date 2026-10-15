@@ -3970,7 +3970,8 @@ static fn edit_prompt_key(positive key)
 
                 for (positive at = 0; at < edit_prompt_length; at++)
                         if (edit_prompt_text[at] >= '0' &&
-                            edit_prompt_text[at] <= '9')
+                            edit_prompt_text[at] <= '9' &&
+                            wanted <= ((positive)-1 - 9) / 10)
                                 wanted = wanted * 10 +
                                          (positive)(edit_prompt_text[at] - '0');
 
