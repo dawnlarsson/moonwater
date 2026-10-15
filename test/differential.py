@@ -96422,7 +96422,8 @@ PINNED = r"""
 {"domain":"util_linux","id":"bb1def30eb4085cb","list":"unstable","reason_id":"h78fa4","utility":"setsid"},
 {"domain":"util_linux","id":"bca8ee5e6e75ea15","list":"unstable","reason_id":"h78fa4","utility":"setsid"},
 {"domain":"util_linux","id":"dcfd3d9c012cb912","list":"unstable","reason_id":"h78fa4","utility":"setsid"},
-{"domain":"util_linux","id":"03bd60736ace79d9","list":"unstable","reason_id":"h78fa4","utility":"unshare"}
+{"domain":"util_linux","id":"03bd60736ace79d9","list":"unstable","reason_id":"h78fa4","utility":"unshare"},
+{"domain":"shell","id":"d8003890ebe6b963","list":"unstable","reason_id":"h78fa4","utility":"names_bash"}
 ]
 """
 # ---- pinned rows end ----
