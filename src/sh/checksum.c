@@ -2042,7 +2042,7 @@ static b32 cksum_main()
         }
         positive family = sha2 ? CHECKSUM_SHA2_FIRST : CHECKSUM_SHA3_FIRST;
 
-        if (lengthed && bits && (sha2 || sha3) && !cksum_sha2_width(family, bits))
+        if (lengthed && (sha2 || sha3) && !cksum_sha2_width(family, bits))
         {
                 return text_done(text_report(1, "cksum: invalid length: '%w'\n"
                   "cksum: digest length for '%w' must be 224, 256, 384, or 512\n",
