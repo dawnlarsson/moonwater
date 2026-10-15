@@ -581,8 +581,12 @@ static b32 process_chroot_credentials(string_address userspec, string_address gr
                         string_address comma = string_first_of(at, ',');
                         positive length = comma ? (positive)(comma - at) : string_length(at);
 
-                        if (length && length < sizeof(text) && listed < array_count(list))
+                        if (length)
                         {
+                                if (length >= sizeof(text))
+                                        return string_report(log_error, 125, "chroot: invalid group\n");
+                                if (listed == array_count(list))
+                                        return string_report(log_error, 125, "chroot: too many groups\n");
                                 memory_copy(text, at, length);
                                 text[length] = end;
                                 bipolar id = file_identity_of((string_address)text, true);
