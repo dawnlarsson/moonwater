@@ -5158,7 +5158,11 @@ static fn expand_run(string_address command, bool quoted)
         log_flush();
 
         if (system_pipe(address_of channel, SHELL_PIPE_CLOSE_ON_EXEC) < 0)
+        {
+                expand_where();
+                writer_stderr_once(str("cannot make pipe for command substitution\n"));
                 return;
+        }
 
         child = expand_tool_direct(command, channel[1]);
 
