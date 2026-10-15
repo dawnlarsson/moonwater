@@ -161,6 +161,7 @@ typedef struct
         bool standard_error;
         bool no_action;
         bool socket_errors;
+        bool lost;
         bool skip_empty;
         bool priority_prefix;
         bool rfc_time;
@@ -681,8 +682,12 @@ static bool logger_connect(logger_control address_to control)
 static bool logger_send_once(logger_control address_to control,
                              p8 address_to bytes, positive length)
 {
-        if (control->no_action || control->handle < 0)
+        if (control->no_action)
                 return true;
+        //      Never connected is silent, as it always was. A send that
+        //      failed and was not restored leaves the line unwritten.
+        if (control->handle < 0)
+                return !control->lost;
 
         if (control->transport == LOGGER_TRANSPORT_DGRAM)
                 return socket_send((b32)control->handle, bytes, length,
@@ -729,6 +734,7 @@ static bool logger_emit(logger_control address_to control,
         bool sent = logger_send_once(control, wire, wire_length);
         if (!sent)
         {
+                control->lost = true;
                 if (logger_connect(control))
                         sent = logger_send_once(control, wire, wire_length);
                 if (!sent)
