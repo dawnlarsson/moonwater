@@ -3190,6 +3190,11 @@ pd_normal:
 
                 if (c != '(')
                 {
+                        if (!c)
+                        {
+                                token.type = PD_END;
+                                return token;
+                        }
                         token.type = c;
                         pc->input++;
                         return token;
@@ -3199,12 +3204,16 @@ pd_normal:
 
                 do
                 {
-                        c = string_get(pc->input++);
+                        //      The terminator is never stepped over: a
+                        //      lex after PD_END must read the same end again,
+                        //      not the bytes past the string.
+                        c = string_get(pc->input);
                         if (!c)
                         {
                                 token.type = PD_END;
                                 return token;
                         }
+                        pc->input++;
                         if (c == '(')
                                 depth++;
                         else if (c == ')')
