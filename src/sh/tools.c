@@ -17507,7 +17507,8 @@ static b32 ul_tasks(b32 pid, bool all, ul_task_action action,
         file_walk walk;
 
         if (!file_walk_open(address_of walk, AT_FDCWD, path))
-                return 1;
+                return string_report(log_error, 1, "%s: cannot list the tasks of pid %b\n",
+                                     program_argument(0), (bipolar)pid);
 
         b32 failed = 0;
         struct linux_dirent64 address_to entry;
