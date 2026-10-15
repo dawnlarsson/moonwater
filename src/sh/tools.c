@@ -882,9 +882,14 @@ static bool logger_operands(logger_control address_to control)
                                                       control->priority);
                                 used = 0;
                         }
-                        memory_copy(control->body, word, control->maximum);
-                        answer &= logger_emit(control, control->maximum,
-                                              control->priority);
+                        for (positive from = 0; from < length;)
+                        {
+                                positive take = min(length - from, control->maximum);
+
+                                memory_copy(control->body, word + from, take);
+                                answer &= logger_emit(control, take, control->priority);
+                                from += take;
+                        }
                         continue;
                 }
 
