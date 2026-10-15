@@ -17054,11 +17054,22 @@ static bool find_access_holds(p8 which)
 // -regex and -iregex match the whole path, which is the one thing the
 // shared matcher has to be told: a find is a match only when it covers
 // every byte of the name.
+static find_node address_to find_regex_compiled;
+
 static bool find_regex_holds(find_node address_to node, string_address text)
 {
-        if (!regex_compile(node->text, false, node->comparison == 'i', false,
-                           FIND_REGEX_POLICY))
-                return false;
+        //      The compiled pattern is one state for the whole process, so it
+        //      is built for a node once and kept while the walk stays on that
+        //      node. Built again for every path, a -regex cost a compile per
+        //      name; a switch to another -regex node still recompiles.
+        if (find_regex_compiled != node)
+        {
+                find_regex_compiled = null;
+                if (!regex_compile(node->text, false, node->comparison == 'i', false,
+                                   FIND_REGEX_POLICY))
+                        return false;
+                find_regex_compiled = node;
+        }
 
         positive length = string_length(text);
 
@@ -18445,6 +18456,7 @@ static fn find_walk_root(string_address root)
 
 static b32 file_find()
 {
+        find_regex_compiled = null;
         positive count = (positive)program_argument_count();
         positive index = 1;
 
