@@ -1326,7 +1326,12 @@ static bool checksum_check_collect(checksum_check_run address_to run)
                         if (!checksum_region_grow(address_of run->names,
                                                   address_of run->names_room,
                                                   run->names_used + length))
+                        {
+                                checksum_blame(run->manifest,
+                                               file_reason(-ERROR_NO_MEMORY));
+                                run->failed = true;
                                 break;
+                        }
                         memory_copy(run->names + run->names_used, filename, length);
                         record.algorithm = one;
                         record.width = (p8)bytes;
@@ -1340,7 +1345,11 @@ static bool checksum_check_collect(checksum_check_run address_to run)
 
                 if (!checksum_region_grow(address_of records, address_of run->room,
                                           (run->pool.count + 1) * sizeof(record)))
+                {
+                        checksum_blame(run->manifest, file_reason(-ERROR_NO_MEMORY));
+                        run->failed = true;
                         break;
+                }
                 run->records = (checksum_record address_to)records;
                 run->records[run->pool.count++] = record;
         }
