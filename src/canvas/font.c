@@ -3270,7 +3270,10 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
 
         for (p32 i = 0; i < e->point_count; i++)
         {
-                b64 x = font_exact(e->points[i].x + shift) * size * (FONT_ONE / 64), y = e->points[i].y * size * (FONT_ONE / 64);
+                //      y is clamped as x is: 8192 points of a crafted glyph can sum to 2^28 font units, and
+                //      scaled by a size of 512 px or more that product was past 2^63 (signed overflow).
+                b64 x = font_exact(e->points[i].x + shift) * size * (FONT_ONE / 64),
+                    y = font_exact(e->points[i].y) * size * (FONT_ONE / 64);
                 p64 mx = x < 0 ? -(p64)x : (p64)x, my = y < 0 ? -(p64)y : (p64)y;
                 b64 qx = (b64)(((unsigned __int128)((mx + bias) >> 14) * reciprocal) >> 64);
                 b64 qy = (b64)(((unsigned __int128)((my + bias) >> 14) * reciprocal) >> 64);
