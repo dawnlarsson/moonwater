@@ -3046,8 +3046,8 @@ static fn edit_copy(bool cut)
 
                 block = edit_span_take(from, to, address_of length);
 
-                if (block)
-                        edit_clip_add(block, length);
+                if (block && !edit_clip_add(block, length))
+                        memory_give(block);
         }
 
         if (!cut)
