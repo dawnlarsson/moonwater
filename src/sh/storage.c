@@ -4091,6 +4091,12 @@ static bipolar storage_mount_one(string_address source, string_address target,
 }
 
 
+/*      mount(8)'s exit status is a set of bits that are ORed together: 1 for
+        incorrect invocation, 2 for a system error (out of memory, cannot
+        fork), 32 for a mount that failed, 64 when some of -a succeeded. An
+        out-of-memory is the second bit, not the first. */
+#define STORAGE_EXIT_SYSERR 2
+
 /*      ignored says the record was passed over rather than mounted: noauto,
         swap, a type the filter excludes. mount -a counts those in neither
         column, and the difference is the whole exit status -- one failure
@@ -4111,7 +4117,8 @@ static b32 storage_mount_fstab_record(storage_fstab address_to record,
         scope_exit(storage_options_free(address_of options));
         if (!storage_options_parse(address_of options, record->options) ||
             (extra && !storage_options_merge(address_of options, extra)))
-                return string_report(diagnostic, 1, "mount: no memory\n");
+                return string_report(diagnostic, STORAGE_EXIT_SYSERR,
+                                     "mount: no memory\n");
         if (extra)
         {
                 options.fake = extra->fake;
@@ -4206,9 +4213,10 @@ static b32 storage_mount_fstab(string_address wanted, bool all, storage_mount_op
                         break;
         }
 
-        /* util-linux: 64 when some of -a succeeded, 32 when a mount failed. */
+        /* util-linux: 64 when some of -a succeeded, 32 when a mount failed;
+           the system-error bit is not a mount failure and stays as it is. */
         if (all && failed && mounted)
-                failed = 64;
+                failed = (failed & ~32) | 64;
         if (!all && !found)
         {
                 string_format(diagnostic, "mount: %s not found in %s\n", wanted,
@@ -4661,6 +4669,7 @@ missing_option:
         goto done;
 no_memory:
         string_format(diagnostic, "mount: no memory\n");
+        status = STORAGE_EXIT_SYSERR;
 done:
         storage_options_free(address_of options);
         byte_store_release(address_of tag_source);
