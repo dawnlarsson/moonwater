@@ -4771,6 +4771,7 @@ static bipolar host_shell_start(string_address address_to argv, positive count,
                 system_call_3(syscall(dup3), (positive)output, 2, 0);
         }
 
+        system_signal_install(1, 0, 0, 0, null);
         system_call_1(syscall(chdir), (positive)(string_address) "/root");
         (void)shell_exec_file(HOST_EVENT_SHELL, argv, count, host_event_environment());
         system_call_1(syscall(exit), 127);
@@ -5181,15 +5182,20 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 system_signal_install(1, 1, 0, 0, null);
 
                 failed = host_canvas_request(SPARK_CANVAS_OFF, address_of control);
-                system_signal_install(1, 0, 0, 0, null);
+                if (failed < 0)
+                        system_signal_install(1, 0, 0, 0, null);
                 if (failed == -EPERM)
                         return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
                 if (failed == -EALREADY)
                         return host_refuse("Canvas is already off\n");
                 return_if(failed < 0, host_fail("canvas off", failed));
 
+                //      The hangup stays ignored until the console shell has
+                //      forked: the terminal this runs on may be the one that
+                //      closed. The shell resets it itself, before it execs.
                 if (!host_console_is_screen())
                         host_tty1_shell();
+                system_signal_install(1, 0, 0, 0, null);
 
                 return 0;
         }
