@@ -231,7 +231,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 The architecture's profile follows them and is not in either
                 list: it is the machine's own unless --arch or an arch/ profile
                 on the line says otherwise. */
-        {"profiles_always", "any general gpu guests latency prod"},
+        {"profiles_always", "any general gpu gpu.amd guests latency prod"},
         //      sec_default is the security tier a plain build ships; a tier
         //      named on the line (sec_reference, sec_hardened, sec_locked)
         //      takes its place with the rest of this list.

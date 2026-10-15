@@ -12,11 +12,12 @@ CONFIG_NTSYNC=y
 #
 # Rendering Vendors
 #
+# AMD is in every build (profile gpu.amd, which the default set and the
+# always-on set both name): nothing here switches it off. NVIDIA is still off
+# until its firmware is pinned.
 CONFIG_DRM_NOUVEAU=n
 CONFIG_NOUVEAU_DEBUG=0
 CONFIG_NOUVEAU_DEBUG_DEFAULT=0
-
-CONFIG_DRM_AMDGPU=n
 
 #
 # NVME Support

@@ -5,10 +5,12 @@
 # firmware, and it does not fall back to an unaccelerated mode the way i915
 # does: it refuses to initialise the card if the blobs are absent, and
 # nothing then drives the panel but the firmware's framebuffer (simpledrm).
-# That framebuffer cannot switch the panel off or bring it back, so on an
-# AMD machine that profile means a sleep that leaves the backlight lit and
-# wakes to a blank screen, and an APU whose graphics are never power
-# managed. Compose this profile on an AMD machine.
+# That framebuffer cannot switch the panel off or bring it back, so without
+# amdgpu a sleep leaves the backlight lit and wakes to a blank screen, and an
+# APU's graphics are never power managed. The build composes this profile
+# always (build.c profiles_always), so every image has amdgpu and the
+# firmware for the Steam Deck's Van Gogh APU, and an AMD card of another
+# generation needs its own firmware lines added here.
 #
 # No blob is in git. The lines below name each file with its SHA-256 at the
 # linux-firmware commit kernel/firmware/apply pins, and the build fetches
