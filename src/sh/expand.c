@@ -6798,7 +6798,7 @@ static fn expand_substring(expand_reference reference, string_address expression
                 {
                         expand_where();
                         string_format(writer_stderr_once, "%s: bad substitution\n", name);
-                        expand_fatal_status((shell_bash_compat || (parameter_mode & EXPAND_PARAMETER_INDIRECT)) ? 1 : 2);
+                        expand_fatal_status((parameter_mode & EXPAND_PARAMETER_INDIRECT) ? 1 : 2);
                         return;
                 }
                 expand_positional_slice(name, expression, quoted);
