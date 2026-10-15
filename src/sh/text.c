@@ -5692,7 +5692,7 @@ static b32 text_join()
 
         if (join_slots < 2)
                 return text_done(text_operand_trouble(join_slots ? "missing operand after" : "missing operand",
-                                                      join_slots ? program_argument(program_argument_count() - 1) : null,
+                                                      join_slots ? join_slot_name[0] : null,
                                                       null));
 
         //      A -j1 or -j2 that never had its field is the field it names.
