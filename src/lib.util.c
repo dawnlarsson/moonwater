@@ -3948,7 +3948,11 @@ static fn table_json_value(writer output, byte_span value, p8 kind, bool short_e
         }
         else if (kind == TABLE_NUMBER || kind == TABLE_NULL_NUMBER)
         {
+                //      An empty number is null, as lsblk -J writes fssize for a
+                //      device with no filesystem; writing nothing left the key
+                //      with no value after it.
                 if (value.length) output(value.bytes, value.length);
+                else output("null", 4);
         }
         else writer_json_span(output, value, false, short_escapes);
 }

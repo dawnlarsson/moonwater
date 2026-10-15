@@ -39422,7 +39422,7 @@ static fn table_oracle_json_table(const table_view address_to view, positive row
                         table_cell cell = table_generated_cell(view->context, row, col, scratch);
                         p8 address_to value = cell.text.bytes;
                         positive length = cell.text.length;
-                        if ((cell.json == TABLE_NULL_STRING || cell.json == TABLE_NULL_NUMBER) && !length)
+                        if ((cell.json == TABLE_NULL_STRING || cell.json == TABLE_NULL_NUMBER || cell.json == TABLE_NUMBER) && !length)
                                 table_oracle_put("null", 4);
                         else if (cell.json == TABLE_BOOLEAN)
                         {
@@ -39636,6 +39636,20 @@ static fn table_generated_checks(void)
         }
 }
 
+/*
+        A number cell with no text. Writing nothing left the key with no value
+        after it, which is not JSON; lsblk -J writes null for the same cell.
+*/
+static fn table_empty_number_checks(void)
+{
+        byte_span empty = {(p8 address_to)"", 0};
+
+        table_reset();
+        table_json_value(table_capture, empty, TABLE_NUMBER, false);
+        check("an empty number cell is written as null",
+              !table_overflow && table_used == 4 && !memory_compare(table_output, "null", 4));
+}
+
 b32 main(void)
 {
         table_layout_checks();
@@ -39649,6 +39663,7 @@ b32 main(void)
         table_limit_checks();
         table_printable_checks();
         table_ipcs_checks();
+        table_empty_number_checks();
 #ifdef TABLE_BENCHMARK
         if (!failures)
         {
