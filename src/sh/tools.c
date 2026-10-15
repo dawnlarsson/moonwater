@@ -8681,11 +8681,10 @@ static b32 tools_mcookie()
         tools_uuid cookie;
         tools_uuid_random_bytes(address_of random, address_of cookie);
         p8 address_to encoded = text_reserve(sizeof(cookie.bytes) * 2 + 1);
-        if (encoded)
-        {
-                memory_into_hex(encoded, cookie.bytes, sizeof(cookie.bytes));
-                encoded[sizeof(cookie.bytes) * 2] = '\n';
-        }
+        if (!encoded)
+                return text_done(string_diagnostic(&text_diagnostic, 1, null, "out of memory"));
+        memory_into_hex(encoded, cookie.bytes, sizeof(cookie.bytes));
+        encoded[sizeof(cookie.bytes) * 2] = '\n';
         return text_done(0);
 }
 
