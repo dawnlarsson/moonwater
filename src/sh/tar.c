@@ -6220,6 +6220,22 @@ static bipolar tar_scan_end(bipolar handle)
                         continue;
                 }
 
+                /* A GNU sparse member's extension blocks sit between its
+                   header and its data, and its size does not count them. */
+                if (type == 'S' && block[482])
+                {
+                        p8 extra[TAR_BLOCK];
+                        bool more = true;
+
+                        while (more)
+                        {
+                                if (system_read_retry((positive)handle, extra, TAR_BLOCK) != TAR_BLOCK)
+                                        return -1;
+                                more = extra[504] != 0;
+                                offset += TAR_BLOCK;
+                        }
+                }
+
                 if (tar_updating)
                 {
                         p8 name[TAR_PATH];
