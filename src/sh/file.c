@@ -19489,7 +19489,8 @@ static b32 file_stat()
                         log("\n", 1);
         }
 
-        log_flush();
+        if (!file_output_told((string_address) "stat"))
+                return 1;
 
         return stat_status;
 }
@@ -22030,7 +22031,8 @@ static b32 file_df()
                 df_row((string_address) "total", (string_address) "-", sum_where, null,
                        address_of sum, true);
 
-        log_flush();
+        if (!file_output_told((string_address) "df"))
+                return 1;
 
         return df_failed ? 1 : 0;
 }
@@ -24854,7 +24856,8 @@ static b32 file_namei()
                 string_format(log, "f: %w\n", writer_terminal_name, namei_operand);
                 namei_show(modes, owners, vertical);
         }
-        log_flush();
+        if (!file_output_told((string_address) "namei"))
+                return 1;
         return status;
 }
 
@@ -25327,7 +25330,8 @@ static b32 file_whereis()
                 }
         }
 
-        log_flush();
+        if (!file_output_told((string_address) "whereis"))
+                return 1;
 
         //      Said once, at the end, after every name has been answered.
         refuse_if(missing_f, 1, "whereis: option -f is missing\n");
@@ -25480,7 +25484,8 @@ static b32 file_readlink()
                         file_written(answer, zero);
         }
 
-        log_flush();
+        if (!file_output_told((string_address) "readlink"))
+                return 1;
 
         return status;
 }
@@ -25548,7 +25553,8 @@ static b32 file_basename()
         else
                 basename_one(program_argument((b32)index), suffix, zero);
 
-        log_flush();
+        if (!file_output_told((string_address) "basename"))
+                return 1;
 
         return 0;
 }
@@ -25597,7 +25603,8 @@ static b32 file_dirname()
                 dirname_one(program_argument((b32)first++),
                             (taking.flags & FILE_FLAG('z')) != 0);
 
-        log_flush();
+        if (!file_output_told((string_address) "dirname"))
+                return 1;
 
         return 0;
 }
@@ -25953,7 +25960,8 @@ static b32 file_realpath()
                         file_written(answer, zero);
         }
 
-        log_flush();
+        if (!file_output_told((string_address) "realpath"))
+                return 1;
 
         return status;
 }
@@ -26179,7 +26187,8 @@ static b32 file_pathchk()
                 if (!pathchk_one(program_argument((b32)first++), basic, extra))
                         status = 1;
 
-        log_flush();
+        if (!file_output_told((string_address) "pathchk"))
+                return 1;
         return status;
 }
 
@@ -26295,7 +26304,8 @@ static b32 file_mkdir()
                         system_close(made);
         }
 
-        log_flush();
+        if (!file_output_told((string_address) "mkdir"))
+                return 1;
 
         return status;
 }
