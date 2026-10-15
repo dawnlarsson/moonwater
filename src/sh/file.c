@@ -47185,8 +47185,9 @@ static b32 file_hostname()
                                              "hostname: the specified hostname is invalid\n");
 
                 failed = system_call_2(syscall(sethostname), (positive)name, length);
-                refuse_if(failed == -1, 1, "hostname: you must be root to change the host name\n");
-                refuse_if(failed == -22, 1, "hostname: name too long\n");
+                refuse_if(failed == -ERROR_NOT_PERMITTED, 1, "hostname: you must be root to change the host name\n");
+                refuse_if(failed == -ERROR_INVALID, 1, "hostname: name too long\n");
+                refuse_if(failed < 0, 1, "hostname: %s\n", file_reason(failed));
                 return 0;
         }
 
