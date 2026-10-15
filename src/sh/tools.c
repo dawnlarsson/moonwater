@@ -1195,10 +1195,38 @@ static bool logger_option_seen(p8 letter, string_address value)
                             "logger: --sd-id was not specified for --sd-param %s\n",
                             value);
                 }
-                if ((!logger_seen_sd_open &&
-                     (!logger_sd_put(logger_seen_sd.used ? "][" : "[") ||
-                      !logger_sd_put(logger_seen_sd_id))) ||
-                    !logger_sd_put(" ") || !logger_sd_put(value))
+                string_address equal = string_first_of(value, '=');
+                if (!equal)
+                {
+                        text_flush();
+                        return string_report(writer_stderr, false,
+                            "logger: --sd-param %s is not name=value\n", value);
+                }
+                //      A parameter is spelled name="value", and the value
+                //      escapes its quote, its backslash and its closing bracket.
+                p8 piece[3] = {0, 0, end};
+                bool failed = (!logger_seen_sd_open &&
+                               (!logger_sd_put(logger_seen_sd.used ? "][" : "[") ||
+                                !logger_sd_put(logger_seen_sd_id))) ||
+                              !logger_sd_put(" ");
+
+                for (string_address at = value; !failed && at < equal; at++)
+                {
+                        piece[0] = string_get(at);
+                        failed = !logger_sd_put((string_address)piece);
+                }
+                failed = failed || !logger_sd_put("=\"");
+                for (string_address at = equal + 1; !failed && string_get(at); at++)
+                {
+                        p8 byte = string_get(at);
+
+                        piece[0] = byte;
+                        failed = ((byte == '"' || byte == '\\' || byte == ']') &&
+                                  !logger_sd_put("\\")) ||
+                                 !logger_sd_put((string_address)piece);
+                }
+                failed = failed || !logger_sd_put("\"");
+                if (failed)
                 {
                         text_flush();
                         return string_report(writer_stderr, false,
