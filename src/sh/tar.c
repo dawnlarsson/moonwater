@@ -4825,25 +4825,6 @@ static fn tar_read_members(tar_members address_to run)
                 if (!tar_field_value(block + 116, 8, address_of group))
                         group = 0;
 
-                tar_sparse_clear();
-                if (type == 'S' && !tar_sparse_load(handle, block))
-                {
-                        tar_refuse("invalid sparse archive");
-                        break;
-                }
-                if (!tar_sparse_active && tar_psp_kind &&
-                    (type == '0' || !type) &&
-                    !tar_pax_sparse_take(handle, address_of size))
-                {
-                        tar_refuse("invalid sparse archive");
-                        break;
-                }
-                if (tar_sparse_active && tar_sparse_payload() != size)
-                {
-                        tar_refuse("invalid sparse archive");
-                        break;
-                }
-
                 /*      A record whose name we could not hold stops the
                         archive, the way a pax header we could not read
                         already does.  Carrying on would extract the member
@@ -4896,6 +4877,27 @@ static fn tar_read_members(tar_members address_to run)
                 if (!tar_size_fits(size))
                 {
                         tar_refuse("member size is too large");
+                        break;
+                }
+
+                /* The pax size is the stored size, map included, so the map
+                   is taken out of it after the size is known. */
+                tar_sparse_clear();
+                if (type == 'S' && !tar_sparse_load(handle, block))
+                {
+                        tar_refuse("invalid sparse archive");
+                        break;
+                }
+                if (!tar_sparse_active && tar_psp_kind &&
+                    (type == '0' || !type) &&
+                    !tar_pax_sparse_take(handle, address_of size))
+                {
+                        tar_refuse("invalid sparse archive");
+                        break;
+                }
+                if (tar_sparse_active && tar_sparse_payload() != size)
+                {
+                        tar_refuse("invalid sparse archive");
                         break;
                 }
 
