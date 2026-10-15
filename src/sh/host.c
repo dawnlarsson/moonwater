@@ -2795,7 +2795,11 @@ static bool host_data_fits(p64 bytes, string_address name)
         }
 
         if (!storage_ext4_layout(address_of plan, bytes))
-                return true;
+        {
+                host_say(log_error, host_label "the data partition on %s has no ext4 "
+                                               "layout; nothing written\n", name);
+                return false;
+        }
 
         if (size.blocks + size.blocks / 32 + 64 > storage_ext4_free_blocks(address_of plan) ||
             size.inodes + size.inodes / 32 + 16 > storage_ext4_free_inodes(address_of plan))
