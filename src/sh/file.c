@@ -18643,26 +18643,56 @@ static bool stat_follow;
 static bool stat_file_system;
 static b32 stat_status;
 
-static string_address statfs_type_name(b64 type)
+/* The name stat -f -c %T gives a filesystem, by its magic number. Every name
+   here is one the reference printed for that magic on a mounted filesystem
+   (ext2/ext3 for ext4 as well, msdos for FAT); xfs, btrfs and overlayfs were
+   here before and are the reference's spelling as well. A magic not listed
+   is spelled as the reference spells it, UNKNOWN with the magic in hex. */
+static string_address statfs_type_name(b64 type, p8 address_to room)
 {
-        if ((p64)type == 0xef53)
-                return (string_address) "ext2/ext3";
-        if ((p64)type == 0x01021994)
-                return (string_address) "tmpfs";
-        if ((p64)type == 0x794c7630)
-                return (string_address) "overlayfs";
-        if ((p64)type == 0x9fa0)
-                return (string_address) "proc";
-        if ((p64)type == 0x62656572)
-                return (string_address) "sysfs";
-        if ((p64)type == 0x63677270)
-                return (string_address) "cgroup2fs";
-        if ((p64)type == 0x58465342)
-                return (string_address) "xfs";
-        if ((p64)type == 0x9123683e)
-                return (string_address) "btrfs";
+        static const struct
+        {
+                p64 magic;
+                string_address name;
+        } names[] = {
+            {0x9fa0, "proc"},          {0x62656572, "sysfs"},
+            {0x01021994, "tmpfs"},     {0x1cd1, "devpts"},
+            {0x19800202, "mqueue"},    {0x42494e4d, "binfmt_misc"},
+            {0x4d44, "msdos"},         {0x6165676c, "pstorefs"},
+            {0x62656570, "configfs"},  {0x63677270, "cgroup2fs"},
+            {0x64626720, "debugfs"},   {0x65735543, "fusectl"},
+            {0x65735546, "fuse"},      {0x73636673, "securityfs"},
+            {0x74726163, "tracefs"},   {0x958458f6, "hugetlbfs"},
+            {0xcafe4a11, "bpf_fs"},    {0xde5e81e4, "efivarfs"},
+            {0xef53, "ext2/ext3"},     {0x6e736673, "nsfs"},
+            {0x794c7630, "overlayfs"}, {0x58465342, "xfs"},
+            {0x9123683e, "btrfs"},
+        };
 
-        return (string_address) "UNKNOWN";
+        for (positive i = 0; i < array_count(names); i++)
+                if ((p64)type == names[i].magic)
+                        return names[i].name;
+
+        static const char digits[] = "0123456789abcdef";
+        p8 spelled[16];
+        positive count = 0;
+        b64 rest = type;
+        p8 address_to out = room;
+
+        do
+        {
+                spelled[count++] = (p8)digits[rest & 15];
+                rest >>= 4;
+        } while (rest);
+
+        string_address head = "UNKNOWN (0x";
+        while (*head)
+                *out++ = *head++;
+        while (count)
+                *out++ = spelled[--count];
+        *out++ = ')';
+        *out = end;
+        return (string_address)room;
 }
 
 static p64 statfs_identity(file_mount_facts address_to facts)
@@ -19110,7 +19140,12 @@ static bool statfs_directive(string_address prefix, positive length, p8 letter,
                 stat_out_unsigned(prefix, length, 'x', (p64)facts->type);
                 break;
         case 'T':
-                stat_out_string(prefix, length, statfs_type_name(facts->type));
+                {
+                        p8 spelled[40];
+
+                        stat_out_string(prefix, length,
+                                        statfs_type_name(facts->type, spelled));
+                }
                 break;
         case 'b':
                 stat_out_number(address_of spec, 'd', facts->blocks, false, false);
