@@ -87,6 +87,10 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_CLOSE_IN 5
 #define COMPOSITOR_RADIUS_MOST 64
 
+#include "ui/taskbar.h"
+
+static struct taskbar_view compositor_taskbar_view(void);
+
 struct compositor_target
 {
         unsigned int *pixels;
@@ -118,7 +122,7 @@ struct compositor_frame
         unsigned int edge;   // the line's colour
         int square;          // corners kept square though there is a radius: 1 top left, 2 top right, 4, 8 below
         int slot;            // the compositor's panel: the tab this frame is (-2 tray, 0 up windows)
-        int top;             // the panel is along the top of the output, its tabs hanging down
+        unsigned int position; // the panel: where its band sits (TASKBAR_BOTTOM, TOP, LEFT or RIGHT)
         const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
         int close;           // a window with a close button over its top right
         unsigned int close_mean; // the mean colour under the close button, made once a present (compositor_close_mean)
@@ -176,21 +180,6 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
                             (unsigned long)(x2 - x1) * 4);
 }
 
-/*
-        The panel: tabs in a row in the middle of the band, with nothing
-        between them -- a tab for each window and the tray -- each the head
-        of a note whose rest is off the edge of the output: its title and its
-        round corners show, three pixels in from the band's inner side, and
-        it runs to the outer one. A window's tab is as wide as its title
-        needs at a fixed width a character with an even margin all round,
-        and never wider than the row has room for each nor eight bands, and
-        the tray is as wide as the time's five characters, worked out from
-        the title alone, without a font. The same slots are drawn and pressed
-        on, so a window's tab is where it looks to be. Slot -2 is the tray
-        and 0 up the windows; a window whose tab would be narrower than a
-        pixel has none.
-*/
-#define COMPOSITOR_HIT_NONE (-3)
 // A window's tab: lit while it has the keys, dim while it is put away.
 #define COMPOSITOR_TAB_LIT 1u
 #define COMPOSITOR_TAB_AWAY 2u
@@ -206,98 +195,12 @@ static unsigned char compositor_title_length(const char *title, unsigned int mos
 }
 
 /*
-        A tab's width for a run of characters: the run at the width a
-        character of the panel's text has (its size is 11/20 of the tab's
-        height and a character a little over half of that), and either side
-        of it as much room as there is above and below a capital, so the
-        title sits in the tab with the same margin all round. Never narrower
-        than the tab is high.
+        One tab, its rectangle x, y, width, height: drawn with the taskbar's ink.
 */
-static int compositor_tab_text(const struct compositor_frame *frame, int characters)
-{
-        int high = frame->height - 3 * frame->scale;
-        int wanted = (characters * high * 308 + high * 604) / 1000;
-
-        return wanted < high ? high : wanted;
-}
-
-// A window's tab's width: its title's, up to the most it may be.
-static int compositor_tab_width(const struct compositor_frame *frame, int which, int most)
-{
-        int wanted;
-
-        if (!frame->lengths)
-                return most;
-        wanted = compositor_tab_text(frame, frame->lengths[which]);
-        return wanted < most ? wanted : most;
-}
-
-static int compositor_panel_slot(const struct compositor_frame *frame, int which, int *x, int *y,
-                                 int *width, int *height)
-{
-        int gap = 4 * frame->scale, inset = 3 * frame->scale, unit = frame->height;
-        int tray = compositor_tab_text(frame, 5), count = (int)frame->mark_count;
-        int room = frame->width - tray - (count + 2) * gap;
-        int most = count && room > 0 ? room / count : 0, windows = 0, start;
-
-        most = most > 8 * unit ? 8 * unit : most;
-        for (int at = 0; most && at < count; at++)
-                windows += compositor_tab_width(frame, at, most) + gap;
-        start = frame->x + (frame->width - (windows + tray)) / 2;
-        *y = frame->top ? frame->y : frame->y + inset;
-        *height = unit - inset;
-
-        if (which == -2)
-        {
-                *x = start + windows;
-                *width = tray;
-        }
-        else
-        {
-                if (which < 0 || which >= count || most < 1)
-                        return 0;
-
-                *x = start;
-                for (int at = 0; at < which; at++)
-                        *x += compositor_tab_width(frame, at, most) + gap;
-                *width = compositor_tab_width(frame, which, most);
-        }
-
-        // A band too narrow for a tab has none: nothing is drawn outside the band.
-        return *height > 0 && *x >= frame->x && *x + *width <= frame->x + frame->width;
-}
-
-// What is at a point of the band: a slot's number, or COMPOSITOR_HIT_NONE.
-static int compositor_panel_hit(const struct compositor_frame *frame, int px, int py)
-{
-        for (int which = -2; which < (int)frame->mark_count; which++)
-        {
-                int x, y, width, height;
-
-                if (compositor_panel_slot(frame, which, &x, &y, &width, &height) &&
-                    px >= x && px < x + width && py >= y && py < y + height)
-                        return which;
-        }
-
-        return COMPOSITOR_HIT_NONE;
-}
-
-/*
-        One tab, its rectangle x, y, width, height: the window's lit while
-        it has the keys and dim while it is put away, the tray for the time.
-*/
-static unsigned int compositor_tab_ink(int slot, unsigned int mark)
-{
-        return slot < 0                         ? COMPOSITOR_INK_BUTTON
-               : mark & COMPOSITOR_TAB_AWAY  ? COMPOSITOR_INK_PANEL
-               : mark & COMPOSITOR_TAB_LIT    ? COMPOSITOR_INK_BUTTON_LIT
-                                                : COMPOSITOR_INK_BUTTON;
-}
-
 static void compositor_panel_tab(const struct compositor_target *t, int slot, unsigned int mark, int x, int y,
                                  int width, int height)
 {
-        compositor_fill(t, x, y, width, height, compositor_tab_ink(slot, mark));
+        compositor_fill(t, x, y, width, height, taskbar_tab_ink(slot, mark));
 }
 
 /*
@@ -576,7 +479,7 @@ static void compositor_draw(const struct compositor_target *t,
         compositor_contents(&part, frame);
 
         const unsigned char *outer = compositor_corner_mask(r), *inner = ri ? compositor_corner_mask(ri) : 0;
-        unsigned int tab = frame->builtin ? compositor_tab_ink(frame->slot, frame->slot >= 0 &&
+        unsigned int tab = frame->builtin ? taskbar_tab_ink(frame->slot, frame->slot >= 0 &&
                                                                                     frame->slot < (int)frame->mark_count
                                                                                 ? frame->marks[frame->slot]
                                                                                 : 0)
@@ -633,19 +536,20 @@ static void compositor_draw(const struct compositor_target *t,
         The tabs of a panel as frames of their own, each its tab's rectangle
         and nothing of the band between them: shapes the scene draws when
         there is no font, and otherwise each the part of the band's pixels
-        its tab is. Round on the side towards the middle of the output,
-        square on the side that is off its edge. Answers how many.
+        its tab is. Round on the side towards the middle of the output and
+        square on the side that is off its edge (taskbar_square). Answers how many.
 */
 static unsigned int compositor_panel_tabs(const struct compositor_frame *band, struct compositor_frame *tabs)
 {
+        struct taskbar_view view = compositor_taskbar_view();
         unsigned int count = 0;
-        int x, y, width, height;
 
         for (int slot = 0; slot <= (int)band->mark_count; slot++)
         {
                 int which = slot == (int)band->mark_count ? -2 : slot;
+                int x, y, width, height;
 
-                if (!compositor_panel_slot(band, which, &x, &y, &width, &height))
+                if (!taskbar_slot(&view, which, &x, &y, &width, &height))
                         continue;
                 tabs[count] = *band;
                 tabs[count].x = x;
@@ -655,23 +559,12 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
                 tabs[count].slot = which;
                 tabs[count].radius = COMPOSITOR_RADIUS * band->scale;
                 tabs[count].line = 0;
-                tabs[count].square = band->top ? 1 | 2 : 4 | 8;
+                tabs[count].square = taskbar_square(band->position);
                 if (!band->builtin)
                         tabs[count].pixels = band->pixels + (unsigned long)(y - band->y) * band->pitch + (unsigned long)(x - band->x);
                 count++;
         }
         return count;
-}
-
-// The panel's band: along the bottom of the output or the top, as high as a tab and its inset. Its tabs lie
-// over what fills the output, and take none of it.
-static void compositor_band(int width, int height, int scale, int bottom, int *x, int *y,
-                            int *band_width, int *band_height)
-{
-        *x = 0;
-        *band_width = width;
-        *band_height = COMPOSITOR_PANEL * scale;
-        *y = bottom ? height - *band_height : 0;
 }
 
 // What a window fills: nothing, the output, or half of it.
@@ -1845,7 +1738,7 @@ static struct
         unsigned long devices; // the evdev numbers that are open
         int device_number[COMPOSITOR_INPUTS];
 
-        int scale, bottom;   // device pixels a drawn one is; the panel's edge
+        int scale;           // device pixels a drawn one is
 
         /*
                 The windows: the table every program maps (window.c), each row's door and wake, and the
@@ -1911,9 +1804,9 @@ static struct
         unsigned char listed[WINDOWS], marks[WINDOWS], lengths[WINDOWS];
         unsigned int listing;
         unsigned int *band;  // the band's pixels, or none: no font, and the tabs are shapes
+        unsigned long band_bytes; // how much memory the band has
         unsigned int *glass; // what is under the tabs, blurred: as wide as the band and its margins, as high
         unsigned long glass_bytes;
-        int band_stale;
 
         /*
                 The windows that are glass (compositor_glass_pass): what is under each, blurred and not yet tinted,
@@ -1933,7 +1826,6 @@ static struct
         unsigned long blur_bytes, frost_bytes, rise_bytes;
         positive blurred, recomposed; // pixels blurred again and composed again, all frames
         int damage_by; // what is being damaged: 0 the scene, a row and one its own picture, COMPOSITOR_OVER what lies over all
-        unsigned int minute;
         font_face face;
         font_engine *engine;
 
@@ -2348,87 +2240,65 @@ static unsigned int compositor_windows(void)
         return count;
 }
 
-// The panel's band with its tabs: the band's own pixels when there is a font to write the titles with,
-// and shapes the scene draws when there is not.
+// What the taskbar is given of the compositor, filled for each call: the output, the band's buffers and the windows'
+// tabs as compositor_windows lists them (the caller lists them first when they may have changed).
+static struct taskbar_view compositor_taskbar_view(void)
+{
+        struct taskbar_view view;
+
+        memory_zero(&view, sizeof(view));
+        view.width = compositor.width;
+        view.height = compositor.height;
+        view.scale = compositor.scale;
+        view.position = taskbar_position();
+        view.pixels = compositor.band;
+        view.band_bytes = compositor.band_bytes;
+        view.glass = compositor.glass;
+        view.glass_bytes = compositor.glass_bytes;
+        view.face = &compositor.face;
+        view.engine = compositor.engine;
+        view.count = compositor.listing;
+        view.marks = compositor.marks;
+        view.lengths = compositor.lengths;
+        for (unsigned int at = 0; at < compositor.listing; at++)
+                view.titles[at] = compositor.title[compositor.listed[at]];
+        return view;
+}
+
+static struct taskbar_view compositor_band_view(void)
+{
+        compositor_windows();
+        return compositor_taskbar_view();
+}
+
+// The panel's band as a frame: the band's own pixels when there is a font to write the titles with, and shapes the
+// scene draws when there is not.
 static void compositor_band_frame(struct compositor_frame *frame)
 {
+        struct taskbar_view view = compositor_band_view();
         int x, y, width, height;
 
-        compositor_band(compositor.width, compositor.height, compositor.scale, compositor.bottom, &x, &y, &width,
-                        &height);
-        compositor_windows();
+        taskbar_band(&view, &x, &y, &width, &height);
         *frame = (struct compositor_frame){x, y, width, height, compositor.scale, compositor.band,
                                            (unsigned long)width, !compositor.band, compositor.marks,
                                            compositor.listing};
-        frame->top = !compositor.bottom;
+        frame->position = view.position;
         frame->lengths = compositor.lengths;
 }
 
-// What the tabs show changed: the windows, which has the keys, which are put away, a title, the minute.
+// What the tabs show changed: the windows, which has the keys, which are put away, a title, the minute, the battery.
 static void compositor_tabs_changed(void)
 {
+        struct taskbar_view view = compositor_taskbar_view();
         int x, y, width, height;
 
-        compositor.band_stale = 1;
-        compositor_band(compositor.width, compositor.height, compositor.scale, compositor.bottom, &x, &y, &width,
-                        &height);
+        taskbar_changed();
+        taskbar_band(&view, &x, &y, &width, &height);
         compositor.damage_by = COMPOSITOR_OVER;
         compositor_damage(x, y, width, height);
         compositor.damage_by = 0;
 }
 
-// One line of text in the middle of a tab, in the tab's own colour for ground, cut off at its edge.
-static void compositor_band_text(int pitch, int x, int y, int width, int height, const char *text,
-                                 unsigned int ink, unsigned int ground)
-{
-        const font_face address_to faces[1] = {&compositor.face};
-        p32 em = (p32)(height * 11 / 20) << 6;
-        font_metrics grid = font_metrics_at(&compositor.face, em);
-        font_target here = {compositor.band + (long)y * pitch + x, (positive)pitch, width, height};
-        unsigned int scratch[1] = {0};
-        font_target nowhere = {scratch, 1, 1, 1};
-        positive length = string_length((string_address)text);
-        int pad;
-
-        // How wide the run is, before it is put anywhere.
-        pad = (width - (int)(font_draw(compositor.engine, faces, 1, (const p8 address_to)text, length, em, 0,
-                                       &nowhere, 0, 0, ink, ground) >> 16)) / 2;
-        font_draw(compositor.engine, faces, 1, (const p8 address_to)text, length, em, 0, &here,
-                  (b32)(pad > 0 ? pad : 0) << 16, (height - grid.cell_height) / 2 + grid.baseline, ink, ground);
-}
-
-static unsigned int compositor_minute(void)
-{
-        timespec now = {0, 0};
-
-        clock_gettime(CLOCK_REALTIME, address_of now);
-        return (unsigned int)(now.tv_sec / 60);
-}
-
-/*
-        The tabs are frosted glass. Under them is composed as the scene has
-        it -- from the first tab to the last and the blur's reach each side,
-        from the reach above the band to its far edge, the output's last row
-        and column repeated past it -- and blurred by memory_average_ahead,
-        a pass of the rounded mean of each byte and the byte ahead at a
-        pixel, two, four and so to eight pixels a step across and four rows
-        down (so many more at a larger scale): a box of sixteen by eight,
-        which each tab reads from back where it reaches, eight pixels left
-        and four up. Every pass is one call over the whole of it, nothing is
-        read that a pass has written, and the work is the hardware's
-        averaging instruction a register at a time. What it costs, besides
-        that, is a little light: each pass rounds up.
-
-        A tab is then its glass made more vivid (each colour half as far
-        again from its grey) and taken further to the side of lightness it is
-        on -- a dark ground darker, a light one lighter -- so the row of tabs
-        is its ground's own and still stands off it, all of a piece: the tab
-        of the window with the keys goes not quite as far, and is told by its
-        title, the ink that stands out on what the tab came to
-        (window_contrast) at full strength where the others' are two thirds
-        of the way to it and a tab put away's under half. Over the desktop's
-        grey that is a tab of 090909, and 0e0e0e with the keys.
-*/
 #define COMPOSITOR_GLASS_ACROSS 8 // half the blur's width, in logical pixels
 #define COMPOSITOR_GLASS_DOWN 4   // and half its height
 
@@ -2742,17 +2612,32 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
         return 1;
 }
 
-// The glass: the scene under the span x0 to x1 of the band composed into it and blurred. Answers its width.
-static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x0, int x1,
-                                 const struct compositor_frame *band)
+// The glass over a rectangle of the output: the scene under it composed and blurred into compositor.glass, with the
+// blur's reach round it. Answers the row stride, or 0 when there is no memory for it.
+static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x, int y, int width,
+                                 int height)
 {
         int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
-        int gw = x1 - x0 + 2 * across, gh = band->height + 2 * down;
+        int gw = width + 2 * across, gh = height + 2 * down;
 
         if ((unsigned long)gw * (unsigned long)gh * 4 > compositor.glass_bytes ||
-            !compositor_blur(compositor.glass, windows, count, x0 - across, band->y - down, gw, gh, across, down))
+            !compositor_blur(compositor.glass, windows, count, x - across, y - down, gw, gh, across, down))
                 return 0;
         return gw;
+}
+
+// The windows the taskbar's glass is made from, for its callback.
+struct compositor_glass_scene
+{
+        const struct compositor_frame *windows;
+        unsigned int count;
+};
+
+static int compositor_glass_scene_make(void *context, int x, int y, int width, int height)
+{
+        const struct compositor_glass_scene *scene = (const struct compositor_glass_scene *)context;
+
+        return compositor_glass_make(scene->windows, scene->count, x, y, width, height);
 }
 
 // A colour half as far again from its grey, kept in a byte.
@@ -2770,108 +2655,6 @@ static unsigned int compositor_vivid(unsigned int pixel)
         return (unsigned int)(r << 16 | g << 8 | b);
 }
 
-// A tab's row is tinted a chunk at a time into this, and grained over no picture at all (memory_glass_over_u32 with
-// the clear picture: alpha 0 gives the ground back, grained). The grain is the same per pixel as compositor_grain_row
-// gives it at the pixel's x: the grain repeats every four pixels, and the call's pattern every sixteen.
-#define COMPOSITOR_TAB_CHUNK 256
-static unsigned int compositor_tab_tint[COMPOSITOR_TAB_CHUNK];
-static const unsigned int compositor_tab_clear[COMPOSITOR_TAB_CHUNK];
-
-/*
-        One tab of glass, its rectangle x, y, width, height in the band, from
-        the glass gw wide whose column 0 is the band's x0: made vivid and
-        tinted toward its own side of lightness. Answers what it came to in its middle,
-        which its title stands out from.
-*/
-static unsigned int compositor_glass_tab(int pitch, int gw, int x0, int x, int y, int width, int height, int slot,
-                                         unsigned int mark)
-{
-        unsigned int middle = compositor_vivid(compositor.glass[(long)(y + height / 2) * gw + x - x0 + width / 2]);
-        unsigned int target = window_light(middle) ? 0xffffffu : 0x000000u;
-        unsigned int amount = slot >= 0 && (mark & COMPOSITOR_TAB_LIT) ? 140 : 179;
-
-        for (int row = y; row < y + height; row++)
-        {
-                const unsigned int *from = compositor.glass + (long)row * gw + (x - x0);
-                unsigned int *into = compositor.band + (long)row * pitch + x;
-
-                for (int at = 0; at < width; at += COMPOSITOR_TAB_CHUNK)
-                {
-                        int count = width - at < COMPOSITOR_TAB_CHUNK ? width - at : COMPOSITOR_TAB_CHUNK;
-
-                        for (int column = 0; column < count; column++)
-                                compositor_tab_tint[column] =
-                                    window_mix(compositor_vivid(from[at + column]), target, amount);
-                        memory_glass_over_u32(into + at, compositor_tab_clear, compositor_tab_tint, (positive)count,
-                                              compositor_grain_row(target != 0, x + at, row));
-                }
-        }
-        return window_mix(middle, target, amount);
-}
-
-/*
-        The band drawn over what is under it: the windows composed into it as
-        the scene has them, blurred, each tab made glass, each window's title
-        on its own and the time in the tray. Only the tabs redo names are made
-        again, and only their span is damaged.
-*/
-/*
-        The span of the band's glass: from the first tab (or the tray, with no
-        window tabs) to the end of the tray. Answers 0 when there is no tray.
-*/
-static int compositor_band_span(const struct compositor_frame *band, int *first, int *last)
-{
-        int x, y, width, height;
-
-        if (!compositor_panel_slot(band, -2, &x, &y, &width, &height))
-                return 0;
-        *last = x + width;
-        *first = band->mark_count && compositor_panel_slot(band, 0, &x, &y, &width, &height) ? x : *last - width;
-        return 1;
-}
-
-// A tabs' redo mask: bit at for the tab at, and the tray's clock on its own bit past the tabs.
-#define COMPOSITOR_TABS_ALL (~0ul)
-
-static unsigned long compositor_tab_bit(int which)
-{
-        return which < 0 ? 1ul << WINDOWS : 1ul << which;
-}
-
-/*
-        The tabs the damage meets, with the blur's reach round each: a change
-        in the scene under a tab, or under its reach, is one to its glass.
-*/
-static unsigned long compositor_band_meets(const struct compositor_frame *band)
-{
-        unsigned long redo = 0;
-
-        for (int which = -2; which < (int)band->mark_count; which++)
-        {
-                int x, y, width, height, reach[4];
-
-                if (!compositor_panel_slot(band, which, &x, &y, &width, &height))
-                        continue;
-                reach[0] = x - COMPOSITOR_GLASS_REACH;
-                reach[1] = band->y - COMPOSITOR_GLASS_REACH;
-                reach[2] = x + width + COMPOSITOR_GLASS_REACH;
-                reach[3] = band->y + band->height + COMPOSITOR_GLASS_REACH;
-                for (unsigned int at = 0; at < compositor.damages; at++)
-                {
-                        int meet[4];
-
-                        memory_copy(meet, compositor.damage[at], sizeof(meet));
-                        compositor_meet(meet, reach);
-                        if (meet[2] > meet[0] && meet[3] > meet[1])
-                        {
-                                redo |= compositor_tab_bit(which);
-                                break;
-                        }
-                }
-        }
-        return redo;
-}
-
 // The output's band over x, width, from y down its height: what the tabs redone wrote, for the composition to show.
 static void compositor_band_damage(int x, int y, int width, int height)
 {
@@ -2880,70 +2663,18 @@ static void compositor_band_damage(int x, int y, int width, int height)
         compositor.damage_by = 0;
 }
 
-// Redoes the tabs redo names: the glass is made over their span and the blur's reach, and the band is damaged over that span.
+#define COMPOSITOR_TABS_ALL (~0ul)
+
+// Redoes the slots redo names on the taskbar: the glass is made over their span and the blur's reach, and the band is
+// damaged over that span.
 static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count, unsigned long redo)
 {
-        struct compositor_frame band;
-        int x, y, width, height, first = 0, last = 0, top, glass_width = 0, glass_left = 0;
-        int any = 0;
-        timespec now = {0, 0};
-        time_t seconds;
-        tm broken;
+        struct taskbar_view view = compositor_band_view();
+        struct compositor_glass_scene scene = {windows, count};
+        int rect[4];
 
-        compositor.band_stale = 0;
-        if (!compositor.band)
-                return;
-
-        compositor_band_frame(&band);
-        for (int which = -2; which < (int)band.mark_count; which++)
-                if ((redo & compositor_tab_bit(which)) && compositor_panel_slot(&band, which, &x, &y, &width, &height))
-                {
-                        if (!any || x < first)
-                                first = x;
-                        if (!any || x + width > last)
-                                last = x + width;
-                        any = 1;
-                }
-        if (!any)
-                return;
-        glass_width = compositor_glass_make(windows, count, first, last, &band);
-        glass_left = first;
-        top = band.y;
-        band.x = band.y = 0;
-        if (!glass_width)
-        {
-                compositor_band_damage(first, top, last - first, band.height);
-                return;
-        }
-
-        for (unsigned int at = 0; at < band.mark_count; at++)
-                if ((redo & compositor_tab_bit((int)at)) && compositor_panel_slot(&band, (int)at, &x, &y, &width, &height))
-                {
-                        unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height,
-                                                                   (int)at, band.marks[at]);
-                        unsigned int ink = window_contrast(ground);
-
-                        compositor_band_text(band.width, x, y, width, height, compositor.title[compositor.listed[at]],
-                                             band.marks[at] & COMPOSITOR_TAB_LIT    ? ink
-                                             : band.marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 110)
-                                                                                    : window_mix(ground, ink, 170),
-                                             ground);
-                }
-
-        compositor.minute = compositor_minute();
-        clock_gettime(CLOCK_REALTIME, address_of now);
-        seconds = now.tv_sec;
-        if ((redo & compositor_tab_bit(-2)) && compositor_panel_slot(&band, -2, &x, &y, &width, &height) &&
-            localtime_r(&seconds, &broken))
-        {
-                char clock[6] = {(char)('0' + broken.tm_hour / 10), (char)('0' + broken.tm_hour % 10), ':',
-                                 (char)('0' + broken.tm_min / 10), (char)('0' + broken.tm_min % 10), 0};
-                unsigned int ground = compositor_glass_tab(band.width, glass_width, glass_left, x, y, width, height, -2, 0);
-
-                compositor_band_text(band.width, x, y, width, height, clock, window_contrast(ground), ground);
-        }
-
-        compositor_band_damage(first, top, last - first, band.height);
+        if (taskbar_draw(&view, redo, compositor_glass_scene_make, &scene, rect))
+                compositor_band_damage(rect[0], rect[1], rect[2], rect[3]);
 }
 
 /*
@@ -4173,7 +3904,6 @@ static void compositor_present(void)
         struct compositor_frame band;
         unsigned char rows[WINDOWS];
         unsigned int count = 0, windows;
-        int band_first, band_last;
 
         if (!compositor.damages)
                 return;
@@ -4201,10 +3931,12 @@ static void compositor_present(void)
         // is made from the scene over the tabs' span and the blur's reach round it, so only a change there is one.
         compositor_band_frame(&band);
         {
-                unsigned long redo = compositor.band_stale ? COMPOSITOR_TABS_ALL : 0;
+                struct taskbar_view view = compositor_taskbar_view();
+                int span[4];
+                unsigned long redo = taskbar_stale() ? COMPOSITOR_TABS_ALL : 0;
 
-                if (!redo && compositor.band && compositor_band_span(&band, &band_first, &band_last))
-                        redo = compositor_band_meets(&band);
+                if (!redo && compositor.band && taskbar_span(&view, &span[0], &span[1], &span[2], &span[3]))
+                        redo = taskbar_meets(&view, compositor.damage, compositor.damages);
                 if (redo)
                         compositor_band_draw(frames, windows, redo);
         }
@@ -4805,6 +4537,20 @@ static void compositor_layout_read(void)
 }
 
 // The word kept in a file of /root: empty when there is none.
+// A file's text, as far as room holds it, with no newline kept: "" when the file is not there.
+static void compositor_text(const char *path, char *text, unsigned int room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        bipolar got = 0;
+
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, text, room - 1);
+                system_close(handle);
+        }
+        text[got < 0 ? 0 : got] = 0;
+}
+
 static void compositor_word(const char *path, char *word, unsigned int room)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
@@ -4943,6 +4689,34 @@ static void compositor_input_settings_set(const char *shake, const char *shake_d
         }
 }
 
+/*
+        The taskbar's settings: its position, the display it is on and its battery, as the files in /root hold them.
+        Read when the compositor starts and again when a file of them is written. A band that moves is damaged where it
+        was as well as where it is now.
+*/
+static void compositor_taskbar_settings_read(void)
+{
+        char position[16], display[16], tune[512];
+        struct taskbar_view view = compositor_taskbar_view();
+        int was[4], now[4];
+
+        compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
+        compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
+        compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
+        taskbar_band(&view, &was[0], &was[1], &was[2], &was[3]);
+        taskbar_settings_set(position, display, tune);
+        view = compositor_taskbar_view();
+        taskbar_band(&view, &now[0], &now[1], &now[2], &now[3]);
+        if (was[0] != now[0] || was[1] != now[1] || was[2] != now[2] || was[3] != now[3])
+                compositor_band_damage(was[0], was[1], was[2], was[3]);
+        compositor_band_damage(now[0], now[1], now[2], now[3]);
+        if (taskbar_display_all())
+        {
+                string_format(log, "compositor: taskbar display all is not supported yet, the taskbar is drawn on its one display\n");
+                log_flush();
+        }
+}
+
 // Read when the compositor starts and again when a file of them is written.
 static void compositor_input_settings_read(void)
 {
@@ -4953,6 +4727,7 @@ static void compositor_input_settings_read(void)
         for (unsigned int at = 0; at < 6; at++)
                 compositor_word(paths[at], words[at], sizeof(words[at]));
         compositor_input_settings_set(words[0], words[1], words[2], words[3], words[4], words[5]);
+        compositor_taskbar_settings_read();
 }
 
 /*
@@ -5094,7 +4869,7 @@ static void compositor_inputs_watch(void)
                         if (at + 16 + (long)length > got)
                                 break;
 
-                        if (compositor_setting_file(name))
+                        if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME))
                         {
                                 compositor_look_read();
                                 compositor_input_settings_read();
@@ -5283,18 +5058,17 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
 }
 
 /*
-        What is under a point: a tab, which tab is set to (COMPOSITOR_HIT_NONE
+        What is under a point: a tab, which tab is set to (TASKBAR_HIT_NONE
         when it is none), and otherwise the topmost window whose contents or
         grip, just outside its edges, hold it. Between the tabs is whatever is
         below them.
 */
 static int compositor_under(int x, int y, int *tab)
 {
-        struct compositor_frame band;
+        struct taskbar_view view = compositor_band_view();
 
-        compositor_band_frame(&band);
-        *tab = compositor_panel_hit(&band, x, y);
-        if (*tab != COMPOSITOR_HIT_NONE)
+        *tab = taskbar_hit(&view, x, y);
+        if (*tab != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
 
         for (unsigned int at = compositor.stacked; at--;)
@@ -6809,20 +6583,18 @@ static positive compositor_map_file(string_address path, positive address_to siz
 static void compositor_font(string_address path)
 {
         static p8 atlas[128 * 128];
-        positive size = 0, bytes = path ? compositor_map_file(path, address_of size) : 0;
-        int x, y, width, height;
+        positive size = 0, bytes = path && MOONWATER_UI_TASKBAR ? compositor_map_file(path, address_of size) : 0;
+        unsigned long band_bytes = 0, glass_bytes = 0;
         long engine, band, glass;
 
         if (!bytes)
                 return;
 
-        compositor_band(compositor.width, compositor.height, compositor.scale, compositor.bottom, &x, &y, &width,
-                        &height);
+        taskbar_bytes(compositor.width, compositor.height, compositor.scale, &band_bytes, &glass_bytes);
         engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
-        band = compositor_call(syscall(mmap), 0, (positive)width * (positive)height * 4, 3, 0x22, (positive)-1, 0);
-        // The glass: the band and the blur's reach on every side.
-        compositor.glass_bytes = (unsigned long)(width + 2 * COMPOSITOR_GLASS_ACROSS * compositor.scale) *
-                                 (unsigned long)(height + 2 * COMPOSITOR_GLASS_DOWN * compositor.scale) * 4;
+        band = compositor_call(syscall(mmap), 0, (positive)band_bytes, 3, 0x22, (positive)-1, 0);
+        // The glass: the band and the blur's reach on every side, for a band on any edge.
+        compositor.glass_bytes = glass_bytes;
         glass = compositor_call(syscall(mmap), 0, compositor.glass_bytes, 3, 0x22, (positive)-1, 0);
         if ((engine < 0 && engine > -4096) || (band < 0 && band > -4096) || (glass < 0 && glass > -4096) ||
             font_load(&compositor.face, (const p8 address_to)bytes, size, 0) != 0)
@@ -6834,8 +6606,9 @@ static void compositor_font(string_address path)
         compositor.engine = (font_engine address_to)engine;
         font_start(compositor.engine, atlas, 128, 128);
         compositor.band = (unsigned int *)band;
+        compositor.band_bytes = band_bytes;
         compositor.glass = (unsigned int *)glass;
-        compositor.band_stale = 1;
+        taskbar_changed();
 }
 
 /*
@@ -6862,7 +6635,6 @@ static b32 compositor_main()
         memory_zero(&compositor, sizeof(compositor));
         compositor.watch = -1;
         compositor.hold = -1;
-        compositor.bottom = 1;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
 
@@ -6871,7 +6643,7 @@ static b32 compositor_main()
                 string_address option = program_argument(at);
 
                 if (compositor_option(option, 't'))
-                        compositor.bottom = 0;
+                        taskbar_position_default(TASKBAR_TOP);
                 else if (at + 1 < program_argument_count() && compositor_option(option, 's'))
                         compositor.scale = (int)compositor_number(program_argument(++at), 0);
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'f'))
@@ -7050,7 +6822,7 @@ static b32 compositor_main()
                         compositor_cursor_move();
                 }
 
-                if (compositor.band && compositor_minute() != compositor.minute)
+                if (compositor.band && taskbar_tick())
                         compositor_tabs_changed();
 
                 // Dated when it starts: a card that holds the call for the rest

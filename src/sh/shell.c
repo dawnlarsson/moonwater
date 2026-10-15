@@ -928,6 +928,10 @@ static bool floodlight_parent_supervised;
 #if MOONWATER_UI_LAUNCHER
 #include "../canvas/ui/launcher.c"
 #endif
+#if MOONWATER_UI_TASKBAR
+#include "../canvas/ui/battery.c"
+#include "../canvas/ui/taskbar.c"
+#endif
 #endif
 #include "edit.c"
 #include "system.c"

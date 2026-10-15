@@ -60,6 +60,8 @@ moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer la
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
+moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
+moonwater taskbar display [primary|all]  the display the taskbar is drawn on: the one Canvas draws on [primary]
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater time [sync]                  the clock; sync sets it and the zone now
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]

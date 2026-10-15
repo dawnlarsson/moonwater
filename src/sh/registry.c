@@ -80,6 +80,8 @@
 #define SETTING_REPEAT_RATE_PATH "/root/keyboard.repeat.rate"
 #define SETTING_SENSITIVITY_PATH "/root/mouse.sensitivity"
 #define SETTING_ACCELERATION_PATH "/root/mouse.acceleration"
+#define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
+#define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
 
 struct settings_row
 {
@@ -175,6 +177,14 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
+    SETTING_PLAIN_ROW(null, "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
+                      .need = "how Canvas draws", .refusal = "taskbar position is bottom, top, left or right, not %s\n",
+                      .usage = "taskbar position [bottom|top|left|right]", .help = "the edge of the screen the taskbar sits on [bottom]"),
+    SETTING_PLAIN_ROW(null, "Taskbar display", SETTINGS_CHOICE, 0, ("taskbar", "display"), "display ", "primary all",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
+                      .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
+                      .usage = "taskbar display [primary|all]", .help = "the display the taskbar is drawn on: the one Canvas draws on [primary]"),
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,

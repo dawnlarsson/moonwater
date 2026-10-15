@@ -108585,6 +108585,10 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #if MOONWATER_UI_LAUNCHER
 #include "../src/canvas/ui/launcher.c"
 #endif
+#if MOONWATER_UI_TASKBAR
+#include "../src/canvas/ui/battery.c"
+#include "../src/canvas/ui/taskbar.c"
+#endif
 
 #define SHARED_counted
 #include "checks.c"
@@ -109270,6 +109274,76 @@ static int look_luma(unsigned int colour)
         return (int)((299 * (colour >> 16 & 255) + 587 * (colour >> 8 & 255) + 114 * (colour & 255)) / 1000);
 }
 
+/* The taskbar's geometry with no card and no font: where the band sits for each position, that the tray is at the far end
+   of it, that a point in the tray is the tray and a point off the band is none, and that the battery's cell sits left of
+   the clock (or above it on a side band) when a battery is shown, and that none is shown when there is none to show. */
+static void check_taskbar_geometry(void)
+{
+    static const char *const positions[4] = {"bottom", "top", "left", "right"};
+    static const int band[4][4] = {{0, 1416, 2560, 24}, {0, 0, 2560, 24}, {0, 0, 24, 1440}, {2536, 0, 24, 1440}};
+
+    for (int at = 0; at < 4; at++)
+    {
+        struct taskbar_view view;
+        int x, y, w, h, tx, ty, tw, th, bx, by, bw, bh;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.width = 2560;
+        compositor.height = 1440;
+        compositor.scale = 1;
+        taskbar_settings_set(positions[at], "primary", "battery none\n");
+        view = compositor_taskbar_view();
+        taskbar_band(&view, &x, &y, &w, &h);
+        check("taskbar: the band is on its own edge of a 2560 by 1440 output, as thick as a tab", x == band[at][0] && y == band[at][1] && w == band[at][2] && h == band[at][3]);
+        check("taskbar: the tray is inside the band; a row's tray is its right-most item, a side band's sits 4 pixels above its bottom", taskbar_slot(&view, -2, &tx, &ty, &tw, &th) &&
+              tx >= x && ty >= y && tx + tw <= x + w && ty + th <= y + h &&
+              (at < 2 ? tx + tw >= x + w / 2 : ty + th == y + h - 4));
+        check("taskbar: a point in the tray is the tray, a point off the band is none", taskbar_hit(&view, tx + tw / 2, ty + th / 2) == -2 &&
+              taskbar_hit(&view, 1280, 700) == TASKBAR_HIT_NONE);
+        check("taskbar: with the battery none, no battery cell is drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+    }
+
+    /* The battery follows the "battery" line of the kept settings (/root/tune, as the battery verb writes it): none
+       shows nothing, a name that is not a battery shows nothing, and auto (no line) shows the first battery there is.
+       A battery is drawn just before the clock, so its cell ends where the clock's begins. */
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.width = 2560;
+    compositor.height = 1440;
+    compositor.scale = 1;
+    {
+        struct battery_state state;
+        int present;
+
+        memory_zero(&state, sizeof(state));
+        present = battery_read((string_address)0, &state) && state.present;
+        taskbar_settings_set("bottom", "primary", "");
+        {
+            struct taskbar_view view = compositor_taskbar_view();
+            int ax, ay, aw, ah, clx, cly, clw, clh;
+
+            check("taskbar: auto draws a battery cell exactly when the machine has a battery to read",
+                  taskbar_slot(&view, -4, &ax, &ay, &aw, &ah) == present);
+            if (present)
+                check("taskbar: an auto battery's cell is just left of the clock",
+                      taskbar_slot(&view, -3, &clx, &cly, &clw, &clh) && ax + aw == clx && ay == cly && ah == clh);
+        }
+    }
+    taskbar_settings_set("bottom", "primary", "battery nosuchbattery\n");
+    {
+        struct taskbar_view view = compositor_taskbar_view();
+        int bx, by, bw, bh;
+
+        check("taskbar: a battery the machine does not have is not drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+    }
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    {
+        struct taskbar_view view = compositor_taskbar_view();
+        int bx, by, bw, bh;
+
+        check("taskbar: the battery set to none is not drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+    }
+}
+
 static void check_compositor_look(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE], glass[64 * 32], band[64 * 32];
@@ -109331,7 +109405,12 @@ static void check_compositor_look(void)
 
             for (unsigned int pixel = 0; pixel < 64 * 32; pixel++)
                 glass[pixel] = grounds[at];
-            tab = compositor_glass_tab(64, 64, 0, 4, 4, 40, 20, 0, lit ? COMPOSITOR_TAB_LIT : 0);
+            struct taskbar_view tv;
+
+            memory_zero(&tv, sizeof(tv));
+            tv.pixels = band;
+            tv.glass = glass;
+            tab = taskbar_glass_tab(&tv, 0, 0, 64, 0, 0, 64, 4, 4, 40, 20, 0, lit ? COMPOSITOR_TAB_LIT : 0);
             ink = window_contrast(tab);
             thin += look_luma(ink) - look_luma(tab) < 100 && look_luma(tab) - look_luma(ink) < 100;
         }
@@ -112202,6 +112281,7 @@ b32 main()
         check_launcher();
 #endif
         check_compositor_look();
+        check_taskbar_geometry();
 #if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
