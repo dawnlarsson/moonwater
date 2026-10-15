@@ -10790,14 +10790,18 @@ static fn parallel_tree_settle(parallel_tree_run address_to run,
                 parallel_tree_close(run, node);
 }
 
-static fn parallel_tree_facts(bipolar handle, positive address_to device,
-                              positive address_to inode)
+static bipolar parallel_tree_facts(bipolar handle, positive address_to device,
+                                   positive address_to inode)
 {
         positive facts[24] = {0};
+        bipolar status = system_call_2(syscall(fstat), (positive)handle,
+                                       (positive)facts);
 
-        system_call_2(syscall(fstat), (positive)handle, (positive)facts);
+        if (status < 0)
+                return status;
         address_to device = facts[0];
         address_to inode = facts[1];
+        return 0;
 }
 
 //      Room for one more handle: a free place under the cap, or the oldest
@@ -10866,9 +10870,8 @@ static bipolar parallel_tree_pin(parallel_tree_run address_to run,
                 positive device;
                 positive inode;
 
-                parallel_tree_facts(handle, address_of device, address_of inode);
-
-                if (device != node->device || inode != node->inode)
+                if (parallel_tree_facts(handle, address_of device, address_of inode) < 0 ||
+                    device != node->device || inode != node->inode)
                 {
                         system_close(handle);
                         handle = -PARALLEL_TREE_STALE;
