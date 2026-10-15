@@ -1201,7 +1201,8 @@ static COLD positive net_dns_kept_at(string_address path, p32 address_to into)
 
                 at += string_span_max(text + at, (positive)got - at,
                                       string_set_blanks);
-                while (at + length < (positive)got && text[at + length] != ' ')
+                while (at + length < (positive)got && text[at + length] != ' ' &&
+                       text[at + length] != '\t')
                         length++;
                 if (!length)
                         break;
