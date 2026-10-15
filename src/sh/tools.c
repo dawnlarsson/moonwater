@@ -378,7 +378,7 @@ static positive tools_clock_text(p8 address_to into, positive room,
 }
 
 /* YYYY-MM-DD?HH:MM:SS, a mark and six digits of microseconds unless the mark
-   is zero, then the zero offset: util-linux's ISO spelling, and RFC 5424's
+   is zero, then the local offset: util-linux's ISO spelling, and RFC 5424's
    with a point for the mark. Needs 40 bytes; answers 0 for no spelling. */
 static positive tools_clock_iso(p8 address_to into, b64 seconds, p8 separator,
                                 p8 mark, positive microseconds)
@@ -395,8 +395,18 @@ static positive tools_clock_iso(p8 address_to into, b64 seconds, p8 separator,
                 made += positive_into_padded(into + made, microseconds % 1000000,
                                              6, '0');
         }
-        memory_copy(into + made, "+00:00", 7);
-        return made + 6;
+        time_t stamp = (time_t)seconds;
+        tm broken;
+        localtime_r(address_of stamp, address_of broken);
+        bipolar east = (bipolar)broken.tm_gmtoff;
+        positive whole = (positive)(east < 0 ? -east : east);
+
+        into[made++] = east < 0 ? '-' : '+';
+        made += positive_into_padded(into + made, whole / 3600, 2, '0');
+        into[made++] = ':';
+        made += positive_into_padded(into + made, whole / 60 % 60, 2, '0');
+        into[made] = end;
+        return made;
 }
 
 // The same with or without a comma and microseconds; process_tools.c's script
