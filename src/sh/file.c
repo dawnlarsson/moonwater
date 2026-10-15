@@ -9024,6 +9024,12 @@ static bipolar file_parents_ensure_open(string_address dest_dir,
 
                 if (missing)
                 {
+                        //      A parent made past the table has no record,
+                        //      so nothing would give it its attributes after
+                        //      the copy; it is refused here, not made without.
+                        if (!record)
+                                return -ERROR_NO_MEMORY;
+
                         positive source_mode = source.mode & 07777;
                         positive omitted = source_mode &
                                            (keeps & FILE_KEEP_OWNER ? 0077
