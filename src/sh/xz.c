@@ -5717,7 +5717,11 @@ static bool xz_cli_options(string_address str, const xz_cli_option_map address_t
                         return xz_cli_say(name, ": Invalid option name", "");
                 }
                 if (value_n >= sizeof(text))
-                        value_n = sizeof(text) - 1;
+                {
+                        memory_copy_apart(text, str + eq + 1, sizeof(text) - 1);
+                        text[sizeof(text) - 1] = 0;
+                        return xz_cli_say((string_address)text, ": Invalid option value", "");
+                }
                 memory_copy_apart(text, str + eq + 1, value_n);
                 text[value_n] = 0;
 
