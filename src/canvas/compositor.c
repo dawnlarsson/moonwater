@@ -36,7 +36,7 @@
         keys are the characters of the layout `moonwater keyboard` set (every
         layout the kernel had, AltGr as the third level, dead accents and
         Caps Lock besides), Alt-Tab, Alt-F4 and Alt-F9 are the compositor's
-        and the machine script's key_ functions its chords (key_ctrl_shift_t, a
+        and the machine script's key_ functions are its chords (key_ctrl_shift_t, a
         terminal), the pointer is gained by the speed of the hand and
         wears a shape for the edge it is over, a window is arranged to fill
         the output or half of it by a double click on its top or with Alt
@@ -311,20 +311,6 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
 }
 
 /*
-        The close button over a window's pixels: an X and nothing round it.
-        Its strokes are the ink that stands out on what is under the button
-        (window_contrast of the mean of the window's pixels there, which
-        compositor_close_mean made once for the present), and a halo a pixel
-        and a half wider round them takes the window's own pixels further to
-        the side of lightness they are on, as the tabs' glass does, so the X
-        reads on a busy picture as on a plain ground; each pixel is the share
-        of its sixteen sample points inside the strokes and inside the halo.
-        What is under it is read from the window's pixels, which are known,
-        and not from the target. Drawn last, after the round corners, through
-        the target's clip, so the scene's pieces and its corners' scratch both
-        have it.
-*/
-/*
         How much of each pixel of a close button the X's halo and its stroke
         cover, in sixteenths (four by four samples): the geometry of the
         button alone, its side and its scale, so made once for them
@@ -382,6 +368,20 @@ static void compositor_close_ready(const struct compositor_frame *frame)
         compositor_close_cover.half = frame->scale;
 }
 
+/*
+        The close button over a window's pixels: an X and nothing round it.
+        Its strokes are the ink that stands out on what is under the button
+        (window_contrast of the mean of the window's pixels there, which
+        compositor_close_mean made once for the present), and a halo a pixel
+        and a half wider round them takes the window's own pixels further to
+        the side of lightness they are on, as the tabs' glass does, so the X
+        reads on a busy picture as on a plain ground; each pixel is the share
+        of its sixteen sample points inside the strokes and inside the halo.
+        What is under it is read from the window's pixels, which are known,
+        and not from the target. Drawn last, after the round corners, through
+        the target's clip, so the scene's pieces and its corners' scratch both
+        have it.
+*/
 static void compositor_close_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
         int bx, by, side;
@@ -1669,7 +1669,6 @@ struct compositor_poll
 };
 
 #define COMPOSITOR_POLLIN 1
-#define COMPOSITOR_POLLERR 8
 #define COMPOSITOR_POLLHUP 16
 
 #define COMPOSITOR_INPUTS 16
@@ -1746,14 +1745,14 @@ static struct
                 it decided. A row is a window everywhere: the stack, the keys, the hand are rows.
         */
         struct windows *table;
-        unsigned long table_bytes, pixels, buffer; // its size, where the buffers are, one buffer: never the table's numbers
+        unsigned long pixels, buffer; // where the buffers are, one buffer: never the table's numbers
         /*
                 A window shown straight from its buffer, with no copy: the table is then a memfd, given to
                 /dev/spark by table_giver (a descriptor of the device, plus one) and linked at WINDOWS_TABLE (its
                 descriptor plus one; 0 when the table is a plain file), /dev/udmabuf is open
                 (plus one), and each buffer asked for is a framebuffer (scan_fb, its card handle scan_handle).
                 on_screen is the framebuffer the card shows: fb, the compositor's own, or a window's, whose row
-                is direct_row (-1 for none) and whose buffer direct_buffer. A flip in flight (flip_pending, to
+                is direct_row (-1 for none). A flip in flight (flip_pending, to
                 flip_row's flip_buffer) holds back what a window is told was taken (held: a frame, plus one) until
                 the card has let go of the buffer it showed before. The tabs written over a window's buffer are
                 kept there with what they covered (under, a buffer's worth of the band each, patched when it is).
@@ -1776,7 +1775,7 @@ static struct
         unsigned int overlay_fb[2], overlay_handle[2], overlay_back, overlay_rows;
         unsigned int *overlay_pixels[2];
         unsigned long overlay_pitch, overlay_bytes; // pitch in words
-        unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, direct_buffer, flip_buffer;
+        unsigned int scan_fb[WINDOWS][2], scan_handle[WINDOWS][2], on_screen, flip_buffer;
         unsigned int taken_held[WINDOWS], held_rows, dropping, patched[WINDOWS][2];
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
         unsigned int memfd_failed; // the step the table's memfd was refused at, said in the table's refused
@@ -2824,7 +2823,6 @@ static void compositor_glass_drop(int row)
         compositor.backdrop[row] = compositor.tinted[row] = compositor.composed[row] = null;
         compositor.glass_cut[row] = 0;
         compositor.glassy[row] = 0;
-        compositor.asks[row] = 0;
         memory_zero(compositor.glass_made[row], sizeof(compositor.glass_made[row]));
         memory_zero(compositor.glass_blocks[row], sizeof(compositor.glass_blocks[row]));
         memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
@@ -2967,18 +2965,6 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
         }
 }
 
-/*
-        The damage, composed straight onto the scanout and then announced.
-        The scanout is a mapping of the card's memory, so it is only ever
-        written: every pixel of the damage once, by the stores of
-        memory_fill_u32_rect and memory_copy (full 64-byte lines where a row
-        is long enough, a masked store or two overlapping ones at the ends),
-        none non-temporal and none a read. The card is then told the
-        rectangles that changed, in one call: a virtual card copies nothing
-        to its host without that.
-
-        The windows go bottom to top, and the tabs over all of them.
-*/
 // The mean colour under a window's close button, from the pixels the frame is drawn with: made once a present,
 // after the glass, and read by compositor_close_draw for every piece of the window that is drawn.
 static void compositor_close_mean(struct compositor_frame *frame)
@@ -3199,8 +3185,7 @@ static void compositor_card_read(void)
         }
 }
 
-// What the tabs covered of the buffer the card shows, put back, so what is made from it (the glass) is the window's.
-// Row's buffer which, from the compositor's own copy of the layout: the table is shared, so the header's pixels,
+// A row's buffer which, from the compositor's own copy of the layout: the table is shared, so the header's pixels,
 // buffer and stride are a client's to write, and the compositor draws through what it set itself.
 static unsigned int *compositor_buffer(int row, unsigned int which)
 {
@@ -3208,6 +3193,7 @@ static unsigned int *compositor_buffer(int row, unsigned int which)
                                 ((unsigned long)row * 2 + (which & 1u)) * compositor.buffer);
 }
 
+// What the tabs covered of the buffer the card shows, put back, so what is made from it (the glass) is the window's.
 static void compositor_direct_unpatch(void)
 {
         int row = compositor.direct_row;
@@ -3318,7 +3304,6 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                 }
         }
         compositor.direct_row = row;
-        compositor.direct_buffer = which;
         compositor.table->scanned++;
 
         // A virtual card copies to its host only what it is told changed.
@@ -3778,7 +3763,6 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
                         compositor.overlay_back ^= 1;
         }
         compositor.direct_row = row;
-        compositor.direct_buffer = which;
         compositor.table->scanned++;
 
         for (unsigned int at = 0; at < compositor.damages; at++)
@@ -3789,6 +3773,16 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         compositor.damages = 0;
         compositor.screen_stale = 1;
         return 1;
+}
+
+// The card's first picture is drawn before the compositor has made its window table, so what the table is to say of that
+// present has nowhere to go yet.
+static unsigned int compositor_unscanned_spare;
+
+static void compositor_unscanned(unsigned int why)
+{
+        if (compositor.table)
+                compositor.table->unscanned = why;
 }
 
 /*
@@ -3803,16 +3797,6 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         compositor still draws round it. A card with no overlay, or one that
         refuses, has the window composed as any other.
 */
-// The card's first picture is drawn before the compositor has made its window table, so what the table is to say of that
-// present has nowhere to go yet.
-static unsigned int compositor_unscanned_spare;
-
-static void compositor_unscanned(unsigned int why)
-{
-        if (compositor.table)
-                compositor.table->unscanned = why;
-}
-
 static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned char *rows,
                                       unsigned int windows, int rect[4])
 {
@@ -3896,6 +3880,18 @@ static int compositor_damage_cut(const int *rect)
         return 1;
 }
 
+/*
+        The damage, composed straight onto the scanout and then announced.
+        The scanout is a mapping of the card's memory, so it is only ever
+        written: every pixel of the damage once, by the stores of
+        memory_fill_u32_rect and memory_copy (full 64-byte lines where a row
+        is long enough, a masked store or two overlapping ones at the ends),
+        none non-temporal and none a read. The card is then told the
+        rectangles that changed, in one call: a virtual card copies nothing
+        to its host without that.
+
+        The windows go bottom to top, and the tabs over all of them.
+*/
 static void compositor_present(void)
 {
         struct compositor_frame frames[COMPOSITOR_FRAMES];
@@ -4018,7 +4014,6 @@ static void compositor_present(void)
                         compositor.plane_fb = fb;
                         compositor_unscanned(0);
                         compositor.plane_row = compositor.direct_row = plane;
-                        compositor.direct_buffer = which;
                         memory_copy(compositor.plane_rect, planed, sizeof(planed));
                         compositor.table->scanned++;
                         // Where the pieces do not fit the list, what is under the plane is composed too, unseen.
@@ -4241,8 +4236,8 @@ static b32 compositor_card_open(void)
         where it was and where it is, and is drawn over what is composed there.
 */
 
-// A pointer's cell, in the scale and shape it is drawn: where it was last damaged and drawn. Its own size
-// when `moonwater canvas cursor size` gave one, and the desktop's when it did not.
+// The scale a pointer is drawn at: its own size when `moonwater canvas cursor size` gave one, and the desktop's
+// when it did not, three times that while it is shaken large.
 static int compositor_cursor_scale(void)
 {
         int base = compositor.cursor.size ? compositor.cursor.size : compositor.scale;
@@ -4472,7 +4467,8 @@ static void compositor_kmsg(string_address text, positive value, string_address 
                 line[length] = text[length];
                 length++;
         }
-        length += positive_into_string(line + length, value);
+        if (value)
+                length += positive_into_string(line + length, value);
         for (positive at = 0; tail[at] && length < sizeof(line) - 1; at++)
                 line[length++] = tail[at];
         line[length++] = '\n';
@@ -4536,8 +4532,7 @@ static void compositor_layout_read(void)
         }
 }
 
-// The word kept in a file of /root: empty when there is none.
-// A file's text, as far as room holds it, with no newline kept: "" when the file is not there.
+// A file's text, as far as room holds it, newlines and all: "" when the file is not there.
 static void compositor_text(const char *path, char *text, unsigned int room)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
@@ -4551,6 +4546,7 @@ static void compositor_text(const char *path, char *text, unsigned int room)
         text[got < 0 ? 0 : got] = 0;
 }
 
+// The word kept in a file of /root, cut at its first space or line end: empty when there is none.
 static void compositor_word(const char *path, char *word, unsigned int room)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
@@ -4857,7 +4853,7 @@ static void compositor_inputs_watch(void)
         for (;;)
         {
                 // struct inotify_event: wd, mask, cookie, len, and len bytes of name.
-                unsigned int buffer[64];
+                unsigned int buffer[72]; // one event with the longest name: 16 bytes, and NAME_MAX + 1 after them
                 long got = compositor_call(syscall(read), (positive)compositor.watch, (positive)buffer,
                                            sizeof(buffer), 0, 0, 0);
 
@@ -5459,6 +5455,7 @@ static void compositor_leave(int row)
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
         compositor.picture_w[row] = compositor.picture_h[row] = compositor.asking[row] = 0;
+        compositor.asks[row] = 0;
         compositor.arranged[row] = COMPOSITOR_FLOATING;
         compositor.title[row][0] = 0;
         compositor_glass_drop(row);
@@ -6392,7 +6389,6 @@ static int compositor_table(void)
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0666, 0, 0, 0);
 
         compositor.table = (struct windows *)mapped;
-        compositor.table_bytes = bytes;
         compositor.pixels = header;
         compositor.buffer = buffer;
         compositor.table->output_width = (unsigned int)compositor.width;
@@ -6682,7 +6678,7 @@ static b32 compositor_main()
         if (!headless)
                 compositor_cursor_start();
         compositor_inputs_open();
-        if (extra >= 0)
+        if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)
         {
                 compositor.inputs[compositor.input_count] = extra;
                 compositor.device_number[compositor.input_count++] = COMPOSITOR_DEVICES - 1;
@@ -6917,7 +6913,7 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
                 else
                         log_direct(str("surface: no font\n"));
                 if (!(engine < 0 && engine > -4096))
-                        compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
+                        compositor_call(syscall(munmap), (positive)engine, atlas_at + 256 * 256, 0, 0, 0, 0);
                 if (bytes)
                         compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
         }
@@ -6998,8 +6994,13 @@ static b32 surface_main()
         table->x[own.row] = (int)x;
         table->y[own.row] = (int)y;
         table->state[own.row] = away ? WINDOW_MINIMIZED : 0;
-        for (positive at = 0; title && title[at] && at < WINDOWS_TITLE - 1; at++)
-                table->title[own.row][at] = (char)title[at];
+        {
+                positive at = 0;
+
+                for (; title && title[at] && at < WINDOWS_TITLE - 1; at++)
+                        table->title[own.row][at] = (char)title[at];
+                table->title[own.row][at] = 0; // a row is reused: what it held past this title is not the title's
+        }
         surface_draw(&own, which, (unsigned int)width, (unsigned int)height, (unsigned int)colour, font, text);
 
         if (!never)
