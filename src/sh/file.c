@@ -39207,8 +39207,11 @@ static b32 file_cp()
 
         if ((taking.flags & (FILE_FLAG('b') | FILE_FLAG('B') | FILE_FLAG('S'))) &&
             (cp_update_policy == 'n' || cp_update_policy == 'F'))
-                return string_report(log_error, 1,
-                                     "cp: --backup is mutually exclusive with -n or --update=none-fail\n");
+        {
+                string_format(log_error,
+                              "cp: --backup is mutually exclusive with -n or --update=none-fail\n");
+                return file_try_help((string_address) "cp", 1);
+        }
 
         {
                 p8 sparse = cp_sparse_policy;
@@ -49496,7 +49499,7 @@ static b32 file_rename()
                                     (no_overwrite || (interactive && no_act) ||
                                      (interactive && !rename_ask((string_address)destination))))
                                 {
-                                        if (no_overwrite || (interactive && no_act))
+                                        if ((no_overwrite || (interactive && no_act)) && verbose)
                                                 string_format(log, "Skipping existing link: `%w' -> `%w'\n",
                                                               writer_terminal_name, source,
                                                               writer_terminal_name, target);
@@ -49564,7 +49567,7 @@ static b32 file_rename()
                         if (file_look(AT_FDCWD, destination, AT_SYMLINK_NOFOLLOW,
                                       address_of there))
                         {
-                                if (no_overwrite)
+                                if (no_overwrite && verbose)
                                         string_format(log, "Skipping existing file: `%w'\n",
                                                       writer_terminal_name, destination);
                                 if (verbose && no_act)
@@ -49623,7 +49626,7 @@ static b32 file_rename()
                             (no_overwrite || (interactive && no_act) ||
                              (interactive && !rename_ask(destination))))
                         {
-                                if (no_overwrite)
+                                if (no_overwrite && verbose)
                                         string_format(log, "Skipping existing file: `%w'\n",
                                                       writer_terminal_name, destination);
                                 if (verbose && no_act)
@@ -49656,8 +49659,9 @@ static b32 file_rename()
                         {
                                 if (no_overwrite && answer == -ERROR_EXISTS)
                                 {
-                                        string_format(log, "Skipping existing file: `%w'\n",
-                                                      writer_terminal_name, destination);
+                                        if (verbose)
+                                                string_format(log, "Skipping existing file: `%w'\n",
+                                                              writer_terminal_name, destination);
                                         continue;
                                 }
                                 string_format(log_error, "rename: %w: rename to %w failed: %s\n",
