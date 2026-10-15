@@ -16,7 +16,7 @@ menu "Moonwater Canvas"
           remain available.
 
     config MOONWATER_CANVAS_AUTOSTART
-        bool "Start Canvas automatically during boot"
+        bool "Bring Canvas up automatically during boot"
         depends on MOONWATER_CANVAS && MOONWATER_SHELL
         default y
         help

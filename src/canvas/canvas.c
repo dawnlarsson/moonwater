@@ -113,7 +113,6 @@ struct output
         struct drm_client_buffer *buffer;
         struct drm_mode_set *mode_set;
 
-        int x, y;
         unsigned int width, height;
         u32 opaque;
 
@@ -356,15 +355,6 @@ module_param_named(cursor_plane, canvas_cursor_plane, bool, 0444);
         placement; the desktop is their bounding box.
 */
 
-/*
-        Whether this display is a window on somebody else's screen.
-
-        The driver's own name, which is the only thing here that actually
-        knows. Working it out from what the display reports does not succeed:
-        a virtual one answers a physical size anyway, bochs says 320 by 200
-        millimetres whatever mode it is in, and QEMU synthesises an EDID too,
-        so neither the size nor the presence of one separates them.
-*/
 /* Is this device's driver one of these? Asked of two lists below, with
    the same answer for a device that has no driver or no name. */
 static PURE _Bool canvas_driver_among(struct drm_device *dev,
@@ -377,6 +367,15 @@ static PURE _Bool canvas_driver_among(struct drm_device *dev,
                                  sizeof(names[0]), count) < count;
 }
 
+/*
+        Whether this display is a window on somebody else's screen.
+
+        The driver's own name, which is the only thing here that actually
+        knows. Working it out from what the display reports does not succeed:
+        a virtual one answers a physical size anyway, bochs says 320 by 200
+        millimetres whatever mode it is in, and QEMU synthesises an EDID too,
+        so neither the size nor the presence of one separates them.
+*/
 static PURE _Bool canvas_is_virtual(struct drm_device *dev)
 {
         static const char *const guests[] = {
@@ -391,8 +390,8 @@ static PURE _Bool canvas_is_virtual(struct drm_device *dev)
 
         simpledrm (and efidrm) bind to whatever GOP left in sysfb. On a
         Dell with i915 that is card0 at the firmware's size -- often
-        1024x768 -- and Canvas starting there paints the kernel log into
-        that buffer. i915 then takes the same pipe; the firmware client is
+        1024x768 -- and Canvas starting there scans its ground into that
+        buffer. i915 then takes the same pipe; the firmware client is
         kicked with a picture on it, and the machine freezes. It is a last
         resort when no real card appears.
 */
@@ -1083,7 +1082,7 @@ static _Bool output_bring_up(struct canvas *canvas, struct drm_mode_set *mode_se
         scanout, when the host window is up. That callback runs on the DRM
         helper workqueue. A commit from here disables every cursor plane
         (drm_client_modeset_commit does) and can wait on that same queue,
-        so the pointer thread never runs again and the plane is left off.
+        so the canvas thread never runs again and the plane is left off.
         The mode already scanning is the one the window has; leave it.
 
         A real card is the same queue. i915 hotplugs after EDID, and with a
@@ -1168,9 +1167,6 @@ static void desktop_place_outputs(void)
 
         list_for_each_entry(output, &desktop.outputs, link)
         {
-                output->x = x;
-                output->y = 0;
-
                 x += (int)output->width;
                 height = max(height, (int)output->height);
         }
@@ -1950,7 +1946,7 @@ static int client_hotplug(struct drm_client_dev *client)
                 drm_client_register calls this itself, which is fine, but a
                 later connector hotplug runs on the DRM helper workqueue. A
                 modeset commit from there disables every cursor plane and can
-                wait on that same queue: on i915 that is a frozen low-res
+                wait on that same queue: on i915 that froze with a low-res
                 kernel log and no pointer. Queue on moonwater/plug, which
                 nothing in DRM flushes.
         */
@@ -2073,9 +2069,6 @@ static struct canvas *canvas_take_over(struct drm_device *dev)
 // nothing and lose the late sibling it is here for.
 #define CANVAS_SETTLE 100
 
-/*
-        What turning Canvas on needs from a card before it is claimed.
-*/
 /* Every in-kernel client on a card but Canvas's, as drm_client_dev_unregister takes them. */
 static void canvas_clients_clear(struct drm_device *dev)
 {
@@ -2228,9 +2221,9 @@ static int canvas_claim(const char *path, unsigned int minor,
 
         /*
                 simpledrm is card0 on a Dell with i915: GOP's leftover
-                size, often 1024x768. Starting there paints the kernel
-                log, then i915 takes the same pipe and the machine
-                freezes. Leave it until a GPU appears, or until the
+                size, often 1024x768. Canvas, when it began there, painted
+                the kernel log; then i915 took the same pipe and the machine
+                froze. Leave it until a GPU appears, or until the
                 settle rounds have passed with none. Userspace on still
                 takes it when it is the only card -- the first pass of
                 claim_all skips firmware so card0 cannot start before
@@ -3209,11 +3202,8 @@ static void canvas_thread_stop(void)
 }
 
 /*
-        Sleeps until something moves, then draws it.
-
-        set_current_state before the flag is read, which is what makes the
-        sleep safe: a wake arriving between the two finds the task already
-        marked and schedule() returns at once rather than losing the event.
+        Wakes the canvas thread, if it is running, so that it looks now rather
+        than at its next poll. With no thread there is nothing to wake.
 */
 static void canvas_thread_wake(void)
 {
@@ -3540,8 +3530,6 @@ void canvas_latency(struct latency_stats *out, unsigned int request)
                 out->quiet += READ_ONCE(*per_cpu_ptr(&canvas_quiet, cpu));
 }
 
-#undef REPORT_CANVAS
-
 /*
         Canvas off and on, and what it holds.
 
@@ -3720,8 +3708,8 @@ void canvas_boot(void)
 void canvas_unload(void)
 {
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
-        // A probe that has not found a card owns no DRM client (and therefore
-        // no module reference) to keep this callback's text resident.
+        // The probe calls into the core (moonwater_bind_fire), so it has to be
+        // stopped before the core's own state goes.
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
 }

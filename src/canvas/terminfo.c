@@ -6,7 +6,8 @@
         bowl both land this file under /run/moonwater/terminfo and export
         that directory. The hashed (78) and letter (x) spellings are both
         written: older ncurses used the hex of the first character, newer
-        ones the character itself.
+        ones the character itself. The moonwater name is written under both
+        spellings too (m and 6d).
 
         Regenerated with: tic -x -o DIR src/canvas/terminfo.ti
 */
@@ -281,11 +282,10 @@ static const unsigned char terminal_terminfo_blob[] = {
 };
 
 /*
-        The blob into a descriptor of the directory that holds it, never
-        through a name. /run is a place other programs write, and this file
-        is opened FILE_WRITE, which carries O_CREAT and O_TRUNC: a symlink
-        left under this name by anyone who got there first would make an
-        install truncate and rewrite whatever it pointed at, with whatever
+        The blob goes through a descriptor of the directory that holds it,
+        never through a name. /run is a place other programs write, so the new
+        blob is opened beside the entry with O_NOFOLLOW and renamed over it: a
+        symlink planted under either name is never written through, whatever
         privilege the terminal or bowl was started with.
 */
 /*

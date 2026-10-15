@@ -2,9 +2,11 @@
         Moonwater window
 
         What a program shares with the compositor, and the cells a terminal's
-        text lives in. Include this one file and nothing else: it carries its
-        own syscalls, so it works from a spark image with no runtime and from
-        an ordinary ELF against libc.
+        text lives in. It includes canvas_abi.h itself, and it needs the
+        library before it (lib.c and lib.util.c, as the shell and the tests
+        include them): the file uses the library's types and memory routines.
+        Its own syscall entry is used only where the library does not supply
+        one.
 
         A program's window is a row of the compositor's table (struct windows,
         below): the program writes its picture, its size and its title there
@@ -16,24 +18,12 @@
         are the program's to write; the ones below are the compositor's,
         which a program that holds the page itself fills in for itself.
 
-        z is the order they stack in: higher is in front. Clicking a window
-        puts it above every other, and the compositor writes the new value
-        back, so a program can always read where it ended up.
-
-        region is where a window wants to be rather than where it is. Zero is
-        free floating and x,y are the program's; anything else is the
-        compositor's placement and it writes x,y to say where that landed. It
-        is a number and not a flag because there is more than one answer --
-        centred is the one that exists so far.
-
-        style is what the window looks like: whether it wears a frame, whether
-        it covers its display, whether it is put away. A new window starts
-        framed.
-
-        edge is the corner radius, in pixels. Zero is square.
-
-        awake says whether the compositor is currently watching the shared
-        pages.
+        The fields z, region, display, style, edge, pitch, awake, the output
+        and maximum sizes are the older per-window protocol. No code outside
+        this file names them now, since struct windows (below) carries the
+        live window state. They stay because the page's layout is asserted
+        further down. The title and the state are still read: the terminal
+        takes its title from the page, and window_closing reads the state.
 */
 
 #ifndef WINDOW_INCLUDED
@@ -50,31 +40,14 @@
 // and the pixels stay page aligned.
 #define WINDOW_PIXELS 4096
 
-// The titlebar the contents were laid under, which the shared page still measures from.
-#define WINDOW_TITLE 20
-
 // The handle of a window of cells the program holds itself (window_grid_open):
 // no file, so no call is made to it.
 #define WINDOW_PRIVATE 0xffffffffu
 
-// region
-#define WINDOW_FREE 0
-#define WINDOW_CENTRED 1
-
 // style
-#define WINDOW_FRAME 1u
-#define WINDOW_FULLSCREEN 2u
 #define WINDOW_MINIMIZED 4u
 
-/*
-        A window takes the pointer over the whole of itself, not only over the
-        parts that do something with it: hovering its middle must not offer to
-        resize whatever is buried underneath. WINDOW_PASSTHROUGH says not to,
-        for a window that is meant to be looked through rather than used.
-*/
-#define WINDOW_PASSTHROUGH 8u
-
-/* Keep pane_raise's top + 1 away from overflow on an untrusted shared page. */
+/* Keep a raise's top + 1 away from overflow on an untrusted shared page. */
 #define WINDOW_Z_MAX (1 << 24)
 
 /*
@@ -89,34 +62,17 @@
 */
 #define WINDOW_COORD_MAX (1 << 24)
 
-// state
-#define WINDOW_FOCUSED 1u
-
 /*
         The compositor is asking this window to go away.
 
         Asking, because it cannot do more: the pages are the program's and the
         task is the kernel's, and a compositor that could end either would be a
-        compositor that can be told to end any of them. The X in the kernel
-        desktop's titlebar, or the compositor's close button, Alt-F4 or a middle
-        press on the window's tab, sets this and wakes the program; what
-        happens next is the program's,
-        and one that ignores it keeps its window.
+        compositor that can be told to end any of them. The compositor's close
+        button, Alt-F4 or a middle press on the window's tab sets this and
+        wakes the program; what happens next is the program's, and one that
+        ignores it keeps its window.
 */
 #define WINDOW_CLOSING 2u
-
-/*
-        Text layout. Alignment is one field: a horizontal one, a vertical one,
-        and whether long text wraps at the width of its box or runs off the end
-        of one line.
-*/
-#define TEXT_LEFT 0u
-#define TEXT_CENTRE 1u
-#define TEXT_RIGHT 2u
-#define TEXT_TOP 0u
-#define TEXT_MIDDLE 4u
-#define TEXT_BOTTOM 8u
-#define TEXT_WRAP 16u
 
 /*
         Keys reach the window that has focus, through a ring in this page.
@@ -164,7 +120,7 @@ struct window
         // when it is the one that moved them.
         int x, y, z; // higher is in front, clamped to +/-WINDOW_Z_MAX
         unsigned int width, height;
-        unsigned int region;  // WINDOW_FREE, WINDOW_CENTRED
+        unsigned int region;  // placement request; no code names it yet
         unsigned int display; // which output a region is measured against
         unsigned int style;
         unsigned int edge;     // corner radius
@@ -172,7 +128,7 @@ struct window
         char title[WINDOW_TITLE_MAX];
 
         // The compositor writes these.
-        unsigned int state;         // WINDOW_FOCUSED
+        unsigned int state;         // WINDOW_CLOSING, read by window_closing
         unsigned int pitch;         // pixels per row of the contents
         unsigned int max_width;     // what the mapping actually holds
         unsigned int max_height;
@@ -439,14 +395,6 @@ static inline void window_grid(struct window *window, unsigned int columns,
         window->grid_rows = rows;
 }
 
-// The window has been given a different shape than its cells are laid out in.
-// Lay them out again at columns by rows, then say so with window_grid.
-static inline int window_regrid(struct window *window)
-{
-        return window->columns != window->grid_columns ||
-               window->rows != window->grid_rows;
-}
-
 // The next key, or false when there is none waiting.
 static inline int window_key(struct window *window, struct window_key *key)
 {
@@ -465,10 +413,8 @@ static inline int window_key(struct window *window, struct window_key *key)
         return 1;
 }
 
-#define window_pixels(window) window_at((window), unsigned int, WINDOW_PIXELS)
-
 /*
-        Windows on the compositor that runs in userspace (src/canvas/compositor.c).
+        The window table of the compositor that runs in userspace (src/canvas/compositor.c).
 
         One table, which the compositor makes and every program maps: a
         column for each field and a row for each window, and the windows'
@@ -531,7 +477,7 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
 
-// event_type, with event_flags WINDOW_KEY_*: a key (a its code, b its character), the pointer at a, b in
+// event_type, with event_flags WINDOW_KEY_*: a key (a is its code, b its character), the pointer at a, b in
 // the window, a button (a its code), the wheel (a in 120ths of a notch, b 1 when it is sideways).
 #define WINDOW_EVENT_KEY 1u
 #define WINDOW_EVENT_MOTION 2u
@@ -715,8 +661,9 @@ _Static_assert(__builtin_offsetof(struct window_cell, flags) == 6, "window cell 
         A shell image already carries lib.c's hardware-floor syscall
         entry on every supported architecture. Use it directly instead of
         emitting a second syscall body in every program that includes this
-        client. window.c remains genuinely standalone: without the library's
-        include guard it retains the small per-architecture fallback below.
+        client. Without the library's include guard the small per-architecture
+        fallback below is used instead; the types and memory routines come from
+        the library either way.
 
         positive and long are both one register wide here. Casting a negative
         AT_FDCWD through positive preserves its bits, and the raw negative
