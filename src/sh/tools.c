@@ -6301,7 +6301,6 @@ static b32 tools_numfmt()
                 numfmt.have_format = true;
         }
 
-        text_refuse(numfmt.grouping && numfmt.have_format, "--grouping cannot be combined with --format");
         if (numfmt.grouping && numfmt.to != NUMFMT_SCALE_NONE)
         {
                 text_flush();
