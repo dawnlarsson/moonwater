@@ -24185,7 +24185,7 @@ fn shell_hash(writer write)
                                 while (back &&
                                        (chain[order[back - 1]] > chain[held] ||
                                         (chain[order[back - 1]] == chain[held] &&
-                                         order[back - 1] < held)))
+                                         order[back - 1] > held)))
                                 {
                                         order[back] = order[back - 1];
                                         back--;
