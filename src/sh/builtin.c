@@ -6061,7 +6061,10 @@ bool shell_cd_walk(bool physical, bool address_to say,
             !path_walk_join(candidate, sizeof(candidate), shell_directory,
                             string_length(shell_directory), shell_cd_target,
                             ""))
+        {
+                shell_cd_reason = 36; // ENAMETOOLONG
                 return false;
+        }
 
         /*
                 Down from here by names alone, with no dots in them to take
