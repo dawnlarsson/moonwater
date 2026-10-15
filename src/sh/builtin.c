@@ -2701,8 +2701,14 @@ HOT fn shell_env_init(string_address address_to process_environment)
         while (process_environment && process_environment[inherited])
                 inherited++;
 
+        //      Without the table the shell would run with no PATH and no
+        //      HOME and say nothing about it, so the start is refused.
         if (!env_table_room(inherited + 16))
-                return;
+        {
+                string_format(log, "shell: no room for the environment\n");
+                log_flush();
+                exit(126);
+        }
 
         // Production enters once. Keeping the routine restartable makes the
         // ownership boundary testable and prevents an embedding harness from
@@ -5054,14 +5060,32 @@ static COLD fn shell_dynamic_versinfo()
 
 static COLD fn shell_dynamic_groups()
 {
-        b32 held[64];
-        string_address said[65];
-        p8 written[65 * 12];
-        bipolar count = system_call_2(syscall(getgroups), array_count(held),
-                                      (positive)held);
+        static b32 address_to held;
+        static positive held_room;
+        static string_address address_to said;
+        static positive said_room;
+        static p8 address_to written;
+        static positive written_room;
+        //      The kernel says how many groups there are before it is asked
+        //      for them, so no fixed buffer can be too small: a user in more
+        //      than 64 groups had only the primary one listed.
+        bipolar count = system_call_2(syscall(getgroups), 0, 0);
         positive used = 0;
         positive total = 0;
         b32 primary = (b32)system_call_1(syscall(getgid), 0);
+
+        if (count < 0)
+                count = 0;
+
+        //      The primary group is listed too, and a written number is at
+        //      most eleven bytes with its end.
+        if (!shell_array_room(held, held_room, count) ||
+            !shell_array_room(said, said_room, count + 1) ||
+            !shell_array_room(written, written_room, (count + 1) * 12))
+                return;
+
+        count = system_call_2(syscall(getgroups), (positive)count,
+                              (positive)held);
 
         if (count < 0)
                 count = 0;
@@ -5072,7 +5096,7 @@ static COLD fn shell_dynamic_groups()
         used += positive_into_string(written, (positive)primary);
         written[used++] = end;
 
-        for (bipolar at = 0; at < count; at++)
+        for (bipolar at = 0; at < count && at < (bipolar)held_room; at++)
         {
                 if (held[at] == primary)
                         continue;
@@ -5734,10 +5758,20 @@ p8 address_to shell_directory HOT_DATA = shell_directory_assignment + 4;
 static p8 shell_directory_was[SHELL_DIRECTORY_MAX];
 static PURE bool shell_physical_on();
 
+//      The errno of the last shell_here that failed, which pwd names: a
+//      directory gone from under the shell is ENOENT, and a parent the shell
+//      may not read is EACCES, which Bash words as Permission denied.
+static bipolar shell_here_error;
+
 bool shell_here(p8 address_to into, positive room)
 {
+        bipolar answer;
+
         into[0] = end;
-        return system_call_2(syscall(getcwd), (positive)into, room) >= 0;
+        answer = system_call_2(syscall(getcwd), (positive)into, room);
+        shell_here_error = answer < 0 ? -answer : 0;
+
+        return answer >= 0;
 }
 
 /*
@@ -5984,7 +6018,8 @@ bool shell_cd_walk(bool physical, bool address_to say,
                (shell_cd_target[1] == '.' &&
                 (shell_cd_target[2] == end || shell_cd_target[2] == '/')))))
         {
-                static p8 search[4096];
+                static p8 address_to search;
+                static positive search_room;
                 /* Bash leaves inherited CDPATH text visible in privileged
                    mode but does not let cd interpret it until set +p. Keep
                    the value in the shared environment engine and gate only
@@ -5993,15 +6028,19 @@ bool shell_cd_walk(bool physical, bool address_to say,
                                            ? null
                                            : env_get("CDPATH");
 
-                //      A value that does not fit is left out whole: cut, its
-                //      last entry would be a different directory.
+                //      The value is copied before it is walked, because a
+                //      directory change can rewrite the environment under the
+                //      walk. The copy grows to the value's length: no entry
+                //      is cut, however long the value is. Only a candidate
+                //      path has a bounded buffer, and a too-long one is
+                //      skipped as its own entry, as Bash skips it.
                 if (value && string_get(value) &&
-                    string_length(value) < sizeof(search))
+                    shell_array_room(search, search_room, string_length(value) + 1))
                 {
                         path_walk walk = {search, null, 0, false};
                         static p8 under[4096];
 
-                        string_copy_max_end(search, value, sizeof(search) - 1);
+                        memory_copy(search, value, string_length(value) + 1);
 
                         while (path_walk_next(address_of walk))
                         {
@@ -6199,10 +6238,16 @@ COLD fn shell_cd(writer write)
                 string_address copied = string_copy_max_end(
                     shell_cd_target, name, sizeof(shell_cd_target) - 1);
 
+                //      The copy cannot hold a name this long. The kernel would
+                //      answer ENAMETOOLONG for it, and each house words that
+                //      answer its own way.
                 if (string_get(name + (copied - shell_cd_target)))
                 {
-                        shell_answer(shell_bash_compat ? 1 : 2);
-                        return log_error(str("cd: directory name too long\n"));
+                        if (shell_bash_compat)
+                                return shell_refuse(1,
+                                    "cd: %s: File name too long\n", name);
+
+                        return shell_refuse(2, "cd: can't cd to %s\n", name);
                 }
         }
 
@@ -6255,17 +6300,36 @@ COLD fn shell_cd(writer write)
         A rotation and a removal both rewrite the kept part, so both go
         through one writer that copies aside first: the pointers handed to it
         are usually into the very bytes it is about to overwrite.
-*/
-#define SHELL_DIRSTACK_MAX 32
-#define SHELL_DIRSTACK_BYTES 8192
 
-static p8 shell_dirstack_pool[SHELL_DIRSTACK_BYTES];
-static positive shell_dirstack_at[SHELL_DIRSTACK_MAX];
+        The stack has no size limit, as Bash's has none: the bytes, the
+        offsets and the entry table grow with what is pushed.
+*/
+static p8 address_to shell_dirstack_pool;
+static positive shell_dirstack_pool_room;
+static p8 address_to shell_dirstack_scratch;
+static positive shell_dirstack_scratch_room;
+static positive address_to shell_dirstack_at;
+static positive shell_dirstack_at_room;
 static positive shell_dirstack_count;
-static string_address shell_dirstack_list[SHELL_DIRSTACK_MAX + 1];
+static string_address address_to shell_dirstack_list;
+static positive shell_dirstack_list_room;
+static string_address address_to shell_dirstack_work;
+static positive shell_dirstack_work_room;
+static string_address shell_dirstack_none[1];
 
 COLD string_address address_to shell_dirstack_entries(positive address_to count)
 {
+        if (!shell_array_room(shell_dirstack_list, shell_dirstack_list_room,
+                              shell_dirstack_count + 1))
+        {
+                //      Out of memory: the listing is the top alone. The
+                //      allocator has already recorded the failure.
+                shell_dirstack_none[0] = shell_directory;
+                address_to count = 1;
+
+                return shell_dirstack_none;
+        }
+
         shell_dirstack_list[0] = shell_directory;
 
         for (positive at = 0; at < shell_dirstack_count; at++)
@@ -6277,28 +6341,54 @@ COLD string_address address_to shell_dirstack_entries(positive address_to count)
         return shell_dirstack_list;
 }
 
+//      Room for a working list of count entries, for a rotation or a removal
+//      to build the new stack in before it is written.
+static COLD string_address address_to shell_dirstack_work_take(positive count)
+{
+        if (!shell_array_room(shell_dirstack_work, shell_dirstack_work_room, count))
+                return null;
+
+        return shell_dirstack_work;
+}
+
 static COLD bool shell_dirstack_write(string_address address_to kept,
                                  positive count)
 {
-        static p8 scratch[SHELL_DIRSTACK_BYTES];
         positive used = 0;
 
-        if (count > SHELL_DIRSTACK_MAX)
+        for (positive at = 0; at < count; at++)
+                used += string_length(kept[at]) + 1;
+
+        //      The kept entries may point into the pool, which growing it
+        //      can move, so they are copied aside before the pool is touched.
+        if (!shell_array_room(shell_dirstack_scratch, shell_dirstack_scratch_room, used) ||
+            !shell_array_room(shell_dirstack_at, shell_dirstack_at_room, count))
                 return false;
+
+        used = 0;
 
         for (positive at = 0; at < count; at++)
         {
                 positive length = string_length(kept[at]);
 
-                if (used + length + 1 > sizeof(scratch))
-                        return false;
-
-                memory_copy(scratch + used, kept[at], length + 1);
-                shell_dirstack_at[at] = used;
+                memory_copy(shell_dirstack_scratch + used, kept[at], length + 1);
                 used += length + 1;
         }
 
-        memory_copy(shell_dirstack_pool, scratch, used);
+        //      The old stack stays as it was until the pool holds the new one.
+        if (!shell_array_room(shell_dirstack_pool, shell_dirstack_pool_room, used))
+                return false;
+
+        memory_copy(shell_dirstack_pool, shell_dirstack_scratch, used);
+
+        used = 0;
+
+        for (positive at = 0; at < count; at++)
+        {
+                shell_dirstack_at[at] = used;
+                used += string_length(shell_dirstack_scratch + used) + 1;
+        }
+
         shell_dirstack_count = count;
 
         return true;
@@ -6580,7 +6670,8 @@ COLD fn shell_pushd(writer write)
             address_of count);
         p8 wanted[SHELL_DIRECTORY_MAX];
         p8 previous[SHELL_DIRECTORY_MAX];
-        string_address rotated[SHELL_DIRSTACK_MAX + 1];
+        p8 top[SHELL_DIRECTORY_MAX];
+        string_address address_to rotated;
         positive index;
         //      -n moves the stack and leaves the shell where it is; the
         //      operand is then written into the stack as it was given,
@@ -6621,25 +6712,49 @@ COLD fn shell_pushd(writer write)
                 named = word;
         }
 
+        rotated = shell_dirstack_work_take(count + 1);
+
+        if (!rotated)
+                return shell_answered(1, "pushd: directory stack full\n");
+
+        //      cd writes the shell's directory in place, so a move rewrites
+        //      the buffer list[0] points at. Every rotation built from the top
+        //      reads this copy instead, taken before anything moves.
+        string_copy_max_end(top, shell_directory, sizeof(top) - 1);
+        list[0] = top;
+
+        //      A lone "-" is the directory OLDPWD names, as cd reads it, and
+        //      that is the name the push goes under. As with cd -, the
+        //      directory moved to is said before the stack is.
+        bool said_previous = false;
+
+        if (named && word_is(named, "-"))
+        {
+                named = env_get("OLDPWD");
+                said_previous = true;
+
+                if (!named)
+                        return shell_refuse(1, "pushd: OLDPWD not set\n");
+        }
+
         if (named && !shell_dirstack_spec(named))
         {
                 //      A name rather than an index: with -n it goes into the
                 //      stack under the top and the shell stays put.
                 if (stack_only)
                 {
-                        string_address kept[SHELL_DIRSTACK_MAX + 1];
                         positive used = 0;
 
-                        kept[used++] = named;
+                        rotated[used++] = named;
 
                         if (count > 1)
                         {
-                                memory_copy(kept + used, list + 1,
+                                memory_copy(rotated + used, list + 1,
                                             (count - 1) * sizeof(*list));
                                 used += count - 1;
                         }
 
-                        if (!shell_dirstack_write(kept, used))
+                        if (!shell_dirstack_write(rotated, used))
                                 return shell_answered(1, "pushd: directory stack full\n");
 
                         shell_dirstack_listed(write, false, false, false);
@@ -6669,6 +6784,9 @@ COLD fn shell_pushd(writer write)
 
                 if (!shell_dirstack_write(rotated, count))
                         return shell_answered(1, "pushd: directory stack full\n");
+
+                if (said_previous)
+                        string_format(write, "%s\n", wanted);
 
                 shell_dirstack_listed(write, false, false, false);
 
@@ -6730,11 +6848,17 @@ COLD fn shell_pushd(writer write)
         //      -n rotates and stays: the shell keeps the directory it is in,
         //      which is still the top of what is listed, so the entry the
         //      rotation brought up is written under it rather than moved to.
-        //      The move comes first, so a move that fails leaves the stack
-        //      as it was; the move does not touch the pool the kept part is
-        //      read from.
+        //      The move comes first, so a move that fails writes nothing
+        //      the shell did not do; the move does not touch the pool the
+        //      kept part is read from.
         if (!stack_only && !shell_dirstack_move(wanted))
         {
+                //      Bash takes the directory it could not enter out of the
+                //      rotation and keeps the rest of it, in the order the
+                //      rotation left them, with the shell where it was.
+                if (!shell_dirstack_write(rotated + 1, count - 1))
+                        return shell_answered(1, "pushd: directory stack full\n");
+
                 return shell_refuse(1,
                     "pushd: %s: No such file or directory\n", wanted);
         }
@@ -6756,8 +6880,9 @@ COLD fn shell_popd(writer write)
         positive count;
         string_address address_to list = shell_dirstack_entries(
             address_of count);
-        string_address kept[SHELL_DIRSTACK_MAX + 1];
+        string_address address_to kept;
         p8 wanted[SHELL_DIRECTORY_MAX];
+        p8 top[SHELL_DIRECTORY_MAX];
         positive index = 0;
         positive used = 0;
         //      -n asks for the stack to lose an entry and the shell to stay
@@ -6808,6 +6933,16 @@ COLD fn shell_popd(writer write)
         if (named && !shell_dirstack_index(named, count, address_of index))
                 return shell_answered(1, "popd: %s: directory stack index out of range\n",
                            named);
+
+        kept = shell_dirstack_work_take(count);
+
+        if (!kept)
+                return shell_answered(1, "popd: directory stack full\n");
+
+        //      The top is copied out before a move can rewrite it, as pushd
+        //      does; a removal of the top keeps nothing of it.
+        string_copy_max_end(top, shell_directory, sizeof(top) - 1);
+        list[0] = top;
 
         //      With -n the top is never the one that goes.
         if (stack_only && !index)
@@ -7330,14 +7465,16 @@ COLD fn shell_pwd(writer write)
                         //      Posix mode says it twice once it has failed
                         //      before, having lost the directory it kept.
                         for (positive said = asks && shell_pwd_failed ? 2 : 1; said; said--)
-                                log_error("pwd: error retrieving current directory: getcwd: "
-                                          "cannot access parent directories: "
-                                          "No such file or directory\n", 0);
+                                string_format(log_error,
+                                    "pwd: error retrieving current directory: getcwd: "
+                                    "cannot access parent directories: %s\n",
+                                    system_error_message(shell_here_error));
                 }
                 else
                 {
                         shell_diagnostic_where();
-                        log_error("pwd: getcwd() failed: No such file or directory\n", 0);
+                        string_format(log_error, "pwd: getcwd() failed: %s\n",
+                                      system_error_message(shell_here_error));
                 }
 
                 shell_pwd_failed = true;
@@ -14632,7 +14769,10 @@ COLD fn shell_read(writer write)
         p8 which;
         while (shell_option_letter(address_of options, address_of which))
         {
-                if (which == 'r' || which == 's' || which == 'e')
+                //      -e and -E ask for line editing, which only a terminal
+                //      has; from a pipe or a file both read as they do
+                //      without them, as Bash reads them.
+                if (which == 'r' || which == 's' || which == 'e' || which == 'E')
                 {
                         raw |= which == 'r';
                         hidden |= which == 's';
@@ -15040,9 +15180,12 @@ COLD fn shell_read(writer write)
                 {
                         string_address one = read_line;
 
+                        //      A zero count read nothing, and Bash's array is
+                        //      empty rather than one empty element.
                         if (!shell_array_words(array_name,
                                                string_length(array_name),
-                                               address_of one, 1))
+                                               address_of one,
+                                               limited && !limit ? 0 : 1))
                                 return shell_answer(2);
                 }
                 else
@@ -15077,7 +15220,12 @@ COLD fn shell_read(writer write)
         {
                 positive count = 0;
                 string_address field;
-                while ((field = read_field(address_of at, false)))
+
+                //      A count of zero reads no characters, so there is no
+                //      field to make: Bash leaves the array empty, where the
+                //      limit would otherwise make one empty word.
+                while (!(limited && !limit) &&
+                       (field = read_field(address_of at, false)))
                 {
                         if (!shell_array_room(read_words, read_words_room, count + 1))
                                 return shell_answered(2, "%s: no room\n", "read");
@@ -15117,6 +15265,67 @@ COLD fn shell_read(writer write)
 static p8 address_to mapfile_text;
 static positive mapfile_room;
 
+//      One word of a callback command, in single quotes, so that the line it
+//      runs holds the words exactly as they were given, whatever they hold.
+static COLD bool mapfile_word_add(byte_store address_to store, string_address word)
+{
+        positive length = string_length(word);
+        positive quotes = 0;
+
+        for (positive at = 0; at < length; at++)
+                quotes += word[at] == '\'';
+
+        if (!byte_store_reserve(store, store->used + length + 2 + quotes * 3 + 1, 256))
+                return false;
+
+        store->bytes[store->used++] = '\'';
+        for (positive at = 0; at < length; at++)
+        {
+                if (word[at] == '\'')
+                {
+                        memory_copy(store->bytes + store->used, "'\\''", 4);
+                        store->used += 4;
+                }
+                else
+                        store->bytes[store->used++] = word[at];
+        }
+        store->bytes[store->used++] = '\'';
+        store->bytes[store->used++] = ' ';
+
+        return true;
+}
+
+//      mapfile -C runs its callback as a command of its own words, with the
+//      index of the element about to be assigned and the line itself. Its
+//      answer does not stop the read, as bash's does not.
+static COLD bool mapfile_callback_run(string_address callback, positive index,
+                                      string_address line)
+{
+        byte_store text = {null, 0, 0};
+        p8 digits[24];
+        bool built;
+
+        positive length = positive_into_string(digits, index);
+        digits[length] = end;
+
+        built = mapfile_word_add(address_of text, callback) &&
+                mapfile_word_add(address_of text, digits) &&
+                mapfile_word_add(address_of text, line);
+        if (built && byte_store_reserve(address_of text, text.used + 2, 16))
+        {
+                text.bytes[text.used++] = '\n';
+                text.bytes[text.used] = end;
+
+                parse_nest_enter();
+                run_lines(text.bytes);
+                parse_nest_leave();
+        }
+        if (text.bytes)
+                memory_free(text.bytes, text.room);
+
+        return built;
+}
+
 COLD fn shell_mapfile(writer write)
 {
         string_address name = (string_address) "MAPFILE";
@@ -15135,6 +15344,8 @@ COLD fn shell_mapfile(writer write)
         bool append = false;
         bool finished = false;
         b32 from = 0;
+        string_address callback = null;
+        positive quantum = 5000;
 
 
         shell_option_walk options = {.index = 1};
@@ -15147,7 +15358,7 @@ COLD fn shell_mapfile(writer write)
                         continue;
                 }
                 p8 said[2] = {which, end};
-                if (!string_first_of("nsOduc", which))
+                if (!string_first_of("nsOducC", which))
                 {
                         if (shell_letter_bad(shell_argv[0], which))
                                 string_format(log_error,
@@ -15169,17 +15380,23 @@ COLD fn shell_mapfile(writer write)
                         continue;
                 }
 
+                if (which == 'C')
+                {
+                        callback = value;
+                        continue;
+                }
+
                 //      -c is how many records go by between calls to the -C
-                //      callback. There is no callback here, and Bash reads
-                //      the number and does nothing with it when none was
-                //      given, so a quantum on its own changes nothing but
-                //      must still be taken.
+                //      callback, 5000 when none is given. Bash checks it
+                //      whether or not there is a callback, and a quantum
+                //      that is no positive number stops the read.
                 if (which == 'c')
                 {
                         if (!read_nonnegative(value, (positive)bipolar_max,
-                                              address_of asked))
-                                return shell_answered(2, "%s: %s: bad number\n",
+                                              address_of asked) || !asked)
+                                return shell_answered(1, "%s: %s: invalid callback quantum\n",
                                     shell_argv[0], value);
+                        quantum = asked;
                         continue;
                 }
 
@@ -15277,11 +15494,19 @@ COLD fn shell_mapfile(writer write)
                         positive end_at = trim ? stop : next;
                         p8 held = mapfile_text[end_at];
                         mapfile_text[end_at] = end;
-                        failed = origin > (positive)bipolar_max - count ||
-                            !shell_array_set(name, name_length, written,
-                                     bipolar_into_string(
-                                         written, (bipolar)(origin + count)),
-                                     mapfile_text + at, false);
+
+                        //      The callback sees the line before its element
+                        //      is assigned, and every quantum-th line is one
+                        //      it is called for.
+                        failed = callback && (count + 1) % quantum == 0 &&
+                            !mapfile_callback_run(callback, origin + count,
+                                                  mapfile_text + at);
+                        if (!failed)
+                                failed = origin > (positive)bipolar_max - count ||
+                                    !shell_array_set(name, name_length, written,
+                                             bipolar_into_string(
+                                                 written, (bipolar)(origin + count)),
+                                             mapfile_text + at, false);
                         mapfile_text[end_at] = held;
                         count++;
                 }
@@ -24004,16 +24229,22 @@ static bool shell_command_path_allowed(string_address name, bool diagnose)
         Assigning PATH throws the whole table away, because every answer in it
         was about the old one.
 */
-#define HASH_MAX 64
-#define HASH_STORAGE 4096
-
-static string_address hash_name[HASH_MAX];
-static string_address hash_path[HASH_MAX];
+//      The table has no size of its own, as bash's has none: the names, the
+//      paths and the counts are tables that shell_array_room extends, and
+//      the bytes they point into are one store that grows the same way. Each
+//      table has its own room, because shell_array_room answers with the
+//      room it made.
+static string_address address_to hash_name;
+static positive hash_name_room;
+static string_address address_to hash_path;
+static positive hash_path_room;
 // How many times the executor has used each answer, which is what bash's
 // listing shows beside it. Remembering an answer the executor found counts
 // as its first use; hash and hash -p write one that has had none.
-static positive hash_hits[HASH_MAX];
-static p8 hash_storage[HASH_STORAGE];
+static positive address_to hash_hits;
+static positive hash_hits_room;
+static p8 address_to hash_storage;
+static positive hash_storage_room;
 static positive hash_used;
 static positive hash_count;
 
@@ -24021,6 +24252,17 @@ fn hash_forget()
 {
         hash_count = 0;
         hash_used = 0;
+}
+
+//      The table's position of a name, or hash_count when it is not there.
+//      An empty table has no array to search.
+static positive hash_at(string_address name)
+{
+        if (!hash_count)
+                return 0;
+
+        return string_table_find(name, hash_name, sizeof(hash_name[0]),
+                                 hash_count);
 }
 
 static bool shell_hash_entry_at(positive at, string_address address_to name,
@@ -24036,8 +24278,7 @@ static bool shell_hash_entry_at(positive at, string_address address_to name,
 
 PURE string_address hash_find(string_address name)
 {
-        positive at = string_table_find(name, hash_name, sizeof(hash_name[0]),
-                                        hash_count);
+        positive at = hash_at(name);
 
         return at < hash_count ? hash_path[at] : null;
 }
@@ -24046,13 +24287,31 @@ HOT fn hash_remember(string_address name, string_address path)
 {
         positive name_length = string_length(name);
         positive path_length = string_length(path);
+        p8 address_to before = hash_storage;
 
         if (hash_find(name))
                 return;
 
-        if (hash_count >= HASH_MAX ||
-            hash_used + name_length + path_length + 2 > HASH_STORAGE)
+        if (!shell_array_room(hash_name, hash_name_room, hash_count + 1) ||
+            !shell_array_room(hash_path, hash_path_room, hash_count + 1) ||
+            !shell_array_room(hash_hits, hash_hits_room, hash_count + 1) ||
+            !shell_array_room(hash_storage, hash_storage_room,
+                              hash_used + name_length + path_length + 2))
                 return;
+
+        //      The store moved if it grew, and every name and path already
+        //      in the table points into the old one: each pointer moves by
+        //      the distance the store did.
+        if (before && before != hash_storage)
+        {
+                p64 moved = (p64)hash_storage - (p64)before;
+
+                for (positive at = 0; at < hash_count; at++)
+                {
+                        hash_name[at] = (p8 address_to)((p64)hash_name[at] + moved);
+                        hash_path[at] = (p8 address_to)((p64)hash_path[at] + moved);
+                }
+        }
 
         hash_name[hash_count] = hash_storage + hash_used;
         memory_copy(hash_storage + hash_used, name, name_length + 1);
@@ -24068,8 +24327,7 @@ HOT fn hash_remember(string_address name, string_address path)
 
 static fn hash_hits_set(string_address name, positive hits)
 {
-        positive at = string_table_find(name, hash_name, sizeof(hash_name[0]),
-                                        hash_count);
+        positive at = hash_at(name);
 
         if (at < hash_count)
                 hash_hits[at] = hits;
@@ -24078,8 +24336,7 @@ static fn hash_hits_set(string_address name, positive hits)
 // One more use of a remembered answer, when the executor is the one asking.
 static fn hash_used_once(string_address name)
 {
-        positive at = string_table_find(name, hash_name, sizeof(hash_name[0]),
-                                        hash_count);
+        positive at = hash_at(name);
 
         if (at < hash_count)
                 hash_hits[at]++;
@@ -24090,8 +24347,7 @@ static fn hash_used_once(string_address name)
 //      walk that would close it.
 static bool hash_drop(string_address name)
 {
-        positive at = string_table_find(name, hash_name, sizeof(hash_name[0]),
-                                        hash_count);
+        positive at = hash_at(name);
 
         if (at >= hash_count)
                 return false;
@@ -24182,8 +24438,14 @@ fn shell_hash(writer write)
                 //      remembered in is not the order it is listed in.
                 if (shell_bash_compat)
                 {
-                        positive order[HASH_MAX];
-                        p32 chain[HASH_MAX];
+                        static positive address_to order;
+                        static positive order_room;
+                        static p32 address_to chain;
+                        static positive chain_room;
+
+                        if (!shell_array_room(order, order_room, hash_count) ||
+                            !shell_array_room(chain, chain_room, hash_count))
+                                return shell_answer(1);
 
                         for (at = 0; at < hash_count; at++)
                         {
@@ -25637,10 +25899,15 @@ fn shell_ulimit(writer write)
 
                         //      A negative limit is no number to either
                         //      shell; dash reads only digits there.
+                        //      Bash refuses an operand whose block scale
+                        //      overflows. Dash does not check: it wraps the
+                        //      product, which for -f is a limit of 0, and the
+                        //      shell answers as dash does.
                         if (!good || asked < 0 ||
-                            (positive)asked >
-                                (UL_LIMIT_INFINITE - 1) /
-                                    shell_limit_step(chosen))
+                            (shell_bash_compat &&
+                             (positive)asked >
+                                 (UL_LIMIT_INFINITE - 1) /
+                                     shell_limit_step(chosen)))
                         {
                                 shell_answer(shell_bash_compat ? 1 : 2);
 
