@@ -2225,7 +2225,11 @@ static awk_reader address_to awk_reader_for(awk_text address_to name, bool pipe)
                 b32 ends[2];
 
                 if (system_pipe(ends, SHELL_PIPE_CLOSE_ON_EXEC) < 0)
+                {
+                        awk_text_drop(made->name);
+                        made->name = null;
                         return null;
+                }
 
                 made->handle = ends[0];
                 made->live = true;
