@@ -20677,6 +20677,13 @@ static bool du_files_from(string_address list)
                                               writer_shell_name, list, number);
                                 du_status = 1;
                         }
+                        else if (at - start >= FILE_PATH_MAX)
+                        {
+                                log_flush();
+                                string_format(log_error, "du: %w:%p: File name too long\n",
+                                              writer_shell_name, list, number);
+                                du_status = 1;
+                        }
                         else
                         {
                                 du_grand += du_measure(name);
@@ -20688,6 +20695,17 @@ static bool du_files_from(string_address list)
                         // A refused write ends the list, as GNU's does.
                         if (du_seen_broken || du_depth_broken || log_failed())
                                 break;
+                }
+
+                //      A name still open after a whole chunk, with no zero byte
+                //      in it yet, can only grow: it is refused here, not held.
+                if (!done && have - start >= FILE_PATH_MAX)
+                {
+                        log_flush();
+                        string_format(log_error, "du: %w:%p: File name too long\n",
+                                      writer_shell_name, list, number + 1);
+                        du_status = 1;
+                        break;
                 }
 
                 memory_copy(held.bytes, held.bytes + start, have - start);
