@@ -5522,6 +5522,7 @@ static bool tar_sparse_scan(bipolar handle, file_facts address_to facts)
         p64 size = facts->size;
         p64 at = 0;
         bool whole;
+        bool failed = false;
 
         tar_ext_count = 0;
         tar_ext_data = 0;
@@ -5533,17 +5534,27 @@ static bool tar_sparse_scan(bipolar handle, file_facts address_to facts)
                 bipolar hole;
 
                 if (data < 0)
+                {
+                        // ENXIO is the end of the data; any other failure
+                        // leaves the map unknown, so the file goes out dense.
+                        failed = data != -ERROR_NO_DEVICE_ADDRESS;
                         break;
+                }
                 if ((p64)data >= size)
                         break;
                 hole = system_seek(handle, data, 4);
                 if (hole < 0 || (p64)hole > size)
                         hole = (bipolar)size;
                 if (!tar_ext_add((p64)data, (p64)hole - (p64)data))
-                        return false;
+                {
+                        failed = true;
+                        break;
+                }
                 at = (p64)hole;
         }
         (void)system_seek(handle, 0, FILE_SEEK_SET);
+        if (failed)
+                return false;
         whole = tar_ext_count == 1 && tar_ext[0].offset == 0 &&
                 tar_ext[0].length == size;
         return !whole && tar_ext_add(size, 0);
