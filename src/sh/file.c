@@ -26953,18 +26953,16 @@ static bool split_parse_size(string_address text, bool suffixes, bool bare_b,
 
         string_address at = text;
         positive value;
-        positive base = 10;
 
         if (!text)
                 return false;
 
-        if (string_is(at, '0') && (at[1] == 'x' || at[1] == 'X'))
-        {
-                at += 2;
-                base = 16;
-        }
+        //      GNU's xstrtoumax reads a size in base 10 only: 0x10 is refused,
+        //      and a leading plus sign is taken.
+        if (string_is(at, '+'))
+                at++;
 
-        if (!split_digits(address_of at, base, saturate, address_of value))
+        if (!split_digits(address_of at, 10, saturate, address_of value))
                 return false;
 
         p8 suffix = string_get(at);
@@ -28487,6 +28485,9 @@ static b32 file_split()
                 positive last = chunk.n - 1;
                 positive start;
 
+                //      GNU reads the start as a decimal for the width, whatever
+                //      the suffixes' radix: --hex-suffixes=c is no start at all
+                //      for it, and --hex-suffixes=10 needs two places for 250.
                 if (split_suffix_start &&
                     string_digits_checked_exact(split_suffix_start, 10, address_of start) &&
                     start < chunk.n)
@@ -30566,7 +30567,6 @@ static positive hardlink_tree;
 static positive hardlink_root_length;
 static positive hardlink_root_major;
 static positive hardlink_root_minor;
-static b32 hardlink_status;
 //      Set by a visit that asks for the directory it was shown not to be entered.
 static bool hardlink_prune;
 static positive hardlink_temp_number;
@@ -30783,7 +30783,6 @@ static fn hardlink_walk(bipolar directory, string_address name,
         {
                 string_format(log_error, "hardlink: %w is nested too deep\n",
                               writer_shell_quoted_name, shown);
-                hardlink_status = 1;
                 return;
         }
 
@@ -30799,9 +30798,10 @@ static fn hardlink_walk(bipolar directory, string_address name,
 
         if (walk.handle < 0)
         {
-                string_format(log_error, "hardlink: cannot access '%w': %s\n",
-                              writer_terminal_quoted_name, shown, file_reason(walk.handle));
-                hardlink_status = 1;
+                //      util-linux says "cannot read" with the path bare, and
+                //      exits 0 as it does after every error in a run.
+                string_format(log_error, "hardlink: cannot read %w: %s\n",
+                              writer_terminal_name, shown, file_reason(walk.handle));
                 return;
         }
 
@@ -30820,7 +30820,6 @@ static fn hardlink_walk(bipolar directory, string_address name,
                                       writer_terminal_quoted_name, shown,
                                       writer_terminal_quoted_name, entry->d_name,
                                       file_reason(-ERROR_NAME_TOO_LONG));
-                        hardlink_status = 1;
                         continue;
                 }
 
@@ -31030,7 +31029,6 @@ static bool hardlink_hash_one(hardlink_file address_to file)
                 else
                         string_format(log_error, "hardlink: '%w' changed while reading\n",
                                       writer_terminal_quoted_name, path);
-                hardlink_status = 1;
         }
         return stable;
 }
@@ -31050,7 +31048,6 @@ static bool hardlink_equal(hardlink_file address_to one,
                 string_format(log_error, "hardlink: cannot compare '%w' and '%w': %s\n",
                               writer_terminal_quoted_name, one_path, writer_terminal_quoted_name,
                               two_path, file_reason(one_handle < 0 ? one_handle : two_handle));
-                hardlink_status = 1;
                 if (one_handle < 0)
                         one->valid = false;
                 if (two_handle < 0)
@@ -31126,7 +31123,6 @@ static bool hardlink_equal(hardlink_file address_to one,
                               writer_terminal_quoted_name, one_path, writer_terminal_quoted_name,
                               two_path,
                               read_error ? file_reason(read_error) : (string_address)"comparison abandoned");
-                hardlink_status = 1;
         }
         return same && stable;
 }
@@ -31615,7 +31611,6 @@ static void hardlink_link_all(positive master_at, positive other_at, bool clone)
                                                       writer_terminal_name, hardlink_path(keep),
                                                       writer_terminal_name, hardlink_path(duplicate),
                                                       file_reason(-ERROR_NOT_SUPPORTED));
-                                hardlink_status = 1;
                                 other->head = duplicate->next;
                                 continue;
                         }
@@ -31843,7 +31838,6 @@ static b32 file_hardlink()
         utility_arena.used = 0;
         path_table_clear(address_of hardlink_table);
         hardlink_node_count = 0;
-        hardlink_status = 0;
         hardlink_linked = 0;
         hardlink_saved = 0;
         hardlink_compared = 0;
@@ -31871,7 +31865,6 @@ static b32 file_hardlink()
                 {
                         string_format(log_error, "hardlink: cannot get realpath: %w: %s\n",
                                       writer_terminal_name, path, file_reason(there));
-                        hardlink_status = 1;
                         continue;
                 }
 
@@ -32030,7 +32023,7 @@ static b32 file_hardlink()
         if (!hardlink_quiet)
                 hardlink_print_stats(started);
         log_flush();
-        return hardlink_status;
+        return 0;
 }
 
 // shred ------------------------------------------------------------
@@ -42579,8 +42572,11 @@ static b32 file_touch()
         //      source too many. -r and -d together are not: the reference
         //      takes the file's times and lets the date move them.
         if (touch_stamp_given && (from || file_option_value(address_of taking, 'd')))
-                return string_report(log_error, 1,
-                                     "touch: cannot specify times from more than one source\n");
+        {
+                string_format(log_error,
+                              "touch: cannot specify times from more than one source\n");
+                return file_try_help((string_address) "touch", 1);
+        }
 
         if (from)
         {
@@ -42756,10 +42752,37 @@ static b32 file_touch()
    timeout and sleep take as forever rather than as a mistake. */
 static bool file_duration_overflowed;
 
+/*
+        A duration as the locale writes its decimal point, in the C form the
+        readers below take. The locale's point is read as a point; a dot is
+        still one too, because GNU's sleep falls back to the C locale when
+        the locale's reader stops at it, so 0.5 and 0,5 are both half a second
+        under fr_FR. The text is copied only when the locale's point is not
+        already a dot.
+*/
+static string_address duration_point_text(string_address text)
+{
+        static p8 copy[160];
+        locale_category address_to one = locale_open(LOCALE_NUMERIC);
+        string_address point = one ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL) : null;
+
+        if (!point || !point[0] || point[1] || point[0] == '.')
+                return text;
+
+        positive length = string_length(text);
+
+        if (length >= sizeof(copy))
+                return text;
+        for (positive at = 0; at < length; at++)
+                copy[at] = text[at] == point[0] ? '.' : (p8)text[at];
+        copy[length] = end;
+        return (string_address)copy;
+}
+
 static bool file_duration_read(string_address text, bool units,
                                 positive address_to nanoseconds)
 {
-        text = locale_number_text(text);
+        text = duration_point_text(text);
         file_duration_overflowed = false;
 
         string_address at = text;
@@ -42900,6 +42923,7 @@ static bool sleep_read_other(string_address text, positive address_to total)
         p8 lowered[16];
         positive length = 0;
 
+        at += string_span(at, string_set_space);
         if (string_is(at, '+'))
                 at++;
         while (length < sizeof(lowered) - 1 && string_get(at + length))
@@ -42908,8 +42932,19 @@ static bool sleep_read_other(string_address text, positive address_to total)
                 length++;
         }
         lowered[length] = end;
-        if (string_equals(lowered, "inf") || string_equals(lowered, "infinity") ||
-            string_equals(lowered, "infs") || string_equals(lowered, "infinitys"))
+
+        //      inf or infinity, and then at most one of sleep's unit letters,
+        //      which the reference applies to the infinite span as it does to
+        //      any other: infm, infd and infinityh all sleep forever too.
+        positive stem = 0;
+        if (lowered[0] == 'i' && lowered[1] == 'n' && lowered[2] == 'f')
+                stem = 3;
+        if (stem == 3 && lowered[3] == 'i' && lowered[4] == 'n' && lowered[5] == 'i' &&
+            lowered[6] == 't' && lowered[7] == 'y')
+                stem = 8;
+        if (stem && (!lowered[stem] ||
+                     (!lowered[stem + 1] && (lowered[stem] == 's' || lowered[stem] == 'm' ||
+                                             lowered[stem] == 'h' || lowered[stem] == 'd'))))
         {
                 address_to total = positive_max;
                 return true;
@@ -43033,13 +43068,12 @@ static b32 file_sleep()
 
         return_if(count < 2, file_need_operand((string_address) "sleep"));
 
+        //      GNU's getopt reads every option before any interval is read,
+        //      so a bad option is the error whatever interval came before it.
         bool intervals_only = false;
-        bool refused = false;
-        positive total = 0;
 
         for (positive i = 1; i < count; i++)
         {
-                p64 wanted[2] = {0, 0};
                 string_address word = program_argument((b32)i);
 
                 //      Two dashes close the options: they are not an
@@ -43068,8 +43102,25 @@ static b32 file_sleep()
                                 string_format(log_error,
                                     "sleep: invalid option -- '%s'\n", named);
                         }
-
                         return file_try_help((string_address) "sleep", 1);
+                }
+        }
+
+        bool refused = false;
+        positive total = 0;
+
+        intervals_only = false;
+        for (positive i = 1; i < count; i++)
+        {
+                p64 wanted[2] = {0, 0};
+                string_address word = program_argument((b32)i);
+
+                //      The options were all read above, so only the
+                //      intervals and the closing dashes are left.
+                if (!intervals_only && string_equals(word, "--"))
+                {
+                        intervals_only = true;
+                        continue;
                 }
 
                 /*
@@ -43128,7 +43179,7 @@ static b32 file_stty()
         bipolar answer = system_control(0, TIOCGWINSZ,
                                        address_of size);
 
-        refuse_if(answer < 0, 1, "stty: standard input: %s\n", file_reason(answer));
+        refuse_if(answer < 0, 1, "stty: 'standard input': %s\n", file_reason(answer));
 
         positive_to_string(log, size.rows);
         log(" ", 1);
@@ -45518,6 +45569,7 @@ static b32 file_seq()
                 decimal = (format.conversion | 0x20) == 'f' &&
                           format.width <= reach && shown <= reach &&
                           shown >= scale && !number[0].infinite && !number[1].infinite &&
+                          !number[2].infinite &&
                           seq_decimal_rescale(address_of number[0], scale) &&
                           seq_decimal_rescale(address_of number[1], scale) &&
                           seq_decimal_rescale(address_of number[2], scale) &&
@@ -46996,7 +47048,12 @@ static b32 file_id()
 
         positive have;
 
-        if (!id_groups_process(group, group, address_of have))
+        //      The list leads with the real group whether or not -r was
+        //      asked for: GNU's id -G prints the real gid, then the effective
+        //      one, then the supplementary groups.
+        positive real_group = (positive)system_call(syscall(getgid));
+
+        if (!id_groups_process(real_group, effective_group, address_of have))
                 return string_report(log_error, 1, "id: failed to get groups for the current process\n");
 
         id_written(user, group, file_id_scratch, have, flags, names, zero);
