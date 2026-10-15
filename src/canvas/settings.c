@@ -2086,9 +2086,16 @@ static fn settings_feed_drop(void)
                 settings_finished(true);
 }
 
+//      Read in one turn at most this much: a verb writing forever (yes, a log
+//      that never stops) never answers EAGAIN, and the loop read it for ever
+//      with the window frozen. What is left is read on the next wake.
+#define SETTINGS_DRAIN_BUDGET (64u << 10)
+
 // What the verb running has said, read; its end, heard.
 static fn settings_drain(void)
 {
+        positive budget = SETTINGS_DRAIN_BUDGET;
+
         for (;;)
         {
                 bipolar got;
@@ -2105,6 +2112,9 @@ static fn settings_drain(void)
                 if (got > 0)
                 {
                         settings.said_length += settings.said_length < sizeof(settings_large->said) ? (positive)got : 0;
+                        budget = budget > (positive)got ? budget - (positive)got : 0;
+                        if (!budget)
+                                return;
                         continue;
                 }
                 if (got == 0 || (got != -EAGAIN && got != -EINTR))
