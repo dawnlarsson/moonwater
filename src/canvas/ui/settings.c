@@ -125,8 +125,7 @@
 #ifndef MOONWATER_CANVAS_SETTINGS
 #define MOONWATER_CANVAS_SETTINGS
 
-// The machine's batteries, read from the kernel by battery.c: the Battery row's value is one of them.
-#include "battery.c"
+// The file that includes this one includes battery.c first: the Battery row's value is one of its batteries.
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
 #define SETTINGS_UNREAD 0u
@@ -1548,7 +1547,7 @@ static int settings_run_width(struct ui address_to ui, struct settings_run addre
 */
 static fn settings_wrap(void)
 {
-        int room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, 14);
+        int room = settings.width - 2 * ui_px(&settings.ui, UI_PAD) - 2 * ui_px(&settings.ui, UI_INSET);
         positive at = 0;
 
         if (settings.wrap_made && settings.wrap_width == settings.width && settings.wrap_scale == settings.ui.scale &&
@@ -2138,7 +2137,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
 
         settings.feed_due = clock_monotonic_nanoseconds() + (positive)settings_feeds[feed].every * 1000000ull;
         // What is being typed for a row of the list is for the row as it was: nothing is changed under it.
-        if (killed || settings.editing >= (int)SETTINGS_LIST || settings_feeds[feed].kind == SETTINGS_FEED_ROWS)
+        if (killed || settings.editing >= (int)SETTINGS_LIST)
                 return;
         if (owner >= 0)
         {
@@ -2516,7 +2515,7 @@ static b32 settings_menu_box(int address_to x, int address_to y, int address_to 
         address_to shown = count < most ? count : most;
         address_to height = address_to shown * item + 2 * pad;
         address_to width = settings.menu_width > settings.width - ui_px(&settings.ui, 16) ? settings.width - ui_px(&settings.ui, 16) : settings.menu_width;
-        address_to x = settings_pane_right() - ui_px(&settings.ui, 14) - address_to width;
+        address_to x = settings_pane_right() - ui_px(&settings.ui, UI_INSET) - address_to width;
         address_to x = address_to x < ui_px(&settings.ui, 8) ? ui_px(&settings.ui, 8) : address_to x;
         if (address_to height <= below)
                 address_to y = row_top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4);
@@ -3251,7 +3250,7 @@ static b32 settings_event(const struct window_event address_to event)
                 if (settings.editing != row)
                 {
                         // A step pressed left of its value's middle goes back.
-                        int middle = settings_pane_right() - ui_px(&settings.ui, 14 + 40);
+                        int middle = settings_pane_right() - ui_px(&settings.ui, UI_INSET + 40);
 
                         settings_activate(row, settings_kind(row) == SETTINGS_STEP && settings.pointer_x < middle ? -1 : 1);
                 }
@@ -3292,7 +3291,7 @@ static b32 settings_event(const struct window_event address_to event)
 */
 static fn settings_draw_item(struct ui address_to ui, int at, int y, const struct settings_item address_to item)
 {
-        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, 14);
+        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, UI_INSET);
         int height = ui_px(&settings.ui, UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT), edge = right - inset, gap = ui_px(&settings.ui, 10);
         int text_left = left + inset;
         char cut[SETTINGS_ITEM_LABEL], mask[SETTINGS_ITEM_LABEL * 3 + 1];
@@ -3367,7 +3366,7 @@ static fn settings_draw_item(struct ui address_to ui, int at, int y, const struc
 static fn settings_draw_row(struct ui address_to ui, int at, int y)
 {
         const struct settings_row address_to row = at < SETTINGS_ANY ? &settings_rows[at] : null;
-        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, 14);
+        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, UI_INSET);
         int height = ui_px(&settings.ui, UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT);
         char cut[SETTINGS_VALUE];
         unsigned int state = row ? settings.state[at] : SETTINGS_READ;
@@ -3509,7 +3508,7 @@ static fn settings_draw_list(struct ui address_to ui)
         ui->bottom = list_bottom;
         if (!settings.visible_count)
         {
-                ui_text(ui, left + ui_px(&settings.ui, 14), ui_baseline(ui, list_top, ui_px(&settings.ui, UI_ROW), UI_TEXT),
+                ui_text(ui, left + ui_px(&settings.ui, UI_INSET), ui_baseline(ui, list_top, ui_px(&settings.ui, UI_ROW), UI_TEXT),
                         (string_address) "Nothing matches what is typed", UI_TEXT, false, ui->quiet, 255);
                 return;
         }
@@ -3560,7 +3559,7 @@ static fn settings_draw_card(struct ui address_to ui)
                 size = size >= sizeof(text) ? sizeof(text) - 1 : size;
                 memory_copy(text, settings_large->card + settings_large->card_at[at], size);
                 text[size] = 0;
-                ui_text(ui, left + ui_px(&settings.ui, 14), ui_baseline(ui, y, line, UI_TEXT), (string_address)text, UI_TEXT, false, ui->ink,
+                ui_text(ui, left + ui_px(&settings.ui, UI_INSET), ui_baseline(ui, y, line, UI_TEXT), (string_address)text, UI_TEXT, false, ui->ink,
                         255);
         }
 }
@@ -3634,7 +3633,7 @@ static fn settings_draw_menu(struct ui address_to ui)
         }
 }
 
-// The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom) (every row when it is empty).
+// The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): settings_paint calls it only for a band with rows in it.
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
 {
         struct ui address_to ui = &settings.ui;
@@ -3807,7 +3806,7 @@ static fn settings_size(unsigned int width, unsigned int height)
 
         settings.width = (int)(width > table->output_width ? table->output_width : width);
         settings.height = (int)(height > table->output_height ? table->output_height : height);
-        ui_scratch_fit(&settings.ui, width);
+        ui_scratch_fit(&settings.ui, (unsigned int)settings.width);
         settings_layout();
         settings_scroll_to(settings.view ? settings.card_scroll : settings.scroll);
         settings_side_reveal();
@@ -3915,7 +3914,6 @@ static struct ui_app settings_app = {
 
 static b32 settings_main()
 {
-        claim_standard_descriptors();
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
         settings.editing = -1;

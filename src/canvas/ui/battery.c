@@ -175,9 +175,11 @@ static void battery_fill(string_address name, struct battery_state address_to st
 /*
         Every battery and UPS the machine has, in the order the directory
         gives them, into names (room of them at most), each with its kind. A
-        name is listed once. The answer is how many there are, which can be
-        more than room; the names are not sorted. Nothing is allocated: the
-        block of directory records is on the stack.
+        name is listed once among those kept: a repeat past room is not seen,
+        and is counted again, which no caller can tell, since both clamp the
+        answer to room. The answer is how many there are, which can be more
+        than room; the names are not sorted. Nothing is allocated: the block
+        of directory records is on the stack.
 */
 static positive battery_list(struct battery_name address_to names, positive room)
 {

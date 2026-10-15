@@ -108579,6 +108579,9 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #if MOONWATER_UI_ANY
 #include "../src/canvas/ui/ui.c"
 #endif
+#if MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR
+#include "../src/canvas/ui/battery.c"
+#endif
 #if MOONWATER_UI_SETTINGS
 #include "../src/canvas/ui/settings.c"
 #endif
@@ -108586,7 +108589,6 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/ui/launcher.c"
 #endif
 #if MOONWATER_UI_TASKBAR
-#include "../src/canvas/ui/battery.c"
 #include "../src/canvas/ui/taskbar.c"
 #endif
 
