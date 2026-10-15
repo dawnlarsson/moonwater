@@ -94945,6 +94945,8 @@ PINNED = r"""
 {"case":{"argv":["-a","words","echo"],"fixture":"files","stdin":"empty"},"domain":"files","list":"regression","utility":"xargs"},
 {"case":{"argv":["-d",",","echo"],"fixture":"files","stdin":"files_words"},"domain":"files","list":"regression","utility":"xargs"},
 {"case":{"argv":["-s","60","echo"],"fixture":"files","stdin":"files_words"},"domain":"files","list":"regression","utility":"xargs"},
+{"case":{"argv":["multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},
+{"case":{"argv":["-o","value","-s","TYPE","multi.img"],"fixture":"ul_images","stdin":"empty","tier":"pinned"},"domain":"util_linux","list":"regression","utility":"blkid"},
 {"case":{"argv":["--getalignoff","-v","--getdiscardzeroes","dir"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},
 {"case":{"argv":["-v","--setro","/dev/null"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},
 {"case":{"argv":["-v"],"fixture":"ul","stdin":"empty"},"domain":"util_linux","list":"regression","utility":"blockdev"},

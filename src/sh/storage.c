@@ -1350,7 +1350,17 @@ enum
         STORAGE_LUKS, STORAGE_XFS, STORAGE_SQUASHFS, STORAGE_F2FS,
         STORAGE_EXFAT, STORAGE_NTFS, STORAGE_FAT, STORAGE_EXT, STORAGE_EROFS,
         STORAGE_SWAP, STORAGE_BTRFS, STORAGE_UDF, STORAGE_ISO9660,
-        STORAGE_PROBES,
+};
+
+/* The order every signature walk takes: first-match discovery (blkid, findfs,
+   mount's type probe) and complete enumeration (wipefs, mkswap) both use it.
+   It is libblkid's chain order: where a device carries a valid swap header and
+   an ext superblock, blkid's first match, and so TYPE, is swap. */
+static const p8 storage_probe_order[] = {
+    STORAGE_LUKS, STORAGE_XFS, STORAGE_SQUASHFS, STORAGE_F2FS,
+    STORAGE_EXFAT, STORAGE_FAT, STORAGE_SWAP, STORAGE_NTFS,
+    STORAGE_EXT, STORAGE_EROFS, STORAGE_BTRFS, STORAGE_UDF,
+    STORAGE_ISO9660,
 };
 
 /* Both first-match discovery and complete signature enumeration use these
@@ -1400,19 +1410,13 @@ static positive storage_each_signature_handle(
     storage_signature_visitor visitor, address_any context)
 {
         p8 bytes[STORAGE_PROBE_ROOM];
-        static const p8 order[] = {
-            STORAGE_LUKS, STORAGE_XFS, STORAGE_SQUASHFS, STORAGE_F2FS,
-            STORAGE_EXFAT, STORAGE_FAT, STORAGE_SWAP, STORAGE_NTFS,
-            STORAGE_EXT, STORAGE_EROFS, STORAGE_BTRFS, STORAGE_UDF,
-            STORAGE_ISO9660,
-        };
         positive found = 0;
         positive have = storage_read(handle, bytes, sizeof(bytes), 0);
-        for (positive at = 0; at < array_count(order); at++)
+        for (positive at = 0; at < array_count(storage_probe_order); at++)
         {
                 storage_signature signature = {0};
                 signature.identity.path = path;
-                p8 kind = order[at];
+                p8 kind = storage_probe_order[at];
                 signature.offset = storage_signature_locations[kind].offset;
                 signature.length = storage_signature_locations[kind].length;
                 signature.usage = kind == STORAGE_LUKS ? (string_address)"crypto"
@@ -1469,9 +1473,12 @@ bool storage_probe_device(string_address path,
         have = storage_read(handle, bytes, sizeof(bytes), 0);
 
         /* Container and fixed-superblock formats precede the deliberately
-           broad boot-sector families. */
-        for (p8 kind = 0; kind < STORAGE_PROBES && !identity->type_length; kind++)
-                storage_probe_kind(kind, handle, identity, bytes, have, null);
+           broad boot-sector families: storage_probe_order is that sequence,
+           the same one the enumeration walks. */
+        for (positive at = 0; at < array_count(storage_probe_order) &&
+                              !identity->type_length; at++)
+                storage_probe_kind(storage_probe_order[at], handle, identity,
+                                   bytes, have, null);
 
         system_close(handle);
         return identity->type_length || identity->partuuid_length ||
