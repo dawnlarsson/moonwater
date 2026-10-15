@@ -2351,7 +2351,8 @@ static b32 host_boot(void)
         bool known;
 
         host_state_ready();
-        host_acquire();
+        if (!host_acquire())
+                return 1;
 
         /*      Boot settles a session once, and what it wrote is what the
                 terminals and the machine script have been waiting for. Run
