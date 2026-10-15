@@ -25607,7 +25607,12 @@ static b32 file_whereis()
 
                                 whereis_forget_kind(kind);
 
-                                for (positive next = i + 1; next < count; next++)
+                                //      With no directory after -B the loop below reads
+                                //      nothing, and the word after -B is then
+                                //      skipped as it always was: the reference
+                                //      refuses "whereis -B -f ls" with "option
+                                //      -f is missing", and so do we.
+                                for (positive next = ++i; next < count; next++)
                                 {
                                         string_address dir =
                                             program_argument((b32)next);
