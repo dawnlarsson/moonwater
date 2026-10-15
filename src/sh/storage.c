@@ -3355,7 +3355,10 @@ COLD b32 storage_findmnt(positive argc, string_address address_to argv,
                                           have_query_id, query_id, submounts,
                                           address_of lines, address_of line_room,
                                           address_of line_count))
+                {
+                        array_store_release(lines, line_room, line_count);
                         return 1;
+                }
                 /*  --list and the export shapes keep the subtree
                     --submounts reached and drop the drawing of it. */
                 options.lines = direct || options.list ? null : lines;
