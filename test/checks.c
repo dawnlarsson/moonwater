@@ -32666,8 +32666,42 @@ static fn shell_asm_take_run(string_address address_to argv, positive argc,
         }
 }
 
+/*
+        A long name that is exactly a row, with two rows that begin with it
+        before it in the table. Prefix matching may take a unique prefix, but
+        an exact name is the answer whatever order the rows come in, so the
+        lookup must reach the exact row after the second prefix match. The
+        randomized walk above compares against the C lookup it shares a source
+        with, so an error both sides make is invisible to it; this case states
+        the answer.
+*/
+static fn shell_asm_exact_after_prefixes(void)
+{
+        static const argument_option rows[] = {
+            {(string_address)"ab-x", 'x', 0, 1},
+            {(string_address)"ab-y", 'y', 0, 2},
+            {(string_address)"ab", 'z', 0, 3},
+            {null},
+        };
+        string_address argv[2] = {(string_address)"--ab", null};
+        argument_cursor cursor = {.argc = 1, .argv = argv, .at = 0};
+        argument_match match;
+        b32 answer;
+
+        memory_fill(address_of match, 0x5a, sizeof(match));
+        answer = argument_option_take(address_of cursor, rows, true, address_of match);
+        checks++;
+        if (answer != 'z' || match.letter != 'z' || match.selection != 3)
+        {
+                failures++;
+                string_format(log, "FAIL exact long name after two prefixes: %p\n",
+                              (positive)(bipolar)answer);
+        }
+}
+
 static fn shell_asm_arguments(p8 address_to pages)
 {
+        shell_asm_exact_after_prefixes();
         static argument_option table[24];
         static char names[24][16];
         static char words[16][24];
@@ -46111,6 +46145,14 @@ test(exact_answers)
         //      A negative base and a fractional exponent is not a real
         //      number and has to say so.
         fail(decimal_is_nan(power(-2.0, 0.5)));
+        //      Every double from 2^52 up is a whole number, so a negative
+        //      base to one of them is +1 or -1 by the parity of the exponent.
+        //      math_whole_kind shifted by 64 at this exponent, and the bit it
+        //      read as "not whole" turned each of these into a NaN.
+        fail(power(-1.0, 4503599627370496.0) == 1.0);
+        fail(power(-1.0, 4503599627370497.0) == -1.0);
+        fail(power(-1.0, 9007199254740990.0) == 1.0);
+        fail(power(-1.0, 9007199254740991.0) == -1.0);
         fail(decimal_is_nan(logarithm(-1.0)));
         fail(decimal_is_nan(arc_sine(1.5)));
         fail(decimal_is_nan(arc_cosine(-1.5)));
@@ -50123,6 +50165,42 @@ static fn test_exec(void)
         words[2] = (string_address) "exit 7";
         words[3] = null;
         same("execv ran the shell", test_run(words, false), 7);
+
+        //      A script with no #! line, run with no arguments after argv[0].
+        //      The kernel refuses it with ENOEXEC and execvp hands it to
+        //      /bin/sh with the script as the operand; the operand was lost
+        //      when there were no arguments, and sh read its standard input.
+        //      execv does not retry (glibc's does not either); the PATH walk of
+        //      execvp does, so this runs execvpe with PATH naming the cwd and an
+        //      empty argument vector, which is the case that lost the operand.
+        {
+                static const char script[] = "exit 7\n";
+                bipolar made = system_call_4(syscall(openat), (positive)AT_FDCWD,
+                                             (positive)"pd-no-shebang",
+                                             O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0755);
+                string_address script_words[1] = {null};
+                string_address script_env[2] = {(string_address) "PATH=.", null};
+
+                if (made >= 0)
+                {
+                        system_call_3(syscall(write), (positive)made,
+                                      (positive)script, sizeof(script) - 1);
+                        system_close(made);
+                }
+                log_flush();
+                b32 script_child = fork();
+                if (script_child == 0)
+                {
+                        setenv((string_address) "PATH", (string_address) ".", 1);
+                        execvpe((string_address) "pd-no-shebang", script_words, script_env);
+                        _exit(100 + errno);
+                }
+                b32 script_status = 0;
+                waitpid(script_child, address_of script_status, 0);
+                same("execvp's PATH walk runs a script with no #! line and no arguments",
+                     WIFEXITED(script_status) ? WEXITSTATUS(script_status) : -1, 7);
+                system_remove_at(AT_FDCWD, (string_address) "pd-no-shebang", 0);
+        }
 
         words[0] = (string_address) "sh";
         same("execvp found the shell on PATH", test_run(words, true), 7);
@@ -98301,6 +98379,16 @@ b32 main(void)
         slurp_test_store(regular);
         slurp_test_fifo(open_fifo, true);
         slurp_test_fifo(read_fifo, false);
+
+        //      Taking nothing from a null reader is not a failure. skip read
+        //      the null that take gives back for that as a failed read, so the
+        //      reader that a zero-length window hands on reported a failure.
+        {
+                byte_reader empty_reader = byte_reader_open(null, 0);
+
+                check("skipping nothing from a null reader succeeds",
+                      byte_reader_skip(address_of empty_reader, 0) && !empty_reader.failed);
+        }
 
         return test_report(null);
 }
