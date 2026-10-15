@@ -37595,6 +37595,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 {
                         file_path_failed(program, "cannot open", writer_shell_quoted_name,
                                          source_shown, pinned, 0);
+                        mv_across_said |= moving;
                         return false;
                 }
 
@@ -37608,6 +37609,7 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                 {
                         file_path_failed(program, "cannot read symbolic link", writer_shell_quoted_name,
                                          source_shown, length < 0 ? length : -ERROR_NAME_TOO_LONG, 0);
+                        mv_across_said |= moving;
                         return false;
                 }
                 target[length] = end;
