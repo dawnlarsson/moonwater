@@ -599,19 +599,34 @@ struct windows
         int event_a[WINDOWS][WINDOWS_EVENTS], event_b[WINDOWS][WINDOWS_EVENTS];
 };
 
-// Row row's buffer which, where the table says it is: for the program, which made none of it.
+// Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
+// constant here and not the header's pixels field, which any mapper of the table may write.
+#define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
+
+// Row row's buffer which, for a caller holding the table: the buffer's size is the header's, which the compositor
+// wrote and any mapper may write too, so the program's own copy (windows_pixels) is the one to draw through.
 #define windows_buffer(table, row, which)                                                              \
-        ((unsigned int *)((char *)(table) + (table)->pixels +                                          \
+        ((unsigned int *)((char *)(table) + WINDOWS_HEADER +                                           \
                           ((unsigned long)(row) * 2 + ((which) & 1u)) * (table)->buffer))
 
-// What a program has of its window: the table, its row, and its two ends.
+// What a program has of its window: the table, its row, and its two ends. The rest is the program's copy of the
+// header, taken once by windows_take and checked there: the table is shared, so a peer may write its header.
 struct window_row
 {
         struct windows *table;
         unsigned int row;
         long door, wake;
         unsigned long bytes;
+        unsigned long buffer;
+        unsigned int stride, output_width, output_height;
 };
+
+// Row row's buffer which, through the program's copy of the header: the one it draws into and gives back.
+static inline unsigned int *windows_pixels(const struct window_row *own, unsigned int which)
+{
+        return (unsigned int *)((char *)own->table + WINDOWS_HEADER +
+                                ((unsigned long)own->row * 2 + (which & 1u)) * own->buffer);
+}
 
 // One event, read out of a row's columns.
 struct window_event
@@ -931,21 +946,76 @@ static void windows_door_name(char *into, unsigned int row, int wake)
         into[at] = 0;
 }
 
+/*
+        The wake read until it has no more: a read that comes back short had the pipe empty as it read, and a knock
+        after that is still in the pipe for the next wait (a ppoll that is readable), so the read that would answer
+        EAGAIN is not made. A knock is one byte, so a wakeup is one read.
+*/
 static void windows_drain(long handle)
 {
         char bytes[64];
+        long got;
 
-        while (window_call(WINDOW_SYS_READ, handle, (long)bytes, sizeof(bytes), 0, 0, 0) > 0)
-                ;
+        do
+                got = window_call(WINDOW_SYS_READ, handle, (long)bytes, sizeof(bytes), 0, 0, 0);
+        while (got == (long)sizeof(bytes));
 }
 
 /*
-        A row taken: the table mapped, the first row with no pid given this one, the program's columns
-        cleared, and its door and its wake opened. The door is opened for writing first, which fails when
-        no compositor holds its other end, and then for reading and writing, which is the end kept: a
-        knock on a door whose compositor has gone is then a byte in a pipe and never a SIGPIPE. Answers 0
-        or a negative errno.
+        Whether a header describes a table of size bytes that can be drawn through: the pixels where the layout puts
+        them, every buffer a whole number of pages and all 2 * WINDOWS of them inside the mapping, and each row of a
+        buffer stride pixels long with stride at least the output's width, the rows used fitting in the buffer. The
+        compositor writes exactly that; a table that does not is refused, not drawn through.
 */
+static int windows_fits(unsigned long size, unsigned long pixels, unsigned long buffer, unsigned int stride,
+                        unsigned int width, unsigned int height)
+{
+        if (pixels != WINDOWS_HEADER || size < WINDOWS_HEADER || !buffer || buffer % 4096)
+                return 0;
+        if (buffer > (size - WINDOWS_HEADER) / (2 * WINDOWS))
+                return 0;
+        if (!width || !height || stride < width)
+                return 0;
+        return buffer / 4 / stride >= height;
+}
+
+/*
+        A row's program fields put back as a row never taken has them. It runs after the row is claimed and before
+        its pid is stored as the program's, so a peer that finds the pid finds a row with no picture, no hover and no
+        damage. pinned is not among them: it is the compositor's, and is 1 while the card may still read the row's
+        buffers after the row has left (compositor_window_fb_drop runs once the card is off them), so clearing it
+        here would let windows_discard give back pages the card reads.
+*/
+static void windows_reset_row(struct windows *table, unsigned int row)
+{
+        table->state[row] = 0;
+        table->x[row] = table->y[row] = 0;
+        table->width[row] = table->height[row] = 0;
+        table->want_width[row] = table->want_height[row] = 0;
+        table->buffer_index[row] = 0;
+        table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
+        table->title[row][0] = 0;
+        table->glass[row] = 0;
+        table->ground[row] = 0;
+        __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->hover_off[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
+        table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
+        __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
+}
+
+/*
+        A row taken: the table mapped and its header copied and checked (-22 when it does not fit), the first row
+        with no pid given this one, the row's program fields reset, and its door and its wake opened. The row is
+        claimed with WINDOWS_TAKING, a pid no peer takes for a program, and the program's pid is stored last, so a
+        peer never finds a row half reset. The door is opened for writing first, which fails when no compositor
+        holds its other end, and then for reading and writing, which is the end kept: a knock on a door whose
+        compositor has gone is then a byte in a pipe and never a SIGPIPE. Answers 0 or a negative errno.
+*/
+#define WINDOWS_TAKING 0x80000000u
+
 static long windows_take(struct window_row *own)
 {
         long spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
@@ -953,6 +1023,8 @@ static long windows_take(struct window_row *own)
         long size, mapped, probe;
         unsigned int pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
         struct windows *table;
+        unsigned long pixels, buffer;
+        unsigned int stride, width, height;
         char name[48];
 
         // The table from the device, which hands any program the compositor's; the path where it gave none
@@ -972,14 +1044,29 @@ static long windows_take(struct window_row *own)
                 return mapped;
 
         table = (struct windows *)mapped;
+        // The header read once, each field into the program's copy, and checked there: a peer may write any of it.
+        pixels = __atomic_load_n(&table->pixels, __ATOMIC_ACQUIRE);
+        buffer = __atomic_load_n(&table->buffer, __ATOMIC_ACQUIRE);
+        stride = __atomic_load_n(&table->stride, __ATOMIC_ACQUIRE);
+        width = __atomic_load_n(&table->output_width, __ATOMIC_ACQUIRE);
+        height = __atomic_load_n(&table->output_height, __ATOMIC_ACQUIRE);
+        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height))
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
+                return -22; // EINVAL
+        }
         own->table = table;
         own->bytes = (unsigned long)size;
+        own->buffer = buffer;
+        own->stride = stride;
+        own->output_width = width;
+        own->output_height = height;
 
         for (own->row = 0; own->row < WINDOWS; own->row++)
         {
                 unsigned int none = 0;
 
-                if (__atomic_compare_exchange_n(&table->pid[own->row], &none, pid, 0, __ATOMIC_ACQ_REL,
+                if (__atomic_compare_exchange_n(&table->pid[own->row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL,
                                                 __ATOMIC_RELAXED))
                         break;
         }
@@ -989,6 +1076,7 @@ static long windows_take(struct window_row *own)
                 window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
                 return -28; // ENOSPC
         }
+        windows_reset_row(table, own->row);
 
         windows_door_name(name, own->row, 0);
         probe = window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_WRITE, 0, 0, 0);
@@ -1011,16 +1099,7 @@ static long windows_take(struct window_row *own)
         }
 
         windows_drain(own->wake);
-        table->state[own->row] = 0;
-        table->x[own->row] = table->y[own->row] = 0;
-        table->width[own->row] = table->height[own->row] = 0;
-        table->buffer_index[own->row] = 0;
-        table->damage_width[own->row] = 0;
-        table->title[own->row][0] = 0;
-        table->glass[own->row] = 0;
-        table->event_tail[own->row] = __atomic_load_n(&table->event_head[own->row], __ATOMIC_ACQUIRE);
-        table->shown[own->row] = 0;
-        __atomic_store_n(&table->frame[own->row], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->pid[own->row], pid, __ATOMIC_RELEASE);
         return 0;
 }
 
@@ -1114,8 +1193,7 @@ static void windows_discard(const struct window_row *own, unsigned int which)
         if (__atomic_load_n(&own->table->pinned[own->row], __ATOMIC_ACQUIRE))
                 return;
         // MADV_REMOVE
-        window_call(WINDOW_SYS_MADVISE, (long)windows_buffer(own->table, own->row, which), (long)own->table->buffer,
-                    9, 0, 0, 0);
+        window_call(WINDOW_SYS_MADVISE, (long)windows_pixels(own, which), (long)own->buffer, 9, 0, 0, 0);
 }
 
 // The window gone: its door closed, which is all the compositor needs.

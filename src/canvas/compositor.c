@@ -3368,7 +3368,7 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         fb.height = (unsigned int)compositor.height;
         fb.format = COMPOSITOR_XRGB8888;
         fb.handles[0] = prime.handle;
-        fb.pitches[0] = compositor.table->stride * 4;
+        fb.pitches[0] = (unsigned int)compositor.width * 4;
         if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0)
         {
                 unsigned int close[2] = {prime.handle, 0};
@@ -3469,6 +3469,14 @@ static void compositor_card_read(void)
 }
 
 // What the tabs covered of the buffer the card shows, put back, so what is made from it (the glass) is the window's.
+// Row's buffer which, from the compositor's own copy of the layout: the table is shared, so the header's pixels,
+// buffer and stride are a client's to write, and the compositor draws through what it set itself.
+static unsigned int *compositor_buffer(int row, unsigned int which)
+{
+        return (unsigned int *)((char *)compositor.table + compositor.pixels +
+                                ((unsigned long)row * 2 + (which & 1u)) * compositor.buffer);
+}
+
 static void compositor_direct_unpatch(void)
 {
         int row = compositor.direct_row;
@@ -3478,9 +3486,9 @@ static void compositor_direct_unpatch(void)
 
         if (row < 0 || !compositor.patched[row][which] || !compositor.under[which])
                 return;
-        pixels = windows_buffer(compositor.table, row, which);
+        pixels = compositor_buffer(row, which);
         for (int y = rect[1]; y < rect[3]; y++)
-                memory_copy(pixels + (unsigned long)y * compositor.table->stride + (unsigned long)rect[0],
+                memory_copy(pixels + (unsigned long)y * (unsigned long)compositor.width + (unsigned long)rect[0],
                             compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
                             (unsigned long)(rect[2] - rect[0]) * 4);
         compositor.patched[row][which] = 0;
@@ -3490,7 +3498,7 @@ static void compositor_direct_unpatch(void)
 static void compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
 {
         int rect[4] = {compositor.width, compositor.height, 0, 0};
-        unsigned int *pixels = windows_buffer(compositor.table, row, which);
+        unsigned int *pixels = compositor_buffer(row, which);
         struct windows *table = compositor.table;
 
         for (unsigned int at = 0; at < count; at++)
@@ -3521,10 +3529,11 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         }
         for (int y = rect[1]; y < rect[3]; y++)
                 memory_copy(compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
-                            pixels + (unsigned long)y * table->stride + (unsigned long)rect[0], (unsigned long)(rect[2] - rect[0]) * 4);
+                            pixels + (unsigned long)y * (unsigned long)compositor.width + (unsigned long)rect[0],
+                            (unsigned long)(rect[2] - rect[0]) * 4);
         memory_copy(compositor.under_rect[which], rect, sizeof(rect));
 
-        struct compositor_target target = {pixels, table->stride, compositor.width, compositor.height,
+        struct compositor_target target = {pixels, (unsigned long)compositor.width, compositor.width, compositor.height,
                                            rect[0], rect[1], rect[2], rect[3]};
 
         for (unsigned int at = 0; at < count; at++)
@@ -7106,14 +7115,13 @@ static b32 compositor_main()
 static void surface_draw(const struct window_row *own, unsigned int which, unsigned int width, unsigned int height,
                          unsigned int colour, string_address font, string_address text)
 {
-        struct windows *table = own->table;
-        unsigned int *pixels = windows_buffer(table, own->row, which);
+        unsigned int *pixels = windows_pixels(own, which);
 
         for (unsigned int line = 0; line < height; line++)
-                memory_fill_u32(pixels + (unsigned long)line * table->stride, width, colour);
+                memory_fill_u32(pixels + (unsigned long)line * own->stride, width, colour);
 
         // Glass has no ground to draw text on.
-        if (font && !table->glass[own->row])
+        if (font && !own->table->glass[own->row])
         {
                 positive size = 0;
                 positive bytes = compositor_map_file(font, address_of size);
@@ -7121,7 +7129,7 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
                 long engine = compositor_call(syscall(mmap), 0, atlas_at + 256 * 256, 3, 0x22, (positive)-1, 0);
                 font_face face;
                 const font_face address_to faces[1] = {&face};
-                font_target target = {pixels, table->stride, (b32)width, (b32)height};
+                font_target target = {pixels, own->stride, (b32)width, (b32)height};
                 p32 em = 16 << 6;
 
                 if (bytes && !(engine < 0 && engine > -4096) && font_load(&face, (const p8 address_to)bytes, size, 0) == 0)
@@ -7142,9 +7150,9 @@ static void surface_draw(const struct window_row *own, unsigned int which, unsig
                         compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
         }
 
-        table->width[own->row] = width;
-        table->height[own->row] = height;
-        table->damage_width[own->row] = 0;
+        own->table->width[own->row] = width;
+        own->table->height[own->row] = height;
+        own->table->damage_width[own->row] = 0;
 }
 
 static b32 surface_main()

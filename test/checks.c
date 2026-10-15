@@ -53966,6 +53966,43 @@ static fn windows_client(void)
 }
 #endif
 
+/*
+        What windows_take checks in the header a peer may write, and what a row's reset clears. A header the
+        compositor could have written is taken; one that is not (pixels off the layout, a buffer that is not whole
+        pages or runs past the mapping, a stride narrower than the output, a buffer shorter than the rows used) is
+        refused. A reset row has no hover, glass, lift, spoiled rows or wanted size left; its pinned is kept,
+        because the card may still read the buffers it names.
+*/
+static fn windows_header(void)
+{
+        static struct windows table;
+        unsigned long buffer = 64 * 32 * 4, size = WINDOWS_HEADER + 2 * WINDOWS * buffer;
+
+        check("a header the compositor writes fits the mapping",
+              windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32));
+        check("pixels off the layout do not", !windows_fits(size, WINDOWS_HEADER + 4096, buffer, 64, 64, 32));
+        check("a buffer past the mapping does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4096, 64, 64, 32));
+        check("a buffer that is not whole pages does not", !windows_fits(size, WINDOWS_HEADER, buffer + 4, 64, 64, 32));
+        check("a stride narrower than the output does not", !windows_fits(size, WINDOWS_HEADER, buffer, 32, 64, 32));
+        check("a buffer shorter than the rows used does not", !windows_fits(size, WINDOWS_HEADER, 4096, 64, 64, 32));
+        check("a zero buffer, width or height does not",
+              !windows_fits(size, WINDOWS_HEADER, 0, 64, 64, 32) && !windows_fits(size, WINDOWS_HEADER, buffer, 64, 0, 32) &&
+              !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 0));
+
+        table.hover_off[3] = 1;
+        table.glass[3] = WINDOW_GLASS;
+        table.lift[3] = 5;
+        table.spoiled_height[3][1] = 7;
+        table.damage_height[3] = 4;
+        table.want_width[3] = 9;
+        table.pinned[3] = 1;
+        windows_reset_row(&table, 3);
+        check("a reset row has no hover, glass, lift, spoiled rows or wanted size",
+              !table.hover_off[3] && !table.glass[3] && !table.lift[3] && !table.spoiled_height[3][1] &&
+              !table.damage_height[3] && !table.want_width[3]);
+        check("and keeps pinned, which the card may still read", table.pinned[3] == 1);
+}
+
 b32 main(void)
 {
         byte_order();
@@ -53974,6 +54011,7 @@ b32 main(void)
         sockets();
         windows_client();
 #endif
+        windows_header();
         return test_report(null);
 }
 #endif /* CHECK_socket */
