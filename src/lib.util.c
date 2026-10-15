@@ -25003,7 +25003,7 @@ static b32 math_whole_kind(decimal value)
                 //      cases above have run.
                 return MATH_EVEN_WHOLE;
         }
-        if ((shape.bits << (12 + exponent)) != 0)
+        if (exponent < MATH_MANTISSA_BITS && (shape.bits << (12 + exponent)) != 0)
                 return MATH_NOT_WHOLE;
         return ((shape.bits >> (MATH_MANTISSA_BITS - exponent)) & 1) ? MATH_ODD_WHOLE
                                                                     : MATH_EVEN_WHOLE;
