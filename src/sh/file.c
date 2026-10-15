@@ -31627,8 +31627,11 @@ static bool hardlink_option_seen(p8 letter, string_address value)
                                              "hardlink: could not compile regular expression %s: Invalid regular expression\n",
                                              value);
                 }
-                if (address_to count < HARDLINK_PATTERNS)
-                        list[address_to count] = value, address_to count += 1;
+                if (address_to count >= HARDLINK_PATTERNS)
+                        return string_report(log_error, false,
+                                             "hardlink: too many patterns, at most %p of each kind\n",
+                                             (positive)HARDLINK_PATTERNS);
+                list[address_to count] = value, address_to count += 1;
                 return true;
         }
         case 's':
