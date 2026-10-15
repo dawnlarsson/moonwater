@@ -15334,7 +15334,9 @@ static b32 find_parse_primary(positive depth)
         find_deepest |= (sets & FIND_SETS_DEEPEST) != 0;
         if (sets & FIND_SETS_DAYSTART)
         {
-                find_moment = file_now() - file_now() % CLOCK_SECONDS_PER_DAY +
+                b64 now = file_now();
+
+                find_moment = now - now % CLOCK_SECONDS_PER_DAY +
                               CLOCK_SECONDS_PER_DAY;
         }
         find_one_system |= (sets & FIND_SETS_ONE_SYSTEM) != 0;
