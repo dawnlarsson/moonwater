@@ -15465,10 +15465,16 @@ static b32 find_parse_primary(positive depth)
         find_deepest |= (sets & FIND_SETS_DEEPEST) != 0;
         if (sets & FIND_SETS_DAYSTART)
         {
+                //      The day is the local one, as the reference reads it:
+                //      the wall clock is read once, its day is cut at local
+                //      midnight, and the next midnight is turned back into an
+                //      instant. A cut on the epoch was UTC midnight, which is
+                //      a different day in every zone east or west of UTC.
                 b64 now = file_now();
+                b64 wall = now + (b64)clock_local_east(now);
 
-                find_moment = now - now % CLOCK_SECONDS_PER_DAY +
-                              CLOCK_SECONDS_PER_DAY;
+                find_moment = clock_local_to_utc(
+                    wall - wall % CLOCK_SECONDS_PER_DAY + CLOCK_SECONDS_PER_DAY);
         }
         find_one_system |= (sets & FIND_SETS_ONE_SYSTEM) != 0;
         find_follow |= (sets & FIND_SETS_FOLLOW) != 0;
