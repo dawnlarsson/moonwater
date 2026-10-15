@@ -7184,7 +7184,8 @@ static bool exec_helper_expand(string_address body, positive length,
         bipolar child;
 
         if (system_pipe(ends, SHELL_PIPE_CLOSE_ON_EXEC) < 0)
-                return false;
+                return string_report(log_error, false,
+                                     "here-document: no pipe\n");
 
         log_flush();
         child = shell_clone();
@@ -7230,7 +7231,8 @@ static bool exec_helper_expand(string_address body, positive length,
         if (child < 0)
         {
                 system_close(ends[0]);
-                return false;
+                return string_report(log_error, false,
+                                     "here-document: cannot fork\n");
         }
 
         return exec_helper_collect(child, ends[0], start, out, out_length);
