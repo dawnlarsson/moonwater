@@ -50092,10 +50092,10 @@ static fn date_wide_probe_write(address_any text, positive length)
 static bool date_shape(writer write, b64 when, positive nanoseconds,
                        string_address format);
 
-// 0 or 1 when a directive of that width was written, and the answer of the
-// rest; 2 when the format holds none.
+// 0 when the directive could not be written; 1 when it was, with the rest of
+// the format in after; 2 when the format holds none.
 static positive date_shape_wide(writer write, b64 when, positive nanoseconds,
-                                string_address format)
+                                string_address format, string_address address_to after)
 {
         //      A width past DATE_WIDE is seven digits after a percent, so a
         //      format with no digit in it holds none.
@@ -50211,7 +50211,8 @@ static positive date_shape_wide(writer write, b64 when, positive nanoseconds,
                         write(date_wide_text.bytes, date_wide_text.used);
 
                 // What is after it may hold another.
-                return date_shape(write, when, nanoseconds, scan + (modifier ? 2 : 1)) ? 1 : 0;
+                address_to after = scan + (modifier ? 2 : 1);
+                return 1;
         }
         return 2;
 }
@@ -50260,11 +50261,16 @@ static bool date_shape(writer write, b64 when, positive nanoseconds,
         if (!date_local(when, address_of broken))
                 return false;
 
+        for (;;)
         {
-                positive wide = date_shape_wide(write, when, nanoseconds, format);
+                string_address after = null;
+                positive wide = date_shape_wide(write, when, nanoseconds, format, address_of after);
 
-                if (wide != 2)
-                        return wide == 1;
+                if (wide == 0)
+                        return false;
+                if (wide == 2)
+                        break;
+                format = after;
         }
 
         length = clock_format_extended(fixed, sizeof(fixed), format,
