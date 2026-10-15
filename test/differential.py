@@ -11836,20 +11836,38 @@ def files_deep_walks(farm):
     return passed, total, notes
 
 
+def files_tree_modes(root):
+    """Every name under root with its permission bits: what a copy left behind,
+    attributes included."""
+    listed = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            listed.append((os.path.relpath(path, root), stat.S_IMODE(os.lstat(path).st_mode)))
+    return sorted(listed)
+
+
 def files_parents_deep(farm):
-    """cp --parents of a file a hundred levels down: a hundred destination
-    directories have to be made, each of which keeps its attributes. Compared
-    with the reference on the status and on the tree left behind."""
+    """cp -p --parents of a file a hundred levels down: a hundred destination
+    directories are made, and each takes the mode of its source directory
+    after the copy. The modes of every directory left behind are compared with
+    the reference's, so a parent that loses its attributes past a fixed count
+    is a difference."""
     levels = 100
     source = "S" + "/q" * levels
 
     def setup(root):
         os.makedirs(root / source)
+        for depth in range(levels + 1):
+            #       0o775 is not what a umask of 022 gives a new directory, so
+            #       each one has to be restored after the copy: the case the
+            #       record table exists for.
+            (root / ("S" + "/q" * depth)).chmod(0o775)
         (root / source / "leaf").write_text("leaf\n")
         (root / "dst").mkdir()
 
-    answers = files_pair(farm, "cp", ["--parents", source + "/leaf", "dst"], setup,
-                         collect=files_tree_listing)
+    answers = files_pair(farm, "cp", ["-p", "--parents", source + "/leaf", "dst"], setup,
+                         collect=files_tree_modes)
     ok = answers[0][:3] == answers[1][:3]
     return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][0]} ours {answers[1][0]}"])
 
@@ -11898,15 +11916,38 @@ def files_find_write_error(farm):
 
 
 def files_exec_refusals(farm):
-    """find -exec of a file that is no program: the kernel answers ENOEXEC
-    (no shebang line), and the reference names that and exits as it does."""
-    def setup(root):
+    """find -exec of a file the kernel will not run, the reference naming why
+    and exiting as it does. Two of them: a file with no program in it (ENOEXEC)
+    and a program that another process has open for writing (ETXTBSY, which
+    the reference calls "Text file busy"). Both compared on the message and on
+    the status."""
+    held = []
+
+    def setup_noexec(root):
         (root / "noexec").write_text("not a program\n")
         os.chmod(root / "noexec", 0o755)
 
-    answers = files_pair(farm, "find", [".", "-name", "noexec", "-exec", "./{}", ";"], setup)
-    ok = answers[0][0] == answers[1][0] and answers[0][2] == answers[1][2]
-    return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][0]} {answers[0][2]!r} ours {answers[1][0]} {answers[1][2]!r}"])
+    def setup_busy(root):
+        (root / "busy").write_text("#!/bin/sh\nexit 0\n")
+        os.chmod(root / "busy", 0o755)
+        held.append(open(root / "busy", "r+b"))
+
+    def release(root):
+        while held:
+            held.pop().close()
+        return files_tree_listing(root)
+
+    passed = total = 0
+    notes = []
+    for name, setup in (("noexec", setup_noexec), ("busy", setup_busy)):
+        answers = files_pair(farm, "find", [".", "-name", name, "-exec", "./{}", ";"], setup,
+                             collect=release)
+        total += 1
+        if answers[0][0] == answers[1][0] and answers[0][2] == answers[1][2]:
+            passed += 1
+        else:
+            notes.append(f"{name}: reference {answers[0][0]} {answers[0][2]!r} ours {answers[1][0]} {answers[1][2]!r}")
+    return passed, total, notes
 
 
 def files_regex_switch(farm):
@@ -11998,7 +12039,9 @@ def files_chmod_unreadable_report(farm):
         (root / "T" / "sub").chmod(0o755)
         return files_tree_listing(root)
 
-    answers = files_pair(farm, "chmod", ["-Rv", "644", "T"], setup, collect=collect)
+    #       755 keeps T searchable, so the walk reaches the unreadable
+    #       directory; 644 would take T's search bit first and hide it.
+    answers = files_pair(farm, "chmod", ["-Rv", "755", "T"], setup, collect=collect)
     ok = answers[0][:3] == answers[1][:3]
     return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][:3]!r} ours {answers[1][:3]!r}"])
 
