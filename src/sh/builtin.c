@@ -6719,19 +6719,20 @@ COLD fn shell_pushd(writer write)
 
         string_copy_max_end(wanted, rotated[0], sizeof(wanted) - 1);
 
-        // Written before the move, because the kept part is read out of the
-        // pool the move does not touch and the top is already in hand.
-        if (!shell_dirstack_write(rotated + 1, count - 1))
-                return shell_answered(1, "pushd: directory stack full\n");
-
         //      -n rotates and stays: the shell keeps the directory it is in,
         //      which is still the top of what is listed, so the entry the
         //      rotation brought up is written under it rather than moved to.
+        //      The move comes first, so a move that fails leaves the stack
+        //      as it was; the move does not touch the pool the kept part is
+        //      read from.
         if (!stack_only && !shell_dirstack_move(wanted))
         {
                 return shell_refuse(1,
                     "pushd: %s: No such file or directory\n", wanted);
         }
+
+        if (!shell_dirstack_write(rotated + 1, count - 1))
+                return shell_answered(1, "pushd: directory stack full\n");
 
         //      A rotation asked to leave the shell where it is says nothing:
         //      Bash writes the stack for a push and for a move, and a
