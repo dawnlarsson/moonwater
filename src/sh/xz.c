@@ -5346,7 +5346,7 @@ static bipolar xz_par_walk(xz_par address_to r, positive batch_output)
                                         memory_copy_apart(r->prefix, stream, 12);
                                         r->prefix_n = 12;
                                 }
-                                memory_copy_apart(r->prefix + r->prefix_n, r->bytes, size);
+                                memory_copy_apart(r->prefix + r->prefix_n, h, size);
                                 r->prefix_n += size;
                                 r->in_stream = !first;
                                 return 0;
