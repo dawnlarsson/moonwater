@@ -5609,7 +5609,9 @@ static bool numfmt_convert(p8 address_to bytes, positive length,
                                 refused = 'O';
                                 break;
                         }
-                        canon[canon_length++] = bytes[at++];
+                        if (count)
+                                canon[canon_length++] = bytes[at];
+                        at++;
                         if (thousands_length && at + thousands_length < stop &&
                             !memory_compare(bytes + at, text_number_thousands, thousands_length) &&
                             byte_is_digit(bytes[at + thousands_length]))
