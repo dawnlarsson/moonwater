@@ -3467,7 +3467,8 @@ static bool host_settings_next(host_settings address_to settings,
         //      Every caller copies the text into a buffer of the most an
         //      entry may hold, so an entry that says more is the end of the
         //      list, whoever checked the block before it got here.
-        if (into->entry.length > SPARK_SETTINGS_TEXT_MOST)
+        if (into->entry.length > SPARK_SETTINGS_TEXT_MOST ||
+            into->entry.length > settings->length - (address_to at + SPARK_SETTINGS_ENTRY))
                 return false;
         into->text = settings->payload + into->at + SPARK_SETTINGS_ENTRY;
         address_to at += SPARK_SETTINGS_ENTRY +
