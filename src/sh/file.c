@@ -21010,8 +21010,10 @@ static bool du_files_from(string_address list)
                         else if (at - start >= FILE_PATH_MAX)
                         {
                                 log_flush();
-                                string_format(log_error, "du: %w:%p: File name too long\n",
-                                              writer_shell_name, list, number);
+                                //      The reference names the file itself and goes on
+                                //      with the rest of the list.
+                                string_format(log_error, "du: cannot access %w: File name too long\n",
+                                              writer_shell_quoted_name, name);
                                 du_status = 1;
                         }
                         else
