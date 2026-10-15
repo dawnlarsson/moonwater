@@ -56,7 +56,24 @@ struct ui
         unsigned int ground, ink, quiet, lit, ring;
         unsigned int address_to scratch; // a line of text, as coverage
         int scratch_width;
+        // A repaint's rows, when band_bottom > band_top: nothing else is written. Last, so the positional initialisers of a ui stay.
+        int band_top, band_bottom;
 };
+
+/*
+        x / 255 for x below 65535, exact: x plus its high byte, plus one, shifted. The blends
+        below never make a product past 255 * 255 + 127, which is well under that.
+*/
+static inline unsigned int ui_div255(unsigned int x)
+{
+        return (x + 1 + (x >> 8)) >> 8;
+}
+
+// Whether row y may be written: a repaint's band, or every row when there is none.
+static inline b32 ui_in_band(const struct ui address_to ui, int y)
+{
+        return ui->band_bottom <= ui->band_top || (y >= ui->band_top && y < ui->band_bottom);
+}
 
 // A colour at alpha (0 to 255), premultiplied: what every piece is drawn in.
 static unsigned int ui_tone(unsigned int colour, unsigned int alpha)
@@ -76,7 +93,7 @@ static fn ui_inks(struct ui address_to ui, unsigned int ground)
 }
 
 // One premultiplied pixel over another.
-static unsigned int ui_over(unsigned int pixel, unsigned int under)
+static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
 {
         unsigned int rest = 255 - (pixel >> 24), out = 0;
 
@@ -84,9 +101,26 @@ static unsigned int ui_over(unsigned int pixel, unsigned int under)
                 return under;
         if (!rest)
                 return pixel;
+        // Over nothing (a picture cleared to the glass), the pixel is the pixel: the blend adds nothing.
+        if (!under)
+                return pixel;
+        /*
+                The four channels in two words of 16-bit lanes (red and blue, green and alpha): under times rest plus 127
+                in each lane is at most 65152, so no lane carries into the next, and ui_div255 is one shift and an add.
+                A sum past 255 in a lane (a tone that is not premultiplied) is clamped the long way.
+        */
+        {
+                unsigned int v_rb = (under & 0x00ff00ffu) * rest + 0x007f007fu;
+                unsigned int v_ag = ((under >> 8) & 0x00ff00ffu) * rest + 0x007f007fu;
+                unsigned int sum_rb = (pixel & 0x00ff00ffu) + ((v_rb + 0x00010001u + ((v_rb >> 8) & 0x00ff00ffu)) >> 8 & 0x00ff00ffu);
+                unsigned int sum_ag = ((pixel >> 8) & 0x00ff00ffu) + ((v_ag + 0x00010001u + ((v_ag >> 8) & 0x00ff00ffu)) >> 8 & 0x00ff00ffu);
+
+                if (!((sum_rb | sum_ag) & 0x01000100u))
+                        return (sum_rb & 0x00ff00ffu) | (sum_ag & 0x00ff00ffu) << 8;
+        }
         for (unsigned int shift = 0; shift < 32; shift += 8)
         {
-                unsigned int channel = (pixel >> shift & 255) + ((under >> shift & 255) * rest + 127) / 255;
+                unsigned int channel = (pixel >> shift & 255) + ui_div255((under >> shift & 255) * rest + 127);
 
                 out |= (channel > 255 ? 255 : channel) << shift;
         }
@@ -101,7 +135,7 @@ static unsigned int ui_cover(unsigned int tone, unsigned int cover)
         if (cover >= 255)
                 return tone;
         for (unsigned int shift = 0; shift < 32; shift += 8)
-                out |= (((tone >> shift & 255) * cover + 127) / 255) << shift;
+                out |= ui_div255((tone >> shift & 255) * cover + 127) << shift;
         return out;
 }
 
@@ -109,16 +143,25 @@ static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
 {
         unsigned int address_to at;
 
-        if (x < 0 || x >= ui->width || y < ui->top || y >= ui->bottom || y >= ui->height)
+        if (x < 0 || x >= ui->width || y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
                 return;
         at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)x;
         address_to at = ui_over(tone, address_to at);
 }
 
-// The whole picture clear: the glass alone.
+// The whole picture clear: the glass alone; within a repaint's band, the glass of its rows.
 static fn ui_clear(struct ui address_to ui)
 {
-        memory_fill_u32_rect(ui->pixels, (positive)ui->pitch, (positive)ui->width, (positive)ui->height, 0);
+        int top = 0, bottom = ui->height;
+
+        if (ui->band_bottom > ui->band_top)
+        {
+                top = ui->band_top < 0 ? 0 : ui->band_top;
+                bottom = ui->band_bottom > ui->height ? ui->height : ui->band_bottom;
+        }
+        if (bottom > top)
+                memory_fill_u32_rect(ui->pixels + (unsigned long)top * ui->pitch, (positive)ui->pitch, (positive)ui->width,
+                                     (positive)(bottom - top), 0);
 }
 
 static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, unsigned int tone)
@@ -129,6 +172,11 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
         y = y < ui->top ? ui->top : y;
         x2 = x2 > ui->width ? ui->width : x2;
         y2 = y2 > ui->bottom ? ui->bottom : y2;
+        if (ui->band_bottom > ui->band_top)
+        {
+                y = y < ui->band_top ? ui->band_top : y;
+                y2 = y2 > ui->band_bottom ? ui->band_bottom : y2;
+        }
         // An opaque tone over a pixel is that tone: the rectangle is one fill.
         if (tone >> 24 == 255)
         {
@@ -189,9 +237,20 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
                         row = last - 1;
                         continue;
                 }
+                // A row outside the band is not walked; a corner row's straight middle is one fill, as its cover is all of it.
+                if (!ui_in_band(ui, y + row))
+                        continue;
                 for (int column = 0; column < width; column++)
                 {
-                        unsigned int cover = ui_inside(column, row, width, height, radius);
+                        unsigned int cover;
+
+                        if (column == radius && width - radius > radius)
+                        {
+                                ui_fill(ui, x + radius, y + row, width - 2 * radius, 1, tone);
+                                column = width - radius - 1;
+                                continue;
+                        }
+                        cover = ui_inside(column, row, width, height, radius);
 
                         if (cover)
                                 ui_dot(ui, x + column, y + row, ui_cover(tone, cover));
@@ -210,6 +269,11 @@ static fn ui_outline(struct ui address_to ui, int x, int y, int width, int heigh
                 {
                         unsigned int outer_cover, inner_cover;
 
+                        if (!ui_in_band(ui, y + row))
+                        {
+                                column = width - 1;
+                                continue;
+                        }
                         // The middle is not the outline.
                         if (column >= thickness + inner && column < width - thickness - inner && row >= thickness &&
                             row < height - thickness)
@@ -226,10 +290,69 @@ static fn ui_outline(struct ui address_to ui, int x, int y, int width, int heigh
 }
 
 /*
+        A run laid a code point at a time: the pen after the last glyph, which
+        is the advance font_draw answers for the run so far, kerning and all.
+        The same steps font_draw takes, without the coverage.
+*/
+struct ui_pen
+{
+        b64 reach;        // the pen after the last glyph, in 16.16
+        b64 cell;         // the advance of a cell the font does not know
+        p32 glyph, face;  // the last glyph, and the face it is from (FONT_DRAWN for none)
+};
+
+static void ui_pen_start(const font_face address_to const address_to faces, p32 em, struct ui_pen address_to pen)
+{
+        pen->reach = 0;
+        pen->cell = (b64)font_metrics_at(faces[0], em).cell_width << 16;
+        pen->glyph = 0;
+        pen->face = FONT_DRAWN;
+}
+
+static void ui_pen_step(struct ui address_to ui, const font_face address_to const address_to faces, p32 em, p32 code,
+                        struct ui_pen address_to pen)
+{
+        p32 face, glyph;
+        b64 advance;
+
+        font_find(ui->engine, faces, 2, code, &face, &glyph);
+        if (face != FONT_DRAWN && pen->face == face)
+                pen->reach += font_kern(ui->engine, faces[face], pen->glyph, glyph, em);
+        advance = face == FONT_DRAWN ? pen->cell : font_advance(faces[face], glyph, em);
+        pen->reach += advance;
+        pen->glyph = glyph;
+        pen->face = face;
+}
+
+static int ui_pen_width(const struct ui_pen address_to pen)
+{
+        return (int)(pen->reach >> 16);
+}
+
+// A run's advance in whole pixels, laid out and not drawn.
+static int ui_advance(struct ui address_to ui, const font_face address_to const address_to faces, string_address text,
+                      positive length, p32 em)
+{
+        struct ui_pen pen;
+        positive at = 0;
+
+        ui_pen_start(faces, em, &pen);
+        while (at < length)
+        {
+                p32 code;
+
+                at = font_decode((const p8 address_to)text, length, at, &code);
+                ui_pen_step(ui, faces, em, code, &pen);
+        }
+        return ui_pen_width(&pen);
+}
+
+/*
         A run of text drawn with its pen at x on the baseline in colour (alpha
         255 is opaque ink, less a fainter one), and its width answered. Only
         the columns from low to high are drawn: a field's text is cut at its
-        well, and the rest of the run is not.
+        well, and the rest of the run is not. A run wholly outside the band
+        of a repaint is measured and not drawn.
 */
 static int ui_run(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
                   unsigned int colour, unsigned int alpha, int low, int high)
@@ -237,13 +360,10 @@ static int ui_run(struct ui address_to ui, int x, int baseline, string_address t
         const font_face address_to faces[2] = {bold && ui->bold ? ui->bold : ui->regular, ui->regular};
         p32 em = (p32)(size * ui->scale) << 6;
         positive length = string_length(text);
-        unsigned int scratch_pixel = 0;
-        font_target nowhere = {&scratch_pixel, 1, 1, 1};
-        int width = (int)(font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, 0, &nowhere, 0, 0,
-                                    0xffffffu, 0) >> 16);
+        int width = ui_advance(ui, faces, text, length, em);
         font_metrics metrics = font_metrics_at(faces[0], em);
         int above = metrics.baseline + 2 * ui->scale, rows = metrics.cell_height + 4 * ui->scale;
-        int left = 2 * ui->scale, wide = width + 2 * left;
+        int left = 2 * ui->scale, wide = width + 2 * left, top = baseline - above;
         b32 light = window_light(colour); // light ink: drawn white on black, so the coverage is the light text's own
         unsigned int paper = light ? 0 : 0xffffffu;
 
@@ -251,6 +371,8 @@ static int ui_run(struct ui address_to ui, int x, int baseline, string_address t
                 return width;
         wide = wide > ui->scratch_width ? ui->scratch_width : wide;
         rows = rows > UI_SCRATCH_ROWS * ui->scale ? UI_SCRATCH_ROWS * ui->scale : rows;
+        if (ui->band_bottom > ui->band_top && (top + rows <= ui->band_top || top >= ui->band_bottom))
+                return width;
 
         memory_fill_u32_rect(ui->scratch, (positive)wide, (positive)wide, (positive)rows, paper);
         {
@@ -260,17 +382,46 @@ static int ui_run(struct ui address_to ui, int x, int baseline, string_address t
                           light ? 0xffffffu : 0, paper);
         }
 
-        // The coverage, as the ink at that alpha, over the picture.
-        for (int row = 0; row < rows; row++)
-                for (int column = 0; column < wide; column++)
-                {
-                        unsigned int value = ui->scratch[(unsigned long)row * (unsigned long)wide + (unsigned long)column] >> 8 & 255;
-                        unsigned int cover = light ? value : 255 - value;
-                        int at = x - left + column;
+        // The coverage, as the ink at that alpha, over the picture: one tone for each coverage, made once. The columns
+        // drawn are those in low to high and in the picture, worked out once, so the walk over a row has no test in it.
+        {
+                unsigned int tone[256];
+                unsigned long long known[4] = {0, 0, 0, 0};
+                int pen_x = x - left, first = 0, last = wide;
 
-                        if (cover && at >= low && at < high)
-                                ui_dot(ui, at, baseline - above + row, ui_tone(colour, cover * alpha / 255));
+                if (low - pen_x > first)
+                        first = low - pen_x;
+                if (high - pen_x < last)
+                        last = high - pen_x;
+                if (-pen_x > first)
+                        first = -pen_x;
+                if (ui->width - pen_x < last)
+                        last = ui->width - pen_x;
+                for (int row = 0; row < rows && first < last; row++)
+                {
+                        int y = top + row;
+                        const unsigned int address_to coverage = ui->scratch + (unsigned long)row * (unsigned long)wide;
+                        unsigned int address_to picture;
+
+                        if (y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
+                                continue;
+                        picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
+                        for (int column = first; column < last; column++, picture++)
+                        {
+                                unsigned int value = coverage[column] >> 8 & 255;
+                                unsigned int cover = light ? value : 255 - value, bit = cover & 63;
+
+                                if (!cover)
+                                        continue;
+                                if (!(known[cover >> 6] >> bit & 1))
+                                {
+                                        tone[cover] = ui_tone(colour, cover * alpha / 255);
+                                        known[cover >> 6] |= 1ull << bit;
+                                }
+                                *picture = ui_over(tone[cover], *picture);
+                        }
                 }
+        }
         return width;
 }
 

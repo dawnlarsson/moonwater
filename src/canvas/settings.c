@@ -636,7 +636,35 @@ static struct
         struct settings_change queue[SETTINGS_QUEUE]; // changes to make once the verb running is done, in order
         positive queued;
         b32 told;         // the first reading is said in the machine's log
+
+        // The picture: the rows changed since the last one was made (empty when bottom <= top), or all of it; and for each
+        // buffer, the rows it lacks since it was last drawn, or all of it. The two buffers alternate, so each lacks what
+        // changed since the frame before last.
+        int change_top, change_bottom;
+        b32 change_all;
+        int stale_top[2], stale_bottom[2];
+        b32 stale_all[2];
+        // What the cuts and the wrapped lines were made for: the fonts, the card, the width and the scale.
+        unsigned int fit_generation, card_generation;
+        b32 wrap_made;
+        int wrap_width, wrap_scale;
+        unsigned int wrap_card;
 } settings;
+
+// A cut a fit made, kept with the text, size, room and scale it was made for: a text laid out once per frame it is drawn in.
+#define SETTINGS_CUTS 128
+#define SETTINGS_CUT_WHOLE 1 // the text fits whole
+#define SETTINGS_CUT_DOTS 2  // the first cut bytes, and the dots
+#define SETTINGS_CUT_ONE 3   // the first cut bytes, and no dots: no prefix fits with them
+
+struct settings_cut
+{
+        char text[SETTINGS_VALUE];
+        positive length, cut, capacity;
+        int size, room, scale;
+        unsigned int generation;
+        unsigned char kind;
+};
 
 /*
         What is kept in a mapping made when the window opens and not in the
@@ -653,6 +681,7 @@ static struct settings_large
         unsigned short card_at[SETTINGS_CARD_LINES], card_size[SETTINGS_CARD_LINES];
         char split[SETTINGS_TYPED * 2];
         struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
+        struct settings_cut cuts[SETTINGS_CUTS];
 } address_to settings_large;
 
 static b32 settings_map(void)
@@ -671,6 +700,35 @@ static b32 settings_map(void)
 static int settings_px(int logical)
 {
         return logical * settings.ui.scale;
+}
+
+// Rows [from, to) added to the rows [top, bottom) (empty when bottom <= top): the union, the empty one none.
+static void settings_rows_add(int address_to top, int address_to bottom, int from, int to)
+{
+        if (to <= from)
+                return;
+        if (*bottom <= *top)
+        {
+                *top = from;
+                *bottom = to;
+                return;
+        }
+        *top = from < *top ? from : *top;
+        *bottom = to > *bottom ? to : *bottom;
+}
+
+// The picture may have changed anywhere: the next one is drawn whole.
+static fn settings_dirty(void)
+{
+        settings.dirty = true;
+        settings.change_all = true;
+}
+
+// Rows [top, bottom) of the picture may have changed, and no others: the next one draws them.
+static fn settings_changed(int top, int bottom)
+{
+        settings.dirty = true;
+        settings_rows_add(&settings.change_top, &settings.change_bottom, top, bottom);
 }
 
 /* ---- the rows ---- */
@@ -918,7 +976,7 @@ static fn settings_side_scroll_to(int scroll)
         if (scroll != settings.group_scroll)
         {
                 settings.group_scroll = scroll;
-                settings.dirty = true;
+                settings_changed(settings_list_top(), settings_list_bottom());
         }
 }
 
@@ -937,29 +995,110 @@ static fn settings_side_reveal(void)
 }
 
 /*
-        text at size cut to room at its end, with "..." in place of what is
-        cut: the text itself when it fits, else fitted, which has room for a
-        value or a label (SETTINGS_VALUE).
+        The cut of a text at size to room: the longest prefix, ending before a
+        character, that with "..." after it fits, found by a search over the
+        prefixes (a prefix's width grows with it), and where none fits, the
+        first character alone. The text itself when it fits. The cut is kept
+        with its text, size, room, scale and capacity, and the fonts it was
+        made in, so a text drawn again is not laid out again.
 */
+static unsigned int settings_cut_slot(string_address text, positive length, int size, int room, int scale)
+{
+        unsigned int hash = 2166136261u;
+
+        for (positive at = 0; at < length; at++)
+                hash = (hash ^ (unsigned char)text[at]) * 16777619u;
+        hash = (hash ^ (unsigned int)size) * 16777619u;
+        hash = (hash ^ (unsigned int)room) * 16777619u;
+        hash = (hash ^ (unsigned int)scale) * 16777619u;
+        return (hash ^ hash >> 15) & (SETTINGS_CUTS - 1);
+}
+
+// The kind of cut a text makes at size in room, and its cut in bytes, which the search makes.
+static unsigned char settings_cut_find(struct ui address_to ui, string_address text, positive length, int size, int room,
+                                       char address_to fitted, positive capacity, positive address_to cut)
+{
+        positive n = length < capacity ? length : capacity - 1, low = 1, high, best = 0;
+
+        if (ui_measure(ui, text, size, false) <= room)
+        {
+                *cut = length;
+                return SETTINGS_CUT_WHOLE;
+        }
+        if (n <= 1)
+        {
+                *cut = n;
+                return SETTINGS_CUT_ONE;
+        }
+        high = n - 1;
+        while (low <= high)
+        {
+                positive mid = (low + high) / 2, at = mid;
+
+                // The prefix ends before a whole character: a continuation byte after it means its character is cut.
+                while (at > 1 && (((unsigned char)text[at]) & 0xc0) == 0x80)
+                        at--;
+                memory_copy(fitted, text, at);
+                fitted[at] = 0;
+                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
+                if (ui_measure(ui, (string_address)fitted, size, false) <= room)
+                {
+                        best = at;
+                        low = mid + 1;
+                }
+                else
+                        high = mid - 1;
+        }
+        if (best)
+        {
+                *cut = best;
+                return SETTINGS_CUT_DOTS;
+        }
+        *cut = 1;
+        return SETTINGS_CUT_ONE;
+}
+
 static string_address settings_fit(struct ui address_to ui, string_address text, int size, int room, char address_to fitted,
                                    positive capacity)
 {
-        positive length = string_length(text);
+        positive length = string_length(text), cut = 0;
+        unsigned char kind = 0;
+        struct settings_cut address_to memo = null;
+        b32 found = false;
 
-        if (ui_measure(ui, text, size, false) <= room)
-                return text;
-        string_copy_bounded((string_address)fitted, text, capacity);
-        while (length > 1)
+        if (length < SETTINGS_VALUE)
         {
-                length--;
-                while (length > 1 && (((unsigned char)fitted[length]) & 0xc0) == 0x80)
-                        length--;
-                fitted[length] = 0;
-                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
-                if (ui_measure(ui, (string_address)fitted, size, false) <= room)
-                        break;
-                fitted[length] = 0;
+                memo = &settings_large->cuts[settings_cut_slot(text, length, size, room, ui->scale)];
+                if (memo->kind && memo->length == length && memo->size == size && memo->room == room && memo->scale == ui->scale &&
+                    memo->capacity == capacity && memo->generation == settings.fit_generation && !memory_compare(memo->text, text, length))
+                {
+                        kind = memo->kind;
+                        cut = memo->cut;
+                        found = true;
+                }
         }
+        if (!found)
+        {
+                kind = settings_cut_find(ui, text, length, size, room, fitted, capacity, &cut);
+                if (memo)
+                {
+                        memory_copy(memo->text, text, length);
+                        memo->length = length;
+                        memo->size = size;
+                        memo->room = room;
+                        memo->scale = ui->scale;
+                        memo->capacity = capacity;
+                        memo->generation = settings.fit_generation;
+                        memo->cut = cut;
+                        memo->kind = kind;
+                }
+        }
+        if (kind == SETTINGS_CUT_WHOLE)
+                return text;
+        memory_copy(fitted, text, cut);
+        fitted[cut] = 0;
+        if (kind == SETTINGS_CUT_DOTS)
+                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
         return (string_address)fitted;
 }
 
@@ -981,7 +1120,7 @@ static fn settings_scroll_to(int scroll)
         if (scroll != address_to now)
         {
                 address_to now = scroll;
-                settings.dirty = true;
+                settings_changed(settings_list_top(), settings_list_bottom());
         }
 }
 
@@ -1035,7 +1174,7 @@ static fn settings_rebuild(void)
                 settings.focus = settings.visible[0];
         settings_layout();
         settings_scroll_to(settings.scroll);
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // The same, and the row with the focus brought into view.
@@ -1301,6 +1440,7 @@ static fn settings_card_fill(void)
         while (made && settings_large->card[made - 1] == '\n')
                 made--;
         settings.card_length = made;
+        settings.card_generation++;
 }
 
 // A run of the card, measured as it is drawn.
@@ -1316,22 +1456,61 @@ static int settings_card_width(positive from, positive to)
 }
 
 /*
+        A run of the card laid on as it is measured: the pen after the bytes
+        from its start to at, so a wider prefix costs its new bytes only.
+        Only for a plain card (ASCII): one byte is one code point there.
+*/
+struct settings_run
+{
+        positive from, at;
+        struct ui_pen pen;
+};
+
+static int settings_run_width(struct ui address_to ui, struct settings_run address_to run, positive from, positive to)
+{
+        const font_face address_to faces[2] = {ui->regular, ui->regular};
+        p32 em = (p32)(UI_TEXT * ui->scale) << 6;
+
+        if (from != run->from || to < run->at)
+        {
+                run->from = from;
+                run->at = from;
+                ui_pen_start(faces, em, &run->pen);
+        }
+        while (run->at < to)
+        {
+                ui_pen_step(ui, faces, em, (unsigned char)settings_large->card[run->at], &run->pen);
+                run->at++;
+        }
+        return ui_pen_width(&run->pen);
+}
+
+/*
         The card's lines cut to the window's width: each of what the verb
         said is as many as it takes, a break at a blank where it can be and
-        else where the line has gone as far as it fits.
+        else where the line has gone as far as it fits. Kept until the width,
+        the scale or the card changes.
 */
 static fn settings_wrap(void)
 {
         int room = settings.width - 2 * settings_px(UI_PAD) - 2 * settings_px(14);
         positive at = 0;
 
+        if (settings.wrap_made && settings.wrap_width == settings.width && settings.wrap_scale == settings.ui.scale &&
+            settings.wrap_card == settings.card_generation)
+                return;
         settings.card_lines = 0;
         while (at <= settings.card_length && settings.card_lines < SETTINGS_CARD_LINES)
         {
                 positive over = at, start = at;
+                struct settings_run run = {0, 0, {0, 0, 0, 0}};
+                b32 plain;
 
                 while (over < settings.card_length && settings_large->card[over] != '\n')
                         over++;
+                plain = over - at < SETTINGS_PROBE;
+                for (positive byte = at; plain && byte < over; byte++)
+                        plain = (unsigned char)settings_large->card[byte] < 0x80;
                 do
                 {
                         positive fit = start, next = start;
@@ -1345,7 +1524,7 @@ static fn settings_wrap(void)
                                         word++;
                                 while (word < over && settings_large->card[word] != ' ')
                                         word++;
-                                if (settings_card_width(start, word) > room)
+                                if ((plain ? settings_run_width(&settings.ui, &run, start, word) : settings_card_width(start, word)) > room)
                                         break;
                                 fit = next = word;
                         }
@@ -1353,7 +1532,8 @@ static fn settings_wrap(void)
                         if (fit == start && start < over)
                         {
                                 fit = start + 1;
-                                while (fit < over && settings_card_width(start, fit + 1) <= room)
+                                while (fit < over && (plain ? settings_run_width(&settings.ui, &run, start, fit + 1)
+                                                            : settings_card_width(start, fit + 1)) <= room)
                                         fit++;
                         }
                         if (settings.card_lines < SETTINGS_CARD_LINES)
@@ -1367,6 +1547,10 @@ static fn settings_wrap(void)
                 } while (start < over && settings.card_lines < SETTINGS_CARD_LINES);
                 at = over + 1;
         }
+        settings.wrap_made = true;
+        settings.wrap_width = settings.width;
+        settings.wrap_scale = settings.ui.scale;
+        settings.wrap_card = settings.card_generation;
 }
 
 // The card shown with the title of the command that made it.
@@ -1377,7 +1561,7 @@ static fn settings_card_open(const char address_to title)
         settings.view = true;
         settings.card_scroll = 0;
         settings_wrap();
-        settings.dirty = true;
+        settings_dirty();
 }
 
 static fn settings_card_leave(void)
@@ -1385,7 +1569,7 @@ static fn settings_card_leave(void)
         settings.view = false;
         settings.status[0] = 0;
         settings_scroll_to(settings.scroll);
-        settings.dirty = true;
+        settings_dirty();
 }
 
 /* ---- the verbs ---- */
@@ -1393,7 +1577,7 @@ static fn settings_card_leave(void)
 static fn settings_say(string_address text)
 {
         string_copy_bounded((string_address)settings.status, text, sizeof(settings.status));
-        settings.dirty = true;
+        settings_changed(settings_list_bottom(), settings.height);
 }
 
 /*
@@ -1600,7 +1784,7 @@ static fn settings_next_job(void)
                                                           : "that is more words than one command takes"));
                 else if (settings.job >= 0)
                         settings.state[settings.job] = SETTINGS_FAILED;
-                settings.dirty = true;
+                settings_dirty();
         }
 }
 
@@ -2059,8 +2243,9 @@ static fn settings_finished(b32 killed)
                                                                                        settings.said_length, settings.value[other],
                                                                                        SETTINGS_VALUE, wait_status_code(status) != 0);
                         // A row asked again that says what it said is no change to draw.
-                        settings.dirty |= settings.state[other] != was ||
-                                          !string_equals((string_address)before, (string_address)settings.value[other]);
+                        if (settings.state[other] != was ||
+                            !string_equals((string_address)before, (string_address)settings.value[other]))
+                                settings_dirty();
                 }
         }
 
@@ -2207,7 +2392,7 @@ static fn settings_menu_close(void)
                 return;
         settings.menu = -1;
         settings_say((string_address) "");
-        settings.dirty = true;
+        settings_dirty();
 }
 
 /*
@@ -2274,7 +2459,7 @@ static fn settings_menu_scroll(int top)
                 settings.menu_at = settings.menu_top;
         else if (settings.menu_at >= settings.menu_top + shown)
                 settings.menu_at = settings.menu_top + shown - 1;
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // The keys on choice at, kept in view.
@@ -2291,7 +2476,7 @@ static fn settings_menu_go(int at)
                 else if (at >= settings.menu_top + shown)
                         settings.menu_top = at - shown + 1;
         }
-        settings.dirty = true;
+        settings_dirty();
 }
 
 static fn settings_menu_open(int row)
@@ -2319,7 +2504,7 @@ static fn settings_menu_open(int row)
         settings_reveal();
         settings_menu_go(settings.menu_at);
         settings_say((string_address) "Up and Down choose, Enter sets it, Escape leaves it");
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // The choice the keys are on, set, and the list closed; a choice the row has already sends nothing.
@@ -2424,7 +2609,7 @@ static fn settings_edit_end(void)
         if (settings.editing >= (int)SETTINGS_LIST)
                 memory_zero(settings.typed, sizeof(settings.typed));
         settings.editing = -1;
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // A row of a list pressed: a network is joined (asking its passphrase when it has one), a device is said what can be done.
@@ -2460,7 +2645,7 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         }
         else
                 settings_say((string_address)settings_item_text(item));
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // Delete on a saved network or a kept device forgets it, when it is pressed twice.
@@ -2501,7 +2686,7 @@ static fn settings_activate(int row, int way)
                 {
                         settings.editing = row;
                         settings.typed[0] = 0;
-                        settings.dirty = true;
+                        settings_dirty();
                 }
                 else
                         settings_run(row, "");
@@ -2515,7 +2700,7 @@ static fn settings_activate(int row, int way)
         case SETTINGS_FIELD:
                 settings.editing = row;
                 string_copy_bounded((string_address)settings.typed, (string_address)settings.value[row], sizeof(settings.typed));
-                settings.dirty = true;
+                settings_dirty();
                 return;
         case SETTINGS_INFO:
                 return;
@@ -2535,6 +2720,30 @@ static fn settings_activate(int row, int way)
                 settings_change(row, next);
 }
 
+// The row's place on the glass, if it is in the list: what a move of the focus changes.
+static fn settings_row_changed(int row)
+{
+        int at = settings_pos(row);
+
+        if (at < 0)
+                settings_changed(0, 0);
+        else
+                settings_changed(settings_list_top() + settings.top[at] - settings.scroll,
+                                 settings_list_top() + settings.top[at] - settings.scroll + settings_px(UI_ROW));
+}
+
+// The list a choice opens, where the keys' choice moved: its box.
+static fn settings_menu_changed(void)
+{
+        int x, y, width, height, shown;
+
+        // A scale of none has no box to measure (settings_menu_box divides by an item's height): the whole picture then.
+        if (settings.ui.scale > 0 && settings_menu_box(&x, &y, &width, &height, &shown))
+                settings_changed(y, y + height);
+        else
+                settings_dirty();
+}
+
 // The focus moved by whole rows of the ones that show; a command row has what it does in the status.
 static fn settings_move(int by)
 {
@@ -2547,7 +2756,8 @@ static fn settings_move(int by)
         settings.focus = settings.visible[at];
         if (settings.focus != before)
         {
-                settings.dirty = true;
+                settings_row_changed(before);
+                settings_row_changed(settings.focus);
                 if (settings.focus >= SETTINGS_ANY)
                         settings_say((string_address)settings_text(settings.focus));
                 else if (before >= SETTINGS_ANY)
@@ -2581,7 +2791,7 @@ static fn settings_group_choose(int group)
                 settings.focus = settings.visible[0];
         settings_side_reveal();
         settings_say((string_address)(settings.focus >= SETTINGS_ANY ? settings_text(settings.focus) : ""));
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // The keys go to the rows of the group chosen.
@@ -2591,7 +2801,7 @@ static fn settings_rows_enter(void)
         if (settings_pos(settings.focus) < 0 && settings.visible_count)
                 settings.focus = settings.visible[0];
         settings_reveal();
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // A key in a field being typed in: Enter keeps it, Escape leaves it, Backspace takes a character.
@@ -2673,7 +2883,7 @@ static fn settings_type(const struct window_event address_to event)
                 settings.typed[length + size] = 0;
         }
         }
-        settings.dirty = true;
+        settings_dirty();
 }
 
 // What is typed with no field open, as a letter of the filter, taken off by Backspace.
@@ -2790,7 +3000,7 @@ static b32 settings_key(const struct window_event address_to event)
                 settings.pane = !settings.pane;
                 if (settings.pane)
                         settings_rows_enter();
-                settings.dirty = true;
+                settings_dirty();
                 break;
         case SETTINGS_KEY_UP:
         case SETTINGS_KEY_DOWN:
@@ -2830,7 +3040,7 @@ static b32 settings_key(const struct window_event address_to event)
                 else if (settings.pane)
                 {
                         settings.pane = 0;
-                        settings.dirty = true;
+                        settings_dirty();
                 }
                 break;
         case SETTINGS_KEY_RIGHT:
@@ -2886,7 +3096,7 @@ static b32 settings_event(const struct window_event address_to event)
                 if (over >= 0 && over != settings.menu_at && over < settings.menu_count)
                 {
                         settings.menu_at = over;
-                        settings.dirty = true;
+                        settings_menu_changed();
                 }
                 break;
         }
@@ -2920,7 +3130,7 @@ static b32 settings_event(const struct window_event address_to event)
                         settings_edit_end();
                         settings.pane = 0;
                         settings_group_choose(row);
-                        settings.dirty = true;
+                        settings_dirty();
                         break;
                 }
                 row = settings_hit(settings.pointer_x, settings.pointer_y);
@@ -2938,7 +3148,7 @@ static b32 settings_event(const struct window_event address_to event)
                 }
                 settings.focus = row;
                 settings.pane = 1;
-                settings.dirty = true;
+                settings_dirty();
                 if (settings.editing != row)
                 {
                         // A step pressed left of its value's middle goes back.
@@ -3325,7 +3535,8 @@ static fn settings_draw_menu(struct ui address_to ui)
         }
 }
 
-static fn settings_draw(unsigned int address_to pixels)
+// The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom) (every row when it is empty).
+static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
 {
         struct ui address_to ui = &settings.ui;
         int left = settings_px(UI_PAD);
@@ -3337,6 +3548,8 @@ static fn settings_draw(unsigned int address_to pixels)
         ui->height = settings.height;
         ui->top = 0;
         ui->bottom = settings.height;
+        ui->band_top = band_bottom > band_top ? band_top : 0;
+        ui->band_bottom = band_bottom > band_top ? band_bottom : 0;
         ui_clear(ui);
         ui_title(ui, left + settings_px(6), settings_px(8), list_top - settings_px(8),
                  settings.view ? (string_address)settings.card_title : (string_address) "Settings");
@@ -3365,20 +3578,79 @@ static fn settings_draw(unsigned int address_to pixels)
                 settings_draw_menu(ui);
 }
 
+static fn settings_draw(unsigned int address_to pixels)
+{
+        settings_draw_rows(pixels, 0, 0);
+}
+
+/*
+        The picture in the buffer slot, redrawn in the rows it lacks: those
+        that changed since it was last drawn (the frame before, or the one
+        before that for the other buffer) and those the compositor spoiled in
+        it. Answers whether the whole of it was drawn, and the rows drawn,
+        [top, bottom): the damage the compositor reads again.
+*/
+static b32 settings_paint(unsigned int address_to pixels, int slot, int spoiled_top, int spoiled_bottom, int address_to top,
+                          int address_to bottom)
+{
+        int drawn_top = settings.stale_top[slot], drawn_bottom = settings.stale_bottom[slot], other = 1 - slot;
+        b32 whole = settings.stale_all[slot] || settings.change_all;
+
+        settings_rows_add(&drawn_top, &drawn_bottom, settings.change_top, settings.change_bottom);
+        settings_rows_add(&drawn_top, &drawn_bottom, spoiled_top, spoiled_bottom);
+        if (whole)
+        {
+                drawn_top = 0;
+                drawn_bottom = settings.height;
+        }
+        drawn_top = drawn_top < 0 ? 0 : drawn_top;
+        drawn_bottom = drawn_bottom > settings.height ? settings.height : drawn_bottom;
+        if (drawn_bottom > drawn_top)
+                settings_draw_rows(pixels, drawn_top, drawn_bottom);
+        else
+                drawn_top = drawn_bottom = 0;
+
+        // The buffer is the picture now; the other lacks what changed since it was last drawn, which is what changed now.
+        settings.stale_top[slot] = settings.stale_bottom[slot] = 0;
+        settings.stale_all[slot] = false;
+        settings.stale_top[other] = settings.change_top;
+        settings.stale_bottom[other] = settings.change_bottom;
+        settings.stale_all[other] = settings.change_all;
+        settings.change_top = settings.change_bottom = 0;
+        settings.change_all = false;
+        *top = drawn_top;
+        *bottom = drawn_bottom;
+        return whole;
+}
+
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
 static b32 settings_frame(void)
 {
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
-        int slot = settings.shown < 0 ? 0 : 1 - settings.shown;
+        int slot = settings.shown < 0 ? 0 : 1 - settings.shown, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
+        int spoiled_top = 0, spoiled_bottom = 0, top, bottom;
+        b32 whole;
 
         if (settings.shown >= 0 && !windows_ready(&settings.own))
                 return false;
-
-        settings_draw(windows_buffer(table, row, (unsigned int)slot));
+        if (windows_spoiled(&settings.own, (unsigned int)slot, &spoiled_x, &spoiled_y, &spoiled_width, &spoiled_height))
+        {
+                spoiled_top = spoiled_y;
+                spoiled_bottom = spoiled_y + spoiled_height;
+        }
+        whole = settings_paint(windows_buffer(table, row, (unsigned int)slot), slot, spoiled_top, spoiled_bottom, &top, &bottom);
         table->width[row] = (unsigned int)settings.width;
         table->height[row] = (unsigned int)settings.height;
-        table->damage_width[row] = 0;
+        if (whole)
+                table->damage_width[row] = 0;
+        else
+        {
+                table->damage_x[row] = 0;
+                table->damage_y[row] = top;
+                table->damage_width[row] = settings.width;
+                table->damage_height[row] = bottom - top;
+        }
         windows_show(&settings.own, (unsigned int)slot);
         settings.shown = slot;
         settings.dirty = false;
@@ -3445,6 +3717,7 @@ static b32 settings_fonts(string_address regular, string_address bold)
         if (!bytes || (engine < 0 && engine > -4096) || font_load(&settings.face[0], (const p8 address_to)bytes, size, 0) != 0)
                 return false;
         settings.ui.engine = (font_engine address_to)engine;
+        settings.fit_generation++;
         font_start(settings.ui.engine, (p8 address_to)(engine + atlas_at), 512, 512);
         settings.ui.regular = &settings.face[0];
         settings.ui.bold = null;
@@ -3485,7 +3758,7 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings_side_reveal();
         if (settings.view)
                 settings_wrap();
-        settings.dirty = true;
+        settings_dirty();
 }
 
 static b32 settings_main()
@@ -3504,6 +3777,7 @@ static b32 settings_main()
         settings.output = -1;
         settings.pane = 1; // the keys start in the rows, on the first of them
         settings.menu = -1;
+        settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
         {
@@ -3583,13 +3857,13 @@ static b32 settings_main()
                 if ((table->focus == row) != settings.focused)
                 {
                         settings.focused = table->focus == row;
-                        settings.dirty = true;
+                        settings_dirty();
                 }
                 if (table->ground[row] && table->ground[row] != settings.ground)
                 {
                         settings.ground = table->ground[row];
                         ui_inks(&settings.ui, settings.ground);
-                        settings.dirty = true;
+                        settings_dirty();
                 }
                 if (table->want_width[row] && table->want_height[row] &&
                     (table->want_width[row] != settings.asked_w || table->want_height[row] != settings.asked_h))
