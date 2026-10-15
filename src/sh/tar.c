@@ -3750,8 +3750,10 @@ static bipolar tar_extract_destination(
                 does; a directory with anything in it is refused. */
         if ((replaced->mode & MODE_FORMAT) == MODE_DIRECTORY)
         {
-                if (system_remove_at(directory, leaf, AT_REMOVEDIR) < 0)
-                        return -ERROR_IS_DIRECTORY;
+                bipolar removed = system_remove_at(directory, leaf, AT_REMOVEDIR);
+
+                if (removed < 0)
+                        return removed;
                 tar_directory_forget(path);
                 tar_stack_forget(path);
                 return 0;
