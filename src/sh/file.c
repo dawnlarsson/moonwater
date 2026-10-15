@@ -32377,12 +32377,12 @@ static b32 shred_pass(bipolar handle, string_address name, b64 address_to sizep,
         bool write_error = false;
         p8 shown[8];
 
-        if (system_seek(handle, 0, FILE_SEEK_SET) < 0)
-        {
-                bipolar code = system_seek(handle, 0, FILE_SEEK_SET);
+        bipolar rewound = system_seek(handle, 0, FILE_SEEK_SET);
 
+        if (rewound < 0)
+        {
                 file_shell_name_reason(log_error, (string_address)"shred: ", name,
-                                       (string_address)": cannot rewind: ", code);
+                                       (string_address)": cannot rewind: ", rewound);
                 return -1;
         }
 
@@ -32459,15 +32459,16 @@ static b32 shred_pass(bipolar handle, string_address name, b64 address_to sizep,
                         {
                                 positive next = (done | 511) + 1;
 
-                                if (system_seek(handle, offset + next, FILE_SEEK_SET) >= 0)
+                                bipolar moved = system_seek(handle, offset + next, FILE_SEEK_SET);
+
+                                if (moved >= 0)
                                 {
                                         done = next;
                                         write_error = true;
                                         continue;
                                 }
                                 file_shell_name_reason(log_error, (string_address)"shred: ", name,
-                                                       (string_address)": lseek failed: ",
-                                                       system_seek(handle, offset + next, FILE_SEEK_SET));
+                                                       (string_address)": lseek failed: ", moved);
                         }
                         return -1;
                 }
