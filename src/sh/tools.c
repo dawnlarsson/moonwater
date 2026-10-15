@@ -2488,7 +2488,7 @@ static positive login_idle(p8 address_to into, login_terminal terminal,
                                               who ? 3 : 5) - into;
 
         b64 now = file_now();
-        b64 idle = now - terminal.accessed;
+        b64 idle = terminal.accessed <= now ? now - terminal.accessed : 0;
 
         if (who && !(boot < terminal.accessed && terminal.accessed <= now &&
                      idle < 86400))
