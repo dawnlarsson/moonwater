@@ -2106,8 +2106,9 @@ static bool shell_check_only HOT_STATE;
         slot is one body's, and the next one hashed to it takes it over.
 */
 #define SHELL_CHECKED_SLOTS 256
+#define SHELL_CHECKED_BYTES 128
 
-static struct { positive hash, length; } shell_checked[SHELL_CHECKED_SLOTS];
+static struct { positive hash, length; p8 text[SHELL_CHECKED_BYTES]; } shell_checked[SHELL_CHECKED_SLOTS];
 
 static COLD bool shell_substitution_parses_fresh(string_address body,
                                                  positive length, bool backquoted);
@@ -2120,12 +2121,17 @@ static COLD bool shell_substitution_parses(string_address body,
         positive hash = memory_hash_33(body, length) * 31 + mode;
         positive slot = (hash ^ (hash >> 17)) % SHELL_CHECKED_SLOTS;
 
-        if (shell_checked[slot].hash == hash && shell_checked[slot].length == length)
+        if (shell_checked[slot].hash == hash && shell_checked[slot].length == length &&
+            !memory_compare(shell_checked[slot].text, body, length))
                 return true;
         if (!shell_substitution_parses_fresh(body, length, backquoted))
                 return false;
-        shell_checked[slot].hash = hash;
-        shell_checked[slot].length = length;
+        if (length <= SHELL_CHECKED_BYTES)
+        {
+                memory_copy(shell_checked[slot].text, body, length);
+                shell_checked[slot].hash = hash;
+                shell_checked[slot].length = length;
+        }
         return true;
 }
 
