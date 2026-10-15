@@ -32649,7 +32649,7 @@ static p8 shred_old_name[FILE_PATH_MAX];
         is unlinked only if it is still the file that was shredded.
 */
 static bool shred_remove(string_address path, file_facts address_to named,
-                         bool named_known, shred_how address_to how)
+                         bipolar named_look, shred_how address_to how)
 {
         positive length = string_length(path);
         bool good = true;
@@ -32715,9 +32715,9 @@ static bool shred_remove(string_address path, file_facts address_to named,
                 memory_copy_end(shred_old_name + base, shred_new_name + base, size);
         }
 
-        bipolar gone = named_known
+        bipolar gone = named_look >= 0
             ? file_remove_path_same(shred_old_name, 0, named)
-            : -ERROR_AGAIN;
+            : named_look;
 
         if (gone < 0)
         {
@@ -32773,8 +32773,8 @@ static bool shred_one(string_address path, shred_how address_to how)
         //      shred writes through a symlink but removes the name it was
         //      given, so the two identities are kept apart.
         file_facts named;
-        bool named_known = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
-                                          address_of named) >= 0;
+        bipolar named_look = file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW,
+                                            address_of named);
         positive flags = O_WRONLY | O_NOCTTY | O_NONBLOCK;
         bipolar handle = system_open_at(AT_FDCWD, path, flags);
 
@@ -32809,7 +32809,7 @@ static bool shred_one(string_address path, shred_how address_to how)
         }
 
         if (good && how->removal && !shred_fatal)
-                good = shred_remove(path, address_of named, named_known, how);
+                good = shred_remove(path, address_of named, named_look, how);
 
         return good;
 }
