@@ -23077,6 +23077,15 @@ static COLD bool bind_add(string_address spelling, string_address text,
 
         bind_users[bind_user_count].keys = comp_keep(canonical);
         bind_users[bind_user_count].text = comp_keep(text);
+
+        if (!bind_users[bind_user_count].keys ||
+            (text && !bind_users[bind_user_count].text))
+        {
+                comp_release(bind_users[bind_user_count].keys);
+                comp_release(bind_users[bind_user_count].text);
+                return false;
+        }
+
         bind_users[bind_user_count].kind = kind;
         bind_users[bind_user_count].keymap = (p8)keymap;
         bind_user_count++;
