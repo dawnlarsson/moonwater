@@ -9253,6 +9253,7 @@ static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask
         positive used = 0;
         positive start;
         positive length;
+        bool unknown;
 
         if (radio_station >= 0)
         {
@@ -9261,12 +9262,16 @@ static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask
                 return;
         }
         count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
+        //      A saved list that is there but does not read is not known to
+        //      be empty, so the rules are kept as they are; a list that is
+        //      not there at all has no networks, and its rules go.
+        unknown = !count && system_access_at(AT_FDCWD, NET_WIFI_LIST, 0) == 0;
         got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
 
         while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
                                          address_of length))
         {
-                bool saved = false;
+                bool saved = unknown;
                 p8 rule = radio_rule_of(text + start, length, ssid, ssid_length);
 
                 rules |= rule;
