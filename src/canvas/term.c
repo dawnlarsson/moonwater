@@ -14,13 +14,11 @@
         Nothing below makes a system call. The emulator is a byte stream in and
         a grid of cells out, so it runs the same whether a pty is driving it or
         a test is, and the term lane of test/run drives it with no kernel underneath at
-        all. The two functions at the bottom are the exception and they are the
-        only ones: everything the parser, the keys and the line editor do is
-        stores into a page.
+        all. claim_standard_descriptors and grid_tell are the exception, and
+        regrid reaches the system through grid_tell: everything the parser, the
+        keys and the line editor do is stores into a page.
 */
 
-#define COLUMNS_WANTED 80
-#define ROWS_WANTED 24
 #define SHELL "/shell"
 
 #ifndef EINTR
@@ -30,9 +28,9 @@
 #define EAGAIN 11
 #endif
 
-// Three below are the shell's.
-// Not the attribute that keeps a symbol: this one lets the compiler drop what
-// it finds no call to, and only quiets the warning about having found none.
+// KEEP, from lib.c, is the attribute that keeps a symbol. This one lets the
+// compiler drop what it finds no call to, and only quiets the warning about
+// having found none.
 #define SPARE __attribute__((unused))
 
 static struct window *window;
@@ -63,7 +61,7 @@ static b32 cursor_visible = true;
 static b32 application_keys;
 /* DEC private mode 2026: programs may update a complete frame without the
    compositor presenting the intermediate rows. The cells are still written
-   immediately; only publication is held by screen.c until the mode ends. */
+   immediately; only publication is held by terminal.c until the mode ends. */
 static b32 synchronized_output;
 static unsigned int mouse_mode;
 static b32 mouse_sgr;
@@ -635,6 +633,10 @@ static fn put_cells(unsigned int character, unsigned int width)
         column_held();
 }
 
+// Cells written by repeats (CSI b) since the drain last asked: a repeat of a whole screen is 1920 writes for nine
+// bytes, so term_drain charges them, or a few kilobytes of them held the window for most of a second.
+static positive term_repeated;
+
 /*
         A character in the columns it takes. A mark that belongs over the
         character before it takes none and is dropped: the face cannot draw
@@ -652,10 +654,6 @@ static fn put_cells(unsigned int character, unsigned int width)
         here, before the call: a byte at a time, the ASCII consume() hands
         put() costs a compare and not a call.
 */
-// Cells written by repeats (CSI b) since the drain last asked: a repeat of a whole screen is 1920 writes for nine
-// bytes, so term_drain charges them, or a few kilobytes of them held the window for most of a second.
-static positive term_repeated;
-
 static fn put(unsigned int character)
 {
         unsigned int width =
@@ -671,9 +669,9 @@ static fn put(unsigned int character)
         What goes back up the pty.
 
         A terminal answers questions -- where the cursor is, what it claims to
-        be -- and a key is bytes rather than a call, so both land here and the
-        one function in this file that has a file descriptor sends them. The
-        emulator itself still makes no system call.
+        be -- and a key is bytes rather than a call, so both land here, and the
+        drain in screen.c sends them up the descriptor. The emulator itself
+        still makes no system call.
 */
 /*
         The queue's fixed buffer, which only the test harness asks for
@@ -886,12 +884,12 @@ static CONST unsigned int acs_character(unsigned int c)
         return map[c - 0x60];
 }
 
-// A colour in xterm's spelling, sixteen bits a channel, ended the way the
-// question was.
 // Where a colour index is looked up for what a program asks the terminal its colours are: the table a
 // program that paints with a theme paints from, so that what is answered is what is on the screen.
 static unsigned int (*term_palette)(unsigned int index);
 
+// A colour in xterm's spelling, sixteen bits a channel, ended the way the
+// question was.
 static fn osc_colour(unsigned int colour, b32 bell)
 {
         p8 text[] = "rgb:0000/0000/0000";
@@ -1617,6 +1615,11 @@ static b32 csi_known(unsigned int final)
         }
 }
 
+// The pixels a cell is, which is the kernel's face until a program that draws
+// its own glyphs says what its font made them. Reports (CSI 14 t, CSI 16 t)
+// and the pty's size both read these.
+static unsigned int term_cell_w = WINDOW_CELL_W, term_cell_h = WINDOW_CELL_H;
+
 // Row a of the page, or of the region in origin mode, counting from one. The
 // count is compared with the room and not added to the top, which a hostile
 // one wraps to a row above the region.
@@ -1785,7 +1788,9 @@ static fn csi_final(unsigned int final)
                 {
                         memory_fill(tab_stop, 0, sizeof(tab_stop));
                 }
-                else if (column < TAB_STOPS)
+                // TBC 0 (or none) clears the stop under the cursor; any other
+                // number is no TBC at all, as xterm and tmux read it.
+                else if (column < TAB_STOPS && terminal_csi.value[0] == 0)
                         tab_stop[column] = 0;
                 break;
         case 'h':
@@ -1890,10 +1895,10 @@ static fn csi_final(unsigned int final)
         case 't':
         {
                 unsigned int op = terminal_csi.value[0];
-                unsigned int high = op == 14 ? ROWS * WINDOW_CELL_H
-                                  : op == 16 ? WINDOW_CELL_H : ROWS;
-                unsigned int wide = op == 14 ? COLUMNS * WINDOW_CELL_W
-                                  : op == 16 ? WINDOW_CELL_W : COLUMNS;
+                unsigned int high = op == 14 ? ROWS * term_cell_h
+                                  : op == 16 ? term_cell_h : ROWS;
+                unsigned int wide = op == 14 ? COLUMNS * term_cell_w
+                                  : op == 16 ? term_cell_w : COLUMNS;
 
                 if ((op != 14 && op != 16 && op != 18 && op != 19) ||
                     !answering())
@@ -3423,14 +3428,6 @@ static fn line_clear_screen()
         touch_all();
 }
 
-/*
-        The line is over, however it ended.
-
-        What was typed stays on the screen -- it is the record of what was
-        asked for, and both the shell's answer and the next prompt go under
-        it -- so the cursor is put past the end of what was drawn and taken
-        down one from there.
-*/
 // Nothing typed, the cursor at its start, and history back at the bottom.
 static fn line_reset()
 {
@@ -3442,6 +3439,14 @@ static fn line_reset()
         line_forget();
 }
 
+/*
+        The line is over, however it ended.
+
+        What was typed stays on the screen -- it is the record of what was
+        asked for, and both the shell's answer and the next prompt go under
+        it -- so the cursor is put past the end of what was drawn and taken
+        down one from there.
+*/
 static fn line_done()
 {
         row = line_anchor_row();
@@ -3681,8 +3686,8 @@ static b32 line_key(unsigned int character, unsigned int code)
 
         Arrows, Home, the function keys: a program is handed the code and
         nothing else, and a terminal owes its shell the sequence ANSI names
-        for each of them. TERM=xterm-256color is exported below, and this is
-        what makes that true rather than a claim.
+        for each of them. screen.c's spawn exports TERM=xterm-256color, and
+        this is what makes that true rather than a claim.
 */
 static const struct
 {
@@ -3825,8 +3830,7 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
                 Without this a program on the far end cannot tell Shift+Right
                 from Right, because nothing in the bytes says. The compositor
                 has known which modifiers were down since canvas's keys section
-                read them; it
-                is only this last step that threw the answer away.
+                read them; it is only this last step that threw the answer away.
         */
         if (held)
         {
@@ -3982,10 +3986,6 @@ static fn grid_take()
                 COLUMNS = window->stride;
 }
 
-// The pixels a cell is, which is the kernel's face until a program that draws
-// its own glyphs says what its font made them.
-static unsigned int term_cell_w = WINDOW_CELL_W, term_cell_h = WINDOW_CELL_H;
-
 // The pty is told the grid, so a program that asks has the size it is drawn
 // in, and a resize reaches it as SIGWINCH.
 static fn grid_tell(b32 master)
@@ -4043,9 +4043,11 @@ static fn alternate_cut(void)
         off the top. That keeps what was on the screen where it was, as tmux
         does.
 
-        What was on the screen stays on it. Lines are not moved or shortened
-        here: the compositor folds a stored line at the width it is drawn in,
-        so narrowing and then widening a window is lossless. The pty learns
+        What was on the screen stays on it. Lines are not moved here, and the
+        primary screen's are not shortened; the alternate screen's are cut to
+        the new width (alternate_cut), and the line being typed is taken out
+        and drawn again. The compositor folds a stored line at the width it is
+        drawn in, so narrowing and then widening a window is lossless. The pty learns
         the new grid below and future output uses it; an application that owns
         the screen can then redraw in response to SIGWINCH.
 */
@@ -4131,8 +4133,8 @@ fn regrid(b32 master)
                 which the cursor could remain absent until some later input.
                 Publish the new grid, put the cursor into that grid, damage
                 it, and synchronously commit before returning. master is -1
-                in the pure emulator harness, whose owner paints its cells
-                directly.
+                where the caller paints the cells itself: the emulator harness,
+                and the resize paths in screen.c and terminal.c.
         */
         if (master >= 0 || cursor_was_shown)
                 cursor_show();
