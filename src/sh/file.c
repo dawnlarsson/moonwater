@@ -46517,7 +46517,7 @@ static b32 file_env()
         string_format(log_error, "env: '%w': %s\n", writer_terminal_quoted_name, name,
                       file_reason(answer));
 
-        if (answer != -ERROR_ACCESS)
+        if (answer == -ERROR_NO_ENTRY)
         {
                 for (positive i = 0; name[i]; i++)
                         if (byte_is_space(name[i]))
