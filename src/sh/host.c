@@ -2712,6 +2712,7 @@ typedef struct
         p64 blocks;
         p64 inodes;
         bool deep;
+        bool unread;
 } host_size;
 
 /*
@@ -2755,7 +2756,9 @@ static fn host_measure(bipolar directory, string_address name, positive depth,
 
                 if (depth >= HOST_MEASURE_DEPTH)
                         size->deep = true;
-                else if (file_walk_open_found(address_of walk, directory, name))
+                else if (!file_walk_open_found(address_of walk, directory, name))
+                        size->unread = true;
+                else
                 {
                         while ((entry = file_walk_next(address_of walk)))
                                 if (!file_is_dot(entry->d_name))
@@ -2791,6 +2794,15 @@ static bool host_data_fits(p64 bytes, string_address name)
                                                "levels, more than an install adds up; "
                                                "nothing written\n",
                          BOWL_ROOT_DIRECTORY, (positive)HOST_MEASURE_DEPTH);
+                return false;
+        }
+
+        if (size.unread)
+        {
+                host_say(log_error, host_label "a directory under %s, /root or /home "
+                                               "could not be read, so what an install "
+                                               "copies is not known; nothing written\n",
+                         BOWL_ROOT_DIRECTORY);
                 return false;
         }
 
