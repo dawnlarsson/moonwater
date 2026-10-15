@@ -11505,6 +11505,12 @@ static b32 text_tee()
 
         handles[0] = 1;
 
+        // An exit mode can leave the open loop early, and the cleanup closes
+        // every entry that is not negative, so the ones never opened start
+        // as -1 rather than as the zeroed pages' 0.
+        for (positive i = 1; i < count; i++)
+                handles[i] = -1;
+
         for (positive i = 1; i < count; i++)
         {
                 string_address name = program_argument(text_files[i - 1]);
