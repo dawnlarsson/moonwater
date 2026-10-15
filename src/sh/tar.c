@@ -3591,7 +3591,12 @@ static bool tar_owner_parse(string_address text, bool group)
                 positive number;
 
                 if (!string_digits_checked_exact(text, 10, address_of number) || number >= p32_max)
-                        return true;
+                {
+                        string_format(log_error, "tar: Invalid %s: %s\n",
+                                      group ? "group" : "owner", text);
+                        tar_status = 2;
+                        return false;
+                }
                 tar_owner_forced_id[group] = (bipolar)number;
                 // The name the number has here, if it has one.
                 (void)(group ? file_group_name(number, name, 32) : file_user_name(number, name, 32));
