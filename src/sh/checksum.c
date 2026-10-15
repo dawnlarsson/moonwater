@@ -1808,7 +1808,6 @@ static bool cksum_other_path(p8 kind, string_address path, bool debug,
         }
 
         p32 sum = kind == 'c' ? ~(p32)0 : 0;
-        p64 total = 0;
         p64 bytes = 0;
         bipolar got;
 
@@ -1822,7 +1821,7 @@ static bool cksum_other_path(p8 kind, string_address path, bool debug,
                 else if (kind == 'b')
                         sum = memory_checksum_bsd16(file_transfer, (positive)got, sum);
                 else
-                        total += (p64)memory_sum_bytes(file_transfer, (positive)got);
+                        sum += (p32)memory_sum_bytes(file_transfer, (positive)got);
                 bytes += (positive)got;
         }
 
@@ -1838,9 +1837,9 @@ static bool cksum_other_path(p8 kind, string_address path, bool debug,
                 sum = ~sum;
         else if (kind == 's')
         {
-                while (total >> 16)
-                        total = (total & 0xffff) + (total >> 16);
-                sum = (p32)total;
+                p32 folded = (sum & 0xffff) + (sum >> 16);
+
+                sum = (folded & 0xffff) + (folded >> 16);
         }
 
         address_to result = sum;
