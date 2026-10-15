@@ -20032,7 +20032,7 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
 }
 
 /*
-        moonwater settings: the settings window (src/canvas/settings.c) on
+        moonwater settings: the settings window (src/canvas/ui/settings.c) on
         the compositor's desktop, which is a front end to this command. Up is
         what the machine script means by it: the window table there, and the
         process compositor.pid names alive. The window is started in a

@@ -45275,7 +45275,7 @@ while True:
         markers = set(re.findall(r'\{null, "@(\w+)", null, \'r\'\}', host_source))
         check({usage.split()[0] for usage, _ in table_rows} <= markers,
               "every verb of the table has its marker on the main page", repr(sorted({u.split()[0] for u, _ in table_rows} - markers)))
-        settings_source = (HARNESS_ROOT / "src/canvas/settings.c").read_text()
+        settings_source = (HARNESS_ROOT / "src/canvas/ui/settings.c").read_text()
         check("settings_rows[] =" not in settings_source and "struct settings_row\n{" not in settings_source and
               "SETTINGS_FIELD, 0" not in settings_source,
               "the settings window keeps no list of rows: its rows are the table's", "")

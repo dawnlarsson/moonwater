@@ -108575,9 +108575,16 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/font.c"
 #include "../src/canvas/compositor.c"
 #include "../src/canvas/terminal.c"
-#include "../src/canvas/ui.c"
-#include "../src/canvas/settings.c"
-#include "../src/canvas/launcher.c"
+#include "../src/canvas/ui/features.h"
+#if MOONWATER_UI_ANY
+#include "../src/canvas/ui/ui.c"
+#endif
+#if MOONWATER_UI_SETTINGS
+#include "../src/canvas/ui/settings.c"
+#endif
+#if MOONWATER_UI_LAUNCHER
+#include "../src/canvas/ui/launcher.c"
+#endif
 
 #define SHARED_counted
 #include "checks.c"
@@ -109671,6 +109678,7 @@ static fn check_glass(void)
         switch puts its knob on its side, and a rounded rectangle's corner is
         covered in part and its middle whole.
 */
+#if MOONWATER_UI_SETTINGS
 static unsigned int settings_parsed(unsigned int row, const char address_to said, char address_to value)
 {
         return settings_parse(&settings_rows[row], said, string_length((string_address)said), value, SETTINGS_VALUE);
@@ -109708,12 +109716,14 @@ static positive settings_lit(const unsigned int address_to pixels, positive coun
                 lit += pixels[at] >> 24 > 64;
         return lit;
 }
+#endif
 
 /*
         The launcher's model: what a text names, in what order, and what a row
         starts. The names of PATH are a fixture here, so the list is a plain
         function of them; no key that would start a program is pressed.
 */
+#if MOONWATER_UI_LAUNCHER
 static b32 launcher_typed(unsigned int code)
 {
         struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, (int)code};
@@ -109991,6 +110001,7 @@ static fn check_launcher(void)
                 system_remove_at(AT_FDCWD, made[0], 0x200);
         }
 }
+#endif
 
 /*
         The settings table (src/sh/registry.c): every plain row is one verb, with its usage, its key, its file
@@ -110186,6 +110197,7 @@ static fn check_registry(void)
         }
 }
 
+#if MOONWATER_UI_SETTINGS
 static fn check_settings(string_address regular, string_address bold)
 {
         check_registry();
@@ -111474,6 +111486,7 @@ static fn check_settings(string_address regular, string_address bold)
                 compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
         }
 }
+#endif
 
 // A code point as UTF-8, into bytes; the count of bytes it takes.
 static positive render_glyph(p8 address_to bytes, p32 code)
@@ -111854,10 +111867,14 @@ b32 main()
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_dismiss();
+#if MOONWATER_UI_LAUNCHER
         check_launcher();
+#endif
         check_compositor_look();
+#if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
+#endif
 
         // What the terminal says its paper and ink are is what it paints them with.
         {

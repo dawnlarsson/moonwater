@@ -5,7 +5,7 @@
         in the settings window, the words of the moonwater command that read
         and set it, the line the help page and the README say of it, the
         file in /root that keeps it, and who applies it. The command
-        (src/sh/host.c), the window (src/canvas/settings.c) and the
+        (src/sh/host.c), the window (src/canvas/ui/settings.c) and the
         compositor (src/canvas/compositor.c) are all in one program, so each
         reads this table and none keeps a list of its own: one row added
         here is a verb that reads and sets it, a line on the help page, a

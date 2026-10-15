@@ -19493,7 +19493,7 @@ else
 fi
 fi
 
-#       The settings window (src/canvas/settings.c) on a plain boot's desktop,
+#       The settings window (src/canvas/ui/settings.c) on a plain boot's desktop,
 #       a guest of its own: opened by the command, glass over what is under
 #       it, its name row changed by the keys and read back from the command.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = s1 ]; then
@@ -19749,7 +19749,7 @@ else
 fi
 fi
 
-#       The launcher (src/canvas/launcher.c) on a plain boot's desktop, a guest of its own: Super and
+#       The launcher (src/canvas/ui/launcher.c) on a plain boot's desktop, a guest of its own: Super and
 #       Space open it in the middle of the screen with the keys in it, what is typed there is run (a
 #       program of PATH in a terminal that stays for a key, a command line by the machine's shell),
 #       and the same chord, Escape and a click elsewhere put it away.

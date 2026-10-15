@@ -1,3 +1,4 @@
+#include "../canvas/ui/features.h"
 /* category, installed name, implementation */
 SHELL_TOOL(GENERAL, awk, text_awk)
 SHELL_TOOL(GENERAL, b2sum, checksum_main)
@@ -205,8 +206,12 @@ SHELL_TOOL(SYSTEM, compositor, compositor_main)
 SHELL_TOOL(SYSTEM, edit, system_edit)
 SHELL_TOOL(SYSTEM, init, system_init)
 SHELL_TOOL(SYSTEM, klog, klog_main)
+#if MOONWATER_UI_LAUNCHER
 SHELL_TOOL(SYSTEM, launcher, launcher_main)
+#endif
+#if MOONWATER_UI_SETTINGS
 SHELL_TOOL(SYSTEM, settings, settings_main)
+#endif
 SHELL_TOOL(SYSTEM, spawn, screen_spawn)
 SHELL_TOOL(SYSTEM, surface, surface_main)
 SHELL_TOOL(SYSTEM, terminal, terminal_main)
