@@ -159,6 +159,12 @@ static struct
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
         unsigned int title_seen;        // how many titles programs had set when it was taken
         b32 hovering;                   // whether the compositor is told of the pointer's motion over it
+        // When the far end's modes were last read, and whether they were read in this pass of the loop (before a key
+        // is taken); when the title was last read, and whether a reading is owed at the frame's end.
+        positive modes_at, title_at;
+        b32 modes_fresh, title_owed;
+        // Per buffer: the top margin was drawn over by what the compositor wrote, and is drawn again.
+        b32 margin_spoiled[2];
 } terminal = {.shown = -1, .view = TERMINAL_LIVE};
 
 static unsigned int terminal_colour[256];
@@ -241,9 +247,28 @@ static unsigned int terminal_top(unsigned int view, unsigned int address_to skip
 /*
         Where the view sits in what there is, in rows rather than lines: what
         the bar is a picture of. False when there is nothing to scroll.
+
+        The rows of the lines above the screen do not change, so they are kept as
+        running sums: terminal_sums[i % TERMINAL_SUMS] is the rows of the lines
+        from the base up to i, for i up to the end of the sums, and only the lines
+        of the screen are counted each time. Walking every line from the oldest
+        (terminal_extent_walk, which is also the fallback for a history too long
+        for the sums) cost about ten instructions a line, every frame: about 9000
+        a frame with a 900-line scrollback, from 3% to 14% of a frame while the
+        view was back from the end. The sums are made again when the grid
+        changes, or the oldest line or the screen moves back past them: a return
+        from the alternate screen moves head back, and the lines it writes over
+        were above the screen while the alternate one was up.
 */
-static b32 terminal_extent(unsigned int address_to first, unsigned int address_to shown,
-                           unsigned int address_to total)
+#define TERMINAL_SUMS 4096
+
+static unsigned int terminal_sums[TERMINAL_SUMS];
+static unsigned int terminal_sums_base, terminal_sums_end;
+static unsigned int terminal_sums_grid[4];
+static b32 terminal_sums_valid;
+
+static b32 terminal_extent_walk(unsigned int address_to first, unsigned int address_to shown,
+                                unsigned int address_to total)
 {
         unsigned int skip, top = terminal_top(terminal.view, &skip), at;
 
@@ -258,6 +283,58 @@ static b32 terminal_extent(unsigned int address_to first, unsigned int address_t
 
                 address_to total += terminal_line_rows(at);
         }
+
+        return address_to total > ROWS;
+}
+
+// The rows from the base to the line at, which is one the sums hold, or else one past their end counted directly.
+static unsigned int terminal_sum_to(unsigned int at)
+{
+        unsigned int rows = 0;
+
+        if (at <= terminal_sums_end)
+                return terminal_sums[at % TERMINAL_SUMS];
+
+        for (unsigned int line = terminal_sums_end; line != at; line++)
+                rows += terminal_line_rows(line);
+        return terminal_sums[terminal_sums_end % TERMINAL_SUMS] + rows;
+}
+
+static b32 terminal_extent(unsigned int address_to first, unsigned int address_to shown,
+                           unsigned int address_to total)
+{
+        unsigned int oldest = terminal_oldest(), head = window->head, screen, skip, top, grid[4];
+        unsigned int from;
+
+        address_to shown = ROWS;
+        address_to total = 0;
+        address_to first = 0;
+
+        if (head == oldest)
+                return false;
+        if (window->history + ROWS >= TERMINAL_SUMS)
+                return terminal_extent_walk(first, shown, total);
+
+        top = terminal_top(terminal.view, &skip);
+        screen = head - oldest > ROWS ? head - ROWS : oldest;
+        grid[0] = COLUMNS, grid[1] = ROWS, grid[2] = window->stride, grid[3] = window->history;
+
+        if (!terminal_sums_valid || oldest < terminal_sums_base || oldest > terminal_sums_end || screen < terminal_sums_end ||
+            memory_compare(grid, terminal_sums_grid, sizeof(grid)))
+        {
+                terminal_sums_base = terminal_sums_end = oldest;
+                terminal_sums[oldest % TERMINAL_SUMS] = 0;
+                memory_copy(terminal_sums_grid, grid, sizeof(grid));
+                terminal_sums_valid = true;
+        }
+
+        for (; terminal_sums_end < screen; terminal_sums_end++)
+                terminal_sums[(terminal_sums_end + 1) % TERMINAL_SUMS] =
+                    terminal_sums[terminal_sums_end % TERMINAL_SUMS] + terminal_line_rows(terminal_sums_end);
+
+        from = terminal_sums[oldest % TERMINAL_SUMS];
+        address_to total = terminal_sum_to(head) - from;
+        address_to first = terminal_sum_to(top) - from + skip;
 
         return address_to total > ROWS;
 }
@@ -741,6 +818,34 @@ static void terminal_margin(unsigned int address_to whole, const struct window_c
 }
 
 /*
+        The coverage of the pill's pixels: how many of each pixel's sixteen sample points are inside its round ends. It
+        depends on the pill's size and nothing else, and the thumb moves a line at a time, so its size changes about
+        once in every few lines; the table is worked out again only when the size changes. Sampling every pixel of the
+        pill at each redraw was most of the bar's cost (about 75000 instructions a frame at 680 pixels).
+*/
+#define TERMINAL_BAR_COVER 32768
+static unsigned char terminal_bar_cover[TERMINAL_BAR_COVER];
+static int terminal_bar_across = -1, terminal_bar_along = -1;
+
+// How many of the sixteen sample points of one pixel of the scroll bar's pill are inside its round ends (see terminal_bar).
+static unsigned int terminal_bar_inside(int column, int row, int across, int along, int radius)
+{
+        unsigned int inside = 0;
+
+        for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++)
+                {
+                        int px = 2 * (column * 4 + sx) + 1, py = 2 * (row * 4 + sy) + 1;
+                        int dx = px - across;
+                        int dy = py < 2 * radius ? py - 2 * radius
+                                 : py > 2 * (along - radius) ? py - 2 * (along - radius) : 0;
+
+                        inside += dx * dx + dy * dy <= across * across;
+                }
+        return inside;
+}
+
+/*
         The right of the grid: each row's paper, from its last cell, to the
         window's right edge, and the scroll bar's thumb a pill on it, as wide
         as half the gutter, round at both ends, a quarter of the gutter in
@@ -782,28 +887,42 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
         // circles of radius wide / 2.
         int across = (int)wide * 4, along = (int)(thumb - 2 * inset) * 4, radius = across / 2;
         unsigned int left = x + inset, pill = terminal.pad_y + at + inset;
+        int columns = across / 4, rows = along / 4;
+        b32 kept = (unsigned long)columns * (unsigned long)rows <= TERMINAL_BAR_COVER;
 
-        for (int row = 0; row < along / 4; row++)
+        if (kept && (across != terminal_bar_across || along != terminal_bar_along))
+        {
+                for (int row = 0; row < rows; row++)
+                        for (int column = 0; column < columns; column++)
+                                terminal_bar_cover[row * columns + column] =
+                                    (unsigned char)terminal_bar_inside(column, row, across, along, radius);
+                terminal_bar_across = across;
+                terminal_bar_along = along;
+        }
+
+        unsigned int ink = 0, inked_ground = 0;
+        b32 inked = false;
+
+        for (int row = 0; row < rows; row++)
         {
                 unsigned int y = pill + (unsigned int)row, cell_row = (y - terminal.pad_y) / terminal.cell_h;
                 unsigned int address_to line = whole + (unsigned long)y * terminal.pitch + left;
                 unsigned int ground = terminal_ground(frame, cell_row < ROWS ? cell_row : ROWS - 1, COLUMNS - 1);
-                unsigned int ink = window_mix(ground, window_contrast(ground), 160 * terminal.bar_level / 256);
 
-                for (int column = 0; column < across / 4; column++)
+                // The ink is a function of the ground and the level alone, and most rows have the same ground: it is
+                // worked out again only when the ground changes.
+                if (!inked || ground != inked_ground)
                 {
-                        unsigned int inside = 0;
+                        ink = window_mix(ground, window_contrast(ground), 160 * terminal.bar_level / 256);
+                        inked_ground = ground;
+                        inked = true;
+                }
 
-                        for (int sy = 0; sy < 4; sy++)
-                                for (int sx = 0; sx < 4; sx++)
-                                {
-                                        int px = 2 * (column * 4 + sx) + 1, py = 2 * (row * 4 + sy) + 1;
-                                        int dx = px - across;
-                                        int dy = py < 2 * radius ? py - 2 * radius
-                                                 : py > 2 * (along - radius) ? py - 2 * (along - radius) : 0;
+                for (int column = 0; column < columns; column++)
+                {
+                        unsigned int inside = kept ? terminal_bar_cover[row * columns + column]
+                                                   : terminal_bar_inside(column, row, across, along, radius);
 
-                                        inside += dx * dx + dy * dy <= across * across;
-                                }
                         if (inside == 16)
                                 line[column] = ink;
                         else if (inside)
@@ -913,6 +1032,11 @@ static void terminal_spoiled(struct window_cell address_to drawn, int slot)
                 last = (int)ROWS, first = first < (int)ROWS - 1 ? first : (int)ROWS - 1;
         if (last > first)
                 memory_fill_u64_aligned(drawn + (positive)first * COLUMNS, (positive)(last - first) * COLUMNS, ~0ull);
+        // A rectangle that marked no row lies in the paper above the grid, which the top row would have drawn with its
+        // own cells. Nothing draws that paper, so the frame draws it again. A rectangle that does mark a row has the
+        // top row drawn over its whole width, and the paper with it.
+        else if (y < (int)terminal.pad_y)
+                terminal.margin_spoiled[slot] = true;
         terminal.bar_drawn[slot] = ~0u;
         (void)x, (void)width;
 }
@@ -1046,7 +1170,10 @@ static b32 terminal_frame(void)
         bar_told = !screen || terminal.bar_first[front] != first || terminal.bar_shown[front] != shown ||
                    terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal.bar_level;
 
-        any = bar || bar_told;
+        // A top margin a spoil reached is drawn again, which makes the frame whether or not a cell changed.
+        b32 margin = terminal.margin_spoiled[slot];
+
+        any = bar || bar_told || margin;
 
         positive changed = 0;
         unsigned int rows = ROWS < TERMINAL_SPAN_ROWS ? ROWS : TERMINAL_SPAN_ROWS;
@@ -1082,6 +1209,12 @@ static b32 terminal_frame(void)
                 struct terminal_banding banding = {pixels, whole, now, drawn, rows, 1};
 
                 terminal_cells_draw(&banding, changed);
+        }
+
+        if (margin)
+        {
+                terminal_margin(whole, now, 0, 0, COLUMNS);
+                terminal.margin_spoiled[slot] = false;
         }
 
         // Nothing differs from the buffer or from the screen: nothing is made or said.
@@ -1121,6 +1254,15 @@ static b32 terminal_frame(void)
                                 y1 = (int)top < y1 ? (int)top : y1;
                                 y2 = (int)(top + height) > y2 ? (int)(top + height) : y2;
                         }
+
+                // The top margin drawn again is the window's top edge across, to the grid's first row.
+                if (margin)
+                {
+                        x1 = x1 < 0 ? x1 : 0;
+                        y1 = y1 < 0 ? y1 : 0;
+                        x2 = x2 > (int)terminal.width ? x2 : (int)terminal.width;
+                        y2 = y2 > (int)terminal.pad_y ? y2 : (int)terminal.pad_y;
+                }
 
                 if (bar_told && terminal.bar)
                 {
@@ -1606,6 +1748,27 @@ static void terminal_pointer_key(unsigned int button, unsigned int flags, struct
         key->reserved = ((column + 1) & 0xffff) | (((row + 1) & 0xffff) << 16);
 }
 
+// The frame period: the far end's modes and the title are read at most once in one.
+static positive terminal_period(void)
+{
+        struct windows address_to table = terminal.own.table;
+
+        return table->period ? table->period : TERMINAL_FRAME_NANOSECONDS;
+}
+
+/*
+        The far end's line discipline, read. ICANON and ECHO say whether the emulator edits the line being typed, and then
+        the kernel's echo has to be off before a key's bytes are queued, or the key is echoed twice. So they are read
+        before any key is taken in a pass of the loop, and otherwise once a frame, where a program's change shows: its
+        output comes with it, as a rule.
+*/
+static void terminal_modes_read(b32 master, positive now)
+{
+        terminal.modes_at = now;
+        terminal.modes_fresh = true;
+        term_follow_modes(master);
+}
+
 /*
         One event from the compositor. Answers whether the pty will still take
         what the shell is owed; dirty is set when what is drawn has to be made
@@ -1619,6 +1782,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         {
         case WINDOW_EVENT_KEY:
                 terminal.modifiers = event->flags;
+                if (!terminal.modes_fresh)
+                        terminal_modes_read(master, clock_monotonic_nanoseconds());
                 terminal_key(event, &key);
                 // Typing is a reason to look at what is being typed; a modifier alone is not typing, and
                 // Control held for a zoom or a copy keeps the place the view was scrolled back to.
@@ -2018,8 +2183,14 @@ static b32 terminal_run(b32 reading)
                         touched_bottom = 0;
                 }
 
+                terminal.modes_fresh = false;
                 if (!reading)
-                        term_follow_modes(master);
+                {
+                        positive read_now = clock_monotonic_nanoseconds();
+
+                        if (read_now - terminal.modes_at >= terminal_period())
+                                terminal_modes_read(master, read_now);
+                }
 
                 // The zoom keys are the terminal's, whichever window it is: the kernel's log follows them too.
                 while (windows_event(&terminal.own, &event))
@@ -2063,8 +2234,22 @@ static b32 terminal_run(b32 reading)
                         terminal.hovering = mouse_mode != 0;
                         windows_hover(&terminal.own, terminal.hovering);
                 }
-                if (!reading && changed && !gone)
-                        terminal_title(master, child);
+                // The title is read when the far end has said something, at most once a frame; a title a program sets
+                // is read as it is set. A reading that waited is owed, and is made at the frame's end, so the title that
+                // came with the last output is not left until the next.
+                if (!reading && !gone && (changed || terminal.title_owed))
+                {
+                        positive title_now = clock_monotonic_nanoseconds();
+
+                        if (title_now - terminal.title_at >= terminal_period() || title_said != terminal.title_seen)
+                        {
+                                terminal_title(master, child);
+                                terminal.title_at = title_now;
+                                terminal.title_owed = false;
+                        }
+                        else
+                                terminal.title_owed = true;
+                }
 
                 if (!gone && !term_send(master))
                         gone = true;
@@ -2194,6 +2379,14 @@ static b32 terminal_run(b32 reading)
 
                 if (gone)
                         break;
+
+                if (terminal.title_owed)
+                {
+                        positive due = terminal.title_at + terminal_period(), owed_now = clock_monotonic_nanoseconds();
+                        long left = due > owed_now ? (long)(due - owed_now) : 0;
+
+                        timeout = timeout < 0 || left < timeout ? left : timeout;
+                }
 
                 /*
                         Asleep until a key, a resize or the shell's output; and, with a frame

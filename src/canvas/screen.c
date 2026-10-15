@@ -355,6 +355,14 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
 }
 
 /*
+        A pointer's motion waits in the queue for the loop's send, which is made once the wake's events have all been taken,
+        so a wake's motion is one write and not one write a motion. The queue is sent here once it is long, so the fixed
+        queue (term.c) does not refuse a report for want of room. Anything else is sent as it is taken, as it always was:
+        a button, a key or a wheel notch that the far end refuses ends its run at once.
+*/
+#define TERM_BATCH 1024
+
+/*
         A key or a pointer report, as the bytes it is for.
 
         The kernel window's key ring and a compositor window's events both come through here as
@@ -369,6 +377,9 @@ static b32 term_input(b32 master, const struct window_key address_to key)
         else if (key->flags & WINDOW_KEY_DOWN)
                 term_key_modified(key->character, key->code, key->flags);
         else
+                return true;
+
+        if ((key->flags & WINDOW_KEY_POINTER_MOVE) && to_shell_length < TERM_BATCH)
                 return true;
 
         return term_send(master);
