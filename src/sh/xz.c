@@ -1780,8 +1780,12 @@ static bool xz_dec_stream(xz_decoder address_to d)
                 if (!xz_dec_le(d, address_of magic, 6))
                         return xz_dec_fail(d, "xz truncated header");
                 return_if(magic != 0x005a587a37fdull, xz_dec_fail(d, "xz bad magic"));
-                flags[0] = (p8)xz_dec_byte(d);
-                flags[1] = (p8)xz_dec_byte(d);
+                bipolar flag0 = xz_dec_byte(d);
+                bipolar flag1 = xz_dec_byte(d);
+
+                return_if(flag0 < 0 || flag1 < 0, xz_dec_fail(d, "xz truncated header"));
+                flags[0] = (p8)flag0;
+                flags[1] = (p8)flag1;
                 if (flags[0] || (flags[1] & 0xf0))
                         return xz_dec_fail(d, "xz reserved stream flags");
                 d->check = flags[1] & 0xf;
