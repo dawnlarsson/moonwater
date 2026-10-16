@@ -39472,6 +39472,15 @@ static fn sort_sources_drop_last()
         if (source->opened)
                 system_close((positive)source->handle);
 
+        //      A decompressor still running is waited for. Its read end is
+        //      closed above, so it ends by SIGPIPE; left alone it stayed a
+        //      zombie until sort exited.
+        if (source->pid > 0)
+        {
+                sort_proc_wait(source->pid, false);
+                source->pid = 0;
+        }
+
         array_store_release(source->buffer, source->room, none);
 }
 
