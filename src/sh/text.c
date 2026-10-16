@@ -38885,6 +38885,19 @@ static bipolar sort_compress_spawn(bool undo, bipolar from, bipolar into)
 
         system_signal_mask(SIG_SETMASK, address_of sort_signals_before, null, 8);
 
+        //      A temporary opened while sort's standard input was closed is
+        //      descriptor 0 itself, and moving the pipe onto 0 would overwrite
+        //      it. Such a temporary is moved above the standard descriptors
+        //      first (F_DUPFD_CLOEXEC, so the compressor does not inherit it).
+        if (into == 0)
+        {
+                bipolar moved = (bipolar)system_call_3(syscall(fcntl), 0, 1030, 3);
+
+                if (moved < 0)
+                        system_call_1(syscall(exit_group), 2);
+                into = moved;
+        }
+
         if (shell_child_fd_move(from, 0) < 0 || shell_child_fd_move(into, 1) < 0)
                 system_call_1(syscall(exit_group), 2);
 
