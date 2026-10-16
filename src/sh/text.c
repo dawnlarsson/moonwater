@@ -39501,6 +39501,24 @@ static p32 sort_tree_build(sort_source address_to sources, p32 address_to tree,
         return left;
 }
 
+// The winner's way back up the tree after its source has moved on: each node
+// keeps the loser, and what climbs out of the top is the next winner.
+static inline INLINE p32 sort_tree_replay(sort_source address_to sources,
+                                          p32 address_to tree, positive count,
+                                          p32 winner)
+{
+        for (positive node = (winner + count) / 2; node; node /= 2)
+                if (sort_source_before(sources, tree[node], winner))
+                {
+                        p32 loser = tree[node];
+
+                        tree[node] = winner;
+                        winner = loser;
+                }
+
+        return winner;
+}
+
 // The merge, made twice by the compiler: once for --debug's annotated answer
 // and once for every other, so the plain merge asks nothing more a line.
 static inline INLINE bool sort_merge_writing(positive count, sort_writer address_to out,
@@ -39539,18 +39557,7 @@ static inline INLINE bool sort_merge_writing(positive count, sort_writer address
                 if (sort_failed)
                         return false;
 
-                for (positive node = (winner + count) / 2; node; node /= 2)
-                {
-                        if (sort_source_before(sources, sort_tree[node], winner))
-                        {
-                                p32 loser = sort_tree[node];
-
-                                sort_tree[node] = winner;
-                                winner = loser;
-                        }
-                }
-
-                sort_tree[0] = winner;
+                sort_tree[0] = sort_tree_replay(sources, sort_tree, count, winner);
         }
 
         return true;
@@ -39984,18 +39991,7 @@ static fn sort_piece_job(address_any context, positive index,
                         return;
                 }
 
-                for (positive node = (winner + count) / 2; node; node /= 2)
-                {
-                        if (sort_source_before(slot->sources, slot->tree[node], winner))
-                        {
-                                p32 loser = slot->tree[node];
-
-                                slot->tree[node] = winner;
-                                winner = loser;
-                        }
-                }
-
-                slot->tree[0] = winner;
+                slot->tree[0] = sort_tree_replay(slot->sources, slot->tree, count, winner);
         }
 
         if (used)
