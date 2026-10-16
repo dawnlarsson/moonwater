@@ -1131,14 +1131,10 @@ static fn job_marks_settle()
                 }
 }
 
-static fn job_drop_at(positive at)
+// The text and the number of a row that is leaving the table; the caller
+// closes the table over it.
+static fn job_row_release(positive at)
 {
-        positive number;
-
-        if (at >= job_count)
-                return;
-
-        number = job_table[at].number;
         if (job_table[at].text)
                 memory_give(job_table[at].text);
 
@@ -1148,6 +1144,17 @@ static fn job_drop_at(positive at)
                 if (job_table[at].number < job_number_low)
                         job_number_low = job_table[at].number;
         }
+}
+
+static fn job_drop_at(positive at)
+{
+        positive number;
+
+        if (at >= job_count)
+                return;
+
+        number = job_table[at].number;
+        job_row_release(at);
 
         array_remove(job_table, job_count, at);
         job_front = 0;
@@ -3573,14 +3580,7 @@ static fn job_prune()
                         continue;
                 }
 
-                if (job_table[at].text)
-                        memory_give(job_table[at].text);
-                if (job_numbers_valid && job_table[at].number < job_numbers_room)
-                {
-                        job_numbers[job_table[at].number] = 0;
-                        if (job_table[at].number < job_number_low)
-                                job_number_low = job_table[at].number;
-                }
+                job_row_release(at);
         }
 
         memory_give(seen);
