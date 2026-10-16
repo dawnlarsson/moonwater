@@ -53564,14 +53564,12 @@ static b32 file_xargs()
 
                         if (letter == '\n')
                         {
-                                if (xargs_replace && started)
-                                {
-                                        while (xargs_item_length &&
-                                               byte_is_blank(xargs_item[xargs_item_length - 1]))
-                                                xargs_item_length--;
-                                        if (!xargs_item_length)
-                                                started = false;
-                                }
+                                //      The blanks at the end of a line stay
+                                //      in its item, as the reference keeps
+                                //      them; a line of blanks alone was never
+                                //      started, so it is no item.
+                                if (xargs_replace && started && !xargs_item_length)
+                                        started = false;
 
                                 if (started)
                                 {
