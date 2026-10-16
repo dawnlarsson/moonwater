@@ -48971,14 +48971,28 @@ static bipolar kill_signal_of(string_address word)
             !string_compare_folded_max(word, "SIG", 3))
                 word += 3;
 
+        //      util-linux has no bare RTMIN or RTMAX name: its real-time
+        //      signals are RT0 to RT30, and the offsets from the ends of
+        //      the range are the only other spelling it takes.
         for (positive i = 0; i < array_count(kill_table); i++)
-                if (!string_compare_folded(word, kill_table[i].name))
+                if (!string_compare_folded(word, kill_table[i].name) &&
+                    (kill_shell_spelling ||
+                     (string_compare_folded(kill_table[i].name, "RTMIN") &&
+                      string_compare_folded(kill_table[i].name, "RTMAX"))))
                         return kill_table[i].number;
 
         //      Each vocabulary knows only its own real-time spelling: the
         //      shells answer RTMIN and refuse RT0, the utility the reverse.
         if (kill_shell_spelling)
                 return kill_real_time_of(word);
+
+        if (string_length(word) > 5)
+        {
+                bipolar offset = kill_real_time_of(word);
+
+                if (offset >= 0)
+                        return offset;
+        }
 
         if (string_is(word, 'R') && string_is(word + 1, 'T') &&
             string_digits_checked_exact(word + 2, 10, address_of number) &&
@@ -49072,7 +49086,7 @@ static b32 kill_listed(string_address word)
 
         // bash --posix names a signal without its SIG: SIGTERM there is no
         // signal at all.
-        if (found < 0 || found >= KILL_LEAST_REAL ||
+        if (found < 0 || (found >= KILL_LEAST_REAL && kill_shell_spelling) ||
             (kill_shell_spelling && shell_posix_on() &&
              !string_compare_folded_max(word, "SIG", 3)))
         {
@@ -49088,6 +49102,13 @@ static b32 kill_listed(string_address word)
         if (shell_bash_compat && kill_shell_spelling)
         {
                 positive_into_string(name, (positive)found);
+                file_line(name);
+        }
+        else if (found >= KILL_LEAST_REAL)
+        {
+                //      A real-time signal is written as RT<n> whichever
+                //      spelling named it, RTMIN+1 and RT1 alike.
+                kill_number_named(found, name);
                 file_line(name);
         }
         else
