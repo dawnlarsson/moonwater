@@ -1417,6 +1417,9 @@ typedef struct file_codec_cli
         positive suffix_count;
         string_address decode_suffix_error;
         string_address encode_suffix_error;
+        //      gzip names the input and skips it with status 2, as its
+        //      warning does; the others say their own refusal and stop at 1.
+        bool suffix_ignored;
         positive features;
         bool decompress;
         bool stdout_out;
@@ -1784,12 +1787,22 @@ static b32 file_codec_paths(file_codec_cli address_to codec, positive first,
                                                  codec->suffix_count,
                                                  codec->decompress))
                                     {
-                                            string_format(
-                                                log_error, "%s: %s\n", codec->name,
-                                                codec->decompress
-                                                    ? codec->decode_suffix_error
-                                                    : codec->encode_suffix_error);
-                                            *codec->status = 1;
+                                            if (codec->decompress && codec->suffix_ignored)
+                                            {
+                                                    string_format(
+                                                        log_error, "%s: %s: %s\n", codec->name,
+                                                        path, codec->decode_suffix_error);
+                                                    *codec->status = 2;
+                                            }
+                                            else
+                                            {
+                                                    string_format(
+                                                        log_error, "%s: %s\n", codec->name,
+                                                        codec->decompress
+                                                            ? codec->decode_suffix_error
+                                                            : codec->encode_suffix_error);
+                                                    *codec->status = 1;
+                                            }
                                             system_path_file_release(address_of input);
                                             break;
                                     }
@@ -1864,8 +1877,10 @@ static b32 file_codec_paths(file_codec_cli address_to codec, positive first,
                 //      A break above ends this operand only; the next one is
                 //      still done, and the codec's status is for it alone.
                 codec->output_path = null;
-                if (*codec->status)
-                        failed = 1;
+                //      A warning (gzip's status 2 for a suffix it ignores)
+                //      is kept as it is; an error, 1, takes its place.
+                if (*codec->status && (*codec->status == 1 || !failed))
+                        failed = *codec->status;
         }
 
         log_flush();

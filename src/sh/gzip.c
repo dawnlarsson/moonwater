@@ -5110,7 +5110,8 @@ static b32 file_gzip(void)
             .version = "gzip from moonwater",
             .status = address_of gzip_status, .suffixes = gzip_suffixes,
             .suffix_count = array_count(gzip_suffixes),
-            .decode_suffix_error = "unknown suffix; use -c",
+            .decode_suffix_error = "unknown suffix -- ignored",
+            .suffix_ignored = true,
             .encode_suffix_error = "cannot guess output name",
             .features = FILE_CODEC_LONG_QUIET | FILE_CODEC_LEVEL_WORDS |
                         FILE_CODEC_NO_NAME | FILE_CODEC_SHORT_VERSION,
