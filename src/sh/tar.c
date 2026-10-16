@@ -247,6 +247,22 @@ static fn tar_header_put_checksum(p8 address_to block)
         block[TAR_CHKSUM + 7] = ' ';
 }
 
+/* GNU also takes the sum with each byte read as a signed char, which is the
+   sum a tool with signed chars writes for a header with bytes above 0x7f. */
+static bool tar_header_sum_match(p8 address_to block, p64 stored, p64 expect)
+{
+        p64 high = 0;
+        positive at;
+
+        if (stored == expect)
+                return true;
+        for (at = 0; at < TAR_BLOCK; at++)
+                if ((at < TAR_CHKSUM || at >= TAR_CHKSUM + TAR_CHKSUM_WIDTH) &&
+                    block[at] > 127)
+                        high++;
+        return (b64)stored == (b64)expect - (b64)high * 256;
+}
+
 static bool tar_header_ok(p8 address_to block)
 {
         p64 stored;
@@ -255,7 +271,7 @@ static bool tar_header_ok(p8 address_to block)
                              address_of stored))
                 return false;
 
-        return stored == tar_header_sum(block);
+        return tar_header_sum_match(block, stored, tar_header_sum(block));
 }
 
 /* The same test, given the sum of the whole block a caller already has. */
@@ -274,8 +290,9 @@ static bool tar_header_ok_from(p8 address_to block, p32 total)
                                   address_of stored))
                 return false;
 
-        return stored == total - memory_sum_bytes(block + TAR_CHKSUM, TAR_CHKSUM_WIDTH) +
-                             TAR_SPACE_SUM;
+        return tar_header_sum_match(block, stored,
+                                    total - memory_sum_bytes(block + TAR_CHKSUM, TAR_CHKSUM_WIDTH) +
+                                    TAR_SPACE_SUM);
 }
 
 static positive tar_padded(p64 size)
@@ -336,8 +353,12 @@ static bool tar_join_name(p8 address_to prefix, p8 address_to name,
         leading run of components, and refuse a path that would walk out of
         the destination with `..`.
 */
+/* GNU says once, per kind of name, that it took the leading slashes away. */
+static bool tar_leading_said;
+static bool tar_leading_link_said;
+
 static bool tar_safe_path(string_address path, positive strip, bool absolute,
-                          p8 address_to into, positive room,
+                          bool link, p8 address_to into, positive room,
                           bool address_to escaped)
 {
         p8 work[TAR_PATH];
@@ -354,6 +375,17 @@ static bool tar_safe_path(string_address path, positive strip, bool absolute,
         if (escaped)
                 address_to escaped = false;
 
+        if (!absolute && string_is(path, '/'))
+        {
+                bool *said = link ? &tar_leading_link_said : &tar_leading_said;
+
+                if (!*said)
+                {
+                        *said = true;
+                        string_format(log_error, link ? "tar: Removing leading `/' from hard link targets\n"
+                                                      : "tar: Removing leading `/' from member names\n");
+                }
+        }
         if (!absolute)
                 at += string_span_of_set(at, "/");
         else if (string_is(path, '/'))
@@ -376,6 +408,9 @@ static bool tar_safe_path(string_address path, positive strip, bool absolute,
 
                 if (piece == 1 && string_is(at, '.'))
                 {
+                        //      GNU counts a "." component toward the strip.
+                        if (strip)
+                                strip--;
                         at += slash ? piece + 1 : piece;
                         continue;
                 }
@@ -985,6 +1020,8 @@ static p8 tar_block[TAR_BLOCK];
 static p8 tar_name[TAR_PATH];
 static p8 tar_link[TAR_PATH];
 static b32 tar_status;
+/* A usage error prints its own hint and no exiting line. */
+static bool tar_usage_exit;
 static bool tar_preserve;
 /* General-purpose tar preserves special files, but callers installing an
    untrusted root filesystem can disable them before extraction. */
@@ -1062,7 +1099,10 @@ static path_table tar_materialized = {.stride = sizeof(tar_materialized_file)};
         is BSS: it is not resident until the first archive byte moves.
 */
 #define TAR_RECORD (TAR_BLOCK * 128)
-#define TAR_TRAILING_LIMIT (TAR_RECORD * 16)
+/* The zero padding after the end marker is one whole record of the writer's
+   blocking factor, up to 2^20 blocks (512 MiB, the -b limit). The bound is
+   that largest record, so every archive this tar writes reads back. */
+#define TAR_TRAILING_LIMIT (TAR_RECORD * 8192)
 #define TAR_ADVISE_SEQUENTIAL 2
 
 /* The size from which a member's bytes go from file to archive in the kernel
@@ -1256,6 +1296,11 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
                 letters[0] = 'h';
         else if (type == '7')
                 letters[0] = 'C';
+        //      A type letter GNU does not know is listed as '?', and named.
+        bool unknown = type && type != '0' && type != 'S' && (type < '1' || type > '6') &&
+                       type != 'D';
+        if (unknown)
+                letters[0] = '?';
 
         //      A pax uname or gname stands in for the header's own field.
         positive owner_length = tar_header_word(owner, user_name ? (p8 address_to)user_name : block + 265,
@@ -1279,7 +1324,9 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
         if (widths > tar_listing_width)
                 tar_listing_width = widths;
 
-        file_split_moment(stamp + clock_local_east(stamp), address_of year,
+        /*      The zone offset is added unsigned: a stamp near the limit of
+                the base-256 field would overflow a signed sum. */
+        file_split_moment((b64)((p64)stamp + (p64)clock_local_east(stamp)), address_of year,
                           address_of month, address_of day, address_of hour,
                           address_of minute, address_of second);
 
@@ -1352,6 +1399,14 @@ static fn tar_long_line(p8 address_to block, p8 type, p64 mode, p64 size,
         {
                 tar_listing(type == '1' ? " link to " : " -> ", type == '1' ? 9 : 4);
                 tar_quoted(tar_listing, link);
+        }
+        if (unknown)
+        {
+                p8 kind[2] = {type, end};
+
+                tar_listing(" unknown file type '", sizeof(" unknown file type '") - 1);
+                tar_listing(kind, 1);
+                tar_listing("'", 1);
         }
         tar_listing("\n", 1);
 }
@@ -3443,10 +3498,22 @@ static bipolar tar_put_span(bipolar archive, bipolar in, p64 size)
 
         if (size >= TAR_DIRECT_MIN && !tar_packed())
         {
+                //      failure 1 is nothing reported. A read error leaves it
+                //      so and fails; a write error sets it; an input that
+                //      ended first sets 0 and the length it never took, which
+                //      is said and padded as the record path does.
+                file_copy_stop stopped = {1, size};
+
                 tar_advise(in);
-                if (!tar_flush(archive) ||
-                    !tar_copy_out(in, archive, size, null))
+                if (!tar_flush(archive))
                         return -1;
+                if (!tar_copy_out(in, archive, size, address_of stopped))
+                {
+                        if (stopped.failure != 0)
+                                return -1;
+                        tar_out_bytes += size - stopped.unmoved;
+                        return (bipolar)stopped.unmoved;
+                }
 
                 tar_out_bytes += size;
                 return 0;
@@ -3801,7 +3868,14 @@ static bipolar tar_extract_destination(
    exchange one component for a symlink during privileged extraction. */
 static bipolar tar_change_directory(string_address path)
 {
-        bipolar directory = system_open_directory_nofollow(AT_FDCWD, path);
+        /*      At STRICT_TIGHT no component may be a link, as with any path
+                a tool was given there. Below it -C follows a link at the last
+                component as GNU does: the user named that directory. */
+        /*      A constant condition, not #if, so both helpers stay
+                referenced in every configuration. */
+        bipolar directory = MOONWATER_STRICT_FILES >= STRICT_TIGHT
+            ? system_open_directory_nofollow(AT_FDCWD, path)
+            : system_open_at(AT_FDCWD, path, O_PATH | O_DIRECTORY | O_CLOEXEC);
         if (directory < 0)
                 return directory;
 
@@ -4070,11 +4144,10 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
         {
                 p8 shown[2] = {type, end};
 
-                string_format(log_error, "tar: %w: unknown file type '%s'\n", writer_terminal_name,
-                              path, shown);
-                tar_status = tar_status ? tar_status : 1;
-                tar_skip(archive, tar_padded(size), seekable);
-                return;
+                /* GNU extracts such a member as a normal file, and says so. */
+                string_format(log_error, "tar: %w: Unknown file type '%s', extracted as normal file\n",
+                              writer_terminal_name, path, shown);
+                regular = true;
         }
 
         if (!tar_extract_type_allowed(type))
@@ -4133,7 +4206,23 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
                         tar_materialized_file address_to authorized =
                             tar_materialized_find(link);
 
-                        made = authorized ? 0 : -ERROR_ACCESS;
+                        /*      A target this run did not write is refused,
+                                as it always was. One that is not on disk at all
+                                is GNU's "No such file or directory". */
+                        if (!authorized)
+                        {
+                                bipolar probe = tar_open_beneath(link, O_PATH);
+
+                                if (probe >= 0)
+                                {
+                                        (void)system_close(probe);
+                                        made = -ERROR_ACCESS;
+                                }
+                                else
+                                        made = probe == -ERROR_NO_ENTRY ? -ERROR_NO_ENTRY : -ERROR_ACCESS;
+                        }
+                        else
+                                made = 0;
                         if (made >= 0)
                         {
                                 source_handle = authorized->pending
@@ -4277,7 +4366,14 @@ static fn tar_extract_member(bipolar archive, p8 type, string_address path,
 
         if (parent_owned)
                 system_close(parent);
-        if (made < 0)
+        if (made == -ERROR_NO_ENTRY && type == '1')
+        {
+                string_format(log_error, "tar: %w: Cannot hard link to '%w': %s\n",
+                              writer_terminal_name, path, writer_terminal_name, link,
+                              file_reason(made));
+                tar_status = 2;
+        }
+        else if (made < 0)
                 tar_fail(path, made);
         tar_skip(archive, tar_padded(size), seekable);
 }
@@ -4840,7 +4936,15 @@ static fn tar_read_members(tar_members address_to run)
                                         tar_refuse("archive end marker is incomplete");
                         }
                         else if (!tar_header_zero(second))
-                                tar_refuse("archive end marker is followed by data");
+                        {
+                                /* A lone zero block ends the archive, as GNU
+                                   reads it: said, and not a failure. */
+                                p8 shown[24];
+
+                                shown[positive_into(shown, tar_blocks_taken - 1)] = end;
+                                string_format(log_error, "tar: A lone zero block at %s\n",
+                                              (string_address)shown);
+                        }
                         break;
                 }
 
@@ -4905,15 +5009,26 @@ static fn tar_read_members(tar_members address_to run)
                             !shell_array_room(tar_pax_body, tar_pax_body_room,
                                               (positive)size + 1) ||
                             !tar_read_payload(handle, size, tar_pax_body,
-                                              (positive)size + 1, seekable) ||
-                            !tar_pax_apply(
+                                              (positive)size + 1, seekable))
+                        {
+                                tar_refuse("invalid extended header");
+                                break;
+                        }
+
+                        if (!tar_pax_apply(
                                 type == 'g'
                                     ? address_of tar_pax_global
                                     : address_of tar_pax_local,
                                 tar_pax_body, (positive)size))
                         {
-                                tar_refuse("invalid extended header");
-                                break;
+                                //      GNU says the length is out of range,
+                                //      drops this header, and reads on.
+                                p8 shown[24];
+
+                                shown[positive_into(shown, (positive)size)] = end;
+                                string_format(log_error, "tar: Extended header length %s is out of range\n",
+                                              (string_address)shown);
+                                tar_status = 2;
                         }
 
                         continue;
@@ -5043,7 +5158,7 @@ static fn tar_read_members(tar_members address_to run)
                         continue;
                 }
 
-                if (!tar_safe_path(tar_name, options->strip, options->absolute,
+                if (!tar_safe_path(tar_name, options->strip, options->absolute, false,
                                    kept, TAR_PATH, address_of escaped))
                 {
                         /*      A name that reduces to nothing is the
@@ -5068,7 +5183,7 @@ static fn tar_read_members(tar_members address_to run)
                 if (type == '1')
                 {
                         if (!tar_safe_path(tar_link, options->strip,
-                                           options->absolute, kept_link,
+                                           options->absolute, true, kept_link,
                                            TAR_PATH, null))
                         {
                                 tar_refuse("hard link target is unsafe");
@@ -6374,8 +6489,15 @@ static b32 tar_add_directory_walk(bipolar archive, file_walk address_to walk_in,
 
                 if (!file_path_join(child, member, entry->d_name))
                 {
-                        tar_refuse("member name is too long");
-                        break;
+                        //      GNU says this name is too long and not dumped,
+                        //      and goes on with the rest of the directory.
+                        p8 limit[24];
+
+                        limit[positive_into(limit, (positive)TAR_PATH)] = end;
+                        string_format(log_error, "tar: %w: file name is too long (max %s); not dumped\n",
+                                      writer_terminal_name, member, (string_address)limit);
+                        tar_status = 2;
+                        continue;
                 }
 
                 tar_add_named(archive, walk.handle, entry->d_name, child,
@@ -6706,8 +6828,12 @@ static b32 tar_write_archive(struct tar_options address_to options)
 
         if (options->first >= count)
         {
-                tar_refuse("cowardly refusing to create an empty archive");
-                return tar_status;
+                //      A usage error as GNU reports it: the message, the hint,
+                //      and no "exiting" line after them.
+                string_format(log_error, "tar: Cowardly refusing to create an empty archive\n");
+                tar_usage_hint();
+                tar_usage_exit = true;
+                return 2;
         }
 
         tar_pack = options->pack;
@@ -6737,9 +6863,12 @@ static b32 tar_write_archive(struct tar_options address_to options)
         {
                 if (!options->archive || string_equals(options->archive, "-"))
                 {
-                        tar_refuse("Cannot update standard output");
-                        tar_fatal_exit = true;
-                        return tar_status;
+                        //      A usage error: GNU names the options and the
+                        //      archive, then the hint, with no exiting line.
+                        string_format(log_error, "tar: Options '-Aru' are incompatible with '-f -'\n");
+                        tar_usage_hint();
+                        tar_usage_exit = true;
+                        return 2;
                 }
                 if (tar_pack != TAR_PACK_NONE)
                 {
@@ -6926,6 +7055,7 @@ enum
         TAR_SAME_OWNER,
         TAR_NUMERIC_OWNER,
         TAR_ZSTD,
+        TAR_OVERWRITE,
         TAR_COMPRESS_PROGRAM,
         TAR_STRIP_COMPONENTS,
         TAR_HELP,
@@ -6999,6 +7129,7 @@ static const argument_option tar_option_rules[] = {
     {"same-owner", TAR_SAME_OWNER, ARGUMENT_LONG_ONLY},
     /* Owners are only ever restored by number. */
     {"numeric-owner", TAR_NUMERIC_OWNER, ARGUMENT_LONG_ONLY},
+    {"overwrite", TAR_OVERWRITE, ARGUMENT_LONG_ONLY},
     {"gzip", 'z'},
     {"gunzip", 'z'},
     {"xz", 'J'},
@@ -7185,6 +7316,7 @@ static bool tar_take(struct tar_options address_to options, p8 letter,
         }
         case TAR_SAME_OWNER: options->owner = 1; break;
         case TAR_NUMERIC_OWNER: options->numeric = true; break;
+        case TAR_OVERWRITE: break;
         case 'z': options->pack = TAR_PACK_GZIP; break;
         case 'J': options->pack = TAR_PACK_XZ; break;
         case TAR_ZSTD: options->pack = TAR_PACK_ZSTD; break;
@@ -7428,8 +7560,8 @@ static bool tar_parse(struct tar_options address_to options)
         }
         if (!options->mode)
         {
-                tar_refuse("you must specify one of the '-c', '-t', or '-x' options");
-                return string_report(log_error, false, "Try 'tar --help' for more information.\n");
+                tar_refuse("You must specify one of the '-Acdtrux', '--delete' or '--test-label' options");
+                return tar_usage_hint();
         }
 
         return true;
@@ -7451,7 +7583,7 @@ static b32 file_tar(void)
                          ? tar_write_archive(address_of options)
                          : tar_read_archive(address_of options);
 
-        if (status == 2)
+        if (status == 2 && !tar_usage_exit)
                 string_format(log_error, tar_fatal_exit
                                              ? "tar: Error is not recoverable: exiting now\n"
                                              : "tar: Exiting with failure status due to previous errors\n");
