@@ -53623,7 +53623,10 @@ static b32 file_xargs()
 
         if (quote)
         {
-                log_error("xargs: unmatched quote\n", 0);
+                if (quote == '"')
+                        log_error("xargs: unmatched double quote; by default quotes are special to xargs unless you use the -0 option\n", 0);
+                else
+                        log_error("xargs: unmatched single quote; by default quotes are special to xargs unless you use the -0 option\n", 0);
                 xargs_answer_raise(1);
                 xargs_done = true;
         }
