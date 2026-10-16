@@ -4691,12 +4691,10 @@ static PURE storage_mount address_to storage_umount_target(
         return found;
 }
 
-/*      Every operational refusal umount(8) reports is 32; 1 is reserved for
-        usage -- a spelling that was never a mount point under --recursive or
-        --all-targets, which do their own table lookup and say so before any
-        syscall. A plain umount of a path the table does not hold still takes
-        umount(2), which is why "not mounted" and "no mount point specified"
-        both leave 32 behind. */
+/*      Every operational refusal umount(8) reports is 32, except a path that
+        is not a mount point, which is 1 as util-linux has it. A plain umount
+        of a path the table does not hold still takes umount(2), so "not
+        mounted" is the EINVAL it answers with. */
 /*      util-linux says what went wrong in its own words rather than the
         kernel's: a path that is nothing to the mount table is "not mounted",
         one the kernel refuses to let go is "target is busy", and a path the
@@ -4753,7 +4751,9 @@ static b32 storage_umount_one(writer diagnostic, string_address target,
                                 string_format(diagnostic, "umount: %s failed: %s\n",
                                               target, strerror(number));
                 }
-                return 32;
+                //      A path that is not a mount point is 1, as util-linux
+                //      has it; every other refusal is 32.
+                return number == ERROR_INVALID ? 1 : 32;
         }
         if (verbose)
                 string_format(diagnostic, "umount: %s (%s) unmounted\n", target,
