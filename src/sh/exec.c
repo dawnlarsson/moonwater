@@ -9842,7 +9842,14 @@ static b32 exec_call(positive slot)
                 exec_trap_condition(TRAP_DEBUG);
         }
 
+        //      A function is a boundary for break and continue: a loop around
+        //      the call is not one the body can leave, as bash and dash both
+        //      have it. The caller's depth comes back when the body is done.
+        b32 held_loops = exec_loop_depth;
+
+        exec_loop_depth = 0;
         status = exec_node(body);
+        exec_loop_depth = held_loops;
 
         // A return anywhere below -- a trap action's among them -- left its
         // answer in shell_status whatever the node it unwound through said.
