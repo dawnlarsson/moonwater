@@ -49577,7 +49577,15 @@ static b32 file_kill()
 
                 if (print_only)
                 {
-                        file_line(word);
+                        //      The pid as the number it is, so 0123 prints
+                        //      as 123, as util-linux prints it.
+                        if (who >= 0)
+                        {
+                                positive_to_string(log, (positive)who);
+                                log("\n", 1);
+                        }
+                        else
+                                file_line(word);
                         kill_ok++;
                         continue;
                 }
