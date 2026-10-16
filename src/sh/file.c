@@ -49043,7 +49043,10 @@ static b32 kill_listed(string_address word)
         {
                 // A status carries the signal that ended a process in its low
                 // seven bits, which is what a caller of -l usually has.
-                if (number > 128)
+                //      util-linux reads 128 as the status of a process that
+                //      exited with no signal, so it is signal zero, which it
+                //      writes as 0; the shells refuse 128.
+                if (number > 128 || (number == 128 && !kill_shell_spelling))
                         number -= 128;
 
                 // The shells have no signal zero to name: bash calls it
@@ -49058,18 +49061,22 @@ static b32 kill_listed(string_address word)
 
                         string_copy(name, (string_address) "EXIT");
                 }
+                else if (!number)
+                        string_copy(name, (string_address) "0");
                 else if (!kill_number_named(number, name))
                 {
                         if (kill_shell_spelling && shell_bash_compat)
                                 return string_report(log_error, 1,
                                                      "kill: %s: invalid signal specification\n",
                                                      word);
-                        string_format(log_error, "kill: unknown signal: %s\n", word);
                         //      Dash answers two for a number that is not a
-                        //      signal and not an exit status with one in
-                        //      it. Bash keeps one.
-                        return kill_shell_spelling && !shell_bash_compat ? 2
-                                                                         : 1;
+                        //      signal and not an exit status, in its own
+                        //      words. Bash keeps one.
+                        if (kill_shell_spelling)
+                                return string_report(log_error, 2,
+                                                     "kill: invalid signal number or exit status: %s\n",
+                                                     word);
+                        return string_report(log_error, 1, "kill: unknown signal: %s\n", word);
                 }
 
                 file_line(name);
