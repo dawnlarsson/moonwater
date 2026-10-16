@@ -48553,9 +48553,19 @@ static b32 file_mktemp()
 
                 memory_copy_apart(path, base, length);
 
-                length -= path_trailing_slashes(path, length);
+                /*      A base of nothing but slashes is kept as it is, as
+                        the reference keeps it: "/" and "//" name the root
+                        and the name goes straight after them. Any other
+                        base loses its trailing slashes and gets one.
+                        path_trailing_slashes never counts the first byte,
+                        so "/" would otherwise come out as "//". */
+                positive kept = length;
 
-                path[length++] = '/';
+                length -= path_trailing_slashes(path, length);
+                if (length == 1 && path[0] == '/')
+                        length = kept;
+                else
+                        path[length++] = '/';
         }
 
         positive whole_length = template_length + suffix_length;
