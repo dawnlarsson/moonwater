@@ -38988,6 +38988,17 @@ static bipolar sort_compress_begin(sort_writer address_to out, bipolar handle,
                 {
                         system_close(pair[0]);
                         system_close(pair[1]);
+                        //      A child that started and could not be
+                        //      recorded is waited for here. It sees its
+                        //      input end at once and finishes, and until
+                        //      then it writes at the temporary's offset,
+                        //      which the plain copy goes on from.
+                        if (child >= 0)
+                        {
+                                positive status = 0;
+
+                                system_wait4_retry(child, address_of status, 0, null);
+                        }
                         result = child < 0 ? child : -12;
                 }
         }
