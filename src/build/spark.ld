@@ -140,7 +140,7 @@ SECTIONS
                 *(.text.hot.exec_save_fd)
                 *(.text.hot.parse_take_redirect.isra.0)
                 *(.text.hot.shell_expand_word)
-                *(.text.hot.exec_redirect_restore)
+                *(.text.hot.exec_redirect_unwind)
                 *(.text.unlikely.shell_expand_word)
                 *(.text.floodlight_load)
                 *(.text.hot.shell_tool_find_hashed)

@@ -7052,9 +7052,14 @@ static HOT bool exec_save_fd(b32 fd, parse_node address_to node)
         return true;
 }
 
-static HOT fn exec_redirect_restore(b32 mark)
+// Puts back the saved descriptors above mark, in reverse. With restore false
+// they are only dropped: exec with nothing to run keeps its redirections, so
+// what was put aside to undo them is dropped instead, because holding the dup
+// would keep the old file open for the rest of the line and never put it back.
+static HOT fn exec_redirect_unwind(b32 mark, bool restore)
 {
-        log_flush();
+        if (restore)
+                log_flush();
 
         while (exec_save_count > mark)
         {
@@ -7066,32 +7071,14 @@ static HOT fn exec_redirect_restore(b32 mark)
                             shell_parser_source_handle == saved->saved)
                                 shell_parser_source_relocated(saved->saved,
                                                               saved->fd);
-                        system_duplicate(saved->saved, saved->fd, 0);
+                        if (restore)
+                                system_duplicate(saved->saved, saved->fd, 0);
                         system_close(saved->saved);
                         continue;
                 }
 
-                system_close(saved->fd);
-        }
-}
-
-// exec with nothing to run keeps its redirections, so what was put aside to
-// undo them is dropped instead: holding the dup would keep the old file open
-// for the rest of the line and never put it back.
-static fn exec_redirect_forget(b32 mark)
-{
-        while (exec_save_count > mark)
-        {
-                exec_saved_fd address_to saved = exec_saves + --exec_save_count;
-
-                if (saved->saved >= 0)
-                {
-                        if (shell_parser_source_active &&
-                            shell_parser_source_handle == saved->saved)
-                                shell_parser_source_relocated(saved->saved,
-                                                              saved->fd);
-                        system_close(saved->saved);
-                }
+                if (restore)
+                        system_close(saved->fd);
         }
 }
 
@@ -12653,7 +12640,7 @@ static HOT b32 exec_simple(b32 index)
         {
                 if (!exec_redirect_apply(index))
                 {
-                        exec_redirect_restore(mark);
+                        exec_redirect_unwind(mark, true);
                         status = (exec_line_aborted() ? shell_status :
                                   exec_redirect_status ? exec_redirect_status
                                                        : 1);
@@ -12865,7 +12852,7 @@ static HOT b32 exec_simple(b32 index)
         {
                 if (!exec_redirect_apply(index))
                 {
-                        exec_redirect_restore(mark);
+                        exec_redirect_unwind(mark, true);
                         status = (exec_line_aborted() ? shell_status : exec_redirect_status ? exec_redirect_status : 1);
                         // An expansion error already selected its reader boundary.
                         // Do not turn a recoverable Bash substring failure into a
@@ -12885,7 +12872,7 @@ static HOT b32 exec_simple(b32 index)
         if (first == count)
         {
                 if (node->redirect_count)
-                        exec_redirect_restore(mark);
+                        exec_redirect_unwind(mark, true);
                 shell_status = shell_substitution_status;
                 shell_store_rewind(address_of exec_store, arena_mark);
                 //      A command of assignments alone leaves $_ empty in
@@ -12975,7 +12962,7 @@ static HOT b32 exec_simple(b32 index)
                                    modified the proposed new input before it
                                    was opened. Keep the old authenticated
                                    reader instead of publishing that source. */
-                                exec_redirect_restore(mark);
+                                exec_redirect_unwind(mark, true);
                                 status = shell_status = 126;
                                 log_error("exec: active child prevents replacing shell input\n",
                                           0);
@@ -12983,7 +12970,7 @@ static HOT b32 exec_simple(b32 index)
                                 shell_exec_failed(126);
                         }
                         else
-                                exec_redirect_forget(mark);
+                                exec_redirect_unwind(mark, false);
                         /* Subsequent commands on this physical line can feed
                            a new pipe installed by the committed exec.
                            Authenticate it only when no outer temporary
@@ -12993,7 +12980,7 @@ static HOT b32 exec_simple(b32 index)
                                 shell_parser_source_refresh();
                 }
                 else
-                        exec_redirect_restore(mark);
+                        exec_redirect_unwind(mark, true);
         }
         /* Bash waitchld's leftover children when a simple command
            finishes, which is when a coproc that died during `sleep` is
@@ -13015,7 +13002,7 @@ static HOT b32 exec_simple(b32 index)
         */
 fail:
         if (redirects_applied)
-                exec_redirect_restore(mark);
+                exec_redirect_unwind(mark, true);
         if (kept && !exec_finish_prefixes(kept, kept_count) && !status)
                 status = shell_status = 2;
         exec_put_back(expanded_kept, expanded_count, true);
@@ -16712,7 +16699,7 @@ static b32 exec_pipe(b32 first, positive count, bool background,
         if (lastpipe)
         {
                 exec_lastpipe_live = true;
-                exec_redirect_restore(lastpipe_mark);
+                exec_redirect_unwind(lastpipe_mark, true);
         }
 
         if (upstream >= 0)
@@ -17597,7 +17584,7 @@ static b32 exec_node_kind(b32 index)
 
         if (node->redirect_count && !exec_redirect_apply(index))
         {
-                exec_redirect_restore(mark);
+                exec_redirect_unwind(mark, true);
                 exec_expansion_done(expanded, substitutions);
 
                 shell_status = (exec_line_aborted() ? shell_status : exec_redirect_status ? exec_redirect_status : 1);
@@ -17668,7 +17655,7 @@ static b32 exec_node_kind(b32 index)
 
         exec_compound_depth--;
 
-        exec_redirect_restore(mark);
+        exec_redirect_unwind(mark, true);
 
         if (shell_bash_compat && exec_compound_depth == 0)
                 shell_child_death_flush();

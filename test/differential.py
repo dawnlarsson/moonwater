@@ -33874,8 +33874,8 @@ def harness_floodlight(argv):
                    'shell_parser_isolated_facts', ')'),
              'the final descriptor inventory removes every sealed-file source '
              'alias that could change parent parser state'),
-            (source_calls(exec_simple_tokens, 'exec_redirect_forget', '(',
-                          'mark', ')') and
+            (source_calls(exec_simple_tokens, 'exec_redirect_unwind', '(',
+                          'mark', ',', 'false', ')') and
              source_calls(exec_simple_tokens, 'exec_parser_source_can_refresh',
                           '(', ')') and
              source_calls(exec_simple_tokens, 'shell_parser_source_refresh',
