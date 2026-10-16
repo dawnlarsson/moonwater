@@ -10100,6 +10100,21 @@ bipolar shell_funsub_run(string_address text, bool value_form,
         return handle;
 }
 
+// One command, run as its own line in a nested shell.
+static fn shell_prompt_run(string_address text)
+{
+        positive size = string_length(text);
+        p8 address_to copy = (p8 address_to)shell_map(size + 2);
+
+        if (!copy)
+                return;
+        memory_copy_end(copy, text, size);
+        copy[size] = '\n';
+        copy[size + 1] = end;
+        exec_run_nested(copy, true, 0);
+        memory_free(copy, size + 2);
+}
+
 /*
         PROMPT_COMMAND: run before each prompt an interactive bash writes, the
         command it names, or each element of the array it is when it is one.
@@ -10125,35 +10140,12 @@ fn shell_prompt_command()
                         shell_array_items("PROMPT_COMMAND", 14, items, count);
                         for (positive at = 0; at < count; at++)
                                 if (items[at].value && string_get(items[at].value))
-                                {
-                                        positive size = string_length(items[at].value);
-                                        p8 address_to copy = (p8 address_to)shell_map(size + 2);
-
-                                        if (!copy)
-                                                continue;
-                                        memory_copy_end(copy, items[at].value, size);
-                                        copy[size] = '\n';
-                                        copy[size + 1] = end;
-                                        exec_run_nested(copy, true, 0);
-                                        memory_free(copy, size + 2);
-                                }
+                                        shell_prompt_run(items[at].value);
                 }
                 shell_store_rewind(address_of expand_store, mark);
         }
         else if (text && string_get(text))
-        {
-                positive size = string_length(text);
-                p8 address_to copy = (p8 address_to)shell_map(size + 2);
-
-                if (copy)
-                {
-                        memory_copy_end(copy, text, size);
-                        copy[size] = '\n';
-                        copy[size + 1] = end;
-                        exec_run_nested(copy, true, 0);
-                        memory_free(copy, size + 2);
-                }
-        }
+                shell_prompt_run(text);
 
         shell_status = held;
 }
