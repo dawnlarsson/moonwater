@@ -48532,7 +48532,6 @@ static b32 file_mktemp()
                                              "mktemp: invalid template, '%w', contains directory separator\n",
                                              writer_terminal_quoted_name, whole);
 
-                base = null;
                 named_where = true;
         }
         else if (named_where && string_is(whole, '/'))
