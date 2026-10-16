@@ -47031,8 +47031,7 @@ static b32 file_env()
                 for (positive i = 0; i < env_have; i++)
                         file_written(env_list[i], zero);
 
-                log_flush();
-                return 0;
+                return file_output_told((string_address) "env") ? 0 : 125;
         }
 
         if (taking.flags & FILE_FLAG('0'))
@@ -47608,8 +47607,7 @@ static b32 file_whoami()
                               "whoami: cannot find name for user ID %p\n", user);
 
         file_line(name);
-        log_flush();
-        return 0;
+        return file_output_told((string_address) "whoami") ? 0 : 1;
 }
 
 // nologin --------------------------------------------------------
@@ -47919,9 +47917,8 @@ static b32 file_uname()
 
         if (!labeled)
                 log("\n", 1);
-        log_flush();
 
-        return 0;
+        return file_output_told((string_address) "uname") ? 0 : 1;
 }
 
 // nproc -----------------------------------------------------------
@@ -48300,8 +48297,7 @@ static b32 file_nproc()
 
         positive_to_string(log, count);
         log("\n", 1);
-        log_flush();
-        return 0;
+        return file_output_told((string_address) "nproc") ? 0 : 1;
 }
 
 // mktemp ----------------------------------------------------------
