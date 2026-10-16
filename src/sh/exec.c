@@ -483,6 +483,26 @@ static positive exec_bash_command_add(positive used, string_address text,
 }
 
 /*
+        The spelling of each redirection operator, for the BASH_COMMAND writer
+        and both function printers. An operator not listed has none.
+*/
+static const string_address exec_redirect_spelling[] = {
+        [OP_DLESS] = "<<", [OP_DGREAT] = ">>",
+        [OP_LESSAND] = "<&", [OP_GREATAND] = ">&",
+        [OP_LESSGREAT] = "<>", [OP_CLOBBER] = ">|",
+        [OP_LESS] = "<", [OP_GREAT] = ">",
+        [OP_ANDGREAT] = "&>", [OP_ANDDGREAT] = "&>>",
+        [OP_HERESTRING] = "<<<"};
+
+// The descriptor a redirection leaves out when it is the default one: 0 for
+// the operators that read, 1 for the operators that write.
+static b32 exec_redirect_fixed_fd(b32 op)
+{
+        return op == OP_LESS || op == OP_LESSAND || op == OP_DLESS ||
+               op == OP_LESSGREAT || op == OP_HERESTRING ? 0 : 1;
+}
+
+/*
         bash writes BASH_COMMAND back from its parse tree: the words with one
         blank between them and each redirection as `2> file`; a for, select
         or case as its header, `case a in `; and an arithmetic for as the
@@ -530,34 +550,22 @@ static COLD fn exec_bash_command_from(parse_node address_to node)
                 {
                         parse_redirect address_to want =
                             parse_redirects + node->redirect + at;
-                        static const string_address spelling[] = {
-                            [OP_DLESS] = "<<", [OP_DGREAT] = ">>",
-                            [OP_LESSAND] = "<&", [OP_GREATAND] = ">&",
-                            [OP_LESSGREAT] = "<>", [OP_CLOBBER] = ">|",
-                            [OP_LESS] = "<", [OP_GREAT] = ">",
-                            [OP_ANDGREAT] = "&>", [OP_ANDDGREAT] = "&>>",
-                            [OP_HERESTRING] = "<<<"};
-                        bool input = want->op == OP_LESS ||
-                                     want->op == OP_LESSAND ||
-                                     want->op == OP_DLESS ||
-                                     want->op == OP_LESSGREAT ||
-                                     want->op == OP_HERESTRING;
                         p8 number[24];
 
-                        if (want->op >= (b32)array_count(spelling) ||
-                            !spelling[want->op])
+                        if (want->op >= (b32)array_count(exec_redirect_spelling) ||
+                            !exec_redirect_spelling[want->op])
                                 continue;
                         if (used && used + 1 < sizeof(exec_bash_command))
                                 exec_bash_command[used++] = ' ';
                         if (!want->var_length && want->op != OP_ANDGREAT &&
                             want->op != OP_ANDDGREAT &&
-                            want->fd != (input ? 0 : 1))
+                            want->fd != exec_redirect_fixed_fd(want->op))
                                 used = exec_bash_command_add(
                                     used, number,
                                     positive_into_string(number, want->fd));
                         used = exec_bash_command_add(
-                            used, spelling[want->op],
-                            string_length(spelling[want->op]));
+                            used, exec_redirect_spelling[want->op],
+                            string_length(exec_redirect_spelling[want->op]));
                         if (want->op != OP_GREATAND && want->op != OP_LESSAND &&
                             want->op != OP_DLESS &&
                             used + 1 < sizeof(exec_bash_command))
@@ -8486,11 +8494,6 @@ static bool exec_function_text_line(exec_function_text address_to made)
 static bool exec_function_text_redirects(exec_function_text address_to made,
                                          parse_node address_to node)
 {
-        static const string_address spelling[] = {
-            null, null, null, null, "<<", ">>", "<&", ">&", "<>",
-            ">|", null, null, null, "<", ">", null, null, "&>",
-            "&>>", "<<<"};
-
         for (b32 at = 0; at < node->redirect_count; at++)
         {
                 parse_redirect address_to redirect =
@@ -8498,8 +8501,8 @@ static bool exec_function_text_redirects(exec_function_text address_to made,
                 p8 number[32];
                 positive used;
 
-                if (redirect->op >= sizeof(spelling) / sizeof(spelling[0]) ||
-                    !spelling[redirect->op])
+                if (redirect->op >= array_count(exec_redirect_spelling) ||
+                    !exec_redirect_spelling[redirect->op])
                         return false;
 
                 exec_function_text_literal(made, " ");
@@ -8513,8 +8516,8 @@ static bool exec_function_text_redirects(exec_function_text address_to made,
                 }
 
                 exec_function_text_add(
-                    made, spelling[redirect->op],
-                    string_length(spelling[redirect->op]));
+                    made, exec_redirect_spelling[redirect->op],
+                    string_length(exec_redirect_spelling[redirect->op]));
 
                 if (redirect->op == OP_DLESS)
                 {
@@ -15020,25 +15023,15 @@ static COLD fn exec_pretty_redirects(exec_function_text address_to made,
                 parse_redirect address_to redirect =
                     parse_redirects + node->redirect + at;
                 p8 number[32];
-                string_address spelling = null;
-                b32 fixed = redirect->op == OP_LESS ? 0 : 1;
+                string_address spelling =
+                    redirect->op < array_count(exec_redirect_spelling)
+                        ? exec_redirect_spelling[redirect->op] : null;
+                b32 fixed = exec_redirect_fixed_fd(redirect->op);
                 bool duplicate = redirect->op == OP_LESSAND ||
                                  redirect->op == OP_GREATAND;
 
-                switch (redirect->op)
+                if (!spelling)
                 {
-                case OP_LESS: spelling = "<"; fixed = 0; break;
-                case OP_GREAT: spelling = ">"; break;
-                case OP_DGREAT: spelling = ">>"; break;
-                case OP_CLOBBER: spelling = ">|"; break;
-                case OP_LESSGREAT: spelling = "<>"; fixed = 0; break;
-                case OP_LESSAND: spelling = "<&"; fixed = 0; break;
-                case OP_GREATAND: spelling = ">&"; break;
-                case OP_ANDGREAT: spelling = "&>"; break;
-                case OP_ANDDGREAT: spelling = "&>>"; break;
-                case OP_HERESTRING: spelling = "<<<"; fixed = 0; break;
-                case OP_DLESS: spelling = "<<"; fixed = 0; break;
-                default:
                         made->failed = true;
                         return;
                 }
