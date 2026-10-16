@@ -47617,10 +47617,20 @@ static b32 file_whoami()
         large /etc/nologin.txt neither allocates nor gets truncated.  util-linux
         accepts -c for su compatibility but deliberately does not execute it.
 */
+/*      login(1) passes the shell's own flags on to nologin, and util-linux's
+        nologin takes -i, -l and -r and the long names below and does nothing
+        with them, so a session that starts with them is refused the same way.
+        Any other option is refused. */
 static const argument_option nologin_options[] = {
     {"command", 'c', ARGUMENT_REQUIRED},
     {"help", 'h'},
     {"version", 'V'},
+    {"ir", 0},
+    {"login", 'l'},
+    {"norc", 'N', ARGUMENT_LONG_ONLY},
+    {"noprofile", 'P', ARGUMENT_LONG_ONLY},
+    {"posix", 'X', ARGUMENT_LONG_ONLY},
+    {"rcfile", 'R', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {null},
 };
 
