@@ -756,6 +756,13 @@ static b32 rx_parse_set(rx_compiler *c, rx_set_facts *facts)
                         bipolar stop = strict ? rx_named(c, 1) : -1;
                         p8 last = stop >= 0 ? (p8)stop : rx_peek(c, 1);
 
+                        //      A range that runs backwards is refused, as
+                        //      grep, sed and awk refuse it. The strict policy
+                        //      of expr and csplit reads it as a range that
+                        //      matches nothing, as it always did.
+                        if (byte > last && !strict)
+                                return rx_refuse(c, REGEX_FAILED_RANGE), set;
+
                         c->at += stop >= 0 ? 6 : 2;
                         for (b32 i = byte; i <= last; i++)
                                 rx_set_add(c, set, (p8)i);
