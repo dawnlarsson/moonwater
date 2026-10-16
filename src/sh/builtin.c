@@ -15295,9 +15295,10 @@ static COLD bool mapfile_word_add(byte_store address_to store, string_address wo
         return true;
 }
 
-//      mapfile -C runs its callback as a command of its own words, with the
-//      index of the element about to be assigned and the line itself. Its
-//      answer does not stop the read, as bash's does not.
+//      mapfile -C runs its callback as a command, the callback's own words
+//      first and then the index of the element about to be assigned and the
+//      line itself, as bash does. Its answer does not stop the read, as
+//      bash's does not.
 static COLD bool mapfile_callback_run(string_address callback, positive index,
                                       string_address line)
 {
@@ -15308,8 +15309,16 @@ static COLD bool mapfile_callback_run(string_address callback, positive index,
         positive length = positive_into_string(digits, index);
         digits[length] = end;
 
-        built = mapfile_word_add(address_of text, callback) &&
-                mapfile_word_add(address_of text, digits) &&
+        positive callback_length = string_length(callback);
+
+        built = byte_store_reserve(address_of text, callback_length + 1, 256);
+        if (built)
+        {
+                memory_copy_apart(text.bytes, callback, callback_length);
+                text.used = callback_length;
+                text.bytes[text.used++] = ' ';
+        }
+        built = built && mapfile_word_add(address_of text, digits) &&
                 mapfile_word_add(address_of text, line);
         if (built && byte_store_reserve(address_of text, text.used + 2, 16))
         {
