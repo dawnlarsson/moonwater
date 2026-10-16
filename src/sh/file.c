@@ -7301,7 +7301,16 @@ static inline bool file_copy_stream(
                                 continue;
                         }
                         if (!copied)
+                        {
+                                //      The input ended first: nothing failed,
+                                //      and the length it never took is said.
+                                if (stopped && bounded)
+                                {
+                                        stopped->failure = 0;
+                                        stopped->unmoved = length;
+                                }
                                 return !bounded;
+                        }
                         if (copied == -4)
                                 continue;
                         if (!file_copy_range_fallback(copied))
@@ -7343,6 +7352,13 @@ static inline bool file_copy_stream(
                 if (taken < 0)
                         return false;
                 if (!taken)
+                {
+                        //      As above: the input ended, and nothing failed.
+                        if (stopped && bounded)
+                        {
+                                stopped->failure = 0;
+                                stopped->unmoved = length;
+                        }
                         return !bounded;
 
                 system_write_result written = system_write_all_checked(
