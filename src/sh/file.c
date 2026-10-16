@@ -38232,6 +38232,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                             "cp: cannot preserve attributes for %w: %s\n",
                             writer_shell_quoted_name, destination_shown,
                             file_reason(attributed));
+                if (!moving && published < 0)
+                        file_path_failed("cp", "cannot create regular file",
+                                         writer_shell_quoted_name, destination_shown,
+                                         published, 0);
                 if (attributed < 0 || published < 0 || closed < 0)
                         return false;
                 goto copied_without_metadata;
@@ -38412,6 +38416,10 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                             "%s: cannot preserve attributes for %w: %s\n",
                             program, writer_shell_quoted_name,
                             destination_shown, file_reason(attributed));
+                if (!moving && published < 0)
+                        file_path_failed("cp", "cannot create regular file",
+                                         writer_shell_quoted_name, destination_shown,
+                                         published, 0);
                 if (attributed < 0 || published < 0 || closed < 0 ||
                     tagged < 0)
                         return false;
