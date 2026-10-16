@@ -48409,7 +48409,7 @@ static const argument_option mktemp_options[] = {
     {"directory", 'd'},
     {"dry-run", 'u'},
     {"quiet", 'q'},
-    {"suffix", 'S', ARGUMENT_REQUIRED},
+    {"suffix", 'S', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"tmpdir", 'T', ARGUMENT_OPTIONAL | ARGUMENT_LONG_ONLY, 1},
     {"p", 0, ARGUMENT_REQUIRED, 1},
     {"t", 0},
@@ -48491,6 +48491,14 @@ static b32 file_mktemp()
 
         positive run_end = memory_after_last(template, 'X', template_length);
 
+        //      What follows the last X is a suffix, and a slash in it is said
+        //      before the X's are counted: "fooX/a" is an invalid suffix, as
+        //      the reference says, where "foo/bar" (no X at all) is too few.
+        if (!suffix && run_end && string_first_of(template + run_end, '/'))
+                return string_report(log_error, 1,
+                                     "mktemp: invalid suffix '%w', contains directory separator\n",
+                                     writer_terminal_quoted_name, template + run_end);
+
         marks = memory_span_byte_reverse(template, 'X', run_end);
         positive run_at = run_end - marks;
 
@@ -48510,17 +48518,12 @@ static b32 file_mktemp()
 
         whole[template_length + suffix_length] = end;
 
-        if (!suffix && string_first_of(whole + run_end, '/'))
-                return string_report(log_error, 1,
-                                     "mktemp: invalid suffix '%w', contains directory separator\n",
-                                     writer_terminal_quoted_name, whole + run_end);
-
         /*
-                Where it goes. -t is the deprecated spelling and answers with
-                the environment's directory whatever -p or --tmpdir said, and
-                refuses a template that names a directory of its own; -p and
-                --tmpdir name one, and either of them written bare or empty
-                means the environment's directory too.
+                Where it goes. -t is the deprecated spelling: it refuses a
+                template that names a directory of its own, and otherwise
+                puts the name in the directory -p or --tmpdir names, or in
+                the environment's when neither is given, as the reference
+                does (mktemp -p DIR -t foo.XXXX makes DIR/foo.XXXX).
         */
         if (old_t)
         {
