@@ -49460,6 +49460,13 @@ static b32 file_kill()
                                         return string_report(log_error, 1,
                                                       "kill: argument error: '%s'\n",
                                                       value);
+                                //      The value is an int in the record
+                                //      sigqueue(3) builds; past it util-linux
+                                //      refuses it, and it was wrapped.
+                                if (queue_value > 2147483647)
+                                        return string_report(log_error, 1,
+                                                      "kill: argument error: '%s': Numerical result out of range\n",
+                                                      value);
                                 queued = true;
                         }
                         index++;
