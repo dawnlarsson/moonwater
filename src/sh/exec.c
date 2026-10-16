@@ -5753,12 +5753,24 @@ static bool history_write(string_address path, positive from, bool append)
 
 static bool history_loaded;
 
+// The history file is read once, by whichever of the two starts first.
+static fn history_load()
+{
+        string_address path;
+
+        history_loaded = true;
+        path = history_file();
+
+        if (path)
+                history_read(path, 0);
+
+        history_saved = history_used;
+}
+
 // What was there before this session, at a terminal and nowhere else: a
 // script's history is a history nobody will ever read back.
 fn history_start()
 {
-        string_address path;
-
         if (!shell_is_interactive)
                 return;
 
@@ -5793,31 +5805,17 @@ fn history_start()
                 }
         }
 
-        history_loaded = true;
-        path = history_file();
-
-        if (path)
-                history_read(path, 0);
-
-        history_saved = history_used;
+        history_load();
 }
 
 //      The history file is read when history is first turned on in a shell
 //      that started with it off, which is what a script's set -o history is.
 fn history_enabled()
 {
-        string_address path;
-
         if (history_loaded || !shell_bash_compat || shell_is_interactive)
                 return;
 
-        history_loaded = true;
-        path = history_file();
-
-        if (path)
-                history_read(path, 0);
-
-        history_saved = history_used;
+        history_load();
 }
 
 //      HISTSIZE was written: the oldest lines beyond it go at once.
