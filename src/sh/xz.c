@@ -1779,7 +1779,7 @@ static bool xz_dec_stream(xz_decoder address_to d)
 
                 if (!xz_dec_le(d, address_of magic, 6))
                         return xz_dec_fail(d, "xz truncated header");
-                return_if(magic != 0x005a587a37fdull, xz_dec_fail(d, "xz bad magic"));
+                return_if(magic != 0x005a587a37fdull, xz_dec_fail(d, "xz File format not recognized"));
                 bipolar flag0 = xz_dec_byte(d);
                 bipolar flag1 = xz_dec_byte(d);
 
@@ -5283,7 +5283,7 @@ static bipolar xz_par_walk(xz_par address_to r, positive batch_output)
                                 return got < 0 ? -1 : (xz_par_fail(r, "xz empty input"), -1);
                 }
                 if (memory_compare(stream, "\xfd" "7zXZ\0", 6))
-                        return xz_par_fail(r, "xz bad magic"), -1;
+                        return xz_par_fail(r, "xz File format not recognized"), -1;
                 if (stream[6] || (stream[7] & 0xf0) ||
                     memory_load_unaligned(p32, stream + 8) != ~hash_crc32(0xffffffffu, stream + 6, 2))
                         return xz_par_fail(r, "xz header CRC"), -1;
