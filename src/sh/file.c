@@ -7360,19 +7360,21 @@ static inline bool file_copy_stream(
                                 stopped->unmoved = length;
                         }
                         return !bounded;
+                }
 
                 system_write_result written = system_write_all_checked(
                     (positive)out, transfer, (positive)taken);
 
                 if (written.bytes != (positive)taken)
                 {
-                        //      The chunk that failed was read whole.
-                        if (stopped && bounded)
+                        //      The chunk that failed was read whole. An
+                        //      unbounded copy (cp) still says why it stopped.
+                        if (stopped)
                         {
                                 stopped->failure = written.error < 0
                                                        ? written.error
                                                        : -ENOSPC;
-                                stopped->unmoved = length - (positive)taken;
+                                stopped->unmoved = bounded ? length - (positive)taken : 0;
                         }
                         return false;
                 }
@@ -7588,7 +7590,8 @@ static bipolar file_clone_refusal(file_facts address_to source, bipolar handle)
 }
 
 static bool file_copy_handles_known(bipolar in, bipolar out,
-                                    file_facts address_to facts)
+                                    file_facts address_to facts,
+                                    bipolar address_to failure)
 {
         file_debug_offload = '?';
         file_debug_sparse = 'n';
@@ -7603,9 +7606,13 @@ static bool file_copy_handles_known(bipolar in, bipolar out,
         {
                 bool range_copy = true;
                 bool send_copy = true;
+                file_copy_stop stopped = {0, 0};
                 complete = file_copy_stream(in, out, 0, false,
                                             address_of range_copy,
-                                            address_of send_copy, null, null);
+                                            address_of send_copy, null,
+                                            address_of stopped);
+                if (!complete && failure)
+                        *failure = stopped.failure;
         }
         //      --debug copies name by name, so no pool job gets here with it.
         if (file_debug)
@@ -7613,14 +7620,14 @@ static bool file_copy_handles_known(bipolar in, bipolar out,
         return complete;
 }
 
-static bool file_copy_handles(bipolar in, bipolar out)
+static bool file_copy_handles(bipolar in, bipolar out, bipolar address_to failure)
 {
         file_facts facts;
 
         // A look that fails leaves the facts zeroed, which is the stream.
         (void)file_look(in, (string_address)"", AT_EMPTY_PATH,
                         address_of facts);
-        return file_copy_handles_known(in, out, address_of facts);
+        return file_copy_handles_known(in, out, address_of facts, failure);
 }
 
 /* Existing names are checked before truncation; new names are exclusive. */
@@ -36866,7 +36873,7 @@ static bool cp_tree_file(bipolar source, bipolar copy, string_address name)
         if (out < 0)
                 return false;
 
-        bool copied = file_copy_handles_known(in, out, address_of facts);
+        bool copied = file_copy_handles_known(in, out, address_of facts, null);
         p8 names[FILE_XATTR_JOB_ROOM];
         p8 value[FILE_XATTR_JOB_ROOM];
         bool tag = copied && cp_preserve;
@@ -38330,10 +38337,13 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                         return false;
                 }
 
+                bipolar copy_failure = 0;
                 bool complete = facts_held
                                     ? file_copy_handles_known(in, out,
-                                                              address_of facts)
-                                    : file_copy_handles(in, out);
+                                                              address_of facts,
+                                                              address_of copy_failure)
+                                    : file_copy_handles(in, out,
+                                                        address_of copy_failure);
                 bool tag = complete && (moving || cp_preserve);
                 bool tag_late = tag && file_xattrs_after_owner();
                 bipolar tagged = tag && !tag_late
@@ -38352,7 +38362,16 @@ static bool file_copy_one(bipolar source_directory, string_address source,
                                     -ERROR_INPUT_OUTPUT, true, null, 0);
                         else
                                 system_close(out);
-                        if (!moving)
+                        //      A write the disk refused is said as GNU says
+                        //      it, with the destination and the reason; any
+                        //      other stop keeps the source-named line.
+                        if (!moving && (copy_failure == -ENOSPC ||
+                                        copy_failure == -EDQUOT ||
+                                        copy_failure == -EFBIG))
+                                string_format(log_error, "cp: error writing %w: %s\n",
+                                              writer_shell_quoted_name, destination_shown,
+                                              file_reason(copy_failure));
+                        else if (!moving)
                                 string_format(log_error, "cp: cannot copy %w\n",
                                               writer_shell_quoted_name, source_shown);
                         return false;
@@ -40332,7 +40351,7 @@ static COLD fn install_pair(string_address source, string_address destination)
         bool debug_wanted = file_debug;
 
         file_debug = false;
-        bool copied = file_copy_handles(source_handle, destination_handle);
+        bool copied = file_copy_handles(source_handle, destination_handle, null);
         file_debug = debug_wanted;
         if (file_debug)
                 file_copy_debug_said();

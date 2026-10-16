@@ -1662,7 +1662,7 @@ static b32 host_copy_file(string_address from, string_address to)
                 return host_fail(to, target);
         }
 
-        copied = file_copy_handles(source, target);
+        copied = file_copy_handles(source, target, null);
         if (copied)
                 synced = system_call_1(syscall(fsync), (positive)target);
 
