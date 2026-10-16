@@ -53237,6 +53237,10 @@ static b32 file_xargs()
         if (posix > 2048)
                 posix -= 2048;
 
+        //      -s may ask for up to the POSIX limit, so a batch is held in a
+        //      buffer that big; the default stays at the 128 KiB it was.
+        positive batch = posix > XARGS_BATCH_BYTES ? posix : XARGS_BATCH_BYTES;
+
         //      findutils takes the environment out of the limit it calls
         //      POSIX's and out of what is left again for the command it will
         //      build: with twelve bytes of environment 2095092 and 2095080.
@@ -53288,8 +53292,8 @@ static b32 file_xargs()
                         string_format(log_error,
                                       "xargs: value %s for -s option should be <= %p\n",
                                       written, posix);
-                if (made > XARGS_BATCH_BYTES)
-                        made = XARGS_BATCH_BYTES;
+                if (made > batch)
+                        made = batch;
                 xargs_most_bytes = made;
         }
 
@@ -53310,7 +53314,7 @@ static b32 file_xargs()
                 }
         }
 
-        positive words = (index < count ? count - index : 1) + XARGS_BATCH_BYTES + 3;
+        positive words = (index < count ? count - index : 1) + batch + 3;
 
         if (!array_arena_reserve(xargs_words, xargs_word_room, 0, words, words,
                                  utility_arena_grow))
@@ -53355,7 +53359,7 @@ static b32 file_xargs()
                 goto xargs_finished;
         }
 
-        xargs_item = (p8 address_to)utility_arena_take(XARGS_BATCH_BYTES + 1);
+        xargs_item = (p8 address_to)utility_arena_take(batch + 1);
         xargs_buffer = (p8 address_to)utility_arena_take(XARGS_READ_BYTES);
 
         //      Where the bytes that are not plain data are, in a block as it
@@ -53375,8 +53379,8 @@ static b32 file_xargs()
                                       ? xargs_most_bytes - xargs_prefix_bytes
                                       : 1;
 
-                if (remain > XARGS_BATCH_BYTES)
-                        remain = XARGS_BATCH_BYTES;
+                if (remain > batch)
+                        remain = batch;
                 xargs_item_room = remain + 1;
         }
         xargs_mark = utility_arena.used;
