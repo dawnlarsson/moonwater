@@ -6406,6 +6406,40 @@ static fn cat_walked()
 #define CAT_SETPIPE_SIZE 1031
 #define CAT_INTERRUPTED (-4)
 
+/*
+        Reads want bytes at offset into into, looping until they are all in.
+        A read that ends the file or fails ends the loop, and that read is the
+        status: zero at the end of the file, negative on an error, zero when
+        every byte came. An interrupted read is taken again when retry is set,
+        and ends the loop when it is not. got takes the bytes read.
+*/
+static bipolar text_pread_full(positive handle, p8 address_to into,
+                               positive want, positive offset, bool retry,
+                               positive address_to got)
+{
+        positive have = 0;
+        bipolar status = 0;
+
+        while (have < want)
+        {
+                bipolar read = system_call_4(syscall(pread64), handle,
+                                             (positive)(into + have), want - have,
+                                             offset + have);
+
+                if (read == CAT_INTERRUPTED && retry)
+                        continue;
+                if (read <= 0)
+                {
+                        status = read;
+                        break;
+                }
+                have += (positive)read;
+        }
+
+        address_to got = have;
+        return status;
+}
+
 static file_facts cat_output;
 static bool cat_output_append;
 
@@ -8138,21 +8172,10 @@ static bool tac_map(tac_buffer address_to buffer, positive handle,
         if (!bytes)
                 return false;
 
-        while (got < size)
+        if (text_pread_full(handle, bytes, size, 0, true, address_of got) < 0)
         {
-                bipolar read = system_call_4(syscall(pread64), handle,
-                                             (positive)(bytes + got), size - got, got);
-
-                if (read == CAT_INTERRUPTED)
-                        continue;
-                if (read < 0)
-                {
-                        memory_free(bytes, size);
-                        return false;
-                }
-                if (!read)
-                        break;
-                got += (positive)read;
+                memory_free(bytes, size);
+                return false;
         }
 
         buffer->bytes = bytes;
@@ -23886,24 +23909,11 @@ static fn tr_parallel_job(address_any context, positive index,
         if (!into)
                 return;
 
-        while (got < want)
-        {
-                bipolar read = system_call_4(syscall(pread64), run->handle,
-                                             (positive)(into + got), want - got,
-                                             run->start + offset + got);
+        bipolar status = text_pread_full(run->handle, into, want,
+                                         run->start + offset, true, address_of got);
 
-                if (read == CAT_INTERRUPTED)
-                        continue;
-
-                if (read <= 0)
-                {
-                        if (read < 0)
-                                run->failed[index] = (p8)(read >= -255 ? -read : ERROR_INPUT_OUTPUT);
-                        break;
-                }
-
-                got += (positive)read;
-        }
+        if (status < 0)
+                run->failed[index] = (p8)(status >= -255 ? -status : ERROR_INPUT_OUTPUT);
 
         if (run->remove)
                 got = memory_delete_bytes(into, got, run->table);
@@ -39674,19 +39684,13 @@ static bipolar sort_run_read(bipolar handle, positive from, positive to,
                             to - from + SORT_SLACK, 1, SORT_FENCE_BYTES))
                 return -12;
 
-        while (from + have < to)
-        {
-                bipolar got = system_call_4(syscall(pread64), (positive)handle,
-                                            (positive)(address_to buffer + have),
-                                            to - from - have, from + have);
+        positive bytes = to > from ? to - from : 0;
+        bipolar status = text_pread_full((positive)handle, address_to buffer,
+                                         bytes, from, false, address_of have);
 
-                if (got <= 0)
-                        return got ? got : -5;
-
-                have += (positive)got;
-        }
-
-        return 0;
+        if (status < 0)
+                return status;
+        return have < bytes ? -5 : 0;
 }
 
 // The first line of a run starting at or after `from`, and its length.
@@ -40531,21 +40535,8 @@ static fn sort_read_job(address_any context, positive index)
         positive from = index * SORT_READ;
         positive at = 0;
 
-        while (at < SORT_READ)
-        {
-                bipolar got = system_call_4(syscall(pread64), run->handle,
-                                            (positive)(run->into + from + at),
-                                            SORT_READ - at, run->offset + from + at);
-
-                if (got == -4)
-                        continue;
-
-                if (got <= 0)
-                        break;
-
-                at += (positive)got;
-        }
-
+        text_pread_full(run->handle, run->into + from, SORT_READ,
+                        run->offset + from, true, address_of at);
         run->got[index] = at;
 }
 
