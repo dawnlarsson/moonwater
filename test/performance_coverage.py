@@ -286,6 +286,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fused_residual_add_f32',
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'f32_to_bf16 bf16_to_f32',
       'paired timing against the definition in C at -O3 for the same instruction '
       'set, in L1, L2 and L3, every x86-64 body including AVX512_BF16')
+cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fast_argmax_f32',
+      'paired timing against the first-NaN-or-first-maximum C loop at -O3 and against '
+      'the fast-math two passes the compiler vectorises, for the same instruction set, '
+      'over 2048, 65536 and 2097152 logits, every x86-64 body')
 cover('direct_benchmark', 'test/checks.c#BENCH_translate_planes', 'memory_translate_planes_u32_rect',
       'paired timing against the C loop it replaced over a terminal strip and '
       'two cell sizes, grey and colour tables, with VBMI and without')

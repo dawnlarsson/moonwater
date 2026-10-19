@@ -47710,10 +47710,144 @@ static void train_bf16_cases(train_to_bf16_call *to, train_from_bf16_call *from,
         for (unsigned long long i = 0; i < 65536; i++)
                 faults->every += ((unsigned *)f)[i] != (unsigned)i << 16;
 }
+
+typedef unsigned long long train_argmax_call(const float *, unsigned long long);
+
+//      The first NaN, or else the first index of the maximum, ties and zeros
+//      of either sign compared as equal.
+static unsigned long long train_argmax_reference(const float *x, unsigned long long n)
+{
+        unsigned long long best = 0;
+
+        for (unsigned long long i = 0; i < n; i++)
+                if (x[i] != x[i])
+                        return i;
+        for (unsigned long long i = 1; i < n; i++)
+                if (x[i] > x[best])
+                        best = i;
+        return best;
+}
+
+typedef struct
+{
+        unsigned long long random, planted, ties, zeros, nans, infinities;
+} train_argmax_faults;
+
+//      A logit with no NaN and nothing above 32: mostly a random float within
+//      a few binades of one, and one in sixteen a zero, a denormal, minus
+//      infinity or the most negative float.
+static float train_logit(void)
+{
+        static const unsigned special[] = {0x00000000, 0x80000000, 0xff800000, 0x00000001,
+                                           0x807fffff, 0xff7fffff, 0x00800000, 0xc1800000};
+        unsigned long long r = train_next();
+
+        if ((r & 15) == 0)
+                return train_float(special[(r >> 4) & 7]);
+        return train_float((unsigned)(r >> 63) << 31 | (unsigned)(124 + (r >> 8) % 7) << 23 | ((unsigned)(r >> 32) & 0x7fffff));
+}
+
+//      Where a maximum or a NaN is put: every place up to 64, then the ends,
+//      the lanes and blocks around them, and a few at random.
+static unsigned long long train_argmax_place(unsigned long long n, unsigned long long k)
+{
+        static const unsigned long long fixed[] = {0, 1, 7, 8, 15, 16, 17, 31, 32, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512};
+
+        if (n <= 64)
+                return k;
+        if (k < sizeof(fixed) / sizeof(fixed[0]))
+                return fixed[k] < n ? fixed[k] : n - 1 - k % 3;
+        if (k < sizeof(fixed) / sizeof(fixed[0]) + 4)
+                return n - 1 - (k - sizeof(fixed) / sizeof(fixed[0])) * 15;
+        return train_next() % n;
+}
+
+static unsigned long long train_argmax_places(unsigned long long n)
+{
+        return n <= 64 ? n : n > 4097 ? 8 : 32;
+}
+
+/*
+        fast_argmax_f32 through one body: at every count and placement, and
+        with the array starting just after a page that faults, random logits,
+        a maximum planted at each place, two copies of it (the first wins),
+        minus and plus zero as the maximum, a NaN at each place after a larger
+        finite value and at each of two places, and infinities.
+*/
+static void train_argmax_cases(train_argmax_call *routine, float *x_end, float *front, train_argmax_faults *faults)
+{
+        for (unsigned long long at = 0; at < TRAIN_COUNTS + 4; at++)
+                for (unsigned long long place = 0; place <= TRAIN_PLACEMENTS; place++)
+                {
+                        static const unsigned long long vocabularies[] = {2048, 32000, 50257, 128256};
+                        unsigned long long n = at < TRAIN_COUNTS ? train_count(at) : vocabularies[at - TRAIN_COUNTS];
+                        float *x = place == TRAIN_PLACEMENTS ? front : x_end - n - train_gaps[place][0];
+
+                        //      Past the largest vocabulary nothing is new.
+                        if (n > 128256 || (place != TRAIN_PLACEMENTS && place >= train_placements(n)))
+                                continue;
+                        for (unsigned long long i = 0; i < n; i++)
+                                x[i] = train_value(3);
+                        faults->random += routine(x, n) != train_argmax_reference(x, n);
+                        if (n == 0)
+                                continue;
+                        for (unsigned long long i = 0; i < n; i++)
+                                x[i] = train_logit();
+                        for (unsigned long long k = 0; k < train_argmax_places(n); k++)
+                        {
+                                unsigned long long p = train_argmax_place(n, k), q = train_next() % n;
+                                float was = x[p], other = x[q];
+
+                                x[p] = 3.0e30f;
+                                faults->planted += routine(x, n) != p;
+                                x[q] = 3.0e30f;
+                                faults->ties += routine(x, n) != (p < q ? p : q);
+                                x[q] = other, x[p] = was;
+
+                                //      A NaN after a larger finite value still wins.
+                                x[p] = train_float(0x7fc00000u | (unsigned)(train_next() & 0x3fffff) | (unsigned)(k & 1) << 31);
+                                if (p > 0)
+                                        x[q % p] = 3.0e38f;
+                                faults->nans += routine(x, n) != p;
+                                x[q] = train_float(0x7f800001u);
+                                faults->nans += routine(x, n) != (p < q ? p : q);
+                                for (unsigned long long i = 0; i < n; i++)
+                                        if (x[i] != x[i] || x[i] == 3.0e38f)
+                                                x[i] = train_logit();
+                        }
+                        //      Zeros of both signs as the maximum, first of either.
+                        {
+                                unsigned long long p = train_next() % n, q = train_next() % n;
+
+                                for (unsigned long long i = 0; i < n; i++)
+                                        x[i] = -1.0f - (float)(i % 7);
+                                x[p] = -0.0f, x[q] = 0.0f;
+                                faults->zeros += routine(x, n) != (p < q ? p : q);
+                                for (unsigned long long i = 0; i < n; i++)
+                                        x[i] = i & 1 ? -0.0f : 0.0f;
+                                faults->zeros += routine(x, n) != 0;
+                        }
+                        //      Infinities: all of minus, one finite among them, plus one.
+                        {
+                                unsigned long long p = train_next() % n, q = train_next() % n;
+
+                                for (unsigned long long i = 0; i < n; i++)
+                                        x[i] = train_float(0xff800000u);
+                                faults->infinities += routine(x, n) != 0;
+                                x[p] = -3.0e38f;
+                                faults->infinities += routine(x, n) != p;
+                                x[q] = train_float(0x7f800000u);
+                                faults->infinities += routine(x, n) != q;
+                                for (unsigned long long i = 0; i < n; i++)
+                                        x[i] = train_float(0x7fc00000u);
+                                faults->infinities += routine(x, n) != 0;
+                        }
+                }
+}
 #endif /* CHECK_train || CHECK_native_train */
 
 #ifdef CHECK_train
-static float *train_x_end, *train_h_end;
+static float *train_x_end, *train_h_end, *train_front;
 
 //      Two runs of TRAIN_MOST floats and room for the gaps, each followed by
 //      a page that faults.
@@ -47731,6 +47865,16 @@ static bool train_guard(void)
                 ends[at] = (float *)(pages + span);
         }
         train_x_end = ends[0], train_h_end = ends[1];
+
+        //      And one whose start is just after a page that faults.
+        p8 address_to pages = memory(span + 2 * 4096);
+
+        if (!pages)
+                return false;
+        p8 address_to start = (p8 address_to)(((positive)pages + 4095) & ~(positive)4095) + 4096;
+        if (system_call_3(syscall(mprotect), (positive)(start - 4096), 4096, 0) != 0)
+                return false;
+        train_front = (float *)start;
         return true;
 }
 
@@ -47749,6 +47893,11 @@ static fn train_call_from_bf16(float *to, const unsigned short *from, unsigned l
         bf16_to_f32(to, from, count);
 }
 
+static unsigned long long train_call_argmax(const float *logits, unsigned long long length)
+{
+        return fast_argmax_f32(logits, length);
+}
+
 #if X64
 //      The instruction the definition is: one float through vcvtneps2bf16.
 static unsigned short train_bf16_instruction(unsigned x)
@@ -47761,26 +47910,49 @@ static unsigned short train_bf16_instruction(unsigned x)
 #endif
 
 //      One machine state's properties, each a check.
-static fn train_tier(string_address tier, bool fused)
+//      Which walks a machine state runs: the bodies it reaches that an
+//      earlier state has not.
+#define TRAIN_RESIDUAL 1
+#define TRAIN_BF16 2
+#define TRAIN_ARGMAX 4
+
+static fn train_tier(string_address tier, bool fused, p32 walks)
 {
         train_faults faults = {0, 0, 0, 0, 0, 0};
         train_bf16_faults bf16 = {0, 0, 0, 0, 0, 0};
+        train_argmax_faults argmax = {0, 0, 0, 0, 0, 0};
 
-        train_residual_cases(train_call_residual, train_x_end, train_h_end, fused, &faults);
-        train_bf16_cases(train_call_to_bf16, train_call_from_bf16, train_x_end, (unsigned short *)train_h_end, &bf16);
         string_format(log, "  %s\n", tier);
-        check("fused_residual_add_f32: every count and placement, each element the reference to the bit", faults.values == 0);
-        check("fused_residual_add_f32: within k eps of the double sum (k = 1 fused, 2 for SSE2)", faults.bounded == 0);
-        check("fused_residual_add_f32: sentinels and gaps beside every array untouched", faults.outside == 0);
-        check("fused_residual_add_f32: h unchanged", faults.kept == 0);
-        check("fused_residual_add_f32: x as h", faults.aliased == 0);
-        check("fused_residual_add_f32: small integers exactly", faults.integers == 0);
-        check("f32_to_bf16: every count and placement, each the definition to the bit", bf16.narrowed == 0);
-        check("bf16_to_f32: every count and placement, each the high half of its float", bf16.widened == 0);
-        check("f32_to_bf16, bf16_to_f32: sources unchanged", bf16.kept == 0);
-        check("f32_to_bf16, bf16_to_f32: sentinels and gaps beside every array untouched", bf16.outside == 0);
-        check("f32_to_bf16: every sign and exponent at every rounding and NaN edge", bf16.strata == 0);
-        check("bf16_to_f32: all 65536 halfwords", bf16.every == 0);
+        if (walks & TRAIN_RESIDUAL)
+        {
+                train_residual_cases(train_call_residual, train_x_end, train_h_end, fused, &faults);
+                check("fused_residual_add_f32: every count and placement, each element the reference to the bit", faults.values == 0);
+                check("fused_residual_add_f32: within k eps of the double sum (k = 1 fused, 2 for SSE2)", faults.bounded == 0);
+                check("fused_residual_add_f32: sentinels and gaps beside every array untouched", faults.outside == 0);
+                check("fused_residual_add_f32: h unchanged", faults.kept == 0);
+                check("fused_residual_add_f32: x as h", faults.aliased == 0);
+                check("fused_residual_add_f32: small integers exactly", faults.integers == 0);
+        }
+        if (walks & TRAIN_BF16)
+        {
+                train_bf16_cases(train_call_to_bf16, train_call_from_bf16, train_x_end, (unsigned short *)train_h_end, &bf16);
+                check("f32_to_bf16: every count and placement, each the definition to the bit", bf16.narrowed == 0);
+                check("bf16_to_f32: every count and placement, each the high half of its float", bf16.widened == 0);
+                check("f32_to_bf16, bf16_to_f32: sources unchanged", bf16.kept == 0);
+                check("f32_to_bf16, bf16_to_f32: sentinels and gaps beside every array untouched", bf16.outside == 0);
+                check("f32_to_bf16: every sign and exponent at every rounding and NaN edge", bf16.strata == 0);
+                check("bf16_to_f32: all 65536 halfwords", bf16.every == 0);
+        }
+        if (walks & TRAIN_ARGMAX)
+        {
+                train_argmax_cases(train_call_argmax, train_x_end, train_front, &argmax);
+                check("fast_argmax_f32: random logits, every count and placement, the reference's index", argmax.random == 0);
+                check("fast_argmax_f32: a maximum at each place", argmax.planted == 0);
+                check("fast_argmax_f32: two of the maximum, the first", argmax.ties == 0);
+                check("fast_argmax_f32: zeros of both signs, the first of either", argmax.zeros == 0);
+                check("fast_argmax_f32: a NaN wins, after a larger value too, and the first of two", argmax.nans == 0);
+                check("fast_argmax_f32: infinities and all NaN", argmax.infinities == 0);
+        }
 }
 
 b32 main(void)
@@ -47830,7 +48002,7 @@ b32 main(void)
                 cpu_has_avx2 = tiers[tier][1] & had2;
                 cpu_has_fma = tiers[tier][2] & hadfma;
                 cpu_has_bf16 = tiers[tier][3];
-                train_tier(names[tier], cpu_has_avx2 && cpu_has_fma);
+                train_tier(names[tier], cpu_has_avx2 && cpu_has_fma, TRAIN_RESIDUAL | TRAIN_BF16 | TRAIN_ARGMAX);
         }
         cpu_has_avx512 = had512, cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_bf16 = had16;
 #elif RISCV64
@@ -47850,7 +48022,7 @@ b32 main(void)
                 if (tier == 0 && vector != 2)
                         continue;
                 cpu_has_vector = tier ? 1 : vector;
-                train_tier(cpu_has_vector == 2 ? "V" : "no V", true);
+                train_tier(cpu_has_vector == 2 ? "V" : "no V", true, TRAIN_RESIDUAL | TRAIN_BF16 | TRAIN_ARGMAX);
         }
         cpu_has_vector = vector;
 #else
@@ -47870,7 +48042,9 @@ b32 main(void)
                 if (tier == 0 && had16 != 2)
                         continue;
                 cpu_has_bf16 = tier ? 1 : 2;
-                train_tier(cpu_has_bf16 == 2 ? "neon bf16" : "neon", true);
+                //      The second state differs in f32_to_bf16's body alone.
+                train_tier(cpu_has_bf16 == 2 ? "neon bf16" : "neon", true,
+                           tier == 0 || had16 != 2 ? TRAIN_RESIDUAL | TRAIN_BF16 | TRAIN_ARGMAX : TRAIN_BF16);
         }
         cpu_has_bf16 = had16;
 #endif
@@ -121926,6 +122100,7 @@ int main(void)
 void fused_residual_add_f32(float *, const float *, unsigned long long, float);
 void f32_to_bf16(unsigned short *, const float *, unsigned long long);
 void bf16_to_f32(float *, const unsigned short *, unsigned long long);
+unsigned long long fast_argmax_f32(const float *, unsigned long long);
 unsigned char cpu_has_bf16 = 2;
 
 static unsigned long long train_ticks(void)
@@ -121948,6 +122123,17 @@ static float *train_native_guard(unsigned long long most)
         return (float *)(pages + span);
 }
 
+//      A run of floats whose start is just after a page that faults.
+static float *train_native_front(unsigned long long most)
+{
+        unsigned long long span = (most * 4 + 16383) / 16384 * 16384;
+        unsigned char *pages = mmap(0, span + 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+        if (pages == MAP_FAILED || mprotect(pages, 16384, PROT_NONE) != 0)
+                return 0;
+        return (float *)(pages + 16384);
+}
+
 __attribute__((noinline)) static void train_former_residual(float *restrict x, const float *restrict h, unsigned long long n,
                                                             float alpha)
 {
@@ -121968,6 +122154,21 @@ __attribute__((noinline)) static void train_former_from_bf16(float *restrict to,
         for (unsigned long long i = 0; i < n; i++)
                 ((unsigned *)to)[i] = (unsigned)from[i] << 16;
 }
+
+//      What a C programmer writes for greedy decoding: the first NaN, or the
+//      first index of the maximum.
+__attribute__((noinline)) static unsigned long long train_former_argmax(const float *x, unsigned long long n)
+{
+        unsigned long long best = 0;
+        float value = n ? x[0] : 0;
+
+        for (unsigned long long i = 1; i < n && value == value; i++)
+                if (x[i] > value || x[i] != x[i])
+                        value = x[i], best = i;
+        return best;
+}
+
+static volatile unsigned long long train_sink;
 
 //      Best of eleven alternated batches of each side, in ticks.
 #define TRAIN_PAIR(label, n, reps, former, assembly)                                                      \
@@ -122017,6 +122218,17 @@ static void train_time(float *x, float *h)
                 TRAIN_PAIR("bf16_to_f32", n, reps, train_former_from_bf16(x, b, n), bf16_to_f32(x, b, n));
         }
         cpu_has_bf16 = 2;
+        static const unsigned long long vocabularies[] = {2048, 32000, 50257, 128256};
+
+        for (unsigned long long s = 0; s < 4; s++)
+        {
+                unsigned long long n = vocabularies[s], reps = (1ull << 24) / n;
+
+                for (unsigned long long i = 0; i < n; i++)
+                        x[i] = (float)((i * 2654435761u) >> 8 & 0xffff) * 1e-4f;
+                x[(n * 7) / 11] = 100.0f;
+                TRAIN_PAIR("fast_argmax_f32", n, reps, train_sink += train_former_argmax(x, n), train_sink += fast_argmax_f32(x, n));
+        }
 }
 
 int main(void)
@@ -122024,6 +122236,8 @@ int main(void)
         float *x_end = train_native_guard(TRAIN_MOST), *h_end = train_native_guard(TRAIN_MOST);
         train_faults faults = {0, 0, 0, 0, 0, 0};
         train_bf16_faults bfcvtn = {0, 0, 0, 0, 0, 0}, integer = {0, 0, 0, 0, 0, 0};
+        train_argmax_faults argmax = {0, 0, 0, 0, 0, 0};
+        float *front = train_native_front(TRAIN_MOST);
 
         if (!x_end || !h_end)
         {
@@ -122036,19 +122250,24 @@ int main(void)
         cpu_has_bf16 = 1;
         train_bf16_cases(f32_to_bf16, bf16_to_f32, x_end, (unsigned short *)h_end, &integer);
         cpu_has_bf16 = 2;
+        if (front)
+                train_argmax_cases(fast_argmax_f32, x_end, front, &argmax);
         unsigned long long bad = faults.values + faults.bounded + faults.outside + faults.kept + faults.aliased + faults.integers;
 
         bad += bfcvtn.narrowed + bfcvtn.widened + bfcvtn.kept + bfcvtn.outside + bfcvtn.strata + bfcvtn.every;
         bad += integer.narrowed + integer.widened + integer.kept + integer.outside + integer.strata + integer.every;
+        bad += !front + argmax.random + argmax.planted + argmax.ties + argmax.zeros + argmax.nans + argmax.infinities;
         for (unsigned long long i = 0; i < TRAIN_MOST; i++)
                 x_end[(long long)i - TRAIN_MOST - 64] = 1.0f / (float)(1 + (i & 1023)),
                 h_end[(long long)i - TRAIN_MOST - 64] = 1e-3f * (float)(i & 255);
         train_time(x_end - TRAIN_MOST - 64, h_end - TRAIN_MOST - 64);
-        printf("arm64 train: 18 checks | residual values %llu | bounded %llu | outside %llu | kept %llu | aliased %llu | "
-               "integers %llu | bfcvtn %llu %llu %llu %llu %llu %llu | integer %llu %llu %llu %llu %llu %llu\n",
+        printf("arm64 train: 24 checks | residual values %llu | bounded %llu | outside %llu | kept %llu | aliased %llu | "
+               "integers %llu | bfcvtn %llu %llu %llu %llu %llu %llu | integer %llu %llu %llu %llu %llu %llu | "
+               "argmax %llu %llu %llu %llu %llu %llu\n",
                faults.values, faults.bounded, faults.outside, faults.kept, faults.aliased, faults.integers, bfcvtn.narrowed,
                bfcvtn.widened, bfcvtn.kept, bfcvtn.outside, bfcvtn.strata, bfcvtn.every, integer.narrowed, integer.widened,
-               integer.kept, integer.outside, integer.strata, integer.every);
+               integer.kept, integer.outside, integer.strata, integer.every, argmax.random, argmax.planted, argmax.ties,
+               argmax.zeros, argmax.nans, argmax.infinities + !front);
         return bad != 0;
 }
 #endif /* CHECK_native_train */
@@ -124850,10 +125069,12 @@ b32 main(void)
    routine replaces, built -O3 for the tier being timed (x86-64-v4 with 512-bit
    vectors for the AVX-512 bodies, x86-64-v3 for AVX2 + FMA, the baseline for
    SSE2; riscv64's with V for the V bodies), at sizes that live in L1, L2 and,
-   natively, L3: fused_residual_add_f32, f32_to_bf16 and bf16_to_f32 over 2048,
-   65536 and 2097152 elements. Paired medians of ASM/C and each side's best
-   ticks a call; a name on the command line runs one shape alone for perf
-   stat. */
+   natively, L3: fused_residual_add_f32, f32_to_bf16, bf16_to_f32 and
+   fast_argmax_f32 over 2048, 65536 and 2097152 elements, and fast_argmax_f32
+   again against the most the compiler makes of it, the fast-math two passes
+   (vectorised, and blind to NaN). Paired medians of ASM/C and each side's
+   best ticks a call; a name on the command line runs one shape alone for
+   perf stat. */
 #include "../src/lib.util.c"
 #define SHARED_bench_measure
 #include "checks.c"
@@ -124896,10 +125117,48 @@ b32 main(void)
         {                                                                                                 \
                 for (positive i = 0; i < count; i++)                                                      \
                         to[i] = (p32)from[i] << 16;                                                       \
+        }                                                                                                 \
+        attributes static positive train_c_argmax_##tag(const f32 *x, positive count)                     \
+        {                                                                                                 \
+                positive best = 0;                                                                        \
+                f32 value = count ? x[0] : 0;                                                             \
+                for (positive i = 1; i < count && value == value; i++)                                    \
+                        if (x[i] > value || x[i] != x[i])                                                 \
+                                value = x[i], best = i;                                                   \
+                return best;                                                                              \
         }
 TRAIN_C_LOOPS(wide, TRAIN_C_WIDE)
 TRAIN_C_LOOPS(ymm, TRAIN_C_YMM)
 TRAIN_C_LOOPS(base, TRAIN_C_BASE)
+
+//      The most the compiler makes of argmax, a second bar: the maximum under
+//      fast-math (vectorised, and blind to NaN, so not the routine's
+//      contract), then a counted search for the first equal to it.
+#if X64
+#define TRAIN_C_FAST_WIDE __attribute__((noinline, noclone, optimize("O3,fast-math"), target("arch=x86-64-v4,prefer-vector-width=512")))
+#define TRAIN_C_FAST_YMM __attribute__((noinline, noclone, optimize("O3,fast-math"), target("arch=x86-64-v3")))
+#elif RISCV64
+#define TRAIN_C_FAST_WIDE __attribute__((noinline, noclone, optimize("O3,fast-math"), target("arch=+v")))
+#define TRAIN_C_FAST_YMM __attribute__((noinline, noclone, optimize("O3,fast-math")))
+#else
+#define TRAIN_C_FAST_WIDE __attribute__((noinline, noclone, optimize("O3,fast-math")))
+#define TRAIN_C_FAST_YMM __attribute__((noinline, noclone, optimize("O3,fast-math")))
+#endif
+#define TRAIN_C_FAST_BASE __attribute__((noinline, noclone, optimize("O3,fast-math")))
+#define TRAIN_C_FAST(tag, attributes)                                                                     \
+        attributes static positive train_c_fast_argmax_##tag(const f32 *x, positive count)                \
+        {                                                                                                 \
+                f32 m = x[0];                                                                             \
+                for (positive i = 1; i < count; i++)                                                      \
+                        m = x[i] > m ? x[i] : m;                                                          \
+                for (positive i = 0; i < count; i++)                                                      \
+                        if (x[i] == m)                                                                    \
+                                return i;                                                                 \
+                return 0;                                                                                 \
+        }
+TRAIN_C_FAST(wide, TRAIN_C_FAST_WIDE)
+TRAIN_C_FAST(ymm, TRAIN_C_FAST_YMM)
+TRAIN_C_FAST(base, TRAIN_C_FAST_BASE)
 
 #define TRAIN_FLOATS 2097152
 static f32 *train_x, *train_h;
@@ -124951,6 +125210,40 @@ static p64 train_from_bf16(bool assembly, positive count, positive reps)
                         train_c_from_bf16_ymm((p32 *)train_h, train_b, count);
                 else
                         train_c_from_bf16_base((p32 *)train_h, train_b, count);
+        return get_cpu_time() - start;
+}
+
+static volatile positive train_sink;
+
+static p64 train_argmax(bool assembly, positive count, positive reps)
+{
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+                if (assembly)
+                        train_sink += fast_argmax_f32(train_x, count);
+                else if (train_tier == 0)
+                        train_sink += train_c_argmax_wide(train_x, count);
+                else if (train_tier == 1)
+                        train_sink += train_c_argmax_ymm(train_x, count);
+                else
+                        train_sink += train_c_argmax_base(train_x, count);
+        return get_cpu_time() - start;
+}
+
+static p64 train_argmax_fast(bool assembly, positive count, positive reps)
+{
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+                if (assembly)
+                        train_sink += fast_argmax_f32(train_x, count);
+                else if (train_tier == 0)
+                        train_sink += train_c_fast_argmax_wide(train_x, count);
+                else if (train_tier == 1)
+                        train_sink += train_c_fast_argmax_ymm(train_x, count);
+                else
+                        train_sink += train_c_fast_argmax_base(train_x, count);
         return get_cpu_time() - start;
 }
 
@@ -125006,6 +125299,8 @@ static fn train_all(string_address tier)
         train_shapes("fused_residual_add_f32", train_residual, tier);
         train_shapes("f32_to_bf16", train_to_bf16, tier);
         train_shapes("bf16_to_f32", train_from_bf16, tier);
+        train_shapes("fast_argmax_f32", train_argmax, tier);
+        train_shapes("fast_argmax_f32 against fast-math C", train_argmax_fast, tier);
 }
 
 //      One shape on one tier, alone, for perf stat; "nothing" is the same
@@ -125052,6 +125347,10 @@ TRAIN_NAMED(to_bf16_2048_zmm, train_to_bf16, 2048, 0, true)
 TRAIN_NAMED(to_bf16_2048_zmm_c, train_to_bf16, 2048, 0, false)
 TRAIN_NAMED(from_bf16_2048_zmm, train_from_bf16, 2048, 0, true)
 TRAIN_NAMED(from_bf16_2048_zmm_c, train_from_bf16, 2048, 0, false)
+TRAIN_NAMED(argmax_2048_zmm, train_argmax, 2048, 0, true)
+TRAIN_NAMED(argmax_2048_zmm_c, train_argmax, 2048, 0, false)
+TRAIN_NAMED(argmax_2048_ymm, train_argmax, 2048, 1, true)
+TRAIN_NAMED(argmax_2048_ymm_c, train_argmax, 2048, 1, false)
 
 static fn train_named_nothing(void)
 {
@@ -125072,6 +125371,10 @@ static bench_work train_named(string_address name)
         BENCH_NAME(name, "to-bf16-2048-zmm-c", train_named_to_bf16_2048_zmm_c);
         BENCH_NAME(name, "from-bf16-2048-zmm", train_named_from_bf16_2048_zmm);
         BENCH_NAME(name, "from-bf16-2048-zmm-c", train_named_from_bf16_2048_zmm_c);
+        BENCH_NAME(name, "argmax-2048-zmm", train_named_argmax_2048_zmm);
+        BENCH_NAME(name, "argmax-2048-zmm-c", train_named_argmax_2048_zmm_c);
+        BENCH_NAME(name, "argmax-2048-ymm", train_named_argmax_2048_ymm);
+        BENCH_NAME(name, "argmax-2048-ymm-c", train_named_argmax_2048_ymm_c);
         return null;
 }
 

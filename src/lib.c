@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        416 routines (392 public, 24 local), 406 of them on all three and 10 local to one.
+        417 routines (393 public, 24 local), 407 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -149,6 +149,7 @@
           deflate_tokens_encode_bmi2     local   yes     --      --
           exit                           public  yes     yes     yes
           f32_to_bf16                    public  yes     yes     yes
+          fast_argmax_f32                public  yes     yes     yes
           fast_sin                       public  yes     yes     yes
           file_close                     public  yes     yes     yes
           file_get_status                public  yes     yes     yes
@@ -39140,6 +39141,10 @@ __asm__(
         other float rounds to nearest even, the largest finite ones to
         infinity. bf16_to_f32(dst, src, count) widens exactly, the halfword
         becoming the high half of the float. Neither may overlap its arrays.
+
+        fast_argmax_f32(logits, length) is the index greedy decoding takes:
+        the first NaN when there is one, otherwise the first index of the
+        maximum, +0 and -0 equal; 0 for a length of 0 or 1.
 */
 #ifndef KERNEL_MODE
 READS_WRITES(1, 3) READS(2, 3)
@@ -39148,6 +39153,7 @@ WRITES(1, 3) READS(2, 3)
 fn f32_to_bf16(p16 address_to dst_bf16, const f32 address_to src_f32, positive count);
 WRITES(1, 3) READS(2, 3)
 fn bf16_to_f32(f32 address_to dst_f32, const p16 address_to src_bf16, positive count);
+PURE READS(1, 2) positive fast_argmax_f32(const f32 address_to logits, positive length);
 /* BF16 conversion in hardware: x86_64's AVX512_BF16 (cpuid leaf 7, subleaf
    1, eax bit 5) with AVX-512's state saved, or arm64's FEAT_BF16 (the BF16
    field of ID_AA64ISAR1_EL1). 0 until f32_to_bf16 first asks, then 1 for
@@ -39504,6 +39510,198 @@ __asm__(
     ".Ltrain_f32b_x_scalar:\n   movzwl (%rsi), %eax\n   shl $16, %eax\n   mov %eax, (%rdi)\n   add $2, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Ltrain_f32b_x_scalar\n"
     ".Ltrain_f32b_x_none:\n" ASM_RET
     ASM_END(bf16_to_f32)
+
+    //      fast_argmax_f32: rdi logits, rsi length; rax the index. One pass
+    //      in blocks (256 floats with AVX-512, 64 with AVX2): a max tree of
+    //      the block, then one compare per lane against the running maximum
+    //      of the lane, and the lanes that rose take the block's number. At
+    //      the end the maximum, the least block among the lanes that hold it,
+    //      and a scan of that block alone. No x86 maximum keeps a NaN (vmaxps
+    //      answers its second source, vrangeps drops a quiet one), so a NaN
+    //      anywhere is found by sums of squares on the FMA pipes, which the
+    //      max tree leaves idle: x * x is a NaN only for a NaN, and a sum of
+    //      squares only through one. The scan is then for the first NaN. The
+    //      last block is the one ending at the end. SSE2 has no FMA and
+    //      takes unordered compares of pairs; under a block, two passes.
+#define TRAIN_AMX_ZHMAX(R)                                                                               \
+    "vextractf64x4 $1, %zmm" R ", %ymm1\n   vmaxps %ymm1, %ymm" R ", %ymm1\n   vextractf128 $1, %ymm1, %xmm2\n" \
+    "vmaxps %xmm2, %xmm1, %xmm1\n   vshufps $0x4e, %xmm1, %xmm1, %xmm2\n   vmaxps %xmm2, %xmm1, %xmm1\n"           \
+    "vshufps $0xb1, %xmm1, %xmm1, %xmm2\n   vmaxps %xmm2, %xmm1, %xmm1\n   vbroadcastss %xmm1, %zmm1\n"
+#define TRAIN_AMX_YHMAX(R)                                                                               \
+    "vextractf128 $1, %ymm" R ", %xmm1\n   vmaxps %xmm1, %xmm" R ", %xmm1\n   vshufps $0x4e, %xmm1, %xmm1, %xmm2\n" \
+    "vmaxps %xmm2, %xmm1, %xmm1\n   vshufps $0xb1, %xmm1, %xmm1, %xmm2\n   vmaxps %xmm2, %xmm1, %xmm1\n   vbroadcastss %xmm1, %ymm1\n"
+//      Half an SSE2 block at byte offset O: eight vectors into xmm0 to xmm7,
+//      unordered compares of the pairs into xmm9 and xmm15, the maximum to xmm0.
+#define TRAIN_AMX_SHALF(O)                                                                               \
+    "movups " O "(%rdi,%rcx,4), %xmm0\n   movups " O "+16(%rdi,%rcx,4), %xmm1\n   movups " O "+32(%rdi,%rcx,4), %xmm2\n" \
+    "movups " O "+48(%rdi,%rcx,4), %xmm3\n   movups " O "+64(%rdi,%rcx,4), %xmm4\n   movups " O "+80(%rdi,%rcx,4), %xmm5\n" \
+    "movups " O "+96(%rdi,%rcx,4), %xmm6\n   movups " O "+112(%rdi,%rcx,4), %xmm7\n   movaps %xmm0, %xmm13\n"     \
+    "cmpunordps %xmm4, %xmm13\n   movaps %xmm1, %xmm14\n   cmpunordps %xmm5, %xmm14\n   orps %xmm13, %xmm9\n"     \
+    "orps %xmm14, %xmm15\n   movaps %xmm2, %xmm13\n   cmpunordps %xmm6, %xmm13\n   movaps %xmm3, %xmm14\n"        \
+    "cmpunordps %xmm7, %xmm14\n   orps %xmm13, %xmm9\n   orps %xmm14, %xmm15\n   maxps %xmm4, %xmm0\n"            \
+    "maxps %xmm5, %xmm1\n   maxps %xmm6, %xmm2\n   maxps %xmm7, %xmm3\n   maxps %xmm2, %xmm0\n   maxps %xmm3, %xmm1\n" \
+    "maxps %xmm1, %xmm0\n"
+    ASM_FUNC(fast_argmax_f32)
+    //      Block numbers are 32 bits: a length of 2^37 or more takes the
+    //      plain two passes.
+    "xor %eax, %eax\n   cmp $1, %rsi\n   jbe .Ltrain_amx_x_none\n   mov %rsi, %rdx\n   shr $37, %rdx\n   jnz .Ltrain_amx_x_ssmall\n"
+    ASM_NARROW("cpu_has_avx2", ".Ltrain_amx_x_sse2")
+    ASM_NARROW("cpu_has_fma", ".Ltrain_amx_x_sse2")
+    ASM_NARROW("cpu_has_avx512", ".Ltrain_amx_x_avx2")
+    //      AVX-512: zmm24 the lanes' maxima, zmm25 their blocks, zmm26 this
+    //      block's number (all ones for the last), zmm27 one, zmm16 to zmm23
+    //      the sums of squares; r8 the last block's start.
+    "cmp $256, %rsi\n   jb .Ltrain_amx_x_zsmall\n   mov $0xff800000, %eax\n   vpbroadcastd %eax, %zmm24\n"
+    "vpxord %zmm25, %zmm25, %zmm25\n   vpxord %zmm26, %zmm26, %zmm26\n   mov $1, %eax\n   vpbroadcastd %eax, %zmm27\n   vpxord %zmm16, %zmm16, %zmm16\n"
+    "vpxord %zmm17, %zmm17, %zmm17\n   vpxord %zmm18, %zmm18, %zmm18\n   vpxord %zmm19, %zmm19, %zmm19\n   vpxord %zmm20, %zmm20, %zmm20\n"
+    "vpxord %zmm21, %zmm21, %zmm21\n   vpxord %zmm22, %zmm22, %zmm22\n   vpxord %zmm23, %zmm23, %zmm23\n   xor %ecx, %ecx\n   lea -256(%rsi), %r8\n"
+    ".balign 64\n.Ltrain_amx_x_zblock:\n"
+    "vmovups (%rdi,%rcx,4), %zmm0\n   vmovups 64(%rdi,%rcx,4), %zmm1\n   vmovups 128(%rdi,%rcx,4), %zmm2\n   vmovups 192(%rdi,%rcx,4), %zmm3\n"
+    "vmovups 256(%rdi,%rcx,4), %zmm4\n   vmovups 320(%rdi,%rcx,4), %zmm5\n   vmovups 384(%rdi,%rcx,4), %zmm6\n   vmovups 448(%rdi,%rcx,4), %zmm7\n"
+    "vmovups 512(%rdi,%rcx,4), %zmm8\n   vmovups 576(%rdi,%rcx,4), %zmm9\n   vmovups 640(%rdi,%rcx,4), %zmm10\n   vmovups 704(%rdi,%rcx,4), %zmm11\n"
+    "vmovups 768(%rdi,%rcx,4), %zmm12\n   vmovups 832(%rdi,%rcx,4), %zmm13\n   vmovups 896(%rdi,%rcx,4), %zmm14\n   vmovups 960(%rdi,%rcx,4), %zmm15\n"
+    "vfmadd231ps %zmm0, %zmm0, %zmm16\n   vfmadd231ps %zmm1, %zmm1, %zmm17\n   vfmadd231ps %zmm2, %zmm2, %zmm18\n   vfmadd231ps %zmm3, %zmm3, %zmm19\n"
+    "vfmadd231ps %zmm4, %zmm4, %zmm20\n   vfmadd231ps %zmm5, %zmm5, %zmm21\n   vfmadd231ps %zmm6, %zmm6, %zmm22\n   vfmadd231ps %zmm7, %zmm7, %zmm23\n"
+    "vfmadd231ps %zmm8, %zmm8, %zmm16\n   vfmadd231ps %zmm9, %zmm9, %zmm17\n   vfmadd231ps %zmm10, %zmm10, %zmm18\n   vfmadd231ps %zmm11, %zmm11, %zmm19\n"
+    "vfmadd231ps %zmm12, %zmm12, %zmm20\n   vfmadd231ps %zmm13, %zmm13, %zmm21\n   vfmadd231ps %zmm14, %zmm14, %zmm22\n   vfmadd231ps %zmm15, %zmm15, %zmm23\n"
+    "vmaxps %zmm8, %zmm0, %zmm0\n   vmaxps %zmm9, %zmm1, %zmm1\n   vmaxps %zmm10, %zmm2, %zmm2\n   vmaxps %zmm11, %zmm3, %zmm3\n"
+    "vmaxps %zmm12, %zmm4, %zmm4\n   vmaxps %zmm13, %zmm5, %zmm5\n   vmaxps %zmm14, %zmm6, %zmm6\n   vmaxps %zmm15, %zmm7, %zmm7\n"
+    "vmaxps %zmm4, %zmm0, %zmm0\n   vmaxps %zmm5, %zmm1, %zmm1\n   vmaxps %zmm6, %zmm2, %zmm2\n   vmaxps %zmm7, %zmm3, %zmm3\n"
+    "vmaxps %zmm2, %zmm0, %zmm0\n   vmaxps %zmm3, %zmm1, %zmm1\n   vmaxps %zmm1, %zmm0, %zmm0\n"
+    "vcmpps $0x1e, %zmm24, %zmm0, %k1\n   vmaxps %zmm24, %zmm0, %zmm24\n   vmovdqa32 %zmm26, %zmm25{%k1}\n"
+    "add $256, %rcx\n   cmp %rsi, %rcx\n   jae .Ltrain_amx_x_zend\n   vpaddd %zmm27, %zmm26, %zmm26\n   cmp %r8, %rcx\n   jbe .Ltrain_amx_x_zblock\n"
+    "mov %r8, %rcx\n   vpternlogd $0xff, %zmm26, %zmm26, %zmm26\n   jmp .Ltrain_amx_x_zblock\n"
+    ".Ltrain_amx_x_zend:\n   vaddps %zmm20, %zmm16, %zmm16\n   vaddps %zmm21, %zmm17, %zmm17\n   vaddps %zmm22, %zmm18, %zmm18\n   vaddps %zmm23, %zmm19, %zmm19\n"
+    "vaddps %zmm18, %zmm16, %zmm16\n   vaddps %zmm19, %zmm17, %zmm17\n   vaddps %zmm17, %zmm16, %zmm16\n   vfpclassps $0x81, %zmm16, %k2\n   kortestw %k2, %k2\n"
+    "jnz .Ltrain_amx_x_znan\n"
+    TRAIN_AMX_ZHMAX("24")
+    "vcmpps $0, %zmm1, %zmm24, %k3\n   vpternlogd $0xff, %zmm2, %zmm2, %zmm2\n   vmovdqa32 %zmm25, %zmm2{%k3}\n"
+    "vextracti64x4 $1, %zmm2, %ymm3\n   vpminud %ymm3, %ymm2, %ymm2\n   vextracti128 $1, %ymm2, %xmm3\n   vpminud %xmm3, %xmm2, %xmm2\n"
+    "vpshufd $0x4e, %xmm2, %xmm3\n   vpminud %xmm3, %xmm2, %xmm2\n   vpshufd $0xb1, %xmm2, %xmm3\n   vpminud %xmm3, %xmm2, %xmm2\n   vmovd %xmm2, %eax\n"
+    "mov %eax, %ecx\n   shl $8, %rcx\n   cmp $-1, %eax\n   cmove %r8, %rcx\n"
+    ".Ltrain_amx_x_zfind:\n   vcmpps $0, (%rdi,%rcx,4), %zmm1, %k1\n   kortestw %k1, %k1\n   jnz .Ltrain_amx_x_zhit\n   add $16, %rcx\n   jmp .Ltrain_amx_x_zfind\n"
+    ".Ltrain_amx_x_zhit:\n   kmovw %k1, %eax\n   bsf %eax, %eax\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+    //      A NaN: the first, sixteen at a time, the last sixteen ending at the end.
+    ".Ltrain_amx_x_znan:\n   xor %ecx, %ecx\n   lea -16(%rsi), %r9\n"
+    ".Ltrain_amx_x_znan_more:\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   vmovups (%rdi,%rcx,4), %zmm0\n   vcmpps $3, %zmm0, %zmm0, %k1\n"
+    "kortestw %k1, %k1\n   jnz .Ltrain_amx_x_zhit\n   add $16, %rcx\n   jmp .Ltrain_amx_x_znan_more\n"
+    //      16 to 255: the maximum sixteen at a time, each vector asked for a
+    //      NaN, then the first equal to it.
+    ".Ltrain_amx_x_zsmall:\n   cmp $16, %rsi\n   jb .Ltrain_amx_x_ztiny\n   lea -16(%rsi), %r9\n   vmovups (%rdi), %zmm24\n   xor %ecx, %ecx\n"
+    "vfpclassps $0x81, %zmm24, %k2\n   kortestw %k2, %k2\n   jnz .Ltrain_amx_x_zhit_nan\n   mov $16, %ecx\n"
+    ".Ltrain_amx_x_zsmall_more:\n   cmp %rsi, %rcx\n   jae .Ltrain_amx_x_zsmall_end\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   vmovups (%rdi,%rcx,4), %zmm0\n"
+    "vfpclassps $0x81, %zmm0, %k2\n   kortestw %k2, %k2\n   jnz .Ltrain_amx_x_zhit_nan\n   vmaxps %zmm24, %zmm0, %zmm24\n   add $16, %rcx\n"
+    "jmp .Ltrain_amx_x_zsmall_more\n"
+    ".Ltrain_amx_x_zhit_nan:\n   kmovw %k2, %eax\n   bsf %eax, %eax\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+    ".Ltrain_amx_x_zsmall_end:\n"
+    TRAIN_AMX_ZHMAX("24")
+    "xor %ecx, %ecx\n"
+    ".Ltrain_amx_x_zsmall_find:\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   vcmpps $0, (%rdi,%rcx,4), %zmm1, %k1\n   kortestw %k1, %k1\n"
+    "jnz .Ltrain_amx_x_zhit\n   add $16, %rcx\n   jmp .Ltrain_amx_x_zsmall_find\n"
+    //      Under 16, one masked vector with minus infinity in the lanes past
+    //      the end, unless they would reach the next page.
+    ".Ltrain_amx_x_ztiny:\n   mov %edi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_amx_x_scalar\n   mov $-1, %eax\n   bzhi %esi, %eax, %eax\n"
+    "kmovw %eax, %k1\n   mov $0xff800000, %eax\n   vpbroadcastd %eax, %zmm0\n   vmovups (%rdi), %zmm0{%k1}\n   vcmpps $3, %zmm0, %zmm0, %k2\n"
+    "kortestw %k2, %k2\n   jnz .Ltrain_amx_x_ztiny_hit\n"
+    TRAIN_AMX_ZHMAX("0")
+    "vcmpps $0, %zmm1, %zmm0, %k2{%k1}\n"
+    ".Ltrain_amx_x_ztiny_hit:\n   kmovw %k2, %eax\n   bsf %eax, %eax\n   vzeroupper\n" ASM_RET
+    //      AVX2 with FMA: ymm13 the lanes' maxima, ymm14 their blocks, ymm15
+    //      this block's number, ymm5 to ymm12 the sums of squares; half a
+    //      block in ymm0 to ymm3 at a time, so that eight sums fit.
+    ".Ltrain_amx_x_avx2:\n   cmp $64, %rsi\n   jb .Ltrain_amx_x_ysmall\n   mov $0xff800000, %eax\n   vmovd %eax, %xmm13\n   vpbroadcastd %xmm13, %ymm13\n"
+    "vpxor %xmm14, %xmm14, %xmm14\n   vpxor %xmm15, %xmm15, %xmm15\n   vxorps %xmm5, %xmm5, %xmm5\n   vxorps %xmm6, %xmm6, %xmm6\n   vxorps %xmm7, %xmm7, %xmm7\n"
+    "vxorps %xmm8, %xmm8, %xmm8\n   vxorps %xmm9, %xmm9, %xmm9\n   vxorps %xmm10, %xmm10, %xmm10\n   vxorps %xmm11, %xmm11, %xmm11\n   vxorps %xmm12, %xmm12, %xmm12\n"
+    "xor %ecx, %ecx\n   lea -64(%rsi), %r8\n"
+    ".balign 64\n.Ltrain_amx_x_yblock:\n"
+    "vmovups (%rdi,%rcx,4), %ymm0\n   vmovups 32(%rdi,%rcx,4), %ymm1\n   vmovups 64(%rdi,%rcx,4), %ymm2\n   vmovups 96(%rdi,%rcx,4), %ymm3\n"
+    "vfmadd231ps %ymm0, %ymm0, %ymm5\n   vfmadd231ps %ymm1, %ymm1, %ymm6\n   vfmadd231ps %ymm2, %ymm2, %ymm7\n   vfmadd231ps %ymm3, %ymm3, %ymm8\n"
+    "vmaxps %ymm1, %ymm0, %ymm0\n   vmaxps %ymm3, %ymm2, %ymm2\n   vmaxps %ymm2, %ymm0, %ymm4\n"
+    "vmovups 128(%rdi,%rcx,4), %ymm0\n   vmovups 160(%rdi,%rcx,4), %ymm1\n   vmovups 192(%rdi,%rcx,4), %ymm2\n   vmovups 224(%rdi,%rcx,4), %ymm3\n"
+    "vfmadd231ps %ymm0, %ymm0, %ymm9\n   vfmadd231ps %ymm1, %ymm1, %ymm10\n   vfmadd231ps %ymm2, %ymm2, %ymm11\n   vfmadd231ps %ymm3, %ymm3, %ymm12\n"
+    "vmaxps %ymm1, %ymm0, %ymm0\n   vmaxps %ymm3, %ymm2, %ymm2\n   vmaxps %ymm2, %ymm0, %ymm0\n   vmaxps %ymm4, %ymm0, %ymm0\n"
+    "vcmpps $0x1e, %ymm13, %ymm0, %ymm1\n   vmaxps %ymm13, %ymm0, %ymm13\n   vpblendvb %ymm1, %ymm15, %ymm14, %ymm14\n"
+    "add $64, %rcx\n   cmp %rsi, %rcx\n   jae .Ltrain_amx_x_yend\n   vpsubd .Ltrain_amx_x_ones(%rip), %ymm15, %ymm15\n   cmp %r8, %rcx\n   jbe .Ltrain_amx_x_yblock\n"
+    "mov %r8, %rcx\n   vpcmpeqd %ymm15, %ymm15, %ymm15\n   jmp .Ltrain_amx_x_yblock\n"
+    ".Ltrain_amx_x_yend:\n   vaddps %ymm9, %ymm5, %ymm5\n   vaddps %ymm10, %ymm6, %ymm6\n   vaddps %ymm11, %ymm7, %ymm7\n   vaddps %ymm12, %ymm8, %ymm8\n"
+    "vaddps %ymm6, %ymm5, %ymm5\n   vaddps %ymm8, %ymm7, %ymm7\n   vaddps %ymm7, %ymm5, %ymm5\n   vcmpunordps %ymm5, %ymm5, %ymm5\n   vmovmskps %ymm5, %eax\n"
+    "test %eax, %eax\n   jnz .Ltrain_amx_x_ynan\n"
+    TRAIN_AMX_YHMAX("13")
+    "vcmpeqps %ymm1, %ymm13, %ymm2\n   vpcmpeqd %ymm3, %ymm3, %ymm3\n   vpblendvb %ymm2, %ymm14, %ymm3, %ymm3\n   vextracti128 $1, %ymm3, %xmm4\n"
+    "vpminud %xmm4, %xmm3, %xmm3\n   vpshufd $0x4e, %xmm3, %xmm4\n   vpminud %xmm4, %xmm3, %xmm3\n   vpshufd $0xb1, %xmm3, %xmm4\n   vpminud %xmm4, %xmm3, %xmm3\n"
+    "vmovd %xmm3, %eax\n   mov %eax, %ecx\n   shl $6, %rcx\n   cmp $-1, %eax\n   cmove %r8, %rcx\n"
+    ".Ltrain_amx_x_yfind:\n   vcmpeqps (%rdi,%rcx,4), %ymm1, %ymm0\n   vmovmskps %ymm0, %eax\n   test %eax, %eax\n   jnz .Ltrain_amx_x_yhit\n"
+    "add $8, %rcx\n   jmp .Ltrain_amx_x_yfind\n"
+    ".Ltrain_amx_x_yhit:\n   bsf %eax, %eax\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+    ".Ltrain_amx_x_ynan:\n   xor %ecx, %ecx\n   lea -8(%rsi), %r9\n"
+    ".Ltrain_amx_x_ynan_more:\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   vmovups (%rdi,%rcx,4), %ymm0\n   vcmpunordps %ymm0, %ymm0, %ymm0\n"
+    "vmovmskps %ymm0, %eax\n   test %eax, %eax\n   jnz .Ltrain_amx_x_yhit\n   add $8, %rcx\n   jmp .Ltrain_amx_x_ynan_more\n"
+    ".Ltrain_amx_x_ysmall:\n   cmp $8, %rsi\n   jb .Ltrain_amx_x_scalar\n   lea -8(%rsi), %r9\n   vmovups (%rdi), %ymm13\n   vmulps %ymm13, %ymm13, %ymm5\n   mov $8, %ecx\n"
+    ".Ltrain_amx_x_ysmall_more:\n   cmp %rsi, %rcx\n   jae .Ltrain_amx_x_ysmall_end\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   vmovups (%rdi,%rcx,4), %ymm0\n"
+    "vfmadd231ps %ymm0, %ymm0, %ymm5\n   vmaxps %ymm13, %ymm0, %ymm13\n   add $8, %rcx\n   jmp .Ltrain_amx_x_ysmall_more\n"
+    ".Ltrain_amx_x_ysmall_end:\n   vcmpunordps %ymm5, %ymm5, %ymm5\n   vmovmskps %ymm5, %eax\n   test %eax, %eax\n   jnz .Ltrain_amx_x_ynan\n"
+    TRAIN_AMX_YHMAX("13")
+    "xor %ecx, %ecx\n"
+    ".Ltrain_amx_x_ysmall_find:\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   vcmpeqps (%rdi,%rcx,4), %ymm1, %ymm0\n   vmovmskps %ymm0, %eax\n"
+    "test %eax, %eax\n   jnz .Ltrain_amx_x_yhit\n   add $8, %rcx\n   jmp .Ltrain_amx_x_ysmall_find\n"
+    //      SSE2: blocks of 64 floats in halves of 32, as with AVX2; xmm10 the
+    //      lanes' maxima, xmm11 their blocks, xmm12 this block's number, xmm9
+    //      and xmm15 the NaN check. No 32-bit minimum in SSE2: the least
+    //      block among the lanes holding the maximum is found in GPRs.
+    ".Ltrain_amx_x_sse2:\n   cmp $64, %rsi\n   jb .Ltrain_amx_x_ssmall\n   mov $0xff800000, %eax\n   movd %eax, %xmm10\n   pshufd $0, %xmm10, %xmm10\n"
+    "pxor %xmm11, %xmm11\n   pxor %xmm12, %xmm12\n   pxor %xmm9, %xmm9\n   pxor %xmm15, %xmm15\n   xor %ecx, %ecx\n   lea -64(%rsi), %r8\n"
+    ".balign 64\n.Ltrain_amx_x_sblock:\n"
+    TRAIN_AMX_SHALF("0")
+    "movaps %xmm0, %xmm8\n"
+    TRAIN_AMX_SHALF("128")
+    "maxps %xmm8, %xmm0\n   movaps %xmm10, %xmm13\n   cmpltps %xmm0, %xmm13\n   maxps %xmm0, %xmm10\n   movaps %xmm11, %xmm14\n"
+    "xorps %xmm12, %xmm14\n   andps %xmm13, %xmm14\n   xorps %xmm14, %xmm11\n"
+    "add $64, %rcx\n   cmp %rsi, %rcx\n   jae .Ltrain_amx_x_send\n   psubd .Ltrain_amx_x_ones(%rip), %xmm12\n   cmp %r8, %rcx\n   jbe .Ltrain_amx_x_sblock\n"
+    "mov %r8, %rcx\n   pcmpeqd %xmm12, %xmm12\n   jmp .Ltrain_amx_x_sblock\n"
+    ".Ltrain_amx_x_send:\n   orps %xmm15, %xmm9\n   movmskps %xmm9, %eax\n   test %eax, %eax\n   jnz .Ltrain_amx_x_snan\n"
+    "movaps %xmm10, %xmm1\n   shufps $0x4e, %xmm1, %xmm1\n   maxps %xmm10, %xmm1\n   movaps %xmm1, %xmm2\n   shufps $0xb1, %xmm2, %xmm2\n"
+    "maxps %xmm2, %xmm1\n   movaps %xmm10, %xmm2\n   cmpeqps %xmm1, %xmm2\n   movmskps %xmm2, %edx\n   movd %xmm11, %eax\n"
+    "pshufd $0x55, %xmm11, %xmm3\n   movd %xmm3, %r9d\n   pshufd $0xaa, %xmm11, %xmm3\n   movd %xmm3, %r10d\n   pshufd $0xff, %xmm11, %xmm3\n"
+    "movd %xmm3, %r11d\n   mov $-1, %ecx\n   test $1, %dl\n   cmovz %ecx, %eax\n   test $2, %dl\n   cmovz %ecx, %r9d\n   test $4, %dl\n"
+    "cmovz %ecx, %r10d\n   test $8, %dl\n   cmovz %ecx, %r11d\n   cmp %r9d, %eax\n   cmova %r9d, %eax\n   cmp %r11d, %r10d\n"
+    "cmova %r11d, %r10d\n   cmp %r10d, %eax\n   cmova %r10d, %eax\n   mov %eax, %ecx\n   shl $6, %rcx\n   cmp $-1, %eax\n   cmove %r8, %rcx\n"
+    ".Ltrain_amx_x_sfind:\n   movups (%rdi,%rcx,4), %xmm0\n   cmpeqps %xmm1, %xmm0\n   movmskps %xmm0, %eax\n   test %eax, %eax\n"
+    "jnz .Ltrain_amx_x_shit\n   add $4, %rcx\n   jmp .Ltrain_amx_x_sfind\n"
+    ".Ltrain_amx_x_shit:\n   bsf %eax, %eax\n   add %rcx, %rax\n" ASM_RET
+    ".Ltrain_amx_x_snan:\n   xor %ecx, %ecx\n   lea -4(%rsi), %r9\n"
+    ".Ltrain_amx_x_snan_more:\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   movups (%rdi,%rcx,4), %xmm0\n   cmpunordps %xmm0, %xmm0\n"
+    "movmskps %xmm0, %eax\n   test %eax, %eax\n   jnz .Ltrain_amx_x_shit\n   add $4, %rcx\n   jmp .Ltrain_amx_x_snan_more\n"
+    //      8 to 63 (and lengths past 2^37), two passes: the maximum four
+    //      vectors a turn with a NaN check of each pair, then the first equal
+    //      to it, or the first NaN.
+    ".Ltrain_amx_x_ssmall:\n   cmp $8, %rsi\n   jb .Ltrain_amx_x_scalar\n   lea -4(%rsi), %r9\n   movups (%rdi), %xmm0\n   movaps %xmm0, %xmm1\n"
+    "movaps %xmm0, %xmm2\n   movaps %xmm0, %xmm3\n   movaps %xmm0, %xmm4\n   cmpunordps %xmm0, %xmm4\n   mov $4, %ecx\n"
+    "1:  lea 16(%rcx), %rax\n   cmp %rsi, %rax\n   ja 2f\n   movups (%rdi,%rcx,4), %xmm5\n   movups 16(%rdi,%rcx,4), %xmm6\n"
+    "movups 32(%rdi,%rcx,4), %xmm7\n   movups 48(%rdi,%rcx,4), %xmm8\n   movaps %xmm5, %xmm9\n   cmpunordps %xmm6, %xmm9\n   movaps %xmm7, %xmm10\n"
+    "cmpunordps %xmm8, %xmm10\n   orps %xmm9, %xmm4\n   orps %xmm10, %xmm4\n   maxps %xmm5, %xmm0\n   maxps %xmm6, %xmm1\n   maxps %xmm7, %xmm2\n"
+    "maxps %xmm8, %xmm3\n   mov %rax, %rcx\n   jmp 1b\n"
+    "2:  cmp %rsi, %rcx\n   jae 3f\n   cmp %r9, %rcx\n   cmova %r9, %rcx\n   movups (%rdi,%rcx,4), %xmm5\n   movaps %xmm5, %xmm9\n"
+    "cmpunordps %xmm5, %xmm9\n   orps %xmm9, %xmm4\n   maxps %xmm5, %xmm0\n   add $4, %rcx\n   jmp 2b\n"
+    "3:  movmskps %xmm4, %eax\n   test %eax, %eax\n   jnz 6f\n   maxps %xmm1, %xmm0\n   maxps %xmm3, %xmm2\n   maxps %xmm2, %xmm0\n"
+    "movhlps %xmm0, %xmm1\n   maxps %xmm1, %xmm0\n   movaps %xmm0, %xmm1\n   shufps $0x55, %xmm1, %xmm1\n   maxss %xmm1, %xmm0\n   shufps $0, %xmm0, %xmm0\n"
+    "xor %ecx, %ecx\n"
+    "4:  cmp %r9, %rcx\n   cmova %r9, %rcx\n   movups (%rdi,%rcx,4), %xmm5\n   cmpeqps %xmm0, %xmm5\n   movmskps %xmm5, %eax\n   test %eax, %eax\n   jnz 5f\n"
+    "add $4, %rcx\n   jmp 4b\n"
+    "5:  bsf %eax, %eax\n   add %rcx, %rax\n" ASM_RET
+    "6:  xor %ecx, %ecx\n"
+    "7:  cmp %r9, %rcx\n   cmova %r9, %rcx\n   movups (%rdi,%rcx,4), %xmm5\n   cmpunordps %xmm5, %xmm5\n   movmskps %xmm5, %eax\n   test %eax, %eax\n   jnz 5b\n"
+    "add $4, %rcx\n   jmp 7b\n"
+    //      A float at a time: the first NaN, or the first that no later one exceeds.
+    ".Ltrain_amx_x_scalar:\n   xor %eax, %eax\n   movss (%rdi), %xmm0\n   ucomiss %xmm0, %xmm0\n   jp .Ltrain_amx_x_none\n   mov $1, %ecx\n"
+    "1:  movss (%rdi,%rcx,4), %xmm1\n   ucomiss %xmm0, %xmm1\n   jp 3f\n   jbe 2f\n   movaps %xmm1, %xmm0\n   mov %rcx, %rax\n"
+    "2:  inc %rcx\n   cmp %rsi, %rcx\n   jb 1b\n" ASM_RET
+    "3:  mov %rcx, %rax\n"
+    ".Ltrain_amx_x_none:\n" ASM_RET
+    ".pushsection .rodata\n   .balign 32\n.Ltrain_amx_x_ones:\n   .rept 8\n   .long -1\n   .endr\n.popsection\n"
+    ASM_END(fast_argmax_f32)
+#undef TRAIN_AMX_ZHMAX
+#undef TRAIN_AMX_YHMAX
+#undef TRAIN_AMX_SHALF
 );
 #elif ARM64
 __asm__(
@@ -39591,6 +39789,44 @@ __asm__(
     "6:  ldrh w9, [x1], #2\n   lsl w9, w9, #16\n   str w9, [x0], #4\n   subs x2, x2, #1\n   b.ne 6b\n"
     "9:  " ASM_RET
     ASM_END(bf16_to_f32)
+
+    //      fast_argmax_f32: x0 logits, x1 length; x0 the index. As on x86_64,
+    //      in blocks of 64 with v16 the lanes' maxima, v17 their blocks and v18
+    //      this block's number; fmax keeps a NaN, so the running maximum says
+    //      whether there was one. Under 64, two passes of four.
+    ASM_FUNC(fast_argmax_f32)
+    "cmp x1, #1\n   b.ls 90f\n   cmp x1, #64\n   b.lo 50f\n   mvni v16.4s, #0x7f, msl #16\n   movi v17.4s, #0\n   movi v18.4s, #0\n   movi v19.4s, #1\n"
+    "mov x2, #0\n   sub x3, x1, #64\n"
+    "10: add x4, x0, x2, lsl #2\n   ldp q0, q1, [x4]\n   ldp q2, q3, [x4, #32]\n   ldp q4, q5, [x4, #64]\n   ldp q6, q7, [x4, #96]\n"
+    "ldp q20, q21, [x4, #128]\n   ldp q22, q23, [x4, #160]\n   ldp q24, q25, [x4, #192]\n   ldp q26, q27, [x4, #224]\n"
+    "fmax v0.4s, v0.4s, v20.4s\n   fmax v1.4s, v1.4s, v21.4s\n   fmax v2.4s, v2.4s, v22.4s\n   fmax v3.4s, v3.4s, v23.4s\n"
+    "fmax v4.4s, v4.4s, v24.4s\n   fmax v5.4s, v5.4s, v25.4s\n   fmax v6.4s, v6.4s, v26.4s\n   fmax v7.4s, v7.4s, v27.4s\n"
+    "fmax v0.4s, v0.4s, v4.4s\n   fmax v1.4s, v1.4s, v5.4s\n   fmax v2.4s, v2.4s, v6.4s\n   fmax v3.4s, v3.4s, v7.4s\n"
+    "fmax v0.4s, v0.4s, v2.4s\n   fmax v1.4s, v1.4s, v3.4s\n   fmax v0.4s, v0.4s, v1.4s\n"
+    "fcmgt v28.4s, v0.4s, v16.4s\n   fmax v16.4s, v16.4s, v0.4s\n   bit v17.16b, v18.16b, v28.16b\n"
+    "add x2, x2, #64\n   cmp x2, x1\n   b.hs 20f\n   add v18.4s, v18.4s, v19.4s\n   cmp x2, x3\n   b.ls 10b\n"
+    "mov x2, x3\n   movi v18.2d, #0xffffffffffffffff\n   b 10b\n"
+    "20: fmaxv s29, v16.4s\n   fcmp s29, s29\n   b.vs 40f\n   dup v29.4s, v29.s[0]\n   fcmeq v30.4s, v16.4s, v29.4s\n"
+    "movi v31.2d, #0xffffffffffffffff\n   bit v31.16b, v17.16b, v30.16b\n   uminv s31, v31.4s\n   fmov w5, s31\n   lsl x6, x5, #6\n"
+    "cmn w5, #1\n   csel x2, x3, x6, eq\n   add x4, x0, x2, lsl #2\n"
+    "31: ldr q0, [x4], #16\n   fcmeq v0.4s, v0.4s, v29.4s\n   xtn v0.4h, v0.4s\n   fmov x5, d0\n   cbnz x5, 35f\n   add x2, x2, #4\n   b 31b\n"
+    "35: rbit x5, x5\n   clz x5, x5\n   add x0, x2, x5, lsr #4\n" ASM_RET
+    //      A NaN: the first, four at a time, the last four ending at the end.
+    "40: mov x2, #0\n   sub x3, x1, #4\n"
+    "41: cmp x2, x3\n   csel x2, x3, x2, hi\n   add x4, x0, x2, lsl #2\n   ldr q0, [x4]\n   fcmeq v0.4s, v0.4s, v0.4s\n   mvn v0.16b, v0.16b\n"
+    "xtn v0.4h, v0.4s\n   fmov x5, d0\n   cbnz x5, 35b\n   add x2, x2, #4\n   b 41b\n"
+    "50: cmp x1, #4\n   b.lo 60f\n   sub x3, x1, #4\n   ldr q16, [x0]\n   mov x2, #4\n"
+    "51: cmp x2, x1\n   b.hs 52f\n   cmp x2, x3\n   csel x2, x3, x2, hi\n   add x4, x0, x2, lsl #2\n   ldr q0, [x4]\n   fmax v16.4s, v16.4s, v0.4s\n"
+    "add x2, x2, #4\n   b 51b\n"
+    "52: fmaxv s29, v16.4s\n   fcmp s29, s29\n   b.vs 40b\n   dup v29.4s, v29.s[0]\n   mov x2, #0\n"
+    "53: cmp x2, x3\n   csel x2, x3, x2, hi\n   add x4, x0, x2, lsl #2\n   ldr q0, [x4]\n   fcmeq v0.4s, v0.4s, v29.4s\n   xtn v0.4h, v0.4s\n"
+    "fmov x5, d0\n   cbnz x5, 35b\n   add x2, x2, #4\n   b 53b\n"
+    "60: ldr s0, [x0]\n   fcmp s0, s0\n   b.vs 90f\n   mov x2, #1\n   mov x6, #0\n"
+    "61: ldr s1, [x0, x2, lsl #2]\n   fcmp s1, s1\n   b.vs 63f\n   fcmp s1, s0\n   b.le 62f\n   fmov s0, s1\n   mov x6, x2\n"
+    "62: add x2, x2, #1\n   cmp x2, x1\n   b.lo 61b\n   mov x0, x6\n" ASM_RET
+    "63: mov x0, x2\n" ASM_RET
+    "90: mov x0, #0\n" ASM_RET
+    ASM_END(fast_argmax_f32)
 );
 #elif RISCV64
 __asm__(
@@ -39678,6 +39914,52 @@ __asm__(
     "slli t1, t0, 1\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 6b\n" ASM_RET
 #endif
     ASM_END(bf16_to_f32)
+
+    //      fast_argmax_f32: a0 logits, a1 length; a0 the index. With V, two
+    //      passes as many floats as eight registers hold: the lanes' maxima
+    //      (tail undisturbed, so the lanes a short last strip leaves keep
+    //      theirs), leaving at the first NaN, then the first equal to their
+    //      maximum. Without it four at a time, branching only on a rise or a
+    //      NaN (fle.s answers 0 for both).
+    ASM_FUNC(fast_argmax_f32)
+    "li t0, 1\n   bgeu t0, a1, 90f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t1, cpu_has_vector\n   lbu t1, 0(t1)\n   li t2, 2\n   beq t1, t2, 5f\n   bnez t1, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j fast_argmax_f32\n"
+#endif
+    //      Four a turn, each rise or NaN out of the line and back to the
+    //      next compare, then one at a time.
+    "1:  flw ft0, 0(a0)\n   feq.s t1, ft0, ft0\n   beqz t1, 90f\n   li t2, 0\n   li t3, 1\n   addi t4, a0, 4\n   addi a2, a1, -3\n"
+    "bge t3, a2, 20f\n"
+    "2:  flw ft1, 0(t4)\n   flw ft2, 4(t4)\n   flw ft3, 8(t4)\n   flw ft4, 12(t4)\n   fle.s t1, ft1, ft0\n   beqz t1, 41f\n"
+    "21: fle.s t1, ft2, ft0\n   beqz t1, 42f\n"
+    "22: fle.s t1, ft3, ft0\n   beqz t1, 43f\n"
+    "23: fle.s t1, ft4, ft0\n   beqz t1, 44f\n"
+    "24: addi t3, t3, 4\n   addi t4, t4, 16\n   blt t3, a2, 2b\n"
+    "20: bgeu t3, a1, 26f\n"
+    "25: flw ft1, 0(t4)\n   fle.s t1, ft1, ft0\n   beqz t1, 45f\n"
+    "27: addi t3, t3, 1\n   addi t4, t4, 4\n   bltu t3, a1, 25b\n"
+    "26: mv a0, t2\n" ASM_RET
+    "41: feq.s t1, ft1, ft1\n   beqz t1, 6f\n   fmv.s ft0, ft1\n   mv t2, t3\n   j 21b\n"
+    "42: feq.s t1, ft2, ft2\n   beqz t1, 62f\n   fmv.s ft0, ft2\n   addi t2, t3, 1\n   j 22b\n"
+    "43: feq.s t1, ft3, ft3\n   beqz t1, 63f\n   fmv.s ft0, ft3\n   addi t2, t3, 2\n   j 23b\n"
+    "44: feq.s t1, ft4, ft4\n   beqz t1, 64f\n   fmv.s ft0, ft4\n   addi t2, t3, 3\n   j 24b\n"
+    "45: feq.s t1, ft1, ft1\n   beqz t1, 6f\n   fmv.s ft0, ft1\n   mv t2, t3\n   j 27b\n"
+    "6:  mv a0, t3\n" ASM_RET
+    "62: addi a0, t3, 1\n" ASM_RET
+    "63: addi a0, t3, 2\n" ASM_RET
+    "64: addi a0, t3, 3\n" ASM_RET
+    "90: li a0, 0\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  vsetvli t0, zero, e32, m8, ta, ma\n   lui t1, 0xff800\n   vmv.v.x v16, t1\n   mv t2, a0\n   mv t3, a1\n   li t4, 0\n"
+    "7:  vsetvli t0, t3, e32, m8, tu, ma\n   vle32.v v8, (t2)\n   vmfne.vv v0, v8, v8\n   vfirst.m t5, v0\n   bgez t5, 9f\n   vfmax.vv v16, v16, v8\n"
+    "slli t6, t0, 2\n   add t2, t2, t6\n   add t4, t4, t0\n   sub t3, t3, t0\n   bnez t3, 7b\n"
+    "vsetvli t0, zero, e32, m8, ta, ma\n   vmv.s.x v24, t1\n   vfredmax.vs v24, v16, v24\n   vfmv.f.s ft0, v24\n   mv t2, a0\n   mv t3, a1\n   li t4, 0\n"
+    "8:  vsetvli t0, t3, e32, m8, ta, ma\n   vle32.v v8, (t2)\n   vmfeq.vf v0, v8, ft0\n   vfirst.m t5, v0\n   bgez t5, 9f\n"
+    "slli t6, t0, 2\n   add t2, t2, t6\n   add t4, t4, t0\n   sub t3, t3, t0\n   bnez t3, 8b\n"
+    "9:  add a0, t4, t5\n" ASM_RET
+#endif
+    ASM_END(fast_argmax_f32)
     ".option pop\n"
 );
 #endif
