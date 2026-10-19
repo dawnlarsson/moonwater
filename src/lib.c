@@ -6856,7 +6856,8 @@ __asm__(
     ASM_FUNC(memory_count)
     "xor %eax, %eax\n   test %rsi, %rsi\n   jz 9f\n"
     ASM_USERSPACE_WIDE(
-    WIDE_PICK
+    ASM_WIDER("cpu_has_avx512", "6f")
+    ASM_NARROW("cpu_has_avx2", ".Lmemory_count_x64_sse2")
     "movzbl %dl, %ecx\n   vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
     //
     //       Four accumulators, not one. vpsubb into the same register every
@@ -6939,6 +6940,43 @@ __asm__(
     "8:  test %rsi, %rsi\n   jz 7f\n   mov %esi, %ecx\n   mov $1, %r8\n   shl %cl, %r8\n   dec %r8\n   kmovq %r8, %k2  # the lanes inside the count\n"
     "vpcmpeqb (%rdi), %zmm1, %k1{%k2}\n   kmovq %k1, %r8\n   popcnt %r8, %r8\n   add %r8, %rax\n"
     "7:  vzeroupper\n" ASM_RET
+    //
+    //       Without AVX2, the thirty two byte body's shape in xmm registers:
+    //       a hundred and twenty eight bytes a turn into eight byte
+    //       accumulators, drained by psadbw every 255 turns, then sixteen at
+    //       a time into one, and the word at a time body for what is under
+    //       sixteen. The loads are movdqu of their own because an SSE
+    //       compare's memory operand has to be aligned. It was the word at a
+    //       time body for everything: on a 9950X with the AVX bodies off,
+    //       14.3 cycles a 64-byte line held in L1 or L2, 3.1 with four
+    //       accumulators and 64 bytes a turn, and 2.0 with eight, which is
+    //       the eight compares and subtracts at four a cycle (AVX2 1.13,
+    //       AVX-512 0.90; the line loads alone 0.50).
+    //
+    ".Lmemory_count_x64_sse2:\n   cmp $16, %rsi\n   jb 5f\n"
+    "movzbl %dl, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n   pxor %xmm7, %xmm7\n"
+    "cmp $128, %rsi\n   jb .Lmemory_count_x64_sse2_sixteen\n"
+    ".Lmemory_count_x64_sse2_round:\n   mov %rsi, %r8\n   shr $7, %r8\n   mov $255, %r9\n   cmp %r9, %r8\n   cmova %r9, %r8  # never more turns than a lane holds\n"
+    "mov %r8, %r10\n   shl $7, %r10\n   sub %r10, %rsi\n   pxor %xmm2, %xmm2\n   pxor %xmm4, %xmm4\n   pxor %xmm6, %xmm6\n   pxor %xmm9, %xmm9\n"
+    "pxor %xmm10, %xmm10\n   pxor %xmm11, %xmm11\n   pxor %xmm12, %xmm12\n   pxor %xmm13, %xmm13\n"
+    ".balign 32\n.Lmemory_count_x64_sse2_turn:\n"
+    "movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm3\n   movdqu 32(%rdi), %xmm5\n   movdqu 48(%rdi), %xmm8\n"
+    "pcmpeqb %xmm1, %xmm0\n   pcmpeqb %xmm1, %xmm3\n   pcmpeqb %xmm1, %xmm5\n   pcmpeqb %xmm1, %xmm8\n"
+    "psubb %xmm0, %xmm2\n   psubb %xmm3, %xmm4\n   psubb %xmm5, %xmm6\n   psubb %xmm8, %xmm9\n"
+    "movdqu 64(%rdi), %xmm0\n   movdqu 80(%rdi), %xmm3\n   movdqu 96(%rdi), %xmm5\n   movdqu 112(%rdi), %xmm8\n"
+    "pcmpeqb %xmm1, %xmm0\n   pcmpeqb %xmm1, %xmm3\n   pcmpeqb %xmm1, %xmm5\n   pcmpeqb %xmm1, %xmm8\n"
+    "psubb %xmm0, %xmm10\n   psubb %xmm3, %xmm11\n   psubb %xmm5, %xmm12\n   psubb %xmm8, %xmm13\n"
+    "add $128, %rdi\n   dec %r8\n   jnz .Lmemory_count_x64_sse2_turn\n"
+    "psadbw %xmm7, %xmm2\n   psadbw %xmm7, %xmm4\n   psadbw %xmm7, %xmm6\n   psadbw %xmm7, %xmm9\n"
+    "psadbw %xmm7, %xmm10\n   psadbw %xmm7, %xmm11\n   psadbw %xmm7, %xmm12\n   psadbw %xmm7, %xmm13\n"
+    "paddq %xmm4, %xmm2\n   paddq %xmm9, %xmm6\n   paddq %xmm11, %xmm10\n   paddq %xmm13, %xmm12\n   paddq %xmm6, %xmm2\n   paddq %xmm12, %xmm10\n"
+    "paddq %xmm10, %xmm2\n   movq %xmm2, %r11\n   add %r11, %rax\n"
+    "punpckhqdq %xmm2, %xmm2\n   movq %xmm2, %r11\n   add %r11, %rax\n   cmp $128, %rsi\n   jae .Lmemory_count_x64_sse2_round\n"
+    "cmp $16, %rsi\n   jb 4f\n"
+    ".Lmemory_count_x64_sse2_sixteen:\n   pxor %xmm2, %xmm2\n"
+    "1:  movdqu (%rdi), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   psubb %xmm0, %xmm2\n   add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae 1b\n"
+    "psadbw %xmm7, %xmm2\n   movq %xmm2, %r11\n   add %r11, %rax\n   punpckhqdq %xmm2, %xmm2\n   movq %xmm2, %r11\n   add %r11, %rax\n"
+    "4:  test %rsi, %rsi\n   jz 9f\n   jmp 5f\n"
     )
     //
     //       Eight bytes at a time, for a processor with neither, for what the
