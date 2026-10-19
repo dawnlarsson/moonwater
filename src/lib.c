@@ -39133,6 +39133,13 @@ __asm__(
         x[i]) for every i below count, in place: one rounding of the exact
         alpha * h[i] + x[i]. h may be x itself, which is x * (1 + alpha) to
         the same one rounding; no other overlap of the two is allowed.
+
+        f32_to_bf16(dst, src, count) narrows each float to bfloat16 bit for
+        bit as VCVTNEPS2BF16 does: a zero or a denormal goes to the zero of
+        its sign, a NaN keeps its high half with the quiet bit set, and every
+        other float rounds to nearest even, the largest finite ones to
+        infinity. bf16_to_f32(dst, src, count) widens exactly, the halfword
+        becoming the high half of the float. Neither may overlap its arrays.
 */
 #ifndef KERNEL_MODE
 READS_WRITES(1, 3) READS(2, 3)
@@ -39167,6 +39174,20 @@ __asm__(
     "cmtst v4.4s, v0.4s, v28.4s\n   cmtst v5.4s, v1.4s, v28.4s\n   cmtst v6.4s, v2.4s, v28.4s\n   cmtst v7.4s, v3.4s, v28.4s\n" \
     "orr v4.16b, v4.16b, v29.16b\n   orr v5.16b, v5.16b, v29.16b\n   orr v6.16b, v6.16b, v29.16b\n   orr v7.16b, v7.16b, v29.16b\n" \
     "and v0.16b, v0.16b, v4.16b\n   and v1.16b, v1.16b, v5.16b\n   and v2.16b, v2.16b, v6.16b\n   and v3.16b, v3.16b, v7.16b\n"
+//      x9 nonzero when one of v0 to v3 is a zero, a denormal or a NaN, in
+//      integers so that no float flag is raised: 2x drops the sign, and
+//      2x + 0x7f000000 (v22) is above 0x7e000000 (v23), signed, exactly for
+//      those. v4 to v7 spent.
+#define NEON_TRAIN_SPECIAL4                                                                              \
+    "add v4.4s, v0.4s, v0.4s\n   add v5.4s, v1.4s, v1.4s\n   add v6.4s, v2.4s, v2.4s\n   add v7.4s, v3.4s, v3.4s\n" \
+    "add v4.4s, v4.4s, v22.4s\n   add v5.4s, v5.4s, v22.4s\n   add v6.4s, v6.4s, v22.4s\n   add v7.4s, v7.4s, v22.4s\n" \
+    "smax v4.4s, v4.4s, v5.4s\n   smax v6.4s, v6.4s, v7.4s\n   smax v4.4s, v4.4s, v6.4s\n   cmgt v4.4s, v4.4s, v23.4s\n" \
+    "xtn v4.4h, v4.4s\n   fmov x9, d4\n"
+//      The definition's rounding alone, for a normal or infinite V, into the
+//      high halves of T (v28 one, v29 0x7fff).
+#define NEON_TRAIN_ROUND(V, T)                                                                           \
+    "ushr " T ".4s, " V ".4s, #16\n   and " T ".16b, " T ".16b, v28.16b\n   add " T ".4s, " T ".4s, " V ".4s\n" \
+    "add " T ".4s, " T ".4s, v29.4s\n"
 #if X64
 __asm__(
     ASM_SECTION
@@ -39331,46 +39352,75 @@ __asm__(
     //      branch, the NaN and denormal answers blended in, then shifted to
     //      the low half for vpackusdw. ymm8 one, ymm9 0x7fff, ymm10
     //      0x7fffffff, ymm11 0x7f800000, ymm12 0x00800000, ymm13 the quiet bit,
-    //      ymm14 the sign; ymm4 to ymm7 spent.
+    //      ymm14 the sign, ymm15 0x7f000000; ymm4 to ymm7 spent. A block whose
+    //      sixteen are all normal or infinite takes the rounding alone,
+    //      TRAIN_B16_YFAST, and the rest the whole of it. The test is in
+    //      integers, so no float flag is raised (a compare would signal on a
+    //      NaN, and trap where the caller unmasked it): 2x drops the sign,
+    //      and 2x + 0x7f000000 is above 0x7e000000, signed, exactly for a
+    //      zero, a denormal and a NaN.
 #define TRAIN_B16_YMM(V, T)                                                                              \
     "vpsrld $16, %ymm" V ", %ymm" T "\n   vpand %ymm8, %ymm" T ", %ymm" T "\n   vpaddd %ymm" V ", %ymm" T ", %ymm" T "\n" \
     "vpaddd %ymm9, %ymm" T ", %ymm" T "\n   vpand %ymm10, %ymm" V ", %ymm4\n   vpcmpgtd %ymm11, %ymm4, %ymm5\n"          \
     "vpcmpgtd %ymm4, %ymm12, %ymm6\n   vpor %ymm13, %ymm" V ", %ymm7\n   vpblendvb %ymm5, %ymm7, %ymm" T ", %ymm" T "\n" \
     "vpand %ymm14, %ymm" V ", %ymm7\n   vpblendvb %ymm6, %ymm7, %ymm" T ", %ymm" T "\n   vpsrld $16, %ymm" T ", %ymm" T "\n"
+#define TRAIN_B16_YFAST(V, T)                                                                            \
+    "vpsrld $16, %ymm" V ", %ymm" T "\n   vpand %ymm8, %ymm" T ", %ymm" T "\n   vpaddd %ymm" V ", %ymm" T ", %ymm" T "\n" \
+    "vpaddd %ymm9, %ymm" T ", %ymm" T "\n   vpsrld $16, %ymm" T ", %ymm" T "\n"
     ".Ltrain_b16_x_avx2:\n   cmp $8, %rdx\n   jb .Ltrain_b16_x_scalar\n"
     "vpbroadcastd .Ltrain_b16_x_k(%rip), %ymm8\n   vpbroadcastd .Ltrain_b16_x_k+16(%rip), %ymm9\n   vpbroadcastd .Ltrain_b16_x_k+32(%rip), %ymm10\n"
     "vpbroadcastd .Ltrain_b16_x_k+48(%rip), %ymm11\n   vpbroadcastd .Ltrain_b16_x_k+64(%rip), %ymm12\n   vpbroadcastd .Ltrain_b16_x_k+80(%rip), %ymm13\n"
-    "vpbroadcastd .Ltrain_b16_x_k+96(%rip), %ymm14\n   cmp $16, %rdx\n   jb .Ltrain_b16_x_ypair\n   xor %ecx, %ecx\n   lea -16(%rdx), %r8\n"
+    "vpbroadcastd .Ltrain_b16_x_k+96(%rip), %ymm14\n   vpbroadcastd .Ltrain_b16_x_k+112(%rip), %ymm15\n   cmp $16, %rdx\n   jb .Ltrain_b16_x_ypair\n"
+    "xor %ecx, %ecx\n   lea -16(%rdx), %r8\n"
     ".balign 64\n.Ltrain_b16_x_y16:\n   vmovdqu (%rsi,%rcx,4), %ymm0\n   vmovdqu 32(%rsi,%rcx,4), %ymm1\n"
-    TRAIN_B16_YMM("0", "2") TRAIN_B16_YMM("1", "3")
-    "vpackusdw %ymm3, %ymm2, %ymm2\n   vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %ymm2, (%rdi,%rcx,2)\n"
+    "vpaddd %ymm0, %ymm0, %ymm4\n   vpaddd %ymm1, %ymm1, %ymm5\n   vpaddd %ymm15, %ymm4, %ymm4\n   vpaddd %ymm15, %ymm5, %ymm5\n"
+    "vpmaxsd %ymm5, %ymm4, %ymm4\n   vpcmpgtd .Ltrain_b16_x_k+128(%rip), %ymm4, %ymm4\n   vptest %ymm4, %ymm4\n   jnz .Ltrain_b16_x_yslow\n"
+    TRAIN_B16_YFAST("0", "2") TRAIN_B16_YFAST("1", "3")
+    ".Ltrain_b16_x_ypack:\n   vpackusdw %ymm3, %ymm2, %ymm2\n   vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %ymm2, (%rdi,%rcx,2)\n"
     "add $16, %rcx\n   cmp %rdx, %rcx\n   jae .Ltrain_b16_x_wide_done\n   cmp %r8, %rcx\n   jbe .Ltrain_b16_x_y16\n   mov %r8, %rcx\n   jmp .Ltrain_b16_x_y16\n"
+    ".Ltrain_b16_x_yslow:\n"
+    TRAIN_B16_YMM("0", "2") TRAIN_B16_YMM("1", "3")
+    "jmp .Ltrain_b16_x_ypack\n"
     ".Ltrain_b16_x_ypair:\n   vmovdqu (%rsi), %ymm0\n   vmovdqu -32(%rsi,%rdx,4), %ymm1\n"
     TRAIN_B16_YMM("0", "2") TRAIN_B16_YMM("1", "3")
     "vpackusdw %ymm3, %ymm2, %ymm2\n   vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %xmm2, (%rdi)\n   vextracti128 $1, %ymm2, -16(%rdi,%rdx,2)\n"
     "jmp .Ltrain_b16_x_wide_done\n"
 #undef TRAIN_B16_YMM
+#undef TRAIN_B16_YFAST
     //      SSE2: the same with and, andn and or for the blends, and psrad with
     //      packssdw, which keeps the high half exactly when it is shifted in
-    //      arithmetically. xmm8 to xmm14 as for AVX2; xmm4 to xmm7 spent.
+    //      arithmetically, and the same rounding alone for a block of normal
+    //      floats, tested as for AVX2 with por and pmovmskb. xmm8 to xmm15 as
+    //      for AVX2; xmm4 to xmm7 spent.
 #define TRAIN_B16_XMM(V, T)                                                                              \
     "movdqa %xmm" V ", %xmm" T "\n   psrld $16, %xmm" T "\n   pand %xmm8, %xmm" T "\n   paddd %xmm" V ", %xmm" T "\n" \
     "paddd %xmm9, %xmm" T "\n   movdqa %xmm" V ", %xmm4\n   pand %xmm10, %xmm4\n   movdqa %xmm4, %xmm5\n   pcmpgtd %xmm11, %xmm5\n" \
     "movdqa %xmm12, %xmm6\n   pcmpgtd %xmm4, %xmm6\n   movdqa %xmm" V ", %xmm7\n   por %xmm13, %xmm7\n   pand %xmm5, %xmm7\n" \
     "pandn %xmm" T ", %xmm5\n   por %xmm7, %xmm5\n   movdqa %xmm" V ", %xmm7\n   pand %xmm14, %xmm7\n   pand %xmm6, %xmm7\n" \
     "pandn %xmm5, %xmm6\n   por %xmm7, %xmm6\n   psrad $16, %xmm6\n   movdqa %xmm6, %xmm" T "\n"
+#define TRAIN_B16_XFAST(V, T)                                                                            \
+    "movdqa %xmm" V ", %xmm" T "\n   psrld $16, %xmm" T "\n   pand %xmm8, %xmm" T "\n   paddd %xmm" V ", %xmm" T "\n" \
+    "paddd %xmm9, %xmm" T "\n   psrad $16, %xmm" T "\n"
     ".Ltrain_b16_x_sse2:\n   cmp $4, %rdx\n   jb .Ltrain_b16_x_scalar\n"
     "movdqa .Ltrain_b16_x_k(%rip), %xmm8\n   movdqa .Ltrain_b16_x_k+16(%rip), %xmm9\n   movdqa .Ltrain_b16_x_k+32(%rip), %xmm10\n"
     "movdqa .Ltrain_b16_x_k+48(%rip), %xmm11\n   movdqa .Ltrain_b16_x_k+64(%rip), %xmm12\n   movdqa .Ltrain_b16_x_k+80(%rip), %xmm13\n"
-    "movdqa .Ltrain_b16_x_k+96(%rip), %xmm14\n   cmp $8, %rdx\n   jb .Ltrain_b16_x_spair\n   xor %ecx, %ecx\n   lea -8(%rdx), %r8\n"
+    "movdqa .Ltrain_b16_x_k+96(%rip), %xmm14\n   movdqa .Ltrain_b16_x_k+112(%rip), %xmm15\n   cmp $8, %rdx\n   jb .Ltrain_b16_x_spair\n"
+    "xor %ecx, %ecx\n   lea -8(%rdx), %r8\n"
     ".balign 64\n.Ltrain_b16_x_s8:\n   movdqu (%rsi,%rcx,4), %xmm0\n   movdqu 16(%rsi,%rcx,4), %xmm1\n"
-    TRAIN_B16_XMM("0", "2") TRAIN_B16_XMM("1", "3")
-    "packssdw %xmm3, %xmm2\n   movdqu %xmm2, (%rdi,%rcx,2)\n"
+    "movdqa %xmm0, %xmm4\n   paddd %xmm0, %xmm4\n   paddd %xmm15, %xmm4\n   pcmpgtd .Ltrain_b16_x_k+128(%rip), %xmm4\n   movdqa %xmm1, %xmm5\n"
+    "paddd %xmm1, %xmm5\n   paddd %xmm15, %xmm5\n   pcmpgtd .Ltrain_b16_x_k+128(%rip), %xmm5\n   por %xmm5, %xmm4\n   pmovmskb %xmm4, %eax\n"
+    "test %eax, %eax\n   jnz .Ltrain_b16_x_sslow\n"
+    TRAIN_B16_XFAST("0", "2") TRAIN_B16_XFAST("1", "3")
+    ".Ltrain_b16_x_spack:\n   packssdw %xmm3, %xmm2\n   movdqu %xmm2, (%rdi,%rcx,2)\n"
     "add $8, %rcx\n   cmp %rdx, %rcx\n   jae .Ltrain_b16_x_none\n   cmp %r8, %rcx\n   jbe .Ltrain_b16_x_s8\n   mov %r8, %rcx\n   jmp .Ltrain_b16_x_s8\n"
+    ".Ltrain_b16_x_sslow:\n"
+    TRAIN_B16_XMM("0", "2") TRAIN_B16_XMM("1", "3")
+    "jmp .Ltrain_b16_x_spack\n"
     ".Ltrain_b16_x_spair:\n   movdqu (%rsi), %xmm0\n   movdqu -16(%rsi,%rdx,4), %xmm1\n"
     TRAIN_B16_XMM("0", "2") TRAIN_B16_XMM("1", "3")
     "packssdw %xmm3, %xmm2\n   movq %xmm2, (%rdi)\n   movhps %xmm2, -8(%rdi,%rdx,2)\n" ASM_RET
 #undef TRAIN_B16_XMM
+#undef TRAIN_B16_XFAST
     //      One at a time, in general registers, by the definition.
     ".Ltrain_b16_x_scalar:\n   mov (%rsi), %eax\n   test $0x7f800000, %eax\n   jz 3f\n   mov %eax, %ecx\n   and $0x7fffffff, %ecx\n"
     "cmp $0x7f800000, %ecx\n   ja 4f\n   mov %eax, %ecx\n   shr $16, %ecx\n   and $1, %ecx\n   lea 0x7fff(%rax,%rcx), %eax\n   shr $16, %eax\n   jmp 5f\n"
@@ -39382,7 +39432,7 @@ __asm__(
     ".Ltrain_b16_x_odd:\n   .set .Ltrain_b16_x_i, 1\n   .rept 32\n   .short .Ltrain_b16_x_i\n   .set .Ltrain_b16_x_i, .Ltrain_b16_x_i + 2\n   .endr\n"
     ".Ltrain_b16_x_k:\n   .rept 4\n   .long 1\n   .endr\n   .rept 4\n   .long 0x7fff\n   .endr\n   .rept 4\n   .long 0x7fffffff\n   .endr\n"
     "   .rept 4\n   .long 0x7f800000\n   .endr\n   .rept 4\n   .long 0x00800000\n   .endr\n   .rept 4\n   .long 0x00400000\n   .endr\n"
-    "   .rept 4\n   .long 0x80000000\n   .endr\n"
+    "   .rept 4\n   .long 0x80000000\n   .endr\n   .rept 4\n   .long 0x7f000000\n   .endr\n   .rept 8\n   .long 0x7e000000\n   .endr\n"
     ".popsection\n"
     ASM_END(f32_to_bf16)
 
@@ -39401,8 +39451,9 @@ __asm__(
     "test %rdx, %rdx\n   jz .Ltrain_f32b_x_none\n"
     ASM_NARROW("cpu_has_avx2", ".Ltrain_f32b_x_sse2")
     ASM_NARROW("cpu_has_avx512", ".Ltrain_f32b_x_avx2")
-    "cmp $16, %rdx\n   jb .Ltrain_f32b_x_zshort\n   vpmovzxwd (%rsi), %zmm0\n   vpslld $16, %zmm0, %zmm0\n   vmovdqu32 %zmm0, (%rdi)\n"
-    "mov $16, %eax\n   cmp $64, %rdx\n   jb .Ltrain_f32b_x_zskip\n   mov %edi, %ecx\n   neg %ecx\n   and $63, %ecx\n   shr $2, %ecx\n   cmovnz %ecx, %eax\n"
+    "cmp $16, %rdx\n   jb .Ltrain_f32b_x_zshort\n   mov $16, %eax\n   cmp $64, %rdx\n   jb .Ltrain_f32b_x_zfirst\n"
+    "mov %edi, %eax\n   neg %eax\n   and $63, %eax\n   shr $2, %eax\n   jz .Ltrain_f32b_x_zskip\n"
+    ".Ltrain_f32b_x_zfirst:\n   vpmovzxwd (%rsi), %zmm0\n   vpslld $16, %zmm0, %zmm0\n   vmovdqu32 %zmm0, (%rdi)\n"
     ".Ltrain_f32b_x_zskip:\n   lea (%rsi,%rax,2), %rsi\n   lea (%rdi,%rax,4), %rdi\n   sub %rax, %rdx\n   jz .Ltrain_f32b_x_wide_done\n"
     "mov %rdx, %rcx\n   and $-64, %rcx\n   jz .Ltrain_f32b_x_z16\n   lea (%rsi,%rcx,2), %rsi\n   lea (%rdi,%rcx,4), %rdi\n   neg %rcx\n"
     "test $31, %sil\n   jnz .Ltrain_f32b_x_zlines\n"
@@ -39483,18 +39534,20 @@ __asm__(
     //      f32_to_bf16: x0 destination, x1 source, x2 count. With FEAT_BF16,
     //      BFCVTN (spelled .inst for the assemblers that predate it) rounds as
     //      FPCR says, so it is used only at FPCR's defaults -- round to
-    //      nearest, no flush, no default NaN, no alternate handling -- and
-    //      after each zero or denormal has been made the zero of its sign,
-    //      which the definition says and BFCVTN does not. Otherwise the
-    //      definition in integer lanes. Sixteen or eight a turn and then the
-    //      block ending at the end; under that, fours and then one at a time.
+    //      nearest, no flush, no default NaN, no alternate handling, no trap
+    //      enabled -- and after each zero or denormal has been made the zero
+    //      of its sign, which the definition says and BFCVTN does not.
+    //      Otherwise the definition in integer lanes, sixteen a turn with
+    //      the rounding alone when none of them is special. Sixteen or eight
+    //      a turn and then the block ending at the end; under that, fours and
+    //      then one at a time.
     //      The x86_64 block carries the contract.
     ASM_FUNC(f32_to_bf16)
     "cbz x2, 9f\n   adrp x9, cpu_has_bf16\n   ldrb w9, [x9, :lo12:cpu_has_bf16]\n   cmp w9, #1\n   b.eq 20f\n   b.hi 10f\n"
     //      The first call asks ID_AA64ISAR1_EL1, which Linux answers at EL0.
     "mrs x9, id_aa64isar1_el1\n   ubfx x9, x9, #44, #4\n   cmp x9, #0\n   cset w9, ne\n   add w9, w9, #1\n"
     "adrp x10, cpu_has_bf16\n   strb w9, [x10, :lo12:cpu_has_bf16]\n   cmp w9, #1\n   b.eq 20f\n"
-    "10: mrs x9, fpcr\n   mov w10, #3\n   movk w10, #0x3c0, lsl #16\n   tst x9, x10\n   b.ne 20f\n"
+    "10: mrs x9, fpcr\n   mov w10, #0x9f03\n   movk w10, #0x3c0, lsl #16\n   tst x9, x10\n   b.ne 20f\n"
     "movz w10, #0x7f80, lsl #16\n   dup v28.4s, w10\n   movi v29.4s, #0x80, lsl #24\n   cmp x2, #16\n   b.lo 15f\n"
     "11: ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x1], #64\n" NEON_TRAIN_FLUSH4
     ".inst 0x0ea16810\n   .inst 0x4ea16830\n   .inst 0x0ea16851\n   .inst 0x4ea16871\n   st1 {v16.8h, v17.8h}, [x0], #32\n"
@@ -39505,6 +39558,16 @@ __asm__(
     ".inst 0x0ea16810\n   st1 {v16.4h}, [x0], #8\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 16b\n   b 30f\n"
     "20: cmp x2, #8\n   b.lo 30f\n   movi v28.4s, #1\n   movi v29.4s, #0x7f, msl #8\n   mvni v30.4s, #0x80, lsl #24\n"
     "movz w10, #0x7f80, lsl #16\n   dup v27.4s, w10\n   movi v26.4s, #0x80, lsl #16\n   movi v25.4s, #0x40, lsl #16\n   movi v24.4s, #0x80, lsl #24\n"
+    "movi v22.4s, #0x7f, lsl #24\n   movi v23.4s, #0x7e, lsl #24\n   cmp x2, #16\n   b.lo 21f\n"
+    //      Sixteen a turn: the rounding alone when none of them is special,
+    //      the whole definition when one is.
+    "22: ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x1], #64\n" NEON_TRAIN_SPECIAL4 "cbnz x9, 24f\n"
+    NEON_TRAIN_ROUND("v0", "v16") NEON_TRAIN_ROUND("v1", "v17") NEON_TRAIN_ROUND("v2", "v18") NEON_TRAIN_ROUND("v3", "v19")
+    "23: uzp2 v20.8h, v16.8h, v17.8h\n   uzp2 v21.8h, v18.8h, v19.8h\n   st1 {v20.8h, v21.8h}, [x0], #32\n"
+    "sub x2, x2, #16\n   cmp x2, #16\n   b.hs 22b\n   cbz x2, 9f\n"
+    "add x1, x1, x2, lsl #2\n   sub x1, x1, #64\n   add x0, x0, x2, lsl #1\n   sub x0, x0, #32\n   mov x2, #16\n   b 22b\n"
+    "24: " NEON_TRAIN_BF16("v0", "v16") NEON_TRAIN_BF16("v1", "v17") NEON_TRAIN_BF16("v2", "v18") NEON_TRAIN_BF16("v3", "v19")
+    "b 23b\n"
     "21: ld1 {v0.4s, v1.4s}, [x1], #32\n" NEON_TRAIN_BF16("v0", "v2") NEON_TRAIN_BF16("v1", "v3")
     "uzp2 v4.8h, v2.8h, v3.8h\n   st1 {v4.8h}, [x0], #16\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs 21b\n   cbz x2, 9f\n"
     "add x1, x1, x2, lsl #2\n   sub x1, x1, #32\n   add x0, x0, x2, lsl #1\n   sub x0, x0, #16\n   mov x2, #8\n   b 21b\n"
@@ -39557,9 +39620,9 @@ __asm__(
     ASM_END(fused_residual_add_f32)
 
     //      f32_to_bf16: a0 destination, a1 source, a2 count. With V, the
-    //      definition as many lanes as four registers hold, the NaN and the
+    //      definition as many lanes as eight registers hold, the NaN and the
     //      denormal answers put in under masks that leave the other lanes
-    //      as they are, and vnsrl takes the high halves; without it one at a
+    //      as they are, and vnsrl takes the high halves; without it two at a
     //      time. The x86_64 block carries the contract.
     ASM_FUNC(f32_to_bf16)
     "beqz a2, 9f\n   lui t3, 0x7f800\n   lui t4, 0x80000\n   addiw t4, t4, -1\n   lui t5, 8\n   addi t5, t5, -1\n"
@@ -39567,34 +39630,51 @@ __asm__(
     "lla t1, cpu_has_vector\n   lbu t1, 0(t1)\n   li t2, 2\n   beq t1, t2, 6f\n   bnez t1, 1f\n"
     "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j f32_to_bf16\n"
 #endif
-    "1:  lwu t0, 0(a1)\n   and t1, t0, t3\n   beqz t1, 3f\n   and t1, t0, t4\n   bltu t3, t1, 4f\n"
-    "srli t1, t0, 16\n   andi t1, t1, 1\n   add t0, t0, t1\n   add t0, t0, t5\n   srli t0, t0, 16\n   j 5f\n"
-    "3:  srli t0, t0, 16\n   lui t1, 8\n   and t0, t0, t1\n   j 5f\n"
-    "4:  srli t0, t0, 16\n   ori t0, t0, 0x40\n"
-    "5:  sh t0, 0(a0)\n   addi a1, a1, 4\n   addi a0, a0, 2\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    //      Two a turn to an end pointer, the zero, denormal and NaN answers
+    //      out of the line, then the odd one.
+    "1:  andi t6, a2, -2\n   slli t6, t6, 2\n   add t6, t6, a1\n   beq a1, t6, 60f\n"
+    "2:  lwu t0, 0(a1)\n   lwu a3, 4(a1)\n   and t1, t0, t3\n   beqz t1, 30f\n   and t1, t0, t4\n   bltu t3, t1, 40f\n"
+    "srli t1, t0, 16\n   andi t1, t1, 1\n   add t0, t0, t1\n   add t0, t0, t5\n   srli t0, t0, 16\n"
+    "3:  and t1, a3, t3\n   beqz t1, 31f\n   and t1, a3, t4\n   bltu t3, t1, 41f\n"
+    "srli t1, a3, 16\n   andi t1, t1, 1\n   add a3, a3, t1\n   add a3, a3, t5\n   srli a3, a3, 16\n"
+    "4:  sh t0, 0(a0)\n   sh a3, 2(a0)\n   addi a1, a1, 8\n   addi a0, a0, 4\n   bne a1, t6, 2b\n"
+    "60: andi a2, a2, 1\n   beqz a2, 9f\n   lwu t0, 0(a1)\n   and t1, t0, t3\n   beqz t1, 32f\n   and t1, t0, t4\n   bltu t3, t1, 42f\n"
+    "srli t1, t0, 16\n   andi t1, t1, 1\n   add t0, t0, t1\n   add t0, t0, t5\n   srli t0, t0, 16\n"
+    "5:  sh t0, 0(a0)\n"
     "9:  " ASM_RET
+    "30: srli t0, t0, 16\n   lui t1, 8\n   and t0, t0, t1\n   j 3b\n"
+    "40: srli t0, t0, 16\n   ori t0, t0, 0x40\n   j 3b\n"
+    "31: srli a3, a3, 16\n   lui t1, 8\n   and a3, a3, t1\n   j 4b\n"
+    "41: srli a3, a3, 16\n   ori a3, a3, 0x40\n   j 4b\n"
+    "32: srli t0, t0, 16\n   lui t1, 8\n   and t0, t0, t1\n   j 5b\n"
+    "42: srli t0, t0, 16\n   ori t0, t0, 0x40\n   j 5b\n"
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     "6:  lui t6, 0x800\n   lui a5, 0x400\n   lui a6, 0x80000\n"
-    "7:  vsetvli t0, a2, e32, m4, ta, mu\n   vle32.v v8, (a1)\n   vsrl.vi v16, v8, 16\n   vand.vi v16, v16, 1\n   vadd.vv v16, v16, v8\n   vadd.vx v16, v16, t5\n"
+    "7:  vsetvli t0, a2, e32, m8, ta, mu\n   vle32.v v8, (a1)\n   vsrl.vi v16, v8, 16\n   vand.vi v16, v16, 1\n   vadd.vv v16, v16, v8\n   vadd.vx v16, v16, t5\n"
     "vand.vx v24, v8, t4\n   vmsgtu.vx v0, v24, t3\n   vor.vx v16, v8, a5, v0.t\n   vmsltu.vx v0, v24, t6\n   vand.vx v16, v8, a6, v0.t\n"
-    "vsetvli zero, t0, e16, m2, ta, ma\n   vnsrl.wi v4, v16, 16\n   vse16.v v4, (a0)\n"
+    "vsetvli zero, t0, e16, m4, ta, ma\n   vnsrl.wi v4, v16, 16\n   vse16.v v4, (a0)\n"
     "slli t1, t0, 2\n   add a1, a1, t1\n   slli t1, t0, 1\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 7b\n" ASM_RET
 #endif
     ASM_END(f32_to_bf16)
 
     //      bf16_to_f32: a0 destination, a1 source, a2 count. With V, vzext
     //      and a shift (a widening multiply by 65536 cannot be written: its
-    //      scalar is sixteen bits); without it a halfword at a time.
+    //      scalar is sixteen bits); without it four halfwords at a time.
     ASM_FUNC(bf16_to_f32)
     "beqz a2, 9f\n"
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     "lla t1, cpu_has_vector\n   lbu t1, 0(t1)\n   li t2, 2\n   beq t1, t2, 6f\n   bnez t1, 1f\n"
     "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j bf16_to_f32\n"
 #endif
-    "1:  lhu t0, 0(a1)\n   slli t0, t0, 16\n   sw t0, 0(a0)\n   addi a1, a1, 2\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "1:  andi t3, a2, -4\n   slli t3, t3, 1\n   add t3, t3, a1\n   beq a1, t3, 3f\n"
+    "2:  lhu t0, 0(a1)\n   lhu t4, 2(a1)\n   lhu t5, 4(a1)\n   lhu t6, 6(a1)\n   slli t0, t0, 16\n   slli t4, t4, 16\n   slli t5, t5, 16\n   slli t6, t6, 16\n"
+    "sw t0, 0(a0)\n   sw t4, 4(a0)\n   sw t5, 8(a0)\n   sw t6, 12(a0)\n   addi a1, a1, 8\n   addi a0, a0, 16\n   bne a1, t3, 2b\n"
+    "3:  andi a2, a2, 3\n   beqz a2, 9f\n"
+    "4:  lhu t0, 0(a1)\n   slli t0, t0, 16\n   sw t0, 0(a0)\n   addi a1, a1, 2\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 4b\n"
     "9:  " ASM_RET
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
-    "6:  vsetvli t0, a2, e16, m4, ta, ma\n   vle16.v v8, (a1)\n   vsetvli zero, t0, e32, m8, ta, ma\n   vzext.vf2 v16, v8\n   vsll.vi v16, v16, 16\n   vse32.v v16, (a0)\n"
+    //      vle16.v carries its own width: one vtype, e32 m8, for the strip.
+    "6:  vsetvli t0, a2, e32, m8, ta, ma\n   vle16.v v8, (a1)\n   vzext.vf2 v16, v8\n   vsll.vi v16, v16, 16\n   vse32.v v16, (a0)\n"
     "slli t1, t0, 1\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 6b\n" ASM_RET
 #endif
     ASM_END(bf16_to_f32)
