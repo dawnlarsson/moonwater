@@ -290,6 +290,13 @@ cover('folds_already', 'count', 'memory_glass_over_u32',
       'the compositor hands it a row of the window the change reaches; its '
       'width comes from the change at run time, so no reachable call site '
       'passes a literal')
+cover('folds_already', 'trans_b', 'gemm_f32',
+      'a trainer passes its shapes, trans_b and beta as constants of the model, '
+      'but what a literal could settle is a branch a K block: the blocks, the '
+      'packing and the tiles are the work, and run the sizes they are given')
+cover('nothing_to_fold', None, 'matrix_engine_f32',
+      'a private core with no C declaration: it takes a job record gemm_f32 '
+      'builds, so no call site can hand it a literal')
 cover('folds_already', 'width', 'memory_blend_u32_rect',
       'the text engine hands it a glyph clipped to its target; widths and '
       'heights come from the glyph at run time, so no reachable call site '

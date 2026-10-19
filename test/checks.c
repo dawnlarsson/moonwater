@@ -46437,6 +46437,493 @@ b32 main()
 }
 #endif /* CHECK_math */
 
+#ifdef CHECK_matrix
+#include "../src/lib.util.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+#endif
+#ifdef CHECK_native_matrix
+#include <stdio.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include "matrix.h"
+#endif
+
+#if defined(CHECK_matrix) || defined(CHECK_native_matrix)
+/*
+        gemm_f32 against a double-precision reference.
+
+        Two programs are built from this: CHECK_matrix, freestanding on the
+        library, which test/run's matrix lane runs on all three machines --
+        x86_64 once per tier with the feature bytes walked down, riscv64 under
+        qemu with no V and at VLEN 128, 256 and 512 -- and CHECK_native_matrix,
+        which links the arm64 bodies lifted out of lib.c and runs them on an
+        arm64 Mac (its main is with the other native sections). What is
+        between here and the first main is what both share, and is written
+        against nothing but the compiler: the two builds differ only in how
+        they map pages and how they report.
+
+        Every M, N and K from 0 to 40 (every one to 14, 34 and 10, then in
+        steps) both ways round: at beta 0 over random floats, beta 1 over
+        small integers, beta 0.5 and -0.75 over random floats, and beta 0
+        over a C full of NaN. Each operand ends against a page that faults
+        and C has sixteen sentinels in front of it, so no tail reads or
+        writes past an end. Random floats are held to the order-independent
+        bound of a serial sum, |got - want| <= (K + 2) eps S + 1e-35 with eps
+        2^-24 and S the sum of the terms' magnitudes; small integers, whose
+        products and partial sums are all exact, to equality, which catches
+        an index wrong by one that a loose bound would not.
+
+        Then the trainer's N and K -- 768, 1364, 682, 256, 32 and 8192 -- with
+        M cut short (a long K still runs every block of it and every panel),
+        682, 1024, 1536, 2048 and 4096 alone in each dimension, and the full
+        8192-row shapes wherever the program runs natively, those checked at
+        sampled outputs. A NaN in A, B or C reaches every output it feeds and
+        nothing else; K of 0 leaves beta C without reading A or B, and M or N
+        of 0 touches nothing, all with null operands; trans_b arrives with
+        junk above its 32 bits and must answer as its low half.
+*/
+typedef void matrix_call(float *, const float *, const float *, unsigned long long, unsigned long long,
+                         unsigned long long, unsigned, float);
+typedef void matrix_wide_call(float *, const float *, const float *, unsigned long long, unsigned long long,
+                              unsigned long long, unsigned long long, float);
+
+typedef struct
+{
+        unsigned char *base;
+        unsigned long long span;
+} matrix_pages;
+
+//      The faults a property found, by kind.
+typedef struct
+{
+        unsigned long long values, outside, nans, edges, narrow, cases;
+} matrix_faults;
+
+#ifdef CHECK_matrix
+static unsigned long long matrix_page(void)
+{
+        return 4096;
+}
+
+static unsigned char *matrix_mapping(unsigned long long span)
+{
+        bipolar mapped = system_call_6(syscall(mmap), 0, span, FILE_PROTECT_READ | FILE_PROTECT_WRITE,
+                                       FILE_MAP_PRIVATE | FILE_MAP_ANONYMOUS, (positive)-1, 0);
+
+        return mapped < 0 ? (unsigned char *)0 : (unsigned char *)mapped;
+}
+
+static int matrix_fence(unsigned char *page, unsigned long long size)
+{
+        return system_call_3(syscall(mprotect), (positive)page, size, 0) == 0;
+}
+
+static void matrix_unmapping(unsigned char *base, unsigned long long span)
+{
+        system_call_2(syscall(munmap), (positive)base, span);
+}
+#else
+static unsigned long long matrix_page(void)
+{
+        return (unsigned long long)getpagesize();
+}
+
+static unsigned char *matrix_mapping(unsigned long long span)
+{
+        void *mapped = mmap(0, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+        return mapped == MAP_FAILED ? (unsigned char *)0 : (unsigned char *)mapped;
+}
+
+static int matrix_fence(unsigned char *page, unsigned long long size)
+{
+        return mprotect(page, size, PROT_NONE) == 0;
+}
+
+static void matrix_unmapping(unsigned char *base, unsigned long long span)
+{
+        munmap(base, span);
+}
+#endif
+
+static unsigned long long matrix_seed = 0x9e3779b97f4a7c15ull;
+
+static unsigned long long matrix_next(void)
+{
+        XORSHIFT64(matrix_seed);
+        return matrix_seed;
+}
+
+static double matrix_real(void)
+{
+        return (double)((long long)(matrix_next() >> 11) - (1ll << 52)) / (double)(1ll << 52);
+}
+
+static float matrix_small(int span)
+{
+        return (float)((int)(matrix_next() % (unsigned long long)(2 * span + 1)) - span);
+}
+
+static float matrix_float(unsigned bits)
+{
+        float value;
+
+        __builtin_memcpy(&value, &bits, 4);
+        return value;
+}
+
+//      C's starting value at an index, so that any sampled output knows
+//      what it began from: kind 1 a small integer, 2 a NaN, else a float.
+static float matrix_c0(unsigned long long at, unsigned kind)
+{
+        unsigned long long h = (at + 1) * 0x9e3779b97f4a7c15ull;
+
+        if (kind == 2)
+                return matrix_float(0x7fc00001u);
+        if (kind == 1)
+                return (float)((int)(h >> 57) - 64);
+        return (float)((double)((long long)(h >> 11) - (1ll << 52)) / (double)(1ll << 52));
+}
+
+//      An array of floats ending against a page that faults, with before
+//      floats of room in front of it.
+static float *matrix_against(matrix_pages *pages, unsigned long long floats, unsigned long long before)
+{
+        unsigned long long page = matrix_page(), bytes = (floats + before) * 4;
+        unsigned long long span = (bytes + page - 1) / page * page + page;
+
+        pages->base = matrix_mapping(span);
+        pages->span = span;
+        if (!pages->base || !matrix_fence(pages->base + span - page, page))
+                return (float *)0;
+        return (float *)(pages->base + span - page) - floats;
+}
+
+static void matrix_release(matrix_pages *pages)
+{
+        if (pages->base && pages->span)
+                matrix_unmapping(pages->base, pages->span);
+}
+
+//      The sweep's operands, mapped once: three regions of 16384 floats
+//      before a page that faults, an operand placed to end against it.
+static matrix_pages matrix_pool[3];
+static float *matrix_pool_end[3];
+
+static float *matrix_take(matrix_pages *pages, int which, unsigned long long floats, unsigned long long before)
+{
+        if (floats + before > 16384)
+                return matrix_against(pages, floats, before);
+        if (!matrix_pool_end[which])
+        {
+                float *start = matrix_against(&matrix_pool[which], 16384, 0);
+
+                if (!start)
+                        return (float *)0;
+                matrix_pool_end[which] = start + 16384;
+        }
+        pages->base = (unsigned char *)0, pages->span = 0;
+        return matrix_pool_end[which] - floats;
+}
+
+//      The worst error seen, in eps S: what the lane log reports.
+static double matrix_worst;
+
+//      One output against the reference: the sum and its magnitude in
+//      double, beta C added when C is read.
+static int matrix_holds(const float *A, const float *B, float got, unsigned long long at, unsigned long long N,
+                        unsigned long long K, unsigned trans, float beta, unsigned kind)
+{
+        unsigned long long i = at / N, j = at % N;
+        double want = 0, size = 0;
+
+        for (unsigned long long k = 0; k < K; k++)
+        {
+                double term = (double)A[i * K + k] * (double)(trans ? B[j * K + k] : B[k * N + j]);
+
+                want += term;
+                size += __builtin_fabs(term);
+        }
+        if (beta != 0)
+        {
+                double c = (double)beta * (double)matrix_c0(at, kind);
+
+                want += c;
+                size += __builtin_fabs(c);
+        }
+        double off = __builtin_fabs((double)got - want);
+
+        if (kind == 1)
+                return off == 0;
+        if (size > 1e-30 && off > matrix_worst * 0x1p-24 * size)
+                matrix_worst = off / (0x1p-24 * size);
+        return off <= (double)(K + 2) * 0x1p-24 * size + 1e-35;
+}
+
+//      kind 0: random floats; 1: small integers, exact; 2: random, C NaN at
+//      beta 0. sample 0 judges every output, else that many at random.
+static void matrix_one(matrix_call *routine, unsigned long long M, unsigned long long N, unsigned long long K,
+                       unsigned trans, float beta, unsigned kind, unsigned long long sample, matrix_faults *faults)
+{
+        matrix_pages pa, pb, pc;
+        unsigned long long na = M * K, nb = N * K, nc = M * N;
+        float *A = matrix_take(&pa, 0, na, 0), *B = matrix_take(&pb, 1, nb, 0), *C = matrix_take(&pc, 2, nc, 16);
+
+        faults->cases++;
+        if (!A || !B || !C)
+        {
+                faults->outside++;
+                return;
+        }
+        for (unsigned long long i = 0; i < na; i++)
+                A[i] = kind == 1 ? matrix_small(8) : (float)matrix_real();
+        for (unsigned long long i = 0; i < nb; i++)
+                B[i] = kind == 1 ? matrix_small(8) : (float)matrix_real();
+        for (int i = 0; i < 16; i++)
+                C[i - 16] = 1234.5f;
+        for (unsigned long long i = 0; i < nc; i++)
+                C[i] = matrix_c0(i, kind);
+        routine(C, A, B, M, N, K, trans, beta);
+        unsigned long long count = sample ? sample : nc;
+
+        for (unsigned long long t = 0; t < count && nc; t++)
+        {
+                unsigned long long at = sample ? matrix_next() % nc : t;
+
+                if (!matrix_holds(A, B, C[at], at, N, K, trans, beta, kind))
+                {
+                        faults->values++;
+                        break;
+                }
+        }
+        for (int i = 0; i < 16; i++)
+                faults->outside += C[i - 16] != 1234.5f;
+        matrix_release(&pa), matrix_release(&pb), matrix_release(&pc);
+}
+
+static void matrix_sweep(matrix_call *routine, matrix_faults *faults, int full)
+{
+        static const float betas[] = {0.5f, -0.75f};
+
+        for (unsigned long long M = 0; M <= 40; M += M < 14 ? 1 : 3)
+                for (unsigned long long N = 0; N <= 70; N += N < 34 ? 1 : 5)
+                        for (unsigned long long K = 0; K <= 40; K += K < 10 ? 1 : 7)
+                                for (unsigned trans = 0; trans < 2; trans++)
+                                {
+                                        unsigned long long turn = M + N + K;
+
+                                        matrix_one(routine, M, N, K, trans, 0.0f, 0, 0, faults);
+                                        if (turn % 3 == 0)
+                                                matrix_one(routine, M, N, K, trans, 1.0f, 1, 0, faults);
+                                        if (turn % 5 == 0)
+                                                matrix_one(routine, M, N, K, trans, betas[turn % 2], 0, 0, faults);
+                                        if (turn % 7 == 0)
+                                                matrix_one(routine, M, N, K, trans, 0.0f, 2, 0, faults);
+                                }
+        static const unsigned long long shapes[][3] = {
+                {50, 768, 256},  {37, 256, 256},  {26, 1364, 256}, {31, 682, 256}, {40, 256, 682},
+                {29, 256, 768},  {19, 256, 1364}, {13, 256, 8192}, {7, 682, 8192}, {256, 256, 32},
+                {256, 32, 256},  {31, 256, 682},  {33, 682, 256},  {40, 256, 256}, {3, 682, 5},
+                {682, 3, 7},     {5, 7, 1024},    {1024, 9, 3},    {2, 4096, 3},   {4096, 2, 5},
+                {7, 3, 4096},    {13, 33, 4100},  {29, 50, 2048},  {37, 97, 1536}, {40, 70, 512},
+                {31, 53, 2049},
+        };
+        for (unsigned s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s++)
+                for (unsigned trans = 0; trans < 2; trans++)
+                {
+                        unsigned long long M = shapes[s][0], N = shapes[s][1], K = shapes[s][2];
+                        unsigned long long sample = M * N > 20000 ? 512 : 0;
+
+                        matrix_one(routine, M, N, K, trans, 0.0f, 0, sample, faults);
+                        matrix_one(routine, M, N, K, trans, 1.0f, 1, sample, faults);
+                        matrix_one(routine, M, N, K, trans, -0.75f, 0, sample, faults);
+                        matrix_one(routine, M, N, K, trans, 0.0f, 2, sample, faults);
+                }
+        if (!full)
+                return;
+        //      the trainer's shapes at full size, judged at 256 outputs
+        static const unsigned long long trained[][4] = {
+                {8192, 768, 256, 1},  {8192, 256, 256, 1}, {8192, 1364, 256, 1}, {8192, 682, 256, 1},
+                {8192, 256, 682, 1},  {8192, 256, 768, 0}, {8192, 256, 1364, 0}, {8192, 682, 256, 0},
+                {768, 256, 8192, 0},  {1364, 256, 8192, 0}, {256, 682, 8192, 0}, {256, 256, 8192, 0},
+                {256, 256, 32, 1},    {256, 32, 256, 0},   {256, 256, 682, 1},  {256, 682, 256, 0},
+                {256, 256, 256, 0},
+        };
+        for (unsigned s = 0; s < sizeof(trained) / sizeof(trained[0]); s++)
+        {
+                unsigned long long M = trained[s][0], N = trained[s][1], K = trained[s][2];
+                unsigned trans = (unsigned)trained[s][3];
+
+                matrix_one(routine, M, N, K, trans, 1.0f, 1, 256, faults);
+                matrix_one(routine, M, N, K, trans, 0.0f, 2, 256, faults);
+        }
+}
+
+//      A NaN in A, B or C reaches every output it feeds and no other.
+static void matrix_nans(matrix_call *routine, matrix_faults *faults)
+{
+        static float A[37 * 23], B[23 * 41], C[37 * 41];
+
+        for (unsigned trans = 0; trans < 2; trans++)
+                for (int where = 0; where < 3; where++)
+                {
+                        for (int i = 0; i < 37 * 23; i++)
+                                A[i] = (float)matrix_real();
+                        for (int i = 0; i < 23 * 41; i++)
+                                B[i] = (float)matrix_real();
+                        for (int i = 0; i < 37 * 41; i++)
+                                C[i] = 1.0f;
+                        if (where == 0)
+                                A[5 * 23 + 17] = matrix_float(0x7fc00001u);
+                        else if (where == 1)
+                                B[trans ? 29 * 23 + 11 : 11 * 41 + 29] = matrix_float(0xffc00002u);
+                        else
+                                C[7 * 41 + 3] = matrix_float(0x7fc00003u);
+                        routine(C, A, B, 37, 41, 23, trans, 1.0f);
+                        for (int i = 0; i < 37; i++)
+                                for (int j = 0; j < 41; j++)
+                                {
+                                        int here = where == 0 ? i == 5 : where == 1 ? j == 29 : i == 7 && j == 3;
+
+                                        faults->nans += here != (__builtin_isnan(C[i * 41 + j]) != 0);
+                                }
+                }
+}
+
+//      K of 0 is beta C, zero at beta 0 without reading C; M or N of 0
+//      touches nothing; and none of them reads A or B.
+static void matrix_edges(matrix_call *routine, matrix_faults *faults)
+{
+        static float C[6 * 7];
+
+        for (int i = 0; i < 42; i++)
+                C[i] = matrix_float(0x7fc00001u);
+        routine(C, (float *)0, (float *)0, 6, 7, 0, 0, 0.0f);
+        for (int i = 0; i < 42; i++)
+                faults->edges += C[i] != 0.0f;
+        for (int i = 0; i < 42; i++)
+                C[i] = (float)i - 7.0f;
+        routine(C, (float *)0, (float *)0, 6, 7, 0, 1, -0.5f);
+        for (int i = 0; i < 42; i++)
+                faults->edges += C[i] != ((float)i - 7.0f) * -0.5f;
+        for (int i = 0; i < 42; i++)
+                C[i] = 3.0f;
+        routine(C, (float *)0, (float *)0, 0, 7, 9, 0, 0.0f);
+        routine(C, (float *)0, (float *)0, 6, 0, 9, 1, 0.0f);
+        for (int i = 0; i < 42; i++)
+                faults->edges += C[i] != 3.0f;
+}
+
+//      trans_b is 32 bits: junk above it must not change the answer.
+static void matrix_narrow(matrix_call *routine, matrix_wide_call *wide, matrix_faults *faults)
+{
+        static float A[9 * 13], B[13 * 11], one[9 * 11], two[9 * 11];
+
+        for (int i = 0; i < 9 * 13; i++)
+                A[i] = (float)matrix_real();
+        for (int i = 0; i < 13 * 11; i++)
+                B[i] = (float)matrix_real();
+        for (unsigned trans = 0; trans < 2; trans++)
+                for (unsigned long long junk = 1; junk < 1u << 20; junk = junk * 7 + 3)
+                {
+                        for (int i = 0; i < 99; i++)
+                                one[i] = two[i] = (float)i;
+                        routine(one, A, B, 9, 11, 13, trans, 0.5f);
+                        wide(two, A, B, 9, 11, 13, trans | junk << 32, 0.5f);
+                        for (int i = 0; i < 99; i++)
+                                faults->narrow += __builtin_memcmp(&one[i], &two[i], 4) != 0;
+                }
+}
+#endif /* CHECK_matrix || CHECK_native_matrix */
+
+#ifdef CHECK_matrix
+//      the full-size shapes where the lane runs natively
+#if X64
+#define MATRIX_FULL 1
+#else
+#define MATRIX_FULL 0
+#endif
+
+static void matrix_gemm(float *C, const float *A, const float *B, unsigned long long M, unsigned long long N,
+                        unsigned long long K, unsigned trans, float beta)
+{
+        gemm_f32(C, A, B, M, N, K, trans, beta);
+}
+
+//      One tier's properties, each one check.
+static fn matrix_tier(string_address tier)
+{
+        matrix_faults faults = {0, 0, 0, 0, 0, 0};
+
+        matrix_worst = 0;
+        matrix_sweep(matrix_gemm, &faults, MATRIX_FULL);
+        matrix_nans(matrix_gemm, &faults);
+        matrix_edges(matrix_gemm, &faults);
+        matrix_narrow(matrix_gemm, (matrix_wide_call *)(address_any)gemm_f32, &faults);
+        check("gemm_f32: every shape within its bound, small integers exact", faults.values == 0);
+        check("gemm_f32: nothing past an end read or written, sentinels kept", faults.outside == 0);
+        check("gemm_f32: a NaN in A, B or C reaches every output it feeds and no other", faults.nans == 0);
+        check("gemm_f32: K of 0 is beta C, M or N of 0 touches nothing, A and B unread", faults.edges == 0);
+        check("gemm_f32: trans_b is read as 32 bits", faults.narrow == 0);
+        string_format(log, "  %s: gemm_f32 %p cases, worst ", tier, faults.cases);
+        decimal_to_string(log, matrix_worst);
+        string_format(log, " eps S\n");
+}
+
+b32 main()
+{
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier < 2 ? wide2 : 0;
+                cpu_has_fma = tier < 2 ? fused : 0;
+                matrix_tier(cpu_has_avx512 ? "avx512" : cpu_has_avx2 && cpu_has_fma ? "avx2 fma" : "sse2");
+        }
+        cpu_has_avx512 = wide512, cpu_has_avx2 = wide2, cpu_has_fma = fused;
+#elif RISCV64
+        //      The first call asks for V itself and answers; the lane runs
+        //      this once with no V and once at each length, so the sweep is
+        //      the machine's own body, and the other body gets a short pass.
+        {
+                static float a[3] = {1, 2, 3}, b[3] = {4, 5, 6}, c[1] = {0};
+
+                cpu_has_vector = 0;
+                gemm_f32(c, a, b, 1, 1, 3, 1, 0.0f);
+                check("gemm_f32: the first call asks for V and answers", c[0] == 32.0f && cpu_has_vector != 0);
+        }
+        p8 vector = cpu_has_vector;
+
+        matrix_tier(vector == 2 ? "V" : "no V");
+        if (vector == 2)
+        {
+                matrix_faults faults = {0, 0, 0, 0, 0, 0};
+
+                cpu_has_vector = 1;
+                for (unsigned long long M = 0; M <= 13; M++)
+                        for (unsigned long long N = 0; N <= 9; N++)
+                                for (unsigned trans = 0; trans < 2; trans++)
+                                {
+                                        matrix_one(matrix_gemm, M, N, M + N, trans, 0.0f, 0, 0, &faults);
+                                        matrix_one(matrix_gemm, M, N, 2 * N + 1, trans, 1.0f, 1, 0, &faults);
+                                }
+                matrix_one(matrix_gemm, 19, 682, 257, 1, -0.75f, 0, 0, &faults);
+                matrix_one(matrix_gemm, 13, 256, 600, 0, 0.0f, 2, 512, &faults);
+                check("gemm_f32: the scalar body where V is present", faults.values == 0 && faults.outside == 0);
+                cpu_has_vector = vector;
+        }
+#else
+        matrix_tier("neon");
+#endif
+        return test_report(null);
+}
+#endif /* CHECK_matrix */
+
 #ifdef CHECK_modulo
 /*
         Experimental C standard library
@@ -120975,6 +121462,33 @@ int main(void)
 }
 #endif /* CHECK_native_reserve */
 
+#ifdef CHECK_native_matrix
+/*
+        gemm_f32's arm64 body lifted out of lib.c, run on this machine
+        through the properties CHECK_matrix walks (the generator, the judge
+        and the walks are with it, after CHECK_math), the trainer's shapes at
+        full size included. The lift is the same bodies byte for byte, with
+        Darwin's symbol spelling, so the hardware here judges what the qemu
+        run on the box judges.
+*/
+void gemm_f32(float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long,
+              unsigned, float);
+
+int main(void)
+{
+        matrix_faults faults = {0, 0, 0, 0, 0, 0};
+
+        matrix_sweep(gemm_f32, &faults, 1);
+        matrix_nans(gemm_f32, &faults);
+        matrix_edges(gemm_f32, &faults);
+        matrix_narrow(gemm_f32, (matrix_wide_call *)(void *)gemm_f32, &faults);
+        printf("  neon: gemm_f32 %llu cases, worst %.3f eps S\n", faults.cases, matrix_worst);
+        printf("arm64 matrix: 5 checks | values %llu | outside %llu | nans %llu | edges %llu | narrow %llu\n",
+               faults.values, faults.outside, faults.nans, faults.edges, faults.narrow);
+        return faults.values || faults.outside || faults.nans || faults.edges || faults.narrow;
+}
+#endif /* CHECK_native_matrix */
+
 
 #ifdef CHECK_edit_regressions
 /*
@@ -122840,6 +123354,286 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_glass */
+
+#ifdef BENCH_matrix
+/* gemm_f32 at the trainer's shapes against the compiler: GEMM written as C
+   for the vectoriser -- rows four at a time, then k, the j loop vectorised --
+   and built -O3 for the tier being timed (x86-64-v4 with 512-bit vectors for
+   the AVX-512 body, x86-64-v3 for AVX2 + FMA, the baseline for SSE2; riscv64's
+   with V for the V body). Paired medians of ASM/C, each side's best ticks a
+   call, and the assembly's flop a tick. Natively the shapes are the training
+   calls themselves (8192 rows); emulated, their M is cut to 64, which is a
+   ratio worth reading and an absolute that is not. The OpenBLAS bar, which
+   this freestanding build cannot link, is in lib.c's notes on gemm_f32.
+
+   One shape on one tier alone, for perf stat:
+
+       bench.matrix.x86_64 SHAPE-TIER     SHAPE 0..17 as the table below,
+                                          TIER 512, 256 or 128 (128: SSE2;
+                                          one tier only off x86_64)
+       bench.matrix.x86_64 nothing        the same program doing none */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#if X64
+#define MATRIX_C_WIDE __attribute__((optimize("O3"), target("arch=x86-64-v4,prefer-vector-width=512")))
+#define MATRIX_C_YMM __attribute__((optimize("O3"), target("arch=x86-64-v3")))
+#elif RISCV64
+#define MATRIX_C_WIDE __attribute__((optimize("O3"), target("arch=+v")))
+#define MATRIX_C_YMM __attribute__((optimize("O3")))
+#else
+#define MATRIX_C_WIDE __attribute__((optimize("O3")))
+#define MATRIX_C_YMM __attribute__((optimize("O3")))
+#endif
+#define MATRIX_C_BASE __attribute__((optimize("O3")))
+
+//      C = beta C + A Bk, Bk K x N: four rows of C at a time against a row
+//      of Bk, which the vectoriser turns into vector FMAs along j.
+#define MATRIX_C_GEMM(name, attributes)                                                                  \
+        attributes static fn name(f32 *restrict C, const f32 *restrict A, const f32 *restrict Bk,        \
+                                  positive M, positive N, positive K, f32 beta)                          \
+        {                                                                                                \
+                for (positive i = 0; i < M; i += 4)                                                      \
+                {                                                                                        \
+                        positive rows = M - i < 4 ? M - i : 4;                                           \
+                                                                                                         \
+                        for (positive r = 0; r < rows; r++)                                              \
+                                for (positive j = 0; j < N; j++)                                         \
+                                        C[(i + r) * N + j] = beta == 0 ? 0 : beta * C[(i + r) * N + j];  \
+                        if (rows < 4)                                                                    \
+                        {                                                                                \
+                                for (positive r = 0; r < rows; r++)                                      \
+                                        for (positive k = 0; k < K; k++)                                 \
+                                        {                                                                \
+                                                f32 a = A[(i + r) * K + k];                              \
+                                                                                                         \
+                                                for (positive j = 0; j < N; j++)                         \
+                                                        C[(i + r) * N + j] += a * Bk[k * N + j];         \
+                                        }                                                                \
+                                continue;                                                                \
+                        }                                                                                \
+                        f32 *restrict c0 = C + i * N, *restrict c1 = c0 + N, *restrict c2 = c1 + N;      \
+                        f32 *restrict c3 = c2 + N;                                                       \
+                                                                                                         \
+                        for (positive k = 0; k < K; k++)                                                 \
+                        {                                                                                \
+                                f32 a0 = A[i * K + k], a1 = A[(i + 1) * K + k], a2 = A[(i + 2) * K + k]; \
+                                f32 a3 = A[(i + 3) * K + k];                                             \
+                                const f32 *restrict b = Bk + k * N;                                      \
+                                                                                                         \
+                                for (positive j = 0; j < N; j++)                                         \
+                                {                                                                        \
+                                        c0[j] += a0 * b[j];                                              \
+                                        c1[j] += a1 * b[j];                                              \
+                                        c2[j] += a2 * b[j];                                              \
+                                        c3[j] += a3 * b[j];                                              \
+                                }                                                                        \
+                        }                                                                                \
+                }                                                                                        \
+        }
+MATRIX_C_GEMM(matrix_c_wide, MATRIX_C_WIDE)
+MATRIX_C_GEMM(matrix_c_ymm, MATRIX_C_YMM)
+MATRIX_C_GEMM(matrix_c_base, MATRIX_C_BASE)
+
+typedef fn (*matrix_c_call)(f32 *restrict, const f32 *restrict, const f32 *restrict, positive, positive, positive,
+                            f32);
+
+static const struct
+{
+        string_address what;
+        positive M, N, K;
+        p32 trans;
+} matrix_shapes[] = {
+        {"qkv forward", 8192, 768, 256, 1},       {"attention out", 8192, 256, 256, 1},
+        {"MLP gate+up", 8192, 1364, 256, 1},      {"MLP gate+up", 8192, 682, 256, 1},
+        {"MLP down", 8192, 256, 682, 1},          {"dX from qkv", 8192, 256, 768, 0},
+        {"dX from MLP", 8192, 256, 1364, 0},      {"dX from down", 8192, 682, 256, 0},
+        {"dX from attention", 8192, 256, 256, 0}, {"dW qkv", 768, 256, 8192, 0},
+        {"dW up", 1364, 256, 8192, 0},            {"dW down", 256, 682, 8192, 0},
+        {"dW attention", 256, 256, 8192, 0},      {"attention Q K^T", 256, 256, 32, 1},
+        {"attention P V", 256, 32, 256, 0},       {"Muon 256x256x682", 256, 256, 682, 1},
+        {"Muon 256x682x256", 256, 682, 256, 0},   {"Muon 256x256x256", 256, 256, 256, 0},
+};
+#define MATRIX_SHAPES (sizeof(matrix_shapes) / sizeof(matrix_shapes[0]))
+
+static f32 *matrix_a, *matrix_b, *matrix_bk, *matrix_c;
+static matrix_c_call matrix_former;
+
+//      M and K as timed: the training call natively; emulated, at most 64
+//      rows and 1024 deep
+static positive matrix_rows(positive s)
+{
+#if X64
+        return matrix_shapes[s].M;
+#else
+        return matrix_shapes[s].M > 64 ? 64 : matrix_shapes[s].M;
+#endif
+}
+
+static positive matrix_depth(positive s)
+{
+#if X64
+        return matrix_shapes[s].K;
+#else
+        return matrix_shapes[s].K > 1024 ? 1024 : matrix_shapes[s].K;
+#endif
+}
+
+static fn matrix_prepare(positive s)
+{
+        positive N = matrix_shapes[s].N, K = matrix_depth(s);
+
+        //      the C side reads op(B) as K x N; for trans_b that is B laid out
+        //      afresh, outside the clock
+        for (positive k = 0; k < K; k++)
+                for (positive j = 0; j < N; j++)
+                        matrix_bk[k * N + j] = matrix_shapes[s].trans ? matrix_b[j * K + k] : matrix_b[k * N + j];
+}
+
+static p64 run(bool assembly, positive s, positive reps)
+{
+        positive M = matrix_rows(s), N = matrix_shapes[s].N, K = matrix_depth(s);
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+                if (assembly)
+                        gemm_f32(matrix_c, matrix_a, matrix_b, M, N, K, matrix_shapes[s].trans, 0.0f);
+                else
+                        matrix_former(matrix_c, matrix_a, matrix_bk, M, N, K, 0.0f);
+        return get_cpu_time() - start;
+}
+
+static fn matrix_hundredths(positive value)
+{
+        string_format(log, "%p.", value / 100);
+        positive_to_padded(log, value % 100, 2, '0', 0);
+}
+
+static fn matrix_tier(string_address tier)
+{
+        for (positive s = 0; s < MATRIX_SHAPES; s++)
+        {
+                positive M = matrix_rows(s), N = matrix_shapes[s].N, K = matrix_depth(s);
+                positive flops = 2 * M * N * K, tries = flops > 1000000000 ? 3 : 7;
+                positive reps = flops > 100000000 ? 1 : 100000000 / (flops ? flops : 1), ratios[7];
+                p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                matrix_prepare(s);
+                for (positive trial = 0; trial < tries; trial++)
+                {
+                        p64 former, assembly;
+
+                        BENCH_ALTERNATE(trial, former, run(false, s, reps), assembly, run(true, s, reps));
+                        ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                        best_c = former < best_c ? former : best_c;
+                        best_a = assembly < best_a ? assembly : best_a;
+                }
+                order(ratios, tries);
+                string_format(log, "gemm_f32 %s %p x %p x %p%s, %s: paired median ASM/C ", matrix_shapes[s].what, M, N, K,
+                              matrix_shapes[s].trans ? (string_address) " (B^T)" : (string_address) "", tier);
+                matrix_hundredths(ratios[tries / 2]);
+                string_format(log, "%%; best ticks a call ASM %p, C %p; ASM flop a tick ", best_a / reps, best_c / reps);
+                matrix_hundredths((positive)((p64)flops * reps * 100 / (best_a ? best_a : 1)));
+                log("\n", 1);
+        }
+}
+
+//      SHAPE-TIER alone, for perf stat
+static positive matrix_named_shape;
+
+static fn matrix_named_run(void)
+{
+        run(true, matrix_named_shape, 1);
+}
+
+static fn matrix_named_nothing(void)
+{
+}
+
+static fn matrix_force(positive tier)
+{
+#if X64
+        cpu_has_avx512 = tier == 512 ? cpu_has_avx512 : 0;
+        cpu_has_avx2 = tier >= 256 ? cpu_has_avx2 : 0;
+        cpu_has_fma = tier >= 256 ? cpu_has_fma : 0;
+#else
+        (void)tier;
+#endif
+}
+
+static bench_work matrix_named(string_address name)
+{
+        BENCH_NAME(name, "nothing", matrix_named_nothing);
+        positive shape = 0, tier = 0, at = 0;
+
+        for (; name[at] >= '0' && name[at] <= '9'; at++)
+                shape = shape * 10 + (positive)(name[at] - '0');
+        if (!at || name[at] != '-' || shape >= MATRIX_SHAPES)
+                return null;
+        for (at++; name[at] >= '0' && name[at] <= '9'; at++)
+                tier = tier * 10 + (positive)(name[at] - '0');
+        if (name[at] || (tier != 512 && tier != 256 && tier != 128))
+                return null;
+        matrix_named_shape = shape;
+        matrix_force(tier);
+        return matrix_named_run;
+}
+
+b32 main(void)
+{
+        positive floats = 8192 * 1364;
+
+        matrix_a = memory(floats * 4), matrix_b = memory(floats * 4), matrix_bk = memory(floats * 4);
+        matrix_c = memory(floats * 4);
+        if (!matrix_a || !matrix_b || !matrix_bk || !matrix_c)
+                return 1;
+        p64 state = 0x9e3779b97f4a7c15ull;
+        for (positive i = 0; i < floats; i++)
+        {
+                XORSHIFT64(state);
+                matrix_a[i] = (f32)((b64)(state >> 40) - (1 << 23)) * (1.0f / (f32)(1 << 23));
+                matrix_b[i] = (f32)((b64)(state & 0xffffff) - (1 << 23)) * (1.0f / (f32)(1 << 23));
+                matrix_c[i] = 0.0f;
+        }
+        BENCH_RUN_NAMED(matrix_named);
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier < 2 ? wide2 : 0;
+                cpu_has_fma = tier < 2 ? fused : 0;
+                if ((tier == 0 && !wide512) || (tier == 1 && !(wide2 && fused)))
+                        continue;
+                matrix_former = tier == 0 ? matrix_c_wide : tier == 1 ? matrix_c_ymm : matrix_c_base;
+                matrix_tier(tier == 0 ? "avx512" : tier == 1 ? "avx2 fma" : "sse2");
+        }
+        cpu_has_avx512 = wide512, cpu_has_avx2 = wide2, cpu_has_fma = fused;
+#elif RISCV64
+        cpu_has_vector = 0;
+        gemm_f32(matrix_c, matrix_a, matrix_b, 1, 1, 1, 0, 0.0f);
+        p8 vector = cpu_has_vector;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+                matrix_former = tier == 0 ? matrix_c_wide : matrix_c_base;
+                matrix_tier(tier == 0 ? "V" : "no V");
+        }
+        cpu_has_vector = vector;
+#else
+        matrix_former = matrix_c_base;
+        matrix_tier("neon");
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_matrix */
 
 #ifdef BENCH_blend_rect
 /* memory_blend_u32_rect against the loop it replaced in font_blend: glyphs

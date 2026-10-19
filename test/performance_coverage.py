@@ -268,6 +268,15 @@ cover('direct_benchmark', 'test/checks.c#BENCH_glass', 'memory_halve_u32 memory_
       'paired former-C/assembly timing over a 640 by 400 glass window: a level '
       'halved, the small picture doubled and the picture laid over its ground, '
       'both x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_matrix', 'gemm_f32',
+      'paired timing against GEMM in C built -O3 for the tier timed, at the '
+      "trainer's eighteen shapes: the 8192-row forward and backward calls, dW "
+      'at K 8192, attention and Muon; every x86-64 body and riscv64 with V and '
+      'without, and core cycles of any one shape and tier by perf stat of its '
+      'named run')
+cover('benchmark_context', 'test/checks.c#BENCH_matrix', 'matrix_engine_f32',
+      'the blocked engine gemm_f32 hands its job to, timed in every gemm_f32 row',
+      {'matrix_engine_f32': 'gemm_f32'})
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')
