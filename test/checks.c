@@ -14875,8 +14875,14 @@ fn check_offsets_of_either()
         p8 address_to bytes = pages + 4096;
         p64 seed = 0x243f6a8885a308d3ull;
 #if X64
-        p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2;
-        positive tiers = 3;
+        // AVX-512 with VBMI2 and without it, AVX2, and SSE2.
+        p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2, avx2 = cpu_has_avx2;
+        positive tiers = 4;
+#elif RISCV64
+        // V, asked for by the first call, then the word body without it.
+        p8 vector = 0;
+        positive tiers = 2;
+        cpu_has_vector = 0;
 #else
         positive tiers = 1;
 #endif
@@ -14885,6 +14891,13 @@ fn check_offsets_of_either()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi2 = tier == 1 ? 1 : vbmi2;
+                cpu_has_avx2 = tier < 3 ? avx2 : 0;
+#elif RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
 #endif
                 same("memory_offsets_of_either", "no room",
                      (memory_offsets_of_either)(got, bytes, 16, 'a', 'b', 0), 0);
@@ -14968,6 +14981,9 @@ fn check_offsets_of_either()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi2 = vbmi2;
+        cpu_has_avx2 = avx2;
+#elif RISCV64
+        cpu_has_vector = vector;
 #endif
         memory_free(pages, 3 * 4096);
 }

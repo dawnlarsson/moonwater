@@ -4977,6 +4977,22 @@ __asm__(
     "popcnt %rdx, %rdx\n   add %rdx, %rax\n"
 
 //
+//      memory_offsets_of_either's SSE2 pieces: the flags of 64 bytes at four
+//      addresses into %rcx (both bytes asked of each xmm, %r11 and %r8 spent),
+//      and one step of the bit walk, an offset written at D off %r8.
+//
+#define OFFSETS_X64_XFLAGS(SRC, MASK)                                         \
+    "movdqu " SRC ", %xmm3\n   movdqa %xmm3, %xmm4\n   pcmpeqb %xmm1, %xmm3\n   pcmpeqb %xmm2, %xmm4\n" \
+    "por %xmm4, %xmm3\n   pmovmskb %xmm3, " MASK "\n"
+#define OFFSETS_X64_XMASK(A, B, C, D)                                         \
+    OFFSETS_X64_XFLAGS(A, "%ecx") OFFSETS_X64_XFLAGS(B, "%r11d")               \
+    "shl $16, %r11d\n   or %r11d, %ecx\n"                                       \
+    OFFSETS_X64_XFLAGS(C, "%r11d") OFFSETS_X64_XFLAGS(D, "%r8d")               \
+    "shl $16, %r8d\n   or %r8d, %r11d\n   shl $32, %r11\n   or %r11, %rcx\n"
+#define OFFSETS_X64_STEP(D)                                                   \
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, " D "(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
+
+//
 //      memory_count_words's pieces. W is a 64-byte block's white space mask,
 //      w the white flag of the byte before the block (1 - inside); a word
 //      starts at ~W & ((W << 1) | w), and the next block's w is W >> 63.
@@ -13609,7 +13625,7 @@ __asm__(
 #ifndef KERNEL_MODE
     ".Lmemory_offsets_x64_short:\n"
     // r10 bytes are done and rax offsets written; fewer than 64 bytes remain (the top of the routine, or the wide loop's tail)
-    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_narrow")
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_offsets_x64_avx2")
     "mov %r9, %r11\n   sub %rax, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_avx2\n   movzbl cpu_has_avx512_vbmi2(%rip), %r11d\n   test %r11d, %r11d\n   jnz 2f\n"
     "push %rbx\n   push %rcx\n   push %rdx\n   mov $7, %eax\n   xor %ecx, %ecx\n   cpuid\n   shr $6, %ecx\n   and $1, %ecx\n   inc %ecx\n   mov %cl, cpu_has_avx512_vbmi2(%rip)\n"
     "mov %ecx, %r11d\n   pop %rdx\n   pop %rcx\n   pop %rbx\n   xor %eax, %eax\n"
@@ -13635,14 +13651,14 @@ __asm__(
     //      It is also where the AVX-512 body goes with less than sixty four offsets of room, which it handed to
     //      the byte loop: a window of 4096 bytes and 256 offsets spent the last kilobyte of every call there.
     //
-    ".Lmemory_offsets_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_x64_narrow\n   push %rbx\n"
+    ".Lmemory_offsets_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_x64_sse2\n   push %rbx\n"
     "vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   movzbl %r8b, %r8d\n   vmovd %r8d, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
     ".balign 16\n.Lmemory_offsets_x64_a2_block:\n"
     "cmp %r9, %rax\n   jae .Lmemory_offsets_x64_a2_full\n   mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_a2_tail\n"
     "vmovdqu (%rsi,%r10), %ymm0\n   vmovdqu 32(%rsi,%r10), %ymm3\n"
     "vpcmpeqb %ymm1, %ymm0, %ymm4\n   vpcmpeqb %ymm2, %ymm0, %ymm5\n   vpcmpeqb %ymm1, %ymm3, %ymm6\n   vpcmpeqb %ymm2, %ymm3, %ymm7\n"
     "vpor %ymm5, %ymm4, %ymm4\n   vpor %ymm7, %ymm6, %ymm6\n   vpmovmskb %ymm4, %ecx\n   vpmovmskb %ymm6, %r8d\n   shl $32, %r8\n   or %r8, %rcx\n   jz .Lmemory_offsets_x64_a2_next\n"
-    "mov %r9, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_x64_a2_slow\n   popcnt %rcx, %r11\n   lea (%rdi,%rax,4), %r8\n   add %r11, %rax\n"
+    ".Lmemory_offsets_x64_a2_hits:\n   mov %r9, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_x64_a2_slow\n   popcnt %rcx, %r11\n   lea (%rdi,%rax,4), %r8\n   add %r11, %rax\n"
     "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 4(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 8(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 12(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 16(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 20(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 24(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 28(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
     "cmp $8, %r11\n   jbe .Lmemory_offsets_x64_a2_next\n"
     "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 32(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 36(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 40(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 44(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 48(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 52(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 56(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\nbsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, 60(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
@@ -13653,8 +13669,54 @@ __asm__(
     ".Lmemory_offsets_x64_a2_slow:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_x64_a2_full\n"
     "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_a2_slow\n   jmp .Lmemory_offsets_x64_a2_next\n"
     ".Lmemory_offsets_x64_a2_full:\n   vzeroupper\n   jmp .Lmemory_offsets_x64_leave\n"
-    //      Fewer than sixty four bytes left: the byte loop, with the two bytes it compares with back in place.
-    ".Lmemory_offsets_x64_a2_tail:\n   vmovd %xmm1, %ecx\n   vmovd %xmm2, %r8d\n   vzeroupper\n   jmp .Lmemory_offsets_x64_one\n"
+    //      Fewer than sixty four bytes left (%r11 of them): the 64 bytes from the cursor when they are on its page, the
+    //      hits past the count dropped; else the count's last 64 when it had them, the bytes already asked dropped;
+    //      the hits then go out as a block's do, and the block after them is past the count. A record of 20 to 23
+    //      bytes, awk -F's call, took 70 cycles in the byte loop on a 9950X with AVX-512 off.
+    ".Lmemory_offsets_x64_a2_tail:\n   test %r11, %r11\n   jz .Lmemory_offsets_x64_a2_full\n   lea (%rsi,%r10), %r8\n   mov %r8d, %ebx\n   and $4095, %ebx\n   cmp $4032, %ebx\n   ja 1f\n"
+    "vmovdqu (%r8), %ymm0\n   vmovdqu 32(%r8), %ymm3\n"
+    "vpcmpeqb %ymm1, %ymm0, %ymm4\n   vpcmpeqb %ymm2, %ymm0, %ymm5\n   vpcmpeqb %ymm1, %ymm3, %ymm6\n   vpcmpeqb %ymm2, %ymm3, %ymm7\n"
+    "vpor %ymm5, %ymm4, %ymm4\n   vpor %ymm7, %ymm6, %ymm6\n   vpmovmskb %ymm4, %ecx\n   vpmovmskb %ymm6, %r8d\n   shl $32, %r8\n   or %r8, %rcx\n"
+    "bzhi %r11, %rcx, %rcx\n   jmp 2f\n"
+    "1:  cmp $64, %rdx\n   jb 3f\n   lea -64(%rsi,%rdx), %r8\n   vmovdqu (%r8), %ymm0\n   vmovdqu 32(%r8), %ymm3\n"
+    "vpcmpeqb %ymm1, %ymm0, %ymm4\n   vpcmpeqb %ymm2, %ymm0, %ymm5\n   vpcmpeqb %ymm1, %ymm3, %ymm6\n   vpcmpeqb %ymm2, %ymm3, %ymm7\n"
+    "vpor %ymm5, %ymm4, %ymm4\n   vpor %ymm7, %ymm6, %ymm6\n   vpmovmskb %ymm4, %ecx\n   vpmovmskb %ymm6, %r8d\n   shl $32, %r8\n   or %r8, %rcx\n"
+    "mov $64, %ebx\n   sub %r11d, %ebx\n   shrx %rbx, %rcx, %rcx\n   shlx %rbx, %rcx, %rcx\n   lea -64(%rdx), %r10\n"
+    "2:  test %rcx, %rcx\n   jz .Lmemory_offsets_x64_a2_full\n"
+    ".Lmemory_offsets_x64_a2_last:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_x64_a2_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_a2_last\n   jmp .Lmemory_offsets_x64_a2_full\n"
+    //      At a page's end with fewer than 64 in the count: the byte loop, the two bytes it compares with back in place.
+    "3:  vmovd %xmm1, %ecx\n   vmovd %xmm2, %r8d\n   vzeroupper\n   jmp .Lmemory_offsets_x64_one\n"
+    //
+    //      SSE2, for a machine without AVX2: the same body four xmm a block, the masks without BMI.
+    //
+    ".Lmemory_offsets_x64_sse2:\n   push %rbx\n   movzbl %cl, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+    "movzbl %r8b, %r8d\n   imul $0x01010101, %r8d, %r8d\n   movd %r8d, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    ".balign 16\n.Lmemory_offsets_x64_x_block:\n"
+    "cmp %r9, %rax\n   jae .Lmemory_offsets_x64_x_full\n   mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_x64_x_tail\n"
+    OFFSETS_X64_XMASK("(%rsi,%r10)", "16(%rsi,%r10)", "32(%rsi,%r10)", "48(%rsi,%r10)")
+    ".Lmemory_offsets_x64_x_found:\n   test %rcx, %rcx\n   jz .Lmemory_offsets_x64_x_next\n   mov %r9, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_x64_x_slow\n"
+    "popcnt %rcx, %r11\n   lea (%rdi,%rax,4), %r8\n   add %r11, %rax\n"
+    OFFSETS_X64_STEP("0") OFFSETS_X64_STEP("4") OFFSETS_X64_STEP("8") OFFSETS_X64_STEP("12")
+    OFFSETS_X64_STEP("16") OFFSETS_X64_STEP("20") OFFSETS_X64_STEP("24") OFFSETS_X64_STEP("28")
+    "cmp $8, %r11\n   jbe .Lmemory_offsets_x64_x_next\n   add $32, %r8\n"
+    OFFSETS_X64_STEP("0") OFFSETS_X64_STEP("4") OFFSETS_X64_STEP("8") OFFSETS_X64_STEP("12")
+    OFFSETS_X64_STEP("16") OFFSETS_X64_STEP("20") OFFSETS_X64_STEP("24") OFFSETS_X64_STEP("28")
+    "cmp $16, %r11\n   jbe .Lmemory_offsets_x64_x_next\n   add $32, %r8\n"
+    ".Lmemory_offsets_x64_x_more:\n   bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   add $4, %r8\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_x_more\n"
+    ".Lmemory_offsets_x64_x_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_x64_x_block\n"
+    ".Lmemory_offsets_x64_x_slow:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_x64_x_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_x_slow\n   jmp .Lmemory_offsets_x64_x_next\n"
+    ".Lmemory_offsets_x64_x_tail:\n   test %r11, %r11\n   jz .Lmemory_offsets_x64_x_full\n   lea (%rsi,%r10), %r8\n   mov %r8d, %ebx\n   and $4095, %ebx\n   cmp $4032, %ebx\n   ja 1f\n"
+    "mov %r11d, %ecx\n   mov $1, %ebx\n   shl %cl, %rbx\n   dec %rbx  # the bytes inside the count\n"
+    OFFSETS_X64_XMASK("(%r8)", "16(%r8)", "32(%r8)", "48(%r8)") "and %rbx, %rcx\n   jmp .Lmemory_offsets_x64_x_sparse\n"
+    "1:  cmp $64, %rdx\n   jb .Lmemory_offsets_x64_x_bytes\n   lea -64(%rsi,%rdx), %r8\n   mov $64, %ecx\n   sub %r11d, %ecx\n   mov $-1, %rbx\n   shl %cl, %rbx  # the bytes not yet asked\n"
+    OFFSETS_X64_XMASK("(%r8)", "16(%r8)", "32(%r8)", "48(%r8)") "and %rbx, %rcx\n   lea -64(%rdx), %r10\n"
+    ".Lmemory_offsets_x64_x_sparse:\n   test %rcx, %rcx\n   jz .Lmemory_offsets_x64_x_full\n"
+    ".Lmemory_offsets_x64_x_last:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_x64_x_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_x64_x_last\n   jmp .Lmemory_offsets_x64_x_full\n"
+    ".Lmemory_offsets_x64_x_bytes:\n   movd %xmm1, %ecx\n   movd %xmm2, %r8d\n   jmp .Lmemory_offsets_x64_one\n"
+    ".Lmemory_offsets_x64_x_full:\n   jmp .Lmemory_offsets_x64_leave\n"
 #endif
     ".Lmemory_offsets_x64_narrow:\n   push %rbx\n"
     ".balign 16\n.Lmemory_offsets_x64_one:\n"
@@ -13841,7 +13903,9 @@ __asm__(
     ".Lmemory_offsets_set_x64_a2_full:\n   vzeroupper\n   pop %r12\n   pop %rbx\n   jmp .Lmemory_offsets_set_x64_done\n"
     ".Lmemory_offsets_set_x64_a2_tail:\n   vzeroupper\n   pop %r12\n   pop %rbx\n   jmp .Lmemory_offsets_set_x64_one\n"
 #endif
-    ".balign 16\n.Lmemory_offsets_set_x64_one:\n"
+    //      Sixty four: this loop is the whole of the routine without AVX2, and at sixteen it moved with the code
+    //      around it (cat -n 3.5 percent slower on SSE2 when memory_offsets_of_either before it grew by 1.2 KB).
+    ".balign 64\n.Lmemory_offsets_set_x64_one:\n"
     "cmp %rdx, %r10\n   jae .Lmemory_offsets_set_x64_done\n   cmp %r8, %rax\n   jae .Lmemory_offsets_set_x64_done\n"
     "movzbl (%rsi,%r10), %r11d\n   mov %r10d, (%rdi,%rax,4)\n   cmpb $0, (%rcx,%r11)\n   setne %r11b\n"
     "movzbl %r11b, %r11d\n   add %r11, %rax\n   inc %r10\n   jmp .Lmemory_offsets_set_x64_one\n"
@@ -22906,7 +22970,7 @@ __asm__(
     ASM_FUNC(memory_offsets_of_either)
     "and w3, w3, #255\n   and w4, w4, #255\n   mov x6, xzr\n   mov x7, xzr\n   cbz x5, .Lmemory_offsets_arm64_done\n"
 #ifndef KERNEL_MODE
-    "dup v1.16b, w3\n   dup v2.16b, w4\n   mov x13, #0x8888888888888888\n   movz x14, #0x0201\n   movk x14, #0x0804, lsl #16\n   movk x14, #0x2010, lsl #32\n   movk x14, #0x8040, lsl #48\n   dup v5.2d, x14\n"
+    "dup v1.16b, w3\n   dup v2.16b, w4\n   mov x13, #0x8888888888888888\n   cmp x2, #64\n   b.lo .Lmemory_offsets_arm64_wide\n   movz x14, #0x0201\n   movk x14, #0x0804, lsl #16\n   movk x14, #0x2010, lsl #32\n   movk x14, #0x8040, lsl #48\n   dup v5.2d, x14\n"
     //
     //       Sixty four bytes a turn while there are sixty four offsets of room, as the x86-64 AVX2 body does: the
     //       flags of four vectors reduced to one 64-bit mask by anding each with the bit its lane stands for and
@@ -22930,12 +22994,28 @@ __asm__(
     "cmp w11, #16\n   b.ls .Lmemory_offsets_arm64_big_next\n"
     ".Lmemory_offsets_arm64_big_more:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x10, x7\n   str w10, [x14], #4\n   sub x12, x9, #1\n   and x9, x9, x12\n   cbnz x9, .Lmemory_offsets_arm64_big_more\n"
     ".Lmemory_offsets_arm64_big_next:\n   add x7, x7, #64\n   b .Lmemory_offsets_arm64_big\n"
-    ".Lmemory_offsets_arm64_wide:  sub x8, x2, x7\n   cmp x8, #16\n   b.lo .Lmemory_offsets_arm64_one\n   sub x8, x5, x6\n   cmp x8, #16\n   b.lo .Lmemory_offsets_arm64_one\n"
+    ".Lmemory_offsets_arm64_wide:  sub x8, x2, x7\n   cmp x8, #16\n   b.lo .Lmemory_offsets_arm64_tail\n   sub x8, x5, x6\n   cmp x8, #16\n   b.lo .Lmemory_offsets_arm64_one\n"
     "ldr q0, [x1, x7]\n   cmeq v3.16b, v0.16b, v1.16b\n   cmeq v4.16b, v0.16b, v2.16b\n   orr v3.16b, v3.16b, v4.16b\n   shrn v3.8b, v3.8h, #4\n   fmov x9, d3\n   and x9, x9, x13\n"
     "cbz x9, .Lmemory_offsets_arm64_next\n"
     ".Lmemory_offsets_arm64_bits:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x7, x10, lsr #2\n   str w10, [x0, x6, lsl #2]\n   add x6, x6, #1\n   sub x11, x9, #1\n   and x9, x9, x11\n"
     "cbnz x9, .Lmemory_offsets_arm64_bits\n"
     ".Lmemory_offsets_arm64_next:\n   add x7, x7, #16\n   b .Lmemory_offsets_arm64_wide\n"
+    //
+    //       Under sixteen left (x8 of them) with sixteen offsets of room: the count's last sixteen bytes when it had
+    //       sixteen, the lanes already asked shifted out of the flags; else the sixteen bytes from the cursor when
+    //       they are on its page, the lanes past the count dropped; the hits read off as a vector's are. They went a
+    //       byte at a time: an awk -F record of 20 to 23 bytes on an M2 Pro, 7.2 ns before and 5.3 after.
+    //
+    ".Lmemory_offsets_arm64_tail:\n   cbz x8, .Lmemory_offsets_arm64_done\n   sub x9, x5, x6\n   cmp x9, #16\n   b.lo .Lmemory_offsets_arm64_one\n"
+    "cmp x2, #16\n   b.lo .Lmemory_offsets_arm64_window\n"
+    "sub x15, x2, #16\n   ldr q0, [x1, x15]\n   cmeq v3.16b, v0.16b, v1.16b\n   cmeq v4.16b, v0.16b, v2.16b\n   orr v3.16b, v3.16b, v4.16b\n   shrn v3.8b, v3.8h, #4\n   fmov x9, d3\n   and x9, x9, x13\n"
+    "mov x10, #16\n   sub x10, x10, x8\n   lsl x10, x10, #2\n   lsr x9, x9, x10\n   lsl x9, x9, x10\n   mov x7, x15\n   b .Lmemory_offsets_arm64_tail_bits\n"
+    ".Lmemory_offsets_arm64_window:\n   add x15, x1, x7\n   and x10, x15, #4095\n   cmp x10, #4080\n   b.hi .Lmemory_offsets_arm64_one\n"
+    "ldr q0, [x15]\n   cmeq v3.16b, v0.16b, v1.16b\n   cmeq v4.16b, v0.16b, v2.16b\n   orr v3.16b, v3.16b, v4.16b\n   shrn v3.8b, v3.8h, #4\n   fmov x9, d3\n   and x9, x9, x13\n"
+    "lsl x10, x8, #2\n   mov x11, #1\n   lsl x11, x11, x10\n   sub x11, x11, #1\n   and x9, x9, x11\n"
+    ".Lmemory_offsets_arm64_tail_bits:\n   cbz x9, .Lmemory_offsets_arm64_done\n"
+    ".Lmemory_offsets_arm64_tail_bit:\n   rbit x10, x9\n   clz x10, x10\n   add x10, x7, x10, lsr #2\n   str w10, [x0, x6, lsl #2]\n   add x6, x6, #1\n"
+    "sub x11, x9, #1\n   and x9, x9, x11\n   cbnz x9, .Lmemory_offsets_arm64_tail_bit\n   b .Lmemory_offsets_arm64_done\n"
 #endif
     ".Lmemory_offsets_arm64_one:  cmp x7, x2\n   b.hs .Lmemory_offsets_arm64_done\n   cmp x6, x5\n   b.hs .Lmemory_offsets_arm64_done\n   ldrb w9, [x1, x7]\n   str w7, [x0, x6, lsl #2]\n"
     "cmp w9, w3\n   ccmp w9, w4, #4, ne\n   cinc x6, x6, eq\n   add x7, x7, #1\n   b .Lmemory_offsets_arm64_one\n"
@@ -31446,16 +31526,51 @@ __asm__(
     ".Lmemory_squeeze_rv_done:\n   sub a0, t0, t5\n" ASM_RET
     ASM_END(memory_squeeze_bytes)
 
-    // memory_offsets_of_either: a byte at a time, every offset stored and the
-    // count moved on by the or of two seqz. The x86_64 block carries the full
-    // contract.
+    // memory_offsets_of_either: with V the bytes a turn as one mask of the two, the turn's indices made by
+    // vid, added to where the turn began and compressed by the mask, and stored at most the room's worth.
+    // Without V a word of bytes at a time once the pointer is on eight, with eight offsets of room: each byte
+    // flagged at bit seven when it is either byte (the carry free zero test of the word xor each), the flags
+    // read off lowest first, the byte's index being the isolated flag moved to bit zero of its byte times
+    // 0x0001020304050607, read from the top byte; a byte at a time otherwise, every offset stored and the count
+    // moved on by the or of two seqz. qemu, instructions a call: a 22-byte record 354 before, 249 by the word
+    // and 55 with V; 64 KiB of text with a hit every six bytes 334,925, 112,592 and 18,156 at VLEN 128 (9,095
+    // at 256). The x86_64 block carries the full contract.
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_offsets_of_either)
-    "andi a3, a3, 255\n   andi a4, a4, 255\n   li t0, 0\n   li t1, 0\n"
+    "andi a3, a3, 255\n   andi a4, a4, 255\n   li t0, 0\n   li t1, 0\n   beqz a5, .Lmemory_offsets_rv_done\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lmemory_offsets_rv_vector\n   bnez t3, .Lmemory_offsets_rv_scalar\n"
+    //  The detect keeps a0-a4 and a7; the limit is a5.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n   addi sp, sp, 16\n   j memory_offsets_of_either\n"
+    ".Lmemory_offsets_rv_vector:\n   bgeu t1, a2, .Lmemory_offsets_rv_done\n   bgeu t0, a5, .Lmemory_offsets_rv_done\n   sub t2, a2, t1\n   vsetvli t3, t2, e8, m2, ta, ma\n"
+    "add t4, a1, t1\n   vle8.v v8, (t4)\n   vmseq.vx v0, v8, a3\n   vmseq.vx v1, v8, a4\n   vmor.mm v0, v0, v1\n   vcpop.m t5, v0\n   beqz t5, .Lmemory_offsets_rv_vector_next\n"
+    "sub t6, a5, t0\n   bltu t6, t5, .Lmemory_offsets_rv_vector_store  # more than the room: as many as it holds\n   mv t6, t5\n"
+    ".Lmemory_offsets_rv_vector_store:\n   vsetvli zero, t3, e32, m8, ta, ma\n   vid.v v16\n   vadd.vx v16, v16, t1\n   vcompress.vm v24, v16, v0\n"
+    "vsetvli zero, t6, e32, m8, ta, ma\n   slli t2, t0, 2\n   add t2, a0, t2\n   vse32.v v24, (t2)\n   add t0, t0, t6\n   bltu t6, t5, .Lmemory_offsets_rv_done\n"
+    ".Lmemory_offsets_rv_vector_next:\n   add t1, t1, t3\n   j .Lmemory_offsets_rv_vector\n"
+    ".Lmemory_offsets_rv_scalar:\n"
+#endif
+    ".Lmemory_offsets_rv_peel:\n   andi t2, a1, 7\n   add t2, t2, t1\n   andi t2, t2, 7\n   beqz t2, .Lmemory_offsets_rv_words\n"
+    "bgeu t1, a2, .Lmemory_offsets_rv_done\n   bgeu t0, a5, .Lmemory_offsets_rv_done\n   add t2, a1, t1\n   lbu t2, 0(t2)\n   slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n"
+    "xor t4, t2, a3\n   seqz t4, t4\n   xor t5, t2, a4\n   seqz t5, t5\n   or t4, t4, t5\n   add t0, t0, t4\n   addi t1, t1, 1\n   j .Lmemory_offsets_rv_peel\n"
+    ".Lmemory_offsets_rv_words:\n   li a6, 0x0101010101010101\n   mul t5, a3, a6\n   mul t6, a4, a6\n   li a6, 0x7f7f7f7f7f7f7f7f\n   li a7, 0x0001020304050607\n"
+    ".Lmemory_offsets_rv_word:\n   sub t2, a2, t1\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_rv_one\n   sub t2, a5, t0\n   bltu t2, t3, .Lmemory_offsets_rv_one\n"
+    "add t2, a1, t1\n   ld t2, 0(t2)\n   xor t3, t2, t5\n   and t4, t3, a6\n   add t4, t4, a6\n   or t4, t4, t3\n"
+    "xor t3, t2, t6\n   and t2, t3, a6\n   add t2, t2, a6\n   or t2, t2, t3\n   and t4, t4, t2  # bit seven clear where either matched\n"
+    "or t4, t4, a6\n   not t4, t4  # set exactly there\n   beqz t4, .Lmemory_offsets_rv_word_next\n   slli t3, t0, 2\n   add t3, a0, t3\n"
+    ".Lmemory_offsets_rv_hit:\n   neg t2, t4\n   and t2, t2, t4\n   srli t2, t2, 7\n   mul t2, t2, a7\n   srli t2, t2, 56\n   add t2, t2, t1\n   sw t2, 0(t3)\n"
+    "addi t3, t3, 4\n   addi t0, t0, 1\n   addi t2, t4, -1\n   and t4, t4, t2\n   bnez t4, .Lmemory_offsets_rv_hit\n"
+    ".Lmemory_offsets_rv_word_next:\n   addi t1, t1, 8\n   j .Lmemory_offsets_rv_word\n"
     ".Lmemory_offsets_rv_one:  bgeu t1, a2, .Lmemory_offsets_rv_done\n   bgeu t0, a5, .Lmemory_offsets_rv_done\n"
     "add t2, a1, t1\n   lbu t2, 0(t2)\n   slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n   xor t4, t2, a3\n   seqz t4, t4\n   xor t5, t2, a4\n   seqz t5, t5\n   or t4, t4, t5\n"
     "add t0, t0, t4\n   addi t1, t1, 1\n   j .Lmemory_offsets_rv_one\n"
     ".Lmemory_offsets_rv_done:\n   mv a0, t0\n" ASM_RET
     ASM_END(memory_offsets_of_either)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
 
     // memory_offsets_between / _outside: a byte at a time, the byte less low
     // held against the width with sltu and flipped for outside. The x86_64
