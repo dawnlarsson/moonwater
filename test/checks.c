@@ -47346,6 +47346,342 @@ b32 main(void)
 }
 #endif /* CHECK_modulo */
 
+#ifdef CHECK_train
+#include "../src/lib.util.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+#endif
+#ifdef CHECK_native_train
+#include <stdio.h>
+#include <sys/mman.h>
+#include "train.h"
+#endif
+
+#if defined(CHECK_train) || defined(CHECK_native_train)
+/*
+        lib.c's training and inference block against references written here.
+
+        Two programs are built from this: CHECK_train, freestanding on the
+        library, which test/run's train lane runs on all three machines --
+        x86_64 once for each of its bodies with the feature bytes walked down,
+        riscv64 under qemu with no V and at VLEN 128, 256 and 512 -- and
+        CHECK_native_train, which links the arm64 bodies lifted out of lib.c
+        and runs them on an arm64 Mac (its main is with the other native
+        sections). Everything between here and the first main is what both
+        share, written against nothing but the compiler's builtins and the
+        machine's own scalar instructions.
+
+        Every routine is walked over every count to 100 and the training sizes,
+        each array ending against a page that faults or a few floats short of
+        it, so that where a start falls in its line moves apart from the count,
+        with sentinels in front and in the gap behind; every in-place call the
+        routine allows; and its edges.
+
+        fused_residual_add_f32 is held to the bit: the bodies with a fused
+        multiply-add to this machine's scalar fma, SSE2 to the product rounded
+        and then the sum. A NaN is held to being a NaN, its payload being the
+        machine's. The same answers are held to the bound the header states
+        against a double sum, k = 1 fused and 2 for SSE2, and small integers to
+        the exact answer.
+*/
+#define TRAIN_MOST 2097152
+#define TRAIN_SENTINEL 0x5a5aa5a5u
+
+typedef void train_residual_call(float *, const float *, unsigned long long, float);
+
+static unsigned long long train_state = 0x6a09e667f3bcc909ull;
+
+static unsigned long long train_next(void)
+{
+        XORSHIFT64(train_state);
+        return train_state;
+}
+
+static float train_float(unsigned bits)
+{
+        float value;
+
+        __builtin_memcpy(&value, &bits, 4);
+        return value;
+}
+
+static unsigned train_bits(float value)
+{
+        unsigned bits;
+
+        __builtin_memcpy(&bits, &value, 4);
+        return bits;
+}
+
+//      One fused multiply-add, the machine's own scalar instruction: a * b + c.
+static float train_fma(float a, float b, float c)
+{
+#if defined(__x86_64__)
+        __asm__("vfmadd231ss %2, %1, %0" : "+x"(c) : "x"(a), "x"(b));
+        return c;
+#elif defined(__aarch64__)
+        float r;
+
+        __asm__("fmadd %s0, %s1, %s2, %s3" : "=w"(r) : "w"(a), "w"(b), "w"(c));
+        return r;
+#else
+        float r;
+
+        __asm__("fmadd.s %0, %1, %2, %3" : "=f"(r) : "f"(a), "f"(b), "f"(c));
+        return r;
+#endif
+}
+
+/*
+        A float to test with: mostly a random sign and mantissa with an
+        exponent within `scale` binades of one, and one in sixteen a value no
+        routine may get wrong -- the zeros, the infinities, NaNs with payloads,
+        the denormals, the largest and smallest normals.
+*/
+static float train_value(unsigned scale)
+{
+        static const unsigned special[] = {0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc12345,
+                                           0x7f800001, 0x00000001, 0x807fffff, 0x7f7fffff, 0xff7fffff, 0x00800000,
+                                           0x80800000, 0x3f800000, 0x00400000, 0x7fbfffff};
+        unsigned long long r = train_next();
+
+        if ((r & 15) == 0)
+                return train_float(special[(r >> 4) & 15]);
+        unsigned exponent = 127 + (unsigned)((r >> 8) % (2 * scale + 1)) - scale;
+
+        return train_float((unsigned)(r >> 63) << 31 | exponent << 23 | ((unsigned)(r >> 32) & 0x7fffff));
+}
+
+//      Every count to 100, the vector edges past it, the trainer's sizes.
+static const unsigned long long train_long[] = {127, 128, 129, 255, 256, 257, 682, 1000, 1023, 1024, 1025,
+                                                4095, 4096, 4097, 65539, 2097152};
+#define TRAIN_COUNTS (101 + sizeof(train_long) / sizeof(train_long[0]))
+
+static unsigned long long train_count(unsigned long long at)
+{
+        return at <= 100 ? at : train_long[at - 101];
+}
+
+/*
+        Where the arrays sit: each ends this many floats before its guard page,
+        so the starts' alignments move apart from the counts' and the floats in
+        the gap stand guard too. The first is both against the page; the counts
+        past 4097 take only the first two.
+*/
+static const unsigned train_gaps[][2] = {{0, 0}, {0, 3}, {1, 1}, {5, 0}, {3, 7}, {9, 9}, {15, 4}, {2, 13}};
+#define TRAIN_PLACEMENTS (sizeof(train_gaps) / sizeof(train_gaps[0]))
+
+static unsigned long long train_placements(unsigned long long count)
+{
+        return count > 4097 ? 2 : TRAIN_PLACEMENTS;
+}
+
+static void train_fence(unsigned *start, unsigned long long count, unsigned gap, unsigned mark)
+{
+        for (int i = 0; i < 16; i++)
+                start[i - 16] = mark + (unsigned)i;
+        for (unsigned i = 0; i < gap; i++)
+                start[count + i] = mark - i;
+}
+
+static int train_fenced(const unsigned *start, unsigned long long count, unsigned gap, unsigned mark)
+{
+        for (int i = 0; i < 16; i++)
+                if (start[i - 16] != mark + (unsigned)i)
+                        return 0;
+        for (unsigned i = 0; i < gap; i++)
+                if (start[count + i] != mark - i)
+                        return 0;
+        return 1;
+}
+
+//      The faults a walk found, by kind.
+typedef struct
+{
+        unsigned long long values, bounded, outside, kept, aliased, integers;
+} train_faults;
+
+static double train_magnitude(double value)
+{
+        return value < 0 ? -value : value;
+}
+
+static int train_same(float got, float want)
+{
+        return want != want ? got != got : train_bits(got) == train_bits(want);
+}
+
+/*
+        fused_residual_add_f32 through one body. fused says whether this body
+        rounds once.
+*/
+static void train_residual_cases(train_residual_call *routine, float *x_end, float *h_end, int fused,
+                                 train_faults *faults)
+{
+        static const unsigned alphas[] = {0x3f400000, 0xb99d4952, 0x3f800000, 0x00000000, 0x80000000, 0x7e61dabc,
+                                          0x7fc00000, 0x7f800000};
+        static float was[TRAIN_MOST], from[TRAIN_MOST];
+
+        for (unsigned long long at = 0; at < TRAIN_COUNTS; at++)
+                for (unsigned long long place = 0; place < train_placements(train_count(at)); place++)
+                {
+                        unsigned long long count = train_count(at);
+                        float alpha = train_float(alphas[(at + place) % 8]);
+                        unsigned x_gap = train_gaps[place][0], h_gap = train_gaps[place][1];
+                        float *x = x_end - count - x_gap, *h = h_end - count - h_gap;
+
+                        train_fence((unsigned *)x, count, x_gap, TRAIN_SENTINEL);
+                        train_fence((unsigned *)h, count, h_gap, ~TRAIN_SENTINEL);
+                        for (unsigned long long i = 0; i < count; i++)
+                        {
+                                was[i] = x[i] = train_value(at & 1 ? 3 : 20);
+                                from[i] = h[i] = train_value(at & 2 ? 3 : 20);
+                        }
+                        routine(x, h, count, alpha);
+                        for (unsigned long long i = 0; i < count; i++)
+                        {
+                                float product = alpha * from[i];
+                                float want = fused ? train_fma(alpha, from[i], was[i]) : product + was[i];
+                                double sum = (double)alpha * (double)from[i] + (double)was[i];
+                                double scale = train_magnitude((double)was[i]) + train_magnitude((double)alpha * (double)from[i]);
+
+                                faults->values += !train_same(x[i], want);
+                                faults->kept += train_bits(h[i]) != train_bits(from[i]);
+                                //      Where the answer and, unfused, the rounded product are
+                                //      finite; the 1e-6 is the double sum's own rounding.
+                                if (want == want && train_magnitude(sum) <= 3.4028234663852886e38 && scale < 1e300 &&
+                                    (fused || train_magnitude((double)alpha * (double)from[i]) <= 3.4028234663852886e38))
+                                        faults->bounded += train_magnitude((double)x[i] - sum) >
+                                                           ((fused ? 1 : 2) + 1e-6) * 0x1p-24 * scale + 1e-35;
+                        }
+                        faults->outside += !train_fenced((unsigned *)x, count, x_gap, TRAIN_SENTINEL) +
+                                           !train_fenced((unsigned *)h, count, h_gap, ~TRAIN_SENTINEL);
+
+                        //      x as h: x * (1 + alpha), one rounding where fused.
+                        if ((place & 1) == 0 && count <= 4097)
+                        {
+                                for (unsigned long long i = 0; i < count; i++)
+                                        was[i] = x[i] = train_value(10);
+                                routine(x, x, count, alpha);
+                                for (unsigned long long i = 0; i < count; i++)
+                                {
+                                        float product = alpha * was[i];
+                                        float want = fused ? train_fma(alpha, was[i], was[i]) : product + was[i];
+
+                                        faults->aliased += !train_same(x[i], want);
+                                }
+                                faults->outside += !train_fenced((unsigned *)x, count, x_gap, TRAIN_SENTINEL);
+                        }
+
+                        //      Small integers and a power of two: every product and sum exact.
+                        if ((place & 1) == 1 && count <= 4097)
+                        {
+                                for (unsigned long long i = 0; i < count; i++)
+                                {
+                                        x[i] = (float)(int)(train_next() % 2001) - 1000;
+                                        h[i] = (float)(int)(train_next() % 2001) - 1000;
+                                        was[i] = x[i] + 0.25f * h[i];
+                                }
+                                routine(x, h, count, 0.25f);
+                                for (unsigned long long i = 0; i < count; i++)
+                                        faults->integers += x[i] != was[i];
+                        }
+                }
+}
+#endif /* CHECK_train || CHECK_native_train */
+
+#ifdef CHECK_train
+static float *train_x_end, *train_h_end;
+
+//      Two runs of TRAIN_MOST floats and room for the gaps, each followed by
+//      a page that faults.
+static bool train_guard(void)
+{
+        positive span = ((TRAIN_MOST + 64) * 4 + 4095) / 4096 * 4096;
+        float *ends[2];
+
+        for (int at = 0; at < 2; at++)
+        {
+                p8 address_to pages = memory(span + 4096);
+
+                if (!pages || system_call_3(syscall(mprotect), (positive)(pages + span), 4096, 0) != 0)
+                        return false;
+                ends[at] = (float *)(pages + span);
+        }
+        train_x_end = ends[0], train_h_end = ends[1];
+        return true;
+}
+
+static fn train_call_residual(float *x, const float *h, unsigned long long count, float alpha)
+{
+        fused_residual_add_f32(x, h, count, alpha);
+}
+
+//      One body's properties, each a check.
+static fn train_tier(string_address tier, bool fused)
+{
+        train_faults faults = {0, 0, 0, 0, 0, 0};
+
+        train_residual_cases(train_call_residual, train_x_end, train_h_end, fused, &faults);
+        string_format(log, "  %s\n", tier);
+        check("fused_residual_add_f32: every count and placement, each element the reference to the bit", faults.values == 0);
+        check("fused_residual_add_f32: within k eps of the double sum (k = 1 fused, 2 for SSE2)", faults.bounded == 0);
+        check("fused_residual_add_f32: sentinels and gaps beside every array untouched", faults.outside == 0);
+        check("fused_residual_add_f32: h unchanged", faults.kept == 0);
+        check("fused_residual_add_f32: x as h", faults.aliased == 0);
+        check("fused_residual_add_f32: small integers exactly", faults.integers == 0);
+}
+
+b32 main(void)
+{
+        check("train: guard pages", train_guard());
+        if (!train_h_end)
+                return test_report(null);
+#if X64
+        p8 had512 = cpu_has_avx512, had2 = cpu_has_avx2, hadfma = cpu_has_fma;
+        //      AVX-512, AVX2 with FMA, then SSE2 three ways: no AVX2, no FMA, neither.
+        static const p8 tiers[][3] = {{1, 1, 1}, {0, 1, 1}, {0, 0, 1}, {0, 1, 0}, {0, 0, 0}};
+        static const string_address names[] = {"avx512", "avx2 fma", "sse2 (no avx2)", "sse2 (no fma)", "sse2"};
+
+        for (positive tier = 0; tier < 5; tier++)
+        {
+                if (tiers[tier][0] && !had512)
+                        continue;
+                cpu_has_avx512 = tiers[tier][0] & had512;
+                cpu_has_avx2 = tiers[tier][1] & had2;
+                cpu_has_fma = tiers[tier][2] & hadfma;
+                train_tier(names[tier], cpu_has_avx2 && cpu_has_fma);
+        }
+        cpu_has_avx512 = had512, cpu_has_avx2 = had2, cpu_has_fma = hadfma;
+#elif RISCV64
+        //      The first call asks for V and keeps its arguments through the
+        //      question.
+        cpu_has_vector = 0;
+        {
+                f32 one = 1;
+
+                fused_residual_add_f32(&one, &one, 1, 1);
+                check("fused_residual_add_f32: the first call asks for V and keeps its arguments", cpu_has_vector != 0 && one == 2);
+        }
+        p8 vector = cpu_has_vector;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                if (tier == 0 && vector != 2)
+                        continue;
+                cpu_has_vector = tier ? 1 : vector;
+                train_tier(cpu_has_vector == 2 ? "V" : "no V", true);
+        }
+        cpu_has_vector = vector;
+#else
+        train_tier("neon", true);
+#endif
+        return test_report(null);
+}
+#endif /* CHECK_train */
+
 #ifdef CHECK_environment
 /*
         Experimental C standard library
@@ -121379,6 +121715,97 @@ int main(void)
 }
 #endif /* CHECK_native_fields */
 
+#ifdef CHECK_native_train
+/*
+        The arm64 training and inference bodies lifted out of lib.c, run on
+        this machine through the walks CHECK_train runs (the generator, the
+        references and the walks are with it, after CHECK_modulo), then timed
+        against the C each replaces as this machine's compiler builds it. The
+        lift is the same bodies byte for byte, with Darwin's symbol spelling,
+        so the hardware here judges what the qemu run on the box judges.
+*/
+void fused_residual_add_f32(float *, const float *, unsigned long long, float);
+
+static unsigned long long train_ticks(void)
+{
+        unsigned long long value;
+
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
+        return value;
+}
+
+//      A run of floats whose end is the start of a page that faults; Apple's
+//      pages are 16 KiB.
+static float *train_native_guard(unsigned long long most)
+{
+        unsigned long long span = ((most + 64) * 4 + 16383) / 16384 * 16384;
+        unsigned char *pages = mmap(0, span + 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+        if (pages == MAP_FAILED || mprotect(pages + span, 16384, PROT_NONE) != 0)
+                return 0;
+        return (float *)(pages + span);
+}
+
+__attribute__((noinline)) static void train_former_residual(float *restrict x, const float *restrict h, unsigned long long n,
+                                                            float alpha)
+{
+        for (unsigned long long i = 0; i < n; i++)
+                x[i] = x[i] + alpha * h[i];
+}
+
+//      L1, L2 and beyond, then the same with both arrays a float off 16 bytes.
+static void train_time_residual(float *x_base, float *h_base)
+{
+        static const unsigned long long sizes[] = {1000, 2048, 8192, 65536, 2097152};
+
+        for (unsigned long long s = 0; s < 10; s++)
+        {
+                unsigned long long n = sizes[s % 5], reps = (1ull << 25) / n, best[2] = {~0ull, ~0ull};
+                float *x = x_base + (s >= 5), *h = h_base + (s >= 5);
+
+                for (int t = 0; t < 11; t++)
+                        for (int side0 = 0; side0 < 2; side0++)
+                        {
+                                int side = t & 1 ? 1 - side0 : side0;
+                                unsigned long long start = train_ticks();
+
+                                for (unsigned long long r = 0; r < reps; r++)
+                                        if (side)
+                                                fused_residual_add_f32(x, h, n, 1e-7f);
+                                        else
+                                                train_former_residual(x, h, n, 1e-7f);
+                                unsigned long long took = train_ticks() - start;
+
+                                best[side] = took < best[side] ? took : best[side];
+                        }
+                printf("  residual add %7llu%s: C %llu ticks, assembly %llu, asm/C %llu%%\n", n, s >= 5 ? " +4 B" : "",
+                       best[0], best[1], best[1] * 100 / (best[0] ? best[0] : 1));
+        }
+}
+
+int main(void)
+{
+        float *x_end = train_native_guard(TRAIN_MOST), *h_end = train_native_guard(TRAIN_MOST);
+        train_faults faults = {0, 0, 0, 0, 0, 0};
+
+        if (!x_end || !h_end)
+        {
+                printf("arm64 train: 1 checks | 1 failures\n");
+                return 1;
+        }
+        train_residual_cases(fused_residual_add_f32, x_end, h_end, 1, &faults);
+        unsigned long long bad = faults.values + faults.bounded + faults.outside + faults.kept + faults.aliased + faults.integers;
+
+        for (unsigned long long i = 0; i < TRAIN_MOST; i++)
+                x_end[(long long)i - TRAIN_MOST - 64] = 1.0f / (float)(1 + (i & 1023)),
+                h_end[(long long)i - TRAIN_MOST - 64] = 1e-3f * (float)(i & 255);
+        train_time_residual(x_end - TRAIN_MOST - 64, h_end - TRAIN_MOST - 64);
+        printf("arm64 train: 6 checks | residual values %llu | bounded %llu | outside %llu | kept %llu | aliased %llu | integers %llu\n",
+               faults.values, faults.bounded, faults.outside, faults.kept, faults.aliased, faults.integers);
+        return bad != 0;
+}
+#endif /* CHECK_native_train */
+
 #ifdef CHECK_native_input_bases
 /* Exact lifted bounded input-base leaves on native Apple ARM silicon. */
 #include "input_bases.h"
@@ -124170,6 +124597,201 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_fill_rect */
+
+#ifdef BENCH_train
+/* The training and inference block against the compiler: the C loop each
+   routine replaces, built -O3 for the tier being timed (x86-64-v4 with 512-bit
+   vectors for the AVX-512 body, x86-64-v3 for AVX2 + FMA, the baseline for
+   SSE2; riscv64's with V for the V body), at sizes that live in L1, L2 and,
+   natively, L3: fused_residual_add_f32 over 2048, 65536 and 2097152 floats.
+   Paired medians of ASM/C and each side's best ticks a call; a name on the
+   command line runs one shape alone for perf stat. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+#if X64
+#define TRAIN_C_WIDE __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v4,prefer-vector-width=512")))
+#define TRAIN_C_YMM __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v3")))
+#elif RISCV64
+#define TRAIN_C_WIDE __attribute__((noinline, noclone, optimize("O3"), target("arch=+v")))
+#define TRAIN_C_YMM __attribute__((noinline, noclone, optimize("O3")))
+#else
+#define TRAIN_C_WIDE __attribute__((noinline, noclone, optimize("O3")))
+#define TRAIN_C_YMM __attribute__((noinline, noclone, optimize("O3")))
+#endif
+#define TRAIN_C_BASE __attribute__((noinline, noclone, optimize("O3")))
+
+#define TRAIN_C_RESIDUAL(name, attributes)                                                                \
+        attributes static fn name(f32 *restrict x, const f32 *restrict h, positive count, f32 alpha)      \
+        {                                                                                                  \
+                for (positive i = 0; i < count; i++)                                                       \
+                        x[i] = x[i] + alpha * h[i];                                                        \
+        }
+TRAIN_C_RESIDUAL(train_c_residual_wide, TRAIN_C_WIDE)
+TRAIN_C_RESIDUAL(train_c_residual_ymm, TRAIN_C_YMM)
+TRAIN_C_RESIDUAL(train_c_residual_base, TRAIN_C_BASE)
+
+typedef fn (*train_c_residual)(f32 *restrict, const f32 *restrict, positive, f32);
+
+#define TRAIN_FLOATS 2097152
+static f32 *train_x, *train_h;
+static train_c_residual train_former;
+
+static p64 run(bool assembly, positive count, positive reps)
+{
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+                if (assembly)
+                        fused_residual_add_f32(train_x, train_h, count, 1e-7f);
+                else
+                        train_former(train_x, train_h, count, 1e-7f);
+        return get_cpu_time() - start;
+}
+
+static fn train_hundredths(positive value)
+{
+        string_format(log, "%p.", value / 100);
+        positive_to_padded(log, value % 100, 2, '0', 0);
+}
+
+static fn train_residual_shapes(string_address tier)
+{
+#if X64
+        static const positive counts[] = {2048, 65536, 2097152};
+#else
+        static const positive counts[] = {2048, 65536};
+#endif
+        for (positive c = 0; c < sizeof(counts) / sizeof(counts[0]); c++)
+        {
+                positive count = counts[c], ratios[TRIES];
+#if X64
+                positive reps = (1u << 25) / count + 1;
+#else
+                positive reps = (1u << 17) / count + 1;
+#endif
+                p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                for (positive trial = 0; trial < TRIES; trial++)
+                {
+                        p64 former, assembly;
+
+                        BENCH_ALTERNATE(trial, former, run(false, count, reps), assembly, run(true, count, reps));
+                        ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                        best_c = former < best_c ? former : best_c;
+                        best_a = assembly < best_a ? assembly : best_a;
+                }
+                order(ratios, TRIES);
+                string_format(log, "fused_residual_add_f32 %p, %s: paired median ASM/C ", count, tier);
+                train_hundredths(ratios[TRIES / 2]);
+                string_format(log, "%%; best ticks a call ASM ");
+                train_hundredths((positive)(best_a * 100 / reps));
+                string_format(log, ", C ");
+                train_hundredths((positive)(best_c * 100 / reps));
+                log("\n", 1);
+        }
+}
+
+//      One shape on one tier, alone, for perf stat; "nothing" is the same
+//      program doing none, the baseline to subtract.
+#if X64
+static fn train_force(p32 tier)
+{
+        static p8 wide512 = 2, wide2, fused;
+
+        if (wide512 == 2)
+                wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+        cpu_has_avx512 = tier == 0 ? wide512 : 0;
+        cpu_has_avx2 = tier < 2 ? wide2 : 0;
+        cpu_has_fma = tier < 2 ? fused : 0;
+        train_former = tier == 0 ? train_c_residual_wide : tier == 1 ? train_c_residual_ymm : train_c_residual_base;
+}
+#else
+static fn train_force(p32 tier)
+{
+        (void)tier;
+        train_former = train_c_residual_base;
+}
+#endif
+#define TRAIN_NAMED(id, count, tier, assembly)                                                           \
+        static fn train_named_##id(void)                                                                 \
+        {                                                                                                \
+                train_force(tier);                                                                       \
+                run(assembly, count, (1u << 28) / (count));                                              \
+        }
+TRAIN_NAMED(residual_2048_zmm, 2048, 0, true)
+TRAIN_NAMED(residual_2048_zmm_c, 2048, 0, false)
+TRAIN_NAMED(residual_2048_ymm, 2048, 1, true)
+TRAIN_NAMED(residual_2048_ymm_c, 2048, 1, false)
+TRAIN_NAMED(residual_2048_xmm, 2048, 2, true)
+TRAIN_NAMED(residual_2048_xmm_c, 2048, 2, false)
+TRAIN_NAMED(residual_2097152_zmm, 2097152, 0, true)
+TRAIN_NAMED(residual_2097152_zmm_c, 2097152, 0, false)
+
+static fn train_named_nothing(void)
+{
+}
+
+static bench_work train_named(string_address name)
+{
+        BENCH_NAME(name, "nothing", train_named_nothing);
+        BENCH_NAME(name, "residual-2048-zmm", train_named_residual_2048_zmm);
+        BENCH_NAME(name, "residual-2048-zmm-c", train_named_residual_2048_zmm_c);
+        BENCH_NAME(name, "residual-2048-ymm", train_named_residual_2048_ymm);
+        BENCH_NAME(name, "residual-2048-ymm-c", train_named_residual_2048_ymm_c);
+        BENCH_NAME(name, "residual-2048-xmm", train_named_residual_2048_xmm);
+        BENCH_NAME(name, "residual-2048-xmm-c", train_named_residual_2048_xmm_c);
+        BENCH_NAME(name, "residual-2097152-zmm", train_named_residual_2097152_zmm);
+        BENCH_NAME(name, "residual-2097152-zmm-c", train_named_residual_2097152_zmm_c);
+        return null;
+}
+
+b32 main(void)
+{
+        train_x = memory(TRAIN_FLOATS * 4), train_h = memory((TRAIN_FLOATS + 512) * 4);
+        if (!train_x || !train_h)
+                return 1;
+        train_h += 480;
+        for (positive i = 0; i < TRAIN_FLOATS; i++)
+                train_x[i] = 1.0f / (f32)(1 + (i & 1023)), train_h[i] = 1e-3f * (f32)(i & 255);
+        BENCH_RUN_NAMED(train_named);
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                if ((tier == 0 && !wide512) || (tier == 1 && !(wide2 && fused)))
+                        continue;
+                train_force(tier);
+                train_residual_shapes(tier == 0 ? "avx512" : tier == 1 ? "avx2 fma" : "sse2");
+        }
+        cpu_has_avx512 = wide512, cpu_has_avx2 = wide2, cpu_has_fma = fused;
+#elif RISCV64
+        cpu_has_vector = 0;
+        fused_residual_add_f32(train_x, train_h, 1, 1e-7f);
+        p8 vector = cpu_has_vector;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+                train_former = tier == 0 ? train_c_residual_wide : train_c_residual_base;
+                train_residual_shapes(tier == 0 ? "V" : "no V");
+        }
+        cpu_has_vector = vector;
+#else
+        train_former = train_c_residual_base;
+        train_residual_shapes("neon");
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_train */
 
 #ifdef BENCH_translate_planes
 /* memory_translate_planes_u32_rect against the C loop it replaced in

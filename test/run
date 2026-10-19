@@ -127,7 +127,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train"
 
 describe()
 {
@@ -200,6 +200,7 @@ describe()
         builtins) echo "the commands the shell runs without leaving itself, and the expansions, against bash and dash" ;;
         awk)      echo "awk against the one on the machine, from generated programs" ;;
         checksum) echo "the cksum CRC against a bitwise model, in every mode, on three machines" ;;
+        train)    echo "the training and inference routines on every body of three machines, against references and pages that fault" ;;
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
@@ -249,7 +250,7 @@ seams="lib compress net link shell tools machine desktop image engine"
 seam_lanes()
 {
         case $1 in
-        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix" ;;
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix train" ;;
         compress) echo "tar zstd gzip xz compression_floor compression" ;;
         net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
         link) echo "waterlink link" ;;
@@ -5050,6 +5051,7 @@ base_field lib positive_into_base writer_fill positive_to_base_field
 human lib positive_into_human_1024_string positive_to_human_1024
 human_nearest lib positive_into_human_nearest_string wait_status_code_base wait_status_code
 fields lib positive_into_padded positive_into_pair
+train lib fused_residual_add_f32
 input_bases lib string_digits_max string_digits_octal_escape_max string_digits_octal_max string_digits_hexadecimal_escape_max string_digits_hexadecimal_max string_digits_base_max
 network lib network_load_16 network_load_32 network_store_16 network_store_32
 tensor lib swiglu_forward_f32 rmsnorm_forward_f32 rmsnorm_backward_f32
@@ -5058,7 +5060,7 @@ reserve lib memory_growth memory_reserve memory_release
 LIFTED
 
 status=0
-for case in byte_hunts bounded riscv_bits bulk reverse words squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor matrix; do
+for case in byte_hunts bounded riscv_bits bulk reverse words squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor matrix train; do
         cc -O2 -w -I"$work" "-DCHECK_native_$case" test/checks.c -o "$work/$case" || { status=1; continue; }
         "$work/$case" || status=1
 done
@@ -5665,6 +5667,13 @@ esac
 )
 
 lane_checksum() { freestanding_checks_lane checksum_crc checksum_crc; }
+
+#
+#       The training and inference routines, CHECK_train: every body each
+#       machine has against references written in the check, every array
+#       against a page that faults; the x86_64 run walks its tiers itself.
+#
+lane_train() { freestanding_checks_vector_lane train train; }
 
 #
 #       The differential engine, one domain at a time.
@@ -20964,7 +20973,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -20999,6 +21008,8 @@ bench_about()
                  bench_line="gemm_f32 at the trainer's shapes, in core cycles and percent of FMA peak, tier for tier, against a blocked C GEMM" ;;
         fill-rect) bench_section=BENCH_fill_rect
                  bench_line="rectangles of one 32-bit value, a cell's ground, against a fill a row" ;;
+        train)   bench_section=BENCH_train
+                 bench_line="the training and inference routines against the C loops a compiler vectorises for each body" ;;
         copy-changed) bench_section=BENCH_copy_changed
                  bench_line="a composed frame's rows stored to the card only where they changed, against C and a plain copy" ;;
         tensor)  bench_section=BENCH_tensor

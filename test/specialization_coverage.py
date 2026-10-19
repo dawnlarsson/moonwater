@@ -304,6 +304,10 @@ cover('folds_already', 'width', 'memory_blend_u32_rect',
 cover('folds_already', 'width', 'memory_fill_u32_rect',
       'the text engine hands it the parts of a cell its glyph leaves; their '
       'sizes come from the grid and the glyph at run time')
+cover('folds_already', 'count', 'fused_residual_add_f32',
+      'a training step hands it a whole activation, batch by context by '
+      'width: thousands to millions of floats a call, where a literal count '
+      'would remove one compare from a stream hundreds of cycles long')
 cover('folds_already', 'count', 'memory_copy_changed_u32',
       'the compositor hands it a row of the damage it composed; the width '
       'comes from the damage at run time, so no reachable call site passes '

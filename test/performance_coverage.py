@@ -280,6 +280,9 @@ cover('benchmark_context', 'test/checks.c#BENCH_matrix', 'matrix_engine_f32',
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fused_residual_add_f32',
+      'paired timing against the C loop at -O3 for the same instruction set, '
+      'over 2048, 65536 and 2097152 floats (L1, L2, L3), every x86-64 body')
 cover('direct_benchmark', 'test/checks.c#BENCH_translate_planes', 'memory_translate_planes_u32_rect',
       'paired timing against the C loop it replaced over a terminal strip and '
       'two cell sizes, grey and colour tables, with VBMI and without')

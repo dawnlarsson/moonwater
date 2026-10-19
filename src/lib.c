@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        413 routines (389 public, 24 local), 403 of them on all three and 10 local to one.
+        414 routines (390 public, 24 local), 404 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -159,6 +159,7 @@
           file_unload                    public  yes     yes     yes
           file_valid                     public  yes     yes     yes
           file_write                     public  yes     yes     yes
+          fused_residual_add_f32         public  yes     yes     yes
           gemm_f32                       public  yes     yes     yes
           get_cpu_time                   public  yes     yes     yes
           ghash_blocks                   public  yes     yes     yes
@@ -39121,6 +39122,175 @@ __asm__(
     ASM_END(memory_into_spelled)
 #endif
 );
+#endif
+
+/*
+        Training and inference arithmetic on f32 arrays.
+
+        fused_residual_add_f32(x, h, count, alpha) is x[i] = fma(alpha, h[i],
+        x[i]) for every i below count, in place: one rounding of the exact
+        alpha * h[i] + x[i]. h may be x itself, which is x * (1 + alpha) to
+        the same one rounding; no other overlap of the two is allowed.
+*/
+#ifndef KERNEL_MODE
+READS_WRITES(1, 3) READS(2, 3)
+fn fused_residual_add_f32(f32 address_to x, const f32 address_to h, positive count, f32 alpha);
+#if X64
+__asm__(
+    ASM_SECTION
+    //      fused_residual_add_f32: rdi x, rsi h, rdx count, xmm0 alpha. h is
+    //      loaded and x is the multiply-add's memory operand, four vectors a
+    //      turn each finished before the next, one index counting up to zero.
+    ASM_FUNC(fused_residual_add_f32)
+    "test %rdx, %rdx\n   jz .Ltrain_res_x_none\n   mov %rdx, %r8\n"
+    ASM_NARROW("cpu_has_avx2", ".Ltrain_res_x_sse2")
+    ASM_NARROW("cpu_has_fma", ".Ltrain_res_x_sse2")
+    ASM_NARROW("cpu_has_avx512", ".Ltrain_res_x_avx2")
+    //      From 64 on, when neither array is on a line, a masked head puts x
+    //      on one, which puts h on one too when the two came from one
+    //      allocator. A misaligned stream of loads costs more than a
+    //      misaligned x, so an h already on a line is left there.
+    "vbroadcastss %xmm0, %zmm0\n   cmp $64, %rdx\n   jb .Ltrain_res_x_zbody\n   mov %edi, %eax\n   and $63, %eax\n   jz .Ltrain_res_x_zbody\n"
+    "test $63, %sil\n   jz .Ltrain_res_x_zbody\n"
+    "shr $2, %eax\n   mov $16, %ecx\n   sub %eax, %ecx\n   mov $-1, %eax\n   bzhi %ecx, %eax, %eax\n   kmovw %eax, %k1\n"
+    "vmovups (%rsi), %zmm1{%k1}{z}\n   vfmadd213ps (%rdi), %zmm0, %zmm1{%k1}\n   vmovups %zmm1, (%rdi){%k1}\n"
+    "lea (%rdi,%rcx,4), %rdi\n   lea (%rsi,%rcx,4), %rsi\n   sub %rcx, %rdx\n"
+    ".Ltrain_res_x_zbody:\n   mov %rdx, %rcx\n   and $-64, %rcx\n   jz .Ltrain_res_x_z16\n"
+    "lea (%rdi,%rcx,4), %rdi\n   lea (%rsi,%rcx,4), %rsi\n   neg %rcx\n   shl $2, %rcx\n"
+    ".balign 64\n.Ltrain_res_x_z64:\n"
+    "vmovups (%rsi,%rcx), %zmm1\n   vfmadd213ps (%rdi,%rcx), %zmm0, %zmm1\n   vmovups %zmm1, (%rdi,%rcx)\n"
+    "vmovups 64(%rsi,%rcx), %zmm2\n   vfmadd213ps 64(%rdi,%rcx), %zmm0, %zmm2\n   vmovups %zmm2, 64(%rdi,%rcx)\n"
+    "vmovups 128(%rsi,%rcx), %zmm3\n   vfmadd213ps 128(%rdi,%rcx), %zmm0, %zmm3\n   vmovups %zmm3, 128(%rdi,%rcx)\n"
+    "vmovups 192(%rsi,%rcx), %zmm4\n   vfmadd213ps 192(%rdi,%rcx), %zmm0, %zmm4\n   vmovups %zmm4, 192(%rdi,%rcx)\n"
+    "add $256, %rcx\n   jnz .Ltrain_res_x_z64\n"
+    ".Ltrain_res_x_z16:\n   and $63, %edx\n"
+    ".Ltrain_res_x_z16_more:\n   cmp $16, %edx\n   jb .Ltrain_res_x_ztail\n"
+    "vmovups (%rsi), %zmm1\n   vfmadd213ps (%rdi), %zmm0, %zmm1\n   vmovups %zmm1, (%rdi)\n"
+    "add $64, %rdi\n   add $64, %rsi\n   sub $16, %edx\n   jmp .Ltrain_res_x_z16_more\n"
+    //      The last 1 to 15 under a mask: a window ending at the end of both
+    //      arrays when there were 16 or more, so no lane is outside them;
+    //      otherwise from the start, unless either window would reach the
+    //      next page, where a lane the mask leaves out still costs about 250
+    //      cycles when that page is not there.
+    ".Ltrain_res_x_ztail:\n   test %edx, %edx\n   jz .Ltrain_res_x_wide_done\n   cmp $16, %r8\n   jb .Ltrain_res_x_zshort\n"
+    "lea -64(%rdi,%rdx,4), %rdi\n   lea -64(%rsi,%rdx,4), %rsi\n   mov $16, %ecx\n   sub %edx, %ecx\n   mov $-1, %eax\n   shl %cl, %eax\n"
+    "jmp .Ltrain_res_x_zmask\n"
+    ".Ltrain_res_x_zshort:\n   mov %edi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_res_x_scalar\n"
+    "mov %esi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_res_x_scalar\n   mov $-1, %eax\n   bzhi %edx, %eax, %eax\n"
+    ".Ltrain_res_x_zmask:\n   kmovw %eax, %k1\n   vmovups (%rsi), %zmm1{%k1}{z}\n   vfmadd213ps (%rdi), %zmm0, %zmm1{%k1}\n"
+    "vmovups %zmm1, (%rdi){%k1}\n   vzeroupper\n" ASM_RET
+    //      AVX2 has no masks, so from 16 on the first and the last eight are
+    //      made from the arrays as they arrived, before anything is stored, and
+    //      stored after everything else: where they overlap what the loops
+    //      wrote they write the same values again, and nothing is done twice.
+    //      Between them x is on 32 bytes, unless h is and x is not.
+    ".Ltrain_res_x_avx2:\n   vbroadcastss %xmm0, %ymm0\n   cmp $16, %rdx\n   jb .Ltrain_res_x_y8_more\n"
+    "vmovups (%rsi), %ymm5\n   vfmadd213ps (%rdi), %ymm0, %ymm5\n   vmovups -32(%rsi,%rdx,4), %ymm6\n   vfmadd213ps -32(%rdi,%rdx,4), %ymm0, %ymm6\n"
+    "mov %rdi, %r10\n   lea -32(%rdi,%rdx,4), %r9\n   mov %edi, %eax\n   neg %eax\n   and $31, %eax\n   shr $2, %eax\n"
+    "xor %ecx, %ecx\n   test $31, %sil\n   cmovz %ecx, %eax\n"
+    "lea (%rdi,%rax,4), %rdi\n   lea (%rsi,%rax,4), %rsi\n   sub %rax, %rdx\n   mov %rdx, %rcx\n   and $-32, %rcx\n   jz .Ltrain_res_x_y8_ends\n"
+    "lea (%rdi,%rcx,4), %rdi\n   lea (%rsi,%rcx,4), %rsi\n   neg %rcx\n   shl $2, %rcx\n"
+    ".balign 64\n.Ltrain_res_x_y32:\n"
+    "vmovups (%rsi,%rcx), %ymm1\n   vfmadd213ps (%rdi,%rcx), %ymm0, %ymm1\n   vmovups %ymm1, (%rdi,%rcx)\n"
+    "vmovups 32(%rsi,%rcx), %ymm2\n   vfmadd213ps 32(%rdi,%rcx), %ymm0, %ymm2\n   vmovups %ymm2, 32(%rdi,%rcx)\n"
+    "vmovups 64(%rsi,%rcx), %ymm3\n   vfmadd213ps 64(%rdi,%rcx), %ymm0, %ymm3\n   vmovups %ymm3, 64(%rdi,%rcx)\n"
+    "vmovups 96(%rsi,%rcx), %ymm4\n   vfmadd213ps 96(%rdi,%rcx), %ymm0, %ymm4\n   vmovups %ymm4, 96(%rdi,%rcx)\n"
+    "add $128, %rcx\n   jnz .Ltrain_res_x_y32\n"
+    ".Ltrain_res_x_y8_ends:\n   and $31, %edx\n"
+    ".Ltrain_res_x_y8_end:\n   cmp $8, %edx\n   jb .Ltrain_res_x_yends\n"
+    "vmovups (%rsi), %ymm1\n   vfmadd213ps (%rdi), %ymm0, %ymm1\n   vmovups %ymm1, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rsi\n   sub $8, %edx\n   jmp .Ltrain_res_x_y8_end\n"
+    ".Ltrain_res_x_yends:\n   vmovups %ymm5, (%r10)\n   vmovups %ymm6, (%r9)\n   vzeroupper\n" ASM_RET
+    //      Under 16: eights, then scalars.
+    ".Ltrain_res_x_y8_more:\n   cmp $8, %edx\n   jb .Ltrain_res_x_ytail\n"
+    "vmovups (%rsi), %ymm1\n   vfmadd213ps (%rdi), %ymm0, %ymm1\n   vmovups %ymm1, (%rdi)\n"
+    "add $32, %rdi\n   add $32, %rsi\n   sub $8, %edx\n   jmp .Ltrain_res_x_y8_more\n"
+    ".Ltrain_res_x_ytail:\n   test %edx, %edx\n   jz .Ltrain_res_x_wide_done\n"
+    //      The fused bodies' scalars: the same single rounding as their vectors.
+    ".Ltrain_res_x_scalar:\n   vmovss (%rsi), %xmm1\n   vfmadd213ss (%rdi), %xmm0, %xmm1\n   vmovss %xmm1, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   dec %edx\n   jnz .Ltrain_res_x_scalar\n"
+    ".Ltrain_res_x_wide_done:\n   vzeroupper\n" ASM_RET
+    //      SSE2: the product rounded, then the sum. The ends as for AVX2 from
+    //      8 on, with x on 16 bytes between them.
+    ".Ltrain_res_x_sse2:\n   shufps $0, %xmm0, %xmm0\n   cmp $8, %rdx\n   jb .Ltrain_res_x_sone\n"
+    "movups (%rsi), %xmm5\n   mulps %xmm0, %xmm5\n   movups (%rdi), %xmm7\n   addps %xmm7, %xmm5\n"
+    "movups -16(%rsi,%rdx,4), %xmm6\n   mulps %xmm0, %xmm6\n   movups -16(%rdi,%rdx,4), %xmm7\n   addps %xmm7, %xmm6\n"
+    "mov %rdi, %r10\n   lea -16(%rdi,%rdx,4), %r9\n   mov %edi, %eax\n   neg %eax\n   and $15, %eax\n   shr $2, %eax\n"
+    "xor %ecx, %ecx\n   test $15, %sil\n   cmovz %ecx, %eax\n"
+    "lea (%rdi,%rax,4), %rdi\n   lea (%rsi,%rax,4), %rsi\n   sub %rax, %rdx\n   mov %rdx, %rcx\n   and $-16, %rcx\n   jz .Ltrain_res_x_s4\n"
+    "lea (%rdi,%rcx,4), %rdi\n   lea (%rsi,%rcx,4), %rsi\n   neg %rcx\n   shl $2, %rcx\n"
+    ".balign 64\n.Ltrain_res_x_s16:\n"
+    "movups (%rsi,%rcx), %xmm1\n   mulps %xmm0, %xmm1\n   movups (%rdi,%rcx), %xmm9\n   addps %xmm9, %xmm1\n   movups %xmm1, (%rdi,%rcx)\n"
+    "movups 16(%rsi,%rcx), %xmm2\n   mulps %xmm0, %xmm2\n   movups 16(%rdi,%rcx), %xmm10\n   addps %xmm10, %xmm2\n   movups %xmm2, 16(%rdi,%rcx)\n"
+    "movups 32(%rsi,%rcx), %xmm3\n   mulps %xmm0, %xmm3\n   movups 32(%rdi,%rcx), %xmm11\n   addps %xmm11, %xmm3\n   movups %xmm3, 32(%rdi,%rcx)\n"
+    "movups 48(%rsi,%rcx), %xmm4\n   mulps %xmm0, %xmm4\n   movups 48(%rdi,%rcx), %xmm12\n   addps %xmm12, %xmm4\n   movups %xmm4, 48(%rdi,%rcx)\n"
+    "add $64, %rcx\n   jnz .Ltrain_res_x_s16\n"
+    ".Ltrain_res_x_s4:\n   and $15, %edx\n"
+    ".Ltrain_res_x_s4_more:\n   cmp $4, %edx\n   jb .Ltrain_res_x_sends\n"
+    "movups (%rsi), %xmm1\n   mulps %xmm0, %xmm1\n   movups (%rdi), %xmm9\n   addps %xmm9, %xmm1\n   movups %xmm1, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rsi\n   sub $4, %edx\n   jmp .Ltrain_res_x_s4_more\n"
+    ".Ltrain_res_x_sends:\n   movups %xmm5, (%r10)\n   movups %xmm6, (%r9)\n" ASM_RET
+    //      Under 8, one at a time.
+    ".Ltrain_res_x_sone:\n   movss (%rsi), %xmm1\n   mulss %xmm0, %xmm1\n   addss (%rdi), %xmm1\n   movss %xmm1, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   dec %edx\n   jnz .Ltrain_res_x_sone\n"
+    ".Ltrain_res_x_none:\n" ASM_RET
+    ASM_END(fused_residual_add_f32)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //      fused_residual_add_f32: x0 x, x1 h, x2 count, s0 alpha. Eight
+    //      vectors a turn in ldp and stp pairs, then four floats, then one;
+    //      fmla and fmadd round once, as the x86_64 block says. An M2 does not
+    //      mind 16 or 32 bytes off, and minds 4 (0.25 cycles a float in L1
+    //      against 0.19): from 64 on, when neither array is on 16 bytes, up to
+    //      three floats one at a time put x there.
+    ASM_FUNC(fused_residual_add_f32)
+    "dup v31.4s, v0.s[0]\n   cmp x2, #64\n   b.lo 8f\n   tst x1, #15\n   b.eq 8f\n   neg x4, x0\n   ubfx x4, x4, #2, #2\n   cbz x4, 8f\n   sub x2, x2, x4\n"
+    "7:  ldr s0, [x1], #4\n   ldr s16, [x0]\n   fmadd s16, s0, s31, s16\n   str s16, [x0], #4\n   subs x4, x4, #1\n   b.ne 7b\n"
+    "8:  lsr x3, x2, #5\n   cbz x3, 2f\n"
+    "1:  ldp q0, q1, [x1]\n   ldp q16, q17, [x0]\n   ldp q2, q3, [x1, #32]\n   ldp q18, q19, [x0, #32]\n"
+    "ldp q4, q5, [x1, #64]\n   ldp q20, q21, [x0, #64]\n   ldp q6, q7, [x1, #96]\n   ldp q22, q23, [x0, #96]\n   add x1, x1, #128\n"
+    "fmla v16.4s, v0.4s, v31.4s\n   fmla v17.4s, v1.4s, v31.4s\n   fmla v18.4s, v2.4s, v31.4s\n   fmla v19.4s, v3.4s, v31.4s\n"
+    "fmla v20.4s, v4.4s, v31.4s\n   fmla v21.4s, v5.4s, v31.4s\n   fmla v22.4s, v6.4s, v31.4s\n   fmla v23.4s, v7.4s, v31.4s\n"
+    "stp q16, q17, [x0]\n   stp q18, q19, [x0, #32]\n   stp q20, q21, [x0, #64]\n   stp q22, q23, [x0, #96]\n   add x0, x0, #128\n"
+    "subs x3, x3, #1\n   b.ne 1b\n"
+    "2:  and x2, x2, #31\n   cmp x2, #4\n   b.lo 3f\n"
+    "4:  ldr q0, [x1], #16\n   ldr q16, [x0]\n   fmla v16.4s, v0.4s, v31.4s\n   str q16, [x0], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 4b\n"
+    "3:  cbz x2, 5f\n"
+    "6:  ldr s0, [x1], #4\n   ldr s16, [x0]\n   fmadd s16, s0, s31, s16\n   str s16, [x0], #4\n   subs x2, x2, #1\n   b.ne 6b\n"
+    "5:  " ASM_RET
+    ASM_END(fused_residual_add_f32)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      fused_residual_add_f32: a0 x, a1 h, a2 count, fa0 alpha. With V,
+    //      as many floats as eight registers hold, vfmacc.vf; without it four
+    //      floats a turn, fmadd.s. Both round once, as the x86_64 block says.
+    ASM_FUNC(fused_residual_add_f32)
+    "beqz a2, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   fsw fa0, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   flw fa0, 0(sp)\n   addi sp, sp, 16\n"
+    "j fused_residual_add_f32\n"
+#endif
+    "1:  li t0, 4\n   bltu a2, t0, 3f\n"
+    "2:  flw ft0, 0(a1)\n   flw ft1, 4(a1)\n   flw ft2, 8(a1)\n   flw ft3, 12(a1)\n   flw ft4, 0(a0)\n   flw ft5, 4(a0)\n   flw ft6, 8(a0)\n   flw ft7, 12(a0)\n"
+    "fmadd.s ft4, ft0, fa0, ft4\n   fmadd.s ft5, ft1, fa0, ft5\n   fmadd.s ft6, ft2, fa0, ft6\n   fmadd.s ft7, ft3, fa0, ft7\n"
+    "fsw ft4, 0(a0)\n   fsw ft5, 4(a0)\n   fsw ft6, 8(a0)\n   fsw ft7, 12(a0)\n   addi a0, a0, 16\n   addi a1, a1, 16\n   addi a2, a2, -4\n   bgeu a2, t0, 2b\n"
+    "3:  beqz a2, 9f\n"
+    "4:  flw ft0, 0(a1)\n   flw ft4, 0(a0)\n   fmadd.s ft4, ft0, fa0, ft4\n   fsw ft4, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   bnez a2, 4b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  vsetvli t0, a2, e32, m8, ta, ma\n   vle32.v v8, (a1)\n   vle32.v v16, (a0)\n   vfmacc.vf v16, fa0, v8\n   vse32.v v16, (a0)\n"
+    "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   sub a2, a2, t0\n   bnez a2, 5b\n" ASM_RET
+#endif
+    ASM_END(fused_residual_add_f32)
+    ".option pop\n"
+);
+#endif
 #endif
 
 string_address string_copy(string_address destination, string_address source);
