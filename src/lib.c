@@ -4977,6 +4977,57 @@ __asm__(
     "popcnt %rdx, %rdx\n   add %rdx, %rax\n"
 
 //
+//      memory_count_words's pieces. W is a 64-byte block's white space mask,
+//      w the white flag of the byte before the block (1 - inside); a word
+//      starts at ~W & ((W << 1) | w), and the next block's w is W >> 63.
+//      Counting from the white mask and not from its complement saves the
+//      not: lea, andn, popcnt, add and shr a block.
+//
+#define WORDS_X64_START(W, CIN, T)                                            \
+    "lea (%" CIN ",%" W ",2), %" T "\n   andn %" T ", %" W ", %" T "\n   popcnt %" T ", %" T "\n   add %" T ", %rax\n"
+//      A byte that is zero exactly at white space, the block loaded once:
+//      min((x - 9) -sat 4, x ^ 32), tested into the mask K.
+#define WORDS_X64_MIN(SRC, X, A, B, K)                                        \
+    "vmovdqu64 " SRC ", %" X "\n   vpaddb %" X ", %zmm2, %" A "\n   vpxorq %" X ", %zmm4, %" B "\n" \
+    "vpsubusb %zmm3, %" A ", %" A "\n   vpminub %" B ", %" A ", %" A "\n   vptestnmb %" A ", %" A ", %" K "\n"
+//      The same byte with VBMI: T[x & 63] | (x & 0xc0), T zero at 9 to 13 and
+//      at 32 -- the lookup cannot see the top two bits, so they are or-ed back.
+#define WORDS_X64_VBMI(SRC, X, A, K)                                          \
+    "vmovdqu64 " SRC ", %" X "\n   vpermb %zmm15, %" X ", %" A "\n   vpternlogd $0xf8, %zmm14, %" X ", %" A "\n" \
+    "vptestnmb %" A ", %" A ", %" K "\n"
+//      Thirty two and sixteen bytes of it, 0xff at white space.
+#define WORDS_X64_YMM(SRC, A, B)                                              \
+    "vpaddb " SRC ", %ymm2, %" A "\n   vpxor " SRC ", %ymm4, %" B "\n   vpsubusb %ymm3, %" A ", %" A "\n" \
+    "vpminub %" B ", %" A ", %" A "\n   vpcmpeqb %ymm7, %" A ", %" A "\n"
+#define WORDS_X64_XMM(SRC, A, B)                                              \
+    "movdqu " SRC ", %" A "\n   movdqa %" A ", %" B "\n   paddb %xmm2, %" A "\n   pxor %xmm4, %" B "\n" \
+    "psubusb %xmm3, %" A "\n   pminub %" B ", %" A "\n   pcmpeqb %xmm7, %" A "\n"
+//      The white mask of the 64 bytes at SRC into %r8, by tier.
+#define WORDS_X64_ZMASK(SRC) WORDS_X64_MIN(SRC, "zmm16", "zmm20", "zmm24", "k1") "kmovq %k1, %r8\n"
+#define WORDS_X64_YMASK(SRC0, SRC1)                                           \
+    WORDS_X64_YMM(SRC0, "ymm0", "ymm1") WORDS_X64_YMM(SRC1, "ymm5", "ymm6")    \
+    "vpmovmskb %ymm0, %r8d\n   vpmovmskb %ymm5, %ecx\n   shl $32, %rcx\n   or %rcx, %r8\n"
+#define WORDS_X64_XMASK(SRC0, SRC1, SRC2, SRC3)                               \
+    WORDS_X64_XMM(SRC0, "xmm0", "xmm1") "pmovmskb %xmm0, %r8d\n"              \
+    WORDS_X64_XMM(SRC1, "xmm0", "xmm1") "pmovmskb %xmm0, %ecx\n   shl $16, %ecx\n   or %ecx, %r8d\n" \
+    WORDS_X64_XMM(SRC2, "xmm0", "xmm1") "pmovmskb %xmm0, %r10d\n"             \
+    WORDS_X64_XMM(SRC3, "xmm0", "xmm1")                                       \
+    "pmovmskb %xmm0, %ecx\n   shl $16, %ecx\n   or %ecx, %r10d\n   shl $32, %r10\n   or %r10, %r8\n"
+//      The last %rsi < 64 bytes for the AVX bodies, the flag of the byte
+//      before them in %rdx: read as the block at %rdi when the 64 bytes are on
+//      its page, the starts past the count dropped; else as the count's last
+//      64 bytes when the count had them (%r11 is where it began), the ones
+//      already counted shifted out; else a byte at a time.
+#define WORDS_X64_TAIL(MASK_AT_RDI, MASK_AT_RCX, OUT, BYTES)                  \
+    "test %rsi, %rsi\n   jz " OUT "\n   mov %edi, %ecx\n   and $4095, %ecx\n   cmp $4032, %ecx\n   ja 1f\n" \
+    MASK_AT_RDI "lea (%rdx,%r8,2), %rcx\n   andn %rcx, %r8, %rcx\n   bzhi %rsi, %rcx, %rcx\n   popcnt %rcx, %rcx\n" \
+    "add %rcx, %rax\n   lea -1(%rsi), %ecx\n   shrx %rcx, %r8, %rdx\n   and $1, %edx\n   jmp " OUT "\n" \
+    "1:  lea -64(%rdi,%rsi), %rcx\n   cmp %r11, %rcx\n   jb " BYTES "\n" MASK_AT_RCX \
+    "mov %r8, %r10\n   shr $63, %r10\n   mov $64, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8\n" \
+    "lea (%rdx,%r8,2), %rcx\n   andn %rcx, %r8, %rcx\n   bzhi %rsi, %rcx, %rcx\n   popcnt %rcx, %rcx\n   add %rcx, %rax\n" \
+    "mov %r10, %rdx\n   jmp " OUT "\n"
+
+//
 //      Two streams and no length, from where four word steps have agreed.
 //
 //      Neither pointer can be aligned down, because aligning one misaligns
@@ -6904,22 +6955,113 @@ __asm__(
     // Count transitions from ASCII whitespace into non-whitespace, carrying
     // the incoming word state in a register and returning count/state in the
     // ABI's ordinary two-register aggregate.
+    //
+    //      Sixty four bytes a mask, the starts counted out of it in general
+    //      registers (WORDS_X64_START above), four blocks a turn with AVX-512
+    //      and two with AVX2, one with SSE2, and the last block read whole
+    //      rather than a byte at a time. It was 32 bytes a turn on AVX2 with a
+    //      not in the count, on AVX-512 too, and a byte loop under 32 bytes and
+    //      on every machine without AVX2. On a 9950X, core cycles a 64-byte
+    //      block: AVX-512 6.6 to 2.9 at 64 KiB calls (the L2 reads 64 bytes in
+    //      1.35, and the work is 2.07 with the block in L1), 96 to 16 at 50-byte
+    //      calls; AVX2 6.6 to 3.9; SSE2 196 to 8. The mask by vpermb is 2.47
+    //      against 2.70 by the min fold at 64 KiB; kept out of the vector
+    //      registers' own count (0/1 bytes, vpermt2b for the byte before,
+    //      vpsadbw) it was 3.19.
+    //
     ASM_FUNC(memory_count_words)
     "xor %eax, %eax\n   and $1, %edx\n   test %rsi, %rsi\n   jz .Lmemory_words_x64_done\n"
 #ifndef KERNEL_MODE
-    "cmp $32, %rsi\n   jb .Lmemory_words_x64_loop\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_words_x64_loop\n   mov $32, %ecx\n   vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
-    "mov $8, %ecx\n   vmovd %ecx, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   mov $14, %ecx\n   vmovd %ecx, %xmm3\n   vpbroadcastb %xmm3, %ymm3\n"
-    // Signed range comparisons exclude high bytes: neither negative bytes
-    // nor 0..8 pass the lower bound. Bits mark non-space bytes, so a word
-    // starts exactly where the preceding bit (or incoming state) is clear.
-    ".Lmemory_words_x64_vector:\n   vmovdqu (%rdi), %ymm0\n   vpcmpgtb %ymm2, %ymm0, %ymm4\n   vpcmpgtb %ymm0, %ymm3, %ymm5\n   vpand %ymm5, %ymm4, %ymm4\n   vpcmpeqb %ymm1, %ymm0, %ymm5\n"
-    "vpor %ymm5, %ymm4, %ymm4\n   vpmovmskb %ymm4, %ecx\n   not %ecx\n   lea (%rcx,%rcx), %r8d\n   or %edx, %r8d\n   not %r8d\n   and %ecx, %r8d\n"
-    "popcnt %r8d, %r8d\n   add %r8, %rax\n   shr $31, %ecx\n   mov %ecx, %edx\n   add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n   jae .Lmemory_words_x64_vector\n"
-    "vzeroupper\n   test %rsi, %rsi\n   jz .Lmemory_words_x64_done\n"
+    "cmp $8, %rsi\n   jb .Lmemory_words_x64_loop\n   xor $1, %edx  # now the white flag of the byte before\n   mov %rdi, %r11\n"
+    ASM_NARROW("cpu_has_avx2", ".Lmemory_words_x64_sse2")
+    ASM_NARROW("cpu_has_avx512", ".Lmemory_words_x64_avx2")
+    "mov $-9, %ecx\n   vpbroadcastb %ecx, %zmm2\n   mov $4, %ecx\n   vpbroadcastb %ecx, %zmm3\n   mov $32, %ecx\n   vpbroadcastb %ecx, %zmm4\n"
+    "cmp $256, %rsi\n   jb .Lmemory_words_x64_z_one\n   push %rbx\n   push %r12\n"
+    "cmpb $0, cpu_has_avx512_vbmi(%rip)\n   je .Lmemory_words_x64_z_min\n"
+    "vmovdqu64 .Lmemory_words_x64_white(%rip), %zmm15\n   mov $0xc0, %ecx\n   vpbroadcastb %ecx, %zmm14\n"
+    ".balign 32\n.Lmemory_words_x64_z_vbmi:\n"
+    WORDS_X64_VBMI("(%rdi)", "zmm16", "zmm20", "k1") WORDS_X64_VBMI("64(%rdi)", "zmm17", "zmm21", "k2")
+    WORDS_X64_VBMI("128(%rdi)", "zmm18", "zmm22", "k3") WORDS_X64_VBMI("192(%rdi)", "zmm19", "zmm23", "k4")
+    "kmovq %k1, %r8\n   kmovq %k2, %r10\n   kmovq %k3, %r9\n   kmovq %k4, %rbx\n"
+    WORDS_X64_START("r8", "rdx", "rcx") "shr $63, %r8\n"
+    WORDS_X64_START("r10", "r8", "r12") "shr $63, %r10\n"
+    WORDS_X64_START("r9", "r10", "rcx") "shr $63, %r9\n"
+    WORDS_X64_START("rbx", "r9", "r12") "shr $63, %rbx\n   mov %rbx, %rdx\n"
+    "add $256, %rdi\n   sub $256, %rsi\n   cmp $256, %rsi\n   jae .Lmemory_words_x64_z_vbmi\n   jmp .Lmemory_words_x64_z_four_done\n"
+    ".balign 32\n.Lmemory_words_x64_z_min:\n"
+    WORDS_X64_MIN("(%rdi)", "zmm16", "zmm20", "zmm24", "k1") WORDS_X64_MIN("64(%rdi)", "zmm17", "zmm21", "zmm25", "k2")
+    WORDS_X64_MIN("128(%rdi)", "zmm18", "zmm22", "zmm26", "k3") WORDS_X64_MIN("192(%rdi)", "zmm19", "zmm23", "zmm27", "k4")
+    "kmovq %k1, %r8\n   kmovq %k2, %r10\n   kmovq %k3, %r9\n   kmovq %k4, %rbx\n"
+    WORDS_X64_START("r8", "rdx", "rcx") "shr $63, %r8\n"
+    WORDS_X64_START("r10", "r8", "r12") "shr $63, %r10\n"
+    WORDS_X64_START("r9", "r10", "rcx") "shr $63, %r9\n"
+    WORDS_X64_START("rbx", "r9", "r12") "shr $63, %rbx\n   mov %rbx, %rdx\n"
+    "add $256, %rdi\n   sub $256, %rsi\n   cmp $256, %rsi\n   jae .Lmemory_words_x64_z_min\n"
+    ".Lmemory_words_x64_z_four_done:\n   pop %r12\n   pop %rbx\n"
+    ".Lmemory_words_x64_z_one:\n   cmp $64, %rsi\n   jb .Lmemory_words_x64_z_tail\n" WORDS_X64_ZMASK("(%rdi)")
+    WORDS_X64_START("r8", "rdx", "rcx") "shr $63, %r8\n   mov %r8, %rdx\n   add $64, %rdi\n   sub $64, %rsi\n   jmp .Lmemory_words_x64_z_one\n"
+    ".Lmemory_words_x64_z_tail:\n"
+    WORDS_X64_TAIL(WORDS_X64_ZMASK("(%rdi)"), WORDS_X64_ZMASK("(%rcx)"), ".Lmemory_words_x64_vector_out",
+                   ".Lmemory_words_x64_vector_bytes")
+    //      AVX2: 128 bytes a turn, then 64
+    ".Lmemory_words_x64_avx2:\n"
+    "mov $-9, %ecx\n   vmovd %ecx, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   mov $4, %ecx\n   vmovd %ecx, %xmm3\n   vpbroadcastb %xmm3, %ymm3\n"
+    "mov $32, %ecx\n   vmovd %ecx, %xmm4\n   vpbroadcastb %xmm4, %ymm4\n   vpxor %xmm7, %xmm7, %xmm7\n"
+    "cmp $128, %rsi\n   jb .Lmemory_words_x64_y_one\n   push %rbx\n"
+    ".balign 32\n.Lmemory_words_x64_y_two:\n"
+    WORDS_X64_YMM("(%rdi)", "ymm0", "ymm1") WORDS_X64_YMM("32(%rdi)", "ymm5", "ymm6")
+    WORDS_X64_YMM("64(%rdi)", "ymm8", "ymm9") WORDS_X64_YMM("96(%rdi)", "ymm10", "ymm11")
+    "vpmovmskb %ymm0, %r8d\n   vpmovmskb %ymm5, %ecx\n   vpmovmskb %ymm8, %r10d\n   vpmovmskb %ymm10, %r9d\n"
+    "shl $32, %rcx\n   or %rcx, %r8\n   shl $32, %r9\n   or %r9, %r10\n"
+    WORDS_X64_START("r8", "rdx", "rcx") "shr $63, %r8\n"
+    WORDS_X64_START("r10", "r8", "rbx") "shr $63, %r10\n   mov %r10, %rdx\n"
+    "sub $-128, %rdi\n   add $-128, %rsi\n   cmp $128, %rsi\n   jae .Lmemory_words_x64_y_two\n   pop %rbx\n"
+    ".Lmemory_words_x64_y_one:\n   cmp $64, %rsi\n   jb .Lmemory_words_x64_y_tail\n" WORDS_X64_YMASK("(%rdi)", "32(%rdi)")
+    WORDS_X64_START("r8", "rdx", "rcx") "shr $63, %r8\n   mov %r8, %rdx\n   add $64, %rdi\n   sub $64, %rsi\n   jmp .Lmemory_words_x64_y_one\n"
+    ".Lmemory_words_x64_y_tail:\n"
+    WORDS_X64_TAIL(WORDS_X64_YMASK("(%rdi)", "32(%rdi)"), WORDS_X64_YMASK("(%rcx)", "32(%rcx)"),
+                   ".Lmemory_words_x64_vector_out", ".Lmemory_words_x64_vector_bytes")
+    ".Lmemory_words_x64_vector_out:\n   vzeroupper\n   xor $1, %edx\n   jmp .Lmemory_words_x64_done\n"
+    ".Lmemory_words_x64_vector_bytes:\n   vzeroupper\n   xor $1, %edx\n   jmp .Lmemory_words_x64_loop\n"
+    //      SSE2: 64 bytes a turn, counted from the word flag (no andn on this tier), the tail without BMI
+    ".Lmemory_words_x64_sse2:\n"
+    "mov $0xf7f7f7f7, %ecx\n   movd %ecx, %xmm2\n   pshufd $0, %xmm2, %xmm2\n   mov $0x04040404, %ecx\n   movd %ecx, %xmm3\n   pshufd $0, %xmm3, %xmm3\n"
+    "mov $0x20202020, %ecx\n   movd %ecx, %xmm4\n   pshufd $0, %xmm4, %xmm4\n   pxor %xmm7, %xmm7\n"
+    "xor $1, %edx  # the loop counts from the word flag\n"
+    ".balign 32\n.Lmemory_words_x64_x_one:\n   cmp $64, %rsi\n   jb .Lmemory_words_x64_x_flip\n"
+    "movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm8\n   movdqa %xmm0, %xmm1\n   movdqa %xmm8, %xmm9\n   paddb %xmm2, %xmm0\n   paddb %xmm2, %xmm8\n   pxor %xmm4, %xmm1\n   pxor %xmm4, %xmm9\n"
+    "psubusb %xmm3, %xmm0\n   psubusb %xmm3, %xmm8\n   pminub %xmm1, %xmm0\n   pminub %xmm9, %xmm8\n   pcmpeqb %xmm7, %xmm0\n   pcmpeqb %xmm7, %xmm8\n   pmovmskb %xmm0, %r8d\n   pmovmskb %xmm8, %r10d\n"
+    "movdqu 32(%rdi), %xmm0\n   movdqu 48(%rdi), %xmm8\n   movdqa %xmm0, %xmm1\n   movdqa %xmm8, %xmm9\n   paddb %xmm2, %xmm0\n   paddb %xmm2, %xmm8\n   pxor %xmm4, %xmm1\n   pxor %xmm4, %xmm9\n"
+    "psubusb %xmm3, %xmm0\n   psubusb %xmm3, %xmm8\n   pminub %xmm1, %xmm0\n   pminub %xmm9, %xmm8\n   pcmpeqb %xmm7, %xmm0\n   pcmpeqb %xmm7, %xmm8\n   pmovmskb %xmm0, %ecx\n   pmovmskb %xmm8, %r9d\n"
+    "shl $16, %r10d\n   or %r10d, %r8d\n   shl $16, %r9d\n   or %r9d, %ecx\n   shl $32, %rcx\n   or %rcx, %r8\n   not %r8  # the word bytes\n"
+    "lea (%rdx,%r8,2), %rcx\n   not %rcx\n   and %r8, %rcx\n   popcnt %rcx, %rcx\n   add %rcx, %rax\n   shr $63, %r8\n   mov %r8, %rdx\n"
+    "add $64, %rdi\n   sub $64, %rsi\n   jmp .Lmemory_words_x64_x_one\n"
+    ".Lmemory_words_x64_x_flip:\n   xor $1, %edx\n"
+    "test %rsi, %rsi\n   jz .Lmemory_words_x64_x_out\n"
+    "mov %edi, %ecx\n   and $4095, %ecx\n   cmp $4032, %ecx\n   ja 1f\n"
+    WORDS_X64_XMASK("(%rdi)", "16(%rdi)", "32(%rdi)", "48(%rdi)")
+    "lea (%rdx,%r8,2), %r9\n   mov %r8, %r10\n   not %r10\n   and %r10, %r9\n   mov %esi, %ecx\n   mov $1, %r10d\n   shl %cl, %r10\n   dec %r10\n"
+    "and %r10, %r9\n   popcnt %r9, %r9\n   add %r9, %rax\n   lea -1(%rsi), %ecx\n   shr %cl, %r8\n   and $1, %r8d\n   mov %r8, %rdx\n"
+    "jmp .Lmemory_words_x64_x_out\n"
+    "1:  lea -64(%rdi,%rsi), %r9\n   cmp %r11, %r9\n   jb .Lmemory_words_x64_x_bytes\n"
+    WORDS_X64_XMASK("(%r9)", "16(%r9)", "32(%r9)", "48(%r9)")
+    "mov %r8, %r10\n   shr $63, %r10\n   mov $64, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8\n"
+    "lea (%rdx,%r8,2), %r9\n   not %r8\n   and %r8, %r9\n   mov %esi, %ecx\n   mov $1, %r8d\n   shl %cl, %r8\n   dec %r8\n   and %r8, %r9\n"
+    "popcnt %r9, %r9\n   add %r9, %rax\n   mov %r10, %rdx\n"
+    ".Lmemory_words_x64_x_out:\n   xor $1, %edx\n   jmp .Lmemory_words_x64_done\n"
+    ".Lmemory_words_x64_x_bytes:\n   xor $1, %edx\n"
 #endif
     ".Lmemory_words_x64_loop:\n   movzbl (%rdi), %ecx\n   cmp $0x20, %cl\n   sete %r8b\n   sub $9, %ecx\n   cmp $4, %ecx\n   setbe %r9b\n   or %r9b, %r8b\n   xor $1, %r8b\n"
     "movzbl %r8b, %ecx\n   xor $1, %edx\n   and %ecx, %edx\n   add %rdx, %rax\n   mov %ecx, %edx\n   inc %rdi\n   dec %rsi\n   jnz .Lmemory_words_x64_loop\n"
     ".Lmemory_words_x64_done:\n" ASM_RET
+#ifndef KERNEL_MODE
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Lmemory_words_x64_white:\n   .byte 255,255,255,255,255,255,255,255,255,0,0,0,0,0,255,255\n"
+    "   .byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255\n"
+    "   .byte 0,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255\n"
+    "   .byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255\n"
+    ".popsection\n"
+#endif
     ASM_END(memory_count_words)
     ASM_FUNC(memory_compare)
     //
@@ -19031,25 +19173,64 @@ __asm__(
     "mov x3, #0\n   and w2, w2, #1\n   cbz x1, .Lmemory_words_arm64_done\n"
 #ifndef KERNEL_MODE
     //
-    //       Sixteen bytes a turn. A byte is white space if it is a space or from 9 to 13; the byte before each
-    //       lane is the lane below it, and the last lane of the vector before comes from a vector register the
-    //       turn keeps (ext by fifteen), so a word starts where the byte before is white and this one is not.
-    //       Each such lane adds one to a byte-wide accumulator by subtracting its 0xff, drained through uaddlv
-    //       every 255 turns before a lane could wrap, as memory_count does. The byte loop under it was a chain
-    //       through the state, 3 cycles a byte. 16 KiB of words, M2 Pro, GB/s: 1.35 before and 27.7 after.
+    //       A byte is white space if it is a space or from 9 to 13: one tbl over 48 bytes that are 0xff at 9 to
+    //       13 and at 32 (an index past the table reads zero). The byte before each lane is the lane below it,
+    //       and the last lane of the vector before comes from the vector that held it (ext by fifteen), so a
+    //       word starts where the byte before is white and this one is not; each such lane subtracts its 0xff
+    //       from a byte-wide accumulator. From 128 bytes, eight vectors a turn in two halves of four, the
+    //       halves' starts added in a tree before they meet the accumulator (a lane takes at most four a half,
+    //       so 63 turns before a drain), and the second half's last vector is v31, the next turn's byte before,
+    //       so nothing is moved. Under 128, a vector a turn. Under sixteen left, the count's last sixteen bytes
+    //       with the lanes already counted masked off, where a byte loop finished them. M2 Pro, GB/s: 64 KiB
+    //       calls 29.9 before and 44.3 after, 300-byte calls 16.8 and 32.8, 50-byte 12.6 and 15.5. A tbl with
+    //       three table registers issues as two of the four SIMD pipes' operations: with one register the same
+    //       turn (wrong answers, the shape alone) ran 53.9, so 44.3 is the twenty operations a 64 bytes take.
     //
-    "cmp x1, #16\n   b.lo .Lmemory_words_arm64_loop\n   movi v31.16b, #0x20\n   movi v30.16b, #9\n   movi v29.16b, #4\n   movi v26.16b, #0\n"
-    "eor w9, w2, #1\n   neg w9, w9\n   dup v27.16b, w9\n   mov x6, #255\n"
-    ".Lmemory_words_arm64_vector:  cmp x1, #16\n   b.lo .Lmemory_words_arm64_vector_done\n   ld1 {v0.16b}, [x0], #16\n"
-    "cmeq v1.16b, v0.16b, v31.16b\n   sub v2.16b, v0.16b, v30.16b\n   cmhs v2.16b, v29.16b, v2.16b\n   orr v1.16b, v1.16b, v2.16b\n"
-    "ext v3.16b, v27.16b, v1.16b, #15\n   bic v3.16b, v3.16b, v1.16b\n   sub v26.16b, v26.16b, v3.16b\n   mov v27.16b, v1.16b\n"
-    "sub x1, x1, #16\n   subs x6, x6, #1\n   b.ne .Lmemory_words_arm64_vector\n"
-    "uaddlv h4, v26.16b\n   umov w7, v4.h[0]\n   add x3, x3, x7\n   movi v26.16b, #0\n   mov x6, #255\n   b .Lmemory_words_arm64_vector\n"
-    ".Lmemory_words_arm64_vector_done:\n   uaddlv h4, v26.16b\n   umov w7, v4.h[0]\n   add x3, x3, x7\n   umov w9, v27.b[15]\n   cmp w9, #0\n   cset w2, eq\n   cbz x1, .Lmemory_words_arm64_done\n"
+    "cmp x1, #16\n   b.lo .Lmemory_words_arm64_loop\n"
+    "movi v24.2d, #0x0000ffffffffff00\n   mov v24.d[0], xzr\n   movi v25.2d, #0\n   movi d26, #0x00000000000000ff\n"
+    "eor w9, w2, #1\n   neg w9, w9\n   dup v31.16b, w9\n   movi v20.16b, #0\n"
+    "cmp x1, #128\n   b.lo .Lmemory_words_arm64_sixteen\n"
+    ".Lmemory_words_arm64_round:\n   movi v20.16b, #0\n   movi v21.16b, #0\n"
+    "lsr x6, x1, #7\n   mov x7, #63\n   cmp x6, x7\n   csel x6, x6, x7, lo\n   sub x1, x1, x6, lsl #7\n"
+    ".balign 16\n"
+    ".Lmemory_words_arm64_turn:\n   ld1 {v0.16b-v3.16b}, [x0], #64\n"
+    "tbl v4.16b, {v24.16b-v26.16b}, v0.16b\n   tbl v5.16b, {v24.16b-v26.16b}, v1.16b\n"
+    "tbl v6.16b, {v24.16b-v26.16b}, v2.16b\n   tbl v7.16b, {v24.16b-v26.16b}, v3.16b\n"
+    "ext v16.16b, v31.16b, v4.16b, #15\n   ext v17.16b, v4.16b, v5.16b, #15\n   ext v18.16b, v5.16b, v6.16b, #15\n   ext v19.16b, v6.16b, v7.16b, #15\n"
+    "bic v16.16b, v16.16b, v4.16b\n   bic v17.16b, v17.16b, v5.16b\n   bic v18.16b, v18.16b, v6.16b\n   bic v19.16b, v19.16b, v7.16b\n"
+    "add v16.16b, v16.16b, v17.16b\n   add v18.16b, v18.16b, v19.16b\n   add v16.16b, v16.16b, v18.16b\n   sub v20.16b, v20.16b, v16.16b\n"
+    "ld1 {v0.16b-v3.16b}, [x0], #64\n"
+    "tbl v28.16b, {v24.16b-v26.16b}, v0.16b\n   tbl v29.16b, {v24.16b-v26.16b}, v1.16b\n"
+    "tbl v30.16b, {v24.16b-v26.16b}, v2.16b\n   tbl v31.16b, {v24.16b-v26.16b}, v3.16b\n"
+    "ext v16.16b, v7.16b, v28.16b, #15\n   ext v17.16b, v28.16b, v29.16b, #15\n   ext v18.16b, v29.16b, v30.16b, #15\n   ext v19.16b, v30.16b, v31.16b, #15\n"
+    "bic v16.16b, v16.16b, v28.16b\n   bic v17.16b, v17.16b, v29.16b\n   bic v18.16b, v18.16b, v30.16b\n   bic v19.16b, v19.16b, v31.16b\n"
+    "add v16.16b, v16.16b, v17.16b\n   add v18.16b, v18.16b, v19.16b\n   add v16.16b, v16.16b, v18.16b\n   sub v21.16b, v21.16b, v16.16b\n"
+    "subs x6, x6, #1\n   b.ne .Lmemory_words_arm64_turn\n"
+    "uaddlv h20, v20.16b\n   uaddlv h21, v21.16b\n   umov w7, v20.h[0]\n   umov w8, v21.h[0]\n   add x3, x3, x7\n   add x3, x3, x8\n"
+    "cmp x1, #128\n   b.hs .Lmemory_words_arm64_round\n   movi v20.16b, #0\n"
+    ".Lmemory_words_arm64_sixteen:\n   subs x1, x1, #16\n   b.lo .Lmemory_words_arm64_sixteen_back\n"
+    ".Lmemory_words_arm64_sixteen_turn:\n   ld1 {v0.16b}, [x0], #16\n   tbl v4.16b, {v24.16b-v26.16b}, v0.16b\n"
+    "ext v16.16b, v31.16b, v4.16b, #15\n   bic v16.16b, v16.16b, v4.16b\n   sub v20.16b, v20.16b, v16.16b\n   mov v31.16b, v4.16b\n"
+    "subs x1, x1, #16\n   b.hs .Lmemory_words_arm64_sixteen_turn\n"
+    ".Lmemory_words_arm64_sixteen_back:\n   add x1, x1, #16\n   cbz x1, .Lmemory_words_arm64_drain\n"
+    //      1 to 15 left, 16 or more counted: the count's last 16 bytes, the lanes under 16 - left already counted.
+    //      The byte before lane 16 - left is the lane under it, the count's last counted byte.
+    "sub x10, x0, #16\n   add x10, x10, x1\n   ld1 {v0.16b}, [x10]\n   tbl v4.16b, {v24.16b-v26.16b}, v0.16b\n"
+    "ext v16.16b, v4.16b, v4.16b, #15\n   bic v16.16b, v16.16b, v4.16b\n"
+    "adrp x11, .Lmemory_words_arm64_lanes\n   add x11, x11, :lo12:.Lmemory_words_arm64_lanes\n   ldr q17, [x11]\n"
+    "mov w12, #16\n   sub w12, w12, w1\n   dup v18.16b, w12\n   cmhs v17.16b, v17.16b, v18.16b\n   and v16.16b, v16.16b, v17.16b\n"
+    "mov x1, #0\n   mov v31.16b, v4.16b\n   sub v20.16b, v20.16b, v16.16b\n"
+    ".Lmemory_words_arm64_drain:\n   uaddlv h20, v20.16b\n   umov w7, v20.h[0]\n   add x3, x3, x7\n"
+    "umov w9, v31.b[15]\n   cmp w9, #0\n   cset w2, eq\n   cbz x1, .Lmemory_words_arm64_done\n"
 #endif
     ".Lmemory_words_arm64_loop:\n   ldrb w4, [x0], #1\n   cmp w4, #0x20\n   cset w5, eq\n   sub w4, w4, #9\n   cmp w4, #4\n   cset w4, ls\n   orr w4, w4, w5\n   eor w4, w4, #1\n"
     "eor w5, w2, #1\n   and w5, w5, w4\n   add x3, x3, x5\n   mov w2, w4\n   subs x1, x1, #1\n   b.ne .Lmemory_words_arm64_loop\n"
     ".Lmemory_words_arm64_done:\n   mov x0, x3\n   mov x1, x2\n" ASM_RET
+#ifndef KERNEL_MODE
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Lmemory_words_arm64_lanes:\n   .byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    ".popsection\n"
+#endif
     ASM_END(memory_count_words)
     ASM_FUNC(memory_compare)
 #ifndef KERNEL_MODE
@@ -26332,12 +26513,53 @@ __asm__(
     "7:  addi a0, a0, 1\n   addi a1, a1, -1\n   bnez a1, 6b\n"
     "9:  mv a0, a3\n" ASM_RET
     ASM_END(memory_count)
+    //
+    //       memory_count_words: with V a vector of the bytes a turn -- W the white mask, its lanes made bytes
+    //       of 1 and 0 and slid up one with the flag of the byte before at lane 0, and a word starts where W is
+    //       0 and the lane before is 1 (vmsltu), counted by vcpop. Without V, eight bytes a word once the
+    //       pointer is on eight: bit seven of each byte flags white space, 9 to 13 (the low seven bits plus
+    //       0x77 reach bit seven and plus 0x72 do not, and the byte's own bit seven is clear) or 32 (the byte
+    //       xor 0x20 is zero, the carry free test), the flags of the byte before are the word shifted up eight,
+    //       and the starts are summed into the top byte by the multiply. It was a byte loop: qemu, instructions
+    //       a 4 KiB call, 57,361 before, 14,414 by the word and 602 with V at VLEN 128 (314 at 256); a 50-byte
+    //       call 715, 272 and 42.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_count_words)
     "li a3, 0\n   andi a2, a2, 1\n   beqz a1, .Lmemory_words_rv_done\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lmemory_words_rv_vector\n   bnez t3, .Lmemory_words_rv_scalar\n"
+    //  The detect keeps a0-a4 and a7.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_count_words\n"
+    ".Lmemory_words_rv_vector:\n   xori a2, a2, 1\n   li t5, 32\n"
+    ".Lmemory_words_rv_vector_turn:\n   vsetvli t0, a1, e8, m8, ta, ma\n   vle8.v v8, (a0)\n   vadd.vi v16, v8, -9\n   vmsleu.vi v0, v16, 4\n   vmseq.vx v1, v8, t5\n"
+    "vmor.mm v0, v0, v1\n   vmv.v.i v24, 0\n   vmerge.vim v24, v24, 1, v0\n   vslide1up.vx v16, v24, a2\n   vmsltu.vv v1, v24, v16\n"
+    "vcpop.m t1, v1\n   add a3, a3, t1\n   addi t2, t0, -1\n   vslidedown.vx v16, v24, t2\n   vmv.x.s a2, v16\n"
+    "add a0, a0, t0\n   sub a1, a1, t0\n   bnez a1, .Lmemory_words_rv_vector_turn\n   xori a2, a2, 1\n   j .Lmemory_words_rv_done\n"
+    ".Lmemory_words_rv_scalar:\n"
+#endif
+    ".Lmemory_words_rv_peel:\n   andi t0, a0, 7\n   beqz t0, .Lmemory_words_rv_aligned\n   beqz a1, .Lmemory_words_rv_done\n"
+    "lbu t0, 0(a0)\n   addi t1, t0, -32\n   seqz t1, t1\n   addi t0, t0, -9\n   sltiu t0, t0, 5\n   or t0, t0, t1\n   xori t0, t0, 1\n   xori t1, a2, 1\n"
+    "and t1, t1, t0\n   add a3, a3, t1\n   mv a2, t0\n   addi a0, a0, 1\n   addi a1, a1, -1\n   j .Lmemory_words_rv_peel\n"
+    ".Lmemory_words_rv_aligned:\n   li t6, 8\n   bltu a1, t6, .Lmemory_words_rv_tail\n"
+    "li a4, 0x7f7f7f7f7f7f7f7f\n   li a5, 0x7777777777777777\n   li a6, 0x7272727272727272\n   li a7, 0x2020202020202020\n"
+    "li t6, 0x8080808080808080\n   li t5, 0x0101010101010101\n   xori a2, a2, 1\n   slli a2, a2, 7  # the white flag of the byte before, at bit seven\n"
+    ".Lmemory_words_rv_word:\n   ld t0, 0(a0)\n   and t1, t0, a4\n   add t2, t1, a5\n   add t3, t1, a6\n   xor t2, t2, t3\n   not t3, t0\n   and t2, t2, t3  # 9..13\n"
+    "xor t3, t0, a7\n   and t4, t3, a4\n   add t4, t4, a4\n   or t4, t4, t3\n   not t4, t4  # 32\n"
+    "or t2, t2, t4\n   and t2, t2, t6  # W\n   slli t3, t2, 8\n   or t3, t3, a2  # the byte before each\n"
+    "not t4, t2\n   and t3, t3, t4  # starts\n   srli t3, t3, 7\n   mul t3, t3, t5\n   srli t3, t3, 56\n   add a3, a3, t3\n"
+    "srli a2, t2, 56\n   addi a0, a0, 8\n   addi a1, a1, -8\n   sltiu t0, a1, 8\n   beqz t0, .Lmemory_words_rv_word\n"
+    "srli a2, a2, 7\n   xori a2, a2, 1  # back to inside\n"
+    ".Lmemory_words_rv_tail:\n   beqz a1, .Lmemory_words_rv_done\n"
     ".Lmemory_words_rv_loop:\n   lbu t0, 0(a0)\n   addi t1, t0, -32\n   seqz t1, t1\n   addi t0, t0, -9\n   sltiu t0, t0, 5\n   or t0, t0, t1\n   xori t0, t0, 1\n   xori t1, a2, 1\n"
     "and t1, t1, t0\n   add a3, a3, t1\n   mv a2, t0\n   addi a0, a0, 1\n   addi a1, a1, -1\n   bnez a1, .Lmemory_words_rv_loop\n"
     ".Lmemory_words_rv_done:\n   mv a0, a3\n   mv a1, a2\n" ASM_RET
     ASM_END(memory_count_words)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
     ASM_FUNC(memory_compare)
     //
     //      The length is asked about before the alignment, because the

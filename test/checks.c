@@ -26838,6 +26838,20 @@ static fn words_sweep()
                                 words_case(room, 65, true);
                         }
 
+        // And in a count long enough for the widest turns (256 bytes and up), at
+        // the lanes either side of each block's edge: a byte a lookup could alias
+        // (73 to 77 and 96 share their low six bits with white space) must not.
+        static const positive lanes[] = {0, 1, 63, 64, 127, 128, 191, 192, 255, 256, 299};
+        for (positive value = 0; value < 256; value++)
+                for (positive background = 0; background < 2; background++)
+                        for (positive k = 0; k < sizeof(lanes) / sizeof(lanes[0]); k++)
+                        {
+                                reference_fill(room, background ? 'x' : ' ', 300);
+                                room[lanes[k]] = (p8)value;
+                                words_case(room, 300, false);
+                                words_case(room, 300, true);
+                        }
+
         for (positive offset = 0; offset < 64; offset++)
                 for (positive size = 0; size <= 257; size++)
                 {
@@ -26867,15 +26881,32 @@ static fn words_sweep()
 
 static fn check_count_words()
 {
-        words_sweep();
 #if X64
+        // Every body the machine can run, down to SSE2: AVX-512 with VBMI, AVX-512
+        // without it, AVX2, and SSE2.
         p8 avx2 = cpu_has_avx2;
         p8 avx512 = cpu_has_avx512;
-        cpu_has_avx2 = 0;
-        cpu_has_avx512 = 0;
-        words_sweep();
+        p8 vbmi = cpu_has_avx512_vbmi;
+        for (p32 tier = 0; tier < 4; tier++)
+        {
+                cpu_has_avx512 = tier < 2 ? avx512 : 0;
+                cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
+                cpu_has_avx2 = tier < 3 ? avx2 : 0;
+                words_sweep();
+        }
         cpu_has_avx2 = avx2;
         cpu_has_avx512 = avx512;
+        cpu_has_avx512_vbmi = vbmi;
+#elif RISCV64
+        // The first call asks for V; then the word body without it.
+        cpu_has_vector = 0;
+        words_sweep();
+        p8 vector = cpu_has_vector;
+        cpu_has_vector = 1;
+        words_sweep();
+        cpu_has_vector = vector;
+#else
+        words_sweep();
 #endif
 }
 
@@ -117542,6 +117573,118 @@ int main(void)
         return bad ? 1 : 0;
 }
 #endif /* CHECK_native_reverse */
+
+#ifdef CHECK_native_words
+/* ARM64 memory_count_words lifted verbatim from lib.c and run on the host: every
+   size to 700 at every residue of a 64-byte line, both incoming states, every
+   byte value at the lanes either side of the wide turn's blocks, long random
+   counts split anywhere, and counts that end against an unmapped page. */
+#include "words.h"
+#include <sys/mman.h>
+#include <unistd.h>
+
+#define NATIVE_SEED 0x9e3779b97f4a7c15ull
+#define SHARED_native
+#include "checks.c"
+#undef SHARED_native
+
+typedef struct
+{
+        u64 x, y;
+} words_pair;
+
+words_pair memory_count_words(const void *, u64, int);
+
+static u8 room[(1u << 16) + 256];
+static u64 checks, bad;
+
+static words_pair reference(const u8 *at, u64 size, int inside)
+{
+        words_pair answer = {0, inside ? 1 : 0};
+
+        for (u64 i = 0; i < size; i++) {
+                int word = !(at[i] == 32 || (at[i] >= 9 && at[i] <= 13));
+
+                if (word && !answer.y)
+                        answer.x++;
+                answer.y = (u64)word;
+        }
+        return answer;
+}
+
+static void same(const char *name, const u8 *at, u64 size, int inside)
+{
+        words_pair want = reference(at, size, inside), got = memory_count_words(at, size, inside);
+
+        checks++;
+        if (got.x != want.x || got.y != want.y)
+                if (bad++ < 8)
+                        printf("  FAIL %s: size %lu inside %d: %lu/%lu want %lu/%lu\n", name, size, inside,
+                               got.x, got.y, want.x, want.y);
+}
+
+static u8 byte(void)
+{
+        static const u8 alphabet[] = {0, 8, 9, 10, 11, 12, 13, 14, 31, 32, 33, 73, 77, 96, 127, 128, 137, 160, 'a', ' '};
+        u64 r = next();
+
+        return (r & 3) ? alphabet[(r >> 8) % sizeof(alphabet)] : (u8)(r >> 16);
+}
+
+int main(void)
+{
+        for (u64 size = 0; size <= 700; size++)
+                for (u64 residue = 0; residue < 64; residue += (size < 300 ? 1 : 7)) {
+                        for (u64 i = 0; i < size; i++)
+                                room[residue + i] = byte();
+                        same("sizes and residues", room + residue, size, 0);
+                        same("sizes and residues", room + residue, size, 1);
+                }
+
+        static const u64 lanes[] = {0, 1, 15, 16, 63, 64, 127, 128, 255, 256, 299};
+        for (u64 value = 0; value < 256; value++)
+                for (u64 k = 0; k < sizeof(lanes) / sizeof(lanes[0]); k++)
+                        for (u64 background = 0; background < 2; background++) {
+                                for (u64 i = 0; i < 300; i++)
+                                        room[i] = background ? 'x' : ' ';
+                                room[lanes[k]] = (u8)value;
+                                same("every byte at the edges", room, 300, 0);
+                                same("every byte at the edges", room, 300, 1);
+                        }
+
+        for (u64 turn = 0; turn < 300; turn++) {
+                u64 size = next() % (1u << 16), split = next() % (size + 1);
+
+                for (u64 i = 0; i < size; i++)
+                        room[i] = byte();
+                words_pair want = reference(room, size, (int)(turn & 1));
+                words_pair first = memory_count_words(room, split, (int)(turn & 1));
+                words_pair rest = memory_count_words(room + split, size - split, (int)first.y);
+
+                checks++;
+                if (first.x + rest.x != want.x || rest.y != want.y)
+                        if (bad++ < 8)
+                                printf("  FAIL split: size %lu at %lu\n", size, split);
+        }
+
+        long page = sysconf(_SC_PAGESIZE);
+        u8 *pages = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (pages == MAP_FAILED || mprotect(pages + page, (size_t)page, PROT_NONE))
+                bad++;
+        else
+                for (u64 size = 0; size <= 1100 && size <= (u64)page; size++) {
+                        u8 *at = pages + page - size;
+
+                        for (u64 i = 0; i < size; i++)
+                                at[i] = byte();
+                        same("against an unmapped page", at, size, 0);
+                        same("against an unmapped page", at, size, 1);
+                }
+
+        printf("arm64 memory_count_words: %lu checks | %lu failures\n", checks, bad);
+        return bad ? 1 : 0;
+}
+#endif /* CHECK_native_words */
 
 #ifdef CHECK_native_squeeze
 /* ARM64 memory_squeeze_bytes lifted verbatim from lib.c and run on the host:

@@ -5019,6 +5019,7 @@ done <<'LIFTED'
 lifted lib string_first_of string_first_of_or_end string_first_of_max string_find string_last_of_or_end string_compare_max string_length_max memory_first_of string_length memory_search memory_search_prepare memory_search_prepared_core memory_compare
 bulk lib memory_fill memory_exchange_apart memory_frob memory_copy_apart memory_copy string_copy string_copy_max string_cut string_replace_all
 reverse lib memory_reverse
+words lib memory_count_words
 series lib memory_decimal_series
 squeeze lib memory_delete_bytes memory_squeeze_bytes
 offsets lib memory_offsets_of_either memory_offsets_between memory_offsets_outside memory_offsets_in_set
@@ -5047,7 +5048,7 @@ reserve lib memory_growth memory_reserve memory_release
 LIFTED
 
 status=0
-for case in byte_hunts bounded riscv_bits bulk reverse squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor; do
+for case in byte_hunts bounded riscv_bits bulk reverse words squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor; do
         cc -O2 -w -I"$work" "-DCHECK_native_$case" test/checks.c -o "$work/$case" || { status=1; continue; }
         "$work/$case" || status=1
 done
