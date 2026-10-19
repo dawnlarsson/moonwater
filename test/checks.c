@@ -94169,6 +94169,9 @@ static fn job_widths(void)
                 src[i] = i >= 3000 && (random & 3) ? src[i - 3000 + (random >> 20) % 8]
                                                    : (p8)('a' + (random >> 8) % 20);
         }
+        /* As in a zstd process that only ever runs jobs: nothing has mapped
+           the single encoder's arena, and a slot encoder must not need it. */
+        zstd_arena = null;
         for (positive w = 0; w < array_count(widths); w++)
         {
                 p8 address_to const into = w ? again : first;
@@ -94193,6 +94196,27 @@ static fn job_widths(void)
                         check("the jobs' frame is the same bytes at a wider pool",
                               ok && zstd_output.used == first_n &&
                                   !memory_compare(again, first, first_n));
+        }
+        /* One encoder over the same input: the cuts cost the jobs only what
+           the overlap leaves out, 8 bytes of 2874068 here. When a slot
+           encoder's literals went out raw for want of that arena, the jobs'
+           frame was 5242903 bytes here, the input all but stored, and 17%
+           bigger than libzstd's at -1 on a source tar. */
+        {
+                bool single;
+
+                zstd_single_job = true;
+                zstd_output.bytes = again;
+                zstd_output.room = sizeof(again);
+                zstd_output.used = 0;
+                zstd_out_fd = -1;
+                zstd_level_params(1, 0, 0, address_of params);
+                single = zstd_encode_start(address_of params, true) &&
+                         zstd_encode_write(src, sizeof(src)) && zstd_encode_end();
+                zstd_output.bytes = null;
+                zstd_single_job = false;
+                check("the jobs' frame is within a fiftieth of one encoder's frame",
+                      single && first_n * 50 <= zstd_output.used * 51);
         }
         parallel_reset(0);
         check("the jobs' frame decodes to its input",

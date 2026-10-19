@@ -3988,8 +3988,10 @@ static positive zstd_pack_literals(zstd_encoder address_to e,
         p64 field;
         bool reuse = false;
         bool const single = n < 256;
-        zstd_enc_arena address_to const arena = e ? zstd_arena : zstd_arena_map();
-        if (!arena)
+        /* An encoder brings its own buffers (a job's slot encoder never maps
+           the arena), so only the one-shot pack with no encoder needs it. */
+        zstd_enc_arena address_to const arena = e ? null : zstd_arena_map();
+        if (!e && !arena)
                 return 0;
         p8 address_to const packed_out = e ? e->packed : arena->packed_lits;
         p32 address_to const table_new = e ? e->lit_table_new : arena->lit_table_new;
