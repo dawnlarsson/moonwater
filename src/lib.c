@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        414 routines (390 public, 24 local), 404 of them on all three and 10 local to one.
+        416 routines (392 public, 24 local), 406 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -74,6 +74,7 @@
           absolute_whole                 public  yes     yes     yes
           absolute_wide                  public  yes     yes     yes
           aes128_ctr_blocks              public  yes     yes     yes
+          bf16_to_f32                    public  yes     yes     yes
           bipolar_into                   public  yes     yes     yes
           bipolar_into_core              local   yes     yes     yes
           bipolar_into_string            public  yes     yes     yes
@@ -147,6 +148,7 @@
           deflate_tokens_encode          public  yes     yes     yes
           deflate_tokens_encode_bmi2     local   yes     --      --
           exit                           public  yes     yes     yes
+          f32_to_bf16                    public  yes     yes     yes
           fast_sin                       public  yes     yes     yes
           file_close                     public  yes     yes     yes
           file_get_status                public  yes     yes     yes
@@ -39135,6 +39137,36 @@ __asm__(
 #ifndef KERNEL_MODE
 READS_WRITES(1, 3) READS(2, 3)
 fn fused_residual_add_f32(f32 address_to x, const f32 address_to h, positive count, f32 alpha);
+WRITES(1, 3) READS(2, 3)
+fn f32_to_bf16(p16 address_to dst_bf16, const f32 address_to src_f32, positive count);
+WRITES(1, 3) READS(2, 3)
+fn bf16_to_f32(f32 address_to dst_f32, const p16 address_to src_bf16, positive count);
+/* BF16 conversion in hardware: x86_64's AVX512_BF16 (cpuid leaf 7, subleaf
+   1, eax bit 5) with AVX-512's state saved, or arm64's FEAT_BF16 (the BF16
+   field of ID_AA64ISAR1_EL1). 0 until f32_to_bf16 first asks, then 1 for
+   absent and 2 for present; riscv64 never reads it. */
+extern p8 cpu_has_bf16;
+__asm__(
+    ASM_BSS_OBJECT_BEGIN(cpu_has_bf16, 1)
+    ".zero 1\n"
+    ASM_OBJECT_END(cpu_has_bf16)
+);
+//      One q register of floats V to bf16 as the bits of f32_to_bf16's
+//      definition, in the high half of each lane of T: v28 one, v29 0x7fff,
+//      v30 0x7fffffff, v27 0x7f800000, v26 0x00800000, v25 0x00400000, v24
+//      the sign; v5 to v7 are spent.
+#define NEON_TRAIN_BF16(V, T)                                                                            \
+    "ushr " T ".4s, " V ".4s, #16\n   and " T ".16b, " T ".16b, v28.16b\n   add " T ".4s, " T ".4s, " V ".4s\n" \
+    "add " T ".4s, " T ".4s, v29.4s\n   and v5.16b, " V ".16b, v30.16b\n   cmhi v6.4s, v5.4s, v27.4s\n"           \
+    "cmhi v7.4s, v26.4s, v5.4s\n   orr v5.16b, " V ".16b, v25.16b\n   bit " T ".16b, v5.16b, v6.16b\n"           \
+    "and v5.16b, " V ".16b, v24.16b\n   bit " T ".16b, v5.16b, v7.16b\n"
+//      Four q registers of floats with each zero or denormal one made the
+//      zero of its sign, which is what BFCVTN alone does not do: v28 the
+//      exponent field, v29 the sign, v4 to v7 spent.
+#define NEON_TRAIN_FLUSH4                                                                                \
+    "cmtst v4.4s, v0.4s, v28.4s\n   cmtst v5.4s, v1.4s, v28.4s\n   cmtst v6.4s, v2.4s, v28.4s\n   cmtst v7.4s, v3.4s, v28.4s\n" \
+    "orr v4.16b, v4.16b, v29.16b\n   orr v5.16b, v5.16b, v29.16b\n   orr v6.16b, v6.16b, v29.16b\n   orr v7.16b, v7.16b, v29.16b\n" \
+    "and v0.16b, v0.16b, v4.16b\n   and v1.16b, v1.16b, v5.16b\n   and v2.16b, v2.16b, v6.16b\n   and v3.16b, v3.16b, v7.16b\n"
 #if X64
 __asm__(
     ASM_SECTION
@@ -39235,6 +39267,192 @@ __asm__(
     "add $4, %rdi\n   add $4, %rsi\n   dec %edx\n   jnz .Ltrain_res_x_sone\n"
     ".Ltrain_res_x_none:\n" ASM_RET
     ASM_END(fused_residual_add_f32)
+
+    //      f32_to_bf16: rdi destination, rsi source, rdx count. With
+    //      AVX512_BF16 the instruction is the definition, 32 a vcvtne2ps2bf16
+    //      and 64 a turn; without it the definition in integer lanes. Every
+    //      body takes whole blocks and then the block that ends at the end,
+    //      which redoes a few and is allowed to, the arrays being apart; a
+    //      count under one block is two half blocks, one at each end, and
+    //      under a half block is masked or one at a time.
+    ASM_FUNC(f32_to_bf16)
+    "test %rdx, %rdx\n   jz .Ltrain_b16_x_none\n"
+    ASM_NARROW("cpu_has_avx2", ".Ltrain_b16_x_sse2")
+    ASM_NARROW("cpu_has_avx512", ".Ltrain_b16_x_avx2")
+    "movzbl cpu_has_bf16(%rip), %eax\n   cmp $1, %eax\n   je .Ltrain_b16_x_zint\n   ja .Ltrain_b16_x_bf16\n"
+    //      The first call asks: cpuid leaf 7, subleaf 1, eax bit 5.
+    "push %rbx\n   push %rdx\n   mov $7, %eax\n   mov $1, %ecx\n   cpuid\n   shr $5, %eax\n   and $1, %eax\n   inc %eax\n"
+    "mov %al, cpu_has_bf16(%rip)\n   pop %rdx\n   pop %rbx\n   cmp $1, %eax\n   je .Ltrain_b16_x_zint\n"
+    ".Ltrain_b16_x_bf16:\n   cmp $16, %rdx\n   jb .Ltrain_b16_x_bshort\n   cmp $32, %rdx\n   jb .Ltrain_b16_x_bpair\n"
+    "mov %rdx, %rcx\n   and $-64, %rcx\n   jz .Ltrain_b16_x_b32\n   lea (%rsi,%rcx,4), %rsi\n   lea (%rdi,%rcx,2), %rdi\n   neg %rcx\n"
+    ".balign 64\n.Ltrain_b16_x_b64:\n"
+    "vmovups 64(%rsi,%rcx,4), %zmm1\n   vcvtne2ps2bf16 (%rsi,%rcx,4), %zmm1, %zmm0\n"
+    "vmovups 192(%rsi,%rcx,4), %zmm3\n   vcvtne2ps2bf16 128(%rsi,%rcx,4), %zmm3, %zmm2\n"
+    "vmovdqu16 %zmm0, (%rdi,%rcx,2)\n   vmovdqu16 %zmm2, 64(%rdi,%rcx,2)\n   add $64, %rcx\n   jnz .Ltrain_b16_x_b64\n"
+    ".Ltrain_b16_x_b32:\n   and $63, %edx\n   jz .Ltrain_b16_x_wide_done\n   cmp $32, %edx\n   jb .Ltrain_b16_x_blast\n"
+    "vmovups 64(%rsi), %zmm1\n   vcvtne2ps2bf16 (%rsi), %zmm1, %zmm0\n   vmovdqu16 %zmm0, (%rdi)\n"
+    "add $128, %rsi\n   add $64, %rdi\n   sub $32, %edx\n   jz .Ltrain_b16_x_wide_done\n"
+    ".Ltrain_b16_x_blast:\n   vmovups -64(%rsi,%rdx,4), %zmm1\n   vcvtne2ps2bf16 -128(%rsi,%rdx,4), %zmm1, %zmm0\n"
+    "vmovdqu16 %zmm0, -64(%rdi,%rdx,2)\n   jmp .Ltrain_b16_x_wide_done\n"
+    ".Ltrain_b16_x_bpair:\n   vmovups -64(%rsi,%rdx,4), %zmm1\n   vcvtne2ps2bf16 (%rsi), %zmm1, %zmm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "vextracti64x4 $1, %zmm0, -32(%rdi,%rdx,2)\n   jmp .Ltrain_b16_x_wide_done\n"
+    //      Under 16 under a mask, unless a window would reach the next page.
+    ".Ltrain_b16_x_bshort:\n   mov %esi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_b16_x_scalar\n"
+    "mov %edi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_b16_x_scalar\n   mov $-1, %eax\n   bzhi %edx, %eax, %eax\n   kmovw %eax, %k1\n"
+    "vcvtneps2bf16 (%rsi), %ymm0{%k1}{z}\n   vmovdqu16 %ymm0, (%rdi){%k1}\n   jmp .Ltrain_b16_x_wide_done\n"
+    //      AVX-512 without BF16: zmm0 and zmm1 to zmm2 and zmm3 by the
+    //      definition, the special cases (a NaN, a denormal) found by
+    //      vfpclassps and mended under masks only when there is one, and the
+    //      high halves packed by vpermt2w. zmm27 the sign, zmm28 one, zmm29
+    //      0x7fff, zmm30 the quiet bit, zmm31 the odd words.
+#define TRAIN_B16_ZINT(tag)                                                                              \
+    "vfpclassps $0xa1, %zmm0, %k1\n   vfpclassps $0xa1, %zmm1, %k2\n   vpsrld $16, %zmm0, %zmm2\n   vpsrld $16, %zmm1, %zmm3\n" \
+    "vpandd %zmm28, %zmm2, %zmm2\n   vpandd %zmm28, %zmm3, %zmm3\n   vpaddd %zmm0, %zmm2, %zmm2\n   vpaddd %zmm1, %zmm3, %zmm3\n" \
+    "vpaddd %zmm29, %zmm2, %zmm2\n   vpaddd %zmm29, %zmm3, %zmm3\n   kortestw %k1, %k2\n   jz .Ltrain_b16_x_zpack" tag "\n" \
+    "vfpclassps $0x81, %zmm0, %k1\n   vfpclassps $0x81, %zmm1, %k2\n   vpord %zmm30, %zmm0, %zmm2{%k1}\n   vpord %zmm30, %zmm1, %zmm3{%k2}\n" \
+    "vfpclassps $0x20, %zmm0, %k1\n   vfpclassps $0x20, %zmm1, %k2\n   vpandd %zmm27, %zmm0, %zmm2{%k1}\n   vpandd %zmm27, %zmm1, %zmm3{%k2}\n" \
+    ".Ltrain_b16_x_zpack" tag ":\n   vpermt2w %zmm3, %zmm31, %zmm2\n"
+    ".Ltrain_b16_x_zint:\n   cmp $16, %rdx\n   jb .Ltrain_b16_x_scalar\n"
+    "vpbroadcastd .Ltrain_b16_x_k+96(%rip), %zmm27\n   vpbroadcastd .Ltrain_b16_x_k(%rip), %zmm28\n   vpbroadcastd .Ltrain_b16_x_k+16(%rip), %zmm29\n"
+    "vpbroadcastd .Ltrain_b16_x_k+80(%rip), %zmm30\n   vmovdqu64 .Ltrain_b16_x_odd(%rip), %zmm31\n   cmp $32, %rdx\n   jb .Ltrain_b16_x_zpair\n"
+    //      rcx the block, r8 the last one's start; the block past it is moved
+    //      back to end at the end.
+    "xor %ecx, %ecx\n   lea -32(%rdx), %r8\n"
+    ".balign 64\n.Ltrain_b16_x_z32:\n   vmovups (%rsi,%rcx,4), %zmm0\n   vmovups 64(%rsi,%rcx,4), %zmm1\n"
+    TRAIN_B16_ZINT("_loop")
+    "vmovdqu16 %zmm2, (%rdi,%rcx,2)\n   add $32, %rcx\n   cmp %rdx, %rcx\n   jae .Ltrain_b16_x_wide_done\n   cmp %r8, %rcx\n   jbe .Ltrain_b16_x_z32\n"
+    "mov %r8, %rcx\n   jmp .Ltrain_b16_x_z32\n"
+    ".Ltrain_b16_x_zpair:\n   vmovups (%rsi), %zmm0\n   vmovups -64(%rsi,%rdx,4), %zmm1\n"
+    TRAIN_B16_ZINT("_pair")
+    "vmovdqu %ymm2, (%rdi)\n   vextracti64x4 $1, %zmm2, -32(%rdi,%rdx,2)\n"
+    ".Ltrain_b16_x_wide_done:\n   vzeroupper\n" ASM_RET
+#undef TRAIN_B16_ZINT
+    //      AVX2: eight lanes of ymm0 or ymm1 by the definition with no
+    //      branch, the NaN and denormal answers blended in, then shifted to
+    //      the low half for vpackusdw. ymm8 one, ymm9 0x7fff, ymm10
+    //      0x7fffffff, ymm11 0x7f800000, ymm12 0x00800000, ymm13 the quiet bit,
+    //      ymm14 the sign; ymm4 to ymm7 spent.
+#define TRAIN_B16_YMM(V, T)                                                                              \
+    "vpsrld $16, %ymm" V ", %ymm" T "\n   vpand %ymm8, %ymm" T ", %ymm" T "\n   vpaddd %ymm" V ", %ymm" T ", %ymm" T "\n" \
+    "vpaddd %ymm9, %ymm" T ", %ymm" T "\n   vpand %ymm10, %ymm" V ", %ymm4\n   vpcmpgtd %ymm11, %ymm4, %ymm5\n"          \
+    "vpcmpgtd %ymm4, %ymm12, %ymm6\n   vpor %ymm13, %ymm" V ", %ymm7\n   vpblendvb %ymm5, %ymm7, %ymm" T ", %ymm" T "\n" \
+    "vpand %ymm14, %ymm" V ", %ymm7\n   vpblendvb %ymm6, %ymm7, %ymm" T ", %ymm" T "\n   vpsrld $16, %ymm" T ", %ymm" T "\n"
+    ".Ltrain_b16_x_avx2:\n   cmp $8, %rdx\n   jb .Ltrain_b16_x_scalar\n"
+    "vpbroadcastd .Ltrain_b16_x_k(%rip), %ymm8\n   vpbroadcastd .Ltrain_b16_x_k+16(%rip), %ymm9\n   vpbroadcastd .Ltrain_b16_x_k+32(%rip), %ymm10\n"
+    "vpbroadcastd .Ltrain_b16_x_k+48(%rip), %ymm11\n   vpbroadcastd .Ltrain_b16_x_k+64(%rip), %ymm12\n   vpbroadcastd .Ltrain_b16_x_k+80(%rip), %ymm13\n"
+    "vpbroadcastd .Ltrain_b16_x_k+96(%rip), %ymm14\n   cmp $16, %rdx\n   jb .Ltrain_b16_x_ypair\n   xor %ecx, %ecx\n   lea -16(%rdx), %r8\n"
+    ".balign 64\n.Ltrain_b16_x_y16:\n   vmovdqu (%rsi,%rcx,4), %ymm0\n   vmovdqu 32(%rsi,%rcx,4), %ymm1\n"
+    TRAIN_B16_YMM("0", "2") TRAIN_B16_YMM("1", "3")
+    "vpackusdw %ymm3, %ymm2, %ymm2\n   vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %ymm2, (%rdi,%rcx,2)\n"
+    "add $16, %rcx\n   cmp %rdx, %rcx\n   jae .Ltrain_b16_x_wide_done\n   cmp %r8, %rcx\n   jbe .Ltrain_b16_x_y16\n   mov %r8, %rcx\n   jmp .Ltrain_b16_x_y16\n"
+    ".Ltrain_b16_x_ypair:\n   vmovdqu (%rsi), %ymm0\n   vmovdqu -32(%rsi,%rdx,4), %ymm1\n"
+    TRAIN_B16_YMM("0", "2") TRAIN_B16_YMM("1", "3")
+    "vpackusdw %ymm3, %ymm2, %ymm2\n   vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %xmm2, (%rdi)\n   vextracti128 $1, %ymm2, -16(%rdi,%rdx,2)\n"
+    "jmp .Ltrain_b16_x_wide_done\n"
+#undef TRAIN_B16_YMM
+    //      SSE2: the same with and, andn and or for the blends, and psrad with
+    //      packssdw, which keeps the high half exactly when it is shifted in
+    //      arithmetically. xmm8 to xmm14 as for AVX2; xmm4 to xmm7 spent.
+#define TRAIN_B16_XMM(V, T)                                                                              \
+    "movdqa %xmm" V ", %xmm" T "\n   psrld $16, %xmm" T "\n   pand %xmm8, %xmm" T "\n   paddd %xmm" V ", %xmm" T "\n" \
+    "paddd %xmm9, %xmm" T "\n   movdqa %xmm" V ", %xmm4\n   pand %xmm10, %xmm4\n   movdqa %xmm4, %xmm5\n   pcmpgtd %xmm11, %xmm5\n" \
+    "movdqa %xmm12, %xmm6\n   pcmpgtd %xmm4, %xmm6\n   movdqa %xmm" V ", %xmm7\n   por %xmm13, %xmm7\n   pand %xmm5, %xmm7\n" \
+    "pandn %xmm" T ", %xmm5\n   por %xmm7, %xmm5\n   movdqa %xmm" V ", %xmm7\n   pand %xmm14, %xmm7\n   pand %xmm6, %xmm7\n" \
+    "pandn %xmm5, %xmm6\n   por %xmm7, %xmm6\n   psrad $16, %xmm6\n   movdqa %xmm6, %xmm" T "\n"
+    ".Ltrain_b16_x_sse2:\n   cmp $4, %rdx\n   jb .Ltrain_b16_x_scalar\n"
+    "movdqa .Ltrain_b16_x_k(%rip), %xmm8\n   movdqa .Ltrain_b16_x_k+16(%rip), %xmm9\n   movdqa .Ltrain_b16_x_k+32(%rip), %xmm10\n"
+    "movdqa .Ltrain_b16_x_k+48(%rip), %xmm11\n   movdqa .Ltrain_b16_x_k+64(%rip), %xmm12\n   movdqa .Ltrain_b16_x_k+80(%rip), %xmm13\n"
+    "movdqa .Ltrain_b16_x_k+96(%rip), %xmm14\n   cmp $8, %rdx\n   jb .Ltrain_b16_x_spair\n   xor %ecx, %ecx\n   lea -8(%rdx), %r8\n"
+    ".balign 64\n.Ltrain_b16_x_s8:\n   movdqu (%rsi,%rcx,4), %xmm0\n   movdqu 16(%rsi,%rcx,4), %xmm1\n"
+    TRAIN_B16_XMM("0", "2") TRAIN_B16_XMM("1", "3")
+    "packssdw %xmm3, %xmm2\n   movdqu %xmm2, (%rdi,%rcx,2)\n"
+    "add $8, %rcx\n   cmp %rdx, %rcx\n   jae .Ltrain_b16_x_none\n   cmp %r8, %rcx\n   jbe .Ltrain_b16_x_s8\n   mov %r8, %rcx\n   jmp .Ltrain_b16_x_s8\n"
+    ".Ltrain_b16_x_spair:\n   movdqu (%rsi), %xmm0\n   movdqu -16(%rsi,%rdx,4), %xmm1\n"
+    TRAIN_B16_XMM("0", "2") TRAIN_B16_XMM("1", "3")
+    "packssdw %xmm3, %xmm2\n   movq %xmm2, (%rdi)\n   movhps %xmm2, -8(%rdi,%rdx,2)\n" ASM_RET
+#undef TRAIN_B16_XMM
+    //      One at a time, in general registers, by the definition.
+    ".Ltrain_b16_x_scalar:\n   mov (%rsi), %eax\n   test $0x7f800000, %eax\n   jz 3f\n   mov %eax, %ecx\n   and $0x7fffffff, %ecx\n"
+    "cmp $0x7f800000, %ecx\n   ja 4f\n   mov %eax, %ecx\n   shr $16, %ecx\n   and $1, %ecx\n   lea 0x7fff(%rax,%rcx), %eax\n   shr $16, %eax\n   jmp 5f\n"
+    "3:  shr $16, %eax\n   and $0x8000, %eax\n   jmp 5f\n"
+    "4:  shr $16, %eax\n   or $0x40, %eax\n"
+    "5:  mov %ax, (%rdi)\n   add $4, %rsi\n   add $2, %rdi\n   dec %rdx\n   jnz .Ltrain_b16_x_scalar\n"
+    ".Ltrain_b16_x_none:\n" ASM_RET
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Ltrain_b16_x_odd:\n   .set .Ltrain_b16_x_i, 1\n   .rept 32\n   .short .Ltrain_b16_x_i\n   .set .Ltrain_b16_x_i, .Ltrain_b16_x_i + 2\n   .endr\n"
+    ".Ltrain_b16_x_k:\n   .rept 4\n   .long 1\n   .endr\n   .rept 4\n   .long 0x7fff\n   .endr\n   .rept 4\n   .long 0x7fffffff\n   .endr\n"
+    "   .rept 4\n   .long 0x7f800000\n   .endr\n   .rept 4\n   .long 0x00800000\n   .endr\n   .rept 4\n   .long 0x00400000\n   .endr\n"
+    "   .rept 4\n   .long 0x80000000\n   .endr\n"
+    ".popsection\n"
+    ASM_END(f32_to_bf16)
+
+    //      bf16_to_f32: rdi destination, rsi source, rdx count. Each is its
+    //      bits in the high half: vpmovzxwd and a shift with AVX-512, an
+    //      unpack against zero after vpermq with AVX2 (no shift: the zero is
+    //      the low half) and with SSE2. The stores are what costs, so from 64
+    //      on (32 with AVX2) the first block is made where it lies and the
+    //      rest from where the destination meets a line; the source is read
+    //      by 32-byte widening loads when it is on 32 bytes there and by
+    //      whole lines widened in registers when it is not, which splits one
+    //      line a load rather than one in two; a destination already on a
+    //      line starts after the first block. Then whole blocks and the block
+    //      ending at the end, as above.
+    ASM_FUNC(bf16_to_f32)
+    "test %rdx, %rdx\n   jz .Ltrain_f32b_x_none\n"
+    ASM_NARROW("cpu_has_avx2", ".Ltrain_f32b_x_sse2")
+    ASM_NARROW("cpu_has_avx512", ".Ltrain_f32b_x_avx2")
+    "cmp $16, %rdx\n   jb .Ltrain_f32b_x_zshort\n   vpmovzxwd (%rsi), %zmm0\n   vpslld $16, %zmm0, %zmm0\n   vmovdqu32 %zmm0, (%rdi)\n"
+    "mov $16, %eax\n   cmp $64, %rdx\n   jb .Ltrain_f32b_x_zskip\n   mov %edi, %ecx\n   neg %ecx\n   and $63, %ecx\n   shr $2, %ecx\n   cmovnz %ecx, %eax\n"
+    ".Ltrain_f32b_x_zskip:\n   lea (%rsi,%rax,2), %rsi\n   lea (%rdi,%rax,4), %rdi\n   sub %rax, %rdx\n   jz .Ltrain_f32b_x_wide_done\n"
+    "mov %rdx, %rcx\n   and $-64, %rcx\n   jz .Ltrain_f32b_x_z16\n   lea (%rsi,%rcx,2), %rsi\n   lea (%rdi,%rcx,4), %rdi\n   neg %rcx\n"
+    "test $31, %sil\n   jnz .Ltrain_f32b_x_zlines\n"
+    ".balign 64\n.Ltrain_f32b_x_z64:\n"
+    "vpmovzxwd (%rsi,%rcx,2), %zmm0\n   vpmovzxwd 32(%rsi,%rcx,2), %zmm1\n   vpmovzxwd 64(%rsi,%rcx,2), %zmm2\n   vpmovzxwd 96(%rsi,%rcx,2), %zmm3\n"
+    "vpslld $16, %zmm0, %zmm0\n   vpslld $16, %zmm1, %zmm1\n   vpslld $16, %zmm2, %zmm2\n   vpslld $16, %zmm3, %zmm3\n"
+    "vmovdqu32 %zmm0, (%rdi,%rcx,4)\n   vmovdqu32 %zmm1, 64(%rdi,%rcx,4)\n   vmovdqu32 %zmm2, 128(%rdi,%rcx,4)\n   vmovdqu32 %zmm3, 192(%rdi,%rcx,4)\n"
+    "add $64, %rcx\n   jnz .Ltrain_f32b_x_z64\n   jmp .Ltrain_f32b_x_z16\n"
+    ".balign 64\n.Ltrain_f32b_x_zlines:\n"
+    "vmovdqu16 (%rsi,%rcx,2), %zmm4\n   vpmovzxwd %ymm4, %zmm0\n   vextracti64x4 $1, %zmm4, %ymm4\n   vpmovzxwd %ymm4, %zmm1\n   vpslld $16, %zmm0, %zmm0\n"
+    "vpslld $16, %zmm1, %zmm1\n   vmovdqu32 %zmm0, (%rdi,%rcx,4)\n   vmovdqu32 %zmm1, 64(%rdi,%rcx,4)\n   add $32, %rcx\n   jnz .Ltrain_f32b_x_zlines\n"
+    ".Ltrain_f32b_x_z16:\n   and $63, %edx\n   jz .Ltrain_f32b_x_wide_done\n"
+    ".Ltrain_f32b_x_z16_more:\n   cmp $16, %edx\n   jb .Ltrain_f32b_x_zlast\n   vpmovzxwd (%rsi), %zmm0\n   vpslld $16, %zmm0, %zmm0\n   vmovdqu32 %zmm0, (%rdi)\n"
+    "add $32, %rsi\n   add $64, %rdi\n   sub $16, %edx\n   jnz .Ltrain_f32b_x_z16_more\n   jmp .Ltrain_f32b_x_wide_done\n"
+    ".Ltrain_f32b_x_zlast:\n   vpmovzxwd -32(%rsi,%rdx,2), %zmm0\n   vpslld $16, %zmm0, %zmm0\n   vmovdqu32 %zmm0, -64(%rdi,%rdx,4)\n   jmp .Ltrain_f32b_x_wide_done\n"
+    ".Ltrain_f32b_x_zshort:\n   mov %esi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_f32b_x_scalar\n"
+    "mov %edi, %ecx\n   not %ecx\n   test $0xfc0, %ecx\n   jz .Ltrain_f32b_x_scalar\n   mov $-1, %eax\n   bzhi %edx, %eax, %eax\n   kmovw %eax, %k1\n"
+    "vpmovzxwd (%rsi), %zmm0{%k1}{z}\n   vpslld $16, %zmm0, %zmm0\n   vmovdqu32 %zmm0, (%rdi){%k1}\n   jmp .Ltrain_f32b_x_wide_done\n"
+    //      AVX2, 16 a block: vpermq puts each quarter beside the one eight on,
+    //      so the unpacks of each lane come out in order.
+    ".Ltrain_f32b_x_avx2:\n   cmp $8, %rdx\n   jb .Ltrain_f32b_x_scalar\n   cmp $16, %rdx\n   jb .Ltrain_f32b_x_ypair\n   vpxor %xmm7, %xmm7, %xmm7\n"
+    "vpermq $0xd8, (%rsi), %ymm4\n   vpunpcklwd %ymm4, %ymm7, %ymm0\n   vpunpckhwd %ymm4, %ymm7, %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n"
+    "mov $16, %eax\n   cmp $32, %rdx\n   jb .Ltrain_f32b_x_yskip\n   mov %edi, %ecx\n   neg %ecx\n   and $31, %ecx\n   shr $2, %ecx\n   cmovnz %ecx, %eax\n"
+    ".Ltrain_f32b_x_yskip:\n   lea (%rsi,%rax,2), %rsi\n   lea (%rdi,%rax,4), %rdi\n   sub %rax, %rdx\n   jz .Ltrain_f32b_x_wide_done\n"
+    "mov %rdx, %rcx\n   and $-32, %rcx\n   jz .Ltrain_f32b_x_y16\n   lea (%rsi,%rcx,2), %rsi\n   lea (%rdi,%rcx,4), %rdi\n   neg %rcx\n"
+    ".balign 64\n.Ltrain_f32b_x_y32:\n"
+    "vpermq $0xd8, (%rsi,%rcx,2), %ymm4\n   vpermq $0xd8, 32(%rsi,%rcx,2), %ymm5\n   vpunpcklwd %ymm4, %ymm7, %ymm0\n   vpunpckhwd %ymm4, %ymm7, %ymm1\n"
+    "vpunpcklwd %ymm5, %ymm7, %ymm2\n   vpunpckhwd %ymm5, %ymm7, %ymm3\n   vmovdqu %ymm0, (%rdi,%rcx,4)\n   vmovdqu %ymm1, 32(%rdi,%rcx,4)\n"
+    "vmovdqu %ymm2, 64(%rdi,%rcx,4)\n   vmovdqu %ymm3, 96(%rdi,%rcx,4)\n   add $32, %rcx\n   jnz .Ltrain_f32b_x_y32\n"
+    ".Ltrain_f32b_x_y16:\n   and $31, %edx\n   jz .Ltrain_f32b_x_wide_done\n"
+    ".Ltrain_f32b_x_y16_more:\n   cmp $16, %edx\n   jb .Ltrain_f32b_x_ylast\n   vpermq $0xd8, (%rsi), %ymm4\n   vpunpcklwd %ymm4, %ymm7, %ymm0\n"
+    "vpunpckhwd %ymm4, %ymm7, %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n   add $32, %rsi\n   add $64, %rdi\n   sub $16, %edx\n"
+    "jnz .Ltrain_f32b_x_y16_more\n   jmp .Ltrain_f32b_x_wide_done\n"
+    ".Ltrain_f32b_x_ylast:\n   vpermq $0xd8, -32(%rsi,%rdx,2), %ymm4\n   vpunpcklwd %ymm4, %ymm7, %ymm0\n   vpunpckhwd %ymm4, %ymm7, %ymm1\n"
+    "vmovdqu %ymm0, -64(%rdi,%rdx,4)\n   vmovdqu %ymm1, -32(%rdi,%rdx,4)\n   jmp .Ltrain_f32b_x_wide_done\n"
+    //      8 to 15: the eight at each end.
+    ".Ltrain_f32b_x_ypair:\n   vpmovzxwd (%rsi), %ymm0\n   vpmovzxwd -16(%rsi,%rdx,2), %ymm1\n   vpslld $16, %ymm0, %ymm0\n   vpslld $16, %ymm1, %ymm1\n"
+    "vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, -32(%rdi,%rdx,4)\n"
+    ".Ltrain_f32b_x_wide_done:\n   vzeroupper\n" ASM_RET
+    ".Ltrain_f32b_x_sse2:\n   cmp $4, %rdx\n   jb .Ltrain_f32b_x_scalar\n   pxor %xmm3, %xmm3\n   cmp $8, %rdx\n   jb .Ltrain_f32b_x_spair\n"
+    "mov %rdx, %rcx\n   and $-8, %rcx\n   lea (%rsi,%rcx,2), %rsi\n   lea (%rdi,%rcx,4), %rdi\n   neg %rcx\n"
+    ".balign 64\n.Ltrain_f32b_x_s8:\n   movdqu (%rsi,%rcx,2), %xmm0\n   movdqa %xmm3, %xmm1\n   movdqa %xmm3, %xmm2\n   punpcklwd %xmm0, %xmm1\n"
+    "punpckhwd %xmm0, %xmm2\n   movdqu %xmm1, (%rdi,%rcx,4)\n   movdqu %xmm2, 16(%rdi,%rcx,4)\n   add $8, %rcx\n   jnz .Ltrain_f32b_x_s8\n"
+    "and $7, %edx\n   jz .Ltrain_f32b_x_none\n   movdqu -16(%rsi,%rdx,2), %xmm0\n   movdqa %xmm3, %xmm1\n   movdqa %xmm3, %xmm2\n   punpcklwd %xmm0, %xmm1\n"
+    "punpckhwd %xmm0, %xmm2\n   movdqu %xmm1, -32(%rdi,%rdx,4)\n   movdqu %xmm2, -16(%rdi,%rdx,4)\n" ASM_RET
+    ".Ltrain_f32b_x_spair:\n   movq (%rsi), %xmm0\n   movdqa %xmm3, %xmm1\n   punpcklwd %xmm0, %xmm1\n   movdqu %xmm1, (%rdi)\n"
+    "movq -8(%rsi,%rdx,2), %xmm0\n   movdqa %xmm3, %xmm1\n   punpcklwd %xmm0, %xmm1\n   movdqu %xmm1, -16(%rdi,%rdx,4)\n" ASM_RET
+    ".Ltrain_f32b_x_scalar:\n   movzwl (%rsi), %eax\n   shl $16, %eax\n   mov %eax, (%rdi)\n   add $2, %rsi\n   add $4, %rdi\n   dec %rdx\n   jnz .Ltrain_f32b_x_scalar\n"
+    ".Ltrain_f32b_x_none:\n" ASM_RET
+    ASM_END(bf16_to_f32)
 );
 #elif ARM64
 __asm__(
@@ -39261,6 +39479,55 @@ __asm__(
     "6:  ldr s0, [x1], #4\n   ldr s16, [x0]\n   fmadd s16, s0, s31, s16\n   str s16, [x0], #4\n   subs x2, x2, #1\n   b.ne 6b\n"
     "5:  " ASM_RET
     ASM_END(fused_residual_add_f32)
+
+    //      f32_to_bf16: x0 destination, x1 source, x2 count. With FEAT_BF16,
+    //      BFCVTN (spelled .inst for the assemblers that predate it) rounds as
+    //      FPCR says, so it is used only at FPCR's defaults -- round to
+    //      nearest, no flush, no default NaN, no alternate handling -- and
+    //      after each zero or denormal has been made the zero of its sign,
+    //      which the definition says and BFCVTN does not. Otherwise the
+    //      definition in integer lanes. Sixteen or eight a turn and then the
+    //      block ending at the end; under that, fours and then one at a time.
+    //      The x86_64 block carries the contract.
+    ASM_FUNC(f32_to_bf16)
+    "cbz x2, 9f\n   adrp x9, cpu_has_bf16\n   ldrb w9, [x9, :lo12:cpu_has_bf16]\n   cmp w9, #1\n   b.eq 20f\n   b.hi 10f\n"
+    //      The first call asks ID_AA64ISAR1_EL1, which Linux answers at EL0.
+    "mrs x9, id_aa64isar1_el1\n   ubfx x9, x9, #44, #4\n   cmp x9, #0\n   cset w9, ne\n   add w9, w9, #1\n"
+    "adrp x10, cpu_has_bf16\n   strb w9, [x10, :lo12:cpu_has_bf16]\n   cmp w9, #1\n   b.eq 20f\n"
+    "10: mrs x9, fpcr\n   mov w10, #3\n   movk w10, #0x3c0, lsl #16\n   tst x9, x10\n   b.ne 20f\n"
+    "movz w10, #0x7f80, lsl #16\n   dup v28.4s, w10\n   movi v29.4s, #0x80, lsl #24\n   cmp x2, #16\n   b.lo 15f\n"
+    "11: ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x1], #64\n" NEON_TRAIN_FLUSH4
+    ".inst 0x0ea16810\n   .inst 0x4ea16830\n   .inst 0x0ea16851\n   .inst 0x4ea16871\n   st1 {v16.8h, v17.8h}, [x0], #32\n"
+    "sub x2, x2, #16\n   cmp x2, #16\n   b.hs 11b\n   cbz x2, 9f\n"
+    "add x1, x1, x2, lsl #2\n   sub x1, x1, #64\n   add x0, x0, x2, lsl #1\n   sub x0, x0, #32\n   mov x2, #16\n   b 11b\n"
+    "15: cmp x2, #4\n   b.lo 30f\n"
+    "16: ld1 {v0.4s}, [x1], #16\n   cmtst v4.4s, v0.4s, v28.4s\n   orr v4.16b, v4.16b, v29.16b\n   and v0.16b, v0.16b, v4.16b\n"
+    ".inst 0x0ea16810\n   st1 {v16.4h}, [x0], #8\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 16b\n   b 30f\n"
+    "20: cmp x2, #8\n   b.lo 30f\n   movi v28.4s, #1\n   movi v29.4s, #0x7f, msl #8\n   mvni v30.4s, #0x80, lsl #24\n"
+    "movz w10, #0x7f80, lsl #16\n   dup v27.4s, w10\n   movi v26.4s, #0x80, lsl #16\n   movi v25.4s, #0x40, lsl #16\n   movi v24.4s, #0x80, lsl #24\n"
+    "21: ld1 {v0.4s, v1.4s}, [x1], #32\n" NEON_TRAIN_BF16("v0", "v2") NEON_TRAIN_BF16("v1", "v3")
+    "uzp2 v4.8h, v2.8h, v3.8h\n   st1 {v4.8h}, [x0], #16\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs 21b\n   cbz x2, 9f\n"
+    "add x1, x1, x2, lsl #2\n   sub x1, x1, #32\n   add x0, x0, x2, lsl #1\n   sub x0, x0, #16\n   mov x2, #8\n   b 21b\n"
+    "30: cbz x2, 9f\n   mov w11, #0x7f800000\n   mov w12, #0x7fff\n"
+    "31: ldr w9, [x1], #4\n   tst w9, #0x7f800000\n   b.eq 33f\n   and w10, w9, #0x7fffffff\n   cmp w10, w11\n   b.hi 34f\n"
+    "ubfx w10, w9, #16, #1\n   add w9, w9, w10\n   add w9, w9, w12\n   lsr w9, w9, #16\n   b 35f\n"
+    "33: lsr w9, w9, #16\n   and w9, w9, #0x8000\n   b 35f\n"
+    "34: lsr w9, w9, #16\n   orr w9, w9, #0x40\n"
+    "35: strh w9, [x0], #2\n   subs x2, x2, #1\n   b.ne 31b\n"
+    "9:  " ASM_RET
+    ASM_END(f32_to_bf16)
+
+    //      bf16_to_f32: x0 destination, x1 source, x2 count. shll is the
+    //      widening exactly: each halfword into the high half of a word.
+    ASM_FUNC(bf16_to_f32)
+    "cmp x2, #16\n   b.lo 5f\n"
+    "1:  ld1 {v0.8h, v1.8h}, [x1], #32\n   shll v2.4s, v0.4h, #16\n   shll2 v3.4s, v0.8h, #16\n   shll v4.4s, v1.4h, #16\n   shll2 v5.4s, v1.8h, #16\n"
+    "st1 {v2.4s, v3.4s, v4.4s, v5.4s}, [x0], #64\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 1b\n   cbz x2, 9f\n"
+    "add x1, x1, x2, lsl #1\n   sub x1, x1, #32\n   add x0, x0, x2, lsl #2\n   sub x0, x0, #64\n   mov x2, #16\n   b 1b\n"
+    "5:  cbz x2, 9f\n"
+    "6:  ldrh w9, [x1], #2\n   lsl w9, w9, #16\n   str w9, [x0], #4\n   subs x2, x2, #1\n   b.ne 6b\n"
+    "9:  " ASM_RET
+    ASM_END(bf16_to_f32)
 );
 #elif RISCV64
 __asm__(
@@ -39288,6 +39555,49 @@ __asm__(
     "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   sub a2, a2, t0\n   bnez a2, 5b\n" ASM_RET
 #endif
     ASM_END(fused_residual_add_f32)
+
+    //      f32_to_bf16: a0 destination, a1 source, a2 count. With V, the
+    //      definition as many lanes as four registers hold, the NaN and the
+    //      denormal answers put in under masks that leave the other lanes
+    //      as they are, and vnsrl takes the high halves; without it one at a
+    //      time. The x86_64 block carries the contract.
+    ASM_FUNC(f32_to_bf16)
+    "beqz a2, 9f\n   lui t3, 0x7f800\n   lui t4, 0x80000\n   addiw t4, t4, -1\n   lui t5, 8\n   addi t5, t5, -1\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t1, cpu_has_vector\n   lbu t1, 0(t1)\n   li t2, 2\n   beq t1, t2, 6f\n   bnez t1, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j f32_to_bf16\n"
+#endif
+    "1:  lwu t0, 0(a1)\n   and t1, t0, t3\n   beqz t1, 3f\n   and t1, t0, t4\n   bltu t3, t1, 4f\n"
+    "srli t1, t0, 16\n   andi t1, t1, 1\n   add t0, t0, t1\n   add t0, t0, t5\n   srli t0, t0, 16\n   j 5f\n"
+    "3:  srli t0, t0, 16\n   lui t1, 8\n   and t0, t0, t1\n   j 5f\n"
+    "4:  srli t0, t0, 16\n   ori t0, t0, 0x40\n"
+    "5:  sh t0, 0(a0)\n   addi a1, a1, 4\n   addi a0, a0, 2\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "6:  lui t6, 0x800\n   lui a5, 0x400\n   lui a6, 0x80000\n"
+    "7:  vsetvli t0, a2, e32, m4, ta, mu\n   vle32.v v8, (a1)\n   vsrl.vi v16, v8, 16\n   vand.vi v16, v16, 1\n   vadd.vv v16, v16, v8\n   vadd.vx v16, v16, t5\n"
+    "vand.vx v24, v8, t4\n   vmsgtu.vx v0, v24, t3\n   vor.vx v16, v8, a5, v0.t\n   vmsltu.vx v0, v24, t6\n   vand.vx v16, v8, a6, v0.t\n"
+    "vsetvli zero, t0, e16, m2, ta, ma\n   vnsrl.wi v4, v16, 16\n   vse16.v v4, (a0)\n"
+    "slli t1, t0, 2\n   add a1, a1, t1\n   slli t1, t0, 1\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 7b\n" ASM_RET
+#endif
+    ASM_END(f32_to_bf16)
+
+    //      bf16_to_f32: a0 destination, a1 source, a2 count. With V, vzext
+    //      and a shift (a widening multiply by 65536 cannot be written: its
+    //      scalar is sixteen bits); without it a halfword at a time.
+    ASM_FUNC(bf16_to_f32)
+    "beqz a2, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t1, cpu_has_vector\n   lbu t1, 0(t1)\n   li t2, 2\n   beq t1, t2, 6f\n   bnez t1, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j bf16_to_f32\n"
+#endif
+    "1:  lhu t0, 0(a1)\n   slli t0, t0, 16\n   sw t0, 0(a0)\n   addi a1, a1, 2\n   addi a0, a0, 4\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "6:  vsetvli t0, a2, e16, m4, ta, ma\n   vle16.v v8, (a1)\n   vsetvli zero, t0, e32, m8, ta, ma\n   vzext.vf2 v16, v8\n   vsll.vi v16, v16, 16\n   vse32.v v16, (a0)\n"
+    "slli t1, t0, 1\n   add a1, a1, t1\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a2, a2, t0\n   bnez a2, 6b\n" ASM_RET
+#endif
+    ASM_END(bf16_to_f32)
     ".option pop\n"
 );
 #endif

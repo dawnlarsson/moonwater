@@ -308,6 +308,10 @@ cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '
       'would remove one compare from a stream hundreds of cycles long')
+cover('folds_already', 'count', 'f32_to_bf16 bf16_to_f32',
+      'a trainer converts whole tensors, weights or activations, sized by the '
+      'model at run time; a literal count would remove one compare from a '
+      'stream of thousands of elements')
 cover('folds_already', 'count', 'memory_copy_changed_u32',
       'the compositor hands it a row of the damage it composed; the width '
       'comes from the damage at run time, so no reachable call site passes '
