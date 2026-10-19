@@ -278,6 +278,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_chang
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '
       'with AVX-512, AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_tensor', 'swiglu_forward_f32',
+      'paired timing against the same algorithm in C built -O3 for the tier timed, '
+      'over rows of 682 and 1024 floats, one, 64 and 8192 of them a call, every '
+      'x86-64 body and riscv64 with V and without')
 cover('direct_benchmark', 'test/checks.c#BENCH_sweep_coverage', 'memory_sweep_coverage',
       'paired former-C/assembly timing over coverage runs of 8 to 400 cells, '
       'every x86-64 body')

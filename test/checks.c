@@ -106109,6 +106109,397 @@ b32 main(void)
 }
 #endif /* CHECK_sensors */
 
+#ifdef CHECK_tensor
+#include "../src/lib.util.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+#endif
+#ifdef CHECK_native_tensor
+#include <math.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include "tensor.h"
+#endif
+
+#if defined(CHECK_tensor) || defined(CHECK_native_tensor)
+/*
+        lib.c's tensor block against a double-precision model.
+
+        Two programs are built from this: CHECK_tensor, freestanding on the
+        library, which test/run's tensor lane runs on all three machines --
+        x86_64 once per tier with the feature bytes walked down, riscv64 under
+        qemu with no V and at VLEN 128, 256 and 512 -- and CHECK_native_tensor,
+        which links the arm64 bodies lifted out of lib.c and runs them on an
+        arm64 Mac (its main is with the other native sections). Everything
+        between here and the first main is what both share, and is written
+        against nothing but the compiler's builtins and exp(): the library's
+        exponential in one, the C library's in the other, both within an ulp
+        in double.
+
+        A routine's check is a property walked over generated cases, not a
+        list of values: every count from nothing to a hundred and the
+        training sizes, each array ending against a page that faults and
+        guarded in front by sentinels; the in-place calls the routine allows;
+        a dense grid through every regime of the activation; and a stride
+        through all 2^32 bit patterns of the gate. Inputs are mostly the
+        values training sees, with wide magnitudes and the edges (zeros,
+        denormals, +-87 to +-105, FLT_MAX, infinities, NaN) dropped in at
+        random places. The judge is the numeric contract: a NaN in gives NaN
+        out, an infinity in asks only that nothing traps, and otherwise
+        |got - ref| <= 8 eps |ref| + 1e-35 + (1 + |g|) |up| 2^-149 with
+        eps = 2^-24, or an infinity of the right sign where the product
+        itself overflows.
+*/
+#define TENSOR_GUARD_FLOATS 4128       /* what one guarded region holds: 4096 and the sentinels */
+#define TENSOR_SENTINEL 16
+
+typedef void tensor_swiglu_call(float *, const float *, const float *, unsigned long long);
+
+static unsigned long long tensor_state = 0x2545f4914f6cdd1dull;
+
+static unsigned long long tensor_next(void)
+{
+        XORSHIFT64(tensor_state);
+        return tensor_state;
+}
+
+static float tensor_float(unsigned bits)
+{
+        float value;
+
+        __builtin_memcpy(&value, &bits, 4);
+        return value;
+}
+
+static unsigned tensor_bits(float value)
+{
+        unsigned bits;
+
+        __builtin_memcpy(&bits, &value, 4);
+        return bits;
+}
+
+//      The edges, by bit pattern: zeros, denormals, where e^-|g| leaves the
+//      normal range and then the denormal one, the clamp at 105, the largest
+//      finite values, infinities and NaNs with and without a payload.
+static const unsigned tensor_edges[] = {
+    0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x3f800000, 0xbf800000,
+    0x41a00000, 0xc1a00000, 0x42ae0000, 0xc2ae0000, 0x42b00000, 0xc2b00000, 0x42b20000, 0xc2b20000,
+    0x42c80000, 0xc2c80000, 0x42d00000, 0xc2d00000, 0x42d20000, 0xc2d20000, 0x42d40000, 0xc2d40000,
+    0x461c4000, 0xc61c4000, 0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc00001};
+
+static float tensor_uniform(float low, float high)
+{
+        return low + (high - low) * (float)((tensor_next() >> 40) * (1.0 / 16777216.0));
+}
+
+//      A gate: mostly what a trained MLP holds, sometimes any magnitude, and
+//      one in sixteen an edge.
+static float tensor_draw_gate(void)
+{
+        unsigned long long draw = tensor_next();
+
+        switch (draw % 16)
+        {
+        case 0:
+                return tensor_float(tensor_edges[(draw >> 8) % (sizeof(tensor_edges) / sizeof(tensor_edges[0]))]);
+        case 1:
+        case 2:
+                return tensor_float((unsigned)(draw >> 32 & 0x807fffff) | (unsigned)(96 + (draw >> 4) % 48) << 23);
+        default:
+                return tensor_uniform(-12.0f, 12.0f);
+        }
+}
+
+static float tensor_draw_up(void)
+{
+        unsigned long long draw = tensor_next();
+
+        switch (draw % 32)
+        {
+        case 0:
+                return tensor_float(tensor_edges[(draw >> 8) % (sizeof(tensor_edges) / sizeof(tensor_edges[0]))]);
+        case 1:
+                return tensor_float((unsigned)(draw >> 32 & 0x807fffff) | (unsigned)(100 + (draw >> 4) % 40) << 23);
+        default:
+                return tensor_uniform(-4.0f, 4.0f);
+        }
+}
+
+static double tensor_sigmoid(double g)
+{
+        if (g >= 0)
+                return 1.0 / (1.0 + exp(-g));
+        double t = exp(g);
+
+        return t / (1.0 + t);
+}
+
+//      The worst error seen, in eps of the reference, where the reference is
+//      a normal float well above the floors: what the lane log reports.
+static double tensor_worst;
+
+//      The contract for one output of swiglu_forward_f32.
+static int tensor_swiglu_holds(float got, float g, float u)
+{
+        if (__builtin_isnan(g) || __builtin_isnan(u))
+                return __builtin_isnan(got);
+        if (__builtin_isinf(g) || __builtin_isinf(u))
+                return 1;
+        double ref = (double)g * tensor_sigmoid(g) * (double)u;
+        double top = 3.4028234663852886e38;
+
+        if (__builtin_fabs(ref) > top * (1.0 + 0x1p-24))
+                return __builtin_isinf(got) && (got > 0) == (ref > 0);
+        if (__builtin_isnan(got) || __builtin_isinf(got))
+                return __builtin_isinf(got) && __builtin_fabs(ref) > top * (1.0 - 0x1p-23);
+        double error = __builtin_fabs((double)got - ref);
+
+        if (__builtin_fabs(ref) > 1e-30 && error > tensor_worst * 0x1p-24 * __builtin_fabs(ref))
+                tensor_worst = error / (0x1p-24 * __builtin_fabs(ref));
+        return error <= 8.0 * 0x1p-24 * __builtin_fabs(ref) + 1e-35 +
+                        (1.0 + __builtin_fabs((double)g)) * __builtin_fabs((double)u) * 0x1p-149;
+}
+
+//      The counts every routine is walked over: every one to a hundred, the
+//      vector edges past it, and the trainer's own (682 = 42 * 16 + 10).
+static const unsigned tensor_counts_long[] = {127, 128, 129, 255, 256, 257, 682, 1024, 4096};
+#define TENSOR_COUNTS (101 + sizeof(tensor_counts_long) / sizeof(tensor_counts_long[0]))
+
+static unsigned long long tensor_count(unsigned long long index)
+{
+        return index <= 100 ? index : tensor_counts_long[index - 101];
+}
+
+//      The faults a property found, by kind.
+typedef struct
+{
+        unsigned long long values, outside, aliased, nans;
+} tensor_faults;
+
+//      Three regions, each TENSOR_GUARD_FLOATS long and ending against a page
+//      that faults: an array of n is placed at end - n, and the sentinels in
+//      front of it are checked after every call.
+static void tensor_sentinels(float *start, unsigned salt)
+{
+        for (int i = 0; i < TENSOR_SENTINEL; i++)
+                start[i - TENSOR_SENTINEL] = tensor_float(0x7fa00000u + salt * 64u + (unsigned)i);
+}
+
+static int tensor_sentinels_kept(const float *start, unsigned salt)
+{
+        for (int i = 0; i < TENSOR_SENTINEL; i++)
+                if (tensor_bits(start[i - TENSOR_SENTINEL]) != 0x7fa00000u + salt * 64u + (unsigned)i)
+                        return 0;
+        return 1;
+}
+
+static void tensor_swiglu_forward_cases(tensor_swiglu_call *routine, float *const region[3], tensor_faults *faults)
+{
+        static float gate_copy[4096], up_copy[4096];
+
+        for (unsigned long long index = 0; index < TENSOR_COUNTS; index++)
+        {
+                unsigned long long n = tensor_count(index);
+                float *out = region[0] + TENSOR_GUARD_FLOATS - n;
+                float *gate = region[1] + TENSOR_GUARD_FLOATS - n;
+                float *up = region[2] + TENSOR_GUARD_FLOATS - n;
+
+                for (unsigned long long i = 0; i < n; i++)
+                {
+                        gate_copy[i] = gate[i] = tensor_draw_gate();
+                        up_copy[i] = up[i] = tensor_draw_up();
+                        out[i] = tensor_float(0x7fb00000u);
+                }
+                tensor_sentinels(out, 1), tensor_sentinels(gate, 2), tensor_sentinels(up, 3);
+                routine(out, gate, up, n);
+                for (unsigned long long i = 0; i < n; i++)
+                {
+                        faults->values += !tensor_swiglu_holds(out[i], gate_copy[i], up_copy[i]);
+                        faults->outside += tensor_bits(gate[i]) != tensor_bits(gate_copy[i]) ||
+                                           tensor_bits(up[i]) != tensor_bits(up_copy[i]);
+                }
+                faults->outside += !tensor_sentinels_kept(out, 1) + !tensor_sentinels_kept(gate, 2) +
+                                   !tensor_sentinels_kept(up, 3);
+
+                //      In place: out over gate, then out over up.
+                routine(gate, gate, up, n);
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->aliased += !tensor_swiglu_holds(gate[i], gate_copy[i], up_copy[i]);
+                for (unsigned long long i = 0; i < n; i++)
+                        gate[i] = gate_copy[i];
+                routine(up, gate, up, n);
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->aliased += !tensor_swiglu_holds(up[i], gate_copy[i], up_copy[i]);
+                faults->outside += !tensor_sentinels_kept(gate, 2) + !tensor_sentinels_kept(up, 3);
+
+                //      A NaN anywhere in either input is a NaN in that output and
+                //      nowhere else.
+                if (n)
+                {
+                        unsigned long long at = tensor_next() % n;
+
+                        for (unsigned long long i = 0; i < n; i++)
+                                gate[i] = gate_copy[i], up[i] = up_copy[i];
+                        if (tensor_next() & 1)
+                                gate[at] = tensor_float(0x7fc00000u | (unsigned)(tensor_next() & 0x3fffff));
+                        else
+                                up[at] = tensor_float(0xffc00000u | (unsigned)(tensor_next() & 0x3fffff));
+                        routine(out, gate, up, n);
+                        faults->nans += !__builtin_isnan(out[at]);
+                        for (unsigned long long i = 0; i < n; i++)
+                                if (i != at)
+                                        faults->nans += !tensor_swiglu_holds(out[i], gate[i], up[i]);
+                }
+        }
+}
+
+//      Every regime of the activation, densely: gates through [-120, 120]
+//      against up = 1 and against random up, 4096 at a call.
+static unsigned long long tensor_swiglu_forward_grid(tensor_swiglu_call *routine, float *const region[3])
+{
+        unsigned long long bad = 0;
+        float *out = region[0] + TENSOR_GUARD_FLOATS - 4096;
+        float *gate = region[1] + TENSOR_GUARD_FLOATS - 4096;
+        float *up = region[2] + TENSOR_GUARD_FLOATS - 4096;
+
+        for (unsigned long long block = 0; block < 32; block++)
+        {
+                for (unsigned long long i = 0; i < 4096; i++)
+                {
+                        gate[i] = -120.0f + 240.0f * (float)(block * 4096 + i) / (32.0f * 4096.0f);
+                        up[i] = block & 1 ? tensor_uniform(-3.0f, 3.0f) : 1.0f;
+                }
+                routine(out, gate, up, 4096);
+                for (unsigned long long i = 0; i < 4096; i++)
+                        bad += !tensor_swiglu_holds(out[i], gate[i], up[i]);
+        }
+        return bad;
+}
+
+//      A stride through all 2^32 gates (a prime, so every exponent and
+//      mantissa pattern turns up), each against one of a handful of ups.
+static unsigned long long tensor_swiglu_forward_sweep(tensor_swiglu_call *routine, float *const region[3], unsigned stride)
+{
+        static const float ups[] = {1.0f, 0.7f, -1.3f, 3e-3f, 5e3f, -0.25f, 9e-7f, 1.75f};
+        unsigned long long bad = 0, bits = 0;
+        float *out = region[0] + TENSOR_GUARD_FLOATS - 4096;
+        float *gate = region[1] + TENSOR_GUARD_FLOATS - 4096;
+        float *up = region[2] + TENSOR_GUARD_FLOATS - 4096;
+
+        while (bits < 0x100000000ull)
+        {
+                unsigned long long n = 0;
+
+                for (; n < 4096 && bits < 0x100000000ull; n++, bits += stride)
+                        gate[n] = tensor_float((unsigned)bits), up[n] = ups[(bits >> 7) % 8];
+                routine(out + 4096 - n, gate, up, n);
+                for (unsigned long long i = 0; i < n; i++)
+                        bad += !tensor_swiglu_holds(out[4096 - n + i], gate[i], up[i]);
+        }
+        return bad;
+}
+#endif /* CHECK_tensor || CHECK_native_tensor */
+
+#ifdef CHECK_tensor
+static float *tensor_region[3];
+
+//      Three regions of TENSOR_GUARD_FLOATS, each followed by a page that
+//      faults.
+static bool tensor_guard(void)
+{
+        positive span = (TENSOR_GUARD_FLOATS * 4 + 4095) / 4096 * 4096;
+
+        for (int at = 0; at < 3; at++)
+        {
+                p8 address_to pages = memory(span + 4096);
+
+                if (!pages || system_call_3(syscall(mprotect), (positive)(pages + span), 4096, 0) != 0)
+                        return false;
+                tensor_region[at] = (float *)(pages + span) - TENSOR_GUARD_FLOATS;
+        }
+        return true;
+}
+
+static fn tensor_call_swiglu_forward(float *out, const float *gate, const float *up, unsigned long long n)
+{
+        swiglu_forward_f32(out, gate, up, n);
+}
+
+//      One tier's properties, each one check.
+static fn tensor_tier(string_address tier)
+{
+        tensor_faults faults = {0, 0, 0, 0};
+
+        tensor_worst = 0;
+        tensor_swiglu_forward_cases(tensor_call_swiglu_forward, tensor_region, &faults);
+        check("swiglu_forward_f32: every count to 100 and 127 to 4096, within the bound", faults.values == 0);
+        check("swiglu_forward_f32: inputs, sentinels and pages beside every array untouched", faults.outside == 0);
+        check("swiglu_forward_f32: out over gate and out over up", faults.aliased == 0);
+        check("swiglu_forward_f32: a NaN in gate or up is NaN out, there alone", faults.nans == 0);
+        check("swiglu_forward_f32: gates through [-120, 120], up 1 and random",
+              tensor_swiglu_forward_grid(tensor_call_swiglu_forward, tensor_region) == 0);
+#if RISCV64
+        //      Emulated: a coarser stride through the bit patterns.
+        check("swiglu_forward_f32: a stride through all 2^32 gates",
+              tensor_swiglu_forward_sweep(tensor_call_swiglu_forward, tensor_region, 262139) == 0);
+#else
+        check("swiglu_forward_f32: a stride through all 2^32 gates",
+              tensor_swiglu_forward_sweep(tensor_call_swiglu_forward, tensor_region, 16411) == 0);
+#endif
+        string_format(log, "  %s: swiglu_forward_f32 worst ", tier);
+        decimal_to_string(log, tensor_worst);
+        string_format(log, " eps\n");
+}
+
+b32 main()
+{
+        check("tensor: guard pages", tensor_guard());
+        if (!tensor_region[2])
+                return test_report(null);
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier < 2 ? wide2 : 0;
+                cpu_has_fma = tier < 2 ? fused : 0;
+                tensor_tier(cpu_has_avx512 ? "avx512" : cpu_has_avx2 && cpu_has_fma ? "avx2 fma" : "sse2");
+        }
+        cpu_has_avx512 = wide512, cpu_has_avx2 = wide2, cpu_has_fma = fused;
+#elif RISCV64
+        //      The first call asks for V and keeps its arguments through the
+        //      question.
+        {
+                float *out = tensor_region[0] + TENSOR_GUARD_FLOATS - 3, *gate = tensor_region[1] + TENSOR_GUARD_FLOATS - 3;
+                float *up = tensor_region[2] + TENSOR_GUARD_FLOATS - 3;
+
+                for (int i = 0; i < 3; i++)
+                        gate[i] = (float)i - 1.5f, up[i] = 2.0f;
+                cpu_has_vector = 0;
+                swiglu_forward_f32(out, gate, up, 3);
+                check("swiglu_forward_f32: the first call asks for V and keeps its arguments",
+                      cpu_has_vector != 0 && tensor_swiglu_holds(out[0], gate[0], up[0]) &&
+                          tensor_swiglu_holds(out[1], gate[1], up[1]) && tensor_swiglu_holds(out[2], gate[2], up[2]));
+        }
+        p8 vector = cpu_has_vector;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                tensor_tier(cpu_has_vector == 2 ? "V" : "no V");
+        }
+        cpu_has_vector = vector;
+#else
+        tensor_tier("neon");
+#endif
+        return test_report(null);
+}
+#endif /* CHECK_tensor */
+
 #ifdef CHECK_font
 #include "../src/lib.util.c"
 #include "../src/canvas/font.c"
@@ -120263,6 +120654,50 @@ int main(void)
 }
 #endif /* CHECK_native_network */
 
+#ifdef CHECK_native_tensor
+/*
+        The arm64 tensor bodies lifted out of lib.c, run on this machine
+        through the properties CHECK_tensor walks (the generator, the model
+        and the walks are with it, ahead of CHECK_font). The lift is the
+        same bodies byte for byte, with Darwin's symbol spelling, so the
+        hardware here judges what the qemu run on the box judges.
+*/
+void swiglu_forward_f32(float *, const float *, const float *, unsigned long long);
+
+int main(void)
+{
+        float *region[3];
+        unsigned long long checks = 0, span = (TENSOR_GUARD_FLOATS * 4 + 16383) / 16384 * 16384;
+
+        //      Each region ends against a page that faults; Apple's pages are
+        //      16 KiB, so the span is a whole number of them.
+        for (int at = 0; at < 3; at++)
+        {
+                unsigned char *pages = mmap(0, span + 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+                if (pages == MAP_FAILED || mprotect(pages + span, 16384, PROT_NONE) != 0)
+                {
+                        printf("arm64 tensor: 1 checks | 1 failures\n");
+                        return 1;
+                }
+                region[at] = (float *)(pages + span) - TENSOR_GUARD_FLOATS;
+        }
+
+        tensor_faults faults = {0, 0, 0, 0};
+
+        tensor_swiglu_forward_cases(swiglu_forward_f32, region, &faults);
+        checks += 4;
+        unsigned long long grid = tensor_swiglu_forward_grid(swiglu_forward_f32, region);
+        unsigned long long sweep = tensor_swiglu_forward_sweep(swiglu_forward_f32, region, 16411);
+
+        checks += 2;
+        printf("  neon: swiglu_forward_f32 worst %.3f eps\n", tensor_worst);
+        printf("arm64 tensor: %llu checks | values %llu | outside %llu | aliased %llu | nans %llu | grid %llu | sweep %llu\n",
+               checks, faults.values, faults.outside, faults.aliased, faults.nans, grid, sweep);
+        return faults.values || faults.outside || faults.aliased || faults.nans || grid || sweep;
+}
+#endif /* CHECK_native_tensor */
+
 #ifdef CHECK_native_reserve
 /* Exact lifted ARM64 movable-store leaves, with native allocation beneath. */
 #include "reserve.h"
@@ -122622,6 +123057,261 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_copy_changed */
+
+#ifdef BENCH_tensor
+/* The tensor block against the compiler: the same algorithm written in C for
+   the vectoriser and built -O3 for the tier being timed (x86-64-v4 with 512-bit
+   vectors for the AVX-512 body, x86-64-v3 for AVX2 + FMA, the baseline for
+   SSE2; riscv64's with V for the V body), at the trainer's rows: H = 682 and
+   1024, one row (L1), 64 rows back to back (L2) and, natively, 8192 (the
+   training call, from memory). Paired medians of ASM/C, and each side's best
+   ticks a call. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+#if X64
+#define TENSOR_C_WIDE __attribute__((optimize("O3"), target("arch=x86-64-v4,prefer-vector-width=512")))
+#define TENSOR_C_YMM __attribute__((optimize("O3"), target("arch=x86-64-v3")))
+#elif RISCV64
+#define TENSOR_C_WIDE __attribute__((optimize("O3"), target("arch=+v")))
+#define TENSOR_C_YMM __attribute__((optimize("O3")))
+#else
+#define TENSOR_C_WIDE __attribute__((optimize("O3")))
+#define TENSOR_C_YMM __attribute__((optimize("O3")))
+#endif
+#define TENSOR_C_BASE __attribute__((optimize("O3")))
+
+static inline __attribute__((always_inline)) f32 tensor_c_float(p32 bits)
+{
+        f32 value;
+
+        __builtin_memcpy(&value, &bits, 4);
+        return value;
+}
+
+static inline __attribute__((always_inline)) p32 tensor_c_bits(f32 value)
+{
+        p32 bits;
+
+        __builtin_memcpy(&bits, &value, 4);
+        return bits;
+}
+
+//      swiglu_forward_f32's algorithm, as C: the overflow-free sigmoid with a
+//      degree-6 exp and the Cephes split of ln2, whose products are exact
+//      with or without an FMA to contract them into.
+#define TENSOR_C_SWIGLU(name, attributes)                                                                \
+        attributes static fn name(f32 *restrict out, const f32 *restrict gate, const f32 *restrict up,   \
+                                  positive n)                                                            \
+        {                                                                                                \
+                for (positive i = 0; i < n; i++)                                                         \
+                {                                                                                        \
+                        f32 g = gate[i];                                                                 \
+                        f32 a = __builtin_fabsf(g);                                                      \
+                        a = a < 105.0f ? a : 105.0f;                                                     \
+                        f32 z = a * 1.44269502f + 12583015.0f;                                           \
+                        f32 m = z - 12583015.0f;                                                         \
+                        f32 x = m * 0.693359375f - a;                                                    \
+                        x = m * -2.12194440e-4f + x;                                                     \
+                        f32 p = tensor_c_float(0x2eb55ce8u);                                             \
+                        p = p * x + tensor_c_float(0x300936aeu);                                         \
+                        p = p * x + tensor_c_float(0x312aac65u);                                         \
+                        p = p * x + tensor_c_float(0x322aaa1fu);                                         \
+                        p = p * x + tensor_c_float(0x32fffffdu);                                         \
+                        p = p * x + tensor_c_float(0x33800000u);                                         \
+                        p = p * x + tensor_c_float(0x33800000u);                                         \
+                        f32 w = tensor_c_float(tensor_c_bits(z) << 23);                                  \
+                        f32 numerator = tensor_c_bits(g) >> 31 ? p : w;                                  \
+                        out[i] = g * (numerator / (w + p)) * up[i];                                      \
+                }                                                                                        \
+        }
+TENSOR_C_SWIGLU(tensor_c_swiglu_wide, TENSOR_C_WIDE)
+TENSOR_C_SWIGLU(tensor_c_swiglu_ymm, TENSOR_C_YMM)
+TENSOR_C_SWIGLU(tensor_c_swiglu_base, TENSOR_C_BASE)
+
+typedef fn (*tensor_c_swiglu)(f32 *restrict, const f32 *restrict, const f32 *restrict, positive);
+
+static f32 *tensor_out, *tensor_gate, *tensor_up;
+static tensor_c_swiglu tensor_former;
+
+static p64 run(bool assembly, positive h, positive rows, positive reps)
+{
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+                for (positive row = 0; row < rows; row++)
+                        if (assembly)
+                                swiglu_forward_f32(tensor_out + row * h, tensor_gate + row * h, tensor_up + row * h, h);
+                        else
+                                tensor_former(tensor_out + row * h, tensor_gate + row * h, tensor_up + row * h, h);
+        return get_cpu_time() - start;
+}
+
+static fn tensor_hundredths(positive value)
+{
+        string_format(log, "%p.", value / 100);
+        positive_to_padded(log, value % 100, 2, '0', 0);
+}
+
+static fn tensor_swiglu_shapes(string_address tier)
+{
+        static const positive widths[] = {682, 1024};
+#if X64
+        static const positive heights[] = {1, 64, 8192};
+#else
+        static const positive heights[] = {1, 64};
+#endif
+
+        for (positive w = 0; w < 2; w++)
+                for (positive t = 0; t < sizeof(heights) / sizeof(heights[0]); t++)
+                {
+                        positive h = widths[w], rows = heights[t];
+#if X64
+                        positive reps = rows == 1 ? 4000 : rows == 64 ? 64 : 1;
+#else
+                        positive reps = rows == 1 ? 64 : 2;
+#endif
+                        positive ratios[TRIES];
+                        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former, assembly;
+
+                                BENCH_ALTERNATE(trial, former, run(false, h, rows, reps), assembly, run(true, h, rows, reps));
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "swiglu_forward_f32 %p by %p, %s: paired median ASM/C ", h, rows, tier);
+                        tensor_hundredths(ratios[TRIES / 2]);
+                        string_format(log, "%%; best ticks a call ASM ");
+                        tensor_hundredths((positive)(best_a * 100 / (rows * reps)));
+                        string_format(log, ", C ");
+                        tensor_hundredths((positive)(best_c * 100 / (rows * reps)));
+                        log("\n", 1);
+                }
+}
+
+//      One shape on one tier, alone, for perf stat: 20000 calls of a row in
+//      L1. "nothing" is the same program doing none, the baseline to subtract.
+#if X64
+static fn tensor_force(p32 tier)
+{
+        static p8 wide512 = 2, wide2, fused;
+
+        if (wide512 == 2)
+                wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+        cpu_has_avx512 = tier == 0 ? wide512 : 0;
+        cpu_has_avx2 = tier < 2 ? wide2 : 0;
+        cpu_has_fma = tier < 2 ? fused : 0;
+        tensor_former = tier == 0 ? tensor_c_swiglu_wide : tier == 1 ? tensor_c_swiglu_ymm : tensor_c_swiglu_base;
+}
+#else
+static fn tensor_force(p32 tier)
+{
+        (void)tier;
+        tensor_former = tensor_c_swiglu_base;
+}
+#endif
+#define TENSOR_NAMED(id, h, tier, assembly)                                                              \
+        static fn tensor_named_##id(void)                                                                \
+        {                                                                                                \
+                tensor_force(tier);                                                                      \
+                run(assembly, h, 1, 20000);                                                              \
+        }
+TENSOR_NAMED(682_zmm, 682, 0, true)
+TENSOR_NAMED(682_zmm_c, 682, 0, false)
+TENSOR_NAMED(682_ymm, 682, 1, true)
+TENSOR_NAMED(682_ymm_c, 682, 1, false)
+TENSOR_NAMED(682_xmm, 682, 2, true)
+TENSOR_NAMED(682_xmm_c, 682, 2, false)
+TENSOR_NAMED(1024_zmm, 1024, 0, true)
+TENSOR_NAMED(1024_zmm_c, 1024, 0, false)
+TENSOR_NAMED(1024_ymm, 1024, 1, true)
+TENSOR_NAMED(1024_ymm_c, 1024, 1, false)
+TENSOR_NAMED(1024_xmm, 1024, 2, true)
+TENSOR_NAMED(1024_xmm_c, 1024, 2, false)
+
+static fn tensor_named_nothing(void)
+{
+}
+
+static bench_work tensor_named(string_address name)
+{
+        BENCH_NAME(name, "nothing", tensor_named_nothing);
+        BENCH_NAME(name, "swiglu-682-zmm", tensor_named_682_zmm);
+        BENCH_NAME(name, "swiglu-682-zmm-c", tensor_named_682_zmm_c);
+        BENCH_NAME(name, "swiglu-682-ymm", tensor_named_682_ymm);
+        BENCH_NAME(name, "swiglu-682-ymm-c", tensor_named_682_ymm_c);
+        BENCH_NAME(name, "swiglu-682-xmm", tensor_named_682_xmm);
+        BENCH_NAME(name, "swiglu-682-xmm-c", tensor_named_682_xmm_c);
+        BENCH_NAME(name, "swiglu-1024-zmm", tensor_named_1024_zmm);
+        BENCH_NAME(name, "swiglu-1024-zmm-c", tensor_named_1024_zmm_c);
+        BENCH_NAME(name, "swiglu-1024-ymm", tensor_named_1024_ymm);
+        BENCH_NAME(name, "swiglu-1024-ymm-c", tensor_named_1024_ymm_c);
+        BENCH_NAME(name, "swiglu-1024-xmm", tensor_named_1024_xmm);
+        BENCH_NAME(name, "swiglu-1024-xmm-c", tensor_named_1024_xmm_c);
+        return null;
+}
+
+b32 main(void)
+{
+        positive floats = 8192 * 1024;
+
+        tensor_out = memory(floats * 4), tensor_gate = memory(floats * 4), tensor_up = memory(floats * 4);
+        if (!tensor_out || !tensor_gate || !tensor_up)
+                return 1;
+        p64 state = 0x9e3779b97f4a7c15ull;
+        for (positive i = 0; i < floats; i++)
+        {
+                XORSHIFT64(state);
+                tensor_gate[i] = (f32)((b64)(state >> 40) - (1 << 23)) * (6.0f / (f32)(1 << 23));
+                tensor_up[i] = (f32)((b64)(state & 0xffffff) - (1 << 23)) * (2.0f / (f32)(1 << 23));
+                tensor_out[i] = 0.0f;
+        }
+        BENCH_RUN_NAMED(tensor_named);
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
+
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier < 2 ? wide2 : 0;
+                cpu_has_fma = tier < 2 ? fused : 0;
+                if ((tier == 0 && !wide512) || (tier == 1 && !(wide2 && fused)))
+                        continue;
+                tensor_former = tier == 0 ? tensor_c_swiglu_wide : tier == 1 ? tensor_c_swiglu_ymm : tensor_c_swiglu_base;
+                tensor_swiglu_shapes(tier == 0 ? "avx512" : tier == 1 ? "avx2 fma" : "sse2");
+        }
+        cpu_has_avx512 = wide512, cpu_has_avx2 = wide2, cpu_has_fma = fused;
+#elif RISCV64
+        cpu_has_vector = 0;
+        swiglu_forward_f32(tensor_out, tensor_gate, tensor_up, 1);
+        p8 vector = cpu_has_vector;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+                tensor_former = tier == 0 ? tensor_c_swiglu_wide : tensor_c_swiglu_base;
+                tensor_swiglu_shapes(tier == 0 ? "V" : "no V");
+        }
+        cpu_has_vector = vector;
+#else
+        tensor_former = tensor_c_swiglu_base;
+        tensor_swiglu_shapes("neon");
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_tensor */
 
 #ifdef BENCH_sweep_coverage
 /* memory_sweep_coverage against the loop it replaced in font_raster, over

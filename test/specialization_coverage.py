@@ -301,6 +301,10 @@ cover('folds_already', 'count', 'memory_copy_changed_u32',
       'the compositor hands it a row of the damage it composed; the width '
       'comes from the damage at run time, so no reachable call site passes '
       'a literal')
+cover('folds_already', 'hidden_dim', 'swiglu_forward_f32',
+      'a trainer passes its MLP width, which is a model constant, but a '
+      'known count would settle only the masked last turn: the four-vector '
+      'loop is the work and runs the count it is given either way')
 cover('folds_already', 'count', 'memory_sweep_coverage',
       'the rasteriser hands it a run of touched blocks whose length the '
       'outline decides at run time; no reachable call site passes a literal')

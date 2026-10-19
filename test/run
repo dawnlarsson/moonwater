@@ -127,7 +127,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor"
 
 describe()
 {
@@ -205,6 +205,7 @@ describe()
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
+        tensor) echo "the f32 transformer kernels against a double-precision model: every count, guard pages, in place, each x86 tier, and riscv64 with no V and V at 128, 256 and 512 bits" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
@@ -247,7 +248,7 @@ seams="lib compress net link shell tools machine desktop image engine"
 seam_lanes()
 {
         case $1 in
-        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack" ;;
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor" ;;
         compress) echo "tar zstd gzip xz compression_floor compression" ;;
         net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
         link) echo "waterlink link" ;;
@@ -3389,6 +3390,39 @@ lane_font()
 }
 
 #
+#       A check section on the three machines, and then on riscv64 three more
+#       times, under the vector shapes a body has to be right in: no V at all,
+#       and V at VLEN 128 -- the least the extension allows and what most
+#       boards ship -- 256 and 512. The vector bodies ask for VLEN with
+#       vsetvli, so these are four different strip lengths through the same
+#       code.
+#
+freestanding_checks_vector_lane()
+{
+        vector_suite=$1
+        vector_source=$2
+        freestanding_checks_lane "$vector_suite" "$vector_source"
+        vector_outcome=$?
+        if target_tools riscv64; then
+                for cpu in rv64 rv64,v=true,vlen=128 rv64,v=true,vlen=256 rv64,v=true,vlen=512; do
+                        target=riscv64
+                        target_runner="qemu-riscv64 -cpu $cpu"
+                        target_label=riscv64-$(printf '%s' "$cpu" | sed 's/rv64,v=true,vlen=/v/')
+                        freestanding_checks_one "$vector_suite" "$vector_source" || vector_outcome=1
+                done
+                target_label=
+        fi
+        return "$vector_outcome"
+}
+
+#
+#       The f32 transformer kernels of lib.c's tensor block, against a
+#       double-precision model on generated cases; the x86_64 run walks the
+#       AVX-512, AVX2 + FMA and SSE2 bodies itself.
+#
+lane_tensor() { freestanding_checks_vector_lane tensor tensor; }
+
+#
 #       The moonwater command, which only the boot lane reached before: run
 #       in a user and mount namespace with no network, chrooted into scratch
 #       directories standing for /root, /etc, /run, /home and two bowls.
@@ -5008,11 +5042,12 @@ human_nearest lib positive_into_human_nearest_string wait_status_code_base wait_
 fields lib positive_into_padded positive_into_pair
 input_bases lib string_digits_max string_digits_octal_escape_max string_digits_octal_max string_digits_hexadecimal_escape_max string_digits_hexadecimal_max string_digits_base_max
 network lib network_load_16 network_load_32 network_store_16 network_store_32
+tensor lib swiglu_forward_f32
 reserve lib memory_growth memory_reserve memory_release
 LIFTED
 
 status=0
-for case in byte_hunts bounded riscv_bits bulk reverse squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve; do
+for case in byte_hunts bounded riscv_bits bulk reverse squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor; do
         cc -O2 -w -I"$work" "-DCHECK_native_$case" test/checks.c -o "$work/$case" || { status=1; continue; }
         "$work/$case" || status=1
 done
@@ -20918,7 +20953,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -20953,6 +20988,8 @@ bench_about()
                  bench_line="rectangles of one 32-bit value, a cell's ground, against a fill a row" ;;
         copy-changed) bench_section=BENCH_copy_changed
                  bench_line="a composed frame's rows stored to the card only where they changed, against C and a plain copy" ;;
+        tensor)  bench_section=BENCH_tensor
+                 bench_line="the f32 transformer kernels at the trainer's rows against GCC -O3 C of the same algorithm, tier for tier" ;;
         sweep-coverage) bench_section=BENCH_sweep_coverage
                  bench_line="the text engine's coverage rows summed into bytes, against the C loop it replaced" ;;
         escape)  bench_section=BENCH_escape

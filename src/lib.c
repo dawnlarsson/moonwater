@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        408 routines (385 public, 23 local), 398 of them on all three and 10 local to one.
+        409 routines (386 public, 23 local), 399 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -432,6 +432,7 @@
           string_token                   public  yes     yes     yes
           string_token_next              public  yes     yes     yes
           strncpy                        public  yes     yes     yes
+          swiglu_forward_f32             public  yes     yes     yes
           system_call                    public  yes     yes     yes
           system_call_1                  public  yes     yes     yes
           system_call_2                  public  yes     yes     yes
@@ -37100,6 +37101,482 @@ __asm__(
     "9:  mv a0, s0\n   mv a1, s1\n   ld ra, 40(sp)\n   ld s0, 32(sp)\n   ld s1, 24(sp)\n   ld s2, 16(sp)\n   ld s3, 8(sp)\n   addi sp, sp, 48\n"
     "tail positive_to_string  # the last write is a tail call\n"
     ASM_END(decimal_to_string)
+);
+#endif
+#endif // KERNEL_MODE
+
+/*
+        The elementwise and row kernels of a transformer's training step, in f32.
+
+        A small transformer trained on the CPU spends what its matrix products
+        leave in a handful of operations between them: the norm in front of
+        attention and of the MLP, the gated activation inside the MLP, the
+        rotation of each head's queries and keys, and the causal softmax.
+        PyTorch runs each as several passes and keeps every intermediate;
+        these are one pass through registers each, called a row at a time.
+        Userspace only, like the decimal routines above: the kernel has no
+        float state of its own to spend on them.
+
+        swiglu_forward_f32(out, gate, up, n) writes out[i] = silu(gate[i]) *
+        up[i], silu(g) = g * sigmoid(g). A count of nothing touches nothing.
+        out may be gate or up exactly, which is the in-place call, and nothing
+        else may overlap. A NaN in either input gives NaN; finite inputs give
+        finite outputs unless the product itself overflows; an infinity traps
+        nothing. sigmoid is held to its value within 8 eps (eps = 2^-24)
+        wherever it is a normal float, and promises no denormal below that:
+        what it loses there is at most half a denormal step, which up then
+        scales, so |out - silu(g) up| <= 8 eps |silu(g) up| + 1e-35 +
+        (1 + |g|) |up| 2^-149. Over every one of the 2^32 gates, each against
+        one of eight values of up, the worst is 4.64 eps on the AVX-512 body,
+        4.83 on AVX2 and 4.58 on SSE2; over the tensor lane's cases, 3.68 on
+        NEON and 4.05 on riscv64, with V and without.
+
+        The sigmoid has no exp in it that can overflow. With a = min(|g|, 105)
+        and m = round(16 a log2e) = 16k + j, x = m ln2/16 - a lies within
+        ln2/32 of zero and e^-a = 2^(-m/16) e^x. Scaled by 2^(m/16 - 24),
+
+            W = 2^(k - 24 + j/16),   p = e^x 2^-24,
+            sigmoid(g) = W / (W + p) when g >= 0, and p / (W + p) when g < 0:
+
+        one denominator for both signs, so the 1 - sigmoid the backward wants
+        is the other numerator and never a subtraction that cancels. W is a
+        normal float for every a, p / (W + p) underflows cleanly to zero as g
+        goes to minus infinity, and sigmoid(-FLT_MAX) is 0, not the 2.9e-39
+        that clamping exp(-g) at 88 makes of it and that turns
+        silu(-FLT_MAX) into -1. W's bits are ((k + 103) << 23) |
+        mantissa(2^(j/16)): z = a 16 log2e + (1.5 2^23 + 16 * 103) carries m
+        in its low bits, j is the low four and k + 103 the nine above, so W is
+        a shift, a table lookup and a merge. W >= p always, so the numerator
+        is max(copysign(W, g), p), with no mask and no branch.
+
+        The exp is the shape each machine's pipes favour, and the same on
+        every routine of the block: AVX-512 keeps the sixteen mantissas in a
+        register for vpermd and needs degree 3 on ln2/32 (0.03 eps); AVX2,
+        whose vpermd holds eight, uses 2^(j/8) and degree 3 on ln2/16 (0.61
+        eps); SSE2, NEON and riscv64 have no cheap table and take m = round(a
+        log2e), degree 6 on ln2/2 (0.10 eps) and W = z << 23. Coefficients
+        are relative-error minimax fits, rounded to float and nudged a few
+        ulps each to the best float set, and carry the 2^-24 themselves. The
+        division is a division: one vdivps per 2.5 cycles at any width on Zen
+        5, one fdiv per cycle on an M2, and rcp14 with a Newton step costs a
+        third more FMA-pipe time than the divide it replaces.
+
+        Cycles a call on a 9950X core, H = 682 and H = 1024 in L1 (the same
+        algorithm in C, GCC 16 -O3 -march=native, in brackets): AVX-512 305 /
+        441 (413 / 611), AVX2 + FMA 635 / 940 (829 / 1219), SSE2 2413 / 3582
+        (3072 / 4560). The textbook g / (1 + expf(-g)) * up with a Cephes
+        expf does not vectorise at all, 7014 / 10528, and is wrong besides.
+        8192 rows streamed from memory, which is the trainer's call: 804
+        against 799 for 682 and at the 1190 the three streams alone take for
+        1024 -- the bandwidth, which no arrangement here moves. An M2 Pro
+        core, NEON: 1015 / 1515 cycles (clang -O3 1079 / 1600), 0.94 of its
+        time at every row count, bound by four FP pipes at nineteen operations
+        every four lanes. riscv64 is counted, not timed: with V at VLEN 128,
+        256 and 512, 863, 445 and 255 instructions (GCC -O3 -march=rv64gcv
+        6206, 3146, 1598); without, 18097 (24926).
+
+        What the shapes are for, measured on Zen 5. A vector's chain from load
+        to store is about sixty cycles, and one vector a turn fills the FP
+        scheduler long before the pipes are busy (de_dispatch_stall
+        fp_sch_rsrc 60% of cycles): four vectors a turn, interleaved an
+        instruction at a time, take 0.43 cycles an element where one a turn
+        takes 0.60 and the same four one after another 0.48. A software
+        pipeline three stages deep computes at 0.42 but streams from memory
+        10% slower, the loads it needs early sitting at the end of each
+        turn. The rest past the whole turns is one more turn of four under
+        masks, not single vectors, which cost 15% from memory at H = 682.
+        vscalefps takes both FADD pipes, a zmm store an FMA slot when they
+        are full, and register copies are not free.
+*/
+#ifndef KERNEL_MODE
+// out[i] = gate[i] * sigmoid(gate[i]) * up[i] for i < hidden_dim; out may be
+// gate or up, nothing else overlaps.
+WRITES(1, 4) READS(2, 4) READS(3, 4)
+fn swiglu_forward_f32(f32 address_to out, const f32 address_to gate, const f32 address_to up,
+                      positive hidden_dim);
+
+/*
+        The arm64 bodies' macros stand here, ahead of the #if, where the Mac
+        lift of an arm64 body can read them. Constant registers: v16 105, v17
+        log2e, v18 the magic 1.5 2^23 + 103, v19 and v20 ln2 high and low,
+        v21 to v27 the degree-6 coefficients of e^-y, highest first, each
+        with the 2^-24 and the sign of (-1)^k folded in.
+*/
+//      One vector of swiglu from gate G, with A, Z, P and T free: A comes
+//      back as G * sigmoid(G), for the caller to multiply by up. y = a - m ln2
+//      is the reduced argument with its sign turned, which the coefficients
+//      absorb.
+#define NEON_TENSOR_SWIGLU(G, A, Z, P, T)                                                                \
+    "fabs " A ".4s, " G ".4s\n   fmin " A ".4s, " A ".4s, v16.4s\n   mov " Z ".16b, v18.16b\n"              \
+    "fmla " Z ".4s, " A ".4s, v17.4s\n   fsub " P ".4s, " Z ".4s, v18.4s\n"                                \
+    "fmls " A ".4s, " P ".4s, v19.4s\n   fmls " A ".4s, " P ".4s, v20.4s\n   shl " Z ".4s, " Z ".4s, #23\n"   \
+    "mov " T ".16b, v22.16b\n   fmla " T ".4s, v21.4s, " A ".4s\n"                                        \
+    "mov " P ".16b, v23.16b\n   fmla " P ".4s, " T ".4s, " A ".4s\n"                                      \
+    "mov " T ".16b, v24.16b\n   fmla " T ".4s, " P ".4s, " A ".4s\n"                                      \
+    "mov " P ".16b, v25.16b\n   fmla " P ".4s, " T ".4s, " A ".4s\n"                                      \
+    "mov " T ".16b, v26.16b\n   fmla " T ".4s, " P ".4s, " A ".4s\n"                                      \
+    "mov " P ".16b, v27.16b\n   fmla " P ".4s, " T ".4s, " A ".4s\n"                                      \
+    "fadd " T ".4s, " P ".4s, " Z ".4s\n   cmlt " A ".4s, " G ".4s, #0\n   bsl " A ".16b, " P ".16b, " Z ".16b\n" \
+    "fdiv " A ".4s, " A ".4s, " T ".4s\n   fmul " A ".4s, " A ".4s, " G ".4s\n"
+
+/*
+        The riscv64 bodies' constants, from the address in t0 into ft0-ft10:
+        105, log2e, the magic, ln2 high and low, the degree-6 coefficients c6
+        to c2 and 2^-24, which is c1 and c0 at once.
+*/
+#define RV_TENSOR_CONSTANTS                                                                              \
+    "flw ft0, 0(t0)\n   flw ft1, 4(t0)\n   flw ft2, 8(t0)\n   flw ft3, 12(t0)\n   flw ft4, 16(t0)\n"            \
+    "flw ft5, 20(t0)\n   flw ft6, 24(t0)\n   flw ft7, 28(t0)\n   flw ft8, 32(t0)\n   flw ft9, 36(t0)\n"            \
+    "flw ft10, 40(t0)\n"
+//      One element in the scalar registers, gate G kept, A, Z and M free and
+//      T an integer register: the result, G * sigmoid(G), comes back in Z. M
+//      holds m, then the polynomial; A holds x, then the denominator.
+#define RV_TENSOR_SWIGLU1(G, A, Z, M, T)                                                                  \
+    "fabs.s " A ", " G "\n   fmin.s " A ", " A ", ft0\n   fmadd.s " Z ", " A ", ft1, ft2\n   fsub.s " M ", " Z ", ft2\n" \
+    "fmsub.s " A ", " M ", ft3, " A "\n   fmadd.s " A ", " M ", ft4, " A "\n"                               \
+    "fmv.x.w " T ", " Z "\n   slli " T ", " T ", 23\n   fmv.w.x " Z ", " T "\n"                                \
+    "fmadd.s " M ", ft5, " A ", ft6\n   fmadd.s " M ", " M ", " A ", ft7\n   fmadd.s " M ", " M ", " A ", ft8\n"   \
+    "fmadd.s " M ", " M ", " A ", ft9\n   fmadd.s " M ", " M ", " A ", ft10\n   fmadd.s " M ", " M ", " A ", ft10\n" \
+    "fadd.s " A ", " Z ", " M "\n   fsgnj.s " Z ", " Z ", " G "\n   fmax.s " Z ", " Z ", " M "\n"                 \
+    "fdiv.s " Z ", " Z ", " A "\n   fmul.s " Z ", " Z ", " G "\n"
+
+#if X64
+/*
+        The step macros of the x86_64 bodies. Each is one instruction of a
+        vector's way through the sigmoid, taking the registers of one slot --
+        G gate, A |g| then x, Z the magic-biased z then the denominator, P
+        the polynomial, W the scale then the result -- and the slot's byte
+        offset O and mask K. TENSOR_ZMM_FOUR and the others below write a step
+        once for every slot, which is how four vectors interleave an
+        instruction at a time; a single vector is the same steps with one
+        slot's registers.
+
+        The constants are one object, tensor_constants_x64, in 32-byte rows
+        of eight copies so a ymm or xmm instruction takes a row as its memory
+        operand and the zmm body broadcasts one word of it:
+
+              0 |g| mask    32 105     64 sign     96 exponent mask   128 2^-24
+            160 16 log2e   192 1.5 2^23 + 16 * 103   224, 256 ln2/16 high, low
+            288, 320 c3, c2 on ln2/32 (2^-24 in each)
+            352 8 log2e    384 1.5 2^23 + 8 * 103    416, 448 ln2/8 high, low
+            480, 512 c3, c2 on ln2/16
+            544 log2e      576 1.5 2^23 + 103        608, 640 ln2 in the
+                Cephes split, whose high half times any m is exact without an FMA
+            672 .. 800 c6 .. c2 on ln2/2      832 the sixteen mantissas of
+                2^(j/16)      896 the eight of 2^(j/8)      928 0 .. 7
+
+        The zmm body keeps zmm21-zmm31 for them (TENSOR_ZMM_CONSTANTS).
+*/
+#define TENSOR_ZMM_CONSTANTS                                                                             \
+    "vmovups tensor_constants_x64+832(%rip), %zmm31\n   vbroadcastss tensor_constants_x64(%rip), %zmm30\n"   \
+    "vbroadcastss tensor_constants_x64+32(%rip), %zmm29\n   vbroadcastss tensor_constants_x64+160(%rip), %zmm28\n" \
+    "vbroadcastss tensor_constants_x64+192(%rip), %zmm27\n   vbroadcastss tensor_constants_x64+96(%rip), %zmm26\n" \
+    "vbroadcastss tensor_constants_x64+288(%rip), %zmm25\n   vbroadcastss tensor_constants_x64+128(%rip), %zmm24\n" \
+    "vbroadcastss tensor_constants_x64+224(%rip), %zmm23\n   vbroadcastss tensor_constants_x64+256(%rip), %zmm22\n" \
+    "vbroadcastss tensor_constants_x64+320(%rip), %zmm21\n"
+#define TENSOR_ZMM_FOUR(STEP)                                                                            \
+    STEP("%zmm0", "%zmm1", "%zmm2", "%zmm3", "%zmm4", "0", "%k1")                                         \
+    STEP("%zmm5", "%zmm6", "%zmm7", "%zmm8", "%zmm9", "64", "%k2")                                        \
+    STEP("%zmm10", "%zmm11", "%zmm12", "%zmm13", "%zmm14", "128", "%k3")                                  \
+    STEP("%zmm15", "%zmm16", "%zmm17", "%zmm18", "%zmm19", "192", "%k4")
+#define TENSOR_ZMM_LOAD(G, A, Z, P, W, O, K) "vmovups " O "(%rsi,%rax), " G "\n"
+#define TENSOR_ZMM_LOAD_MASKED(G, A, Z, P, W, O, K) "vmovups " O "(%rsi,%rax), " G "{" K "}{z}\n"
+#define TENSOR_ZMM_ABS(G, A, Z, P, W, O, K) "vandps %zmm30, " G ", " A "\n"
+#define TENSOR_ZMM_CLAMP(G, A, Z, P, W, O, K) "vminps %zmm29, " A ", " A "\n"
+#define TENSOR_ZMM_Z0(G, A, Z, P, W, O, K) "vmovaps %zmm27, " Z "\n"
+#define TENSOR_ZMM_Z(G, A, Z, P, W, O, K) "vfmadd231ps %zmm28, " A ", " Z "\n"
+#define TENSOR_ZMM_M(G, A, Z, P, W, O, K) "vsubps %zmm27, " Z ", " P "\n"
+#define TENSOR_ZMM_XHI(G, A, Z, P, W, O, K) "vfmsub231ps %zmm23, " P ", " A "\n"
+#define TENSOR_ZMM_XLO(G, A, Z, P, W, O, K) "vfmadd231ps %zmm22, " P ", " A "\n"
+#define TENSOR_ZMM_MANT(G, A, Z, P, W, O, K) "vpermd %zmm31, " Z ", " W "\n"
+#define TENSOR_ZMM_EXP(G, A, Z, P, W, O, K) "vpslld $19, " Z ", " Z "\n"
+#define TENSOR_ZMM_W(G, A, Z, P, W, O, K) "vpternlogd $0xf8, %zmm26, " Z ", " W "\n"
+#define TENSOR_ZMM_P0(G, A, Z, P, W, O, K) "vmovaps %zmm21, " P "\n"
+#define TENSOR_ZMM_P3(G, A, Z, P, W, O, K) "vfmadd231ps %zmm25, " A ", " P "\n"
+#define TENSOR_ZMM_P1(G, A, Z, P, W, O, K) "vfmadd213ps %zmm24, " A ", " P "\n"
+#define TENSOR_ZMM_D(G, A, Z, P, W, O, K) "vaddps " W ", " P ", " Z "\n"
+//      W | (g & sign): the sign is what the |g| mask leaves out.
+#define TENSOR_ZMM_SIGN(G, A, Z, P, W, O, K) "vpternlogd $0xf4, %zmm30, " G ", " W "\n"
+#define TENSOR_ZMM_NUM(G, A, Z, P, W, O, K) "vmaxps " P ", " W ", " W "\n"
+#define TENSOR_ZMM_DIV(G, A, Z, P, W, O, K) "vdivps " Z ", " W ", " W "\n"
+#define TENSOR_ZMM_G(G, A, Z, P, W, O, K) "vmulps " G ", " W ", " W "\n"
+#define TENSOR_ZMM_UP(G, A, Z, P, W, O, K) "vmulps " O "(%rdx,%rax), " W ", " W "\n"
+#define TENSOR_ZMM_UP_MASKED(G, A, Z, P, W, O, K)                                                        \
+    "vmovups " O "(%rdx,%rax), " A "{" K "}{z}\n   vmulps " A ", " W ", " W "\n"
+#define TENSOR_ZMM_STORE(G, A, Z, P, W, O, K) "vmovups " W ", " O "(%rdi,%rax)\n"
+#define TENSOR_ZMM_STORE_MASKED(G, A, Z, P, W, O, K) "vmovups " W ", " O "(%rdi,%rax){" K "}\n"
+//      gate in G to G * sigmoid(G) in W, every slot at once.
+#define TENSOR_ZMM_SILU                                                                                  \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_ABS) TENSOR_ZMM_FOUR(TENSOR_ZMM_CLAMP) TENSOR_ZMM_FOUR(TENSOR_ZMM_Z0)        \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_Z) TENSOR_ZMM_FOUR(TENSOR_ZMM_M) TENSOR_ZMM_FOUR(TENSOR_ZMM_XHI)             \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_XLO) TENSOR_ZMM_FOUR(TENSOR_ZMM_MANT) TENSOR_ZMM_FOUR(TENSOR_ZMM_EXP)        \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_W) TENSOR_ZMM_FOUR(TENSOR_ZMM_P0) TENSOR_ZMM_FOUR(TENSOR_ZMM_P3)             \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_P1) TENSOR_ZMM_FOUR(TENSOR_ZMM_P1) TENSOR_ZMM_FOUR(TENSOR_ZMM_D)             \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_SIGN) TENSOR_ZMM_FOUR(TENSOR_ZMM_NUM) TENSOR_ZMM_FOUR(TENSOR_ZMM_DIV)        \
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_G)
+
+//      ymm: two slots, constants ymm10-ymm14 (8 log2e, ln2/8 high and low,
+//      c3, 2^-24) and the rest as memory operands; ymm15 is the tail's mask.
+#define TENSOR_YMM_CONSTANTS                                                                             \
+    "vbroadcastss tensor_constants_x64+352(%rip), %ymm10\n   vbroadcastss tensor_constants_x64+416(%rip), %ymm11\n" \
+    "vbroadcastss tensor_constants_x64+448(%rip), %ymm12\n   vbroadcastss tensor_constants_x64+480(%rip), %ymm13\n" \
+    "vbroadcastss tensor_constants_x64+128(%rip), %ymm14\n"
+#define TENSOR_YMM_TWO(STEP)                                                                             \
+    STEP("%ymm0", "%ymm1", "%ymm2", "%ymm3", "%ymm4", "0")                                                 \
+    STEP("%ymm5", "%ymm6", "%ymm7", "%ymm8", "%ymm9", "32")
+#define TENSOR_YMM_ONE(STEP) STEP("%ymm0", "%ymm1", "%ymm2", "%ymm3", "%ymm4", "0")
+#define TENSOR_YMM_LOAD(G, A, Z, P, W, O) "vmovups " O "(%rsi,%rax), " G "\n"
+#define TENSOR_YMM_LOAD_MASKED(G, A, Z, P, W, O) "vmaskmovps " O "(%rsi,%rax), %ymm15, " G "\n"
+#define TENSOR_YMM_ABS(G, A, Z, P, W, O) "vandps tensor_constants_x64(%rip), " G ", " A "\n"
+#define TENSOR_YMM_CLAMP(G, A, Z, P, W, O) "vminps tensor_constants_x64+32(%rip), " A ", " A "\n"
+#define TENSOR_YMM_Z0(G, A, Z, P, W, O) "vmovaps tensor_constants_x64+384(%rip), " Z "\n"
+#define TENSOR_YMM_Z(G, A, Z, P, W, O) "vfmadd231ps %ymm10, " A ", " Z "\n"
+#define TENSOR_YMM_M(G, A, Z, P, W, O) "vsubps tensor_constants_x64+384(%rip), " Z ", " P "\n"
+#define TENSOR_YMM_XHI(G, A, Z, P, W, O) "vfmsub231ps %ymm11, " P ", " A "\n"
+#define TENSOR_YMM_XLO(G, A, Z, P, W, O) "vfmadd231ps %ymm12, " P ", " A "\n"
+#define TENSOR_YMM_MANT(G, A, Z, P, W, O) "vpermd tensor_constants_x64+896(%rip), " Z ", " W "\n"
+#define TENSOR_YMM_EXP(G, A, Z, P, W, O) "vpslld $20, " Z ", " Z "\n"
+#define TENSOR_YMM_EXPMASK(G, A, Z, P, W, O) "vpand tensor_constants_x64+96(%rip), " Z ", " Z "\n"
+#define TENSOR_YMM_W(G, A, Z, P, W, O) "vpor " Z ", " W ", " W "\n"
+#define TENSOR_YMM_P0(G, A, Z, P, W, O) "vmovaps tensor_constants_x64+512(%rip), " P "\n"
+#define TENSOR_YMM_P3(G, A, Z, P, W, O) "vfmadd231ps %ymm13, " A ", " P "\n"
+#define TENSOR_YMM_P1(G, A, Z, P, W, O) "vfmadd213ps %ymm14, " A ", " P "\n"
+#define TENSOR_YMM_D(G, A, Z, P, W, O) "vaddps " W ", " P ", " Z "\n"
+//      vblendvps reads the select from g's sign bit itself: one instruction.
+#define TENSOR_YMM_NUM(G, A, Z, P, W, O) "vblendvps " G ", " P ", " W ", " W "\n"
+#define TENSOR_YMM_DIV(G, A, Z, P, W, O) "vdivps " Z ", " W ", " W "\n"
+#define TENSOR_YMM_G(G, A, Z, P, W, O) "vmulps " G ", " W ", " W "\n"
+#define TENSOR_YMM_UP(G, A, Z, P, W, O) "vmulps " O "(%rdx,%rax), " W ", " W "\n"
+#define TENSOR_YMM_UP_MASKED(G, A, Z, P, W, O)                                                           \
+    "vmaskmovps " O "(%rdx,%rax), %ymm15, " A "\n   vmulps " A ", " W ", " W "\n"
+#define TENSOR_YMM_STORE(G, A, Z, P, W, O) "vmovups " W ", " O "(%rdi,%rax)\n"
+#define TENSOR_YMM_STORE_MASKED(G, A, Z, P, W, O) "vmaskmovps " W ", %ymm15, " O "(%rdi,%rax)\n"
+#define TENSOR_YMM_SILU(EACH)                                                                            \
+    EACH(TENSOR_YMM_ABS) EACH(TENSOR_YMM_CLAMP) EACH(TENSOR_YMM_Z0) EACH(TENSOR_YMM_Z) EACH(TENSOR_YMM_M)  \
+    EACH(TENSOR_YMM_XHI) EACH(TENSOR_YMM_XLO) EACH(TENSOR_YMM_MANT) EACH(TENSOR_YMM_EXP)                    \
+    EACH(TENSOR_YMM_EXPMASK) EACH(TENSOR_YMM_W) EACH(TENSOR_YMM_P0) EACH(TENSOR_YMM_P3)                     \
+    EACH(TENSOR_YMM_P1) EACH(TENSOR_YMM_P1) EACH(TENSOR_YMM_D) EACH(TENSOR_YMM_NUM) EACH(TENSOR_YMM_DIV)    \
+    EACH(TENSOR_YMM_G)
+
+//      xmm, the SSE2 floor: two slots of six -- G, A, Z (z then W then the
+//      numerator), T (x then the denominator), P and F -- every constant a
+//      memory operand, and mul and add apart where there is no FMA.
+#define TENSOR_XMM_TWO(STEP)                                                                             \
+    STEP("%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5")                                             \
+    STEP("%xmm6", "%xmm7", "%xmm8", "%xmm9", "%xmm10", "%xmm11")
+#define TENSOR_XMM_ONE(STEP) STEP("%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5")
+#define TENSOR_XMM_A(G, A, Z, T, P, F) "movaps " G ", " A "\n   andps tensor_constants_x64(%rip), " A "\n"
+#define TENSOR_XMM_CLAMP(G, A, Z, T, P, F) "minps tensor_constants_x64+32(%rip), " A "\n"
+#define TENSOR_XMM_Z(G, A, Z, T, P, F) "movaps " A ", " Z "\n   mulps tensor_constants_x64+544(%rip), " Z "\n"
+#define TENSOR_XMM_ZM(G, A, Z, T, P, F) "addps tensor_constants_x64+576(%rip), " Z "\n"
+#define TENSOR_XMM_M(G, A, Z, T, P, F) "movaps " Z ", " F "\n   subps tensor_constants_x64+576(%rip), " F "\n"
+#define TENSOR_XMM_XHI(G, A, Z, T, P, F) "movaps " F ", " T "\n   mulps tensor_constants_x64+608(%rip), " T "\n"
+#define TENSOR_XMM_XA(G, A, Z, T, P, F) "subps " A ", " T "\n"
+#define TENSOR_XMM_XLO(G, A, Z, T, P, F) "mulps tensor_constants_x64+640(%rip), " F "\n"
+#define TENSOR_XMM_X(G, A, Z, T, P, F) "addps " F ", " T "\n"
+#define TENSOR_XMM_P6(G, A, Z, T, P, F) "movaps tensor_constants_x64+672(%rip), " P "\n   mulps " T ", " P "\n"
+#define TENSOR_XMM_P5(G, A, Z, T, P, F) "addps tensor_constants_x64+704(%rip), " P "\n   mulps " T ", " P "\n"
+#define TENSOR_XMM_P4(G, A, Z, T, P, F) "addps tensor_constants_x64+736(%rip), " P "\n   mulps " T ", " P "\n"
+#define TENSOR_XMM_P3(G, A, Z, T, P, F) "addps tensor_constants_x64+768(%rip), " P "\n   mulps " T ", " P "\n"
+#define TENSOR_XMM_P2(G, A, Z, T, P, F) "addps tensor_constants_x64+800(%rip), " P "\n   mulps " T ", " P "\n"
+#define TENSOR_XMM_P1(G, A, Z, T, P, F) "addps tensor_constants_x64+128(%rip), " P "\n   mulps " T ", " P "\n"
+#define TENSOR_XMM_P0(G, A, Z, T, P, F) "addps tensor_constants_x64+128(%rip), " P "\n"
+#define TENSOR_XMM_W(G, A, Z, T, P, F) "pslld $23, " Z "\n"
+#define TENSOR_XMM_D(G, A, Z, T, P, F) "movaps " Z ", " T "\n   addps " P ", " T "\n"
+#define TENSOR_XMM_SIGN(G, A, Z, T, P, F) "movaps " G ", " F "\n   andps tensor_constants_x64+64(%rip), " F "\n"
+#define TENSOR_XMM_WS(G, A, Z, T, P, F) "orps " F ", " Z "\n"
+#define TENSOR_XMM_NUM(G, A, Z, T, P, F) "maxps " P ", " Z "\n"
+#define TENSOR_XMM_DIV(G, A, Z, T, P, F) "divps " T ", " Z "\n"
+#define TENSOR_XMM_G(G, A, Z, T, P, F) "mulps " G ", " Z "\n"
+#define TENSOR_XMM_SILU(EACH)                                                                            \
+    EACH(TENSOR_XMM_A) EACH(TENSOR_XMM_CLAMP) EACH(TENSOR_XMM_Z) EACH(TENSOR_XMM_ZM) EACH(TENSOR_XMM_M)    \
+    EACH(TENSOR_XMM_XHI) EACH(TENSOR_XMM_XA) EACH(TENSOR_XMM_XLO) EACH(TENSOR_XMM_X) EACH(TENSOR_XMM_P6)    \
+    EACH(TENSOR_XMM_P5) EACH(TENSOR_XMM_P4) EACH(TENSOR_XMM_P3) EACH(TENSOR_XMM_P2) EACH(TENSOR_XMM_P1)     \
+    EACH(TENSOR_XMM_P0) EACH(TENSOR_XMM_W) EACH(TENSOR_XMM_D) EACH(TENSOR_XMM_SIGN) EACH(TENSOR_XMM_WS)     \
+    EACH(TENSOR_XMM_NUM) EACH(TENSOR_XMM_DIV) EACH(TENSOR_XMM_G)
+
+#define TENSOR_X64_ROW(word) ".rept 8\n   .4byte " #word "\n   .endr\n"
+
+__asm__(
+    ASM_RODATA_OBJECT_BEGIN(tensor_constants_x64, 64)
+    TENSOR_X64_ROW(0x7fffffff) TENSOR_X64_ROW(0x42d20000) TENSOR_X64_ROW(0x80000000) TENSOR_X64_ROW(0xff800000)
+    TENSOR_X64_ROW(0x33800000)
+    TENSOR_X64_ROW(0x41b8aa3b) TENSOR_X64_ROW(0x4b400670) TENSOR_X64_ROW(0x3d317218) TENSOR_X64_ROW(0xaf02e308)
+    TENSOR_X64_ROW(0x322aa9cc) TENSOR_X64_ROW(0x33000120)
+    TENSOR_X64_ROW(0x4138aa3b) TENSOR_X64_ROW(0x4b400338) TENSOR_X64_ROW(0x3db17218) TENSOR_X64_ROW(0xaf82e308)
+    TENSOR_X64_ROW(0x322aa691) TENSOR_X64_ROW(0x330004f8)
+    TENSOR_X64_ROW(0x3fb8aa3b) TENSOR_X64_ROW(0x4b400067) TENSOR_X64_ROW(0x3f318000) TENSOR_X64_ROW(0xb95e8083)
+    TENSOR_X64_ROW(0x2eb55ce8) TENSOR_X64_ROW(0x300936ae) TENSOR_X64_ROW(0x312aac65) TENSOR_X64_ROW(0x322aaa1f)
+    TENSOR_X64_ROW(0x32fffffd)
+    ".4byte 0x000000, 0x05aac3, 0x0b95c2, 0x11c3d3, 0x1837f0, 0x1ef532, 0x25fed7, 0x2d583f\n"
+    ".4byte 0x3504f3, 0x3d08a4, 0x45672a, 0x4e248c, 0x5744fd, 0x60ccdf, 0x6ac0c7, 0x75257d\n"
+    ".4byte 0x000000, 0x0b95c2, 0x1837f0, 0x25fed7, 0x3504f3, 0x45672a, 0x5744fd, 0x6ac0c7\n"
+    ".4byte 0, 1, 2, 3, 4, 5, 6, 7\n"
+    ASM_OBJECT_END(tensor_constants_x64)
+
+    //
+    //      swiglu_forward_f32 -- rdi out, rsi gate, rdx up, rcx the count.
+    //      AVX-512: four vectors a turn, then the 0 to 63 left as one turn of
+    //      four under masks; AVX2 with FMA: two a turn, one more, then the
+    //      last 1 to 7 under vmaskmovps; SSE2: two a turn, one more, then one
+    //      element at a time through the same steps on movss. Nothing past
+    //      the count is read or written, and every vector is read before it
+    //      is written, which is what lets out be gate or up.
+    //
+    ASM_FUNC(swiglu_forward_f32)
+    ASM_NARROW("cpu_has_avx512", ".Lswiglu_forward_x64_ymm")
+    TENSOR_ZMM_CONSTANTS
+    "xor %eax, %eax\n   mov %rcx, %r9\n   shr $6, %r9\n   jz 2f\n"
+    ".balign 32\n"
+    "1:\n"
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_LOAD)
+    TENSOR_ZMM_SILU
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_UP)
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_STORE)
+    "add $256, %rax\n   dec %r9\n   jnz 1b\n"
+    "2:  and $63, %ecx\n   jz 9f\n   mov $-1, %r8\n   bzhi %rcx, %r8, %r8\n   kmovq %r8, %k1\n"
+    "kshiftrq $16, %k1, %k2\n   kshiftrq $32, %k1, %k3\n   kshiftrq $48, %k1, %k4\n"
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_LOAD_MASKED)
+    TENSOR_ZMM_SILU
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_UP_MASKED)
+    TENSOR_ZMM_FOUR(TENSOR_ZMM_STORE_MASKED)
+    "9:  vzeroupper\n" ASM_RET
+    ".Lswiglu_forward_x64_ymm:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lswiglu_forward_x64_sse")
+    ASM_NARROW("cpu_has_fma", ".Lswiglu_forward_x64_sse")
+    TENSOR_YMM_CONSTANTS
+    "xor %eax, %eax\n   mov %rcx, %r9\n   shr $4, %r9\n   jz 2f\n"
+    ".balign 32\n"
+    "1:\n"
+    TENSOR_YMM_TWO(TENSOR_YMM_LOAD)
+    TENSOR_YMM_SILU(TENSOR_YMM_TWO)
+    TENSOR_YMM_TWO(TENSOR_YMM_UP)
+    TENSOR_YMM_TWO(TENSOR_YMM_STORE)
+    "add $64, %rax\n   dec %r9\n   jnz 1b\n"
+    "2:  test $8, %cl\n   jz 3f\n"
+    TENSOR_YMM_ONE(TENSOR_YMM_LOAD)
+    TENSOR_YMM_SILU(TENSOR_YMM_ONE)
+    TENSOR_YMM_ONE(TENSOR_YMM_UP)
+    TENSOR_YMM_ONE(TENSOR_YMM_STORE)
+    "add $32, %rax\n"
+    "3:  and $7, %ecx\n   jz 9f\n   vmovd %ecx, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n"
+    "vpcmpgtd tensor_constants_x64+928(%rip), %ymm15, %ymm15\n"
+    TENSOR_YMM_ONE(TENSOR_YMM_LOAD_MASKED)
+    TENSOR_YMM_SILU(TENSOR_YMM_ONE)
+    TENSOR_YMM_ONE(TENSOR_YMM_UP_MASKED)
+    TENSOR_YMM_ONE(TENSOR_YMM_STORE_MASKED)
+    "9:  vzeroupper\n" ASM_RET
+    ".Lswiglu_forward_x64_sse:\n"
+    "xor %eax, %eax\n   mov %rcx, %r9\n   shr $3, %r9\n   jz 2f\n"
+    ".balign 32\n"
+    "1:  movups (%rsi,%rax), %xmm0\n   movups 16(%rsi,%rax), %xmm6\n"
+    TENSOR_XMM_SILU(TENSOR_XMM_TWO)
+    "movups (%rdx,%rax), %xmm0\n   movups 16(%rdx,%rax), %xmm6\n   mulps %xmm0, %xmm2\n   mulps %xmm6, %xmm8\n"
+    "movups %xmm2, (%rdi,%rax)\n   movups %xmm8, 16(%rdi,%rax)\n"
+    "add $32, %rax\n   dec %r9\n   jnz 1b\n"
+    "2:  test $4, %cl\n   jz 3f\n   movups (%rsi,%rax), %xmm0\n"
+    TENSOR_XMM_SILU(TENSOR_XMM_ONE)
+    "movups (%rdx,%rax), %xmm0\n   mulps %xmm0, %xmm2\n   movups %xmm2, (%rdi,%rax)\n   add $16, %rax\n"
+    "3:  and $3, %ecx\n   jz 9f\n"
+    "4:  movss (%rsi,%rax), %xmm0\n"
+    TENSOR_XMM_SILU(TENSOR_XMM_ONE)
+    "movss (%rdx,%rax), %xmm0\n   mulss %xmm0, %xmm2\n   movss %xmm2, (%rdi,%rax)\n   add $4, %rax\n   dec %ecx\n   jnz 4b\n"
+    "9:  " ASM_RET
+    ASM_END(swiglu_forward_f32)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //
+    //      swiglu_forward_f32 -- x0 out, x1 gate, x2 up, x3 the count. Four
+    //      vectors a turn, one after another (interleaving them measured
+    //      slower here: an M2's window is wide enough to find the overlap
+    //      itself), then single vectors, then single elements through the
+    //      same macro on s registers, whose loads clear the other lanes.
+    //      v8-v15 hold slots, so d8-d15 are kept.
+    //
+    ASM_FUNC(swiglu_forward_f32)
+    "stp d8, d9, [sp, #-64]!\n   stp d10, d11, [sp, #16]\n   stp d12, d13, [sp, #32]\n   stp d14, d15, [sp, #48]\n"
+    "adrp x9, .Lswiglu_forward_arm64_k\n   add x9, x9, :lo12:.Lswiglu_forward_arm64_k\n"
+    "ld1r {v16.4s}, [x9], #4\n   ld1r {v17.4s}, [x9], #4\n   ld1r {v18.4s}, [x9], #4\n   ld1r {v19.4s}, [x9], #4\n"
+    "ld1r {v20.4s}, [x9], #4\n   ld1r {v21.4s}, [x9], #4\n   ld1r {v22.4s}, [x9], #4\n   ld1r {v23.4s}, [x9], #4\n"
+    "ld1r {v24.4s}, [x9], #4\n   ld1r {v25.4s}, [x9], #4\n   ld1r {v26.4s}, [x9], #4\n   ld1r {v27.4s}, [x9]\n"
+    "lsr x9, x3, #4\n   cbz x9, 2f\n"
+    "1:  ld1 {v0.4s-v3.4s}, [x1], #64\n"
+    NEON_TENSOR_SWIGLU("v0", "v4", "v8", "v12", "v28")
+    NEON_TENSOR_SWIGLU("v1", "v5", "v9", "v13", "v29")
+    NEON_TENSOR_SWIGLU("v2", "v6", "v10", "v14", "v30")
+    NEON_TENSOR_SWIGLU("v3", "v7", "v11", "v15", "v31")
+    "ld1 {v0.4s-v3.4s}, [x2], #64\n"
+    "fmul v4.4s, v4.4s, v0.4s\n   fmul v5.4s, v5.4s, v1.4s\n   fmul v6.4s, v6.4s, v2.4s\n   fmul v7.4s, v7.4s, v3.4s\n"
+    "st1 {v4.4s-v7.4s}, [x0], #64\n   subs x9, x9, #1\n   b.ne 1b\n"
+    "2:  and x10, x3, #15\n   lsr x9, x10, #2\n   cbz x9, 4f\n"
+    "3:  ldr q0, [x1], #16\n"
+    NEON_TENSOR_SWIGLU("v0", "v4", "v8", "v12", "v28")
+    "ldr q0, [x2], #16\n   fmul v4.4s, v4.4s, v0.4s\n   str q4, [x0], #16\n   subs x9, x9, #1\n   b.ne 3b\n"
+    "4:  ands x10, x10, #3\n   b.eq 9f\n"
+    "5:  ldr s0, [x1], #4\n"
+    NEON_TENSOR_SWIGLU("v0", "v4", "v8", "v12", "v28")
+    "ldr s0, [x2], #4\n   fmul v4.4s, v4.4s, v0.4s\n   str s4, [x0], #4\n   subs x10, x10, #1\n   b.ne 5b\n"
+    "9:  ldp d10, d11, [sp, #16]\n   ldp d12, d13, [sp, #32]\n   ldp d14, d15, [sp, #48]\n   ldp d8, d9, [sp], #64\n"
+    ASM_RET
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Lswiglu_forward_arm64_k:\n"
+    "   .4byte 0x42d20000, 0x3fb8aa3b, 0x4b400067, 0x3f317218, 0xb102e308\n"
+    "   .4byte 0x2eb55ce8, 0xb00936ae, 0x312aac65, 0xb22aaa1f, 0x32fffffd, 0xb3800000, 0x33800000\n"
+    ".popsection\n"
+    ASM_END(swiglu_forward_f32)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    //
+    //      swiglu_forward_f32 -- a0 out, a1 gate, a2 up, a3 the count. With V,
+    //      a strip of vsetvli at e32 m8 (32 elements at the smallest VLEN) in
+    //      four register groups, gate read twice rather than kept, and no
+    //      tail but the last strip's own length; without, two elements a turn
+    //      through the scalar F registers and one more. The first call asks
+    //      for V (cpu_vector_detect keeps a0-a4).
+    //
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(swiglu_forward_f32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j swiglu_forward_f32\n"
+#endif
+    "1:  lla t0, .Lswiglu_forward_rv_k\n"
+    RV_TENSOR_CONSTANTS
+    "srli t2, a3, 1\n   beqz t2, 3f\n"
+    "2:  flw fa0, 0(a1)\n   flw fa4, 4(a1)\n"
+    RV_TENSOR_SWIGLU1("fa0", "fa1", "fa2", "fa3", "t1")
+    RV_TENSOR_SWIGLU1("fa4", "fa5", "fa6", "fa7", "t3")
+    "flw fa1, 0(a2)\n   flw fa5, 4(a2)\n   fmul.s fa2, fa2, fa1\n   fmul.s fa6, fa6, fa5\n   fsw fa2, 0(a0)\n   fsw fa6, 4(a0)\n"
+    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, 8\n   addi t2, t2, -1\n   bnez t2, 2b\n"
+    "3:  andi a3, a3, 1\n   beqz a3, 9f\n   flw fa0, 0(a1)\n"
+    RV_TENSOR_SWIGLU1("fa0", "fa1", "fa2", "fa3", "t1")
+    "flw fa1, 0(a2)\n   fmul.s fa2, fa2, fa1\n   fsw fa2, 0(a0)\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  lla t0, .Lswiglu_forward_rv_k\n"
+    RV_TENSOR_CONSTANTS
+    "6:  vsetvli t0, a3, e32, m8, ta, ma\n   beqz t0, 9b\n"
+    "vle32.v v0, (a1)\n   vfsgnjx.vv v8, v0, v0\n   vfmin.vf v8, v8, ft0\n"
+    "vfmul.vf v16, v8, ft1\n   vfadd.vf v16, v16, ft2\n   vfsub.vf v24, v16, ft2\n"
+    "vfmsac.vf v8, ft3, v24\n   vfmacc.vf v8, ft4, v24\n   vsll.vi v16, v16, 23\n"
+    "vfmv.v.f v24, ft6\n   vfmacc.vf v24, ft5, v8\n   vfmv.v.f v0, ft7\n   vfmacc.vv v0, v24, v8\n"
+    "vfmv.v.f v24, ft8\n   vfmacc.vv v24, v0, v8\n   vfmv.v.f v0, ft9\n   vfmacc.vv v0, v24, v8\n"
+    "vfmv.v.f v24, ft10\n   vfmacc.vv v24, v0, v8\n   vfmv.v.f v0, ft10\n   vfmacc.vv v0, v24, v8\n"
+    "vfadd.vv v24, v16, v0\n   vle32.v v8, (a1)\n   vfsgnj.vv v16, v16, v8\n   vfmax.vv v16, v16, v0\n"
+    "vfdiv.vv v16, v16, v24\n   vfmul.vv v16, v16, v8\n   vle32.v v8, (a2)\n   vfmul.vv v16, v16, v8\n   vse32.v v16, (a0)\n"
+    "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   add a2, a2, t1\n   sub a3, a3, t0\n   j 6b\n"
+#endif
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Lswiglu_forward_rv_k:\n"
+    "   .4byte 0x42d20000, 0x3fb8aa3b, 0x4b400067, 0x3f317218, 0xb102e308\n"
+    "   .4byte 0x2eb55ce8, 0x300936ae, 0x312aac65, 0x322aaa1f, 0x32fffffd, 0x33800000\n"
+    ".popsection\n"
+    ASM_END(swiglu_forward_f32)
+    ".option pop\n"
 );
 #endif
 #endif // KERNEL_MODE
