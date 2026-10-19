@@ -291,6 +291,14 @@ cover('direct_benchmark', 'test/checks.c#BENCH_tensor', 'swiglu_forward_f32',
       'paired timing against the same algorithm in C built -O3 for the tier timed, '
       'over rows of 682 and 1024 floats, one, 64 and 8192 of them a call, every '
       'x86-64 body and riscv64 with V and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_tensor', 'rmsnorm_forward_f32',
+      'paired timing against the same two passes in C built -O3 for the tier timed, '
+      'over rows of 256 and 1024 floats, one row chained in place and 8, 64 and 8192 '
+      'back to back, every x86-64 body and riscv64 with V and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_tensor', 'rmsnorm_backward_f32',
+      'paired timing against the same two passes in C built -O3 for the tier timed, '
+      'over rows of 256 and 1024 floats, one row chained in place and 8, 64 and 8192 '
+      'back to back, every x86-64 body and riscv64 with V and without')
 cover('direct_benchmark', 'test/checks.c#BENCH_sweep_coverage', 'memory_sweep_coverage',
       'paired former-C/assembly timing over coverage runs of 8 to 400 cells, '
       'every x86-64 body')

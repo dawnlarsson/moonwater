@@ -312,6 +312,16 @@ cover('folds_already', 'hidden_dim', 'swiglu_forward_f32',
       'a trainer passes its MLP width, which is a model constant, but a '
       'known count would settle only the masked last turn: the four-vector '
       'loop is the work and runs the count it is given either way')
+cover('folds_already', 'dim', 'rmsnorm_forward_f32',
+      'a trainer passes its model width, a constant, and the AVX-512 body '
+      'already keeps any row of 193 to 256 floats in registers under four '
+      'masks: a known count would save the range test and the mask setup, '
+      'a few instructions against a seventy-cycle chain')
+cover('folds_already', 'dim', 'rmsnorm_backward_f32',
+      'a trainer passes its model width, a constant, and the AVX-512 body '
+      'already keeps any row of 193 to 256 floats in registers under four '
+      'masks: a known count would save the range test and the mask setup, '
+      'a few instructions against a seventy-cycle chain')
 cover('folds_already', 'count', 'memory_sweep_coverage',
       'the rasteriser hands it a run of touched blocks whose length the '
       'outline decides at run time; no reachable call site passes a literal')

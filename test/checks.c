@@ -106823,7 +106823,7 @@ static int tensor_swiglu_holds(float got, float g, float u)
 
 //      The counts every routine is walked over: every one to a hundred, the
 //      vector edges past it, and the trainer's own (682 = 42 * 16 + 10).
-static const unsigned tensor_counts_long[] = {127, 128, 129, 255, 256, 257, 682, 1024, 4096};
+static const unsigned tensor_counts_long[] = {127, 128, 129, 191, 192, 193, 255, 256, 257, 682, 1024, 4096};
 #define TENSOR_COUNTS (101 + sizeof(tensor_counts_long) / sizeof(tensor_counts_long[0]))
 
 static unsigned long long tensor_count(unsigned long long index)
@@ -106959,18 +106959,294 @@ static unsigned long long tensor_swiglu_forward_sweep(tensor_swiglu_call *routin
         }
         return bad;
 }
+
+/*
+        rmsnorm. The model sums the squares in double, which no f32 row can
+        overflow, and takes r = 1 / sqrt(sum / n + eps) with the library's
+        square root or the C library's. The contract is a sum's: n positive
+        terms added in f32 with none passing through more than n/4 + 8
+        roundings, which every body here meets, halved by the square root;
+        so r and each y are within (8 + n/8) eps of the model, y with a floor
+        of two denormal steps scaled by r for an x w that lands below the
+        normal range. The backward's dx is judged against its own scale,
+        |r dy w| + |x| r^3 sum |dy w x| / n, which is what a dot product's
+        error is measured in, and dw += dy x r rounds three times.
+*/
+typedef float tensor_rmsnorm_call(float *, const float *, const float *, unsigned long long, float);
+typedef void tensor_rmsnorm_back_call(float *, float *, const float *, const float *, const float *,
+                                      unsigned long long, float);
+
+#ifdef CHECK_tensor
+#define tensor_root square_root
+#else
+#define tensor_root sqrt
+#endif
+
+static double tensor_rmsnorm_k(unsigned long long n)
+{
+        return 8.0 + (double)n / 8.0;
+}
+
+//      The worst errors seen, as tensor_worst is for swiglu.
+static double tensor_rms_worst, tensor_rmsb_worst;
+
+static double tensor_rmsnorm_model(const float *x, unsigned long long n, float eps)
+{
+        double sum = 0;
+
+        for (unsigned long long i = 0; i < n; i++)
+                sum += (double)x[i] * (double)x[i];
+        return 1.0 / tensor_root(sum / (double)(n ? n : 1) + (double)eps);
+}
+
+static int tensor_close(double got, double ref, double scale, double k, double floor, double *worst)
+{
+        double error = __builtin_fabs(got - ref);
+
+        if (scale > 1e-30 && error > *worst * 0x1p-24 * scale)
+                *worst = error / (0x1p-24 * scale);
+        return error <= k * 0x1p-24 * scale + floor;
+}
+
+//      One forward row against the model: r, then every y.
+static int tensor_rmsnorm_row_holds(float r, const float *y, const float *x, const float *w, unsigned long long n,
+                                    float eps)
+{
+        double ref = tensor_rmsnorm_model(x, n, eps), k = tensor_rmsnorm_k(n);
+        int good = tensor_close(r, ref, ref, k, 0, &tensor_rms_worst);
+
+        for (unsigned long long i = 0; i < n; i++)
+        {
+                double yref = (double)x[i] * (double)w[i] * ref;
+
+                good &= tensor_close(y[i], yref, __builtin_fabs(yref), k, 2.0 * 0x1p-149 * (1.0 + ref), &tensor_rms_worst);
+        }
+        return good;
+}
+
+//      A row of activations at a scale that varies by count, and a weight
+//      row near one with a few zeros and negatives.
+static float tensor_rms_scale(unsigned long long index)
+{
+        static const float scales[] = {1.0f, 1e-3f, 30.0f, 1e-15f, 1e15f, 0.2f};
+
+        return scales[index % (sizeof(scales) / sizeof(scales[0]))];
+}
+
+static float tensor_rms_eps(unsigned long long index)
+{
+        static const float epsilons[] = {1e-5f, 1e-6f, 0.25f, 1e-12f};
+
+        return epsilons[(index / 6) % (sizeof(epsilons) / sizeof(epsilons[0]))];
+}
+
+static void tensor_rms_rows(float *x, float *w, unsigned long long n, float scale)
+{
+        for (unsigned long long i = 0; i < n; i++)
+        {
+                unsigned long long draw = tensor_next();
+
+                x[i] = draw % 29 == 0 ? 0.0f : tensor_uniform(-2.0f, 2.0f) * scale;
+                w[i] = draw % 31 == 1 ? 0.0f : tensor_uniform(-0.5f, 2.0f);
+        }
+}
+
+static void tensor_rmsnorm_forward_cases(tensor_rmsnorm_call *routine, float *const region[3], tensor_faults *faults)
+{
+        static float x_copy[4096], w_copy[4096];
+
+        for (unsigned long long index = 0; index < TENSOR_COUNTS; index++)
+        {
+                unsigned long long n = tensor_count(index);
+                float *y = region[0] + TENSOR_GUARD_FLOATS - n;
+                float *x = region[1] + TENSOR_GUARD_FLOATS - n;
+                float *w = region[2] + TENSOR_GUARD_FLOATS - n;
+                float eps = tensor_rms_eps(index);
+
+                tensor_rms_rows(x, w, n, tensor_rms_scale(index));
+                for (unsigned long long i = 0; i < n; i++)
+                        x_copy[i] = x[i], w_copy[i] = w[i], y[i] = tensor_float(0x7fb00000u);
+                tensor_sentinels(y, 1), tensor_sentinels(x, 2), tensor_sentinels(w, 3);
+                float r = routine(y, x, w, n, eps);
+
+                faults->values += !tensor_rmsnorm_row_holds(r, y, x_copy, w_copy, n, eps);
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->outside += tensor_bits(x[i]) != tensor_bits(x_copy[i]) || tensor_bits(w[i]) != tensor_bits(w_copy[i]);
+                faults->outside += !tensor_sentinels_kept(y, 1) + !tensor_sentinels_kept(x, 2) + !tensor_sentinels_kept(w, 3);
+
+                //      In place, y over x.
+                r = routine(x, x, w, n, eps);
+                faults->aliased += !tensor_rmsnorm_row_holds(r, x, x_copy, w_copy, n, eps);
+                faults->outside += !tensor_sentinels_kept(x, 2) + !tensor_sentinels_kept(w, 3);
+                if (!n)
+                        continue;
+
+                //      A NaN in x is a NaN r and every y NaN; an infinity in x
+                //      makes the sum infinite and r 0, so y is 0 but at the
+                //      infinity, where it is NaN; a NaN in w is NaN in that y
+                //      alone.
+                unsigned long long at = tensor_next() % n;
+
+                for (unsigned long long i = 0; i < n; i++)
+                        x[i] = x_copy[i];
+                x[at] = tensor_float(0x7fc00000u | (unsigned)(tensor_next() & 0x3fffff));
+                r = routine(y, x, w, n, eps);
+                faults->nans += !__builtin_isnan(r);
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->nans += !__builtin_isnan(y[i]);
+                x[at] = tensor_float(tensor_next() & 1 ? 0x7f800000u : 0xff800000u);
+                r = routine(y, x, w, n, eps);
+                faults->nans += r != 0.0f;
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->nans += i == at ? !__builtin_isnan(y[i]) : y[i] != 0.0f;
+                x[at] = x_copy[at];
+                w[at] = tensor_float(0xffc00000u);
+                r = routine(y, x, w, n, eps);
+                faults->nans += !tensor_close(r, tensor_rmsnorm_model(x, n, eps), tensor_rmsnorm_model(x, n, eps),
+                                              tensor_rmsnorm_k(n), 0, &tensor_rms_worst);
+                faults->nans += !__builtin_isnan(y[at]);
+                w[at] = w_copy[at];
+        }
+}
+
+//      An empty row is the mean of nothing taken as zero: r = 1/sqrt(eps)
+//      and nothing touched. A row of zeros with eps 0 is 1/sqrt(0), inf.
+static int tensor_rmsnorm_edges(tensor_rmsnorm_call *routine, float *const region[3])
+{
+        float *y = region[0] + TENSOR_GUARD_FLOATS - 64, *x = region[1] + TENSOR_GUARD_FLOATS - 64;
+        float *w = region[2] + TENSOR_GUARD_FLOATS - 64;
+        int good = 1;
+
+        tensor_sentinels(region[0] + TENSOR_GUARD_FLOATS, 4);
+        good &= tensor_close(routine(region[0] + TENSOR_GUARD_FLOATS, region[1] + TENSOR_GUARD_FLOATS,
+                                     region[2] + TENSOR_GUARD_FLOATS, 0, 0.25f),
+                             2.0, 2.0, tensor_rmsnorm_k(0), 0, &tensor_rms_worst);
+        good &= tensor_sentinels_kept(region[0] + TENSOR_GUARD_FLOATS, 4);
+        for (int i = 0; i < 64; i++)
+                x[i] = 0.0f, w[i] = 1.0f;
+        float r = routine(y, x, w, 64, 0.0f);
+
+        good &= __builtin_isinf(r) && r > 0;
+        for (int i = 0; i < 64; i++)
+                good &= __builtin_isnan(y[i]);
+        //      A square past FLT_MAX: the f32 sum is infinite, r 0, y 0.
+        x[5] = 1e30f;
+        r = routine(y, x, w, 64, 1e-5f);
+        good &= r == 0.0f;
+        for (int i = 0; i < 64; i++)
+                good &= y[i] == 0.0f;
+        //      A sum below the normal range, eps 0: r is 1/sqrt of that
+        //      denormal, near 1e20, which an estimate that reads denormals
+        //      as zero would make inf. The model is the f32 square itself.
+        static const float tiny[] = {1e-20f, -3e-21f, 7e-23f, 1e-19f};
+        static float sink;
+
+        for (int t = 0; t < 4; t++)
+        {
+                x[0] = tiny[t];
+                sink = x[0] * x[0];
+                double ref = 1.0 / tensor_root((double)sink);
+
+                r = routine(y, x, w, 1, 0.0f);
+                good &= tensor_close(r, ref, ref, tensor_rmsnorm_k(1), 0, &tensor_rms_worst);
+                good &= tensor_close(y[0], (double)x[0] * r, __builtin_fabs((double)x[0] * r), 2.0, 0, &tensor_rms_worst);
+        }
+        return good;
+}
+
+//      One backward row against the model.
+static int tensor_rmsnorm_back_holds(const float *dx, const float *dw, const float *dw_before, const float *dy,
+                                     const float *x, const float *w, unsigned long long n, float r)
+{
+        double dot = 0, magnitude = 0, rr = r, k = tensor_rmsnorm_k(n);
+        int good = 1;
+
+        for (unsigned long long i = 0; i < n; i++)
+        {
+                double term = (double)dy[i] * (double)w[i] * (double)x[i];
+
+                dot += term, magnitude += __builtin_fabs(term);
+        }
+        for (unsigned long long i = 0; i < n; i++)
+        {
+                double g = rr * (double)dy[i] * (double)w[i];
+                double ref = g - (double)x[i] * rr * rr * rr * dot / (double)n;
+                double scale = __builtin_fabs(g) + __builtin_fabs((double)x[i]) * rr * rr * rr * magnitude / (double)n;
+                double wref = (double)dw_before[i] + (double)dy[i] * (double)x[i] * rr;
+                double wscale = __builtin_fabs((double)dw_before[i]) + __builtin_fabs((double)dy[i] * (double)x[i] * rr);
+
+                good &= tensor_close(dx[i], ref, scale, k, 4.0 * 0x1p-149 * (1.0 + rr), &tensor_rmsb_worst);
+                good &= tensor_close(dw[i], wref, wscale, 4.0, 4.0 * 0x1p-149 * (1.0 + rr), &tensor_rmsb_worst);
+        }
+        return good;
+}
+
+static void tensor_rmsnorm_backward_cases(tensor_rmsnorm_back_call *routine, float *const region[3], float *const extra[2],
+                                          tensor_faults *faults)
+{
+        static float dy_copy[4096], x_copy[4096], w_copy[4096], dw_copy[4096];
+
+        for (unsigned long long index = 0; index < TENSOR_COUNTS; index++)
+        {
+                unsigned long long n = tensor_count(index);
+                float *dx = region[0] + TENSOR_GUARD_FLOATS - n, *x = region[1] + TENSOR_GUARD_FLOATS - n;
+                float *w = region[2] + TENSOR_GUARD_FLOATS - n, *dy = extra[0] + TENSOR_GUARD_FLOATS - n;
+                float *dw = extra[1] + TENSOR_GUARD_FLOATS - n;
+
+                tensor_rms_rows(x, w, n, tensor_rms_scale(index));
+                float r = (float)tensor_rmsnorm_model(x, n, tensor_rms_eps(index));
+
+                for (unsigned long long i = 0; i < n; i++)
+                {
+                        dy[i] = tensor_uniform(-1.0f, 1.0f) * (index % 3 == 0 ? 1e-4f : 1.0f);
+                        dw[i] = tensor_next() % 7 == 0 ? 0.0f : tensor_uniform(-3.0f, 3.0f);
+                        dy_copy[i] = dy[i], x_copy[i] = x[i], w_copy[i] = w[i], dw_copy[i] = dw[i];
+                        dx[i] = tensor_float(0x7fb00000u);
+                }
+                tensor_sentinels(dx, 1), tensor_sentinels(x, 2), tensor_sentinels(w, 3), tensor_sentinels(dy, 4),
+                    tensor_sentinels(dw, 5);
+                routine(dx, dw, dy, x, w, n, r);
+                faults->values += !tensor_rmsnorm_back_holds(dx, dw, dw_copy, dy_copy, x_copy, w_copy, n, r);
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->outside += tensor_bits(x[i]) != tensor_bits(x_copy[i]) || tensor_bits(w[i]) != tensor_bits(w_copy[i]) ||
+                                           tensor_bits(dy[i]) != tensor_bits(dy_copy[i]);
+                faults->outside += !tensor_sentinels_kept(dx, 1) + !tensor_sentinels_kept(x, 2) + !tensor_sentinels_kept(w, 3) +
+                                   !tensor_sentinels_kept(dy, 4) + !tensor_sentinels_kept(dw, 5);
+
+                //      In place, dx over dy.
+                for (unsigned long long i = 0; i < n; i++)
+                        dw[i] = dw_copy[i];
+                routine(dy, dw, dy, x, w, n, r);
+                faults->aliased += !tensor_rmsnorm_back_holds(dy, dw, dw_copy, dy_copy, x_copy, w_copy, n, r);
+                faults->outside += !tensor_sentinels_kept(dy, 4) + !tensor_sentinels_kept(dw, 5);
+                if (!n)
+                        continue;
+
+                //      A NaN in dy makes the dot NaN and so every dx, and dw NaN
+                //      there alone.
+                unsigned long long at = tensor_next() % n;
+
+                for (unsigned long long i = 0; i < n; i++)
+                        dy[i] = dy_copy[i], dw[i] = dw_copy[i];
+                dy[at] = tensor_float(0x7fc00000u);
+                routine(dx, dw, dy, x, w, n, r);
+                for (unsigned long long i = 0; i < n; i++)
+                        faults->nans += !__builtin_isnan(dx[i]) + (i == at ? !__builtin_isnan(dw[i]) : __builtin_isnan(dw[i]));
+        }
+}
 #endif /* CHECK_tensor || CHECK_native_tensor */
 
 #ifdef CHECK_tensor
-static float *tensor_region[3];
+static float *tensor_region[5];
 
-//      Three regions of TENSOR_GUARD_FLOATS, each followed by a page that
-//      faults.
+//      Five regions of TENSOR_GUARD_FLOATS, each followed by a page that
+//      faults: the first three for a routine's arrays, the last two for the
+//      backward's other two.
 static bool tensor_guard(void)
 {
         positive span = (TENSOR_GUARD_FLOATS * 4 + 4095) / 4096 * 4096;
 
-        for (int at = 0; at < 3; at++)
+        for (int at = 0; at < 5; at++)
         {
                 p8 address_to pages = memory(span + 4096);
 
@@ -106984,6 +107260,24 @@ static bool tensor_guard(void)
 static fn tensor_call_swiglu_forward(float *out, const float *gate, const float *up, unsigned long long n)
 {
         swiglu_forward_f32(out, gate, up, n);
+}
+
+static float tensor_call_rmsnorm_forward(float *y, const float *x, const float *w, unsigned long long n, float eps)
+{
+        return rmsnorm_forward_f32(y, x, w, n, eps);
+}
+
+static fn tensor_call_rmsnorm_backward(float *dx, float *dw, const float *dy, const float *x, const float *w,
+                                       unsigned long long n, float r)
+{
+        rmsnorm_backward_f32(dx, dw, dy, x, w, n, r);
+}
+
+static fn tensor_worst_line(string_address tier, string_address routine, double worst)
+{
+        string_format(log, "  %s: %s worst ", tier, routine);
+        decimal_to_string(log, worst);
+        string_format(log, " eps\n");
 }
 
 //      One tier's properties, each one check.
@@ -107007,9 +107301,26 @@ static fn tensor_tier(string_address tier)
         check("swiglu_forward_f32: a stride through all 2^32 gates",
               tensor_swiglu_forward_sweep(tensor_call_swiglu_forward, tensor_region, 16411) == 0);
 #endif
-        string_format(log, "  %s: swiglu_forward_f32 worst ", tier);
-        decimal_to_string(log, tensor_worst);
-        string_format(log, " eps\n");
+        tensor_worst_line(tier, "swiglu_forward_f32", tensor_worst);
+
+        tensor_faults norm = {0, 0, 0, 0}, back = {0, 0, 0, 0};
+
+        tensor_rms_worst = 0, tensor_rmsb_worst = 0;
+        tensor_rmsnorm_forward_cases(tensor_call_rmsnorm_forward, tensor_region, &norm);
+        check("rmsnorm_forward_f32: every count to 100 and 127 to 4096, r and y within the bound", norm.values == 0);
+        check("rmsnorm_forward_f32: x, w, sentinels and pages beside every array untouched", norm.outside == 0);
+        check("rmsnorm_forward_f32: y over x", norm.aliased == 0);
+        check("rmsnorm_forward_f32: NaN in x is NaN everywhere, an infinity in x is r = 0, NaN in w is NaN there",
+              norm.nans == 0);
+        check("rmsnorm_forward_f32: no count is 1/sqrt(eps), zeros with eps 0 are inf, an overflowing square is r = 0",
+              tensor_rmsnorm_edges(tensor_call_rmsnorm_forward, tensor_region));
+        tensor_rmsnorm_backward_cases(tensor_call_rmsnorm_backward, tensor_region, tensor_region + 3, &back);
+        check("rmsnorm_backward_f32: every count to 100 and 127 to 4096, dx and dw within the bound", back.values == 0);
+        check("rmsnorm_backward_f32: dy, x, w, sentinels and pages beside every array untouched", back.outside == 0);
+        check("rmsnorm_backward_f32: dx over dy", back.aliased == 0);
+        check("rmsnorm_backward_f32: NaN in dy is NaN in every dx and in that dw alone", back.nans == 0);
+        tensor_worst_line(tier, "rmsnorm_forward_f32", tensor_rms_worst);
+        tensor_worst_line(tier, "rmsnorm_backward_f32", tensor_rmsb_worst);
 }
 
 b32 main()
@@ -107042,6 +107353,21 @@ b32 main()
                 check("swiglu_forward_f32: the first call asks for V and keeps its arguments",
                       cpu_has_vector != 0 && tensor_swiglu_holds(out[0], gate[0], up[0]) &&
                           tensor_swiglu_holds(out[1], gate[1], up[1]) && tensor_swiglu_holds(out[2], gate[2], up[2]));
+                cpu_has_vector = 0;
+                float r = rmsnorm_forward_f32(out, gate, up, 3, 0.25f);
+
+                check("rmsnorm_forward_f32: the first call asks for V and keeps its arguments, eps among them",
+                      cpu_has_vector != 0 && tensor_rmsnorm_row_holds(r, out, gate, up, 3, 0.25f));
+
+                float *dw = tensor_region[3] + TENSOR_GUARD_FLOATS - 3, *dx = tensor_region[4] + TENSOR_GUARD_FLOATS - 3;
+                float before[3];
+
+                for (int i = 0; i < 3; i++)
+                        dw[i] = before[i] = (float)i;
+                cpu_has_vector = 0;
+                rmsnorm_backward_f32(dx, dw, gate, out, up, 3, r);
+                check("rmsnorm_backward_f32: the first call asks for V and keeps its arguments, the count among them",
+                      cpu_has_vector != 0 && tensor_rmsnorm_back_holds(dx, dw, before, gate, out, up, 3, r));
         }
         p8 vector = cpu_has_vector;
 
@@ -121333,15 +121659,17 @@ int main(void)
         hardware here judges what the qemu run on the box judges.
 */
 void swiglu_forward_f32(float *, const float *, const float *, unsigned long long);
+float rmsnorm_forward_f32(float *, const float *, const float *, unsigned long long, float);
+void rmsnorm_backward_f32(float *, float *, const float *, const float *, const float *, unsigned long long, float);
 
 int main(void)
 {
-        float *region[3];
+        float *region[5];
         unsigned long long checks = 0, span = (TENSOR_GUARD_FLOATS * 4 + 16383) / 16384 * 16384;
 
         //      Each region ends against a page that faults; Apple's pages are
         //      16 KiB, so the span is a whole number of them.
-        for (int at = 0; at < 3; at++)
+        for (int at = 0; at < 5; at++)
         {
                 unsigned char *pages = mmap(0, span + 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 
@@ -121361,10 +121689,23 @@ int main(void)
         unsigned long long sweep = tensor_swiglu_forward_sweep(swiglu_forward_f32, region, 16411);
 
         checks += 2;
-        printf("  neon: swiglu_forward_f32 worst %.3f eps\n", tensor_worst);
-        printf("arm64 tensor: %llu checks | values %llu | outside %llu | aliased %llu | nans %llu | grid %llu | sweep %llu\n",
-               checks, faults.values, faults.outside, faults.aliased, faults.nans, grid, sweep);
-        return faults.values || faults.outside || faults.aliased || faults.nans || grid || sweep;
+
+        tensor_faults norm = {0, 0, 0, 0}, back = {0, 0, 0, 0};
+
+        tensor_rmsnorm_forward_cases(rmsnorm_forward_f32, region, &norm);
+        int edges = tensor_rmsnorm_edges(rmsnorm_forward_f32, region);
+
+        tensor_rmsnorm_backward_cases(rmsnorm_backward_f32, region, region + 3, &back);
+        checks += 9;
+        printf("  neon: swiglu_forward_f32 worst %.3f eps, rmsnorm_forward_f32 %.3f, rmsnorm_backward_f32 %.3f\n",
+               tensor_worst, tensor_rms_worst, tensor_rmsb_worst);
+        printf("arm64 tensor: %llu checks | values %llu | outside %llu | aliased %llu | nans %llu | grid %llu | sweep %llu"
+               " | rmsnorm %llu %llu %llu %llu %s | backward %llu %llu %llu %llu\n",
+               checks, faults.values, faults.outside, faults.aliased, faults.nans, grid, sweep, norm.values, norm.outside,
+               norm.aliased, norm.nans, edges ? "edges" : "EDGES", back.values, back.outside, back.aliased, back.nans);
+        return faults.values || faults.outside || faults.aliased || faults.nans || grid || sweep || norm.values ||
+               norm.outside || norm.aliased || norm.nans || !edges || back.values || back.outside || back.aliased ||
+               back.nans;
 }
 #endif /* CHECK_native_tensor */
 
@@ -124050,17 +124391,19 @@ b32 main(void)
 
 #define TRIES 9
 
+//      no-math-errno lets 1/sqrtf be the instruction, as a trainer's C
+//      would compile it, rather than a call kept for errno.
 #if X64
-#define TENSOR_C_WIDE __attribute__((optimize("O3"), target("arch=x86-64-v4,prefer-vector-width=512")))
-#define TENSOR_C_YMM __attribute__((optimize("O3"), target("arch=x86-64-v3")))
+#define TENSOR_C_WIDE __attribute__((optimize("O3", "no-math-errno"), target("arch=x86-64-v4,prefer-vector-width=512")))
+#define TENSOR_C_YMM __attribute__((optimize("O3", "no-math-errno"), target("arch=x86-64-v3")))
 #elif RISCV64
-#define TENSOR_C_WIDE __attribute__((optimize("O3"), target("arch=+v")))
-#define TENSOR_C_YMM __attribute__((optimize("O3")))
+#define TENSOR_C_WIDE __attribute__((optimize("O3", "no-math-errno"), target("arch=+v")))
+#define TENSOR_C_YMM __attribute__((optimize("O3", "no-math-errno")))
 #else
-#define TENSOR_C_WIDE __attribute__((optimize("O3")))
-#define TENSOR_C_YMM __attribute__((optimize("O3")))
+#define TENSOR_C_WIDE __attribute__((optimize("O3", "no-math-errno")))
+#define TENSOR_C_YMM __attribute__((optimize("O3", "no-math-errno")))
 #endif
-#define TENSOR_C_BASE __attribute__((optimize("O3")))
+#define TENSOR_C_BASE __attribute__((optimize("O3", "no-math-errno")))
 
 static inline __attribute__((always_inline)) f32 tensor_c_float(p32 bits)
 {
@@ -124110,10 +124453,68 @@ TENSOR_C_SWIGLU(tensor_c_swiglu_wide, TENSOR_C_WIDE)
 TENSOR_C_SWIGLU(tensor_c_swiglu_ymm, TENSOR_C_YMM)
 TENSOR_C_SWIGLU(tensor_c_swiglu_base, TENSOR_C_BASE)
 
-typedef fn (*tensor_c_swiglu)(f32 *restrict, const f32 *restrict, const f32 *restrict, positive);
+//      rmsnorm's two passes as C: 64 partial sums, which the vectoriser
+//      keeps in registers without reassociating anything, then the scale.
+#define TENSOR_C_RMSNORM(name, attributes)                                                               \
+        attributes static f32 name(f32 *y, const f32 *x, const f32 *w, positive n, f32 eps)              \
+        {                                                                                                \
+                f32 acc[64] = {0};                                                                       \
+                positive i = 0;                                                                          \
+                for (; i + 64 <= n; i += 64)                                                             \
+                        for (positive j = 0; j < 64; j++)                                                \
+                                acc[j] += x[i + j] * x[i + j];                                           \
+                for (positive j = 0; i + j < n; j++)                                                     \
+                        acc[j] += x[i + j] * x[i + j];                                                   \
+                for (positive s = 32; s; s /= 2)                                                         \
+                        for (positive j = 0; j < s; j++)                                                 \
+                                acc[j] += acc[j + s];                                                    \
+                f32 r = 1.0f / __builtin_sqrtf(acc[0] * (1.0f / (f32)(n ? n : 1)) + eps);                \
+                for (i = 0; i < n; i++)                                                                  \
+                        y[i] = x[i] * w[i] * r;                                                          \
+                return r;                                                                                \
+        }
+#define TENSOR_C_RMSNORM_BACK(name, attributes)                                                          \
+        attributes static fn name(f32 *dx, f32 *restrict dw, const f32 *dy, const f32 *x, const f32 *w,  \
+                                  positive n, f32 r)                                                     \
+        {                                                                                                \
+                f32 acc[64] = {0};                                                                       \
+                positive i = 0;                                                                          \
+                for (; i + 64 <= n; i += 64)                                                             \
+                        for (positive j = 0; j < 64; j++)                                                \
+                        {                                                                                \
+                                f32 a = dy[i + j] * r;                                                   \
+                                dw[i + j] += a * x[i + j];                                               \
+                                acc[j] += a * w[i + j] * x[i + j];                                       \
+                        }                                                                                \
+                for (positive j = 0; i + j < n; j++)                                                     \
+                {                                                                                        \
+                        f32 a = dy[i + j] * r;                                                           \
+                        dw[i + j] += a * x[i + j];                                                       \
+                        acc[j] += a * w[i + j] * x[i + j];                                               \
+                }                                                                                        \
+                for (positive s = 32; s; s /= 2)                                                         \
+                        for (positive j = 0; j < s; j++)                                                 \
+                                acc[j] += acc[j + s];                                                    \
+                f32 k = acc[0] * (r * r / (f32)(n ? n : 1));                                             \
+                for (i = 0; i < n; i++)                                                                  \
+                        dx[i] = dy[i] * r * w[i] - k * x[i];                                             \
+        }
+TENSOR_C_RMSNORM(tensor_c_rmsnorm_wide, TENSOR_C_WIDE)
+TENSOR_C_RMSNORM(tensor_c_rmsnorm_ymm, TENSOR_C_YMM)
+TENSOR_C_RMSNORM(tensor_c_rmsnorm_base, TENSOR_C_BASE)
+TENSOR_C_RMSNORM_BACK(tensor_c_rmsnorm_back_wide, TENSOR_C_WIDE)
+TENSOR_C_RMSNORM_BACK(tensor_c_rmsnorm_back_ymm, TENSOR_C_YMM)
+TENSOR_C_RMSNORM_BACK(tensor_c_rmsnorm_back_base, TENSOR_C_BASE)
 
-static f32 *tensor_out, *tensor_gate, *tensor_up;
+typedef fn (*tensor_c_swiglu)(f32 *restrict, const f32 *restrict, const f32 *restrict, positive);
+typedef f32 (*tensor_c_rmsnorm)(f32 *, const f32 *, const f32 *, positive, f32);
+typedef fn (*tensor_c_rmsnorm_back)(f32 *, f32 *restrict, const f32 *, const f32 *, const f32 *, positive, f32);
+
+static f32 *tensor_out, *tensor_gate, *tensor_up, *tensor_w, *tensor_dw;
 static tensor_c_swiglu tensor_former;
+static tensor_c_rmsnorm tensor_former_norm;
+static tensor_c_rmsnorm_back tensor_former_back;
+static f32 tensor_sink;
 
 static p64 run(bool assembly, positive h, positive rows, positive reps)
 {
@@ -124175,6 +124576,74 @@ static fn tensor_swiglu_shapes(string_address tier)
                 }
 }
 
+//      rmsnorm rows: x (dy and x for the backward) from the big arrays, w and
+//      dw one row each, as a trainer holds them. rows 0 is the chain: one
+//      row in place, each call waiting on the last, which is the latency.
+static p64 run_rmsnorm(bool assembly, bool backward, positive d, positive rows, positive reps)
+{
+        p64 start = get_cpu_time();
+        positive each = rows ? rows : 1;
+
+        for (positive r = 0; r < reps; r++)
+                for (positive row = 0; row < each; row++)
+                {
+                        f32 *y = rows ? tensor_out + row * d : tensor_gate, *x = tensor_gate + row * d;
+
+                        if (!backward)
+                                tensor_sink += assembly ? rmsnorm_forward_f32(y, x, tensor_w, d, 1e-5f)
+                                                        : tensor_former_norm(y, x, tensor_w, d, 1e-5f);
+                        else if (assembly)
+                                rmsnorm_backward_f32(y, tensor_dw, x, tensor_up + row * d, tensor_w, d, 1.0f);
+                        else
+                                tensor_former_back(y, tensor_dw, x, tensor_up + row * d, tensor_w, d, 1.0f);
+                }
+        return get_cpu_time() - start;
+}
+
+static fn tensor_rmsnorm_shapes(string_address tier)
+{
+        static const positive widths[] = {256, 1024};
+#if X64
+        static const positive heights[] = {0, 8, 64, 8192};
+#else
+        static const positive heights[] = {0, 8};
+#endif
+
+        for (positive backward = 0; backward < 2; backward++)
+                for (positive w = 0; w < 2; w++)
+                        for (positive t = 0; t < sizeof(heights) / sizeof(heights[0]); t++)
+                        {
+                                positive d = widths[w], rows = heights[t];
+#if X64
+                                positive reps = rows == 0 ? 8000 : rows == 8 ? 1000 : rows == 64 ? 128 : 1;
+#else
+                                positive reps = rows == 0 ? 64 : 8;
+#endif
+                                positive ratios[TRIES], calls = (rows ? rows : 1) * reps;
+                                p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                                for (positive trial = 0; trial < TRIES; trial++)
+                                {
+                                        p64 former, assembly;
+
+                                        BENCH_ALTERNATE(trial, former, run_rmsnorm(false, backward, d, rows, reps), assembly,
+                                                        run_rmsnorm(true, backward, d, rows, reps));
+                                        ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                        best_c = former < best_c ? former : best_c;
+                                        best_a = assembly < best_a ? assembly : best_a;
+                                }
+                                order(ratios, TRIES);
+                                string_format(log, "%s %p by %p, %s: paired median ASM/C ",
+                                              backward ? "rmsnorm_backward_f32" : "rmsnorm_forward_f32", d, rows, tier);
+                                tensor_hundredths(ratios[TRIES / 2]);
+                                string_format(log, "%%; best ticks a call ASM ");
+                                tensor_hundredths((positive)(best_a * 100 / calls));
+                                string_format(log, ", C ");
+                                tensor_hundredths((positive)(best_c * 100 / calls));
+                                log("\n", 1);
+                        }
+}
+
 //      One shape on one tier, alone, for perf stat: 20000 calls of a row in
 //      L1. "nothing" is the same program doing none, the baseline to subtract.
 #if X64
@@ -124188,12 +124657,18 @@ static fn tensor_force(p32 tier)
         cpu_has_avx2 = tier < 2 ? wide2 : 0;
         cpu_has_fma = tier < 2 ? fused : 0;
         tensor_former = tier == 0 ? tensor_c_swiglu_wide : tier == 1 ? tensor_c_swiglu_ymm : tensor_c_swiglu_base;
+        tensor_former_norm = tier == 0 ? tensor_c_rmsnorm_wide : tier == 1 ? tensor_c_rmsnorm_ymm : tensor_c_rmsnorm_base;
+        tensor_former_back = tier == 0 ? tensor_c_rmsnorm_back_wide
+                             : tier == 1 ? tensor_c_rmsnorm_back_ymm
+                                         : tensor_c_rmsnorm_back_base;
 }
 #else
+//      Tier 0's C is the wide build (riscv64's with V), the others the base.
 static fn tensor_force(p32 tier)
 {
-        (void)tier;
-        tensor_former = tensor_c_swiglu_base;
+        tensor_former = tier == 0 ? tensor_c_swiglu_wide : tensor_c_swiglu_base;
+        tensor_former_norm = tier == 0 ? tensor_c_rmsnorm_wide : tensor_c_rmsnorm_base;
+        tensor_former_back = tier == 0 ? tensor_c_rmsnorm_back_wide : tensor_c_rmsnorm_back_base;
 }
 #endif
 #define TENSOR_NAMED(id, h, tier, assembly)                                                              \
@@ -124202,6 +124677,25 @@ static fn tensor_force(p32 tier)
                 tensor_force(tier);                                                                      \
                 run(assembly, h, 1, 20000);                                                              \
         }
+//      rmsnorm alone: eight rows of 256 back to back, 2500 times (in L1).
+#define TENSOR_NAMED_RMS(id, backward, tier, assembly)                                                   \
+        static fn tensor_named_rms_##id(void)                                                            \
+        {                                                                                                \
+                tensor_force(tier);                                                                      \
+                run_rmsnorm(assembly, backward, 256, 8, 2500);                                           \
+        }
+TENSOR_NAMED_RMS(zmm, false, 0, true)
+TENSOR_NAMED_RMS(zmm_c, false, 0, false)
+TENSOR_NAMED_RMS(ymm, false, 1, true)
+TENSOR_NAMED_RMS(ymm_c, false, 1, false)
+TENSOR_NAMED_RMS(xmm, false, 2, true)
+TENSOR_NAMED_RMS(xmm_c, false, 2, false)
+TENSOR_NAMED_RMS(back_zmm, true, 0, true)
+TENSOR_NAMED_RMS(back_zmm_c, true, 0, false)
+TENSOR_NAMED_RMS(back_ymm, true, 1, true)
+TENSOR_NAMED_RMS(back_ymm_c, true, 1, false)
+TENSOR_NAMED_RMS(back_xmm, true, 2, true)
+TENSOR_NAMED_RMS(back_xmm_c, true, 2, false)
 TENSOR_NAMED(682_zmm, 682, 0, true)
 TENSOR_NAMED(682_zmm_c, 682, 0, false)
 TENSOR_NAMED(682_ymm, 682, 1, true)
@@ -124234,6 +124728,18 @@ static bench_work tensor_named(string_address name)
         BENCH_NAME(name, "swiglu-1024-ymm-c", tensor_named_1024_ymm_c);
         BENCH_NAME(name, "swiglu-1024-xmm", tensor_named_1024_xmm);
         BENCH_NAME(name, "swiglu-1024-xmm-c", tensor_named_1024_xmm_c);
+        BENCH_NAME(name, "rmsnorm-256-zmm", tensor_named_rms_zmm);
+        BENCH_NAME(name, "rmsnorm-256-zmm-c", tensor_named_rms_zmm_c);
+        BENCH_NAME(name, "rmsnorm-256-ymm", tensor_named_rms_ymm);
+        BENCH_NAME(name, "rmsnorm-256-ymm-c", tensor_named_rms_ymm_c);
+        BENCH_NAME(name, "rmsnorm-256-xmm", tensor_named_rms_xmm);
+        BENCH_NAME(name, "rmsnorm-256-xmm-c", tensor_named_rms_xmm_c);
+        BENCH_NAME(name, "rmsnorm-back-256-zmm", tensor_named_rms_back_zmm);
+        BENCH_NAME(name, "rmsnorm-back-256-zmm-c", tensor_named_rms_back_zmm_c);
+        BENCH_NAME(name, "rmsnorm-back-256-ymm", tensor_named_rms_back_ymm);
+        BENCH_NAME(name, "rmsnorm-back-256-ymm-c", tensor_named_rms_back_ymm_c);
+        BENCH_NAME(name, "rmsnorm-back-256-xmm", tensor_named_rms_back_xmm);
+        BENCH_NAME(name, "rmsnorm-back-256-xmm-c", tensor_named_rms_back_xmm_c);
         return null;
 }
 
@@ -124242,7 +124748,8 @@ b32 main(void)
         positive floats = 8192 * 1024;
 
         tensor_out = memory(floats * 4), tensor_gate = memory(floats * 4), tensor_up = memory(floats * 4);
-        if (!tensor_out || !tensor_gate || !tensor_up)
+        tensor_w = memory(4096 * 4), tensor_dw = memory(4096 * 4);
+        if (!tensor_out || !tensor_gate || !tensor_up || !tensor_w || !tensor_dw)
                 return 1;
         p64 state = 0x9e3779b97f4a7c15ull;
         for (positive i = 0; i < floats; i++)
@@ -124252,6 +124759,11 @@ b32 main(void)
                 tensor_up[i] = (f32)((b64)(state & 0xffffff) - (1 << 23)) * (2.0f / (f32)(1 << 23));
                 tensor_out[i] = 0.0f;
         }
+        //      w = 1 and r = 1 keep the chained rows normal: the forward
+        //      normalises its row each call, the backward projects x out of it.
+        for (positive i = 0; i < 4096; i++)
+                tensor_w[i] = 1.0f, tensor_dw[i] = 0.0f;
+        tensor_force(0);
         BENCH_RUN_NAMED(tensor_named);
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2, fused = cpu_has_fma;
@@ -124263,8 +124775,9 @@ b32 main(void)
                 cpu_has_fma = tier < 2 ? fused : 0;
                 if ((tier == 0 && !wide512) || (tier == 1 && !(wide2 && fused)))
                         continue;
-                tensor_former = tier == 0 ? tensor_c_swiglu_wide : tier == 1 ? tensor_c_swiglu_ymm : tensor_c_swiglu_base;
+                tensor_force(tier);
                 tensor_swiglu_shapes(tier == 0 ? "avx512" : tier == 1 ? "avx2 fma" : "sse2");
+                tensor_rmsnorm_shapes(tier == 0 ? "avx512" : tier == 1 ? "avx2 fma" : "sse2");
         }
         cpu_has_avx512 = wide512, cpu_has_avx2 = wide2, cpu_has_fma = fused;
 #elif RISCV64
@@ -124278,12 +124791,16 @@ b32 main(void)
                 if (tier == 0 && vector != 2)
                         continue;
                 tensor_former = tier == 0 ? tensor_c_swiglu_wide : tensor_c_swiglu_base;
+                tensor_former_norm = tier == 0 ? tensor_c_rmsnorm_wide : tensor_c_rmsnorm_base;
+                tensor_former_back = tier == 0 ? tensor_c_rmsnorm_back_wide : tensor_c_rmsnorm_back_base;
                 tensor_swiglu_shapes(tier == 0 ? "V" : "no V");
+                tensor_rmsnorm_shapes(tier == 0 ? "V" : "no V");
         }
         cpu_has_vector = vector;
 #else
-        tensor_former = tensor_c_swiglu_base;
+        tensor_force(0);
         tensor_swiglu_shapes("neon");
+        tensor_rmsnorm_shapes("neon");
 #endif
         log_flush();
         return 0;

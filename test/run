@@ -206,7 +206,7 @@ describe()
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
-        tensor) echo "the f32 transformer kernels against a double-precision model: every count, guard pages, in place, each x86 tier, and riscv64 with no V and V at 128, 256 and 512 bits" ;;
+        tensor) echo "the f32 transformer kernels against a double-precision model: every count, guard pages, in place, each x86 tier, and riscv64 with no V and V at 128, 256, 512 and 1024 bits" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
@@ -3391,12 +3391,12 @@ lane_font()
 }
 
 #
-#       A check section on the three machines, and then on riscv64 three more
+#       A check section on the three machines, and then on riscv64 five more
 #       times, under the vector shapes a body has to be right in: no V at all,
 #       and V at VLEN 128 -- the least the extension allows and what most
-#       boards ship -- 256 and 512. The vector bodies ask for VLEN with
+#       boards ship -- 256, 512 and 1024. The vector bodies ask for VLEN with
 #       vsetvli, so these are four different strip lengths through the same
-#       code.
+#       code, and a fold or a tree over the lanes four different depths.
 #
 freestanding_checks_vector_lane()
 {
@@ -3405,7 +3405,7 @@ freestanding_checks_vector_lane()
         freestanding_checks_lane "$vector_suite" "$vector_source"
         vector_outcome=$?
         if target_tools riscv64; then
-                for cpu in rv64 rv64,v=true,vlen=128 rv64,v=true,vlen=256 rv64,v=true,vlen=512; do
+                for cpu in rv64 rv64,v=true,vlen=128 rv64,v=true,vlen=256 rv64,v=true,vlen=512 rv64,v=true,vlen=1024; do
                         target=riscv64
                         target_runner="qemu-riscv64 -cpu $cpu"
                         target_label=riscv64-$(printf '%s' "$cpu" | sed 's/rv64,v=true,vlen=/v/')
@@ -5052,7 +5052,7 @@ human_nearest lib positive_into_human_nearest_string wait_status_code_base wait_
 fields lib positive_into_padded positive_into_pair
 input_bases lib string_digits_max string_digits_octal_escape_max string_digits_octal_max string_digits_hexadecimal_escape_max string_digits_hexadecimal_max string_digits_base_max
 network lib network_load_16 network_load_32 network_store_16 network_store_32
-tensor lib swiglu_forward_f32
+tensor lib swiglu_forward_f32 rmsnorm_forward_f32 rmsnorm_backward_f32
 matrix lib gemm_f32 matrix_engine_f32
 reserve lib memory_growth memory_reserve memory_release
 LIFTED

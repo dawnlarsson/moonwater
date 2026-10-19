@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        411 routines (387 public, 24 local), 401 of them on all three and 10 local to one.
+        413 routines (389 public, 24 local), 403 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -346,6 +346,8 @@
           program_environment            public  yes     yes     yes
           program_environment_list       public  yes     yes     yes
           program_initial_identity       public  yes     yes     yes
+          rmsnorm_backward_f32           public  yes     yes     yes
+          rmsnorm_forward_f32            public  yes     yes     yes
           sha1_blocks                    public  yes     yes     yes
           sha256_blocks                  public  yes     yes     yes
           sha256_compress                public  yes     yes     yes
@@ -37470,6 +37472,27 @@ __asm__(
         4.83 on AVX2 and 4.58 on SSE2; over the tensor lane's cases, 3.68 on
         NEON and 4.05 on riscv64, with V and without.
 
+        rmsnorm_forward_f32(y, x, w, n, eps) writes y[i] = x[i] w[i] r and
+        returns r = 1 / sqrt(mean(x^2) + eps), which the backward takes back;
+        rmsnorm_backward_f32(dx, dw, dy, x, w, n, r) writes dx[i] = r (dy[i]
+        w[i] - x[i] r^2 dot / n) with dot = sum dy w x, and adds dy[i] x[i] r
+        into dw[i]. y may be x and dx may be dy; nothing else overlaps. A
+        count of nothing is the mean of nothing taken as zero: r = 1/sqrt(eps)
+        and nothing is touched. The squares are summed in f32, as torch's f32
+        norm sums them, so 1/sqrt is taken of what IEEE makes of that sum: a
+        NaN anywhere in x is a NaN r and every y NaN; an infinity in x, or a
+        square past FLT_MAX, is r = 0 and y = 0 but NaN where x or w is
+        infinite; eps = 0 under a row of zeros is r = inf and y NaN, and a sum
+        below the normal range is 1/sqrt of that denormal. A NaN in dy is NaN
+        in every dx, through the dot, and in that dw alone. Both
+        are sums of n terms in f32 that no term passes through more than n/4
+        + 8 roundings of, so r and each y are within (8 + n/8) eps of the
+        value in exact arithmetic, and each dx within (8 + n/8) eps of its
+        scale |r dy w| + |x| r^3 sum |dy w x| / n; dw rounds three times.
+        The lane's worst are a few eps: r and y 2.79 on AVX-512, 3.55 on
+        AVX2, 3.37 on SSE2, 3.01 on NEON and 2.95 / 3.55 on riscv64 with V /
+        without; dx and dw 2.26, 2.35, 2.22, 2.39 and 2.39 / 2.35.
+
         The sigmoid has no exp in it that can overflow. With a = min(|g|, 105)
         and m = round(16 a log2e) = 16k + j, x = m ln2/16 - a lies within
         ln2/32 of zero and e^-a = 2^(-m/16) e^x. Scaled by 2^(m/16 - 24),
@@ -37526,6 +37549,57 @@ __asm__(
         masks, not single vectors, which cost 15% from memory at H = 682.
         vscalefps takes both FADD pipes, a zmm store an FMA slot when they
         are full, and register copies are not free.
+
+        rmsnorm is a reduction in front of a scale, so a row's chain -- the
+        sum's tree, the horizontal sum, the reciprocal square root, the
+        broadcast -- is some seventy cycles on Zen 5, and rows overlap only as
+        far as the FP scheduler holds what waits on r: sixteen multiplies and
+        sixteen stores a row of 256 (fp_sch_rsrc stalls, 16 cycles a row).
+        So everything that can happen before r does: x w is formed while the
+        sum reduces, and on AVX-512 a row of 193 to 256 floats stays in
+        registers, twelve whole vectors and four under masks, against a
+        second pass that reads x and w again (the backward keeps its sixteen
+        g, 20% over computing them again). r is rsqrt14 or rsqrt and one
+        Newton step, 16 cycles of chain against sqrtss and divss's 24 (AVX2
+        16% faster from L3 for it), and the inputs whose step is NaN -- a sum
+        of 0, inf or NaN -- branch to their fix rather than pay a min on
+        every row's chain. SSE2, NEON and riscv64 take sqrt and a divide.
+        AVX2 and SSE2 compute the backward's g a second time from dy and w,
+        still in cache; storing it into dx to read back is 3% faster from L2
+        and 16% slower from memory at 1024 floats, writing dx twice. An M2 is
+        load bound (40 bytes a cycle, ld1 of four or ldp alike), so NEON
+        keeps sixteen accumulators for its four FMA pipes, takes the second
+        pass through ldp and stp, a quarter faster than ld1 and st1 there,
+        and does store g into dx: six loads a vector and not seven, 8% at
+        1024 floats.
+
+        Cycles a call at n = 256 on a 9950X core (C in brackets, the same two
+        passes with 64 partial sums for the vectoriser and 1/sqrtf as the
+        instruction): eight rows in L1, forward 43 on AVX-512 (117), 71 on
+        AVX2 (153), 138 on SSE2 (244); backward 65 to 77 (123), 129 (190), 239
+        (411). Of the forward's 43, three are what the routine adds to its
+        bare loop -- the tier test, the Newton form that rounds once, the
+        branch for 0, inf and NaN -- about one each. The forward's op mix
+        alone, with r a constant, runs at 28, against 24 for its 48 multiplies
+        on two pipes: the rest is the chain. From L2 and L3 the rows' traffic
+        binds, and how hard depends on where the rows live: in small arrays
+        the same bodies ran at the 46 and 69 cycles a plain copy of the row
+        takes at 64 and 8192 rows, and the backward at its 71 and 112; in the
+        bench's 32 MiB arrays, on huge pages, the copy takes 46 and 72 and the
+        bodies 70 and 91 forward, 116 and 155 against 87 and 120 backward --
+        a chain that waits on its loads feels a latency the copy streams
+        past. ASM/C there 0.62 / 0.67 forward and 0.78 / 0.81 backward at 64
+        and 8192 rows on AVX-512. At 1024 floats from memory both directions
+        sit on DRAM bandwidth, as the C does (0.98-1.01). Where the code sits
+        moves the memory case too: the same resident body two to sixteen
+        bytes along ran 70 to 79 cycles a row from L3, with the prefetchers
+        leaving 1.2 to 7.1 demand misses a row; the bodies start on 64. An M2
+        Pro core, NEON: forward 110 cycles (clang -O3 140), backward 198
+        (233); 8192 rows 111 (157) and 228 (265); its loads alone would take
+        76 and 150. riscv64 counted at VLEN 128, 256 and 512: forward 230,
+        152 and 116 instructions (GCC -O3 -march=rv64gcv 1484, 1023, 798),
+        backward 309, 191, 135 (2821, 1560, 935); without V 2353 (4754) and
+        4332 (8594).
 */
 #ifndef KERNEL_MODE
 // out[i] = gate[i] * sigmoid(gate[i]) * up[i] for i < hidden_dim; out may be
@@ -37533,6 +37607,17 @@ __asm__(
 WRITES(1, 4) READS(2, 4) READS(3, 4)
 fn swiglu_forward_f32(f32 address_to out, const f32 address_to gate, const f32 address_to up,
                       positive hidden_dim);
+// y[i] = x[i] * w[i] * r for i < dim, r = 1 / sqrt(mean(x^2) + eps), which it
+// returns; y may be x, nothing else overlaps.
+WRITES(1, 4) READS(2, 4) READS(3, 4)
+f32 rmsnorm_forward_f32(f32 address_to y, const f32 address_to x, const f32 address_to w, positive dim,
+                        f32 eps);
+// The gradient of that row given its r: dx[i] = r (dy[i] w[i] - x[i] r^2 dot /
+// dim) with dot = sum dy w x, and dw[i] += dy[i] x[i] r. dx may be dy; nothing
+// else overlaps, dw least of all.
+WRITES(1, 6) READS_WRITES(2, 6) READS(3, 6) READS(4, 6) READS(5, 6)
+fn rmsnorm_backward_f32(f32 address_to dx, f32 address_to dw, const f32 address_to dy,
+                        const f32 address_to x, const f32 address_to w, positive dim, f32 inv_rms);
 
 /*
         The arm64 bodies' macros stand here, ahead of the #if, where the Mac
@@ -37578,6 +37663,13 @@ fn swiglu_forward_f32(f32 address_to out, const f32 address_to gate, const f32 a
     "fmadd.s " M ", " M ", " A ", ft9\n   fmadd.s " M ", " M ", " A ", ft10\n   fmadd.s " M ", " M ", " A ", ft10\n" \
     "fadd.s " A ", " Z ", " M "\n   fsgnj.s " Z ", " Z ", " G "\n   fmax.s " Z ", " Z ", " M "\n"                 \
     "fdiv.s " Z ", " Z ", " A "\n   fmul.s " Z ", " Z ", " G "\n"
+//      One element of rmsnorm's backward first pass at byte offset O, r in
+//      fa0, the cursors dx t2, dw t3, dy t4, x t5, w t6: a = dy r into A, g =
+//      a w into G and stored to dx, the dot D += g x, then dw += a x.
+#define RV_RMSB1(O, X, A, G, D)                                                                          \
+    "flw " X ", " O "(t5)\n   flw " A ", " O "(t4)\n   fmul.s " A ", " A ", fa0\n   flw " G ", " O "(t6)\n"     \
+    "fmul.s " G ", " G ", " A "\n   fsw " G ", " O "(t2)\n   fmadd.s " D ", " G ", " X ", " D "\n"               \
+    "flw " G ", " O "(t3)\n   fmadd.s " G ", " A ", " X ", " G "\n   fsw " G ", " O "(t3)\n"
 
 #if X64
 /*
@@ -37603,6 +37695,7 @@ fn swiglu_forward_f32(f32 address_to out, const f32 address_to gate, const f32 a
                 Cephes split, whose high half times any m is exact without an FMA
             672 .. 800 c6 .. c2 on ln2/2      832 the sixteen mantissas of
                 2^(j/16)      896 the eight of 2^(j/8)      928 0 .. 7
+            960 1      992 1/2
 
         The zmm body keeps zmm21-zmm31 for them (TENSOR_ZMM_CONSTANTS).
 */
@@ -37751,6 +37844,7 @@ __asm__(
     ".4byte 0x3504f3, 0x3d08a4, 0x45672a, 0x4e248c, 0x5744fd, 0x60ccdf, 0x6ac0c7, 0x75257d\n"
     ".4byte 0x000000, 0x0b95c2, 0x1837f0, 0x25fed7, 0x3504f3, 0x45672a, 0x5744fd, 0x6ac0c7\n"
     ".4byte 0, 1, 2, 3, 4, 5, 6, 7\n"
+    TENSOR_X64_ROW(0x3f800000) TENSOR_X64_ROW(0x3f000000)
     ASM_OBJECT_END(tensor_constants_x64)
 
     //
@@ -37823,6 +37917,426 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(swiglu_forward_f32)
 );
+
+/*
+        rmsnorm's x86_64 pieces. A row of sixteen zmm vectors, slot i in
+        zmm(8 + i) at byte offset 64 i with accumulator zmm(i mod 8); the
+        resident bodies put the last four under k1-k4, which cover the
+        elements from 192 on. The backward's row keeps g_i = dy_i r w_i in
+        zmm(i), x in zmm(16 + i mod 4), a = dy r in zmm(20 + i mod 4) and the
+        dot in zmm(26 + i mod 4).
+*/
+#define TENSOR_ZMM_SIXTEEN(STEP)                                                                         \
+    STEP("%zmm8", "0", "%zmm0", "", "") STEP("%zmm9", "64", "%zmm1", "", "")                             \
+    STEP("%zmm10", "128", "%zmm2", "", "") STEP("%zmm11", "192", "%zmm3", "", "")                        \
+    STEP("%zmm12", "256", "%zmm4", "", "") STEP("%zmm13", "320", "%zmm5", "", "")                        \
+    STEP("%zmm14", "384", "%zmm6", "", "") STEP("%zmm15", "448", "%zmm7", "", "")                        \
+    STEP("%zmm16", "512", "%zmm0", "", "") STEP("%zmm17", "576", "%zmm1", "", "")                        \
+    STEP("%zmm18", "640", "%zmm2", "", "") STEP("%zmm19", "704", "%zmm3", "", "")                        \
+    STEP("%zmm20", "768", "%zmm4", "", "") STEP("%zmm21", "832", "%zmm5", "", "")                        \
+    STEP("%zmm22", "896", "%zmm6", "", "") STEP("%zmm23", "960", "%zmm7", "", "")
+#define TENSOR_ZMM_SIXTEEN_MASKED(STEP)                                                                  \
+    STEP("%zmm8", "0", "%zmm0", "", "") STEP("%zmm9", "64", "%zmm1", "", "")                             \
+    STEP("%zmm10", "128", "%zmm2", "", "") STEP("%zmm11", "192", "%zmm3", "", "")                        \
+    STEP("%zmm12", "256", "%zmm4", "", "") STEP("%zmm13", "320", "%zmm5", "", "")                        \
+    STEP("%zmm14", "384", "%zmm6", "", "") STEP("%zmm15", "448", "%zmm7", "", "")                        \
+    STEP("%zmm16", "512", "%zmm0", "", "") STEP("%zmm17", "576", "%zmm1", "", "")                        \
+    STEP("%zmm18", "640", "%zmm2", "", "") STEP("%zmm19", "704", "%zmm3", "", "")                        \
+    STEP("%zmm20", "768", "%zmm4", "{%k1}{z}", "{%k1}") STEP("%zmm21", "832", "%zmm5", "{%k2}{z}", "{%k2}") \
+    STEP("%zmm22", "896", "%zmm6", "{%k3}{z}", "{%k3}") STEP("%zmm23", "960", "%zmm7", "{%k4}{z}", "{%k4}")
+#define TENSOR_RMS_LOAD(R, O, A, MZ, M) "vmovups " O "(%rsi), " R MZ "\n"
+#define TENSOR_RMS_XW(R, O, A, MZ, M) "vmulps " O "(%rdx), " R ", " R MZ "\n"
+#define TENSOR_RMS_SCALE(R, O, A, MZ, M) "vmulps %zmm24, " R ", " R "\n"
+#define TENSOR_RMS_STORE(R, O, A, MZ, M) "vmovups " R ", " O "(%rdi)" M "\n"
+#define TENSOR_RMS_LOAD_AT(R, O, A, MZ, M) "vmovups " O "(%rsi,%rax), " R "\n"
+#define TENSOR_RMS_SQUARE(R, O, A, MZ, M) "vfmadd231ps " R ", " R ", " A "\n"
+#define TENSOR_RMS_XW_AT(R, O, A, MZ, M) "vmulps " O "(%rdx,%rax), " R ", " R "\n"
+#define TENSOR_RMS_STORE_AT(R, O, A, MZ, M) "vmovups " R ", " O "(%rdi,%rax)\n"
+#define TENSOR_ZMM_BACK16(FIRST, REST)                                                                    \
+    FIRST("%zmm0", "%zmm16", "%zmm20", "%zmm26", "0", "", "") FIRST("%zmm1", "%zmm17", "%zmm21", "%zmm27", "64", "", "") \
+    FIRST("%zmm2", "%zmm18", "%zmm22", "%zmm28", "128", "", "") FIRST("%zmm3", "%zmm19", "%zmm23", "%zmm29", "192", "", "") \
+    REST("%zmm4", "%zmm16", "%zmm20", "%zmm26", "256", "", "") REST("%zmm5", "%zmm17", "%zmm21", "%zmm27", "320", "", "") \
+    REST("%zmm6", "%zmm18", "%zmm22", "%zmm28", "384", "", "") REST("%zmm7", "%zmm19", "%zmm23", "%zmm29", "448", "", "") \
+    REST("%zmm8", "%zmm16", "%zmm20", "%zmm26", "512", "", "") REST("%zmm9", "%zmm17", "%zmm21", "%zmm27", "576", "", "") \
+    REST("%zmm10", "%zmm18", "%zmm22", "%zmm28", "640", "", "") REST("%zmm11", "%zmm19", "%zmm23", "%zmm29", "704", "", "") \
+    REST("%zmm12", "%zmm16", "%zmm20", "%zmm26", "768", "{%k1}{z}", "{%k1}")                              \
+    REST("%zmm13", "%zmm17", "%zmm21", "%zmm27", "832", "{%k2}{z}", "{%k2}")                              \
+    REST("%zmm14", "%zmm18", "%zmm22", "%zmm28", "896", "{%k3}{z}", "{%k3}")                              \
+    REST("%zmm15", "%zmm19", "%zmm23", "%zmm29", "960", "{%k4}{z}", "{%k4}")
+//      a = dy r and g = a w, dw += a x stored, then the dot's first product or
+//      the next one.
+#define TENSOR_RMSB_IN(G, X, A, C, O, MZ, M)                                                              \
+    "vmovups " O "(%rcx), " X MZ "\n   vmulps " O "(%rdx), %zmm24, " A MZ "\n"                             \
+    "vmulps " O "(%r8), " A ", " G MZ "\n   vfmadd213ps " O "(%rsi), " X ", " A MZ "\n"                    \
+    "vmovups " A ", " O "(%rsi)" M "\n"
+#define TENSOR_RMSB_FIRST(G, X, A, C, O, MZ, M) TENSOR_RMSB_IN(G, X, A, C, O, MZ, M) "vmulps " X ", " G ", " C "\n"
+#define TENSOR_RMSB_NEXT(G, X, A, C, O, MZ, M) TENSOR_RMSB_IN(G, X, A, C, O, MZ, M) "vfmadd231ps " X ", " G ", " C "\n"
+#define TENSOR_RMSB_OUT(G, X, A, C, O, MZ, M)                                                             \
+    "vfnmadd231ps " O "(%rcx), %zmm23, " G MZ "\n   vmovups " G ", " O "(%rdi)" M "\n"
+//      The horizontal sum of zmm Z into lane 0 (and every lane) of its xmm X,
+//      through the temporary T.
+#define TENSOR_ZMM_HSUM(N, T)                                                                              \
+    "vextractf64x4 $1, %zmm" N ", %ymm" T "\n   vaddps %ymm" T ", %ymm" N ", %ymm" N "\n"                \
+    "vextractf32x4 $1, %ymm" N ", %xmm" T "\n   vaddps %xmm" T ", %xmm" N ", %xmm" N "\n"                \
+    "vpermilps $0x4e, %xmm" N ", %xmm" T "\n   vaddps %xmm" T ", %xmm" N ", %xmm" N "\n"                 \
+    "vpermilps $0xb1, %xmm" N ", %xmm" T "\n   vaddps %xmm" T ", %xmm" N ", %xmm" N "\n"
+//      T = 1/sqrt(M) from the estimate RSQRT gives and one Newton step,
+//      e = 1 - M y0^2 and T = y0 + y0/2 e, which rounds once at the end;
+//      Y and H are free. Where M is 0, inf or NaN, or below the normal range
+//      (which rsqrtss reads as 0), the estimate is inf, 0 or NaN and the
+//      step makes T NaN; TENSOR_X64_RSQRT_SPECIAL branches on that to
+//      TENSOR_X64_RSQRT_FIX, sqrtss and divss, right for every M. A branch
+//      and not a fix-up on every row's chain (a min there costs two cycles).
+#define TENSOR_X64_RSQRT(RSQRT, M, Y, T, H)                                                               \
+    RSQRT " " M ", " M ", " Y "\n   vmulss " Y ", " M ", " T "\n"                                         \
+    "vmulss tensor_constants_x64+992(%rip), " Y ", " H "\n"                                                \
+    "vfnmadd213ss tensor_constants_x64+960(%rip), " Y ", " T "\n   vfmadd213ss " Y ", " H ", " T "\n"
+#define TENSOR_X64_RSQRT_SPECIAL(T, FIX) "vucomiss " T ", " T "\n   jp " FIX "\n"
+#define TENSOR_X64_RSQRT_FIX(M, T, H)                                                                     \
+    "vsqrtss " M ", " M ", " T "\n   vmovss tensor_constants_x64+960(%rip), " H "\n   vdivss " T ", " H ", " T "\n"
+
+__asm__(
+    ASM_SECTION
+    //
+    //      rmsnorm_forward_f32 -- rdi y, rsi x, rdx w, rcx the count, xmm0
+    //      eps; r comes back in xmm0. On AVX-512 a row of 193 to 256 floats
+    //      stays in registers: sixteen vectors, the last four under masks,
+    //      squared into eight accumulators, multiplied by w while the sum
+    //      reduces, then scaled and stored. Any other count is two passes,
+    //      sixteen vectors a turn, then whole vectors, then a masked one.
+    //      AVX2 with FMA: two passes, eight vectors a turn into eight
+    //      accumulators, then whole vectors, then vmaskmovps; SSE2 the same
+    //      with four a turn on the way back and single floats at the end.
+    //      Every element of x is read before y's is written, which is what
+    //      lets y be x. r is rsqrt14 (AVX-512) or rsqrt (AVX2) and a Newton
+    //      step; SSE2's has no FMA to keep that step exact enough and takes
+    //      sqrtss and divss.
+    //
+    ASM_FUNC(rmsnorm_forward_f32)
+    ASM_NARROW("cpu_has_avx512", ".Lrmsnorm_forward_x64_ymm")
+    "vmovaps %xmm0, %xmm26\n   mov %rcx, %r10\n   cmp $1, %rcx\n   adc $0, %r10\n"
+    "vcvtusi2ss %r10, %xmm31, %xmm30\n   vmovss tensor_constants_x64+960(%rip), %xmm29\n"
+    "vdivss %xmm30, %xmm29, %xmm25\n"
+    "lea -193(%rcx), %r8\n   cmp $63, %r8\n   jbe .Lrmsnorm_forward_zmm_row\n"
+    "vpxord %zmm0, %zmm0, %zmm0\n   vpxord %zmm1, %zmm1, %zmm1\n   vpxord %zmm2, %zmm2, %zmm2\n"
+    "vpxord %zmm3, %zmm3, %zmm3\n   vpxord %zmm4, %zmm4, %zmm4\n   vpxord %zmm5, %zmm5, %zmm5\n"
+    "vpxord %zmm6, %zmm6, %zmm6\n   vpxord %zmm7, %zmm7, %zmm7\n"
+    "xor %eax, %eax\n   mov %rcx, %r8\n   shr $8, %r8\n   jz 2f\n"
+    ".balign 32\n"
+    "1:\n"
+    TENSOR_ZMM_SIXTEEN(TENSOR_RMS_LOAD_AT)
+    TENSOR_ZMM_SIXTEEN(TENSOR_RMS_SQUARE)
+    "add $1024, %rax\n   dec %r8\n   jnz 1b\n"
+    "2:  mov %ecx, %r8d\n   and $255, %r8d\n   shr $4, %r8d\n   jz 4f\n"
+    "3:  vmovups (%rsi,%rax), %zmm8\n   vfmadd231ps %zmm8, %zmm8, %zmm0\n   add $64, %rax\n   dec %r8d\n   jnz 3b\n"
+    "4:  mov %ecx, %r8d\n   and $15, %r8d\n   jz 5f\n"
+    "mov $-1, %r10d\n   bzhi %r8d, %r10d, %r10d\n   kmovw %r10d, %k1\n"
+    "vmovups (%rsi,%rax), %zmm8{%k1}{z}\n   vfmadd231ps %zmm8, %zmm8, %zmm1\n"
+    "5:  vaddps %zmm1, %zmm0, %zmm0\n   vaddps %zmm3, %zmm2, %zmm2\n   vaddps %zmm5, %zmm4, %zmm4\n"
+    "vaddps %zmm7, %zmm6, %zmm6\n   vaddps %zmm2, %zmm0, %zmm0\n   vaddps %zmm6, %zmm4, %zmm4\n"
+    "vaddps %zmm4, %zmm0, %zmm0\n"
+    TENSOR_ZMM_HSUM("0", "1")
+    "vfmadd213ss %xmm26, %xmm25, %xmm0\n"
+    TENSOR_X64_RSQRT("vrsqrt14ss", "%xmm0", "%xmm2", "%xmm3", "%xmm4")
+    TENSOR_X64_RSQRT_SPECIAL("%xmm3", ".Lrmsnorm_forward_zmm_special")
+    ".Lrmsnorm_forward_zmm_scale:\n"
+    "vbroadcastss %xmm3, %zmm24\n"
+    "xor %eax, %eax\n   mov %rcx, %r8\n   shr $8, %r8\n   jz 7f\n"
+    ".balign 32\n"
+    "6:\n"
+    TENSOR_ZMM_SIXTEEN(TENSOR_RMS_LOAD_AT)
+    TENSOR_ZMM_SIXTEEN(TENSOR_RMS_XW_AT)
+    TENSOR_ZMM_SIXTEEN(TENSOR_RMS_SCALE)
+    TENSOR_ZMM_SIXTEEN(TENSOR_RMS_STORE_AT)
+    "add $1024, %rax\n   dec %r8\n   jnz 6b\n"
+    "7:  mov %ecx, %r8d\n   and $255, %r8d\n   shr $4, %r8d\n   jz 9f\n"
+    "8:  vmovups (%rsi,%rax), %zmm8\n   vmulps (%rdx,%rax), %zmm8, %zmm8\n   vmulps %zmm24, %zmm8, %zmm8\n"
+    "vmovups %zmm8, (%rdi,%rax)\n   add $64, %rax\n   dec %r8d\n   jnz 8b\n"
+    "9:  test $15, %cl\n   jz 10f\n"
+    "vmovups (%rsi,%rax), %zmm8{%k1}{z}\n   vmulps (%rdx,%rax), %zmm8, %zmm8{%k1}{z}\n   vmulps %zmm24, %zmm8, %zmm8\n"
+    "vmovups %zmm8, (%rdi,%rax){%k1}\n"
+    "10: vmovaps %xmm3, %xmm0\n   vzeroupper\n" ASM_RET
+    ".Lrmsnorm_forward_zmm_special:\n"
+    TENSOR_X64_RSQRT_FIX("%xmm0", "%xmm3", "%xmm4")
+    "jmp .Lrmsnorm_forward_zmm_scale\n"
+    ".Lrmsnorm_forward_zmm_row_special:\n"
+    TENSOR_X64_RSQRT_FIX("%xmm0", "%xmm3", "%xmm4")
+    "jmp .Lrmsnorm_forward_zmm_row_scale\n"
+    ".balign 64\n"
+    ".Lrmsnorm_forward_zmm_row:\n"
+    "inc %r8d\n   mov $-1, %rax\n   bzhi %r8, %rax, %rax\n   kmovq %rax, %k1\n"
+    "kshiftrq $16, %k1, %k2\n   kshiftrq $32, %k1, %k3\n   kshiftrq $48, %k1, %k4\n"
+    TENSOR_ZMM_SIXTEEN_MASKED(TENSOR_RMS_LOAD)
+    "vmulps %zmm8, %zmm8, %zmm0\n   vmulps %zmm9, %zmm9, %zmm1\n   vmulps %zmm10, %zmm10, %zmm2\n"
+    "vmulps %zmm11, %zmm11, %zmm3\n   vmulps %zmm12, %zmm12, %zmm4\n   vmulps %zmm13, %zmm13, %zmm5\n"
+    "vmulps %zmm14, %zmm14, %zmm6\n   vmulps %zmm15, %zmm15, %zmm7\n"
+    "vfmadd231ps %zmm16, %zmm16, %zmm0\n   vfmadd231ps %zmm17, %zmm17, %zmm1\n   vfmadd231ps %zmm18, %zmm18, %zmm2\n"
+    "vfmadd231ps %zmm19, %zmm19, %zmm3\n   vfmadd231ps %zmm20, %zmm20, %zmm4\n   vfmadd231ps %zmm21, %zmm21, %zmm5\n"
+    "vfmadd231ps %zmm22, %zmm22, %zmm6\n   vfmadd231ps %zmm23, %zmm23, %zmm7\n"
+    "vaddps %zmm1, %zmm0, %zmm0\n   vaddps %zmm3, %zmm2, %zmm2\n   vaddps %zmm5, %zmm4, %zmm4\n"
+    "vaddps %zmm7, %zmm6, %zmm6\n   vaddps %zmm2, %zmm0, %zmm0\n   vaddps %zmm6, %zmm4, %zmm4\n"
+    "vaddps %zmm4, %zmm0, %zmm0\n"
+    TENSOR_ZMM_SIXTEEN_MASKED(TENSOR_RMS_XW)
+    TENSOR_ZMM_HSUM("0", "1")
+    "vfmadd213ss %xmm26, %xmm25, %xmm0\n"
+    TENSOR_X64_RSQRT("vrsqrt14ss", "%xmm0", "%xmm2", "%xmm3", "%xmm4")
+    TENSOR_X64_RSQRT_SPECIAL("%xmm3", ".Lrmsnorm_forward_zmm_row_special")
+    ".Lrmsnorm_forward_zmm_row_scale:\n"
+    "vbroadcastss %xmm3, %zmm24\n"
+    TENSOR_ZMM_SIXTEEN_MASKED(TENSOR_RMS_SCALE)
+    TENSOR_ZMM_SIXTEEN_MASKED(TENSOR_RMS_STORE)
+    "vmovaps %xmm3, %xmm0\n   vzeroupper\n" ASM_RET
+    ".Lrmsnorm_forward_x64_ymm:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lrmsnorm_forward_x64_sse")
+    ASM_NARROW("cpu_has_fma", ".Lrmsnorm_forward_x64_sse")
+    "vmovss %xmm0, -8(%rsp)\n   mov %rcx, %r10\n   cmp $1, %rcx\n   adc $0, %r10\n   vcvtsi2ss %r10, %xmm1, %xmm1\n"
+    "vmovss tensor_constants_x64+960(%rip), %xmm2\n   vdivss %xmm1, %xmm2, %xmm2\n   vmovss %xmm2, -4(%rsp)\n"
+    "vxorps %ymm0, %ymm0, %ymm0\n   vxorps %ymm1, %ymm1, %ymm1\n   vxorps %ymm2, %ymm2, %ymm2\n   vxorps %ymm3, %ymm3, %ymm3\n"
+    "vxorps %ymm4, %ymm4, %ymm4\n   vxorps %ymm5, %ymm5, %ymm5\n   vxorps %ymm6, %ymm6, %ymm6\n   vxorps %ymm7, %ymm7, %ymm7\n"
+    "xor %eax, %eax\n   mov %rcx, %r8\n   shr $6, %r8\n   jz 2f\n"
+    ".balign 32\n"
+    "1:  vmovups (%rsi,%rax), %ymm8\n   vmovups 32(%rsi,%rax), %ymm9\n   vmovups 64(%rsi,%rax), %ymm10\n"
+    "vmovups 96(%rsi,%rax), %ymm11\n   vmovups 128(%rsi,%rax), %ymm12\n   vmovups 160(%rsi,%rax), %ymm13\n"
+    "vmovups 192(%rsi,%rax), %ymm14\n   vmovups 224(%rsi,%rax), %ymm15\n"
+    "vfmadd231ps %ymm8, %ymm8, %ymm0\n   vfmadd231ps %ymm9, %ymm9, %ymm1\n   vfmadd231ps %ymm10, %ymm10, %ymm2\n"
+    "vfmadd231ps %ymm11, %ymm11, %ymm3\n   vfmadd231ps %ymm12, %ymm12, %ymm4\n   vfmadd231ps %ymm13, %ymm13, %ymm5\n"
+    "vfmadd231ps %ymm14, %ymm14, %ymm6\n   vfmadd231ps %ymm15, %ymm15, %ymm7\n"
+    "add $256, %rax\n   dec %r8\n   jnz 1b\n"
+    "2:  mov %ecx, %r8d\n   and $63, %r8d\n   shr $3, %r8d\n   jz 4f\n"
+    "3:  vmovups (%rsi,%rax), %ymm8\n   vfmadd231ps %ymm8, %ymm8, %ymm0\n   add $32, %rax\n   dec %r8d\n   jnz 3b\n"
+    "4:  mov %ecx, %r8d\n   and $7, %r8d\n   jz 5f\n"
+    "vmovd %r8d, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n   vpcmpgtd tensor_constants_x64+928(%rip), %ymm15, %ymm15\n"
+    "vmaskmovps (%rsi,%rax), %ymm15, %ymm8\n   vfmadd231ps %ymm8, %ymm8, %ymm1\n"
+    "5:  vaddps %ymm1, %ymm0, %ymm0\n   vaddps %ymm3, %ymm2, %ymm2\n   vaddps %ymm5, %ymm4, %ymm4\n"
+    "vaddps %ymm7, %ymm6, %ymm6\n   vaddps %ymm2, %ymm0, %ymm0\n   vaddps %ymm6, %ymm4, %ymm4\n   vaddps %ymm4, %ymm0, %ymm0\n"
+    "vextractf128 $1, %ymm0, %xmm8\n   vaddps %xmm8, %xmm0, %xmm0\n"
+    "vpermilps $0x4e, %xmm0, %xmm8\n   vaddps %xmm8, %xmm0, %xmm0\n   vpermilps $0xb1, %xmm0, %xmm8\n   vaddps %xmm8, %xmm0, %xmm0\n"
+    "vmovss -4(%rsp), %xmm9\n   vfmadd213ss -8(%rsp), %xmm9, %xmm0\n"
+    TENSOR_X64_RSQRT("vrsqrtss", "%xmm0", "%xmm2", "%xmm13", "%xmm4")
+    TENSOR_X64_RSQRT_SPECIAL("%xmm13", ".Lrmsnorm_forward_ymm_special")
+    ".Lrmsnorm_forward_ymm_scale:\n"
+    "vbroadcastss %xmm13, %ymm14\n"
+    "xor %eax, %eax\n   mov %rcx, %r8\n   shr $6, %r8\n   jz 7f\n"
+    ".balign 32\n"
+    "6:  vmovups (%rsi,%rax), %ymm0\n   vmovups 32(%rsi,%rax), %ymm1\n   vmovups 64(%rsi,%rax), %ymm2\n"
+    "vmovups 96(%rsi,%rax), %ymm3\n   vmovups 128(%rsi,%rax), %ymm4\n   vmovups 160(%rsi,%rax), %ymm5\n"
+    "vmovups 192(%rsi,%rax), %ymm6\n   vmovups 224(%rsi,%rax), %ymm7\n"
+    "vmulps (%rdx,%rax), %ymm0, %ymm0\n   vmulps 32(%rdx,%rax), %ymm1, %ymm1\n   vmulps 64(%rdx,%rax), %ymm2, %ymm2\n"
+    "vmulps 96(%rdx,%rax), %ymm3, %ymm3\n   vmulps 128(%rdx,%rax), %ymm4, %ymm4\n   vmulps 160(%rdx,%rax), %ymm5, %ymm5\n"
+    "vmulps 192(%rdx,%rax), %ymm6, %ymm6\n   vmulps 224(%rdx,%rax), %ymm7, %ymm7\n"
+    "vmulps %ymm14, %ymm0, %ymm0\n   vmulps %ymm14, %ymm1, %ymm1\n   vmulps %ymm14, %ymm2, %ymm2\n   vmulps %ymm14, %ymm3, %ymm3\n"
+    "vmulps %ymm14, %ymm4, %ymm4\n   vmulps %ymm14, %ymm5, %ymm5\n   vmulps %ymm14, %ymm6, %ymm6\n   vmulps %ymm14, %ymm7, %ymm7\n"
+    "vmovups %ymm0, (%rdi,%rax)\n   vmovups %ymm1, 32(%rdi,%rax)\n   vmovups %ymm2, 64(%rdi,%rax)\n"
+    "vmovups %ymm3, 96(%rdi,%rax)\n   vmovups %ymm4, 128(%rdi,%rax)\n   vmovups %ymm5, 160(%rdi,%rax)\n"
+    "vmovups %ymm6, 192(%rdi,%rax)\n   vmovups %ymm7, 224(%rdi,%rax)\n"
+    "add $256, %rax\n   dec %r8\n   jnz 6b\n"
+    "7:  mov %ecx, %r8d\n   and $63, %r8d\n   shr $3, %r8d\n   jz 9f\n"
+    "8:  vmovups (%rsi,%rax), %ymm0\n   vmulps (%rdx,%rax), %ymm0, %ymm0\n   vmulps %ymm14, %ymm0, %ymm0\n"
+    "vmovups %ymm0, (%rdi,%rax)\n   add $32, %rax\n   dec %r8d\n   jnz 8b\n"
+    "9:  test $7, %cl\n   jz 10f\n"
+    "vmaskmovps (%rsi,%rax), %ymm15, %ymm0\n   vmaskmovps (%rdx,%rax), %ymm15, %ymm1\n   vmulps %ymm1, %ymm0, %ymm0\n"
+    "vmulps %ymm14, %ymm0, %ymm0\n   vmaskmovps %ymm0, %ymm15, (%rdi,%rax)\n"
+    "10: vmovaps %xmm13, %xmm0\n   vzeroupper\n" ASM_RET
+    ".Lrmsnorm_forward_ymm_special:\n"
+    TENSOR_X64_RSQRT_FIX("%xmm0", "%xmm13", "%xmm4")
+    "jmp .Lrmsnorm_forward_ymm_scale\n"
+    ".Lrmsnorm_forward_x64_sse:\n"
+    "movss %xmm0, -8(%rsp)\n   mov %rcx, %r10\n   cmp $1, %rcx\n   adc $0, %r10\n   cvtsi2ss %r10, %xmm1\n"
+    "movss tensor_constants_x64+960(%rip), %xmm2\n   divss %xmm1, %xmm2\n   movss %xmm2, -4(%rsp)\n"
+    "xorps %xmm0, %xmm0\n   xorps %xmm1, %xmm1\n   xorps %xmm2, %xmm2\n   xorps %xmm3, %xmm3\n"
+    "xorps %xmm4, %xmm4\n   xorps %xmm5, %xmm5\n   xorps %xmm6, %xmm6\n   xorps %xmm7, %xmm7\n"
+    "xor %eax, %eax\n   mov %rcx, %r8\n   shr $5, %r8\n   jz 2f\n"
+    ".balign 32\n"
+    "1:  movups (%rsi,%rax), %xmm8\n   movups 16(%rsi,%rax), %xmm9\n   movups 32(%rsi,%rax), %xmm10\n"
+    "movups 48(%rsi,%rax), %xmm11\n   movups 64(%rsi,%rax), %xmm12\n   movups 80(%rsi,%rax), %xmm13\n"
+    "movups 96(%rsi,%rax), %xmm14\n   movups 112(%rsi,%rax), %xmm15\n"
+    "mulps %xmm8, %xmm8\n   mulps %xmm9, %xmm9\n   mulps %xmm10, %xmm10\n   mulps %xmm11, %xmm11\n"
+    "mulps %xmm12, %xmm12\n   mulps %xmm13, %xmm13\n   mulps %xmm14, %xmm14\n   mulps %xmm15, %xmm15\n"
+    "addps %xmm8, %xmm0\n   addps %xmm9, %xmm1\n   addps %xmm10, %xmm2\n   addps %xmm11, %xmm3\n"
+    "addps %xmm12, %xmm4\n   addps %xmm13, %xmm5\n   addps %xmm14, %xmm6\n   addps %xmm15, %xmm7\n"
+    "add $128, %rax\n   dec %r8\n   jnz 1b\n"
+    "2:  mov %ecx, %r8d\n   and $31, %r8d\n   shr $2, %r8d\n   jz 4f\n"
+    "3:  movups (%rsi,%rax), %xmm8\n   mulps %xmm8, %xmm8\n   addps %xmm8, %xmm0\n   add $16, %rax\n   dec %r8d\n   jnz 3b\n"
+    "4:  mov %ecx, %r8d\n   and $3, %r8d\n   jz 5f\n   mov %rax, %r9\n"
+    "44: movss (%rsi,%r9), %xmm8\n   mulss %xmm8, %xmm8\n   addss %xmm8, %xmm1\n   add $4, %r9\n   dec %r8d\n   jnz 44b\n"
+    "5:  addps %xmm1, %xmm0\n   addps %xmm3, %xmm2\n   addps %xmm5, %xmm4\n   addps %xmm7, %xmm6\n"
+    "addps %xmm2, %xmm0\n   addps %xmm6, %xmm4\n   addps %xmm4, %xmm0\n"
+    "movhlps %xmm0, %xmm8\n   addps %xmm8, %xmm0\n   pshufd $0x55, %xmm0, %xmm8\n   addss %xmm8, %xmm0\n"
+    "mulss -4(%rsp), %xmm0\n   addss -8(%rsp), %xmm0\n   sqrtss %xmm0, %xmm0\n"
+    "movss tensor_constants_x64+960(%rip), %xmm1\n   divss %xmm0, %xmm1\n   movaps %xmm1, %xmm15\n   shufps $0, %xmm15, %xmm15\n"
+    "xor %eax, %eax\n   mov %rcx, %r8\n   shr $4, %r8\n   jz 7f\n"
+    ".balign 32\n"
+    "6:  movups (%rsi,%rax), %xmm2\n   movups (%rdx,%rax), %xmm3\n   movups 16(%rsi,%rax), %xmm4\n   movups 16(%rdx,%rax), %xmm5\n"
+    "movups 32(%rsi,%rax), %xmm6\n   movups 32(%rdx,%rax), %xmm7\n   movups 48(%rsi,%rax), %xmm8\n   movups 48(%rdx,%rax), %xmm9\n"
+    "mulps %xmm3, %xmm2\n   mulps %xmm5, %xmm4\n   mulps %xmm7, %xmm6\n   mulps %xmm9, %xmm8\n"
+    "mulps %xmm15, %xmm2\n   mulps %xmm15, %xmm4\n   mulps %xmm15, %xmm6\n   mulps %xmm15, %xmm8\n"
+    "movups %xmm2, (%rdi,%rax)\n   movups %xmm4, 16(%rdi,%rax)\n   movups %xmm6, 32(%rdi,%rax)\n   movups %xmm8, 48(%rdi,%rax)\n"
+    "add $64, %rax\n   dec %r8\n   jnz 6b\n"
+    "7:  mov %ecx, %r8d\n   and $15, %r8d\n   shr $2, %r8d\n   jz 9f\n"
+    "8:  movups (%rsi,%rax), %xmm2\n   movups (%rdx,%rax), %xmm3\n   mulps %xmm3, %xmm2\n   mulps %xmm15, %xmm2\n"
+    "movups %xmm2, (%rdi,%rax)\n   add $16, %rax\n   dec %r8d\n   jnz 8b\n"
+    "9:  mov %ecx, %r8d\n   and $3, %r8d\n   jz 10f\n"
+    "99: movss (%rsi,%rax), %xmm2\n   mulss (%rdx,%rax), %xmm2\n   mulss %xmm15, %xmm2\n   movss %xmm2, (%rdi,%rax)\n"
+    "add $4, %rax\n   dec %r8d\n   jnz 99b\n"
+    "10: movaps %xmm1, %xmm0\n" ASM_RET
+    ASM_END(rmsnorm_forward_f32)
+
+    //
+    //      rmsnorm_backward_f32 -- rdi dx, rsi dw, rdx dy, rcx x, r8 w, r9 the
+    //      count, xmm0 r. With a = dy r and g = a w, dw += a x and the dot is
+    //      the sum of g x, which is r times dy . (w x); then dx = g - K x with
+    //      K = dot r^2 / D. On AVX-512 a row of 193 to 256 floats keeps its
+    //      sixteen g in registers between the two; any other count is a pass
+    //      that stores dw and sums the dot, then a pass that computes g again
+    //      from dy and w, which are in cache by then. AVX2 the same four
+    //      vectors a turn, SSE2 two. Storing g into dx and reading it back
+    //      instead saves FMA-pipe work but writes dx twice: 3% faster from L2,
+    //      16% slower from memory at 1024 floats.
+    //
+    ASM_FUNC(rmsnorm_backward_f32)
+    ASM_NARROW("cpu_has_avx512", ".Lrmsnorm_backward_x64_ymm")
+    "vbroadcastss %xmm0, %zmm24\n   mov %r9, %r10\n   cmp $1, %r9\n   adc $0, %r10\n"
+    "vcvtusi2ss %r10, %xmm31, %xmm30\n   vmulss %xmm0, %xmm0, %xmm29\n   vdivss %xmm30, %xmm29, %xmm25\n"
+    "lea -193(%r9), %rax\n   cmp $63, %rax\n   jbe .Lrmsnorm_backward_zmm_row\n"
+    "vpxord %zmm26, %zmm26, %zmm26\n   vpxord %zmm27, %zmm27, %zmm27\n"
+    "vpxord %zmm28, %zmm28, %zmm28\n   vpxord %zmm29, %zmm29, %zmm29\n"
+    "xor %eax, %eax\n   mov %r9, %r10\n   shr $6, %r10\n   jz 2f\n"
+    ".balign 32\n"
+    "1:  vmovups (%rcx,%rax), %zmm0\n   vmulps (%rdx,%rax), %zmm24, %zmm8\n   vmulps (%r8,%rax), %zmm8, %zmm16\n"
+    "vfmadd213ps (%rsi,%rax), %zmm0, %zmm8\n   vfmadd231ps %zmm0, %zmm16, %zmm26\n   vmovups %zmm8, (%rsi,%rax)\n"
+    "vmovups 64(%rcx,%rax), %zmm1\n   vmulps 64(%rdx,%rax), %zmm24, %zmm9\n   vmulps 64(%r8,%rax), %zmm9, %zmm17\n"
+    "vfmadd213ps 64(%rsi,%rax), %zmm1, %zmm9\n   vfmadd231ps %zmm1, %zmm17, %zmm27\n   vmovups %zmm9, 64(%rsi,%rax)\n"
+    "vmovups 128(%rcx,%rax), %zmm2\n   vmulps 128(%rdx,%rax), %zmm24, %zmm10\n   vmulps 128(%r8,%rax), %zmm10, %zmm18\n"
+    "vfmadd213ps 128(%rsi,%rax), %zmm2, %zmm10\n   vfmadd231ps %zmm2, %zmm18, %zmm28\n   vmovups %zmm10, 128(%rsi,%rax)\n"
+    "vmovups 192(%rcx,%rax), %zmm3\n   vmulps 192(%rdx,%rax), %zmm24, %zmm11\n   vmulps 192(%r8,%rax), %zmm11, %zmm19\n"
+    "vfmadd213ps 192(%rsi,%rax), %zmm3, %zmm11\n   vfmadd231ps %zmm3, %zmm19, %zmm29\n   vmovups %zmm11, 192(%rsi,%rax)\n"
+    "add $256, %rax\n   dec %r10\n   jnz 1b\n"
+    "2:  mov %r9d, %r10d\n   and $63, %r10d\n   shr $4, %r10d\n   jz 4f\n"
+    "3:  vmovups (%rcx,%rax), %zmm0\n   vmulps (%rdx,%rax), %zmm24, %zmm8\n   vmulps (%r8,%rax), %zmm8, %zmm16\n"
+    "vfmadd213ps (%rsi,%rax), %zmm0, %zmm8\n   vfmadd231ps %zmm0, %zmm16, %zmm26\n   vmovups %zmm8, (%rsi,%rax)\n"
+    "add $64, %rax\n   dec %r10d\n   jnz 3b\n"
+    "4:  mov %r9d, %r10d\n   and $15, %r10d\n   jz 5f\n"
+    "mov $-1, %r11d\n   bzhi %r10d, %r11d, %r11d\n   kmovw %r11d, %k1\n"
+    "vmovups (%rcx,%rax), %zmm0{%k1}{z}\n   vmulps (%rdx,%rax), %zmm24, %zmm8{%k1}{z}\n   vmulps (%r8,%rax), %zmm8, %zmm16{%k1}{z}\n"
+    "vfmadd213ps (%rsi,%rax), %zmm0, %zmm8{%k1}{z}\n   vfmadd231ps %zmm0, %zmm16, %zmm27\n   vmovups %zmm8, (%rsi,%rax){%k1}\n"
+    "5:  vaddps %zmm27, %zmm26, %zmm26\n   vaddps %zmm29, %zmm28, %zmm28\n   vaddps %zmm28, %zmm26, %zmm26\n"
+    TENSOR_ZMM_HSUM("26", "22")
+    "vmulss %xmm25, %xmm26, %xmm26\n   vbroadcastss %xmm26, %zmm23\n"
+    "xor %eax, %eax\n   mov %r9, %r10\n   shr $6, %r10\n   jz 7f\n"
+    ".balign 32\n"
+    "6:  vmulps (%rdx,%rax), %zmm24, %zmm0\n   vmulps 64(%rdx,%rax), %zmm24, %zmm1\n"
+    "vmulps 128(%rdx,%rax), %zmm24, %zmm2\n   vmulps 192(%rdx,%rax), %zmm24, %zmm3\n"
+    "vmulps (%r8,%rax), %zmm0, %zmm0\n   vmulps 64(%r8,%rax), %zmm1, %zmm1\n"
+    "vmulps 128(%r8,%rax), %zmm2, %zmm2\n   vmulps 192(%r8,%rax), %zmm3, %zmm3\n"
+    "vfnmadd231ps (%rcx,%rax), %zmm23, %zmm0\n   vfnmadd231ps 64(%rcx,%rax), %zmm23, %zmm1\n"
+    "vfnmadd231ps 128(%rcx,%rax), %zmm23, %zmm2\n   vfnmadd231ps 192(%rcx,%rax), %zmm23, %zmm3\n"
+    "vmovups %zmm0, (%rdi,%rax)\n   vmovups %zmm1, 64(%rdi,%rax)\n   vmovups %zmm2, 128(%rdi,%rax)\n   vmovups %zmm3, 192(%rdi,%rax)\n"
+    "add $256, %rax\n   dec %r10\n   jnz 6b\n"
+    "7:  mov %r9d, %r10d\n   and $63, %r10d\n   shr $4, %r10d\n   jz 9f\n"
+    "8:  vmulps (%rdx,%rax), %zmm24, %zmm0\n   vmulps (%r8,%rax), %zmm0, %zmm0\n   vfnmadd231ps (%rcx,%rax), %zmm23, %zmm0\n"
+    "vmovups %zmm0, (%rdi,%rax)\n   add $64, %rax\n   dec %r10d\n   jnz 8b\n"
+    "9:  test $15, %r9b\n   jz 10f\n"
+    "vmulps (%rdx,%rax), %zmm24, %zmm0{%k1}{z}\n   vmulps (%r8,%rax), %zmm0, %zmm0{%k1}{z}\n"
+    "vfnmadd231ps (%rcx,%rax), %zmm23, %zmm0{%k1}{z}\n   vmovups %zmm0, (%rdi,%rax){%k1}\n"
+    "10: vzeroupper\n" ASM_RET
+    ".balign 64\n"
+    ".Lrmsnorm_backward_zmm_row:\n"
+    "inc %eax\n   mov $-1, %r10\n   bzhi %rax, %r10, %r10\n   kmovq %r10, %k1\n"
+    "kshiftrq $16, %k1, %k2\n   kshiftrq $32, %k1, %k3\n   kshiftrq $48, %k1, %k4\n"
+    TENSOR_ZMM_BACK16(TENSOR_RMSB_FIRST, TENSOR_RMSB_NEXT)
+    "vaddps %zmm27, %zmm26, %zmm26\n   vaddps %zmm29, %zmm28, %zmm28\n   vaddps %zmm28, %zmm26, %zmm26\n"
+    TENSOR_ZMM_HSUM("26", "22")
+    "vmulss %xmm25, %xmm26, %xmm26\n   vbroadcastss %xmm26, %zmm23\n"
+    TENSOR_ZMM_BACK16(TENSOR_RMSB_OUT, TENSOR_RMSB_OUT)
+    "vzeroupper\n" ASM_RET
+    ".Lrmsnorm_backward_x64_ymm:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lrmsnorm_backward_x64_sse")
+    ASM_NARROW("cpu_has_fma", ".Lrmsnorm_backward_x64_sse")
+    "vbroadcastss %xmm0, %ymm15\n   mov %r9, %r10\n   cmp $1, %r9\n   adc $0, %r10\n   vcvtsi2ss %r10, %xmm1, %xmm1\n"
+    "vmulss %xmm0, %xmm0, %xmm2\n   vdivss %xmm1, %xmm2, %xmm2\n   vmovss %xmm2, -4(%rsp)\n"
+    "vxorps %ymm12, %ymm12, %ymm12\n   vxorps %ymm13, %ymm13, %ymm13\n"
+    "xor %eax, %eax\n   mov %r9, %r10\n   shr $5, %r10\n   jz 2f\n"
+    ".balign 32\n"
+    "1:  vmovups (%rcx,%rax), %ymm0\n   vmulps (%rdx,%rax), %ymm15, %ymm1\n   vmulps (%r8,%rax), %ymm1, %ymm2\n"
+    "vfmadd213ps (%rsi,%rax), %ymm0, %ymm1\n   vfmadd231ps %ymm0, %ymm2, %ymm12\n   vmovups %ymm1, (%rsi,%rax)\n"
+    "vmovups 32(%rcx,%rax), %ymm3\n   vmulps 32(%rdx,%rax), %ymm15, %ymm4\n   vmulps 32(%r8,%rax), %ymm4, %ymm5\n"
+    "vfmadd213ps 32(%rsi,%rax), %ymm3, %ymm4\n   vfmadd231ps %ymm3, %ymm5, %ymm13\n   vmovups %ymm4, 32(%rsi,%rax)\n"
+    "vmovups 64(%rcx,%rax), %ymm6\n   vmulps 64(%rdx,%rax), %ymm15, %ymm7\n   vmulps 64(%r8,%rax), %ymm7, %ymm8\n"
+    "vfmadd213ps 64(%rsi,%rax), %ymm6, %ymm7\n   vfmadd231ps %ymm6, %ymm8, %ymm12\n   vmovups %ymm7, 64(%rsi,%rax)\n"
+    "vmovups 96(%rcx,%rax), %ymm9\n   vmulps 96(%rdx,%rax), %ymm15, %ymm10\n   vmulps 96(%r8,%rax), %ymm10, %ymm11\n"
+    "vfmadd213ps 96(%rsi,%rax), %ymm9, %ymm10\n   vfmadd231ps %ymm9, %ymm11, %ymm13\n   vmovups %ymm10, 96(%rsi,%rax)\n"
+    "add $128, %rax\n   dec %r10\n   jnz 1b\n"
+    "2:  mov %r9d, %r10d\n   and $31, %r10d\n   shr $3, %r10d\n   jz 4f\n"
+    "3:  vmovups (%rcx,%rax), %ymm0\n   vmulps (%rdx,%rax), %ymm15, %ymm1\n   vmulps (%r8,%rax), %ymm1, %ymm2\n"
+    "vfmadd213ps (%rsi,%rax), %ymm0, %ymm1\n   vfmadd231ps %ymm0, %ymm2, %ymm12\n   vmovups %ymm1, (%rsi,%rax)\n"
+    "add $32, %rax\n   dec %r10d\n   jnz 3b\n"
+    "4:  mov %r9d, %r10d\n   and $7, %r10d\n   jz 5f\n"
+    "vmovd %r10d, %xmm14\n   vpbroadcastd %xmm14, %ymm14\n   vpcmpgtd tensor_constants_x64+928(%rip), %ymm14, %ymm14\n"
+    "vmaskmovps (%rcx,%rax), %ymm14, %ymm0\n   vmaskmovps (%rdx,%rax), %ymm14, %ymm1\n   vmaskmovps (%r8,%rax), %ymm14, %ymm2\n"
+    "vmaskmovps (%rsi,%rax), %ymm14, %ymm3\n   vmulps %ymm15, %ymm1, %ymm1\n   vmulps %ymm2, %ymm1, %ymm2\n"
+    "vfmadd213ps %ymm3, %ymm0, %ymm1\n   vfmadd231ps %ymm0, %ymm2, %ymm13\n"
+    "vmaskmovps %ymm1, %ymm14, (%rsi,%rax)\n"
+    "5:  vaddps %ymm13, %ymm12, %ymm12\n   vextractf128 $1, %ymm12, %xmm0\n   vaddps %xmm0, %xmm12, %xmm12\n"
+    "vpermilps $0x4e, %xmm12, %xmm0\n   vaddps %xmm0, %xmm12, %xmm12\n   vpermilps $0xb1, %xmm12, %xmm0\n   vaddps %xmm0, %xmm12, %xmm12\n"
+    "vmulss -4(%rsp), %xmm12, %xmm12\n   vbroadcastss %xmm12, %ymm13\n"
+    "xor %eax, %eax\n   mov %r9, %r10\n   shr $5, %r10\n   jz 7f\n"
+    ".balign 32\n"
+    "6:  vmulps (%rdx,%rax), %ymm15, %ymm0\n   vmulps 32(%rdx,%rax), %ymm15, %ymm1\n   vmulps 64(%rdx,%rax), %ymm15, %ymm2\n"
+    "vmulps 96(%rdx,%rax), %ymm15, %ymm3\n   vmulps (%r8,%rax), %ymm0, %ymm0\n   vmulps 32(%r8,%rax), %ymm1, %ymm1\n"
+    "vmulps 64(%r8,%rax), %ymm2, %ymm2\n   vmulps 96(%r8,%rax), %ymm3, %ymm3\n"
+    "vfnmadd231ps (%rcx,%rax), %ymm13, %ymm0\n   vfnmadd231ps 32(%rcx,%rax), %ymm13, %ymm1\n"
+    "vfnmadd231ps 64(%rcx,%rax), %ymm13, %ymm2\n   vfnmadd231ps 96(%rcx,%rax), %ymm13, %ymm3\n"
+    "vmovups %ymm0, (%rdi,%rax)\n   vmovups %ymm1, 32(%rdi,%rax)\n   vmovups %ymm2, 64(%rdi,%rax)\n   vmovups %ymm3, 96(%rdi,%rax)\n"
+    "add $128, %rax\n   dec %r10\n   jnz 6b\n"
+    "7:  mov %r9d, %r10d\n   and $31, %r10d\n   shr $3, %r10d\n   jz 9f\n"
+    "8:  vmulps (%rdx,%rax), %ymm15, %ymm0\n   vmulps (%r8,%rax), %ymm0, %ymm0\n   vfnmadd231ps (%rcx,%rax), %ymm13, %ymm0\n"
+    "vmovups %ymm0, (%rdi,%rax)\n"
+    "add $32, %rax\n   dec %r10d\n   jnz 8b\n"
+    "9:  test $7, %r9b\n   jz 10f\n"
+    "vmaskmovps (%rdx,%rax), %ymm14, %ymm0\n   vmaskmovps (%r8,%rax), %ymm14, %ymm1\n   vmaskmovps (%rcx,%rax), %ymm14, %ymm2\n"
+    "vmulps %ymm15, %ymm0, %ymm0\n   vmulps %ymm1, %ymm0, %ymm0\n   vfnmadd231ps %ymm2, %ymm13, %ymm0\n"
+    "vmaskmovps %ymm0, %ymm14, (%rdi,%rax)\n"
+    "10: vzeroupper\n" ASM_RET
+    ".Lrmsnorm_backward_x64_sse:\n"
+    "movaps %xmm0, %xmm15\n   shufps $0, %xmm15, %xmm15\n   mov %r9, %r10\n   cmp $1, %r9\n   adc $0, %r10\n"
+    "cvtsi2ss %r10, %xmm1\n   movaps %xmm0, %xmm2\n   mulss %xmm0, %xmm2\n   divss %xmm1, %xmm2\n   movss %xmm2, -4(%rsp)\n"
+    "xorps %xmm12, %xmm12\n   xorps %xmm13, %xmm13\n"
+    "xor %eax, %eax\n   mov %r9, %r10\n   shr $3, %r10\n   jz 2f\n"
+    ".balign 32\n"
+    "1:  movups (%rcx,%rax), %xmm0\n   movups (%rdx,%rax), %xmm1\n   movups (%r8,%rax), %xmm2\n   mulps %xmm15, %xmm1\n"
+    "mulps %xmm1, %xmm2\n   movups (%rsi,%rax), %xmm3\n   mulps %xmm0, %xmm1\n   addps %xmm3, %xmm1\n   mulps %xmm0, %xmm2\n"
+    "movups %xmm1, (%rsi,%rax)\n   addps %xmm2, %xmm12\n"
+    "movups 16(%rcx,%rax), %xmm5\n   movups 16(%rdx,%rax), %xmm6\n   movups 16(%r8,%rax), %xmm7\n   mulps %xmm15, %xmm6\n"
+    "mulps %xmm6, %xmm7\n   movups 16(%rsi,%rax), %xmm8\n   mulps %xmm5, %xmm6\n   addps %xmm8, %xmm6\n   mulps %xmm5, %xmm7\n"
+    "movups %xmm6, 16(%rsi,%rax)\n   addps %xmm7, %xmm13\n"
+    "add $32, %rax\n   dec %r10\n   jnz 1b\n"
+    "2:  test $4, %r9b\n   jz 4f\n"
+    "movups (%rcx,%rax), %xmm0\n   movups (%rdx,%rax), %xmm1\n   movups (%r8,%rax), %xmm2\n   mulps %xmm15, %xmm1\n"
+    "mulps %xmm1, %xmm2\n   movups (%rsi,%rax), %xmm3\n   mulps %xmm0, %xmm1\n   addps %xmm3, %xmm1\n   mulps %xmm0, %xmm2\n"
+    "movups %xmm1, (%rsi,%rax)\n   addps %xmm2, %xmm12\n   add $16, %rax\n"
+    "4:  mov %r9d, %r10d\n   and $3, %r10d\n   jz 5f\n   mov %rax, %r11\n"
+    "44: movss (%rcx,%r11), %xmm0\n   movss (%rdx,%r11), %xmm1\n   mulss %xmm15, %xmm1\n   movss (%r8,%r11), %xmm2\n"
+    "mulss %xmm1, %xmm2\n   mulss %xmm0, %xmm1\n   addss (%rsi,%r11), %xmm1\n   movss %xmm1, (%rsi,%r11)\n"
+    "mulss %xmm0, %xmm2\n   addss %xmm2, %xmm13\n   add $4, %r11\n   dec %r10d\n   jnz 44b\n"
+    "5:  addps %xmm13, %xmm12\n   movhlps %xmm12, %xmm0\n   addps %xmm0, %xmm12\n   pshufd $0x55, %xmm12, %xmm0\n"
+    "addss %xmm0, %xmm12\n   mulss -4(%rsp), %xmm12\n   shufps $0, %xmm12, %xmm12\n"
+    "xor %eax, %eax\n   mov %r9, %r10\n   shr $3, %r10\n   jz 7f\n"
+    ".balign 32\n"
+    "6:  movups (%rdx,%rax), %xmm0\n   movups (%r8,%rax), %xmm1\n   movups (%rcx,%rax), %xmm2\n"
+    "mulps %xmm15, %xmm0\n   mulps %xmm12, %xmm2\n   mulps %xmm1, %xmm0\n   subps %xmm2, %xmm0\n   movups %xmm0, (%rdi,%rax)\n"
+    "movups 16(%rdx,%rax), %xmm3\n   movups 16(%r8,%rax), %xmm4\n   movups 16(%rcx,%rax), %xmm5\n"
+    "mulps %xmm15, %xmm3\n   mulps %xmm12, %xmm5\n   mulps %xmm4, %xmm3\n   subps %xmm5, %xmm3\n   movups %xmm3, 16(%rdi,%rax)\n"
+    "add $32, %rax\n   dec %r10\n   jnz 6b\n"
+    "7:  test $4, %r9b\n   jz 8f\n"
+    "movups (%rdx,%rax), %xmm0\n   movups (%r8,%rax), %xmm1\n   movups (%rcx,%rax), %xmm2\n"
+    "mulps %xmm15, %xmm0\n   mulps %xmm12, %xmm2\n   mulps %xmm1, %xmm0\n   subps %xmm2, %xmm0\n   movups %xmm0, (%rdi,%rax)\n"
+    "add $16, %rax\n"
+    "8:  mov %r9d, %r10d\n   and $3, %r10d\n   jz 10f\n"
+    "9:  movss (%rdx,%rax), %xmm0\n   mulss %xmm15, %xmm0\n   mulss (%r8,%rax), %xmm0\n   movss (%rcx,%rax), %xmm2\n"
+    "mulss %xmm12, %xmm2\n   subss %xmm2, %xmm0\n   movss %xmm0, (%rdi,%rax)\n   add $4, %rax\n   dec %r10d\n   jnz 9b\n"
+    "10: " ASM_RET
+    ASM_END(rmsnorm_backward_f32)
+);
 #elif ARM64
 __asm__(
     ASM_SECTION
@@ -37865,6 +38379,106 @@ __asm__(
     "   .4byte 0x2eb55ce8, 0xb00936ae, 0x312aac65, 0xb22aaa1f, 0x32fffffd, 0xb3800000, 0x33800000\n"
     ".popsection\n"
     ASM_END(swiglu_forward_f32)
+);
+__asm__(
+    ASM_SECTION
+    //
+    //      rmsnorm_forward_f32 -- x0 y, x1 x, x2 w, x3 the count, s0 eps; r
+    //      comes back in s0. Sixteen vectors a turn squared into sixteen
+    //      accumulators, which is what keeps four FMA pipes fed through the
+    //      four-cycle chains, then whole vectors and single floats; r is fsqrt
+    //      and fdiv, cheaper on an M2 than frsqrte and two Newton steps. The
+    //      second pass takes eight vectors a turn through ldp and stp, which
+    //      an M2 streams a quarter faster than ld1 and st1 of four. eps and
+    //      1/D wait in w8 and w9 while every vector register is busy.
+    //
+    ASM_FUNC(rmsnorm_forward_f32)
+    "cmp x3, #1\n   cinc x4, x3, lo\n   ucvtf s1, x4\n   fmov s2, #1.0\n   fdiv s1, s2, s1\n   fmov w8, s0\n   fmov w9, s1\n"
+    "movi v16.16b, #0\n   movi v17.16b, #0\n   movi v18.16b, #0\n   movi v19.16b, #0\n"
+    "movi v20.16b, #0\n   movi v21.16b, #0\n   movi v22.16b, #0\n   movi v23.16b, #0\n"
+    "movi v24.16b, #0\n   movi v25.16b, #0\n   movi v26.16b, #0\n   movi v27.16b, #0\n"
+    "movi v28.16b, #0\n   movi v29.16b, #0\n   movi v30.16b, #0\n   movi v31.16b, #0\n"
+    "mov x5, x1\n   lsr x6, x3, #6\n   cbz x6, 2f\n"
+    ".balign 32\n"
+    "1:  ld1 {v0.4s-v3.4s}, [x5], #64\n   ld1 {v4.4s-v7.4s}, [x5], #64\n"
+    "fmla v16.4s, v0.4s, v0.4s\n   fmla v17.4s, v1.4s, v1.4s\n   fmla v18.4s, v2.4s, v2.4s\n   fmla v19.4s, v3.4s, v3.4s\n"
+    "fmla v20.4s, v4.4s, v4.4s\n   fmla v21.4s, v5.4s, v5.4s\n   fmla v22.4s, v6.4s, v6.4s\n   fmla v23.4s, v7.4s, v7.4s\n"
+    "ld1 {v0.4s-v3.4s}, [x5], #64\n   ld1 {v4.4s-v7.4s}, [x5], #64\n"
+    "fmla v24.4s, v0.4s, v0.4s\n   fmla v25.4s, v1.4s, v1.4s\n   fmla v26.4s, v2.4s, v2.4s\n   fmla v27.4s, v3.4s, v3.4s\n"
+    "fmla v28.4s, v4.4s, v4.4s\n   fmla v29.4s, v5.4s, v5.4s\n   fmla v30.4s, v6.4s, v6.4s\n   fmla v31.4s, v7.4s, v7.4s\n"
+    "subs x6, x6, #1\n   b.ne 1b\n"
+    "2:  movi v1.16b, #0\n   and x6, x3, #63\n   lsr x6, x6, #2\n   cbz x6, 4f\n"
+    "3:  ld1 {v0.4s}, [x5], #16\n   fmla v16.4s, v0.4s, v0.4s\n   subs x6, x6, #1\n   b.ne 3b\n"
+    "4:  ands x6, x3, #3\n   b.eq 5f\n"
+    "44: ldr s0, [x5], #4\n   fmadd s1, s0, s0, s1\n   subs x6, x6, #1\n   b.ne 44b\n"
+    "5:  fadd v16.4s, v16.4s, v17.4s\n   fadd v18.4s, v18.4s, v19.4s\n   fadd v20.4s, v20.4s, v21.4s\n"
+    "fadd v22.4s, v22.4s, v23.4s\n   fadd v24.4s, v24.4s, v25.4s\n   fadd v26.4s, v26.4s, v27.4s\n"
+    "fadd v28.4s, v28.4s, v29.4s\n   fadd v30.4s, v30.4s, v31.4s\n   fadd v16.4s, v16.4s, v18.4s\n"
+    "fadd v20.4s, v20.4s, v22.4s\n   fadd v24.4s, v24.4s, v26.4s\n   fadd v28.4s, v28.4s, v30.4s\n"
+    "fadd v16.4s, v16.4s, v20.4s\n   fadd v24.4s, v24.4s, v28.4s\n   fadd v16.4s, v16.4s, v24.4s\n"
+    "faddp v16.4s, v16.4s, v16.4s\n   faddp s16, v16.2s\n   fadd s16, s16, s1\n"
+    "fmov s1, w9\n   fmov s2, w8\n   fmadd s16, s16, s1, s2\n   fsqrt s18, s16\n   fmov s17, #1.0\n   fdiv s17, s17, s18\n"
+    "mov x5, x1\n   mov x7, x2\n   mov x10, x0\n   lsr x6, x3, #5\n   cbz x6, 7f\n"
+    ".balign 32\n"
+    "6:  ldp q0, q1, [x5], #32\n   ldp q2, q3, [x5], #32\n   ldp q4, q5, [x5], #32\n   ldp q6, q7, [x5], #32\n"
+    "ldp q24, q25, [x7], #32\n   ldp q26, q27, [x7], #32\n   ldp q28, q29, [x7], #32\n   ldp q30, q31, [x7], #32\n"
+    "fmul v0.4s, v0.4s, v24.4s\n   fmul v1.4s, v1.4s, v25.4s\n   fmul v2.4s, v2.4s, v26.4s\n   fmul v3.4s, v3.4s, v27.4s\n"
+    "fmul v4.4s, v4.4s, v28.4s\n   fmul v5.4s, v5.4s, v29.4s\n   fmul v6.4s, v6.4s, v30.4s\n   fmul v7.4s, v7.4s, v31.4s\n"
+    "fmul v0.4s, v0.4s, v17.s[0]\n   fmul v1.4s, v1.4s, v17.s[0]\n   fmul v2.4s, v2.4s, v17.s[0]\n   fmul v3.4s, v3.4s, v17.s[0]\n"
+    "fmul v4.4s, v4.4s, v17.s[0]\n   fmul v5.4s, v5.4s, v17.s[0]\n   fmul v6.4s, v6.4s, v17.s[0]\n   fmul v7.4s, v7.4s, v17.s[0]\n"
+    "stp q0, q1, [x10], #32\n   stp q2, q3, [x10], #32\n   stp q4, q5, [x10], #32\n   stp q6, q7, [x10], #32\n"
+    "subs x6, x6, #1\n   b.ne 6b\n"
+    "7:  and x6, x3, #31\n   lsr x6, x6, #2\n   cbz x6, 9f\n"
+    "8:  ld1 {v0.4s}, [x5], #16\n   ld1 {v1.4s}, [x7], #16\n   fmul v0.4s, v0.4s, v1.4s\n   fmul v0.4s, v0.4s, v17.s[0]\n"
+    "st1 {v0.4s}, [x10], #16\n   subs x6, x6, #1\n   b.ne 8b\n"
+    "9:  ands x6, x3, #3\n   b.eq 10f\n"
+    "99: ldr s0, [x5], #4\n   ldr s1, [x7], #4\n   fmul s0, s0, s1\n   fmul s0, s0, s17\n   str s0, [x10], #4\n"
+    "subs x6, x6, #1\n   b.ne 99b\n"
+    "10: fmov s0, s17\n" ASM_RET
+    ASM_END(rmsnorm_forward_f32)
+
+    //
+    //      rmsnorm_backward_f32 -- x0 dx, x1 dw, x2 dy, x3 x, x4 w, x5 the
+    //      count, s0 r. Four vectors a turn: a = dy r, g = a w, dw += a x
+    //      and the dot += g x, with g stored into dx for the second pass to
+    //      read back with x, which loads less than computing it again (an M2
+    //      is load bound here). Then whole vectors and single floats. Only
+    //      v0-v7 and v16-v31, so d8-d15 are untouched.
+    //
+    ASM_FUNC(rmsnorm_backward_f32)
+    "fmov s20, s0\n   cmp x5, #1\n   cinc x6, x5, lo\n   ucvtf s1, x6\n   fmul s2, s0, s0\n   fdiv s21, s2, s1\n"
+    "movi v28.16b, #0\n   movi v29.16b, #0\n   movi v30.16b, #0\n   movi v31.16b, #0\n   movi v22.16b, #0\n"
+    "mov x9, x0\n   mov x10, x1\n   mov x11, x2\n   mov x12, x3\n   mov x13, x4\n   lsr x6, x5, #4\n   cbz x6, 2f\n"
+    ".balign 32\n"
+    "1:  ld1 {v0.4s-v3.4s}, [x12], #64\n   ld1 {v4.4s-v7.4s}, [x11], #64\n   ld1 {v16.4s-v19.4s}, [x13], #64\n"
+    "ld1 {v24.4s-v27.4s}, [x10]\n"
+    "fmul v4.4s, v4.4s, v20.s[0]\n   fmul v5.4s, v5.4s, v20.s[0]\n   fmul v6.4s, v6.4s, v20.s[0]\n   fmul v7.4s, v7.4s, v20.s[0]\n"
+    "fmul v16.4s, v16.4s, v4.4s\n   fmul v17.4s, v17.4s, v5.4s\n   fmul v18.4s, v18.4s, v6.4s\n   fmul v19.4s, v19.4s, v7.4s\n"
+    "fmla v24.4s, v4.4s, v0.4s\n   fmla v25.4s, v5.4s, v1.4s\n   fmla v26.4s, v6.4s, v2.4s\n   fmla v27.4s, v7.4s, v3.4s\n"
+    "fmla v28.4s, v16.4s, v0.4s\n   fmla v29.4s, v17.4s, v1.4s\n   fmla v30.4s, v18.4s, v2.4s\n   fmla v31.4s, v19.4s, v3.4s\n"
+    "st1 {v24.4s-v27.4s}, [x10], #64\n   st1 {v16.4s-v19.4s}, [x9], #64\n   subs x6, x6, #1\n   b.ne 1b\n"
+    "2:  and x6, x5, #15\n   lsr x6, x6, #2\n   cbz x6, 4f\n"
+    "3:  ld1 {v0.4s}, [x12], #16\n   ld1 {v4.4s}, [x11], #16\n   ld1 {v16.4s}, [x13], #16\n   ld1 {v24.4s}, [x10]\n"
+    "fmul v4.4s, v4.4s, v20.s[0]\n   fmul v16.4s, v16.4s, v4.4s\n   fmla v24.4s, v4.4s, v0.4s\n   fmla v28.4s, v16.4s, v0.4s\n"
+    "st1 {v24.4s}, [x10], #16\n   st1 {v16.4s}, [x9], #16\n   subs x6, x6, #1\n   b.ne 3b\n"
+    "4:  ands x6, x5, #3\n   b.eq 5f\n"
+    "44: ldr s0, [x12], #4\n   ldr s4, [x11], #4\n   ldr s16, [x13], #4\n   ldr s24, [x10]\n   fmul s4, s4, s20\n"
+    "fmul s16, s16, s4\n   fmadd s24, s4, s0, s24\n   fmadd s22, s16, s0, s22\n   str s24, [x10], #4\n   str s16, [x9], #4\n"
+    "subs x6, x6, #1\n   b.ne 44b\n"
+    "5:  fadd v28.4s, v28.4s, v29.4s\n   fadd v30.4s, v30.4s, v31.4s\n   fadd v28.4s, v28.4s, v30.4s\n"
+    "faddp v28.4s, v28.4s, v28.4s\n   faddp s28, v28.2s\n   fadd s28, s28, s22\n   fmul s23, s28, s21\n"
+    "mov x9, x0\n   mov x12, x3\n   lsr x6, x5, #4\n   cbz x6, 7f\n"
+    ".balign 32\n"
+    "6:  ld1 {v0.4s-v3.4s}, [x9]\n   ld1 {v4.4s-v7.4s}, [x12], #64\n"
+    "fmls v0.4s, v4.4s, v23.s[0]\n   fmls v1.4s, v5.4s, v23.s[0]\n   fmls v2.4s, v6.4s, v23.s[0]\n   fmls v3.4s, v7.4s, v23.s[0]\n"
+    "st1 {v0.4s-v3.4s}, [x9], #64\n   subs x6, x6, #1\n   b.ne 6b\n"
+    "7:  and x6, x5, #15\n   lsr x6, x6, #2\n   cbz x6, 9f\n"
+    "8:  ld1 {v0.4s}, [x9]\n   ld1 {v4.4s}, [x12], #16\n   fmls v0.4s, v4.4s, v23.s[0]\n   st1 {v0.4s}, [x9], #16\n"
+    "subs x6, x6, #1\n   b.ne 8b\n"
+    "9:  ands x6, x5, #3\n   b.eq 10f\n"
+    "99: ldr s0, [x9]\n   ldr s4, [x12], #4\n   fmsub s0, s4, s23, s0\n   str s0, [x9], #4\n   subs x6, x6, #1\n   b.ne 99b\n"
+    "10: " ASM_RET
+    ASM_END(rmsnorm_backward_f32)
 );
 #elif RISCV64
 __asm__(
@@ -37915,6 +38529,117 @@ __asm__(
     "   .4byte 0x2eb55ce8, 0x300936ae, 0x312aac65, 0x322aaa1f, 0x32fffffd, 0x33800000\n"
     ".popsection\n"
     ASM_END(swiglu_forward_f32)
+    ".option pop\n"
+);
+__asm__(
+    ASM_SECTION
+    //
+    //      rmsnorm_forward_f32 -- a0 y, a1 x, a2 w, a3 the count, fa0 eps; r
+    //      comes back in fa0. With V, strips at e32 m8 squared into one
+    //      accumulator group under tu, which keeps the last strip's tail as
+    //      it was; the group folds in halves to one register and that one in
+    //      halves by vslidedown, a tree whose depth is log2 of the lanes and
+    //      not their count, as vfredusum's would be where it adds in order.
+    //      Without V, four accumulators. r is fsqrt.s and fdiv.s.
+    //
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(rmsnorm_forward_f32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j rmsnorm_forward_f32\n"
+#endif
+    "1:  seqz t0, a3\n   add t0, t0, a3\n   fcvt.s.lu ft0, t0\n   lui t1, 0x3f800\n   fmv.w.x ft1, t1\n   fdiv.s ft0, ft1, ft0\n"
+    "fmv.w.x ft2, zero\n   fmv.w.x ft3, zero\n   fmv.w.x ft4, zero\n   fmv.w.x ft5, zero\n"
+    "mv t2, a1\n   srli t3, a3, 2\n   beqz t3, 3f\n"
+    "2:  flw ft6, 0(t2)\n   flw ft7, 4(t2)\n   flw ft8, 8(t2)\n   flw ft9, 12(t2)\n"
+    "fmadd.s ft2, ft6, ft6, ft2\n   fmadd.s ft3, ft7, ft7, ft3\n   fmadd.s ft4, ft8, ft8, ft4\n   fmadd.s ft5, ft9, ft9, ft5\n"
+    "addi t2, t2, 16\n   addi t3, t3, -1\n   bnez t3, 2b\n"
+    "3:  andi t3, a3, 3\n   beqz t3, 4f\n"
+    "33: flw ft6, 0(t2)\n   fmadd.s ft2, ft6, ft6, ft2\n   addi t2, t2, 4\n   addi t3, t3, -1\n   bnez t3, 33b\n"
+    "4:  fadd.s ft2, ft2, ft3\n   fadd.s ft4, ft4, ft5\n   fadd.s ft2, ft2, ft4\n   fmadd.s ft2, ft2, ft0, fa0\n"
+    "fsqrt.s ft2, ft2\n   fdiv.s ft2, ft1, ft2\n"
+    "mv t2, a1\n   mv t4, a2\n   mv t5, a0\n   srli t3, a3, 2\n   beqz t3, 42f\n"
+    "41: flw ft6, 0(t2)\n   flw ft7, 4(t2)\n   flw ft8, 8(t2)\n   flw ft9, 12(t2)\n"
+    "flw fa1, 0(t4)\n   flw fa2, 4(t4)\n   flw fa3, 8(t4)\n   flw fa4, 12(t4)\n"
+    "fmul.s ft6, ft6, fa1\n   fmul.s ft7, ft7, fa2\n   fmul.s ft8, ft8, fa3\n   fmul.s ft9, ft9, fa4\n"
+    "fmul.s ft6, ft6, ft2\n   fmul.s ft7, ft7, ft2\n   fmul.s ft8, ft8, ft2\n   fmul.s ft9, ft9, ft2\n"
+    "fsw ft6, 0(t5)\n   fsw ft7, 4(t5)\n   fsw ft8, 8(t5)\n   fsw ft9, 12(t5)\n"
+    "addi t2, t2, 16\n   addi t4, t4, 16\n   addi t5, t5, 16\n   addi t3, t3, -1\n   bnez t3, 41b\n"
+    "42: andi t3, a3, 3\n   beqz t3, 44f\n"
+    "43: flw ft6, 0(t2)\n   flw fa1, 0(t4)\n   fmul.s ft6, ft6, fa1\n   fmul.s ft6, ft6, ft2\n   fsw ft6, 0(t5)\n"
+    "addi t2, t2, 4\n   addi t4, t4, 4\n   addi t5, t5, 4\n   addi t3, t3, -1\n   bnez t3, 43b\n"
+    "44: fmv.s fa0, ft2\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  seqz t0, a3\n   add t0, t0, a3\n   fcvt.s.lu ft0, t0\n   lui t1, 0x3f800\n   fmv.w.x ft1, t1\n   fdiv.s ft0, ft1, ft0\n"
+    "vsetvli t0, zero, e32, m8, ta, ma\n   vmv.v.i v8, 0\n   mv t2, a1\n   mv t3, a3\n"
+    "6:  vsetvli t0, t3, e32, m8, tu, ma\n   beqz t0, 7f\n   vle32.v v0, (t2)\n   vfmacc.vv v8, v0, v0\n"
+    "slli t1, t0, 2\n   add t2, t2, t1\n   sub t3, t3, t0\n   j 6b\n"
+    "7:  vsetvli t0, zero, e32, m4, ta, ma\n   vfadd.vv v8, v8, v12\n   vsetvli t0, zero, e32, m2, ta, ma\n   vfadd.vv v8, v8, v10\n"
+    "vsetvli t0, zero, e32, m1, ta, ma\n   vfadd.vv v8, v8, v9\n"
+    "8:  srli t0, t0, 1\n   beqz t0, 9f\n   vsetvli zero, t0, e32, m1, ta, ma\n   vslidedown.vx v9, v8, t0\n   vfadd.vv v8, v8, v9\n   j 8b\n"
+    "9:  vfmv.f.s ft2, v8\n   fmadd.s ft2, ft2, ft0, fa0\n   fsqrt.s ft2, ft2\n   fdiv.s ft2, ft1, ft2\n"
+    "mv t2, a1\n   mv t4, a2\n   mv t5, a0\n   mv t3, a3\n"
+    "10: vsetvli t0, t3, e32, m8, ta, ma\n   beqz t0, 11f\n   vle32.v v0, (t2)\n   vle32.v v8, (t4)\n   vfmul.vv v0, v0, v8\n"
+    "vfmul.vf v0, v0, ft2\n   vse32.v v0, (t5)\n   slli t1, t0, 2\n   add t2, t2, t1\n   add t4, t4, t1\n   add t5, t5, t1\n"
+    "sub t3, t3, t0\n   j 10b\n"
+    "11: fmv.s fa0, ft2\n" ASM_RET
+#endif
+    ASM_END(rmsnorm_forward_f32)
+
+    //
+    //      rmsnorm_backward_f32 -- a0 dx, a1 dw, a2 dy, a3 x, a4 w, a5 the
+    //      count, fa0 r. a = dy r, g = a w, dw += a x and the dot += g x, g
+    //      stored into dx and read back with x for dx = g - K x. With V the
+    //      strips of the forward and its fold of the dot; without, an
+    //      element at a time into two dot accumulators. a5 is not one the
+    //      detect keeps, so it is spilled around it.
+    //
+    ASM_FUNC(rmsnorm_backward_f32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n"
+    "addi sp, sp, 16\n   j rmsnorm_backward_f32\n"
+#endif
+    "1:  seqz t0, a5\n   add t0, t0, a5\n   fcvt.s.lu ft0, t0\n   fmul.s ft1, fa0, fa0\n   fdiv.s ft0, ft1, ft0\n"
+    "fmv.w.x ft2, zero\n   fmv.w.x ft3, zero\n   mv t2, a0\n   mv t3, a1\n   mv t4, a2\n   mv t5, a3\n   mv t6, a4\n"
+    "srli a6, a5, 2\n   beqz a6, 3f\n"
+    "2:\n"
+    RV_RMSB1("0", "ft4", "ft5", "ft6", "ft2") RV_RMSB1("4", "ft7", "ft8", "ft9", "ft3")
+    RV_RMSB1("8", "ft10", "ft11", "fa1", "ft2") RV_RMSB1("12", "fa2", "fa3", "fa4", "ft3")
+    "addi t2, t2, 16\n   addi t3, t3, 16\n   addi t4, t4, 16\n   addi t5, t5, 16\n   addi t6, t6, 16\n"
+    "addi a6, a6, -1\n   bnez a6, 2b\n"
+    "3:  andi a6, a5, 3\n   beqz a6, 4f\n"
+    "33:\n"
+    RV_RMSB1("0", "ft4", "ft5", "ft6", "ft2")
+    "addi t2, t2, 4\n   addi t3, t3, 4\n   addi t4, t4, 4\n   addi t5, t5, 4\n   addi t6, t6, 4\n"
+    "addi a6, a6, -1\n   bnez a6, 33b\n"
+    "4:  fadd.s ft2, ft2, ft3\n   fmul.s ft2, ft2, ft0\n   mv t2, a0\n   mv t5, a3\n   srli a6, a5, 2\n   beqz a6, 42f\n"
+    "41: flw ft4, 0(t2)\n   flw ft5, 0(t5)\n   flw ft6, 4(t2)\n   flw ft7, 4(t5)\n   flw ft8, 8(t2)\n   flw ft9, 8(t5)\n"
+    "flw ft10, 12(t2)\n   flw ft11, 12(t5)\n   fnmsub.s ft4, ft2, ft5, ft4\n   fnmsub.s ft6, ft2, ft7, ft6\n"
+    "fnmsub.s ft8, ft2, ft9, ft8\n   fnmsub.s ft10, ft2, ft11, ft10\n   fsw ft4, 0(t2)\n   fsw ft6, 4(t2)\n   fsw ft8, 8(t2)\n"
+    "fsw ft10, 12(t2)\n   addi t2, t2, 16\n   addi t5, t5, 16\n   addi a6, a6, -1\n   bnez a6, 41b\n"
+    "42: andi a6, a5, 3\n   beqz a6, 9f\n"
+    "43: flw ft4, 0(t2)\n   flw ft5, 0(t5)\n   fnmsub.s ft4, ft2, ft5, ft4\n   fsw ft4, 0(t2)\n"
+    "addi t2, t2, 4\n   addi t5, t5, 4\n   addi a6, a6, -1\n   bnez a6, 43b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  seqz t0, a5\n   add t0, t0, a5\n   fcvt.s.lu ft0, t0\n   fmul.s ft1, fa0, fa0\n   fdiv.s ft0, ft1, ft0\n"
+    "vsetvli t0, zero, e32, m8, ta, ma\n   vmv.v.i v24, 0\n"
+    "mv t2, a0\n   mv t3, a1\n   mv t4, a2\n   mv t5, a3\n   mv t6, a4\n   mv a6, a5\n"
+    "6:  vsetvli t0, a6, e32, m8, tu, ma\n   beqz t0, 7f\n"
+    "vle32.v v0, (t5)\n   vle32.v v8, (t4)\n   vfmul.vf v8, v8, fa0\n   vle32.v v16, (t6)\n   vfmul.vv v16, v16, v8\n"
+    "vse32.v v16, (t2)\n   vfmacc.vv v24, v16, v0\n   vle32.v v16, (t3)\n   vfmacc.vv v16, v8, v0\n   vse32.v v16, (t3)\n"
+    "slli t1, t0, 2\n   add t2, t2, t1\n   add t3, t3, t1\n   add t4, t4, t1\n   add t5, t5, t1\n   add t6, t6, t1\n"
+    "sub a6, a6, t0\n   j 6b\n"
+    "7:  vsetvli t0, zero, e32, m4, ta, ma\n   vfadd.vv v24, v24, v28\n   vsetvli t0, zero, e32, m2, ta, ma\n   vfadd.vv v24, v24, v26\n"
+    "vsetvli t0, zero, e32, m1, ta, ma\n   vfadd.vv v24, v24, v25\n"
+    "8:  srli t0, t0, 1\n   beqz t0, 81f\n   vsetvli zero, t0, e32, m1, ta, ma\n   vslidedown.vx v25, v24, t0\n   vfadd.vv v24, v24, v25\n   j 8b\n"
+    "81: vfmv.f.s ft2, v24\n   fmul.s ft2, ft2, ft0\n   mv t2, a0\n   mv t5, a3\n   mv a6, a5\n"
+    "10: vsetvli t0, a6, e32, m8, ta, ma\n   beqz t0, 11f\n   vle32.v v0, (t2)\n   vle32.v v8, (t5)\n   vfnmsac.vf v0, ft2, v8\n"
+    "vse32.v v0, (t2)\n   slli t1, t0, 2\n   add t2, t2, t1\n   add t5, t5, t1\n   sub a6, a6, t0\n   j 10b\n"
+    "11: " ASM_RET
+#endif
+    ASM_END(rmsnorm_backward_f32)
     ".option pop\n"
 );
 #endif
