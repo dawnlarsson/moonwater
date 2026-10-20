@@ -183,7 +183,11 @@ static COLD fn text_put_spill(address_any data, positive length)
         if (!text_flush_out())
                 return;
 
-        if (length > TEXT_OUT_MAX)
+        //      A run of half the buffer or more goes out as it is. The buffer
+        //      was just emptied, so copying the run in costs the same write
+        //      later and the copy besides: head and tail, handed whole 64 KiB
+        //      reads, spent three fifths of their cycles in that copy.
+        if (length >= TEXT_OUT_MAX / 2)
         {
                 text_write_out(data, length);
                 return;
