@@ -296,6 +296,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_translate_planes', 'memory_transl
 cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_encode_power2_lines',
       'paired timing of a 76-column base64 block against the routine and then '
       'every line moved up for its newline, which is what the encoder did')
+cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_cut_fields__room_64',
+      'paired timing against the walk cut -f had, every boundary from '
+      'memory_offsets_of_either and the kept fields copied, over 4 MiB of '
+      'four-field records for -f2,4 and -f2, with AVX2 and SSE2')
 cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_copy_apart__room_64',
       'paired timing against the memory_copy_apart its callers had, over the lines '
       'of src/lib.c into a buffer nothing reads and one read at once, and at fixed '

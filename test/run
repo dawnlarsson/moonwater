@@ -5067,7 +5067,7 @@ human lib positive_into_human_1024_string positive_to_human_1024
 human_nearest lib positive_into_human_nearest_string wait_status_code_base wait_status_code
 fields lib positive_into_padded positive_into_pair
 train lib fused_residual_add_f32 f32_to_bf16 bf16_to_f32 fast_argmax_f32
-ranged lib memory_copy_apart__room_64 memory_copy_apart string_length memory_encode_power2 memory_encode_power2_lines
+ranged lib memory_copy_apart__room_64 memory_copy_apart string_length memory_encode_power2 memory_encode_power2_lines memory_cut_fields__room_64
 input_bases lib string_digits_max string_digits_octal_escape_max string_digits_octal_max string_digits_hexadecimal_escape_max string_digits_hexadecimal_max string_digits_base_max
 network lib network_load_16 network_load_32 network_store_16 network_store_32
 tensor lib swiglu_forward_f32 rmsnorm_forward_f32 rmsnorm_backward_f32
@@ -5722,6 +5722,13 @@ lane_ranged()
                 > "$work/ranged.in"
         printf 'a\tb\001c\n\n\n\377\200x\r\nend' >> "$work/ranged.in"
         cat "$work/ranged.in" "$work/ranged.in" "$work/ranged.in" > "$work/ranged.in3"
+        #       Fields, and enough of them that a regular file is the pool's.
+        tr ' ' : < "$work/ranged.in3" > "$work/ranged.fields"
+        ranged_turn=0
+        while [ $ranged_turn -lt 24 ]; do
+                cat "$work/ranged.fields"
+                ranged_turn=$((ranged_turn + 1))
+        done > "$work/ranged.big"
         ranged_failed=0
         ranged_rows=$(sed -n '/^RANGED_SITES$/,/^RANGED_SITES_END$/p' "$root/test/run" | sed '1d;$d')
         for ranged_file in $(grep -rlE '[A-Z_]+__(ROOM|MAX)\(|[a-z_]+__(room|max)_[0-9]+\(' src programs | sort); do
@@ -5733,11 +5740,11 @@ lane_ranged()
         done
         printf '%s\n' "$ranged_rows" | while IFS='|' read -r ranged_file ranged_count ranged_case ranged_command; do
                 [ -n "$ranged_case" ] || continue
-                IN="$work/ranged.in" IN3="$work/ranged.in3" PATH="$work/bin:/usr/bin:/bin" LC_ALL=C \
-                        /bin/sh -c "$ranged_command" > "$work/ranged.plain" 2>&1
+                IN="$work/ranged.in" IN3="$work/ranged.in3" FIELDS="$work/ranged.fields" BIG="$work/ranged.big" \
+                        PATH="$work/bin:/usr/bin:/bin" LC_ALL=C /bin/sh -c "$ranged_command" > "$work/ranged.plain" 2>&1
                 ranged_plain=$?
-                IN="$work/ranged.in" IN3="$work/ranged.in3" PATH="$work/ranged-bin:/usr/bin:/bin" LC_ALL=C \
-                        /bin/sh -c "$ranged_command" > "$work/ranged.checked" 2>&1
+                IN="$work/ranged.in" IN3="$work/ranged.in3" FIELDS="$work/ranged.fields" BIG="$work/ranged.big" \
+                        PATH="$work/ranged-bin:/usr/bin:/bin" LC_ALL=C /bin/sh -c "$ranged_command" > "$work/ranged.checked" 2>&1
                 ranged_checked=$?
                 [ "$ranged_plain" = "$ranged_checked" ] && cmp -s "$work/ranged.plain" "$work/ranged.checked"
                 verdict "ranged-site-$ranged_case" - 'ranged site $ranged_case: status $ranged_checked against $ranged_plain, or the output differs'
@@ -5751,6 +5758,7 @@ lane_ranged()
 : <<'RANGED_SITES_END'
 RANGED_SITES
 src/sh/text.c|1|cat-n|cat -n "$IN3"; cat -nA "$IN3"; cat -b "$IN"; cat -nT "$IN"
+src/sh/text.c|2|cut-f|cut -d: -f2,4 "$FIELDS"; cut -s -d: -f3- < "$FIELDS"; cut -d: --complement -f1 "$BIG"; cut -d: -f2 "$BIG"
 RANGED_SITES_END
 
 #

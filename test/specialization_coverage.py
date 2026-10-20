@@ -131,6 +131,15 @@ cover('ranged', 'size', 'memory_copy_apart__room_64',
       'into a buffer nothing reads 14.0 to 8.7 cycles; the M2 Pro 4.2 to 3.4 '
       'ns. A literal count is copy_apart_known, as the plain name\'s is',
       expansion='copy_apart_room', evidence='test/checks.c#CHECK_ranged')
+cover('ranged', 'length', 'memory_cut_fields__room_64',
+      'Measured. cut -f over whole lines for a read and an output that both '
+      'run 64 bytes past: a field and the byte that ends it one copy, the '
+      'rest of a line past the last field named one more. cut -d: -f2,4 '
+      'over 54 MB of records 75.2M to 37.9M user cycles on a 9950X (AVX2 '
+      '61% fewer, SSE2 60%), -f2 34% fewer; qemu instructions a line '
+      'aarch64 281 to 86, riscv64 401 to 172, with V 306 to 94. There is no '
+      'plain routine: every caller has the room',
+      expansion='cut_fields_room', evidence='test/checks.c#CHECK_ranged')
 
 # ----------------------------------------------------------------------
 #       worth_it -- measured
@@ -970,7 +979,9 @@ def validate():
             if not spelled:
                 errors.append('%s: a ranged row is not <routine>__max_<N> or '
                               '<routine>__room_<N>' % row.routine)
-            elif spelled.group(1) not in inventory:
+            #      An entry with no plain routine is its own body, for a
+            #      contract every caller keeps; it is in the inventory itself.
+            elif spelled.group(1) not in inventory and row.routine not in inventory:
                 errors.append('%s: ranged over %s, which is not in the '
                               'inventory' % (row.routine, spelled.group(1)))
             if not row.evidence:

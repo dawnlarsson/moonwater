@@ -8058,6 +8058,41 @@ static inline INLINE address_any copy_apart_room(library_copy_entry entry,
         copy_apart_room(memory_copy_apart__room_64, (destination), (source),   \
                         (size), 64)
 
+#define MEMORY_CUT_FIELDS__ROOM(room, destination, made, source, length, keep, control) \
+        LIBRARY_PASTE(memory_cut_fields__room_, room)((destination), (made), (source), \
+                                                     (length), (keep), (control))
+
+typedef positive (*library_cut_entry)(p8 address_to, positive address_to, const p8 address_to,
+                                      positive, const p8 address_to, positive);
+
+//      The same promise for the field cutter: the source read to its length
+//      and the room past it, the destination's room after what it made.
+static inline INLINE positive cut_fields_room(library_cut_entry entry,
+                                              p8 address_to destination,
+                                              positive address_to made,
+                                              const p8 address_to source, positive length,
+                                              const p8 address_to keep, positive control,
+                                              positive room)
+{
+#ifdef MOONWATER_RANGES_CHECKED
+        if (__builtin_dynamic_object_size(source, 1) < length + room ||
+            __builtin_dynamic_object_size(destination, 1) < length + room)
+                __builtin_trap();
+        (void)((const volatile p8 address_to)source)[length + room - 1];
+#endif
+        positive taken = entry(destination, made, source, length, keep, control);
+#ifdef MOONWATER_RANGES_CHECKED
+        volatile p8 address_to spoiled = destination + address_to made;
+        for (positive at = 0; at < room; at++)
+                spoiled[at] = 0xa5;
+#endif
+        return taken;
+}
+
+#define memory_cut_fields__room_64(destination, made, source, length, keep, control) \
+        cut_fields_room(memory_cut_fields__room_64, (destination), (made), (source),  \
+                        (length), (keep), (control), 64)
+
 //      set-literal
 /*
         A macro names itself in its own replacement, which the preprocessor

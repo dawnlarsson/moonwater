@@ -48074,6 +48074,8 @@ unsigned long long string_length(const char *);
 unsigned long long memory_encode_power2(void *, const void *, unsigned long long, const char *, unsigned long long);
 unsigned long long memory_encode_power2_lines(void *, const void *, unsigned long long, const char *, unsigned long long,
                                               unsigned long long);
+unsigned long long memory_cut_fields__room_64(unsigned char *, unsigned long long *, const unsigned char *,
+                                              unsigned long long, const unsigned char *, unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48264,6 +48266,125 @@ static unsigned long long ranged_lines_cases(unsigned char *d_end, unsigned char
         return faults;
 }
 
+/*
+        memory_cut_fields__room_64 against cut a line at a time: every count
+        to 300 and long ones, fields from a byte to hundreds in four
+        densities, ':' and 0xe9 for the delimiter with a newline, and '\n'
+        and ',' with a NUL, tables of caps one to ten and 4100 with random
+        entries, -s on and off; the source's room and the destination's
+        both ending exactly against a page that faults, newlines in the
+        source's room that must not be taken, guard bytes in front of the
+        output, and the answer, the count made and the bytes all checked.
+*/
+static unsigned long long ranged_cut_reference(unsigned char *out, const unsigned char *in, unsigned long long length,
+                                               const unsigned char *keep, unsigned long long control,
+                                               unsigned long long *taken)
+{
+        unsigned char delimiter = (unsigned char)control, newline = (unsigned char)(control >> 8);
+        unsigned long long only = control >> 16 & 1, cap = control >> 32, made = 0, start = 0;
+
+        for (unsigned long long at = 0; at < length; at++)
+        {
+                if (in[at] != newline)
+                        continue;
+                unsigned long long fields = 0;
+                for (unsigned long long i = start; i < at; i++)
+                        fields += in[i] == delimiter;
+                if (!fields)
+                {
+                        if (!only)
+                                for (unsigned long long i = start; i <= at; i++)
+                                        out[made++] = in[i];
+                }
+                else
+                {
+                        unsigned long long f = 0, from = start;
+                        int wrote = 0;
+
+                        for (unsigned long long i = start; i <= at; i++)
+                                if (i == at || in[i] == delimiter)
+                                {
+                                        if (keep[f < cap ? f : cap])
+                                        {
+                                                if (wrote)
+                                                        out[made++] = delimiter;
+                                                for (unsigned long long k = from; k < i; k++)
+                                                        out[made++] = in[k];
+                                                wrote = 1;
+                                        }
+                                        f++;
+                                        from = i + 1;
+                                }
+                        out[made++] = newline;
+                }
+                start = at + 1;
+        }
+        *taken = start;
+        return made;
+}
+
+static unsigned char ranged_cut_want[20000 + 64], ranged_cut_keep[4101];
+
+static unsigned long long ranged_cut_cases(unsigned char *d_end, unsigned char *s_end)
+{
+        static const unsigned long long longs[] = {1000, 4096, 5000, 20000};
+        static const unsigned long long caps[] = {1, 2, 3, 4, 5, 7, 10, 4100};
+        static const unsigned char ends[][2] = {{':', '\n'}, {0xe9, '\n'}, {'\n', 0}, {',', 0}};
+        static const unsigned densities[][2] = {{40, 60}, {20, 28}, {4, 6}, {1, 2}};
+        unsigned long long faults = 0;
+
+        for (unsigned long long at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
+        {
+                unsigned long long length = at <= 300 ? at : longs[at - 301];
+
+                for (unsigned e = 0; e < 4; e++)
+                {
+                        unsigned char delimiter = ends[e][0], newline = ends[e][1];
+                        const unsigned *density = densities[(at + e) % 4];
+                        unsigned char *source = s_end - 64 - length;
+
+                        for (unsigned long long i = 0; i < length; i++)
+                        {
+                                unsigned r = ranged_byte();
+                                source[i] = r < density[0]   ? delimiter
+                                            : r < density[1] ? newline
+                                                             : (unsigned char)('a' + r % 26);
+                        }
+                        for (unsigned long long i = length; i < length + 64; i++)
+                                source[i] = i & 1 ? newline : delimiter;
+                        for (unsigned c = 0; c < sizeof(caps) / sizeof(caps[0]); c++)
+                        {
+                                unsigned long long cap = caps[c];
+
+                                if (cap > 10 && at % 16)
+                                        continue;
+                                for (unsigned long long f = 0; f <= cap; f++)
+                                        ranged_cut_keep[f] = ranged_byte() & 1 ? (unsigned char)(ranged_byte() | 1) : 0;
+                                for (unsigned long long only = 0; only < 2; only++)
+                                {
+                                        unsigned long long control = delimiter | (unsigned long long)newline << 8 | only << 16 |
+                                                                     cap << 32;
+                                        unsigned long long want_taken = 0;
+                                        unsigned long long want = ranged_cut_reference(ranged_cut_want, source, length,
+                                                                                       ranged_cut_keep, control, &want_taken);
+                                        unsigned char *into = d_end - 64 - length;
+                                        unsigned long long made = ~0ull;
+
+                                        for (int i = 1; i <= 16; i++)
+                                                into[-i] = (unsigned char)(0x5c ^ i);
+                                        unsigned long long taken = (memory_cut_fields__room_64)(into, &made, source, length,
+                                                                                                ranged_cut_keep, control);
+                                        faults += taken != want_taken || made != want ||
+                                                  (made == want && !ranged_same(into, ranged_cut_want, want));
+                                        for (int i = 1; i <= 16; i++)
+                                                faults += into[-i] != (unsigned char)(0x5c ^ i);
+                                }
+                        }
+                }
+        }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 /*
         memory_first_of's windows for a short count and the first sixty four
@@ -48355,6 +48476,9 @@ static fn ranged_tier(string_address tier)
         check("memory_first_of: every count to 300 and long ones, the byte at each end's every place and nowhere, against "
               "pages that fault at either end",
               ranged_first_of_cases(ranged_d_end, ranged_d_front) == 0);
+        check("memory_cut_fields__room_64: every count to 300 and long ones, four densities, four delimiter and line end "
+              "pairs, caps one to ten and 4100, -s, against cut a line at a time with both rooms ending at a page that faults",
+              ranged_cut_cases(ranged_d_end, ranged_s_end) == 0);
 }
 
 /*
@@ -48676,11 +48800,12 @@ int main(void)
         ranged_copy_cases(d_end, s_end, d_front, s_front, &faults);
         unsigned long long lengths = ranged_length_cases(d_end);
         unsigned long long lines = ranged_lines_cases(d_end, s_end);
+        unsigned long long cuts = ranged_cut_cases(d_end, s_end);
         ranged_time();
-        printf("arm64 ranged: 7 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
-               "lines %llu\n",
-               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines);
-        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines != 0;
+        printf("arm64 ranged: 8 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
+               "lines %llu | cuts %llu\n",
+               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts);
+        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts != 0;
 }
 #endif
 #endif /* CHECK_ranged || CHECK_native_ranged */
@@ -126268,7 +126393,9 @@ b32 main(void)
 #ifdef BENCH_ranged
 /* The call-site entries at the shapes their callers have, against what the
    same callers got before -- memory_encode_power2_lines a 76-column base64
-   block against the routine and then every line moved, below -- and
+   block against the routine and then every line moved, and
+   memory_cut_fields__room_64 over 4 MiB of records against the walk cut -f
+   had, below -- and
    memory_copy_apart__room_64 over the lines of
    src/lib.c (every length to 128, in order) into a buffer nothing reads and
    into one buffer read at once, and at a fixed 40 and 76 bytes hidden from
@@ -126322,6 +126449,113 @@ static p64 wrap_run(positive side)
         return get_cpu_time() - start;
 }
 
+/*      cut -d: over 4 MiB of four-field records, -f2,4 and -f2: the walk
+        cut -f had -- every boundary of the read from memory_offsets_of_either,
+        a line's delimiters marked, then its kept fields copied with
+        memory_copy_apart -- against memory_cut_fields__room_64. */
+static p8 cut_text[(1 << 22) + 64], cut_out[(1 << 22) + 64];
+static positive cut_length;
+static p32 cut_offsets[4096], cut_marks[4096];
+static const p8 cut_keep_24[5] = {0, 1, 0, 1, 0}, cut_keep_2[3] = {0, 1, 0};
+
+static fn cut_records(void)
+{
+        static const string_address names[] = {(string_address) "alpha", (string_address) "beta"};
+        static const string_address kinds[] = {(string_address) "plain", (string_address) "needle"};
+        positive at = 0;
+
+        for (positive i = 0; at + 64 < (1 << 22); i++)
+        {
+                string_address name = names[i % 3 == 0], kind = kinds[i % 97 == 0];
+                p8 digits[24];
+                positive n = i * 7919, d = 0;
+
+                while (*name)
+                        cut_text[at++] = (p8)*name++;
+                cut_text[at++] = ':';
+                cut_text[at++] = (p8)('0' + i / 100 % 10);
+                cut_text[at++] = (p8)('0' + i / 10 % 10);
+                cut_text[at++] = (p8)('0' + i % 10);
+                cut_text[at++] = ':';
+                while (*kind)
+                        cut_text[at++] = (p8)*kind++;
+                cut_text[at++] = ':';
+                do
+                        digits[d++] = (p8)('0' + n % 10);
+                while (n /= 10);
+                while (d)
+                        cut_text[at++] = digits[--d];
+                cut_text[at++] = '\n';
+        }
+        cut_length = at;
+}
+
+static positive cut_walk(p8 address_to into, const p8 address_to base, positive left, const p8 address_to keep,
+                         positive cap)
+{
+        positive made = 0, line_start = 0, fields = 0, scan = 0;
+
+        for (;;)
+        {
+                positive count = memory_offsets_of_either(cut_offsets, base + scan, left - scan, ':', '\n', 4096);
+
+                for (positive i = 0; i < count; i++)
+                {
+                        positive ending = scan + cut_offsets[i];
+
+                        if (base[ending] != '\n')
+                        {
+                                cut_marks[fields++] = (p32)ending;
+                                continue;
+                        }
+                        positive from = line_start;
+                        bool wrote = false;
+
+                        for (positive f = 0; f <= fields; f++)
+                        {
+                                positive stop = f < fields ? cut_marks[f] : ending;
+
+                                if (keep[f < cap ? f : cap])
+                                {
+                                        if (wrote)
+                                                into[made++] = ':';
+                                        memory_copy_apart(into + made, base + from, stop - from);
+                                        made += stop - from;
+                                        wrote = true;
+                                }
+                                from = stop + 1;
+                        }
+                        into[made++] = '\n';
+                        line_start = ending + 1;
+                        fields = 0;
+                }
+                if (count < 4096)
+                        break;
+                scan += cut_offsets[count - 1] + 1;
+        }
+        return made;
+}
+
+static p64 cut_run(positive side, positive list)
+{
+        const p8 address_to keep = list ? cut_keep_2 : cut_keep_24;
+        positive cap = list ? 2 : 4;
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < 4; round++)
+        {
+                positive made = 0;
+
+                if (side)
+                        memory_cut_fields__room_64(cut_out, address_of made, cut_text, cut_length, keep,
+                                                   ':' | '\n' << 8 | cap << 32);
+                else
+                        made = cut_walk(cut_out, cut_text, cut_length, keep, cap);
+                sink += made + cut_out[made / 2];
+        }
+        return get_cpu_time() - start;
+}
+
 static p64 run(positive side, positive shape)
 {
         p64 start = get_cpu_time(), sum = 0;
@@ -126366,6 +126600,7 @@ b32 main(void)
                 log_flush();
                 return 1;
         }
+        cut_records();
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
         for (p32 tier = 0; tier < 2; tier++)
@@ -126380,6 +126615,22 @@ b32 main(void)
 
                         BENCH_PAIRED(ratios, walked, wrap_run(0), lined, wrap_run(1));
                         string_format(log, "memory_encode_power2_lines base64 at 76 columns%s: paired median lines/walked %p.",
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+                for (positive list = 0; list < 2; list++)
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, walked, cut_run(0, list), engine, cut_run(1, list));
+                        string_format(log, "memory_cut_fields__room_64 %s%s: paired median engine/walk %p.",
+                                      list ? (string_address) "-f2" : (string_address) "-f2,4",
 #if X64
                                       cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
 #else

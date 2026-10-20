@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        419 routines (395 public, 24 local), 409 of them on all three and 10 local to one.
+        420 routines (396 public, 24 local), 410 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -231,6 +231,7 @@
           memory_count                   public  yes     yes     yes
           memory_count_records_with_prepared public  yes     yes     yes
           memory_count_words             public  yes     yes     yes
+          memory_cut_fields__room_64     public  yes     yes     yes
           memory_decimal_series          public  yes     yes     yes
           memory_decode_power2           public  yes     yes     yes
           memory_delete_bytes            public  yes     yes     yes
@@ -40323,6 +40324,324 @@ __asm__(
     "sub a0, s0, s8\n   ld ra, 88(sp)\n   ld s0, 80(sp)\n   ld s1, 72(sp)\n   ld s2, 64(sp)\n   ld s3, 56(sp)\n   ld s4, 48(sp)\n   ld s5, 40(sp)\n   ld s6, 32(sp)\n   ld s7, 24(sp)\n   ld s8, 16(sp)\n   addi sp, sp, 96\n" ASM_RET
     "8:  li a0, 0\n" ASM_RET
     ASM_END(memory_encode_power2_lines)
+);
+#endif
+#endif
+
+/*
+        cut -f over whole lines, the fields of every line kept or dropped by
+        one table.
+
+        memory_cut_fields__room_64(destination, made, source, length, keep,
+        control) cuts every whole line of source -- through the last newline
+        in length -- and answers how many bytes that is; *made is how many it
+        wrote. control is the field delimiter in bits 0 to 7, the newline in
+        8 to 15 (they differ), 1 at bit 16 for -s, and from bit 32 the cap:
+        keep[f] is nonzero where field f (from 0) is written, for f up to the
+        cap, and keep[cap] answers every field past it too. The cap is at
+        least 1. A line with no delimiter is written whole unless -s; the
+        fields written are joined by the delimiter and the line ended by the
+        newline, which is what GNU writes with no --output-delimiter. Both
+        buffers run 64 bytes past the length, the destination being reserved
+        as long as the source is: a line is never longer cut than whole.
+        What is written past *made is unspecified. There is no plain routine;
+        every caller has the room.
+
+        Sixty four bytes give two masks, every boundary and the newlines
+        among them, and the boundaries are taken lowest first. A field is
+        written with the byte that ends it, so a kept field and its delimiter
+        are one copy -- thirty two bytes whatever the length, the room taking
+        what is past it -- and a dropped field is the cursor left where it
+        was. At a newline a kept last field has written the newline too;
+        after a dropped one the delimiter last written becomes the newline,
+        or the newline is all there is. A field reaching the cap is the rest
+        of the line, one copy with only its newline asked for: a line of many
+        fields past the last one named is a run of bytes, and no line has too
+        many fields to take.
+
+        cut -d: over 54 MB of four-field records on a 9950X, user cycles
+        against the walk cut -f had (every boundary from
+        memory_offsets_of_either, then each line's kept fields copied): -f2,4
+        75.2M to 37.9M, -f2 43.8M to 28.8M, -f4 43.9M to 36.5M, -f1,3- 81.1M
+        to 29.2M; with AVX2 alone 61, 56, 44 and 71 percent fewer, with SSE2
+        60, 48, 45 and 66. AVX-512 masks took 9M fewer instructions and no
+        fewer cycles, and copying a dropped field rather than branching on
+        its entry cost -f4 7 percent. qemu instructions a line, -f2,4 and
+        -f2: aarch64 281 and 162 to 86 and 71; riscv64 401 and 423 to 172 and
+        139, with V 306 and 328 to 94 and 74.
+*/
+#ifndef KERNEL_MODE
+positive memory_cut_fields__room_64(p8 address_to destination, positive address_to made,
+                                    const p8 address_to source, positive length,
+                                    const p8 address_to keep, positive control);
+#if X64
+//      The two masks of the 64 bytes at rdx without AVX2: every boundary in
+//      rbp, the newlines in rbx; rax and r14 spent.
+#define CUTF_X64_XFLAGS(OFFSET, BOUNDS, LINES)                                 \
+    "movdqu " OFFSET "(%rdx), %xmm3\n   movdqa %xmm3, %xmm4\n   pcmpeqb %xmm1, %xmm3\n   pcmpeqb %xmm2, %xmm4\n" \
+    "por %xmm4, %xmm3\n   pmovmskb %xmm3, " BOUNDS "\n   pmovmskb %xmm4, " LINES "\n"
+#define CUTF_X64_XMASKS                                                        \
+    CUTF_X64_XFLAGS("0", "%ebp", "%ebx")                                       \
+    CUTF_X64_XFLAGS("16", "%eax", "%r14d")                                     \
+    "shl $16, %eax\n   or %rax, %rbp\n   shl $16, %r14d\n   or %r14, %rbx\n"   \
+    CUTF_X64_XFLAGS("32", "%eax", "%r14d")                                     \
+    "shl $32, %rax\n   or %rax, %rbp\n   shl $32, %r14\n   or %r14, %rbx\n"    \
+    CUTF_X64_XFLAGS("48", "%eax", "%r14d")                                     \
+    "shl $48, %rax\n   or %rax, %rbp\n   shl $48, %r14\n   or %r14, %rbx\n"
+#define CUTF_X64_YMASKS                                                        \
+    "vmovdqu (%rdx), %ymm0\n   vmovdqu 32(%rdx), %ymm3\n"                      \
+    "vpcmpeqb %ymm1, %ymm0, %ymm4\n   vpcmpeqb %ymm2, %ymm0, %ymm5\n   vpcmpeqb %ymm1, %ymm3, %ymm6\n   vpcmpeqb %ymm2, %ymm3, %ymm7\n" \
+    "vpor %ymm5, %ymm4, %ymm4\n   vpor %ymm7, %ymm6, %ymm6\n"                 \
+    "vpmovmskb %ymm4, %ebp\n   vpmovmskb %ymm6, %eax\n   shl $32, %rax\n   or %rax, %rbp\n" \
+    "vpmovmskb %ymm5, %ebx\n   vpmovmskb %ymm7, %eax\n   shl $32, %rax\n   or %rax, %rbx\n"
+//      Thirty two bytes from rsi to rdi, and at r15 past both.
+#define CUTF_X64_XCOPY                                                         \
+    "movdqu (%rsi), %xmm5\n   movdqu 16(%rsi), %xmm6\n   movdqu %xmm5, (%rdi)\n   movdqu %xmm6, 16(%rdi)\n"
+#define CUTF_X64_XCOPY_AT                                                      \
+    "movdqu (%rsi,%r15), %xmm5\n   movdqu 16(%rsi,%r15), %xmm6\n   movdqu %xmm5, (%rdi,%r15)\n   movdqu %xmm6, 16(%rdi,%r15)\n"
+#define CUTF_X64_YCOPY "vmovdqu (%rsi), %ymm8\n   vmovdqu %ymm8, (%rdi)\n"
+#define CUTF_X64_YCOPY_AT "vmovdqu (%rsi,%r15), %ymm8\n   vmovdqu %ymm8, (%rdi,%r15)\n"
+/*
+        The walk, for a tier's masks, copies and bit operations. rdx the
+        block, r12 the end, rsi where the field starts, rcx where the line
+        does, rdi the cursor and r9 where the line's output began; r8 the
+        table's entry for the cap, r10 the field less the cap, counting up to
+        nought there, and r11 nought less the cap; rbp and rbx the block's
+        masks and rax the boundaries still to take; r13 to r15 spent. A field
+        that reaches the cap seeks the newline: the boundaries left are the
+        ones past it.
+*/
+#define CUTF_X64_WALK(P, MASKS, COPY, COPY_AT, CLEAR, PAST, END)               \
+    P "_block:\n   cmp %r12, %rdx\n   jae " END "\n" MASKS                     \
+    "mov %r12, %rax\n   sub %rdx, %rax\n   cmp $64, %rax\n   jb " P "_clip\n" \
+    P "_clipped:\n   mov %rbp, %rax\n   test %r10, %r10\n   jz " P "_seek\n   test %rax, %rax\n   jz " P "_next\n" \
+    ".balign 16\n"                                                            \
+    P "_bound:\n   tzcnt %rax, %r13\n   " CLEAR "   bt %r13, %rbx\n   jc " P "_line\n" \
+    "lea 1(%rdx,%r13), %r13\n   cmpb $0, (%r8,%r10)\n   je " P "_drop\n"   \
+    COPY "   mov %r13, %r14\n   sub %rsi, %r14\n   cmp $32, %r14\n   ja " P "_dlong\n" \
+    P "_dkept:\n   add %r14, %rdi\n"                                           \
+    P "_drop:\n   mov %r13, %rsi\n   inc %r10\n   jz " P "_seek\n   test %rax, %rax\n   jnz " P "_bound\n" \
+    P "_next:\n   add $64, %rdx\n   jmp " P "_block\n"                         \
+    P "_seek:\n   mov %rax, %r15\n   and %rbx, %r15\n   jz " P "_next\n   tzcnt %r15, %r13\n   " PAST "   jmp " P "_line\n" \
+    P "_dlong:\n   mov $32, %r15d\n"                                           \
+    "1:  " COPY_AT "   add $32, %r15\n   cmp %r14, %r15\n   jb 1b\n   jmp " P "_dkept\n" \
+    /* A newline: the line's last field, then the newline over the       */  \
+    /* delimiter a dropped last field leaves, or after nothing.          */  \
+    P "_line:\n   lea 1(%rdx,%r13), %r13\n   cmp %r11, %r10\n   je " P "_whole\n" \
+    "cmpb $0, (%r8,%r10)\n   je " P "_ldrop\n"                                \
+    COPY "   mov %r13, %r14\n   sub %rsi, %r14\n   cmp $32, %r14\n   ja " P "_llong\n" \
+    P "_lkept:\n   add %r14, %rdi\n   jmp " P "_ended\n"                       \
+    P "_ldrop:\n   cmp %rdi, %r9\n   sbb $0, %rdi\n   movzbl -1(%r13), %r15d\n   mov %r15b, (%rdi)\n   inc %rdi\n" \
+    P "_ended:\n   mov %rdi, %r9\n   mov %r13, %rsi\n   mov %r13, %rcx\n   mov %r11, %r10\n" \
+    "test %rax, %rax\n   jnz " P "_bound\n   jmp " P "_next\n"                 \
+    P "_llong:\n   mov $32, %r15d\n"                                           \
+    "1:  " COPY_AT "   add $32, %r15\n   cmp %r14, %r15\n   jb 1b\n   jmp " P "_lkept\n" \
+    /* No delimiter in the line: all of it, or none under -s.            */  \
+    P "_whole:\n" COPY "   mov %r13, %r14\n   sub %rsi, %r14\n   cmpq $0, 24(%rsp)\n   jne " P "_ended\n" \
+    "cmp $32, %r14\n   ja " P "_wlong\n"                                       \
+    P "_wkept:\n   add %r14, %rdi\n   jmp " P "_ended\n"                       \
+    P "_wlong:\n   mov $32, %r15d\n"                                           \
+    "1:  " COPY_AT "   add $32, %r15\n   cmp %r14, %r15\n   jb 1b\n   jmp " P "_wkept\n" \
+    /* The last block: its masks clipped to the length, past which the   */  \
+    /* room holds whatever an earlier read left.                         */  \
+    P "_clip:\n   xor %r15d, %r15d\n   bts %rax, %r15\n   dec %r15\n   and %r15, %rbp\n   and %r15, %rbx\n   jmp " P "_clipped\n"
+__asm__(
+    ASM_SECTION
+    //      memory_cut_fields__room_64: rdi destination, rsi made, rdx
+    //      source, rcx length, r8 keep, r9 control; rax the bytes taken.
+    ASM_FUNC(memory_cut_fields__room_64)
+    "test %rcx, %rcx\n   jnz 1f\n   movq $0, (%rsi)\n   xor %eax, %eax\n" ASM_RET
+    "1:  push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $40, %rsp\n"
+    "mov %rsi, (%rsp)\n   mov %rdx, 8(%rsp)\n   mov %rdi, 16(%rsp)\n   mov %r9, %rax\n   shr $16, %eax\n   and $1, %eax\n   mov %rax, 24(%rsp)\n"
+    "movzbl %r9b, %eax\n   mov %r9, %rbx\n   shr $8, %ebx\n   movzbl %bl, %ebx\n   mov %r9, %r11\n   shr $32, %r11\n"
+    "lea (%rdx,%rcx), %r12\n   mov %rdx, %rsi\n   mov %rdx, %rcx\n   mov %rdi, %r9\n   add %r11, %r8\n   neg %r11\n   mov %r11, %r10\n"
+    ASM_NARROW("cpu_has_avx2", ".Lcutf_x64_sse2")
+    "vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   vmovd %ebx, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
+    CUTF_X64_WALK(".Lcutf_x64_a", CUTF_X64_YMASKS, CUTF_X64_YCOPY, CUTF_X64_YCOPY_AT, "blsr %rax, %rax\n",
+                  "blsmsk %r15, %r15\n   andn %rax, %r15, %rax\n", ".Lcutf_x64_a_end")
+    ".Lcutf_x64_a_end:\n   vzeroupper\n   jmp .Lcutf_x64_end\n"
+    ".Lcutf_x64_sse2:\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+    "imul $0x01010101, %ebx, %ebx\n   movd %ebx, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    CUTF_X64_WALK(".Lcutf_x64_x", CUTF_X64_XMASKS, CUTF_X64_XCOPY, CUTF_X64_XCOPY_AT, "lea -1(%rax), %r14\n   and %r14, %rax\n",
+                  "lea -1(%r15), %r14\n   xor %r14, %r15\n   not %r15\n   and %r15, %rax\n", ".Lcutf_x64_end")
+    //      What the whole lines made, and where the first line not whole begins.
+    ".Lcutf_x64_end:\n   mov (%rsp), %rax\n   mov %r9, %rdx\n   sub 16(%rsp), %rdx\n   mov %rdx, (%rax)\n   mov %rcx, %rax\n   sub 8(%rsp), %rax\n"
+    "add $40, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_cut_fields__room_64)
+);
+#elif ARM64
+/*
+        The same walk: x6 the block, x3 the end, x7 where the field starts,
+        x8 where the line does, x0 the cursor and x9 where the line's output
+        began; x4 the table's entry for the cap, x10 the field less the cap
+        and x5 nought less the cap; x13 and x12 the block's masks, every
+        boundary and the newlines, made by anding each lane's flag with the
+        bit it stands for and adding pairs, both masks in one tree; x11 the
+        boundaries still to take; x14 to x17 spent; x19 the start of the
+        output and x20 -s.
+*/
+#define NEON_CUT_COPY "ldp q6, q7, [x7]\n   stp q6, q7, [x0]\n   sub x15, x14, x7\n"
+#define NEON_CUT_LONG(BACK)                                                  \
+    "add x16, x7, #32\n   add x17, x0, #32\n"                                  \
+    "1:  ldp q6, q7, [x16], #32\n   stp q6, q7, [x17], #32\n   cmp x16, x14\n   b.lo 1b\n   b " BACK "\n"
+__asm__(
+    ASM_SECTION
+    //      memory_cut_fields__room_64: x0 destination, x1 made, x2 source,
+    //      x3 length, x4 keep, x5 control; x0 the bytes taken.
+    ASM_FUNC(memory_cut_fields__room_64)
+    "cbnz x3, 1f\n   str xzr, [x1]\n   mov x0, #0\n" ASM_RET
+    "1:  stp x19, x20, [sp, #-16]!\n   mov x19, x0\n   ubfx x20, x5, #16, #1\n"
+    "and w16, w5, #255\n   dup v1.16b, w16\n   ubfx x16, x5, #8, #8\n   dup v2.16b, w16\n"
+    "movz x16, #0x0201\n   movk x16, #0x0804, lsl #16\n   movk x16, #0x2010, lsl #32\n   movk x16, #0x8040, lsl #48\n   dup v5.2d, x16\n"
+    "lsr x17, x5, #32\n   add x4, x4, x17\n   neg x5, x17\n   mov x10, x5\n"
+    "add x3, x2, x3\n   mov x6, x2\n   mov x7, x2\n   mov x8, x2\n   mov x9, x0\n"
+    ".Lcutf_arm64_block:\n   cmp x6, x3\n   b.hs .Lcutf_arm64_end\n"
+    "ldp q16, q17, [x6]\n   ldp q18, q19, [x6, #32]\n"
+    "cmeq v20.16b, v16.16b, v1.16b\n   cmeq v24.16b, v16.16b, v2.16b\n   cmeq v21.16b, v17.16b, v1.16b\n   cmeq v25.16b, v17.16b, v2.16b\n"
+    "cmeq v22.16b, v18.16b, v1.16b\n   cmeq v26.16b, v18.16b, v2.16b\n   cmeq v23.16b, v19.16b, v1.16b\n   cmeq v27.16b, v19.16b, v2.16b\n"
+    "orr v20.16b, v20.16b, v24.16b\n   orr v21.16b, v21.16b, v25.16b\n   orr v22.16b, v22.16b, v26.16b\n   orr v23.16b, v23.16b, v27.16b\n"
+    "and v20.16b, v20.16b, v5.16b\n   and v21.16b, v21.16b, v5.16b\n   and v22.16b, v22.16b, v5.16b\n   and v23.16b, v23.16b, v5.16b\n"
+    "and v24.16b, v24.16b, v5.16b\n   and v25.16b, v25.16b, v5.16b\n   and v26.16b, v26.16b, v5.16b\n   and v27.16b, v27.16b, v5.16b\n"
+    "addp v20.16b, v20.16b, v21.16b\n   addp v22.16b, v22.16b, v23.16b\n   addp v24.16b, v24.16b, v25.16b\n   addp v26.16b, v26.16b, v27.16b\n"
+    "addp v20.16b, v20.16b, v22.16b\n   addp v24.16b, v24.16b, v26.16b\n   addp v20.16b, v20.16b, v24.16b\n"
+    "fmov x13, d20\n   mov x12, v20.d[1]\n"
+    "sub x16, x3, x6\n   cmp x16, #64\n   b.lo .Lcutf_arm64_clip\n"
+    ".Lcutf_arm64_clipped:\n   mov x11, x13\n   cbz x10, .Lcutf_arm64_seek\n   cbz x11, .Lcutf_arm64_next\n"
+    ".balign 16\n"
+    ".Lcutf_arm64_bound:\n   rbit x14, x11\n   clz x14, x14\n   sub x16, x11, #1\n   and x11, x11, x16\n   lsr x16, x12, x14\n   tbnz x16, #0, .Lcutf_arm64_line\n"
+    "add x14, x6, x14\n   add x14, x14, #1\n   ldrb w16, [x4, x10]\n   cbz w16, .Lcutf_arm64_drop\n"
+    NEON_CUT_COPY "   cmp x15, #32\n   b.hi .Lcutf_arm64_dlong\n"
+    ".Lcutf_arm64_dkept:\n   add x0, x0, x15\n"
+    ".Lcutf_arm64_drop:\n   mov x7, x14\n   adds x10, x10, #1\n   b.eq .Lcutf_arm64_seek\n   cbnz x11, .Lcutf_arm64_bound\n"
+    ".Lcutf_arm64_next:\n   add x6, x6, #64\n   b .Lcutf_arm64_block\n"
+    //      The field at the cap is the rest of the line: the boundaries past its newline are what is left.
+    ".Lcutf_arm64_seek:\n   and x16, x11, x12\n   cbz x16, .Lcutf_arm64_next\n   rbit x14, x16\n   clz x14, x14\n"
+    "sub x17, x16, #1\n   eor x16, x16, x17\n   bic x11, x11, x16\n   b .Lcutf_arm64_line\n"
+    ".Lcutf_arm64_dlong:\n" NEON_CUT_LONG(".Lcutf_arm64_dkept")
+    //      A newline: the line's last field with it, or the newline over the delimiter a dropped one leaves.
+    ".Lcutf_arm64_line:\n   add x14, x6, x14\n   add x14, x14, #1\n   cmp x10, x5\n   b.eq .Lcutf_arm64_whole\n"
+    "ldrb w16, [x4, x10]\n   cbz w16, .Lcutf_arm64_ldrop\n"
+    NEON_CUT_COPY "   cmp x15, #32\n   b.hi .Lcutf_arm64_llong\n"
+    ".Lcutf_arm64_lkept:\n   add x0, x0, x15\n   b .Lcutf_arm64_ended\n"
+    ".Lcutf_arm64_ldrop:\n   cmp x0, x9\n   cset x16, ne\n   sub x0, x0, x16\n   ldurb w16, [x14, #-1]\n   strb w16, [x0], #1\n"
+    ".Lcutf_arm64_ended:\n   mov x9, x0\n   mov x7, x14\n   mov x8, x14\n   mov x10, x5\n   cbnz x11, .Lcutf_arm64_bound\n   b .Lcutf_arm64_next\n"
+    ".Lcutf_arm64_llong:\n" NEON_CUT_LONG(".Lcutf_arm64_lkept")
+    //      No delimiter in the line: all of it, or none under -s.
+    ".Lcutf_arm64_whole:\n" NEON_CUT_COPY "   cbnz x20, .Lcutf_arm64_ended\n   cmp x15, #32\n   b.hi .Lcutf_arm64_wlong\n"
+    ".Lcutf_arm64_wkept:\n   add x0, x0, x15\n   b .Lcutf_arm64_ended\n"
+    ".Lcutf_arm64_wlong:\n" NEON_CUT_LONG(".Lcutf_arm64_wkept")
+    //      The last block: its masks clipped to the length.
+    ".Lcutf_arm64_clip:\n   mov x17, #1\n   lsl x17, x17, x16\n   sub x17, x17, #1\n   and x13, x13, x17\n   and x12, x12, x17\n   b .Lcutf_arm64_clipped\n"
+    ".Lcutf_arm64_end:\n   sub x16, x9, x19\n   str x16, [x1]\n   sub x0, x8, x2\n   ldp x19, x20, [sp], #16\n" ASM_RET
+    ASM_END(memory_cut_fields__room_64)
+);
+#elif RISCV64
+/*
+        The same walk on the scalar masks either path makes: a6 the block,
+        a3 the end, a7 where the field starts, t0 where the line does, a0
+        the cursor and t1 where the line's output began; a4 the table's
+        entry for the cap, t2 the field less the cap and a5 nought less the
+        cap; t5 and t4 the block's masks and t3 the boundaries still to take;
+        s1 a boundary's bit, cleared from t3 with an xor, t6 its end; s0 a
+        field's length; s3 the start of the output and s4 -s. With V the
+        block is sixty four bytes and its masks a bit a byte, read out with
+        vmv.x.s and a bit found by multiplying it into a table; without, it
+        is a word and its masks bit seven of a byte, the carry free zero
+        test of the word xor each byte, and a bit's byte the multiply
+        memory_offsets_of_either reads it with.
+*/
+#define CUTF_RV_WALK(P, STEP, BLOCK, INDEX, COPY)                             \
+    BLOCK                                                                     \
+    P "_clipped:\n   mv t3, t5\n   beqz t2, " P "_seek\n   beqz t3, " P "_next\n" \
+    P "_bound:\n   neg s1, t3\n   and s1, s1, t3\n   xor t3, t3, s1\n   and s2, s1, t4\n   bnez s2, " P "_line\n" \
+    INDEX "   add t6, a6, t6\n   addi t6, t6, 1\n   add s2, a4, t2\n   lbu s2, 0(s2)\n   beqz s2, " P "_drop\n" \
+    "sub s0, t6, a7\n" COPY "   add a0, a0, s0\n"                           \
+    P "_drop:\n   mv a7, t6\n   addi t2, t2, 1\n   beqz t2, " P "_seek\n   bnez t3, " P "_bound\n" \
+    P "_next:\n   addi a6, a6, " STEP "\n   j " P "_block\n"                    \
+    /* The field at the cap is the rest of the line: what is left is the */  \
+    /* boundaries past its newline.                                       */  \
+    P "_seek:\n   and s1, t3, t4\n   beqz s1, " P "_next\n   neg s2, s1\n   and s1, s1, s2\n" \
+    "add s2, s1, s1\n   neg s2, s2\n   and t3, t3, s2\n"                       \
+    P "_line:\n" INDEX "   add t6, a6, t6\n   addi t6, t6, 1\n   beq t2, a5, " P "_whole\n" \
+    "add s2, a4, t2\n   lbu s2, 0(s2)\n   beqz s2, " P "_ldrop\n"              \
+    "sub s0, t6, a7\n" COPY "   add a0, a0, s0\n   j " P "_ended\n"           \
+    P "_ldrop:\n   sltu s2, t1, a0\n   sub a0, a0, s2\n   lbu s2, -1(t6)\n   sb s2, 0(a0)\n   addi a0, a0, 1\n" \
+    P "_ended:\n   mv t1, a0\n   mv a7, t6\n   mv t0, t6\n   mv t2, a5\n   bnez t3, " P "_bound\n   j " P "_next\n" \
+    /* No delimiter in the line: all of it, or none under -s.            */  \
+    P "_whole:\n   bnez s4, " P "_ended\n   sub s0, t6, a7\n" COPY "   add a0, a0, s0\n   j " P "_ended\n"
+#define CUTF_RV_VMASKS                                                         \
+    "vsetvli zero, s10, e8, m4, ta, ma\n   vle8.v v8, (a6)\n   vmseq.vx v0, v8, s6\n   vmseq.vx v1, v8, s7\n   vmor.mm v2, v0, v1\n" \
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s t5, v2\n   vmv.x.s t4, v1\n"
+#define CUTF_RV_SMASKS                                                         \
+    "ld s0, 0(a6)\n   xor s1, s0, s6\n   and s2, s1, s8\n   add s2, s2, s8\n   or s2, s2, s1\n" \
+    "xor s1, s0, s7\n   and s11, s1, s8\n   add s11, s11, s8\n   or s11, s11, s1\n" \
+    "and t5, s2, s11\n   or t5, t5, s8\n   not t5, t5\n   or t4, s11, s8\n   not t4, t4\n"
+//      With V: exact copies, one vsetvli for a field to a hundred and twenty eight bytes at the smallest VLEN.
+#define CUTF_RV_VCOPY                                                          \
+    "vsetvli s2, s0, e8, m8, ta, ma\n   vle8.v v16, (a7)\n   vse8.v v16, (a0)\n   bltu s2, s0, 3f\n   j 4f\n" \
+    "3:  mv s1, a7\n   mv s11, a0\n   mv s8, s0\n"                             \
+    "5:  vsetvli s2, s8, e8, m8, ta, ma\n   vle8.v v16, (s1)\n   vse8.v v16, (s11)\n   add s1, s1, s2\n   add s11, s11, s2\n   sub s8, s8, s2\n   bnez s8, 5b\n" \
+    "4:\n"
+//      Without: eight or sixteen bytes a byte at a time whatever the count, the room taking what is past it, and
+//      a longer field a byte a turn.
+#define CUTF_RV_BCOPY                                                          \
+    "li s1, 16\n   bltu s1, s0, 3f\n" CUTF_RV_BYTES8 "li s1, 8\n   bgeu s1, s0, 4f\n" CUTF_RV_BYTES16 "j 4f\n" \
+    "3:  mv s1, a7\n   mv s2, a0\n"                                            \
+    "5:  lbu s11, 0(s1)\n   sb s11, 0(s2)\n   addi s1, s1, 1\n   addi s2, s2, 1\n   bltu s1, t6, 5b\n" \
+    "4:\n"
+#define CUTF_RV_BYTES8                                                        \
+    "lbu s1, 0(a7)\n   lbu s2, 1(a7)\n   sb s1, 0(a0)\n   sb s2, 1(a0)\n" \
+    "lbu s1, 2(a7)\n   lbu s2, 3(a7)\n   sb s1, 2(a0)\n   sb s2, 3(a0)\n" \
+    "lbu s1, 4(a7)\n   lbu s2, 5(a7)\n   sb s1, 4(a0)\n   sb s2, 5(a0)\n" \
+    "lbu s1, 6(a7)\n   lbu s2, 7(a7)\n   sb s1, 6(a0)\n   sb s2, 7(a0)\n"
+#define CUTF_RV_BYTES16                                                       \
+    "lbu s1, 8(a7)\n   lbu s2, 9(a7)\n   sb s1, 8(a0)\n   sb s2, 9(a0)\n" \
+    "lbu s1, 10(a7)\n   lbu s2, 11(a7)\n   sb s1, 10(a0)\n   sb s2, 11(a0)\n" \
+    "lbu s1, 12(a7)\n   lbu s2, 13(a7)\n   sb s1, 12(a0)\n   sb s2, 13(a0)\n" \
+    "lbu s1, 14(a7)\n   lbu s2, 15(a7)\n   sb s1, 14(a0)\n   sb s2, 15(a0)\n"
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      memory_cut_fields__room_64: a0 destination, a1 made, a2 source,
+    //      a3 length, a4 keep, a5 control; a0 the bytes taken.
+    ASM_FUNC(memory_cut_fields__room_64)
+    "bnez a3, 1f\n   sd zero, 0(a1)\n   li a0, 0\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "1:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 2f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n   addi sp, sp, 16\n   j memory_cut_fields__room_64\n"
+#else
+    "1:  li t3, 1\n"
+#endif
+    "2:  addi sp, sp, -112\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "mv s3, a0\n   srli s4, a5, 16\n   andi s4, s4, 1\n   andi s6, a5, 255\n   srli s7, a5, 8\n   andi s7, s7, 255\n"
+    "srli s0, a5, 32\n   add a4, a4, s0\n   neg a5, s0\n   mv t2, a5\n"
+    "add a3, a2, a3\n   mv a7, a2\n   mv t0, a2\n   mv t1, a0\n   li s0, 2\n   bne t3, s0, .Lcutf_rv_scalar\n"
+    //      V: the block's masks a bit a byte; a bit's place from de Bruijn's multiply and its table.
+    "mv a6, a2\n   li s10, 64\n   li s5, 0x03f79d71b4cb0a89\n   lla s9, .Lcutf_rv_bits\n"
+    CUTF_RV_WALK(".Lcutf_rv_v", "64",
+                 ".Lcutf_rv_v_block:\n   bgeu a6, a3, .Lcutf_rv_end\n" CUTF_RV_VMASKS
+                 "sub s0, a3, a6\n   bgeu s0, s10, .Lcutf_rv_v_clipped\n   li s1, 1\n   sll s1, s1, s0\n   addi s1, s1, -1\n   and t5, t5, s1\n   and t4, t4, s1\n",
+                 "mul s2, s1, s5\n   srli s2, s2, 58\n   add s2, s2, s9\n   lbu t6, 0(s2)\n", CUTF_RV_VCOPY)
+    //      Without V: words, from the one the source starts in, the bytes before it dropped from the first and
+    //      the bytes past the end from the last; s9 is the last word that is all inside.
+    ".Lcutf_rv_scalar:\n   andi a6, a2, -8\n   addi s9, a3, -8\n   li s5, 0x0001020304050607\n   li s8, 0x7f7f7f7f7f7f7f7f\n   li s0, 0x0101010101010101\n"
+    "mul s6, s6, s0\n   mul s7, s7, s0\n" CUTF_RV_SMASKS
+    "sub s0, a2, a6\n   slli s0, s0, 3\n   li s1, -1\n   sll s1, s1, s0\n   and t5, t5, s1\n   and t4, t4, s1\n   bgtu a6, s9, .Lcutf_rv_s_edge\n   j .Lcutf_rv_s_clipped\n"
+    CUTF_RV_WALK(".Lcutf_rv_s", "8", ".Lcutf_rv_s_block:\n   bgtu a6, s9, .Lcutf_rv_s_last\n" CUTF_RV_SMASKS,
+                 "srli t6, s1, 7\n   mul t6, t6, s5\n   srli t6, t6, 56\n", CUTF_RV_BCOPY)
+    ".Lcutf_rv_s_last:\n   bgeu a6, a3, .Lcutf_rv_end\n" CUTF_RV_SMASKS
+    ".Lcutf_rv_s_edge:\n   sub s0, a3, a6\n   slli s0, s0, 3\n   li s1, 1\n   sll s1, s1, s0\n   addi s1, s1, -1\n   and t5, t5, s1\n   and t4, t4, s1\n   j .Lcutf_rv_s_clipped\n"
+    ".Lcutf_rv_end:\n   sub s0, t1, s3\n   sd s0, 0(a1)\n   sub a0, t0, a2\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 112\n" ASM_RET
+    ".pushsection .rodata\n"
+    //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
+    ".Lcutf_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
+    "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
+    ".popsection\n"
+    ASM_END(memory_cut_fields__room_64)
+    ".option pop\n"
 );
 #endif
 #endif

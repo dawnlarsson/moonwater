@@ -21293,310 +21293,54 @@ static const argument_option cut_options[] = {
 // letter cannot say on its own, so the options are counted as they arrive.
 
 /*
-        cut -f over a whole read at once: every delimiter and every line end
-        in it comes from one library pass, and each complete line is then
-        its fields' copies and nothing else. The line reader asked for each
-        line's end and then each field's delimiter, a call apiece. Stops at
-        the first line that is not whole in the read, has more fields than
-        are kept here, or does not fit the output, and answers how many
-        bytes it took, all of them whole lines; the line reader has the
-        rest.
+        cut -f over a whole read at once: the fields of every complete line
+        come from memory_cut_fields__room_64, one pass over the read with the
+        table below, and the line reader has what is left, a last line not
+        whole in the read. -b and -c take a read's line ends from
+        memory_offsets_of_either, CUT_OFFSETS of them a call.
 */
 #define CUT_OFFSETS 4096
-#define CUT_FIELDS 4096
-// Delimiters past the last field a range wants before a line is long.
-#define CUT_LONG 16
 
 static p32 cut_offsets[CUT_OFFSETS];
-static p32 cut_marks[CUT_FIELDS];
 
 /*
-        One range of fields, first to last, over a whole read: the delimiters
-        before a line's end only move two marks, where the first field starts
-        and where the last one stops, and the line's end writes the run
-        between them straight into the output. The output is never longer
-        than what it is cut from, so the read's length is reserved once.
+        Which fields cut -f writes, as memory_cut_fields__room_64 asks: an
+        entry a field from the first, nonzero for written, up to the first
+        field from which every one is the same, and the control word with
+        the delimiter, the line end, -s and that field. A list naming a field
+        past the marks is the line walk's.
 */
-/*
-        Kept out of line: inlined into cut_lines, whose field walk it
-        shares a frame with, its loop ran 17% more cycles on the same
-        instructions (cut -d: -f2 over 18 MB, 11.3 M cycles at 5f31feaf,
-        13.3 M after 0862f47f moved it); on its own it is back to 11.4 M.
-*/
-static inline INLINE positive cut_lines_range_body(
-    p8 address_to out, positive address_to made_out, p32 address_to offsets,
-    p8 address_to base, positive left, p8 delimiter, bool only_delimited)
+static p8 address_to cut_keep;
+static positive cut_keep_control;
+
+static bool cut_keep_build(p8 delimiter, bool complement, bool only_delimited)
 {
-        positive first = text_list_single_first;
-        positive last = text_list_single_last == TEXT_UNSET ? positive_max
-                                                            : text_list_single_last;
-        positive made = 0;
-        positive line_start = 0;
-        positive scan = 0;
-        positive seen = 0;
-        positive from = 0;
-        positive to = positive_max;
-        p8 newline = text_delimiter;
-        // How many delimiters a call looks for: all it has room for, until a
-        // line has so many past the last field wanted that the rest of it is
-        // not worth looking at, and then only as many as that line took.
-        positive limit = CUT_OFFSETS;
-        positive long_line = last != positive_max && last + CUT_LONG + 1 < CUT_OFFSETS
-                                 ? last + CUT_LONG : positive_max;
+        positive uniform = text_list_open ? text_list_open : text_list_used;
+        positive cap = uniform > 2 ? uniform - 1 : 1;
 
-        for (;;)
-        {
-                positive asked = limit;
-                positive count = memory_offsets_of_either(
-                    offsets, base + scan, left - scan, delimiter, newline, asked);
+        if (cap >= TEXT_LIST_MARKS_MAX)
+                return false;
 
-                for (positive i = 0; i < count; i++)
-                {
-                        positive at = scan + offsets[i];
-                        bool skipped = false;
+        memory_give(cut_keep);
+        cut_keep = (p8 address_to)memory_take(cap + 1);
 
-                        if (base[at] != newline)
-                        {
-                                seen++;
-                                from = seen + 1 == first ? at + 1 : from;
-                                to = seen == last ? at : to;
+        if (!cut_keep)
+                return false;
 
-                                if (seen != long_line)
-                                        continue;
+        for (positive f = 0; f <= cap; f++)
+                cut_keep[f] = text_list_has(f + 1) != complement;
 
-                                /*
-                                        A long line: its fields past the last
-                                        one wanted are not read, and its end is
-                                        found as a run of bytes and not by
-                                        every delimiter on the way to it.
-                                */
-                                p8 address_to eol = memory_first_of(base + at + 1, newline,
-                                                                    left - at - 1);
-
-                                if (!eol)
-                                        goto done;
-                                at = (positive)(eol - base);
-                                skipped = true;
-                        }
-
-                        positive start = first == 1 ? line_start : seen + 1 >= first ? from : at;
-                        positive stop = to < at ? to : at;
-
-                        if (!seen)
-                        {
-                                start = line_start;
-                                stop = only_delimited ? line_start : at;
-                        }
-
-                        start = start < stop ? start : stop;
-
-                        /*
-                                A field is short, and a copy that picks its
-                                width from the length guesses wrong a line at
-                                a time: two sixteen-byte moves cover it with
-                                no choice to make, where the read and the
-                                reservation both have the room, and whatever
-                                lands past the field is written over next.
-                        */
-                        if (stop - start <= 32 && start + 32 <= left && made + 32 <= left)
-                        {
-                                __builtin_memcpy(out + made, base + start, 16);
-                                __builtin_memcpy(out + made + 16, base + start + 16, 16);
-                        }
-                        else
-                                memory_copy_apart(out + made, base + start, stop - start);
-
-                        made += stop - start;
-                        out[made] = newline;
-                        made += !(only_delimited && !seen);
-                        line_start = at + 1;
-                        seen = 0;
-                        to = positive_max;
-
-                        if (skipped)
-                        {
-                                limit = last + CUT_LONG;
-                                scan = at + 1;
-                                goto rescan;
-                        }
-                        limit = CUT_OFFSETS;
-                }
-
-                if (count < asked)
-                        break;
-
-                scan += offsets[count - 1] + 1;
-        rescan:;
-        }
-
-done:
-        address_to made_out = made;
-        return line_start;
-}
-
-/*
-        The serial run's copy has the scratch array it always had, a constant
-        to it, and the pool's has one on its job's stack: written once, built
-        twice, each out of line.
-*/
-__attribute__((noinline)) static positive cut_lines_range(
-    p8 address_to base, positive left, p8 delimiter, bool only_delimited)
-{
-        p8 address_to out = text_reserve(left);
-        positive made = 0;
-
-        if (!out)
-                return 0;
-
-        positive took = cut_lines_range_body(out, address_of made, cut_offsets, base, left,
-                                             delimiter, only_delimited);
-
-        text_out_used -= left - made;
-        return took;
-}
-
-__attribute__((noinline)) static positive cut_lines_range_pooled(
-    p8 address_to out, positive address_to made_out, p32 address_to offsets, p8 address_to base,
-    positive left, p8 delimiter, bool only_delimited)
-{
-        return cut_lines_range_body(out, made_out, offsets, base, left, delimiter,
-                                    only_delimited);
-}
-
-/*
-        Whole lines of fields, into an output the caller reserved as long as
-        the lines are -- a line is never longer cut than whole. What was made
-        is answered beside how many bytes of the input were taken, which stops
-        short of a line with more fields than the table keeps or one as long as
-        a reservation, and the scratch arrays are the caller's, so a job of the
-        pool can run it beside the serial loop.
-*/
-static inline INLINE positive cut_lines_into(p8 address_to out, positive address_to made_out,
-                                             p32 address_to offsets, p32 address_to marks,
-                                             p8 address_to base, positive left, p8 delimiter,
-                                             bool complement, bool only_delimited,
-                                             bool pooled)
-{
-        positive line_start = 0;
-        positive fields = 0;
-        positive scan = 0;
-        positive made = 0;
-
-        // The serial run took this path before it reserved anything.
-        if (pooled && text_list_single && !complement)
-                return cut_lines_range_pooled(out, made_out, offsets, base, left,
-                                              delimiter, only_delimited);
-
-        for (;;)
-        {
-                positive count = memory_offsets_of_either(
-                    offsets, base + scan, left - scan, delimiter,
-                    text_delimiter, CUT_OFFSETS);
-
-                for (positive i = 0; i < count; i++)
-                {
-                        positive ending = scan + offsets[i];
-
-                        if (base[ending] != text_delimiter)
-                        {
-                                if (fields == CUT_FIELDS)
-                                        goto stop;
-
-                                marks[fields++] = (p32)ending;
-                                continue;
-                        }
-
-                        p8 address_to line = base + line_start;
-                        positive line_length = ending - line_start;
-
-                        if (!fields)
-                        {
-                                if (!only_delimited)
-                                {
-                                        memory_copy_apart(out + made, line, line_length + 1);
-                                        made += line_length + 1;
-                                }
-                        }
-                        else
-                        {
-                                if (line_length + 1 > TEXT_OUT_MAX)
-                                        goto stop;
-
-                                p8 address_to into = out + made;
-                                positive out_length = 0;
-                                positive from = line_start;
-                                positive which = 1;
-                                bool wrote = false;
-
-                                for (positive f = 0;; f++)
-                                {
-                                        positive at = f < fields ? marks[f] : ending;
-
-                                        if (text_list_has(which) != complement)
-                                        {
-                                                if (wrote)
-                                                        into[out_length++] = delimiter;
-
-                                                memory_copy_apart(into + out_length, base + from,
-                                                                  at - from);
-                                                out_length += at - from;
-                                                wrote = true;
-                                        }
-
-                                        if (f == fields)
-                                                break;
-
-                                        // No field past this one is listed:
-                                        // the rest is kept or dropped whole.
-                                        if (!text_list_open && which + 1 >= text_list_used)
-                                        {
-                                                if (complement)
-                                                {
-                                                        if (wrote)
-                                                                into[out_length++] = delimiter;
-
-                                                        memory_copy_apart(into + out_length,
-                                                                          base + at + 1,
-                                                                          ending - at - 1);
-                                                        out_length += ending - at - 1;
-                                                }
-
-                                                break;
-                                        }
-
-                                        from = at + 1;
-                                        which++;
-                                }
-
-                                into[out_length++] = text_delimiter;
-                                made += out_length;
-                        }
-
-                        line_start = ending + 1;
-                        fields = 0;
-                }
-
-                if (count < CUT_OFFSETS)
-                        break;
-
-                scan += offsets[count - 1] + 1;
-        }
-
-stop:
-        address_to made_out = made;
-        return line_start;
+        cut_keep_control = delimiter | (positive)text_delimiter << 8 |
+                           (positive)only_delimited << 16 | cap << 32;
+        return true;
 }
 
 // One reservation for what a read's whole lines make, given back to the size
 // they made: the serial writer's way to the kernel above.
-static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
-                          bool complement, bool only_delimited)
+static positive cut_lines(p8 address_to base, positive left)
 {
         _Static_assert(TEXT_READ_MAX <= TEXT_OUT_MAX,
                        "a read's cut must fit one reservation");
-
-        if (text_list_single && !complement)
-                return cut_lines_range(base, left, delimiter, only_delimited);
 
         p8 address_to out = text_reserve(left);
         positive made = 0;
@@ -21604,22 +21348,22 @@ static positive cut_lines(p8 address_to base, positive left, p8 delimiter,
         if (!out)
                 return 0;
 
-        positive took = cut_lines_into(out, address_of made, cut_offsets, cut_marks, base,
-                                       left, delimiter, complement, only_delimited, false);
+        positive took = MEMORY_CUT_FIELDS__ROOM(TEXT_ROOM, out, address_of made, base, left,
+                                                cut_keep, cut_keep_control);
 
         text_out_used -= left - made;
         return took;
 }
 
 /*
-        cut -b and -c over whole lines at once, as cut_lines_into does fields:
-        every line end in the read comes from one library pass, and each line
+        cut -b and -c over whole lines at once, as cut -f's are: every line
+        end in the read comes from one library pass, and each line
         is the copies its list makes of it and a line end. One range, kept or
         left out, or a list of them written one after another; a list whose
         ranges are set apart by an output delimiter is the byte walk's. A copy
         of a few bytes is two sixteen-byte moves where the input and the
-        output both have the room, as the fields' range has, and whatever
-        lands past what is kept is written over next.
+        output both have the room, and whatever lands past what is kept is
+        written over next.
 */
 static inline INLINE p8 address_to cut_bytes_copy(p8 address_to out, p8 address_to from,
                                                   positive size, p8 address_to room_in,
@@ -21800,15 +21544,13 @@ static positive cut_bytes(p8 address_to base, positive left, bool complement, bo
         cut over the pieces of a regular file. A line is cut by itself, so a
         piece of whole lines is cut by the same kernels the serial loop runs
         over a read, into an output of its own that the pool hands to the sink
-        in order. A piece that a kernel does not take whole -- a line with too
-        many fields, or a last line with no end -- is left, and the serial loop
-        takes the file from its edge, which is what it would have done with
-        the rest.
+        in order. A piece that a kernel does not take whole -- a last line
+        with no end -- is left, and the serial loop takes the file from its
+        edge, which is what it would have done with the rest.
 */
 typedef struct
 {
-        bool by_field, complement, only_delimited, single, characters;
-        p8 delimiter;
+        bool by_field, complement, single, characters;
 } cut_pieces;
 
 static bool cut_pieces_emit(address_any context, positive index, p8 address_to lines,
@@ -21817,7 +21559,6 @@ static bool cut_pieces_emit(address_any context, positive index, p8 address_to l
 {
         cut_pieces address_to run = context;
         p32 offsets[CUT_OFFSETS];
-        p32 marks[CUT_FIELDS];
         positive made = 0;
         positive took;
         p8 address_to out;
@@ -21825,20 +21566,20 @@ static bool cut_pieces_emit(address_any context, positive index, p8 address_to l
         (void)index;
         (void)offset;
 
-        out = parallel_reserve(output, length + 32);
+        out = parallel_reserve(output, length + TEXT_ROOM);
 
         if (!out)
                 return false;
 
         took = run->by_field
-                   ? cut_lines_into(out, address_of made, offsets, marks, lines, length,
-                                    run->delimiter, run->complement, run->only_delimited, true)
+                   ? MEMORY_CUT_FIELDS__ROOM(TEXT_ROOM, out, address_of made, lines, length,
+                                             cut_keep, cut_keep_control)
                    : cut_bytes_into(out, address_of made, offsets, lines, length,
                                     run->complement, run->single,
                                     run->characters &&
                                         memory_ascii_span(lines, length) != length);
 
-        output->used -= length + 32 - made;
+        output->used -= length + TEXT_ROOM - made;
         return took == length;
 }
 
@@ -22656,6 +22397,9 @@ static b32 text_cut()
         if (nothing_selected)
                 whole_lines = false;
 
+        if (whole_lines && !cut_keep_build(delimiter, complement, only_delimited))
+                whole_lines = false;
+
         // -b and -c that are one range, or ranges written one after another,
         // go a read at a time too.
         bool bytes_single = by_character && text_list_single &&
@@ -22676,10 +22420,8 @@ static b32 text_cut()
                 {
                         cut_pieces pieces = {.by_field = whole_lines,
                                              .complement = complement,
-                                             .only_delimited = only_delimited,
                                              .single = bytes_single,
-                                             .characters = characters,
-                                             .delimiter = delimiter};
+                                             .characters = characters};
 
                         cut_pieces_run(address_of pieces);
                 }
@@ -22727,8 +22469,7 @@ static b32 text_cut()
                         {
                                 positive took = cut_lines(
                                     text_input.buffer + text_input.position,
-                                    text_input.filled - text_input.position,
-                                    delimiter, complement, only_delimited);
+                                    text_input.filled - text_input.position);
 
                                 text_input.position += took;
 
