@@ -4951,6 +4951,57 @@ static b32 build_surface(string_address config, string_address kind)
         return 0;
 }
 
+/*
+        Which release an extracted tree is, from the head of its Makefile, in
+        the spelling kernel.org gives the tarball: 7.3, 7.2.8, 7.4-rc1. Empty
+        when the Makefile does not say.
+*/
+static string_address build_kernel_tree_version(string_address tree)
+{
+        static const string_address fields[4] = {"VERSION", "PATCHLEVEL", "SUBLEVEL",
+                                                 "EXTRAVERSION"};
+        string_address values[4] = {"", "", "", ""};
+        p8 head[1024];
+        string_address line = head;
+
+        if (file_slurp(build_join(tree, "/Makefile", null), head, sizeof(head)) < 0)
+                return "";
+
+        while (string_get(line))
+        {
+                string_address stop = line;
+                positive field;
+
+                while (string_get(stop) && !string_is(stop, '\n'))
+                        stop++;
+
+                for (field = 0; field < 4; field++)
+                {
+                        positive named = string_length(fields[field]);
+                        string_address value = line + named;
+
+                        if (string_compare_max(line, fields[field], named) ||
+                            !(string_is(value, ' ') || string_is(value, '=')))
+                                continue;
+                        while (value < stop && (string_is(value, ' ') || string_is(value, '=')))
+                                value++;
+                        values[field] = build_text_keep(value, (positive)(stop - value));
+                }
+
+                line = string_get(stop) ? stop + 1 : stop;
+        }
+
+        if (!string_get(values[0]) || !string_get(values[1]))
+                return "";
+
+        //      A first release has SUBLEVEL 0 and no third number in its name.
+        if (string_equals(values[2], "0"))
+                values[2] = "";
+
+        return build_join(values[0], ".", values[1], string_get(values[2]) ? "." : "",
+                          values[2], values[3], null);
+}
+
 static b32 build_kernel_source()
 {
         string_address artifacts = build_setting_get("artifacts");
@@ -4996,6 +5047,29 @@ static b32 build_kernel_source()
         //      only for the directory treated an empty or half extracted tree
         //      as a finished extraction.
         present = build_is_file(build_join(tree, "/Makefile", null));
+
+        //      And it has to be the release pinned. A cache that built 7.2
+        //      kept its tree when the pin moved to 7.3, and the next build
+        //      compiled 7.3's sources against 7.2's headers. Another release
+        //      goes, with the patch stamps that describe it, as --clean
+        //      would remove them.
+        if (present)
+        {
+                string_address found = build_kernel_tree_version(tree);
+
+                if (!string_equals(found, version))
+                {
+                        string_format(log, "%s Kernel tree is %s, the pin is %s: extracting %s %s\n",
+                                      BUILD_BOLD, found[0] ? found : (string_address)"unknown", version,
+                                      version, BUILD_RESET);
+                        log_flush();
+                        build_tool("rm", "-rf", tree,
+                                   build_join(artifacts, "/asm.applied", null),
+                                   build_join(artifacts, "/asm.arch", null),
+                                   build_join(artifacts, "/asm.requested", null), null);
+                        present = false;
+                }
+        }
 
         if (present)
         {
