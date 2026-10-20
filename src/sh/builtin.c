@@ -3188,22 +3188,23 @@ PURE string_address env_get(const_string name)
         5 -- where this shell went on answering it; a name here with its bit
         set reads as unset and is assigned like any other.
 */
-static const string_address shell_dynamic_names[] = {
-    "EUID", "RANDOM", "LINENO", "OSTYPE", "SECONDS", "SRANDOM",
-    "BASHPID", "HOSTNAME", "HOSTTYPE", "MACHTYPE", "BASHOPTS",
-    "SHELLOPTS", "BASH_COMMAND", "BASH_VERSION", "EPOCHSECONDS",
-    "BASH_SUBSHELL", "EPOCHREALTIME", "GROUPS", "DIRSTACK", "BASH_TRAPSIG",
-    "BASH", "BASH_ARGV0", "BASH_MONOSECONDS", "COMP_WORDBREAKS",
-    "BASH_LOADABLES_PATH", "BASH_EXECUTION_STRING", "HISTCMD",
-};
-static const string_address shell_dynamic_listed[] = {
-    "EUID=", "RANDOM=", "LINENO=", "OSTYPE=", "SECONDS=", "SRANDOM=",
-    "BASHPID=", "HOSTNAME=", "HOSTTYPE=", "MACHTYPE=", "BASHOPTS=",
-    "SHELLOPTS=", "BASH_COMMAND=", "BASH_VERSION=", "EPOCHSECONDS=",
-    "BASH_SUBSHELL=", "EPOCHREALTIME=", "GROUPS=", "DIRSTACK=", "BASH_TRAPSIG=",
-    "BASH=", "BASH_ARGV0=", "BASH_MONOSECONDS=", "COMP_WORDBREAKS=",
-    "BASH_LOADABLES_PATH=", "BASH_EXECUTION_STRING=", "HISTCMD=",
-};
+//      One list, spelled three ways: the name, the name with its = for a
+//      listing, and its length, so a lookup compares a byte before it
+//      measures or compares anything.
+#define SHELL_DYNAMIC_LIST(X)                                                  \
+    X("EUID") X("RANDOM") X("LINENO") X("OSTYPE") X("SECONDS") X("SRANDOM")  \
+    X("BASHPID") X("HOSTNAME") X("HOSTTYPE") X("MACHTYPE") X("BASHOPTS")      \
+    X("SHELLOPTS") X("BASH_COMMAND") X("BASH_VERSION") X("EPOCHSECONDS")      \
+    X("BASH_SUBSHELL") X("EPOCHREALTIME") X("GROUPS") X("DIRSTACK")           \
+    X("BASH_TRAPSIG") X("BASH") X("BASH_ARGV0") X("BASH_MONOSECONDS")         \
+    X("COMP_WORDBREAKS") X("BASH_LOADABLES_PATH") X("BASH_EXECUTION_STRING")  \
+    X("HISTCMD")
+#define SHELL_DYNAMIC_NAME(text) text,
+#define SHELL_DYNAMIC_LISTED(text) text "=",
+#define SHELL_DYNAMIC_LENGTH(text) (p8)(sizeof(text) - 1),
+static const string_address shell_dynamic_names[] = {SHELL_DYNAMIC_LIST(SHELL_DYNAMIC_NAME)};
+static const string_address shell_dynamic_listed[] = {SHELL_DYNAMIC_LIST(SHELL_DYNAMIC_LISTED)};
+static const p8 shell_dynamic_lengths[] = {SHELL_DYNAMIC_LIST(SHELL_DYNAMIC_LENGTH)};
 static p32 shell_dynamic_gone HOT_STATE;
 
 //      The text of bash -c, which BASH_EXECUTION_STRING answers; null when
@@ -3229,7 +3230,8 @@ static COLD bipolar shell_dynamic_index(const_string name, positive length)
         //      Not memory_is_word: that takes its length from a literal,
         //      and these are pointers.
         for (positive at = 0; at < array_count(shell_dynamic_names); at++)
-                if (length == string_length(shell_dynamic_names[at]) &&
+                if (length == shell_dynamic_lengths[at] &&
+                    (p8)name[0] == shell_dynamic_names[at][0] &&
                     !memory_compare((address_any)name, shell_dynamic_names[at], length))
                         return (bipolar)at;
         return -1;
@@ -3307,7 +3309,7 @@ positive env_names_prefix(string_address prefix, positive length,
         */
         for (positive at = 0; at < array_count(shell_dynamic_names); at++)
         {
-                positive size = string_length(shell_dynamic_names[at]);
+                positive size = shell_dynamic_lengths[at];
                 bool held = shell_dynamic_gone >> at & 1;
 
                 if (size < length || memory_compare(shell_dynamic_names[at], prefix, length))
