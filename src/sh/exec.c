@@ -9911,6 +9911,119 @@ static b32 exec_call(positive slot)
 }
 
 /*
+        The command a substitution stands in is half made: its words so far
+        are in the store and the argument table, the word being built is in
+        the expander's buffers. A command run inside it, here and not in a
+        child, makes its own and gives them back: held is everything that has
+        to come back as it was, and the expander starts empty in between.
+*/
+typedef struct
+{
+        p8 address_to text;
+        positive text_room;
+        p8 address_to mark;
+        positive mark_room;
+        positive length;
+        positive empty;
+        //      expand_begin sets the depth to nothing, and the $( ) being
+        //      run is one level of the word it stands in.
+        positive depth;
+        bool overflow;
+        bool quoted;
+        bool failed;
+        bool at_empty;
+        bool explicit_empty;
+        bool assigning;
+        bool element;
+        bool floored;
+        bool token_overflow;
+        shell_mark floor;
+        string_address address_to argv;
+        positive argv_room;
+        positive argc;
+        positive token;
+        b32 wait;
+        positive line;
+        shell_mark inside;
+} exec_held_expansion;
+
+static fn exec_expansion_hold(exec_held_expansion address_to held)
+{
+        held->text = expand_text;
+        held->text_room = expand_text_room;
+        held->mark = expand_mark;
+        held->mark_room = expand_mark_room;
+        held->length = expand_length;
+        held->depth = expand_depth;
+        held->overflow = expand_overflow;
+        held->quoted = expand_quoted_seen;
+        held->empty = expand_empty_count;
+        held->failed = expand_failed;
+        held->at_empty = expand_name_at_empty;
+        held->explicit_empty = expand_explicit_empty;
+        held->assigning = expand_assigning;
+        held->element = expand_list_element;
+        held->floored = expand_store_floored;
+        held->floor = expand_store_floor;
+        held->argv = shell_argv;
+        held->argv_room = shell_argv_room;
+        held->argc = shell_argc;
+        held->token = token_used;
+        held->token_overflow = token_overflow;
+        held->wait = exec_wait_node;
+        held->line = exec_line;
+        held->inside = shell_store_mark(address_of expand_store);
+
+        expand_text = null;
+        expand_text_room = 0;
+        expand_mark = null;
+        expand_mark_room = 0;
+        expand_length = 0;
+        expand_overflow = false;
+        expand_quoted_seen = false;
+        expand_empty_count = 0;
+        expand_failed = false;
+        expand_name_at_empty = false;
+        expand_explicit_empty = false;
+        expand_assigning = false;
+        expand_list_element = false;
+        expand_store_floor = held->inside;
+        expand_store_floored = true;
+        shell_argv = null;
+        shell_argv_room = 0;
+        shell_argc = 0;
+}
+
+// The caller has already put away whatever its own command made.
+static fn exec_expansion_give_back(exec_held_expansion address_to held)
+{
+        expand_text = held->text;
+        expand_text_room = held->text_room;
+        expand_mark = held->mark;
+        expand_mark_room = held->mark_room;
+        expand_length = held->length;
+        expand_depth = held->depth;
+        expand_overflow = held->overflow;
+        expand_quoted_seen = held->quoted;
+        expand_empty_count = held->empty;
+        expand_failed = held->failed;
+        expand_name_at_empty = held->at_empty;
+        expand_explicit_empty = held->explicit_empty;
+        expand_assigning = held->assigning;
+        expand_list_element = held->element;
+        expand_store_floored = held->floored;
+        expand_store_floor = held->floor;
+        shell_argv = held->argv;
+        shell_argv_room = held->argv_room;
+        shell_argc = held->argc;
+        token_used = held->token;
+        token_overflow = held->token_overflow;
+        exec_wait_node = held->wait;
+        exec_line = held->line;
+        shell_store_rewind(address_of expand_store, held->inside);
+}
+
+/*
         ${ command; } and ${| command; }, bash 5.3's substitutions that run in
         the shell itself.
 
@@ -9984,48 +10097,9 @@ bipolar shell_funsub_run(string_address text, bool value_form,
                 and gives them back.
         */
         {
-                p8 address_to held_text = expand_text;
-                positive held_text_room = expand_text_room;
-                p8 address_to held_mark = expand_mark;
-                positive held_mark_room = expand_mark_room;
-                positive held_length = expand_length;
-                bool held_overflow = expand_overflow;
-                bool held_quoted = expand_quoted_seen;
-                positive held_empty = expand_empty_count;
-                bool held_failed = expand_failed;
-                bool held_at_empty = expand_name_at_empty;
-                bool held_explicit = expand_explicit_empty;
-                bool held_assigning = expand_assigning;
-                bool held_element = expand_list_element;
-                bool held_floored = expand_store_floored;
-                shell_mark held_floor = expand_store_floor;
-                string_address address_to held_argv = shell_argv;
-                positive held_argv_room = shell_argv_room;
-                positive held_argc = shell_argc;
-                positive held_token = token_used;
-                bool held_token_overflow = token_overflow;
-                b32 held_wait = exec_wait_node;
-                positive held_line = exec_line;
-                shell_mark inside = shell_store_mark(address_of expand_store);
+                exec_held_expansion held;
 
-                expand_text = null;
-                expand_text_room = 0;
-                expand_mark = null;
-                expand_mark_room = 0;
-                expand_length = 0;
-                expand_overflow = false;
-                expand_quoted_seen = false;
-                expand_empty_count = 0;
-                expand_failed = false;
-                expand_name_at_empty = false;
-                expand_explicit_empty = false;
-                expand_assigning = false;
-                expand_list_element = false;
-                expand_store_floor = inside;
-                expand_store_floored = true;
-                shell_argv = null;
-                shell_argv_room = 0;
-                shell_argc = 0;
+                exec_expansion_hold(address_of held);
 
                 //      Its lines are counted from the one it stands on, so
                 //      a diagnostic names the line of the script.
@@ -10051,29 +10125,7 @@ bipolar shell_funsub_run(string_address text, bool value_form,
                 if (shell_argv)
                         memory_free(shell_argv,
                                     shell_argv_room * sizeof(shell_argv[0]));
-                expand_text = held_text;
-                expand_text_room = held_text_room;
-                expand_mark = held_mark;
-                expand_mark_room = held_mark_room;
-                expand_length = held_length;
-                expand_overflow = held_overflow;
-                expand_quoted_seen = held_quoted;
-                expand_empty_count = held_empty;
-                expand_failed = held_failed;
-                expand_name_at_empty = held_at_empty;
-                expand_explicit_empty = held_explicit;
-                expand_assigning = held_assigning;
-                expand_list_element = held_element;
-                expand_store_floored = held_floored;
-                expand_store_floor = held_floor;
-                shell_argv = held_argv;
-                shell_argv_room = held_argv_room;
-                shell_argc = held_argc;
-                token_used = held_token;
-                token_overflow = held_token_overflow;
-                exec_wait_node = held_wait;
-                exec_line = held_line;
-                shell_store_rewind(address_of expand_store, inside);
+                exec_expansion_give_back(address_of held);
                 shell_status = address_to status;
         }
         shell_local_leave();
@@ -10105,6 +10157,466 @@ bipolar shell_funsub_run(string_address text, bool value_form,
 
         (void)system_seek(handle, 0, FILE_SEEK_SET);
         return handle;
+}
+
+/*
+        $( ) of a builtin that does nothing but write, run in this shell.
+
+        A command substitution is a subshell: nothing it does may reach the
+        shell that asked, which is what the fork bought. echo and printf
+        write and set a status and touch nothing else, so when every word of
+        the command can only be read -- no assignment, no ?, no arithmetic,
+        no substitution inside it, no name that answers differently in a
+        child or moves when it is read -- there is nothing a child would have
+        kept from this shell, and the fork, the pipe and the wait are what
+        such a $( ) cost: thirty thousand cycles, against a builtin's few
+        hundred. Everything is decided from the text and the shell's state
+        before anything runs, and anything not proven goes to the child as
+        it always did.
+*/
+
+// Whether $name, ${name} or the like at at is a read and nothing else.
+// Answers where it ends, or null.
+static string_address exec_inline_dollar(string_address at)
+{
+        string_address name = at + 1;
+        bool braced = string_is(name, '{');
+        positive length;
+
+        if (braced)
+                name++;
+
+        if (byte_is_alpha(string_get(name)) || string_is(name, '_'))
+        {
+                length = string_span(name, string_set_name);
+                //      The names that answer when read: RANDOM moves,
+                //      BASHPID and BASH_SUBSHELL are the child's, and $_ is
+                //      the last word of a command this one is not.
+                if (shell_dynamic_index(name, length) >= 0 ||
+                    (length == 1 && string_is(name, '_')))
+                        return null;
+        }
+        else if (byte_is_digit(string_get(name)))
+                length = 1;
+        else if (!braced && (string_is(name, '#') || string_is(name, '@') ||
+                             string_is(name, '*') || string_is(name, '?') ||
+                             string_is(name, '$')))
+                length = 1;
+        else
+                return null;
+
+        if (braced)
+                return string_is(name + length, '}') ? name + length + 1 : null;
+
+        return name + length;
+}
+
+/*
+        The utilities of this image that run here as well as in a child: each
+        answers by returning, never by exiting, starts from nothing of its own
+        each time, reads no input, and writes only to standard output and
+        standard error. A name goes on this list only once its code has been
+        read for all four.
+*/
+static const string_address exec_inline_tools[] = {"basename", "dirname", "expr", null};
+
+typedef struct
+{
+        shell_command_function builtin;
+        positive tool;
+} exec_inline_command;
+
+static bool exec_inline_screen(string_address text, exec_inline_command address_to found)
+{
+        string_address at = text;
+        p8 name[16];
+        positive length;
+        shell_command address_to command = null;
+        positive words = 0;
+        bool format;
+
+        if (shell_options & (SHELL_FLAG('x') | SHELL_FLAG('u')) ||
+            trap_action(TRAP_DEBUG) || trap_action(TRAP_ERR) ||
+            trap_action(TRAP_RETURN))
+                return false;
+
+        while (string_is(at, ' ') || string_is(at, '\t') || string_is(at, '\n'))
+                at++;
+
+        length = string_span(at, string_set_name);
+        if (length < 4 || length >= sizeof(name) ||
+            !(string_is(at + length, ' ') || string_is(at + length, '\t') ||
+              string_is(at + length, '\n') || !string_get(at + length)))
+                return false;
+
+        memory_copy_end(name, at, length);
+        found->builtin = null;
+        found->tool = SHELL_TOOLS;
+
+        {
+                positive2 named = string_hash_33_length(name);
+
+                if (exec_function_locate(name, named) != positive_max)
+                        return false;
+                if (!(shell_bash_compat && !shell_shopt_on(EXPAND_ALIASES)) &&
+                    alias_lookup(name))
+                        return false;
+
+                command = shell_command_named_hashed(name, named);
+                if (command)
+                {
+                        if (command->function != shell_echo &&
+                            command->function != shell_printf)
+                                return false;
+                        found->builtin = command->function;
+                }
+                else
+                {
+                        positive listed = 0;
+
+                        while (exec_inline_tools[listed] &&
+                               !string_equals(exec_inline_tools[listed], name))
+                                listed++;
+                        if (!exec_inline_tools[listed] ||
+                            !shell_tool_only_here(name, named))
+                                return false;
+                        found->tool = shell_tool_find_hashed(name, named);
+                        if (found->tool == SHELL_TOOLS)
+                                return false;
+                }
+        }
+
+        //      printf -v assigns, so the format is spelled out and is not an
+        //      option: no expansion in it and no dash at its start.
+        format = found->builtin == shell_printf;
+        at += length;
+
+        for (;;)
+        {
+                while (string_is(at, ' ') || string_is(at, '\t'))
+                        at++;
+
+                if (string_is(at, '\n'))
+                {
+                        while (string_is(at, ' ') || string_is(at, '\t') ||
+                               string_is(at, '\n'))
+                                at++;
+                        if (string_get(at))
+                                return false;
+                }
+
+                if (!string_get(at))
+                        break;
+
+                words++;
+                if (format && words == 1)
+                {
+                        string_address first = at;
+                        string_address stop = at;
+
+                        if (string_is(first, '\'') || string_is(first, '"'))
+                                first++;
+                        if (string_is(first, '-'))
+                                return false;
+                        while (string_get(stop) && !string_is(stop, ' ') &&
+                               !string_is(stop, '\t') && !string_is(stop, '\n'))
+                        {
+                                if (string_is(stop, '$') || string_is(stop, '`'))
+                                        return false;
+                                stop++;
+                        }
+                }
+
+                while (string_get(at) && !string_is(at, ' ') && !string_is(at, '\t') &&
+                       !string_is(at, '\n'))
+                {
+                        p8 c = string_get(at);
+
+                        if (c == '\'')
+                        {
+                                string_address close = string_first_of(at + 1, '\'');
+
+                                if (!close)
+                                        return false;
+                                at = close + 1;
+                        }
+                        else if (c == '"')
+                        {
+                                at++;
+                                while (!string_is(at, '"'))
+                                {
+                                        if (!string_get(at) || string_is(at, '`'))
+                                                return false;
+                                        if (string_is(at, '\\'))
+                                        {
+                                                if (!string_get(at + 1) ||
+                                                    string_is(at + 1, '\n'))
+                                                        return false;
+                                                at += 2;
+                                        }
+                                        else if (string_is(at, '$'))
+                                        {
+                                                if (!(at = exec_inline_dollar(at)))
+                                                        return false;
+                                        }
+                                        else
+                                                at++;
+                                }
+                                at++;
+                        }
+                        else if (c == '\\')
+                        {
+                                if (!string_get(at + 1) || string_is(at + 1, '\n'))
+                                        return false;
+                                at += 2;
+                        }
+                        else if (c == '$')
+                        {
+                                if (!(at = exec_inline_dollar(at)))
+                                        return false;
+                        }
+                        //      Operators, a comment, a glob, braces and a
+                        //      tilde are what this does not take.
+                        else if (c == ';' || c == '&' || c == '|' || c == '<' ||
+                                 c == '>' || c == '(' || c == ')' || c == '`' ||
+                                 c == '#' || c == '*' || c == '?' || c == '[' ||
+                                 c == ']' || c == '{' || c == '}' || c == '~')
+                                return false;
+                        else
+                                at++;
+                }
+        }
+
+        if (format && !words)
+                return false;
+
+        return true;
+}
+
+//      What the builtin wrote, kept here: one buffer for every such $( ),
+//      grown when one writes more and kept at its size.
+static p8 address_to exec_inline_out;
+static positive exec_inline_out_room;
+static positive exec_inline_out_used;
+static bool exec_inline_out_lost;
+//      The expander's buffers and argument table for the command run here,
+//      kept from one $( ) to the next rather than made and freed each time.
+static p8 address_to exec_inline_text;
+static positive exec_inline_text_room;
+static p8 address_to exec_inline_mark;
+static positive exec_inline_mark_room;
+static string_address address_to exec_inline_argv;
+static positive exec_inline_argv_room;
+
+static fn exec_inline_write(address_any data, positive length)
+{
+        if (exec_inline_out_lost)
+                return;
+        if (length > positive_max - exec_inline_out_used ||
+            !shell_room((address_any address_to)address_of exec_inline_out,
+                        address_of exec_inline_out_room, exec_inline_out_used + length, 1))
+        {
+                exec_inline_out_lost = true;
+                return;
+        }
+        memory_copy(exec_inline_out + exec_inline_out_used, data, length);
+        exec_inline_out_used += length;
+}
+
+/*
+        A utility writes to standard output itself, through lib.c's writer and
+        text.c's, so what it writes is caught where it goes: descriptor 1 is
+        a memory file for the call, made once and emptied after each.
+*/
+static bipolar exec_inline_file = -1;
+
+static bool exec_inline_tool(positive which, b32 address_to status)
+{
+        string_address address_to kept_list = program_argument_list();
+        b32 kept_count = program_argument_count();
+        bool kept_waited = exec_coproc_waited;
+        bipolar saved;
+        bipolar size;
+
+        //      A utility the register confines needs the child the filter
+        //      goes on; asked before anything has run.
+        if (floodlight_launch_decide(null, shell_argv, shell_argc, true, false, false,
+                                     null) != FLOODLIGHT_LAUNCH_ALLOW)
+                return false;
+
+        if (exec_inline_file < 0)
+        {
+                exec_inline_file = system_call_2(
+                    syscall(memfd_create), (positive)(string_address) "shell-inline",
+                    SHELL_PARSER_MFD_CLOEXEC);
+                if (exec_inline_file < 0)
+                        return false;
+        }
+
+        log_flush();
+        saved = exec_save_duplicate(1, null, 10);
+        if (saved < 0)
+                return false;
+        if (system_duplicate(exec_inline_file, 1, 0) < 0)
+        {
+                system_close(saved);
+                return false;
+        }
+
+        program_arguments_use(shell_argv, (b32)shell_argc);
+        address_to status = shell_tool_call(which);
+        program_arguments_use(kept_list, kept_count);
+        exec_coproc_waited = kept_waited;
+
+        log_flush();
+        system_duplicate(saved, 1, 0);
+        system_close(saved);
+
+        exec_inline_out_used = 0;
+        exec_inline_out_lost = false;
+        size = system_seek(exec_inline_file, 0, FILE_SEEK_CUR);
+        if (size > 0)
+        {
+                if (!shell_room((address_any address_to)address_of exec_inline_out,
+                                address_of exec_inline_out_room, (positive)size, 1) ||
+                    system_call_4(syscall(pread64), (positive)exec_inline_file,
+                                  (positive)exec_inline_out, (positive)size, 0) != size)
+                        exec_inline_out_lost = true;
+                else
+                        exec_inline_out_used = (positive)size;
+        }
+        system_call_2(syscall(ftruncate), (positive)exec_inline_file, 0);
+        system_seek(exec_inline_file, 0, FILE_SEEK_SET);
+        return true;
+}
+
+bool shell_inline_substitution(string_address text, p8 mark, positive start)
+{
+        exec_inline_command command;
+        exec_held_expansion held;
+        shell_words arguments;
+        b32 kept_status = shell_status;
+        b32 kept_entering = shell_status_entering;
+        b32 status;
+        bool failed;
+        bool ran = true;
+        string_address at = text;
+
+        if (!exec_inline_screen(text, address_of command))
+                return false;
+
+        exec_expansion_hold(address_of held);
+        expand_text = exec_inline_text;
+        expand_text_room = exec_inline_text_room;
+        expand_mark = exec_inline_mark;
+        expand_mark_room = exec_inline_mark_room;
+        shell_words_bind(address_of arguments, address_of exec_inline_argv,
+                         address_of exec_inline_argv_room);
+
+        //      The screen above proved the words are blank-separated, with
+        //      every quote closed; each is copied out whole and expanded the
+        //      way the child would have expanded it.
+        failed = false;
+        for (;;)
+        {
+                string_address word;
+                string_address stop;
+                p8 address_to copy;
+
+                while (string_is(at, ' ') || string_is(at, '\t') || string_is(at, '\n'))
+                        at++;
+                if (!string_get(at))
+                        break;
+
+                word = at;
+                while (string_get(at) && !string_is(at, ' ') && !string_is(at, '\t') &&
+                       !string_is(at, '\n'))
+                {
+                        if (string_is(at, '\''))
+                                at = string_first_of(at + 1, '\'') + 1;
+                        else if (string_is(at, '"'))
+                        {
+                                at++;
+                                while (!string_is(at, '"'))
+                                        at += string_is(at, '\\') ? 2 : 1;
+                                at++;
+                        }
+                        else
+                                at += string_is(at, '\\') ? 2 : 1;
+                }
+                stop = at;
+
+                copy = shell_store_take(address_of expand_store,
+                                        (positive)(stop - word) + 1);
+                if (!copy)
+                {
+                        failed = true;
+                        break;
+                }
+                memory_copy_end(copy, word, (positive)(stop - word));
+                shell_expand_fields(copy, address_of arguments);
+                if (expand_failed || expand_overflow)
+                {
+                        failed = true;
+                        break;
+                }
+        }
+
+        if (!failed)
+        {
+                shell_argv = address_to arguments.word;
+                shell_argv_room = address_to arguments.room;
+                shell_argc = arguments.count;
+                exec_inline_out_used = 0;
+                exec_inline_out_lost = false;
+                if (command.builtin)
+                {
+                        shell_status_entering = shell_status;
+                        shell_status = 0;
+                        command.builtin(exec_inline_write);
+                }
+                else if (exec_inline_tool(command.tool, address_of status))
+                        shell_status = status;
+                else
+                        ran = false;
+        }
+
+        status = shell_status;
+        shell_status = kept_status;
+        shell_status_entering = kept_entering;
+
+        exec_inline_text = expand_text;
+        exec_inline_text_room = expand_text_room;
+        exec_inline_mark = expand_mark;
+        exec_inline_mark_room = expand_mark_room;
+        exec_expansion_give_back(address_of held);
+
+        //      Nothing has run and nothing the words did can be seen: the
+        //      child takes it, as it would have.
+        if (!ran)
+                return false;
+
+        //      An expansion that failed has already said why, the way the
+        //      child would have; the substitution is then empty and answers 1.
+        if (failed)
+        {
+                expand_substitution_done(status ? status : 1);
+                return true;
+        }
+
+        if (exec_inline_out_lost)
+                expand_overflow = true;
+        else
+        {
+                bool dropped = false;
+
+                expand_substitution_take(exec_inline_out, exec_inline_out_used, mark,
+                                         address_of dropped);
+                expand_substitution_finish(dropped, start);
+        }
+
+        expand_substitution_done(status);
+        return true;
 }
 
 // One command, run as its own line in a nested shell.

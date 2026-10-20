@@ -21480,10 +21480,60 @@ def shell_regress_substitution_collision(rng):
 
 
 def shell_regress_pipe_failure(rng):
-    """A command substitution whose pipe cannot be made says so and sets its status."""
+    """A command substitution whose pipe cannot be made says so and sets its status.
+    The body is two commands: a lone echo runs in the shell with no pipe to make."""
     limit = rng.choice(("3", "4"))
-    body = rng.choice(("x=$(echo hi); echo st=$? x=$x", 'echo "$(echo hi)"; echo st=$?'))
+    body = rng.choice(("x=$(echo hi; :); echo st=$? x=$x", 'echo "$(echo hi; :)"; echo st=$?'))
     return "regress-pipe-failure", shell_ALL, shell_program(f"ulimit -n {limit}", body)
+
+
+def shell_regress_inline_substitution(rng):
+    """$( ) of a lone echo or printf runs in the shell, with no child: what it
+    writes, its status, $? around it and the newlines it ends with are what a
+    child gave, and a word or a name that a child would keep to itself -- a
+    function or an alias of the same name, ${u?}, set -u -- still gets one."""
+    lines = [
+        "x=$(printf '%s-%05d-%x' name 7 255); echo \"[$x]\"",
+        "echo \"[$(echo a b   c)]\"",
+        "x=$(printf 'abc'); echo \"[$x]\"",
+        "x=$(printf 'a\\n\\n\\n'); echo \"[$x]\"",
+        "x=$(printf '%s\\n' one two three); echo \"[$x]\"",
+        "false; x=$(echo $?); echo \"[$x] $?\"",
+        "x=$(false); echo \"after=$?\"",
+        "x=$(printf '%d' abc 2>/dev/null); echo \"[$x]\"",
+        "set -- p1 'p 2'; x=$(echo \"$@\" $# \"$*\"); echo \"[$x]\"",
+        "IFS=:; v='a:b'; x=$(echo $v); echo \"[$x]\"; unset IFS",
+        "x=$(echo \\$HOME \"q\\\"uote\" 'sin gle'); echo \"[$x]\"",
+        "x=$(  echo   spaced  ); echo \"[$x]\"",
+        "x=\"$(echo \"in quotes\")\"; echo \"[$x]\"",
+        "echo $(echo a) $(echo b)",
+        "echo \"$(echo c) $((1+2)) ${HOME:+h}\"",
+        "big=$(printf '%3000s' x); echo ${#big}",
+        "printf() { command printf 'F%s' \"$@\"; }; x=$(printf a); echo \"[$x]\"; unset -f printf",
+        "u=; x=$(echo ${u?boom}) 2>/dev/null; echo \"st=$?\"",
+        "(set -u; x=$(echo ${nosuch}) 2>/dev/null; echo \"st=$?\")",
+        "set -e; x=$(printf ok); echo \"[$x]\"; set +e",
+    ]
+    rng.shuffle(lines)
+    return "regress-inline-substitution", shell_ALL, shell_program(*lines[:rng.randint(6, len(lines))])
+
+
+def shell_regress_inline_substitution_bash(rng):
+    """The bash side of the same: a child's own $BASHPID and $BASH_SUBSHELL,
+    printf -v kept from the shell, \\c, and the word about a NUL."""
+    lines = [
+        "x=$(echo $BASHPID); [ \"$x\" != \"$$\" ] && echo pid-differs",
+        "x=$(echo $BASH_SUBSHELL); echo \"[$x]\"",
+        "x=$(printf -v y 1); echo \"[${y-unset}]\"",
+        "x=$(echo -e 'a\\cb'); echo \"[$x]\"",
+        "x=$(echo -n abc); echo \"[$x]\"",
+        "x=$(printf 'a\\0b'); echo \"[$x]\"",
+        #       Bash reads a $( ) when it reads the line, so an alias set on
+        #       the line before is the one it sees.
+        "shopt -s expand_aliases; alias echo='printf ALIAS'\nx=$(echo hi); unalias echo; printf '[%s]\\n' \"$x\"",
+    ]
+    rng.shuffle(lines)
+    return "regress-inline-substitution-bash", shell_BASH, shell_program(*lines[:rng.randint(3, len(lines))])
 
 
 def shell_regress_array_comment(rng):
@@ -21796,6 +21846,8 @@ SHELL_FAMILIES = (
     shell_regress_ifs_utf8_join,
     shell_regress_substitution_collision,
     shell_regress_pipe_failure,
+    shell_regress_inline_substitution,
+    shell_regress_inline_substitution_bash,
     shell_regress_array_comment,
     shell_lang_fc_default_editor,
     shell_lang_jobs_x_words,
@@ -96189,22 +96241,22 @@ PINNED = r"""
 {"case":{"argv":["-c","(export LC_ALL=C.UTF-8; exec -a bash /proc/$$/exe -c 'IFS='\"'\"'日'\"'\"'\na=(one two three)\nset -- one two three\nprintf '\"'\"'<%s>\\n'\"'\"' \"$*\"\n')\n"],"family":"regress-ifs-utf8-join","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-ifs-utf8-join"},
 {"case":{"argv":["-c","(export LC_ALL=C.UTF-8; exec -a bash /proc/$$/exe -c 'IFS='\"'\"'日'\"'\"'\na=(one two three)\nset -- one two three\nprintf '\"'\"'<%s>\\n'\"'\"' \"${a[*]}\"\n')\n"],"family":"regress-ifs-utf8-join","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-ifs-utf8-join"},
 {"case":{"argv":["-c","(export LC_ALL=C.UTF-8; exec -a bash /proc/$$/exe -c 'IFS='\"'\"'日'\"'\"'\na=(one two three)\nset -- one two three\nprintf '\"'\"'<%s>\\n'\"'\"' \"${a[*]#?}\"\n')\n"],"family":"regress-ifs-utf8-join","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-ifs-utf8-join"},
-{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
-{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"bash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 3\necho \"$(echo hi; :)\"; echo st=$?\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
+{"case":{"argv":["-c","ulimit -n 4\nx=$(echo hi; :); echo st=$? x=$x\n"],"family":"regress-pipe-failure","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-pipe-failure"},
 {"case":{"argv":["-c","set -- a b c\nprintf '<%s>\\n' ${9223372036854775808:-unset}\n"],"family":"regress-positional-overflow","fixture":"shell","mode":"posix","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-positional-overflow"},
 {"case":{"argv":["-c","set -- a b c\nprintf '<%s>\\n' ${18446744073709551616:-unset}\n"],"family":"regress-positional-overflow","fixture":"shell","mode":"sh","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-positional-overflow"},
 {"case":{"argv":["-c","set -- a b c\nprintf '<%s>\\n' ${18446744073709551617}\n"],"family":"regress-positional-overflow","fixture":"shell","mode":"dash","stdin":"empty","tier":"family","utility":"shell"},"domain":"shell","list":"regression","utility":"regress-positional-overflow"},

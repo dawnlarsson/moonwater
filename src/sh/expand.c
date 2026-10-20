@@ -5105,6 +5105,46 @@ static fn expand_substitution_body(string_address command, bool capture);
 //      $(printf 'a\0b') was a where they give ab. bash says so once.
 static bool expand_substitution_keep;
 
+//      What a substitution wrote, into the word: its NULs are dropped, as
+//      every shell drops them, and the rest goes in as it came.
+static fn expand_substitution_take(p8 address_to block, positive got, p8 mark,
+                                   bool address_to dropped)
+{
+        positive at = 0;
+
+        while (at < got)
+        {
+                positive run = memory_span_byte(block + at, 0, got - at);
+
+                if (run)
+                {
+                        address_to dropped = true;
+                        at += run;
+                        continue;
+                }
+
+                p8 address_to nul = memory_first_of(block + at, 0, got - at);
+                positive take = nul ? (positive)(nul - (block + at)) : got - at;
+
+                expand_push_run(block + at, take, mark);
+                at += take;
+        }
+}
+
+// Once all of it is in: bash's word about the NULs, and the newlines at the end off.
+static fn expand_substitution_finish(bool dropped, positive start)
+{
+        if (dropped && shell_bash_compat)
+        {
+                expand_where();
+                writer_stderr_once(str("warning: command substitution: ignored null byte in input\n"));
+        }
+
+        if (!expand_substitution_keep)
+                expand_length -= memory_span_byte_reverse(
+                    expand_text + start, '\n', expand_length - start);
+}
+
 static fn expand_read_substitution(b32 fd, p8 mark, positive start)
 {
         p8 block[512];
@@ -5112,42 +5152,10 @@ static fn expand_read_substitution(b32 fd, p8 mark, positive start)
         bool dropped = false;
 
         while ((got = system_read_retry((positive)fd, block, sizeof(block))) > 0)
-        {
-                positive at = 0;
-
-                while (at < (positive)got)
-                {
-                        positive run = memory_span_byte(block + at, 0,
-                                                        (positive)got - at);
-
-                        if (run)
-                        {
-                                dropped = true;
-                                at += run;
-                                continue;
-                        }
-
-                        p8 address_to nul = memory_first_of(block + at, 0,
-                                                            (positive)got - at);
-                        positive take = nul ? (positive)(nul - (block + at))
-                                            : (positive)got - at;
-
-                        expand_push_run(block + at, take, mark);
-                        at += take;
-                }
-        }
-
-        if (dropped && shell_bash_compat)
-        {
-                expand_where();
-                writer_stderr_once(str("warning: command substitution: ignored null byte in input\n"));
-        }
+                expand_substitution_take(block, (positive)got, mark, address_of dropped);
 
         system_close(fd);
-
-        if (!expand_substitution_keep)
-                expand_length -= memory_span_byte_reverse(
-                    expand_text + start, '\n', expand_length - start);
+        expand_substitution_finish(dropped, start);
 }
 
 static fn expand_substitution_done(b32 status)
@@ -5158,6 +5166,8 @@ static fn expand_substitution_done(b32 status)
                 shell_status = status;
 }
 
+bool shell_inline_substitution(string_address text, p8 mark, positive start);
+
 static fn expand_run(string_address command, bool quoted)
 {
         p8 mark = quoted ? MARK_QUOTED : MARK_FIELD;
@@ -5165,6 +5175,10 @@ static fn expand_run(string_address command, bool quoted)
         b32 channel[2];
         bipolar child = -1;
         positive status = 0;
+
+        //      A builtin that only writes runs here, with no child to make.
+        if (shell_inline_substitution(command, mark, start))
+                return;
 
         // Whatever this shell has buffered belongs to this shell, and a fork
         // with it still in hand prints all of it a second time.
