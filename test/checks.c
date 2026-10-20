@@ -99758,7 +99758,7 @@ b32 main(void)
                 shell_argc = 1; shell_argv[0] = names[i];
                 shell_command address_to command = shell_command_named_hashed(
                     names[i], string_hash_33_length(names[i]));
-                command->function(capture, null);
+                command->function(capture);
                 check("constant-status handlers", shell_status == (i == 2));
         }
         static const struct {positive bytes; string_address text;} sizes[] = {
