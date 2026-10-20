@@ -48265,6 +48265,50 @@ static unsigned long long ranged_lines_cases(unsigned char *d_end, unsigned char
 }
 
 #ifdef CHECK_ranged
+/*
+        memory_first_of's windows for a short count and the first sixty four
+        of a long one: every count to 300 and 4096 and 65536, the byte at every
+        place in the first 80 and the last 80 and nowhere, each count's span
+        ending against a page that faults and starting just after one, and the
+        bytes past the count holding the byte so a read past it answers wrong.
+*/
+static unsigned long long ranged_first_of_cases(p8 address_to page_end, p8 address_to page_front)
+{
+        static const positive longs[] = {511, 4095, 4096, 4097, 65536};
+        unsigned long long faults = 0;
+
+        for (positive at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
+        {
+                positive n = at <= 300 ? at : longs[at - 301];
+
+                for (positive where = 0; where < 2; where++)
+                {
+                        p8 address_to span = where ? page_front : page_end - n;
+                        bool front = where;
+
+                        if (front && n > 16384 - 64)
+                                continue;
+                        for (positive i = 0; i < n; i++)
+                                span[i] = (p8)(ranged_byte() | 1);
+                        if (front)
+                                for (positive i = n; i < n + 64; i++)
+                                        span[i] = 0x2a;
+                        for (b64 hit = -1; hit < (b64)n; hit++)
+                        {
+                                if (hit >= 80 && hit < (b64)n - 80)
+                                        continue;
+                                if (hit >= 0)
+                                        span[hit] = 0x2a;
+                                address_any got = (memory_first_of)(span, 0x2a, n);
+                                faults += got != (hit >= 0 ? span + hit : null);
+                                if (hit >= 0)
+                                        span[hit] = (p8)(ranged_byte() | 1) == 0x2a ? 0x2b : 0x2d;
+                        }
+                }
+        }
+        return faults;
+}
+
 //      A run of RANGED_SPAN bytes whose end is a page that faults, or whose
 //      start is just after one.
 static unsigned char *ranged_end(void)
@@ -48308,6 +48352,9 @@ static fn ranged_tier(string_address tier)
               ranged_length_cases(ranged_d_end) == 0);
         check("memory_encode_power2_lines: every bits, groups and line, against the routine with the newlines put in",
               ranged_lines_cases(ranged_d_end, ranged_s_end) == 0);
+        check("memory_first_of: every count to 300 and long ones, the byte at each end's every place and nowhere, against "
+              "pages that fault at either end",
+              ranged_first_of_cases(ranged_d_end, ranged_d_front) == 0);
 }
 
 /*

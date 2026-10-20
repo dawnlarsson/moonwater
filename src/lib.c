@@ -6699,7 +6699,7 @@ __asm__(
     // Kernel builds reach that entry directly and never read feature bytes.
     "xor %eax, %eax\n"
     ASM_USERSPACE_WIDE(
-        ASM_NARROW("cpu_has_avx2", "5f")
+        ASM_NARROW("cpu_has_avx2", ".Lfirst_sse2")
         //
         //      Sixty four bytes or fewer: two 256-bit compares of the first sixty four, the flags of both in one
         //      register, a mask a shift makes cut to the count, and the lowest flag left. No branch on the size,
@@ -6739,6 +6739,44 @@ __asm__(
         ".Lfirst_edge:\n   cmp $32, %rdx\n   jb 5f\n"
         WIDE_MEMORY(AVX2_WIDTH, AVX2_BROADCAST, AVX2_ZEROED, AVX2_HUNT,
                     AVX2_HUNT_QUAD, AVX2_HUNT_QUAD_WHICH, AVX2_LEAVE, "5f")
+        //
+        //      Without AVX2, xmm windows where it went a word at a time: the first thirty two as one mask of two
+        //      compares and one branch, sixty four a turn folded by por, sixteen a turn under that, and the
+        //      count's last sixteen read whole, the bytes in front of the cursor in it having been asked already
+        //      and held none. Under sixteen bytes one compare of the sixteen at the pointer, when they do not
+        //      cross into the next page, cut to the count. Core cycles a line on a 9950X, each search starting
+        //      where the last ended over a megabyte: lines of 2 to 6 bytes 27.6 to 16.2, 8 to 27 39.2 to 16.4,
+        //      20 to 62 54.4 to 24.0, 20 to 80 56.5 to 23.6, the lines of C source 35.9 to 22.2; 64 KiB with no
+        //      match 0.18 to 0.06 a byte. The two compares branched on one at a time, the first sixteen's first,
+        //      took 2 to 6 to 13.3 and 8 to 27 only to 24.4. bsf, not tzcnt: SSE2 has no BMI.
+        //
+        //      The same split of the first thirty two with AVX2, two 128-bit compares branched on one at a
+        //      time, was 15.6 to 13.3 at 2 to 6 bytes but 18.2 to 23.5 at 8 to 27 and 17.5 to 18.5 on the C
+        //      source; the first sixty four as one mask of two 256-bit compares, 17.5 to 18.8 on the source.
+        //      Neither replaced the two branches above.
+        //
+        ".Lfirst_sse2:\n   cmp $16, %rdx\n   jb .Lfirst_sse2_small\n"
+        "movzbl %sil, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+        "lea (%rdi,%rdx), %r9\n   cmp $32, %rdx\n   jb .Lfirst_sse2_quad\n"
+        "movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm2\n   pcmpeqb %xmm1, %xmm0\n   pcmpeqb %xmm1, %xmm2\n   pmovmskb %xmm0, %eax\n   pmovmskb %xmm2, %ecx\n"
+        "shl $16, %ecx\n   or %ecx, %eax\n   jnz .Lfirst_sse2_hit\n   add $32, %rdi\n"
+        ".balign 16\n.Lfirst_sse2_quad:\n   mov %r9, %r8\n   sub %rdi, %r8\n   cmp $64, %r8\n   jb .Lfirst_sse2_one\n"
+        "movdqu (%rdi), %xmm2\n   movdqu 16(%rdi), %xmm3\n   movdqu 32(%rdi), %xmm4\n   movdqu 48(%rdi), %xmm5\n"
+        "pcmpeqb %xmm1, %xmm2\n   pcmpeqb %xmm1, %xmm3\n   pcmpeqb %xmm1, %xmm4\n   pcmpeqb %xmm1, %xmm5\n"
+        "movdqa %xmm2, %xmm6\n   por %xmm3, %xmm6\n   movdqa %xmm4, %xmm7\n   por %xmm5, %xmm7\n   por %xmm7, %xmm6\n   pmovmskb %xmm6, %eax\n"
+        "test %eax, %eax\n   jnz .Lfirst_sse2_which\n   add $64, %rdi\n   jmp .Lfirst_sse2_quad\n"
+        ".Lfirst_sse2_which:\n   pmovmskb %xmm2, %eax\n   pmovmskb %xmm3, %ecx\n   shl $16, %ecx\n   or %ecx, %eax\n   pmovmskb %xmm4, %ecx\n"
+        "shl $32, %rcx\n   or %rcx, %rax\n   pmovmskb %xmm5, %ecx\n   shl $48, %rcx\n   or %rcx, %rax\n   bsf %rax, %rax\n   add %rdi, %rax\n" ASM_RET
+        ".Lfirst_sse2_one:\n   cmp $16, %r8\n   jb .Lfirst_sse2_last\n   movdqu (%rdi), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %eax\n"
+        "test %eax, %eax\n   jnz .Lfirst_sse2_hit\n   add $16, %rdi\n   sub $16, %r8\n   jmp .Lfirst_sse2_one\n"
+        ".Lfirst_sse2_last:\n   test %r8, %r8\n   jz .Lfirst_sse2_none\n   lea -16(%r9), %rdi\n   movdqu (%rdi), %xmm0\n   pcmpeqb %xmm1, %xmm0\n"
+        "pmovmskb %xmm0, %eax\n   test %eax, %eax\n   jnz .Lfirst_sse2_hit\n"
+        ".Lfirst_sse2_none:\n   xor %eax, %eax\n" ASM_RET
+        ".Lfirst_sse2_hit:\n   bsf %eax, %eax\n   add %rdi, %rax\n" ASM_RET
+        ".Lfirst_sse2_small:\n   test %rdx, %rdx\n   jz .Lfirst_sse2_none\n   mov %edi, %ecx\n   not %ecx\n   test $0xff0, %ecx\n   jz 5f\n"
+        "movzbl %sil, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+        "movdqu (%rdi), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %eax\n   mov %edx, %ecx\n   mov $1, %r8d\n   shl %cl, %r8d\n   dec %r8d\n"
+        "and %r8d, %eax\n   jz .Lfirst_sse2_none\n   bsf %eax, %eax\n   add %rdi, %rax\n" ASM_RET
     )
     "5:  test %rdx, %rdx\n   jz 9f\n   movzbl %sil, %ecx\n   movabs $0x0101010101010101, %r10\n"
     "mov %rcx, %rsi\n   imul %r10, %rsi\n   movabs $0x8080808080808080, %r11\n   lea (%rdi,%rdx), %r9  # one past the last byte we may report\n"
