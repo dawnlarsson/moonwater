@@ -5206,7 +5206,7 @@ static address_any file_tree_node_take(address_any parent, positive header,
         about no name at all -- du's totals, its read failures -- passes no
         head and carries no path, and the sink steps over the record alone.
 */
-static bool file_tree_put(parallel_output address_to output,
+static inline INLINE bool file_tree_put(parallel_output address_to output,
                           address_any record, positive size,
                           p32 address_to path_bytes,
                           string_address head, positive head_length,
