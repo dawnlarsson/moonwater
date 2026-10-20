@@ -934,11 +934,12 @@ freestanding()
 
         #       MW_RANGES=1 builds every program and check with
         #       MOONWATER_RANGES_CHECKED, where a call-site entry's broken
-        #       promise is seen: a __max_N count past N traps, and a
-        #       __room_N copy faults on a source with no room and spoils the
-        #       destination's room after it, so a caller that kept anything
-        #       there answers wrong. The ranged lane builds its own shell this
-        #       way for the call sites; this asks it of any lane.
+        #       promise is seen: a __room_N copy traps against an object the
+        #       compiler can see the end of, faults on a source with no room
+        #       and spoils the destination's room after it, so a caller that
+        #       kept anything there answers wrong. The ranged lane builds its
+        #       own shell this way for the call sites; this asks it of any
+        #       lane.
         #
         #           MW_RANGES=1 sh test/run text
         if [ -n "${MW_RANGES:-}" ]; then

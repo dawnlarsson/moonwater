@@ -8001,29 +8001,29 @@ static inline INLINE address_any copy_until_known(address_any destination,
         and one with no entry is an undeclared name, a build that stops
         rather than a call that runs the slower body.
 
-        LIBRARY_AT_MOST is the question a wrapper asks before it routes a
-        call to a __max_ entry on its own: whether the compiler has already
-        proved the count is in range -- from a mask, an earlier test, a
-        clamp -- without its being a literal. GCC and clang both fold the
-        comparison when the range is known and leave it unfolded when it is
-        not, so an unknown count keeps the general entry.
-
         A literal count is still the expansion: the copy of a size the
         compiler holds is a line of moves at the call site, which no entry
         beats.
 
         MOONWATER_RANGES_CHECKED is the build that catches a promise broken.
-        A __max_ count past its bound traps. A __room_ copy reads the last
-        byte of the source's room, which faults if the room is not there,
-        and overwrites the destination's room with 0xa5 after the copy,
-        which turns a caller that kept anything in it into a wrong answer the
-        lane sees rather than a right one that depends on what this machine's
-        body happened to leave there.
+        A __room_ copy is held to the end of any object the compiler can see
+        at the call, reads the last byte of the source's room, which faults
+        if the room is not there, and overwrites the destination's room with
+        0xa5 after the copy, which turns a caller that kept anything in it
+        into a wrong answer the lane sees rather than a right one that
+        depends on what this machine's body happened to leave there.
+
+        There is no __max_ entry yet. The first one traps past its bound in
+        the same build, and its wrapper may route a call to it unasked where
+        __builtin_constant_p((count) <= (cap)) && (count) <= (cap) holds: GCC
+        and clang both fold that when a mask, an earlier test or a clamp has
+        bounded the count, and leave it unfolded when nothing has, so an
+        unknown count keeps the general entry. The census of the hot call
+        sites found no count bounded that way, which is why it is not spelled
+        here.
 */
 #define LIBRARY_PASTE(first, second) LIBRARY_PASTE_TOKENS(first, second)
 #define LIBRARY_PASTE_TOKENS(first, second) first##second
-#define LIBRARY_AT_MOST(count, cap)                                           \
-        (__builtin_constant_p((count) <= (cap)) && (count) <= (cap))
 
 #define MEMORY_COPY_APART__ROOM(room, destination, source, size)              \
         LIBRARY_PASTE(memory_copy_apart__room_, room)((destination), (source), (size))

@@ -39984,12 +39984,14 @@ __asm__(
 
         A promise nothing has an entry for does not build, so no call site
         silently runs the slower body. lib.util.c spells them as
-        MEMORY_COPY_APART__ROOM(64, d, s, n) and the like, routes a call
-        whose count the compiler can already bound, and under
-        MOONWATER_RANGES_CHECKED makes a broken promise visible: a count past
-        __max_N traps, and the room of a __room_N copy is read at its far end
-        and overwritten, so a caller that kept anything there finds out. None
-        of this is in a kernel build.
+        MEMORY_COPY_APART__ROOM(64, d, s, n) and the like, and under
+        MOONWATER_RANGES_CHECKED makes a broken promise visible: the room of a
+        __room_N copy is held to whatever object the compiler can see, read
+        at its far end and overwritten, so a caller that kept anything there
+        finds out. There is no __max_ entry yet -- no hot call site the census
+        found has a count the compiler can bound -- and the first one's
+        spelling has to trap past N in that build the same way. None of this
+        is in a kernel build.
 
         memory_copy_apart__room_64 is for the lines a text tool moves into
         its output or a record buffer: a different length every call, most
@@ -40068,7 +40070,8 @@ __asm__(
     //      a0 the destination. With V the copy is exact and takes no room:
     //      eight registers hold every count to a hundred and twenty eight at
     //      the smallest VLEN, so a line is one vsetvli, one load and one
-    //      store. Without it the stores have to be aligned words, so the
+    //      store. Without it a count to sixteen is bytes, and past it the
+    //      stores have to be aligned words, so the
     //      destination is walked to a word a byte at a time and then filled
     //      a word a turn -- straight words when the two agree on their
     //      residue, else each built from the two source words it straddles,
@@ -40081,7 +40084,17 @@ __asm__(
     "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
     "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_copy_apart__room_64\n"
 #endif
-    "1:  mv a3, a0\n   beqz a2, 9f\n   add a4, a0, a2\n   andi t0, a0, 7\n   beqz t0, 3f\n"
+    //      Sixteen or fewer: eight or sixteen bytes a byte at a time, whatever
+    //      the count, the room taking what is past it, where walking the
+    //      destination to a word could take seven of them by itself.
+    "1:  li t0, 16\n   bltu t0, a2, 10f\n   li t0, 8\n   bltu t0, a2, 11f\n"
+    "lbu t0, 0(a1)\n   lbu t1, 1(a1)\n   lbu t2, 2(a1)\n   lbu t3, 3(a1)\n   lbu t4, 4(a1)\n   lbu t5, 5(a1)\n   lbu t6, 6(a1)\n   lbu a5, 7(a1)\n"
+    "sb t0, 0(a0)\n   sb t1, 1(a0)\n   sb t2, 2(a0)\n   sb t3, 3(a0)\n   sb t4, 4(a0)\n   sb t5, 5(a0)\n   sb t6, 6(a0)\n   sb a5, 7(a0)\n" ASM_RET
+    "11: lbu t0, 0(a1)\n   lbu t1, 1(a1)\n   lbu t2, 2(a1)\n   lbu t3, 3(a1)\n   lbu t4, 4(a1)\n   lbu t5, 5(a1)\n   lbu t6, 6(a1)\n   lbu a5, 7(a1)\n"
+    "sb t0, 0(a0)\n   sb t1, 1(a0)\n   sb t2, 2(a0)\n   sb t3, 3(a0)\n   sb t4, 4(a0)\n   sb t5, 5(a0)\n   sb t6, 6(a0)\n   sb a5, 7(a0)\n"
+    "lbu t0, 8(a1)\n   lbu t1, 9(a1)\n   lbu t2, 10(a1)\n   lbu t3, 11(a1)\n   lbu t4, 12(a1)\n   lbu t5, 13(a1)\n   lbu t6, 14(a1)\n   lbu a5, 15(a1)\n"
+    "sb t0, 8(a0)\n   sb t1, 9(a0)\n   sb t2, 10(a0)\n   sb t3, 11(a0)\n   sb t4, 12(a0)\n   sb t5, 13(a0)\n   sb t6, 14(a0)\n   sb a5, 15(a0)\n" ASM_RET
+    "10: mv a3, a0\n   add a4, a0, a2\n   andi t0, a0, 7\n   beqz t0, 3f\n"
     "2:  lbu t1, 0(a1)\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   andi t0, a0, 7\n   bnez t0, 2b\n"
     "bgeu a0, a4, 9f\n"
     "3:  andi a5, a1, 7\n   bnez a5, 6f\n"
@@ -40091,8 +40104,11 @@ __asm__(
     "7:  ld t1, 8(a1)\n   srl t2, t0, a5\n   sll t3, t1, a6\n   or t2, t2, t3\n   sd t2, 0(a0)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   mv t0, t1\n   bltu a0, a4, 7b\n"
     "mv a0, a3\n" ASM_RET
 #if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
-    "5:  mv a3, a0\n"
-    "8:  vsetvli t0, a2, e8, m8, ta, ma\n   vle8.v v8, (a1)\n   vse8.v v8, (a3)\n   add a1, a1, t0\n   add a3, a3, t0\n   sub a2, a2, t0\n   bnez a2, 8b\n" ASM_RET
+    //      One strip is every count eight registers hold; a longer one goes on
+    //      from where it stopped.
+    "5:  vsetvli t0, a2, e8, m8, ta, ma\n   vle8.v v8, (a1)\n   vse8.v v8, (a0)\n   bltu t0, a2, 6f\n" ASM_RET
+    "6:  mv a3, a0\n"
+    "8:  add a1, a1, t0\n   add a3, a3, t0\n   sub a2, a2, t0\n   vsetvli t0, a2, e8, m8, ta, ma\n   vle8.v v8, (a1)\n   vse8.v v8, (a3)\n   bltu t0, a2, 8b\n" ASM_RET
 #endif
     ASM_END(memory_copy_apart__room_64)
     ".option pop\n"
