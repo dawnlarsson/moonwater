@@ -32183,6 +32183,10 @@ static bool sed_case_span_bytes(sed_context address_to ctx, positive address_to 
         return true;
 }
 
+// The gate's (below, with the lines it skips): whether it is on, and how many cycles it waits.
+static bool sed_gate_on;
+static positive sed_gate_wait;
+
 static bool sed_transfer(sed_buffer address_to into,
                          const sed_buffer address_to from, bool append)
 {
@@ -32195,6 +32199,23 @@ static bool sed_transfer(sed_buffer address_to into,
         memory_copy_apart(into->bytes + start, from->bytes, from->length);
         into->length = start + from->length;
         into->ended = from->ended;
+        return true;
+}
+
+/*
+        A borrowed line into the pattern space's own store, for the commands
+        that write the space in place, append to it or read on past it: y, D,
+        G, N and x. The rest read it, and s builds its answer in the work
+        store whichever it is.
+*/
+static inline INLINE bool sed_pattern_own()
+{
+        if (sed_pattern.bytes == sed_pattern.store->bytes)
+                return true;
+        if (!sed_store_fits(address_of sed_serial, sed_pattern.store, 0, sed_pattern.length))
+                return false;
+        memory_copy_apart(sed_pattern.store->bytes, sed_pattern.bytes, sed_pattern.length);
+        sed_pattern.bytes = sed_pattern.store->bytes;
         return true;
 }
 
@@ -33289,9 +33310,18 @@ static bool sed_address_matches(p8 type, positive line, b32 which, positive step
                         every time (/(a|b)*a(a|b){4}$/ over a megabyte was
                         530 ms to GNU's 10). It wants the line's end to be a
                         NUL, which a pattern space is not till it is made one,
-                        in the byte the store keeps for it.
+                        in the byte the store keeps for it -- or, for a line
+                        borrowed from the reader, in its delimiter, which the
+                        reader has already read past. Not when the gate is
+                        to search the reader from the next byte on: a vector
+                        load over a byte just stored cannot be forwarded the
+                        store and waits for it, which in sed -n /mutex/p was
+                        185 cycles a line the gate stopped at, so there the
+                        line goes into the store first.
                 */
-                if (sed_pattern.bytes == sed_pattern.store->bytes &&
+                if (sed_pattern.bytes != sed_pattern.store->bytes && sed_gate_on && !sed_gate_wait)
+                        sed_pattern_own();
+                if (sed_pattern.bytes != sed_pattern.store->bytes ||
                     sed_pattern.length < sed_pattern.store->room)
                 {
                         sed_pattern.bytes[sed_pattern.length] = end;
@@ -33975,9 +34005,9 @@ static bool sed_pieces_script(void)
         many each time, so that a script it cannot help costs what it cost.
 */
 static const_string sed_gate_text, sed_gate_replacement;
-static positive sed_gate_size, sed_gate_wait, sed_gate_backoff, sed_gate_replacement_length;
+static positive sed_gate_size, sed_gate_backoff, sed_gate_replacement_length;  // sed_gate_wait with the address test
 static positive2 sed_gate_anchors;
-static bool sed_gate_on, sed_gate_icase, sed_gate_pass, sed_gate_literal, sed_gate_global;
+static bool sed_gate_icase, sed_gate_pass, sed_gate_literal, sed_gate_global;  // sed_gate_on with the address test
 
 // Bytes a pass has to skip to have been worth the call: a line.
 #define SED_GATE_WORTH 1
@@ -34629,13 +34659,41 @@ publish:
 // its text or its reader is.
 
 
-// The next line into the pattern space's own store, grown to hold it.
+/*
+        The next line into the pattern space, where it lies in the reader's
+        buffer when the whole of it does. Copying every line into the store
+        cost sed the copy and then the search that read it straight back --
+        a vector load of bytes just stored a word or two at a time waits for
+        the stores -- and most cycles only read their line. So a line whose
+        delimiter is in the buffer and is not the last byte read is borrowed:
+        the next read cannot fill over it before the cycle ends, because the
+        buffer still holds what comes after it. A command that writes the
+        space, or reads on past it, takes it into the store first
+        (sed_pattern_own). Anything else is copied into the store as it was.
+*/
 static bool sed_line_next()
 {
         byte_store address_to store = sed_pattern.store;
 
         text_line_length = 0;
         text_line_ended = false;
+        if (text_input.position < text_input.filled && !text_spill_partial)
+        {
+                p8 address_to at = text_input.buffer + text_input.position;
+                p8 address_to found = memory_first_of(at, text_delimiter,
+                                                      text_input.filled - text_input.position);
+
+                if (found && found + 1 < text_input.buffer + text_input.filled)
+                {
+                        text_line_length = (positive)(found - at);
+                        text_line_ended = true;
+                        text_input.position += text_line_length + 1;
+                        text_spill_moved = null;
+                        text_spill_more = false;
+                        sed_pattern.bytes = at;
+                        return true;
+                }
+        }
 
         bool have = text_reader_spill(address_of text_input, text_delimiter,
                                       store->bytes, store,
@@ -35082,6 +35140,8 @@ static b32 text_sed()
                                                 break;
                                         }
 
+                                        if (!sed_pattern_own())
+                                                goto space_full;
                                         memory_translate(sed_pattern.bytes, sed_pattern.length,
                                                          sed_maps[command->map]);
                                         break;
@@ -35105,6 +35165,8 @@ static b32 text_sed()
                                         {
                                                 if (!newline)
                                                         goto drop_cycle;
+                                                if (!sed_pattern_own())
+                                                        goto space_full;
                                                 sed_pattern.length -= stop + 1;
                                                 memory_copy(sed_pattern.bytes, sed_pattern.bytes + stop + 1,
                                                             sed_pattern.length);
@@ -35147,6 +35209,8 @@ static b32 text_sed()
                                                         goto drop_cycle;
                                                 sed_replaced = false;
                                         }
+                                        else if (!sed_pattern_own())
+                                                goto space_full;
                                         else if (!sed_line_across(address_of i, inputs))
                                         {
                                                 sed_last = true;
@@ -35170,6 +35234,8 @@ static b32 text_sed()
                                 case 'G':
                                 {
                                         bool holding = kind == 'h' || kind == 'H';
+                                        if (kind == 'G' && !sed_pattern_own())
+                                                goto space_full;
                                         if (!sed_transfer(holding ? address_of sed_holding
                                                                   : address_of sed_pattern,
                                                           holding ? address_of sed_pattern
@@ -35180,6 +35246,8 @@ static b32 text_sed()
                                 }
                                 case 'x':
                                 {
+                                        if (!sed_pattern_own())
+                                                goto space_full;
                                         sed_buffer swap = sed_pattern;
                                         sed_pattern = sed_holding;
                                         sed_holding = swap;
