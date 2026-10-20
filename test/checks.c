@@ -48052,6 +48052,452 @@ b32 main(void)
 }
 #endif /* CHECK_train */
 
+#if defined(CHECK_ranged) || defined(CHECK_native_ranged)
+#ifdef CHECK_ranged
+//      The checked build, always: what a broken promise does under it is
+//      part of what this section proves, and the entries are called by
+//      their own names below, around the macros, for the plain bodies.
+#define MOONWATER_RANGES_CHECKED
+#include "../src/lib.util.c"
+
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+typedef address_any ranged_copy_call(address_any, const address_any, positive);
+#else
+#include <stdio.h>
+#include <sys/mman.h>
+#include "ranged.h"
+void *memory_copy_apart__room_64(void *, const void *, unsigned long long);
+void *memory_copy_apart(void *, const void *, unsigned long long);
+typedef void *ranged_copy_call(void *, const void *, unsigned long long);
+#endif
+
+/*
+        lib.c's call-site entries against what their names promise.
+
+        Two programs are built from this: CHECK_ranged, freestanding on the
+        library, which test/run's ranged lane runs on all three machines --
+        x86_64 once for each body with the feature bytes walked down, riscv64
+        under qemu with no V and at VLEN 128 to 1024 -- and
+        CHECK_native_ranged, which links the arm64 bodies lifted out of lib.c
+        and runs them on an arm64 Mac. What is between here and the first main
+        is what both share.
+
+        memory_copy_apart__room_64 is walked over every count to 300 and the
+        long ones past it, with each run's room ending against a page that
+        faults or a few bytes short of it, so that no load or store past the
+        room goes unseen; the bytes before each start and after each room
+        stand guard and must come back as they were, and so must the source.
+        Then both runs start just after a page that faults.
+*/
+static unsigned long long ranged_state = 0xbb67ae8584caa73bull;
+
+static unsigned char ranged_byte(void)
+{
+        XORSHIFT64(ranged_state);
+        return (unsigned char)(ranged_state >> 32);
+}
+
+static const unsigned long long ranged_long[] = {511, 512, 513, 1000, 4095, 4096, 4097, 65539};
+#define RANGED_COUNTS (301 + sizeof(ranged_long) / sizeof(ranged_long[0]))
+#define RANGED_MOST 65539
+#define RANGED_SPAN (RANGED_MOST + 64 + 128 + 16)
+
+static unsigned long long ranged_count(unsigned long long at)
+{
+        return at <= 300 ? at : ranged_long[at - 301];
+}
+
+//      How far short of its page each run's room ends: destination, source.
+static const unsigned ranged_gaps[][2] = {{0, 0}, {0, 5}, {3, 0}, {17, 9}, {63, 1}, {64, 64}, {1, 100}};
+#define RANGED_PLACEMENTS (sizeof(ranged_gaps) / sizeof(ranged_gaps[0]))
+
+typedef struct
+{
+        unsigned long long copied, answer, outside, source, front;
+} ranged_copy_faults;
+
+static unsigned char ranged_saved[RANGED_SPAN];
+
+static int ranged_same(const unsigned char *one, const unsigned char *two, unsigned long long count)
+{
+        for (unsigned long long i = 0; i < count; i++)
+                if (one[i] != two[i])
+                        return 0;
+        return 1;
+}
+
+static void ranged_copy_cases(unsigned char *d_end, unsigned char *s_end, unsigned char *d_front,
+                              unsigned char *s_front, ranged_copy_faults *faults)
+{
+        for (unsigned long long at = 0; at < RANGED_COUNTS; at++)
+        {
+                unsigned long long n = ranged_count(at);
+
+                for (unsigned long long p = 0; p < RANGED_PLACEMENTS; p++)
+                {
+                        unsigned dg = ranged_gaps[p][0], sg = ranged_gaps[p][1];
+                        unsigned char *d = d_end - dg - 64 - n, *s = s_end - sg - 64 - n;
+                        long long source_span = (long long)(n + 64 + sg), into_span = (long long)(n + 64 + dg);
+
+                        for (long long i = -16; i < source_span; i++)
+                                ranged_saved[i + 16] = s[i] = ranged_byte();
+                        for (long long i = -16; i < into_span; i++)
+                                d[i] = (unsigned char)(0x3c ^ i);
+                        //      In brackets, the routine and not lib.util.c's macro of it.
+                        faults->answer += (memory_copy_apart__room_64)(d, s, n) != d;
+                        faults->copied += !ranged_same(d, s, n);
+                        for (long long i = -16; i < 0; i++)
+                                faults->outside += d[i] != (unsigned char)(0x3c ^ i);
+                        for (long long i = (long long)n + 64; i < into_span; i++)
+                                faults->outside += d[i] != (unsigned char)(0x3c ^ i);
+                        faults->source += !ranged_same(s - 16, ranged_saved, (unsigned long long)source_span + 16);
+                }
+                if (n + 64 <= 16384)
+                {
+                        for (unsigned long long i = 0; i < n + 64; i++)
+                                s_front[i] = ranged_byte(), d_front[i] = 0;
+                        faults->front += (memory_copy_apart__room_64)(d_front, s_front, n) != d_front ||
+                                         !ranged_same(d_front, s_front, n);
+                }
+        }
+}
+
+#ifdef CHECK_ranged
+//      A run of RANGED_SPAN bytes whose end is a page that faults, or whose
+//      start is just after one.
+static unsigned char *ranged_end(void)
+{
+        positive span = (RANGED_SPAN + 4095) / 4096 * 4096;
+        p8 address_to pages = memory(span + 4096);
+
+        if (!pages || system_call_3(syscall(mprotect), (positive)(pages + span), 4096, 0) != 0)
+                return null;
+        return pages + span;
+}
+
+static unsigned char *ranged_front(void)
+{
+        p8 address_to pages = memory(16384 + 3 * 4096);
+
+        if (!pages)
+                return null;
+        p8 address_to start = (p8 address_to)(((positive)pages + 4095) & ~(positive)4095) + 4096;
+        if (system_call_3(syscall(mprotect), (positive)(start - 4096), 4096, 0) != 0)
+                return null;
+        return start;
+}
+
+static unsigned char *ranged_d_end, *ranged_s_end, *ranged_d_front, *ranged_s_front;
+
+static fn ranged_tier(string_address tier)
+{
+        ranged_copy_faults faults = {0, 0, 0, 0, 0};
+
+        string_format(log, "  %s\n", tier);
+        ranged_copy_cases(ranged_d_end, ranged_s_end, ranged_d_front, ranged_s_front, address_of faults);
+        check("memory_copy_apart__room_64: every count to 300 and the long ones, each placement, the bytes copied",
+              faults.copied == 0);
+        check("memory_copy_apart__room_64: answers the destination", faults.answer == 0);
+        check("memory_copy_apart__room_64: nothing before a start or past the room touched", faults.outside == 0);
+        check("memory_copy_apart__room_64: the source as it was", faults.source == 0);
+        check("memory_copy_apart__room_64: both runs just after a page that faults", faults.front == 0);
+}
+
+/*
+        The spelled forms through lib.util.c, in the checked build: a literal
+        count is the expansion, any other the entry, and either way the room
+        comes back spoiled, which is what makes a caller that kept something
+        there give a wrong answer in a lane.
+*/
+static bool ranged_spoiled(const p8 address_to room)
+{
+        for (positive i = 0; i < 64; i++)
+                if (room[i] != 0xa5)
+                        return false;
+        return true;
+}
+
+#define RANGED_LITERAL(count)                                                         \
+        do {                                                                          \
+                for (positive i = 0; i < (count) + 64; i++)                           \
+                        s[i] = ranged_byte(), d[i] = 0;                               \
+                fine = fine && MEMORY_COPY_APART__ROOM(64, d, s, count) == d &&      \
+                       ranged_same(d, s, count) && ranged_spoiled(d + (count));       \
+        } while (0)
+
+static fn ranged_macros(void)
+{
+        p8 address_to d = ranged_d_end - 64 - 300, address_to s = ranged_s_end - 64 - 300;
+        bool fine = true;
+
+        RANGED_LITERAL(0);
+        RANGED_LITERAL(1);
+        RANGED_LITERAL(7);
+        RANGED_LITERAL(16);
+        RANGED_LITERAL(33);
+        RANGED_LITERAL(64);
+        RANGED_LITERAL(100);
+        RANGED_LITERAL(128);
+        RANGED_LITERAL(129);
+        check("MEMORY_COPY_APART__ROOM(64, ...): literal counts copied, the room spoiled", fine);
+
+        for (volatile positive count = 0; count <= 300; count++)
+        {
+                positive n = count;
+
+                for (positive i = 0; i < n + 64; i++)
+                        s[i] = ranged_byte(), d[i] = 0;
+                fine = fine && memory_copy_apart__room_64(d, s, n) == d && ranged_same(d, s, n) && ranged_spoiled(d + n);
+        }
+        check("memory_copy_apart__room_64(...): every count to 300 through the macro, the room spoiled", fine);
+}
+
+//      The checked macro reads the last byte of the source's room first, so
+//      a source with no room past it is a fault and not a quiet over-read.
+static fn ranged_promise_broken(void)
+{
+        log_flush();
+        bipolar child = system_call_2(syscall(clone), SIGCHLD, 0);
+
+        if (child == 0)
+        {
+                static p8 into[256];
+                volatile positive n = 8;
+
+                memory_copy_apart__room_64(into, ranged_s_end - 8, n);
+                exit(0);
+        }
+        positive raw = 0;
+
+        if (child > 0)
+                system_wait4_retry(child, address_of raw, 0, null);
+        check("MOONWATER_RANGES_CHECKED: a source with no room past it faults", child > 0 && (raw & 0x7f) == SIGSEGV);
+}
+
+b32 main(void)
+{
+        ranged_d_end = ranged_end(), ranged_s_end = ranged_end();
+        ranged_d_front = ranged_front(), ranged_s_front = ranged_front();
+        check("ranged: guard pages", ranged_d_end && ranged_s_end && ranged_d_front && ranged_s_front);
+        if (!ranged_d_end || !ranged_s_end || !ranged_d_front || !ranged_s_front)
+                return test_report(null);
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
+
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier == 0 ? wide2 : 0;
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                if (tier == 0 && !wide2)
+                        continue;
+                ranged_tier(cpu_has_avx2 ? "avx2" : "sse2");
+        }
+        cpu_has_avx512 = wide512, cpu_has_avx2 = wide2;
+#elif RISCV64
+        p8 vector = cpu_has_vector;
+        {
+                p8 address_to d = ranged_d_end - 64 - 40, address_to s = ranged_s_end - 64 - 40;
+
+                for (positive i = 0; i < 40; i++)
+                        s[i] = ranged_byte();
+                cpu_has_vector = 0;
+                (memory_copy_apart__room_64)(d, s, 40);
+                check("memory_copy_apart__room_64: the first call asks for V and keeps its arguments",
+                      cpu_has_vector != 0 && ranged_same(d, s, 40));
+                vector = cpu_has_vector;
+        }
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                if (tier == 0 && vector != 2)
+                        continue;
+                cpu_has_vector = tier ? 1 : vector;
+                ranged_tier(cpu_has_vector == 2 ? "V" : "no V");
+        }
+        cpu_has_vector = vector;
+#else
+        ranged_tier("neon");
+#endif
+        ranged_macros();
+        ranged_promise_broken();
+        return test_report(null);
+}
+#else
+/*
+        CHECK_native_ranged: the arm64 call-site entries lifted out of
+        lib.c, through the walks CHECK_ranged runs above, then timed
+        on this machine against what a caller gets today: lib.util.c's
+        inline overlapping pair under sixteen bytes and the lifted
+        memory_copy_apart above, which is copy_apart_running's shape.
+*/
+static unsigned long long ranged_ticks(void)
+{
+        unsigned long long value;
+
+        __asm__ volatile("isb\n   mrs %0, cntvct_el0" : "=r"(value));
+        return value;
+}
+
+//      Apple's pages are 16 KiB.
+static unsigned char *ranged_native_end(void)
+{
+        unsigned long long span = (RANGED_SPAN + 16383) / 16384 * 16384;
+        unsigned char *pages = mmap(0, span + 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+        if (pages == MAP_FAILED || mprotect(pages + span, 16384, PROT_NONE) != 0)
+                return 0;
+        return pages + span;
+}
+
+static unsigned char *ranged_native_front(void)
+{
+        unsigned char *pages = mmap(0, 3 * 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+
+        if (pages == MAP_FAILED || mprotect(pages, 16384, PROT_NONE) != 0)
+                return 0;
+        return pages + 16384;
+}
+
+//      copy_apart_running at LIBRARY_RUNNING_MAX 16, as the compiler builds it here.
+__attribute__((noinline)) static void *ranged_shipped(void *destination, const void *source, unsigned long long size)
+{
+        unsigned char *to = destination;
+        const unsigned char *from = source;
+
+        if (size >= 16)
+                return memory_copy_apart(destination, source, size);
+        if (size >= 8)
+        {
+                unsigned long long head, tail;
+
+                __builtin_memcpy(&head, from, 8);
+                __builtin_memcpy(&tail, from + size - 8, 8);
+                __builtin_memcpy(to, &head, 8);
+                __builtin_memcpy(to + size - 8, &tail, 8);
+        }
+        else if (size >= 4)
+        {
+                unsigned head, tail;
+
+                __builtin_memcpy(&head, from, 4);
+                __builtin_memcpy(&tail, from + size - 4, 4);
+                __builtin_memcpy(to, &head, 4);
+                __builtin_memcpy(to + size - 4, &tail, 4);
+        }
+        else if (size >= 2)
+        {
+                unsigned short head, tail;
+
+                __builtin_memcpy(&head, from, 2);
+                __builtin_memcpy(&tail, from + size - 2, 2);
+                __builtin_memcpy(to, &head, 2);
+                __builtin_memcpy(to + size - 2, &tail, 2);
+        }
+        else if (size)
+                to[0] = from[0];
+        return destination;
+}
+
+#define RANGED_LINES 65536
+static unsigned ranged_line_at[RANGED_LINES], ranged_line_size[RANGED_LINES];
+static unsigned ranged_lines;
+static unsigned char ranged_text[1 << 23];
+static unsigned char ranged_out[RANGED_LINES * 140 + 4096];
+static volatile unsigned long long ranged_sink;
+
+//      The lines of lib.c itself, up to 128 bytes, in order: a text tool's
+//      lengths, which a predictor cannot learn.
+static void ranged_load_lines(void)
+{
+        FILE *in = fopen("src/lib.c", "rb");
+        unsigned long long have = in ? fread(ranged_text, 1, sizeof(ranged_text) - 4096, in) : 0;
+        unsigned long long start = 0;
+
+        if (in)
+                fclose(in);
+        for (unsigned long long i = 0; i < have && ranged_lines < RANGED_LINES; i++)
+                if (ranged_text[i] == '\n')
+                {
+                        if (i - start <= 128)
+                        {
+                                ranged_line_at[ranged_lines] = (unsigned)start;
+                                ranged_line_size[ranged_lines++] = (unsigned)(i - start);
+                        }
+                        start = i + 1;
+                }
+}
+
+//      shape 0: into a buffer nothing reads back; 1: into one buffer, read at once.
+static unsigned long long ranged_time_one(ranged_copy_call *routine, int shape)
+{
+        unsigned long long best = ~0ull;
+
+        for (int trial = 0; trial < 21; trial++)
+        {
+                unsigned long long made = 0, sum = 0, start = ranged_ticks();
+
+                for (unsigned i = 0; i < ranged_lines; i++)
+                {
+                        unsigned long long n = ranged_line_size[i];
+                        unsigned char *d = shape ? ranged_out : ranged_out + made;
+
+                        routine(d, ranged_text + ranged_line_at[i], n);
+                        if (shape)
+                                sum += d[n >> 1];
+                        else
+                                made += n + 8;
+                }
+                unsigned long long took = ranged_ticks() - start;
+
+                ranged_sink += sum + made;
+                if (took < best)
+                        best = took;
+        }
+        return best;
+}
+
+static void ranged_time(void)
+{
+        static const char *shapes[] = {"into a buffer nothing reads", "into one buffer read at once"};
+
+        ranged_load_lines();
+        if (!ranged_lines)
+                return;
+        for (int shape = 0; shape < 2; shape++)
+        {
+                //      Alternated, best of each, in nanoseconds a line (the counter is 24 MHz).
+                unsigned long long shipped = ranged_time_one(ranged_shipped, shape);
+                unsigned long long entry = ranged_time_one(memory_copy_apart__room_64, shape);
+                unsigned long long shipped2 = ranged_time_one(ranged_shipped, shape);
+
+                if (shipped2 < shipped)
+                        shipped = shipped2;
+                printf("  arm64 memory_copy_apart__room_64 %s, %u lines: shipped %.2f ns, entry %.2f ns a line\n", shapes[shape],
+                       ranged_lines, shipped * 1e9 / 24e6 / ranged_lines, entry * 1e9 / 24e6 / ranged_lines);
+        }
+}
+
+int main(void)
+{
+        unsigned char *d_end = ranged_native_end(), *s_end = ranged_native_end();
+        unsigned char *d_front = ranged_native_front(), *s_front = ranged_native_front();
+        ranged_copy_faults faults = {0, 0, 0, 0, 0};
+
+        if (!d_end || !s_end || !d_front || !s_front)
+        {
+                printf("arm64 ranged: 1 checks | 1 failures\n");
+                return 1;
+        }
+        ranged_copy_cases(d_end, s_end, d_front, s_front, &faults);
+        ranged_time();
+        printf("arm64 ranged: 5 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu\n", faults.copied,
+               faults.answer, faults.outside, faults.source, faults.front);
+        return faults.copied + faults.answer + faults.outside + faults.source + faults.front != 0;
+}
+#endif
+#endif /* CHECK_ranged || CHECK_native_ranged */
+
 #ifdef CHECK_environment
 /*
         Experimental C standard library
@@ -125631,6 +126077,106 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_copy_changed */
+
+#ifdef BENCH_ranged
+/* The call-site entries at the shapes their callers have, against what the
+   same callers got before: memory_copy_apart__room_64 over the lines of
+   src/lib.c (every length to 128, in order) into a buffer nothing reads and
+   into one buffer read at once, and at a fixed 40 and 76 bytes hidden from
+   the compiler, against lib.util.c's memory_copy_apart (the inline pair
+   under sixteen bytes, the routine above); x86_64 with AVX2 and with SSE2. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define LINES 65536
+
+static p8 text[1 << 23];
+static p8 out[LINES * 140 + 4096];
+static p32 line_at[LINES], line_size[LINES];
+static positive lines;
+static volatile positive fixed_size[2] = {40, 76};
+static volatile p64 sink;
+
+static p64 run(positive side, positive shape)
+{
+        p64 start = get_cpu_time(), sum = 0;
+        positive made = 0;
+
+        for (positive round = 0; round < 8; round++)
+                for (positive i = 0; i < lines; i++)
+                {
+                        positive n = shape < 2 ? line_size[i] : fixed_size[shape - 2];
+                        p8 address_to d = shape == 0 ? out + made : out;
+
+                        if (side)
+                                memory_copy_apart__room_64(d, text + line_at[i], n);
+                        else
+                                memory_copy_apart(d, text + line_at[i], n);
+                        if (shape == 0)
+                                made = made + n + 8 > LINES * 130 ? 0 : made + n + 8;
+                        else
+                                sum += d[n >> 1];
+                }
+        sink += sum;
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const string_address names[] = {"lines into a buffer nothing reads", "lines into one buffer read at once",
+                                               "a fixed 40", "a fixed 76"};
+        bipolar got = file_slurp((string_address) "src/lib.c", text, sizeof(text) - 4096);
+        positive start = 0;
+
+        for (positive i = 0; got > 0 && i < (positive)got && lines < LINES; i++)
+                if (text[i] == '\n')
+                {
+                        if (i - start <= 128)
+                                line_at[lines] = (p32)start, line_size[lines++] = (p32)(i - start);
+                        start = i + 1;
+                }
+        if (!lines)
+        {
+                log("ranged: no src/lib.c to take lines from\n", 39);
+                log_flush();
+                return 1;
+        }
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier == 0 ? wide2 : 0;
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                if (tier == 0 && !wide2)
+                        continue;
+#endif
+                for (positive shape = 0; shape < 4; shape++)
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, shipped, run(0, shape), entry, run(1, shape));
+                        string_format(log, "memory_copy_apart__room_64 %s%s: paired median entry/memory_copy_apart %p.", names[shape],
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide2;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_ranged */
 
 #ifdef BENCH_tensor
 /* The tensor block against the compiler: the same algorithm written in C for

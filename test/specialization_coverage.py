@@ -33,6 +33,14 @@ instructions at the call site instead of calling them. It names an expansion
 and a measurement like ``specialized`` does, and no parameter, because there
 is none.
 
+``ranged`` is an entry a call site names for what it promises, spelled
+<routine>__max_<N> (the count is at most N) or <routine>__room_<N> (both
+buffers run N bytes past it). Its row names the count it bounds, the
+lib.util.c wrapper its spelling goes through, and the section of
+test/checks.c that calls it by value in its range; the name has to parse as
+that spelling over a routine in the inventory, so a promise cannot be
+recorded for a routine that is not there.
+
 ``nothing_to_fold`` takes no parameter the compiler could know: handles,
 pointers into memory the caller owns, and the arguments of a syscall whose
 work happens on the far side of the trap.
@@ -72,6 +80,7 @@ ROWS = []
 CATEGORY_DESCRIPTION = {
     'specialized': 'a known-argument path ships today',
     'placed': 'no argument folds; the routine is placed rather than called',
+    'ranged': 'an entry a call site names for a range or room it promises',
     'worth_it': 'a foldable parameter that changes the shape of the work',
     'folds_already': 'foldable, but the expansion would remove nothing',
     'nothing_to_fold': 'no parameter the compiler could know',
@@ -79,7 +88,10 @@ CATEGORY_DESCRIPTION = {
 
 #       Only these carry a measured claim, and only these are counted as
 #       evidence in the summary.
-MEASURED = ('specialized', 'worth_it', 'placed')
+MEASURED = ('specialized', 'worth_it', 'placed', 'ranged')
+
+#       <routine>__max_<N> and <routine>__room_<N>, lib.c's call-site entries.
+RANGED_NAME = re.compile(r'^([a-z_][a-z_0-9]*?)__(max|room)_([0-9]+)$')
 
 
 def cover(category, parameter, names, note, expansion=None, evidence=None,
@@ -108,6 +120,17 @@ cover('specialized', 'size', 'memory_fill', 'memset, expanded up to '
       'KNOWN_SIZE_MAX with a broadcast when the byte is not folded',
       expansion='fill_known', evidence='test/checks.c#CHECK_exact')
 
+
+# ----------------------------------------------------------------------
+#       ranged -- lib.c's call-site entries
+# ----------------------------------------------------------------------
+cover('ranged', 'size', 'memory_copy_apart__room_64',
+      'Measured. memcpy for buffers that both run 64 bytes past the count: '
+      'one branch where the ladder took several the predictor cannot learn. '
+      'cat -n 37% fewer user cycles on a 9950X (AVX2 31%, SSE2 19%); a line '
+      'into a buffer nothing reads 14.0 to 8.7 cycles; the M2 Pro 4.2 to 3.4 '
+      'ns. A literal count is copy_apart_known, as the plain name\'s is',
+      expansion='copy_apart_room', evidence='test/checks.c#CHECK_ranged')
 
 # ----------------------------------------------------------------------
 #       worth_it -- measured
@@ -896,7 +919,7 @@ def validate():
         r'^#define\s+([a-z_][a-z_0-9]*)\s*\(', specializers, re.MULTILINE)) & inventory
     manifested_specialized = {
         row.routine for row in ROWS
-        if row.category in ('specialized', 'placed')
+        if row.category in ('specialized', 'placed', 'ranged')
     }
     if macro_specialized != manifested_specialized:
         if macro_specialized - manifested_specialized:
@@ -932,6 +955,20 @@ def validate():
                 errors.append('%s: placed row carries no evidence' % row.routine)
             continue
 
+        #      A ranged entry is its routine's name, a promise and a number,
+        #      over a routine the inventory has.
+        if row.category == 'ranged':
+            spelled = RANGED_NAME.match(row.routine)
+            if not spelled:
+                errors.append('%s: a ranged row is not <routine>__max_<N> or '
+                              '<routine>__room_<N>' % row.routine)
+            elif spelled.group(1) not in inventory:
+                errors.append('%s: ranged over %s, which is not in the '
+                              'inventory' % (row.routine, spelled.group(1)))
+            if not row.evidence:
+                errors.append('%s: a ranged entry needs the section that calls '
+                              'it in its range' % row.routine)
+
         #      Everything else claims a foldable parameter, and the claim is
         #      checked against the routine's own declaration rather than left
         #      as prose nobody reads.
@@ -956,16 +993,16 @@ def validate():
                               row.routine)
             continue
 
-        #      specialized and worth_it both name the expansion they mean.
+        #      specialized, ranged and worth_it name the expansion they mean.
         if not row.expansion:
             errors.append('%s: %s row names no expansion' %
                           (row.routine, row.category))
-        elif row.category == 'specialized' and \
+        elif row.category in ('specialized', 'ranged') and \
                 not manifest.token_present(specializers, row.expansion):
             errors.append('%s: specializer %s is absent from '
                           'src/lib.util.c' % (row.routine, row.expansion))
 
-        if row.category == 'specialized' and not row.evidence:
+        if row.category in ('specialized', 'ranged') and not row.evidence:
             errors.append('%s: a shipped specializer needs correctness '
                           'evidence' % row.routine)
 

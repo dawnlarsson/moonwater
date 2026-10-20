@@ -127,7 +127,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged"
 
 describe()
 {
@@ -201,6 +201,7 @@ describe()
         awk)      echo "awk against the one on the machine, from generated programs" ;;
         checksum) echo "the cksum CRC against a bitwise model, in every mode, on three machines" ;;
         train)    echo "the training and inference routines on every body of three machines, against references and pages that fault" ;;
+        ranged)   echo "the call-site entries (__max_N, __room_N) on every body of three machines against pages that fault, and every call site naming one under the checked build" ;;
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
@@ -250,7 +251,7 @@ seams="lib compress net link shell tools machine desktop image engine"
 seam_lanes()
 {
         case $1 in
-        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix train" ;;
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix train ranged" ;;
         compress) echo "tar zstd gzip xz compression_floor compression" ;;
         net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
         link) echo "waterlink link" ;;
@@ -929,6 +930,19 @@ freestanding()
         if [ -n "${MW_UBSAN:-}" ]; then
                 set -- "$@" -fsanitize=undefined -fno-sanitize=alignment \
                         -fsanitize-undefined-trap-on-error
+        fi
+
+        #       MW_RANGES=1 builds every program and check with
+        #       MOONWATER_RANGES_CHECKED, where a call-site entry's broken
+        #       promise is seen: a __max_N count past N traps, and a
+        #       __room_N copy faults on a source with no room and spoils the
+        #       destination's room after it, so a caller that kept anything
+        #       there answers wrong. The ranged lane builds its own shell this
+        #       way for the call sites; this asks it of any lane.
+        #
+        #           MW_RANGES=1 sh test/run text
+        if [ -n "${MW_RANGES:-}" ]; then
+                set -- "$@" -DMOONWATER_RANGES_CHECKED
         fi
 
         #       MW_HARDEN=1 builds every program and check the way
@@ -5052,6 +5066,7 @@ human lib positive_into_human_1024_string positive_to_human_1024
 human_nearest lib positive_into_human_nearest_string wait_status_code_base wait_status_code
 fields lib positive_into_padded positive_into_pair
 train lib fused_residual_add_f32 f32_to_bf16 bf16_to_f32 fast_argmax_f32
+ranged lib memory_copy_apart__room_64 memory_copy_apart
 input_bases lib string_digits_max string_digits_octal_escape_max string_digits_octal_max string_digits_hexadecimal_escape_max string_digits_hexadecimal_max string_digits_base_max
 network lib network_load_16 network_load_32 network_store_16 network_store_32
 tensor lib swiglu_forward_f32 rmsnorm_forward_f32 rmsnorm_backward_f32
@@ -5060,7 +5075,7 @@ reserve lib memory_growth memory_reserve memory_release
 LIFTED
 
 status=0
-for case in byte_hunts bounded riscv_bits bulk reverse words squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor matrix train; do
+for case in byte_hunts bounded riscv_bits bulk reverse words squeeze offsets hash join floodlight keyword envprobe funcslot assignment arguments series wide bases base_field human human_nearest fields input_bases network reserve tensor matrix train ranged; do
         cc -O2 -w -I"$work" "-DCHECK_native_$case" test/checks.c -o "$work/$case" || { status=1; continue; }
         "$work/$case" || status=1
 done
@@ -5674,6 +5689,68 @@ lane_checksum() { freestanding_checks_lane checksum_crc checksum_crc; }
 #       against a page that faults; the x86_64 run walks its tiers itself.
 #
 lane_train() { freestanding_checks_vector_lane train train; }
+
+#
+#       lib.c's call-site entries, CHECK_ranged: every body of three machines
+#       against pages that fault, the x86_64 run walking its tiers itself.
+#       Then every call site that names one, through a shell built with
+#       MOONWATER_RANGES_CHECKED against the plain one on the same input:
+#       a promise the site does not keep faults or spoils the answer there.
+#       The table is the gate. Each file's uses of a __max_ or __room_
+#       spelling are counted, and a file whose count the table's rows do not
+#       add up to fails, so a site cannot name an entry and go unexercised.
+#       A row is file, the sites it covers, a name, and the command.
+#
+lane_ranged()
+(
+        freestanding_checks_vector_lane ranged ranged
+        ranged_outcome=$?
+        need_shell || exit 1
+        if [ ! -x "$work/ranged-shell" ]; then
+                freestanding programs/shell.c "$work/ranged-shell" "$host_arch" \
+                        -DMOONWATER_RANGES_CHECKED || exit 1
+        fi
+        mkdir -p "$work/ranged-bin" || exit 1
+        for ranged_name in $utilities; do
+                ln -sf "$work/ranged-shell" "$work/ranged-bin/$ranged_name" || exit 1
+        done
+        #       Lines of every length to 300, three of each, then tabs,
+        #       controls, high bytes, a carriage return and no final newline.
+        awk 'BEGIN { srand(7); for (n = 0; n <= 300; n++) for (k = 0; k < 3; k++) {
+                s = ""; for (i = 0; i < n; i++) s = s sprintf("%c", 32 + int(rand() * 95)); print s } }' \
+                > "$work/ranged.in"
+        printf 'a\tb\001c\n\n\n\377\200x\r\nend' >> "$work/ranged.in"
+        cat "$work/ranged.in" "$work/ranged.in" "$work/ranged.in" > "$work/ranged.in3"
+        ranged_failed=0
+        ranged_rows=$(sed -n '/^RANGED_SITES$/,/^RANGED_SITES_END$/p' "$root/test/run" | sed '1d;$d')
+        for ranged_file in $(grep -rlE '[A-Z_]+__(ROOM|MAX)\(|[a-z_]+__(room|max)_[0-9]+\(' src programs | sort); do
+                case $ranged_file in src/lib.c|src/lib.util.c) continue ;; esac
+                ranged_uses=$(grep -oE '[A-Z_]+__(ROOM|MAX)\(|[a-z_]+__(room|max)_[0-9]+\(' "$ranged_file" | wc -l)
+                ranged_listed=$(printf '%s\n' "$ranged_rows" | awk -F'|' -v f="$ranged_file" '$1 == f { n += $2 } END { print n + 0 }')
+                [ "$ranged_uses" = "$ranged_listed" ]
+                verdict "ranged-sites-$(printf '%s' "$ranged_file" | tr '/.' '--')" ranged_failed '$ranged_file: $ranged_uses uses of a call-site entry, the table covers $ranged_listed'
+        done
+        printf '%s\n' "$ranged_rows" | while IFS='|' read -r ranged_file ranged_count ranged_case ranged_command; do
+                [ -n "$ranged_case" ] || continue
+                IN="$work/ranged.in" IN3="$work/ranged.in3" PATH="$work/bin:/usr/bin:/bin" LC_ALL=C \
+                        /bin/sh -c "$ranged_command" > "$work/ranged.plain" 2>&1
+                ranged_plain=$?
+                IN="$work/ranged.in" IN3="$work/ranged.in3" PATH="$work/ranged-bin:/usr/bin:/bin" LC_ALL=C \
+                        /bin/sh -c "$ranged_command" > "$work/ranged.checked" 2>&1
+                ranged_checked=$?
+                [ "$ranged_plain" = "$ranged_checked" ] && cmp -s "$work/ranged.plain" "$work/ranged.checked"
+                verdict "ranged-site-$ranged_case" - 'ranged site $ranged_case: status $ranged_checked against $ranged_plain, or the output differs'
+                [ "$ranged_plain" = "$ranged_checked" ] && cmp -s "$work/ranged.plain" "$work/ranged.checked" || touch "$work/ranged.failed"
+        done
+        [ ! -e "$work/ranged.failed" ] || ranged_failed=1
+        rm -f "$work/ranged.failed"
+        [ "$ranged_outcome" = 0 ] && [ "$ranged_failed" = 0 ]
+)
+#       The call sites lane_ranged runs, one row each: file|sites|name|command.
+: <<'RANGED_SITES_END'
+RANGED_SITES
+src/sh/text.c|1|cat-n|cat -n "$IN3"; cat -nA "$IN3"; cat -b "$IN"; cat -nT "$IN"
+RANGED_SITES_END
 
 #
 #       The differential engine, one domain at a time.
@@ -20973,7 +21050,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect average-ahead glass fill-rect copy-changed sweep-coverage escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -21008,6 +21085,8 @@ bench_about()
                  bench_line="gemm_f32 at the trainer's shapes, in core cycles and percent of FMA peak, tier for tier, against a blocked C GEMM" ;;
         fill-rect) bench_section=BENCH_fill_rect
                  bench_line="rectangles of one 32-bit value, a cell's ground, against a fill a row" ;;
+        ranged)  bench_section=BENCH_ranged
+                 bench_line="the call-site entries at the shapes their callers have, against what those callers got before" ;;
         train)   bench_section=BENCH_train
                  bench_line="the training and inference routines against the C loops a compiler vectorises for each body" ;;
         copy-changed) bench_section=BENCH_copy_changed

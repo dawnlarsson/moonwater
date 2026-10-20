@@ -61,11 +61,21 @@ static bipolar sort_compare_bytes(p8 address_to one,
 
 #define TEXT_OUT_MAX 65536
 #define TEXT_READ_MAX 65536
+/*
+        Bytes past the end of the output buffer and of every reader's buffer
+        that nothing keeps, so a line moved from one to the other may be moved
+        as memory_copy_apart__room_64 moves it: sixty four bytes, or a hundred
+        and twenty eight, whatever the line's length, which is one branch
+        where the length ladder was several the predictor cannot learn. The
+        output is never written past TEXT_OUT_MAX and a reader is never filled
+        past TEXT_READ_MAX, so what a copy leaves here is never read.
+*/
+#define TEXT_ROOM 64
 #define TEXT_LINE_MAX (1 << 20)
 #define TEXT_PATH_MAX 4096
 #define TEXT_UNSET ((positive)-1)
 
-static p8 text_out_buffer[TEXT_OUT_MAX];
+static p8 text_out_buffer[TEXT_OUT_MAX + TEXT_ROOM];
 static positive text_out_used HOT_STATE;
 static positive text_out_handle HOT_DATA = 1;
 static string_address text_name HOT_DATA = "text";
@@ -550,7 +560,7 @@ typedef struct
         positive fills;
         // The negated errno of the failure, for a caller that words it.
         bipolar error;
-        p8 buffer[TEXT_READ_MAX];
+        p8 buffer[TEXT_READ_MAX + TEXT_ROOM];
 } text_reader;
 
 static text_reader text_input;
@@ -6364,7 +6374,9 @@ static fn cat_walked()
                                         held = false;
                                 }
                                 positive run = min((positive)(special - at), (positive)(limit - into));
-                                memory_copy_apart(into, at, run);
+                                //      Out of the reader into the output's reservation, both with
+                                //      TEXT_ROOM behind them.
+                                MEMORY_COPY_APART__ROOM(TEXT_ROOM, into, at, run);
                                 into += run;
                                 at += run;
                                 continue;

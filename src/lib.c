@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        417 routines (393 public, 24 local), 407 of them on all three and 10 local to one.
+        418 routines (394 public, 24 local), 408 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -221,6 +221,7 @@
           memory_compare_ascii_case      public  yes     yes     yes
           memory_copy                    public  yes     yes     yes
           memory_copy_apart              public  yes     yes     yes
+          memory_copy_apart__room_64     public  yes     yes     yes
           memory_copy_apart_end          public  yes     yes     yes
           memory_copy_changed_u32        public  yes     yes     yes
           memory_copy_end                public  yes     yes     yes
@@ -39960,6 +39961,140 @@ __asm__(
     "9:  add a0, t4, t5\n" ASM_RET
 #endif
     ASM_END(fast_argmax_f32)
+    ".option pop\n"
+);
+#endif
+#endif
+
+/*
+        Entries a call site names for what it can promise.
+
+        A routine reached by its plain name knows nothing about the caller,
+        so it asks: how long, which rung, which tier. When the caller can
+        promise something the routine would otherwise have to find out, a
+        second entry takes the promise in its name and skips the asking. Two
+        spellings, both after a double underscore:
+
+            <routine>__max_<N>    the count is at most N, so the rungs
+                                  above N are not there to choose between
+            <routine>__room_<N>   both buffers run at least N bytes past
+                                  the count, so the routine may read and
+                                  write that far; what it leaves in those
+                                  bytes is unspecified
+
+        A promise nothing has an entry for does not build, so no call site
+        silently runs the slower body. lib.util.c spells them as
+        MEMORY_COPY_APART__ROOM(64, d, s, n) and the like, routes a call
+        whose count the compiler can already bound, and under
+        MOONWATER_RANGES_CHECKED makes a broken promise visible: a count past
+        __max_N traps, and the room of a __room_N copy is read at its far end
+        and overwritten, so a caller that kept anything there finds out. None
+        of this is in a kernel build.
+
+        memory_copy_apart__room_64 is for the lines a text tool moves into
+        its output or a record buffer: a different length every call, most
+        of them under a hundred and twenty eight bytes, and nothing after
+        them in either buffer that the copy may not overwrite. The plain
+        routine's ladder chooses a rung at sixteen, thirty two, sixty four and
+        a hundred and twenty eight, and the caller's inline copy one at four
+        and eight below that, which at those lengths is several branches the
+        predictor cannot learn. This is one: sixty four bytes whatever the
+        count, or a hundred and twenty eight above sixty four, all of them
+        read before any is written and the first written last, so that a
+        load of the head of what was copied is forwarded from one store.
+        Past a hundred and twenty eight it is the plain routine, exactly.
+
+        Core cycles a call on a 9950X, the lines of 8 MiB of C source in
+        order (every length to 128, a fifth of them under 16), against the
+        memory_copy_apart a caller gets today (the inline ladder under 16,
+        the routine above): into a buffer nothing reads back 14.0 to 8.7
+        (SSE2 29.5 to 9.3); into one buffer and counted at once 43.5 to 36.3
+        (SSE2 55.2 to 36.5); a fixed 40 or 76 bytes, the size hidden from the
+        compiler, 8.0 and 18.1 to 6.0 and 7.0. Sizes from a generator the
+        predictor cannot learn, uniform to 128, stay where they were (23.1
+        to 24.4) because the branch at sixty four is then a coin: lines are
+        not like that, and a cmov in its place cost real lines 0.5 to 1.1
+        cycles for it. ymm where the processor has AVX2 and xmm otherwise:
+        the 9950X measures the two level, and a part with one store a cycle
+        stores half as many ymm; zmm measured no quicker here and forwards
+        to a narrower load two cycles later. The tier test costs it nothing
+        measurable on that machine.
+*/
+#ifndef KERNEL_MODE
+address_any memory_copy_apart__room_64(address_any destination, const address_any source,
+                                       positive size);
+#if X64
+__asm__(
+    ASM_SECTION
+    //      memory_copy_apart__room_64: rdi destination, rsi source, rdx size;
+    //      rax the destination. Loads, then stores from the far end in.
+    ASM_FUNC(memory_copy_apart__room_64)
+    "mov %rdi, %rax\n   cmp $64, %rdx\n   ja 2f\n"
+    ASM_NARROW("cpu_has_avx2", "1f")
+    "vmovdqu 32(%rsi), %ymm1\n   vmovdqu (%rsi), %ymm0\n   vmovdqu %ymm1, 32(%rdi)\n   vmovdqu %ymm0, (%rdi)\n   vzeroupper\n" ASM_RET
+    "1:  movdqu 48(%rsi), %xmm3\n   movdqu 32(%rsi), %xmm2\n   movdqu 16(%rsi), %xmm1\n   movdqu (%rsi), %xmm0\n"
+    "movdqu %xmm3, 48(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm0, (%rdi)\n" ASM_RET
+    "2:  cmp $128, %rdx\n   ja memory_copy_apart\n"
+    ASM_NARROW("cpu_has_avx2", "3f")
+    "vmovdqu 96(%rsi), %ymm3\n   vmovdqu 64(%rsi), %ymm2\n   vmovdqu 32(%rsi), %ymm1\n   vmovdqu (%rsi), %ymm0\n"
+    "vmovdqu %ymm3, 96(%rdi)\n   vmovdqu %ymm2, 64(%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n   vmovdqu %ymm0, (%rdi)\n   vzeroupper\n" ASM_RET
+    "3:  movdqu 112(%rsi), %xmm7\n   movdqu 96(%rsi), %xmm6\n   movdqu 80(%rsi), %xmm5\n   movdqu 64(%rsi), %xmm4\n"
+    "movdqu 48(%rsi), %xmm3\n   movdqu 32(%rsi), %xmm2\n   movdqu 16(%rsi), %xmm1\n   movdqu (%rsi), %xmm0\n"
+    "movdqu %xmm7, 112(%rdi)\n   movdqu %xmm6, 96(%rdi)\n   movdqu %xmm5, 80(%rdi)\n   movdqu %xmm4, 64(%rdi)\n"
+    "movdqu %xmm3, 48(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm0, (%rdi)\n" ASM_RET
+    ASM_END(memory_copy_apart__room_64)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //      memory_copy_apart__room_64: x0 destination, x1 source, x2 size;
+    //      x0 the destination, untouched. Two or four pairs of q, the far
+    //      ones stored first, as on x86_64. The long copy is an unconditional
+    //      branch: a conditional one cannot reach a symbol in another section.
+    ASM_FUNC(memory_copy_apart__room_64)
+    "cmp x2, #64\n   b.hi 2f\n"
+    "ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   stp q2, q3, [x0, #32]\n   stp q0, q1, [x0]\n" ASM_RET
+    "2:  cmp x2, #128\n   b.hi 3f\n"
+    "ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x1, #64]\n   ldp q6, q7, [x1, #96]\n"
+    "stp q6, q7, [x0, #96]\n   stp q4, q5, [x0, #64]\n   stp q2, q3, [x0, #32]\n   stp q0, q1, [x0]\n" ASM_RET
+    "3:  b memory_copy_apart\n"
+    ASM_END(memory_copy_apart__room_64)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      memory_copy_apart__room_64: a0 destination, a1 source, a2 size;
+    //      a0 the destination. With V the copy is exact and takes no room:
+    //      eight registers hold every count to a hundred and twenty eight at
+    //      the smallest VLEN, so a line is one vsetvli, one load and one
+    //      store. Without it the stores have to be aligned words, so the
+    //      destination is walked to a word a byte at a time and then filled
+    //      a word a turn -- straight words when the two agree on their
+    //      residue, else each built from the two source words it straddles,
+    //      as memory_copy_apart does -- with no remainder: the last word may
+    //      end up to seven bytes past the count, the walk up to seven past
+    //      it, and the merge reads one source word beyond the last it uses,
+    //      all inside the room.
+    ASM_FUNC(memory_copy_apart__room_64)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 5f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_copy_apart__room_64\n"
+#endif
+    "1:  mv a3, a0\n   beqz a2, 9f\n   add a4, a0, a2\n   andi t0, a0, 7\n   beqz t0, 3f\n"
+    "2:  lbu t1, 0(a1)\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   andi t0, a0, 7\n   bnez t0, 2b\n"
+    "bgeu a0, a4, 9f\n"
+    "3:  andi a5, a1, 7\n   bnez a5, 6f\n"
+    "4:  ld t1, 0(a1)\n   sd t1, 0(a0)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   bltu a0, a4, 4b\n"
+    "9:  mv a0, a3\n" ASM_RET
+    "6:  andi a1, a1, -8\n   slli a5, a5, 3\n   li a6, 64\n   sub a6, a6, a5\n   ld t0, 0(a1)\n"
+    "7:  ld t1, 8(a1)\n   srl t2, t0, a5\n   sll t3, t1, a6\n   or t2, t2, t3\n   sd t2, 0(a0)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   mv t0, t1\n   bltu a0, a4, 7b\n"
+    "mv a0, a3\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "5:  mv a3, a0\n"
+    "8:  vsetvli t0, a2, e8, m8, ta, ma\n   vle8.v v8, (a1)\n   vse8.v v8, (a3)\n   add a1, a1, t0\n   add a3, a3, t0\n   sub a2, a2, t0\n   bnez a2, 8b\n" ASM_RET
+#endif
+    ASM_END(memory_copy_apart__room_64)
     ".option pop\n"
 );
 #endif
