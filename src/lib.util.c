@@ -8126,6 +8126,38 @@ static inline INLINE positive reverse_lines_room(library_lines_entry entry,
         reverse_lines_room(memory_reverse_lines__room_64, (destination), (made),     \
                            (source), (length), (control), 64)
 
+#define MEMORY_FOLD_LINES__ROOM(room, destination, made, source, length, width, control) \
+        LIBRARY_PASTE(memory_fold_lines__room_, room)((destination), (made), (source),  \
+                                                     (length), (width), (control))
+
+typedef positive (*library_fold_entry)(p8 address_to, positive address_to, const p8 address_to,
+                                       positive, positive, positive);
+
+//      And for fold's, whose output may be twice its input: the destination's room is past twice it.
+static inline INLINE positive fold_lines_room(library_fold_entry entry, p8 address_to destination,
+                                              positive address_to made, const p8 address_to source,
+                                              positive length, positive width, positive control,
+                                              positive room)
+{
+#ifdef MOONWATER_RANGES_CHECKED
+        if (__builtin_dynamic_object_size(source, 1) < length + room ||
+            __builtin_dynamic_object_size(destination, 1) < 2 * length + room)
+                __builtin_trap();
+        (void)((const volatile p8 address_to)source)[length + room - 1];
+#endif
+        positive taken = entry(destination, made, source, length, width, control);
+#ifdef MOONWATER_RANGES_CHECKED
+        volatile p8 address_to spoiled = destination + address_to made;
+        for (positive at = 0; at < room; at++)
+                spoiled[at] = 0xa5;
+#endif
+        return taken;
+}
+
+#define memory_fold_lines__room_64(destination, made, source, length, width, control) \
+        fold_lines_room(memory_fold_lines__room_64, (destination), (made), (source),   \
+                        (length), (width), (control), 64)
+
 //      set-literal
 /*
         A macro names itself in its own replacement, which the preprocessor

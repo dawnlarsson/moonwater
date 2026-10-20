@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        421 routines (397 public, 24 local), 411 of them on all three and 10 local to one.
+        422 routines (398 public, 24 local), 412 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -248,6 +248,7 @@
           memory_fill_u64_aligned        public  yes     yes     yes
           memory_first_of                public  yes     yes     yes
           memory_first_of_ascii_case     public  yes     yes     yes
+          memory_fold_lines__room_64     public  yes     yes     yes
           memory_free                    public  yes     yes     yes
           memory_frob                    public  yes     yes     yes
           memory_from_hex_exact          public  yes     yes     yes
@@ -41021,6 +41022,394 @@ __asm__(
     "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
     ".popsection\n"
     ASM_END(memory_reverse_lines__room_64)
+    ".option pop\n"
+);
+#endif
+#endif
+
+/*
+        fold over whole lines: every line of a read cut at a width in one
+        pass.
+
+        memory_fold_lines__room_64(destination, made, source, length, width,
+        control) writes each whole line of source -- through the last
+        newline in length -- broken with a newline wherever the next byte
+        would take its column past width, as GNU's fold breaks it without -s,
+        and answers how many bytes of source that is; *made is how many it
+        wrote, at most twice that. control is 1 at bit 0 for -b, where every
+        byte is a column, and 1 at bit 1 for a UTF-8 locale. Otherwise a tab
+        moves to the next multiple of eight and a backspace, a carriage
+        return or a NUL is the caller's to measure, and so under UTF-8 is a
+        byte past ASCII: the routine stops before a line holding one. A byte
+        that would cross the width on a line with nothing on it yet is
+        written all the same, as GNU writes it. The source runs 64 bytes past
+        its length and the destination 64 past twice it; what is written past
+        *made is unspecified. There is no plain routine; every caller has the
+        room.
+
+        Sixty four bytes give the newlines, the tabs and the bytes that stop
+        the routine. A line with no tab and no wider than the width is one
+        copy; any other is walked from tab to tab, each run of other bytes
+        taken as far as the width has room for and copied whole.
+
+        fold over 64 MB of C source on a 9950X, user cycles against the walk
+        fold had, the mean of eight layouts of lib.c: -w 60 214.2M to 107.3M,
+        -b -w 60 134.7M to 63.3M, and over 8 MB -c -w 60 21.3M to 10.7M; with
+        AVX2 alone -w 60 225.4M to 107.2M, with SSE2 alone 357.4M to 120.1M
+        and -b 166.3M to 71.9M. M2 Pro, lifted, the whole lines of the first
+        4 MiB of src/lib.c against GNU's walk in C: 113.8 to 14.8 ns a line.
+        qemu instructions a line, C source at -w 60 and at -b -w 60: aarch64
+        251 and 174 to 79 and 78; riscv64 864 and 306 to 213 and 212, with V
+        864 and 306 to 52 and 52.
+*/
+#ifndef KERNEL_MODE
+positive memory_fold_lines__room_64(p8 address_to destination, positive address_to made,
+                                    const p8 address_to source, positive length, positive width,
+                                    positive control);
+#if X64
+/*
+        The walk, for a tier's masks, turns and bit work. rdx the block, r12
+        the end, r9 the source; rsi where the line or the output line begins,
+        r10 the line's newline, rdi the cursor; rax the newlines still to take
+        in the block, rbx its stops and r11 its tabs past the line taken
+        last, rbp whether the line so far held either in an earlier block
+        (bits 0 and 1). The frame holds the width at 32 and -b at 40. A line
+        with no tab and no wider than the width is one copy; any other is the
+        cut, which keeps the block's masks on the stack and walks the line: r13
+        where it has got, r14 the column, r15 the next tab or the newline, rbx
+        the width, each run of plain bytes taken as far as the width lets it
+        and a tab moving to its stop or, where that is past the width with
+        something on the line, breaking before it.
+*/
+//      LEN bytes from rsi to rdi, a turn at a time, the room taking what is past them; r8 spent.
+#define FOLD_X64_COPY(LEN, TURN)                                               \
+    "xor %r8d, %r8d\n1:  " TURN "   add $32, %r8\n   cmp " LEN ", %r8\n   jb 1b\n   add " LEN ", %rdi\n"
+#define FOLD_X64_WALK(P, MASKS, TURN, BITS, CLEAR, TABS, LOWCLEAR, END)       \
+    P "_block:\n   cmp %r12, %rdx\n   jae " END "\n" MASKS                     \
+    "mov %r12, %r14\n   sub %rdx, %r14\n   cmp $64, %r14\n   jb " P "_clip\n" \
+    P "_clipped:\n   test %rax, %rax\n   jz " P "_carry\n"                     \
+    ".balign 16\n"                                                            \
+    P "_line:\n   tzcnt %rax, %r13\n   " BITS "   lea (%rdx,%r13), %r10\n"     \
+    "test %r14, %rbx\n   jnz " END "\n   test $1, %ebp\n   jnz " END "\n"      \
+    "mov %r14, %r15\n   and %r11, %r15\n" CLEAR                                \
+    "mov %r10, %rcx\n   sub %rsi, %rcx\n   test $2, %ebp\n   jnz " P "_cut\n" \
+    "test %r15, %r15\n   jnz " P "_cut\n   cmp 32(%rsp), %rcx\n   ja " P "_cut\n" \
+    "inc %rcx\n" FOLD_X64_COPY("%rcx", TURN)                                   \
+    P "_ended:\n   lea 1(%r10), %rsi\n   xor %ebp, %ebp\n   test %rax, %rax\n   jnz " P "_line\n" \
+    P "_carry:\n   xor %ecx, %ecx\n   test %rbx, %rbx\n   setnz %cl\n   or %ecx, %ebp\n" \
+    "test %r11, %r11\n   setnz %cl\n   add %ecx, %ecx\n   or %ecx, %ebp\n"   \
+    "add $64, %rdx\n   jmp " P "_block\n"                                      \
+    P "_clip:\n   xor %r15d, %r15d\n   bts %r14, %r15\n   dec %r15\n   and %r15, %rax\n   and %r15, %rbx\n   and %r15, %r11\n   jmp " P "_clipped\n" \
+    /* The cut: the block's masks kept, the line walked a run at a time,  */ \
+    /* its tabs sixty four bytes a mask: rbp where the mask begins, r11   */ \
+    /* the tabs in it not yet taken.                                      */ \
+    P "_cut:\n   push %rax\n   push %rbx\n   push %r11\n   mov 56(%rsp), %rbx\n   mov %rsi, %r13\n   xor %r14d, %r14d\n" \
+    "mov %rsi, %rbp\n" TABS                                                     \
+    /* The next tab at or after r13, or the newline, into r15. */            \
+    P "_next:\n   mov %r10, %r15\n   cmpq $0, 64(%rsp)\n   jne " P "_run\n"   \
+    P "_tab:\n   test %r11, %r11\n   jz " P "_more\n   tzcnt %r11, %rax\n   lea (%rbp,%rax), %r15\n   jmp " P "_run\n" \
+    P "_more:\n   lea 64(%rbp), %rax\n   cmp %r10, %rax\n   jae " P "_run\n   mov %rax, %rbp\n" TABS "jmp " P "_tab\n" \
+    /* The run to r15: as much as the width has room for, then a break.  */  \
+    P "_run:\n   mov %rbx, %rax\n   sub %r14, %rax\n   mov $0, %ecx\n   cmovl %rcx, %rax\n   mov %r15, %rcx\n   sub %r13, %rcx\n" \
+    "cmp %rax, %rcx\n   jbe " P "_fits\n   add %rax, %r13\n"                  \
+    "mov %r13, %rcx\n   sub %rsi, %rcx\n" FOLD_X64_COPY("%rcx", TURN) "movb $10, (%rdi)\n   inc %rdi\n" \
+    "mov %r13, %rsi\n   xor %r14d, %r14d\n   jmp " P "_run\n"                  \
+    P "_fits:\n   add %rcx, %r14\n   mov %r15, %r13\n   cmp %r10, %r13\n   jae " P "_last\n" \
+    /* A tab: the next stop of eight, after a break if that is past the width with something on the line. */ \
+    "mov %r14, %rax\n   or $7, %rax\n   inc %rax\n   cmp %rbx, %rax\n   jbe 3f\n   cmp %rsi, %r13\n   jbe 3f\n" \
+    "mov %r13, %rcx\n   sub %rsi, %rcx\n" FOLD_X64_COPY("%rcx", TURN) "movb $10, (%rdi)\n   inc %rdi\n" \
+    "mov %r13, %rsi\n   mov $8, %eax\n"                                         \
+    "3:  mov %rax, %r14\n   inc %r13\n   " LOWCLEAR "   jmp " P "_next\n"     \
+    P "_last:\n   mov %r10, %rcx\n   sub %rsi, %rcx\n   inc %rcx\n" FOLD_X64_COPY("%rcx", TURN) \
+    "pop %r11\n   pop %rbx\n   pop %rax\n   jmp " P "_ended\n"
+//      AVX2: ymm2 the newline, ymm6 the tab, ymm7 to ymm9 the backspace, the return and NUL, ymm10 0xff
+//      where those stop the routine (without -b), ymm11 0x80 where a byte past ASCII does (UTF-8).
+#define FOLD_X64_YHALF(OFF, NL, TAB, STOP)                                     \
+    "vmovdqu " OFF "(%rdx), %ymm0\n   vpcmpeqb %ymm2, %ymm0, %ymm3\n   vpmovmskb %ymm3, " NL "\n" \
+    "vpcmpeqb %ymm6, %ymm0, %ymm3\n   vpmovmskb %ymm3, " TAB "\n"            \
+    "vpcmpeqb %ymm7, %ymm0, %ymm3\n   vpcmpeqb %ymm8, %ymm0, %ymm4\n   vpor %ymm4, %ymm3, %ymm3\n   vpcmpeqb %ymm9, %ymm0, %ymm4\n" \
+    "vpor %ymm4, %ymm3, %ymm3\n   vpand %ymm10, %ymm3, %ymm3\n   vpand %ymm11, %ymm0, %ymm4\n   vpor %ymm4, %ymm3, %ymm3\n" \
+    "vpmovmskb %ymm3, " STOP "\n"
+#define FOLD_X64_YMASKS                                                         \
+    FOLD_X64_YHALF("0", "%eax", "%r11d", "%ebx")                                \
+    FOLD_X64_YHALF("32", "%r13d", "%r14d", "%r15d")                             \
+    "shl $32, %r13\n   or %r13, %rax\n   shl $32, %r14\n   or %r14, %r11\n   shl $32, %r15\n   or %r15, %rbx\n   and 24(%rsp), %r11\n"
+#define FOLD_X64_YTURN "vmovdqu (%rsi,%r8), %ymm5\n   vmovdqu %ymm5, (%rdi,%r8)\n"
+//      The tabs of the sixty four bytes at rbp into r11, those at or past the newline dropped; rax and rcx spent.
+#define FOLD_X64_YTABS                                                          \
+    "vmovdqu (%rbp), %ymm0\n   vmovdqu 32(%rbp), %ymm1\n   vpcmpeqb %ymm6, %ymm0, %ymm3\n   vpcmpeqb %ymm6, %ymm1, %ymm4\n" \
+    "vpmovmskb %ymm3, %r11d\n   vpmovmskb %ymm4, %eax\n   shl $32, %rax\n   or %rax, %r11\n" \
+    "mov %r10, %rcx\n   sub %rbp, %rcx\n   cmp $64, %rcx\n   jae 2f\n   bzhi %rcx, %r11, %r11\n2:\n"
+//      SSE2: the same in xmm, sixteen bytes a quarter; xmm2 and xmm6 to xmm11 as above.
+#define FOLD_X64_XQUARTER(OFF, NL, TAB, STOP)                                   \
+    "movdqu " OFF "(%rdx), %xmm0\n   movdqa %xmm0, %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, " NL "\n" \
+    "movdqa %xmm0, %xmm3\n   pcmpeqb %xmm6, %xmm3\n   pmovmskb %xmm3, " TAB "\n" \
+    "movdqa %xmm0, %xmm3\n   pcmpeqb %xmm7, %xmm3\n   movdqa %xmm0, %xmm4\n   pcmpeqb %xmm8, %xmm4\n   por %xmm4, %xmm3\n" \
+    "movdqa %xmm0, %xmm4\n   pcmpeqb %xmm9, %xmm4\n   por %xmm4, %xmm3\n   pand %xmm10, %xmm3\n   pand %xmm11, %xmm0\n   por %xmm0, %xmm3\n" \
+    "pmovmskb %xmm3, " STOP "\n"
+#define FOLD_X64_XMASKS                                                         \
+    FOLD_X64_XQUARTER("0", "%eax", "%r11d", "%ebx")                             \
+    FOLD_X64_XQUARTER("16", "%r13d", "%r14d", "%r15d")                          \
+    "shl $16, %r13d\n   or %r13, %rax\n   shl $16, %r14d\n   or %r14, %r11\n   shl $16, %r15d\n   or %r15, %rbx\n" \
+    FOLD_X64_XQUARTER("32", "%r13d", "%r14d", "%r15d")                          \
+    "shl $32, %r13\n   or %r13, %rax\n   shl $32, %r14\n   or %r14, %r11\n   shl $32, %r15\n   or %r15, %rbx\n" \
+    FOLD_X64_XQUARTER("48", "%r13d", "%r14d", "%r15d")                          \
+    "shl $48, %r13\n   or %r13, %rax\n   shl $48, %r14\n   or %r14, %r11\n   shl $48, %r15\n   or %r15, %rbx\n   and 24(%rsp), %r11\n"
+#define FOLD_X64_XTURN                                                          \
+    "movdqu (%rsi,%r8), %xmm5\n   movdqu 16(%rsi,%r8), %xmm4\n   movdqu %xmm5, (%rdi,%r8)\n   movdqu %xmm4, 16(%rdi,%r8)\n"
+#define FOLD_X64_XTAB(OFF, REG)                                                 \
+    "movdqu " OFF "(%rbp), %xmm5\n   pcmpeqb %xmm6, %xmm5\n   pmovmskb %xmm5, " REG "\n"
+#define FOLD_X64_XTABS                                                          \
+    FOLD_X64_XTAB("0", "%r11d") FOLD_X64_XTAB("16", "%eax") "shl $16, %eax\n   or %rax, %r11\n" \
+    FOLD_X64_XTAB("32", "%eax") "shl $32, %rax\n   or %rax, %r11\n" FOLD_X64_XTAB("48", "%eax") "shl $48, %rax\n   or %rax, %r11\n" \
+    "mov %r10, %rcx\n   sub %rbp, %rcx\n   cmp $64, %rcx\n   jae 2f\n   mov $1, %eax\n   shl %cl, %rax\n   dec %rax\n   and %rax, %r11\n2:\n"
+__asm__(
+    ASM_SECTION
+    //      memory_fold_lines__room_64: rdi destination, rsi made, rdx source,
+    //      rcx length, r8 width, r9 control; rax the bytes taken.
+    ASM_FUNC(memory_fold_lines__room_64)
+    "test %rcx, %rcx\n   jnz 1f\n   movq $0, (%rsi)\n   xor %eax, %eax\n" ASM_RET
+    "1:  push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $56, %rsp\n"
+    "mov %rsi, (%rsp)\n   mov %rdi, 8(%rsp)\n   lea (%rdx,%rcx), %r12\n   mov %r8, 32(%rsp)\n"
+    "mov %r9, %rax\n   and $1, %eax\n   mov %rax, 40(%rsp)\n"
+    //      24: the tabs' mask, every bit without -b and none with it; r10b 0xff where the controls stop the
+    //      routine (without -b), r11b 0x80 where a byte past ASCII does (UTF-8).
+    "lea -1(%rax), %r10\n   mov %r10, 24(%rsp)\n   mov %r9, %r11\n   shr $1, %r11d\n   and $1, %r11d\n   shl $7, %r11d\n"
+    "mov %rdx, %r9\n   mov %rdx, %rsi\n   xor %ebp, %ebp\n"
+    ASM_NARROW("cpu_has_avx2", ".Lfold_x64_sse2")
+    "mov $10, %eax\n   vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   mov $9, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastb %xmm6, %ymm6\n"
+    "mov $8, %eax\n   vmovd %eax, %xmm7\n   vpbroadcastb %xmm7, %ymm7\n   mov $13, %eax\n   vmovd %eax, %xmm8\n   vpbroadcastb %xmm8, %ymm8\n"
+    "vpxor %ymm9, %ymm9, %ymm9\n   vmovd %r10d, %xmm10\n   vpbroadcastb %xmm10, %ymm10\n   vmovd %r11d, %xmm11\n   vpbroadcastb %xmm11, %ymm11\n"
+    FOLD_X64_WALK(".Lfold_x64_a", FOLD_X64_YMASKS, FOLD_X64_YTURN, "blsmsk %rax, %r14\n   blsr %rax, %rax\n",
+                  "andn %rbx, %r14, %rbx\n   andn %r11, %r14, %r11\n", FOLD_X64_YTABS, "blsr %r11, %r11\n", ".Lfold_x64_a_end")
+    ".Lfold_x64_a_end:\n   vzeroupper\n   jmp .Lfold_x64_end\n"
+    ".Lfold_x64_sse2:\n   mov $0x0a0a0a0a, %eax\n   movd %eax, %xmm2\n   pshufd $0, %xmm2, %xmm2\n   mov $0x09090909, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "mov $0x08080808, %eax\n   movd %eax, %xmm7\n   pshufd $0, %xmm7, %xmm7\n   mov $0x0d0d0d0d, %eax\n   movd %eax, %xmm8\n   pshufd $0, %xmm8, %xmm8\n"
+    "pxor %xmm9, %xmm9\n   movzbl %r10b, %eax\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm10\n   pshufd $0, %xmm10, %xmm10\n"
+    "movzbl %r11b, %eax\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm11\n   pshufd $0, %xmm11, %xmm11\n"
+    FOLD_X64_WALK(".Lfold_x64_x", FOLD_X64_XMASKS, FOLD_X64_XTURN,
+                  "lea -1(%rax), %r8\n   mov %rax, %r14\n   xor %r8, %r14\n   and %r8, %rax\n",
+                  "mov %r14, %r8\n   not %r8\n   and %r8, %rbx\n   and %r8, %r11\n", FOLD_X64_XTABS,
+                  "lea -1(%r11), %rax\n   and %rax, %r11\n", ".Lfold_x64_end")
+    ".Lfold_x64_end:\n   mov (%rsp), %rax\n   mov %rdi, %rdx\n   sub 8(%rsp), %rdx\n   mov %rdx, (%rax)\n   mov %rsi, %rax\n   sub %r9, %rax\n"
+    "add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_fold_lines__room_64)
+);
+
+#elif ARM64
+/*
+        The same walk: x7 the block, x3 the end, x2 the source; x8 where the
+        line or the output line begins, x9 the line's newline, x0 the cursor;
+        x10 the newlines still to take in the block, x11 its stops and x12
+        its tabs past the line taken last, x13 whether the line so far held
+        either in an earlier block; x4 the width, x6 the tabs' mask (none
+        under -b), bit 0 of x5 -b. A stop is one tbl of the byte into v30,
+        0xff at NUL, the backspace and the return where they stop the
+        routine, and a byte past ASCII under UTF-8 (v27); v28 the newline,
+        v29 the tab, v31 the lanes' bits. The cut walks the line in x19
+        (where it has got), x20 (the column), x21 (the next tab or the
+        newline), x22 and x23 (where its mask of tabs begins and the tabs in
+        it not yet taken). The turns are in q16 and q17, which hold the
+        block only until its masks are made.
+*/
+//      LEN bytes from x8 to x0, thirty two a turn, the room taking what is past them; x14, x16 and x17 spent.
+#define NEON_FOLD_COPY(LEN)                                                    \
+    "mov x14, x8\n   mov x16, x0\n   add x17, x0, " LEN "\n"                     \
+    "1:  ldp q16, q17, [x14], #32\n   stp q16, q17, [x16], #32\n   cmp x16, x17\n   b.lo 1b\n   mov x0, x17\n"
+//      Four compares to two levels of the sum of their lanes' bits, sixteen bytes a vector to four, in A.
+#define NEON_FOLD_REDUCE(A, B, C, D)                                           \
+    "and " A ".16b, " A ".16b, v31.16b\n   and " B ".16b, " B ".16b, v31.16b\n" \
+    "and " C ".16b, " C ".16b, v31.16b\n   and " D ".16b, " D ".16b, v31.16b\n" \
+    "addp " A ".16b, " A ".16b, " B ".16b\n   addp " C ".16b, " C ".16b, " D ".16b\n   addp " A ".16b, " A ".16b, " C ".16b\n"
+#define NEON_FOLD_STOP(V, OUT)                                                 \
+    "tbl " OUT ".16b, {v30.16b}, " V ".16b\n   cmlt v26.16b, " V ".16b, #0\n" \
+    "and v26.16b, v26.16b, v27.16b\n   orr " OUT ".16b, " OUT ".16b, v26.16b\n"
+//      The tabs of the sixty four bytes at x22 into x23, those at or past the newline dropped; v0 to v7, x14 and
+//      x15 spent.
+#define NEON_FOLD_TABS                                                         \
+    "ldp q0, q1, [x22]\n   ldp q2, q3, [x22, #32]\n   cmeq v4.16b, v0.16b, v29.16b\n   cmeq v5.16b, v1.16b, v29.16b\n" \
+    "cmeq v6.16b, v2.16b, v29.16b\n   cmeq v7.16b, v3.16b, v29.16b\n" NEON_FOLD_REDUCE("v4", "v5", "v6", "v7") \
+    "addp v4.16b, v4.16b, v4.16b\n   fmov x23, d4\n   sub x14, x9, x22\n   cmp x14, #64\n   b.hs 2f\n"         \
+    "mov x15, #1\n   lsl x15, x15, x14\n   sub x15, x15, #1\n   and x23, x23, x15\n2:\n"
+__asm__(
+    ASM_SECTION
+    //      memory_fold_lines__room_64: x0 destination, x1 made, x2 source,
+    //      x3 length, x4 width, x5 control; x0 the bytes taken.
+    ASM_FUNC(memory_fold_lines__room_64)
+    "cbnz x3, 1f\n   str xzr, [x1]\n   mov x0, #0\n" ASM_RET
+    "1:  stp x29, x30, [sp, #-80]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n"
+    "stp x0, x1, [sp, #64]\n   add x3, x2, x3\n   and x6, x5, #1\n   sub x6, x6, #1\n"
+    //      v30: 0xff at 0, 8 and 13 without -b; v27 0xff under UTF-8.
+    "movi v30.16b, #0\n   tbnz x5, #0, 2f\n   mov w14, #0xff\n   mov v30.b[0], w14\n   mov v30.b[8], w14\n   mov v30.b[13], w14\n"
+    "2:  ubfx x14, x5, #1, #1\n   neg w14, w14\n   dup v27.16b, w14\n   movi v28.16b, #10\n   movi v29.16b, #9\n"
+    "movz x14, #0x0201\n   movk x14, #0x0804, lsl #16\n   movk x14, #0x2010, lsl #32\n   movk x14, #0x8040, lsl #48\n   dup v31.2d, x14\n"
+    "mov x7, x2\n   mov x8, x2\n   mov x13, #0\n"
+    ".Lfold_arm64_block:\n   cmp x7, x3\n   b.hs .Lfold_arm64_end\n"
+    "ldp q0, q1, [x7]\n   ldp q2, q3, [x7, #32]\n"
+    "cmeq v4.16b, v0.16b, v28.16b\n   cmeq v5.16b, v1.16b, v28.16b\n   cmeq v6.16b, v2.16b, v28.16b\n   cmeq v7.16b, v3.16b, v28.16b\n"
+    "cmeq v16.16b, v0.16b, v29.16b\n   cmeq v17.16b, v1.16b, v29.16b\n   cmeq v18.16b, v2.16b, v29.16b\n   cmeq v19.16b, v3.16b, v29.16b\n"
+    NEON_FOLD_STOP("v0", "v20") NEON_FOLD_STOP("v1", "v21") NEON_FOLD_STOP("v2", "v22") NEON_FOLD_STOP("v3", "v23")
+    NEON_FOLD_REDUCE("v4", "v5", "v6", "v7") NEON_FOLD_REDUCE("v16", "v17", "v18", "v19")
+    NEON_FOLD_REDUCE("v20", "v21", "v22", "v23")
+    "addp v4.16b, v4.16b, v16.16b\n   addp v20.16b, v20.16b, v20.16b\n   fmov x10, d4\n   mov x12, v4.d[1]\n   fmov x11, d20\n   and x12, x12, x6\n"
+    "sub x14, x3, x7\n   cmp x14, #64\n   b.hs 3f\n   mov x15, #1\n   lsl x15, x15, x14\n   sub x15, x15, #1\n"
+    "and x10, x10, x15\n   and x11, x11, x15\n   and x12, x12, x15\n"
+    "3:  cbz x10, .Lfold_arm64_carry\n"
+    ".balign 16\n"
+    ".Lfold_arm64_line:\n   rbit x14, x10\n   clz x14, x14\n   sub x15, x10, #1\n   eor x16, x10, x15\n   and x10, x10, x15\n   add x9, x7, x14\n"
+    "tst x16, x11\n   b.ne .Lfold_arm64_end\n   tbnz x13, #0, .Lfold_arm64_end\n"
+    "and x17, x16, x12\n   bic x11, x11, x16\n   bic x12, x12, x16\n   sub x15, x9, x8\n"
+    "tbnz x13, #1, .Lfold_arm64_cut\n   cbnz x17, .Lfold_arm64_cut\n   cmp x15, x4\n   b.hi .Lfold_arm64_cut\n"
+    "add x15, x15, #1\n" NEON_FOLD_COPY("x15")
+    ".Lfold_arm64_ended:\n   add x8, x9, #1\n   mov x13, #0\n   cbnz x10, .Lfold_arm64_line\n"
+    ".Lfold_arm64_carry:\n   cmp x11, #0\n   cset x14, ne\n   orr x13, x13, x14\n   cmp x12, #0\n   cset x14, ne\n   orr x13, x13, x14, lsl #1\n"
+    "add x7, x7, #64\n   b .Lfold_arm64_block\n"
+    //      The cut: the line walked a run at a time, its tabs sixty four bytes a mask.
+    ".Lfold_arm64_cut:\n   mov x19, x8\n   mov x20, #0\n   mov x22, x8\n" NEON_FOLD_TABS
+    ".Lfold_arm64_next:\n   mov x21, x9\n   tbnz x5, #0, .Lfold_arm64_run\n"
+    ".Lfold_arm64_tab:\n   cbz x23, .Lfold_arm64_more\n   rbit x14, x23\n   clz x14, x14\n   add x21, x22, x14\n   b .Lfold_arm64_run\n"
+    ".Lfold_arm64_more:\n   add x14, x22, #64\n   cmp x14, x9\n   b.hs .Lfold_arm64_run\n   mov x22, x14\n" NEON_FOLD_TABS
+    "b .Lfold_arm64_tab\n"
+    //      The run to x21: as much as the width has room for, then a break.
+    ".Lfold_arm64_run:\n   subs x14, x4, x20\n   csel x14, x14, xzr, ge\n   sub x15, x21, x19\n   cmp x15, x14\n   b.ls .Lfold_arm64_fits\n"
+    "add x19, x19, x14\n   sub x15, x19, x8\n" NEON_FOLD_COPY("x15")
+    "mov w14, #10\n   strb w14, [x0], #1\n   mov x8, x19\n   mov x20, #0\n   b .Lfold_arm64_run\n"
+    ".Lfold_arm64_fits:\n   add x20, x20, x15\n   mov x19, x21\n   cmp x19, x9\n   b.hs .Lfold_arm64_last\n"
+    //      A tab: the next stop of eight, after a break if that is past the width with something on the line.
+    "orr x14, x20, #7\n   add x14, x14, #1\n   cmp x14, x4\n   b.ls 3f\n   cmp x19, x8\n   b.ls 3f\n"
+    "sub x15, x19, x8\n" NEON_FOLD_COPY("x15") "mov w16, #10\n   strb w16, [x0], #1\n   mov x8, x19\n   mov x14, #8\n"
+    "3:  mov x20, x14\n   add x19, x19, #1\n   sub x15, x23, #1\n   and x23, x23, x15\n   b .Lfold_arm64_next\n"
+    ".Lfold_arm64_last:\n   sub x15, x9, x8\n   add x15, x15, #1\n" NEON_FOLD_COPY("x15") "b .Lfold_arm64_ended\n"
+    ".Lfold_arm64_end:\n   ldp x14, x1, [sp, #64]\n   sub x14, x0, x14\n   str x14, [x1]\n   sub x0, x8, x2\n"
+    "ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n   ldp x29, x30, [sp], #80\n" ASM_RET
+    ASM_END(memory_fold_lines__room_64)
+);
+#elif RISCV64
+/*
+        With V, the same walk: a6 the block, a3 the end, a2 the source; t0
+        where the line or the output line begins, t1 the line's newline, a0
+        the cursor; t5 the newlines still to take in the block, t4 its stops
+        and t3 its tabs past the line taken last, t2 whether the line so far
+        held either in an earlier block; a4 the width, s5 the tabs' mask
+        (none under -b), v28 all set where the controls stop the routine and
+        v29 where a byte past ASCII does. Masks are a bit a byte, read out
+        with vmv.x.s, and a bit's place is de Bruijn's multiply by s9 into
+        the table at s10. The cut walks the line in s6 (where it has got), s7
+        (the column), s8 (the next tab or the newline), s4 and s11 (where its
+        mask of tabs begins and the tabs in it not yet taken). Copies are
+        exact, a vsetvli each to a hundred and twenty eight bytes at the
+        smallest VLEN.
+
+        Without V, a byte at a time, four a turn, written as it is read: t0
+        the byte, t1 where the line begins and t6 where its output does, t3
+        where the output line under way began, t2 its column. A run of bytes
+        of fourteen and up is as many as the width has room for, bounded by
+        the end; a byte under fourteen is the newline, the tab, a stop or a
+        column. A line that stops the routine, and the last when it has no
+        newline, gives back what it wrote.
+*/
+//      s0 bytes from t0 to a0; s2, t2 and t6 spent.
+#define FOLD_RV_VCOPY                                                          \
+    "vsetvli s2, s0, e8, m8, ta, ma\n   vle8.v v16, (t0)\n   vse8.v v16, (a0)\n   bgeu s2, s0, 8f\n   mv t6, s2\n" \
+    "7:  sub t2, s0, t6\n   vsetvli s2, t2, e8, m8, ta, ma\n   add t2, t0, t6\n   vle8.v v16, (t2)\n   add t2, a0, t6\n" \
+    "vse8.v v16, (t2)\n   add t6, t6, s2\n   bltu t6, s0, 7b\n8:\n"
+#define FOLD_RV_VINDEX(BIT, OUT)                                               \
+    "mul " OUT ", " BIT ", s9\n   srli " OUT ", " OUT ", 58\n   add " OUT ", " OUT ", s10\n   lbu " OUT ", 0(" OUT ")\n"
+#define FOLD_RV_VMASKS                                                         \
+    "vsetvli zero, a7, e8, m4, ta, ma\n   vle8.v v8, (a6)\n   vmseq.vi v0, v8, 10\n   vmseq.vi v1, v8, 9\n" \
+    "vmseq.vi v2, v8, 8\n   vmseq.vi v3, v8, 13\n   vmor.mm v2, v2, v3\n   vmseq.vi v3, v8, 0\n   vmor.mm v2, v2, v3\n" \
+    "vmand.mm v2, v2, v28\n   vmsle.vi v3, v8, -1\n   vmand.mm v3, v3, v29\n   vmor.mm v2, v2, v3\n"                \
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s t5, v0\n   vmv.x.s t3, v1\n   vmv.x.s t4, v2\n   and t3, t3, s5\n"
+//      The tabs of the sixty four bytes at s4 into s11, those at or past the newline dropped; s0 and s2 spent.
+#define FOLD_RV_VTABS                                                          \
+    "vsetvli zero, a7, e8, m4, ta, ma\n   vle8.v v8, (s4)\n   vmseq.vi v1, v8, 9\n"                              \
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s s11, v1\n   sub s0, t1, s4\n   bgeu s0, a7, 6f\n"           \
+    "li s2, 1\n   sll s2, s2, s0\n   addi s2, s2, -1\n   and s11, s11, s2\n6:\n"
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      memory_fold_lines__room_64: a0 destination, a1 made, a2 source,
+    //      a3 length, a4 width, a5 control; a0 the bytes taken.
+    ASM_FUNC(memory_fold_lines__room_64)
+    "bnez a3, 1f\n   sd zero, 0(a1)\n   li a0, 0\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "1:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 2f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n   addi sp, sp, 16\n   j memory_fold_lines__room_64\n"
+#else
+    "1:  li t3, 1\n"
+#endif
+    "2:  addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "mv s3, a0\n   andi s5, a5, 1\n   addi s5, s5, -1\n   add a3, a2, a3\n   mv t0, a2\n   li t2, 0\n   li s0, 2\n   bne t3, s0, .Lfold_rv_scalar\n"
+    "mv a6, a2\n   li a7, 64\n   li s9, 0x03f79d71b4cb0a89\n   lla s10, .Lfold_rv_bits\n"
+    "vsetvli zero, a7, e8, m4, ta, ma\n   vmv.v.x v8, s5\n   vmsne.vi v28, v8, 0\n   srli s0, a5, 1\n   andi s0, s0, 1\n   neg s0, s0\n"
+    "vmv.v.x v8, s0\n   vmsne.vi v29, v8, 0\n"
+    ".Lfold_rv_v_block:\n   bgeu a6, a3, .Lfold_rv_end\n" FOLD_RV_VMASKS
+    "sub s0, a3, a6\n   bgeu s0, a7, 5f\n   li s1, 1\n   sll s1, s1, s0\n   addi s1, s1, -1\n   and t5, t5, s1\n   and t4, t4, s1\n   and t3, t3, s1\n"
+    "5:  beqz t5, .Lfold_rv_v_carry\n"
+    ".Lfold_rv_v_line:\n   neg s1, t5\n   and s1, s1, t5\n   xor t5, t5, s1\n" FOLD_RV_VINDEX("s1", "t6")
+    "addi s0, s1, -1\n   or s0, s0, s1\n   add t1, a6, t6\n"
+    "and s2, s0, t4\n   bnez s2, .Lfold_rv_end\n   andi s2, t2, 1\n   bnez s2, .Lfold_rv_end\n"
+    "and s2, s0, t3\n   not s0, s0\n   and t4, t4, s0\n   and t3, t3, s0\n   sub t6, t1, t0\n"
+    "andi s0, t2, 2\n   bnez s0, .Lfold_rv_v_cut\n   bnez s2, .Lfold_rv_v_cut\n   bltu a4, t6, .Lfold_rv_v_cut\n"
+    "addi s0, t6, 1\n" FOLD_RV_VCOPY "add a0, a0, s0\n"
+    ".Lfold_rv_v_ended:\n   addi t0, t1, 1\n   li t2, 0\n   bnez t5, .Lfold_rv_v_line\n"
+    ".Lfold_rv_v_carry:\n   snez s0, t4\n   or t2, t2, s0\n   snez s0, t3\n   slli s0, s0, 1\n   or t2, t2, s0\n"
+    "addi a6, a6, 64\n   j .Lfold_rv_v_block\n"
+    //      The cut, as on the others.
+    ".Lfold_rv_v_cut:\n   mv s6, t0\n   li s7, 0\n   mv s4, t0\n" FOLD_RV_VTABS
+    ".Lfold_rv_v_next:\n   mv s8, t1\n   andi s0, a5, 1\n   bnez s0, .Lfold_rv_v_run\n"
+    ".Lfold_rv_v_tab:\n   beqz s11, .Lfold_rv_v_more\n   neg s1, s11\n   and s1, s1, s11\n" FOLD_RV_VINDEX("s1", "t6")
+    "add s8, s4, t6\n   j .Lfold_rv_v_run\n"
+    ".Lfold_rv_v_more:\n   addi s0, s4, 64\n   bgeu s0, t1, .Lfold_rv_v_run\n   mv s4, s0\n" FOLD_RV_VTABS "j .Lfold_rv_v_tab\n"
+    ".Lfold_rv_v_run:\n   sub s0, a4, s7\n   bgez s0, 1f\n   li s0, 0\n1:  sub s1, s8, s6\n   bgeu s0, s1, .Lfold_rv_v_fits\n"
+    "add s6, s6, s0\n   sub s0, s6, t0\n" FOLD_RV_VCOPY
+    "add a0, a0, s0\n   li s0, 10\n   sb s0, 0(a0)\n   addi a0, a0, 1\n   mv t0, s6\n   li s7, 0\n   j .Lfold_rv_v_run\n"
+    ".Lfold_rv_v_fits:\n   add s7, s7, s1\n   mv s6, s8\n   bgeu s6, t1, .Lfold_rv_v_last\n"
+    "ori s1, s7, 7\n   addi s1, s1, 1\n   bgeu a4, s1, 3f\n   bgeu t0, s6, 3f\n   sub s0, s6, t0\n" FOLD_RV_VCOPY
+    "add a0, a0, s0\n   li s0, 10\n   sb s0, 0(a0)\n   addi a0, a0, 1\n   mv t0, s6\n   li s1, 8\n"
+    "3:  mv s7, s1\n   addi s6, s6, 1\n   addi s0, s11, -1\n   and s11, s11, s0\n   j .Lfold_rv_v_next\n"
+    ".Lfold_rv_v_last:\n   sub s0, t1, t0\n   addi s0, s0, 1\n" FOLD_RV_VCOPY "add a0, a0, s0\n   j .Lfold_rv_v_ended\n"
+    //      Without V: s1 fourteen, s2 the first byte that stops the routine (0x80 under UTF-8, none
+    //      otherwise), s4 -b, s6 where the run began and s11 the last place a turn of four may, s7 the newline
+    //      and s8 the tab.
+    ".Lfold_rv_scalar:\n   mv t1, a2\n   mv t6, a0\n   mv t3, a0\n   li s1, 14\n   li s2, 256\n   andi s0, a5, 2\n   beqz s0, 1f\n   li s2, 128\n"
+    "1:  andi s4, a5, 1\n   li s7, 10\n   li s8, 9\n"
+    ".Lfold_rv_s_run:\n   sub s0, a4, t2\n   bgez s0, 1f\n   li s0, 0\n1:  add s0, t0, s0\n   bleu s0, a3, 2f\n   mv s0, a3\n"
+    "2:  mv s6, t0\n   addi s11, s0, -4\n   bgtu t0, s11, .Lfold_rv_s_tail\n"
+    ".Lfold_rv_s_four:\n   lbu t4, 0(t0)\n   bltu t4, s1, .Lfold_rv_s_low\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 0(a0)\n"
+    "lbu t4, 1(t0)\n   bltu t4, s1, .Lfold_rv_s_low1\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 1(a0)\n"
+    "lbu t4, 2(t0)\n   bltu t4, s1, .Lfold_rv_s_low2\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 2(a0)\n"
+    "lbu t4, 3(t0)\n   bltu t4, s1, .Lfold_rv_s_low3\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 3(a0)\n"
+    "addi t0, t0, 4\n   addi a0, a0, 4\n   bleu t0, s11, .Lfold_rv_s_four\n"
+    ".Lfold_rv_s_tail:\n   bgeu t0, s0, .Lfold_rv_s_edge\n"
+    ".Lfold_rv_s_byte:\n   lbu t4, 0(t0)\n   bltu t4, s1, .Lfold_rv_s_low\n   bgeu t4, s2, .Lfold_rv_s_back\n"
+    "sb t4, 0(a0)\n   addi t0, t0, 1\n   addi a0, a0, 1\n   bltu t0, s0, .Lfold_rv_s_byte\n"
+    //      The width reached, or the end: the next byte breaks the line unless it is under fourteen.
+    ".Lfold_rv_s_edge:\n   sub s0, t0, s6\n   add t2, t2, s0\n   bgeu t0, a3, .Lfold_rv_s_back\n   lbu t4, 0(t0)\n"
+    "bltu t4, s1, .Lfold_rv_s_control\n   bgeu t4, s2, .Lfold_rv_s_back\n"
+    "sb s7, 0(a0)\n   addi a0, a0, 1\n   mv t3, a0\n   li t2, 0\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_low3:\n   addi t0, t0, 1\n   addi a0, a0, 1\n"
+    ".Lfold_rv_s_low2:\n   addi t0, t0, 1\n   addi a0, a0, 1\n"
+    ".Lfold_rv_s_low1:\n   addi t0, t0, 1\n   addi a0, a0, 1\n"
+    ".Lfold_rv_s_low:\n   sub s0, t0, s6\n   add t2, t2, s0\n"
+    ".Lfold_rv_s_control:\n   beq t4, s7, .Lfold_rv_s_newline\n   bnez s4, .Lfold_rv_s_column\n   beq t4, s8, .Lfold_rv_s_tab\n"
+    "beqz t4, .Lfold_rv_s_back\n   li t5, 8\n   beq t4, t5, .Lfold_rv_s_back\n   li t5, 13\n   beq t4, t5, .Lfold_rv_s_back\n"
+    ".Lfold_rv_s_column:\n   bltu t2, a4, 1f\n   bgeu t3, a0, 1f\n   sb s7, 0(a0)\n   addi a0, a0, 1\n   mv t3, a0\n   li t2, 0\n"
+    "1:  sb t4, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, 1\n   addi t2, t2, 1\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_tab:\n   ori t5, t2, 7\n   addi t5, t5, 1\n   bgeu a4, t5, 1f\n   bgeu t3, a0, 1f\n   sb s7, 0(a0)\n   addi a0, a0, 1\n   mv t3, a0\n   li t5, 8\n"
+    "1:  sb t4, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, 1\n   mv t2, t5\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_newline:\n   sb t4, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, 1\n   mv t1, t0\n   mv t6, a0\n   mv t3, a0\n   li t2, 0\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_back:\n   mv a0, t6\n   mv t0, t1\n"
+    ".Lfold_rv_end:\n   sub s0, a0, s3\n   sd s0, 0(a1)\n   sub a0, t0, a2\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    ".pushsection .rodata\n"
+    //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
+    ".Lfold_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
+    "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
+    ".popsection\n"
+    ASM_END(memory_fold_lines__room_64)
     ".option pop\n"
 );
 #endif

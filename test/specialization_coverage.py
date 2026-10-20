@@ -147,6 +147,13 @@ cover('ranged', 'length', 'memory_reverse_lines__room_64',
       'sequences turned back. Numbers in lib.c. No plain routine: every '
       'caller has the room',
       expansion='reverse_lines_room', evidence='test/checks.c#CHECK_ranged')
+cover('ranged', 'length', 'memory_fold_lines__room_64',
+      'Measured. fold over whole lines for a read and an output that run 64 '
+      'bytes past it and twice it: a line with no tab and no wider than the '
+      'width one copy, any other walked a run at a time, a line with a '
+      'backspace, a return, a NUL or a byte past ASCII in UTF-8 left to the '
+      'caller. Numbers in lib.c. No plain routine: every caller has the room',
+      expansion='fold_lines_room', evidence='test/checks.c#CHECK_ranged')
 
 # ----------------------------------------------------------------------
 #       worth_it -- measured

@@ -48078,6 +48078,8 @@ unsigned long long memory_cut_fields__room_64(unsigned char *, unsigned long lon
                                               unsigned long long, const unsigned char *, unsigned long long);
 unsigned long long memory_reverse_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
                                                  unsigned long long, unsigned long long);
+unsigned long long memory_fold_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
+                                              unsigned long long, unsigned long long, unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48528,6 +48530,113 @@ static unsigned long long ranged_rev_cases(unsigned char *d_end, unsigned char *
         return faults;
 }
 
+/*
+        memory_fold_lines__room_64 against GNU's fold a line at a time:
+        lines of every length to 300 and long ones, of printable bytes and,
+        by mode, many newlines or few, tabs, and now and then a NUL, a
+        backspace, a return, another control or a byte past ASCII; widths
+        from one to past the longest line, each length meeting two of them;
+        bytes and columns, C and UTF-8. A line with a byte the routine stops
+        at is where it stops. The source's room holds newlines, so a block
+        that took one would answer wrong; the rooms end at a page that
+        faults, and then the source starts just after one.
+*/
+static unsigned long long ranged_fold_reference(unsigned char *out, const unsigned char *in, unsigned long long length,
+                                                unsigned long long width, unsigned long long control,
+                                                unsigned long long *taken)
+{
+        int bytes = (int)(control & 1), utf8 = (int)(control >> 1 & 1);
+        unsigned long long made = 0, start = 0;
+
+        for (unsigned long long at = 0; at < length; at++)
+        {
+                if (in[at] != '\n')
+                        continue;
+                int stop = 0;
+                for (unsigned long long k = start; k < at; k++)
+                        stop |= (!bytes && (in[k] == 0 || in[k] == 8 || in[k] == 13)) || (utf8 && in[k] >= 0x80);
+                if (stop)
+                        break;
+                unsigned long long column = 0, line = made;
+                for (unsigned long long k = start; k < at; k++)
+                {
+                        int tab = !bytes && in[k] == '\t';
+                        unsigned long long after = tab ? (column | 7) + 1 : column + 1;
+                        if (after > width && made > line)
+                        {
+                                out[made++] = '\n';
+                                line = made;
+                                after = tab ? 8 : 1;
+                        }
+                        out[made++] = in[k];
+                        column = after;
+                }
+                out[made++] = '\n';
+                start = at + 1;
+        }
+        *taken = start;
+        return made;
+}
+
+static unsigned char ranged_fold_want[2 * 20000 + 64];
+
+static void ranged_fold_fill(unsigned char *source, unsigned long long length, unsigned mode)
+{
+        static const unsigned char odd[] = {0, 8, 13, 1, 11, 0x7f, 0x80, 0xc3, 0xa9, 0xff};
+
+        for (unsigned long long at = 0; at < length; at++)
+        {
+                unsigned r = ranged_byte();
+                source[at] = r < (mode & 1 ? 12u : 2u)         ? '\n'
+                             : mode & 2 && r >= 200 && r < 236 ? '\t'
+                             : mode & 4 && r == 255            ? odd[ranged_byte() % sizeof(odd)]
+                                                               : (unsigned char)(' ' + r % 95);
+        }
+}
+
+static unsigned long long ranged_fold_cases(unsigned char *d_end, unsigned char *s_end, unsigned char *s_front)
+{
+        static const unsigned long long longs[] = {1000, 4096, 5000, 20000};
+        static const unsigned long long widths[] = {1, 2, 7, 8, 9, 15, 16, 17, 33, 63, 64, 65, 80, 127, 200, 4100};
+        unsigned long long faults = 0;
+
+        for (unsigned long long at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
+        {
+                unsigned long long length = at <= 300 ? at : longs[at - 301];
+
+                for (unsigned mode = 0; mode < 8; mode++)
+                        for (unsigned place = 0; place < 2; place++)
+                        {
+                                unsigned char *source = place ? s_front : s_end - 64 - length;
+
+                                if (place && length > 16384 - 64)
+                                        continue;
+                                ranged_fold_fill(source, length, mode);
+                                for (unsigned long long i = length; i < length + 64; i++)
+                                        source[i] = '\n';
+                                for (unsigned pick = 0; pick < 2; pick++)
+                                        for (unsigned long long control = 0; control < 4; control++)
+                                        {
+                                                unsigned long long width = widths[(at * 3 + mode * 5 + pick * 7 + place) % 16];
+                                                unsigned long long want_taken = 0, made = ~0ull;
+                                                unsigned long long want = ranged_fold_reference(ranged_fold_want, source, length,
+                                                                                                width, control, &want_taken);
+                                                unsigned char *into = d_end - 64 - 2 * length;
+
+                                                for (int i = 1; i <= 16; i++)
+                                                        into[-i] = (unsigned char)(0x3a ^ i);
+                                                unsigned long long taken = (memory_fold_lines__room_64)(into, &made, source,
+                                                                                                       length, width, control);
+                                                faults += taken != want_taken || made != want ||
+                                                          (made == want && !ranged_same(into, ranged_fold_want, want));
+                                                for (int i = 1; i <= 16; i++)
+                                                        faults += into[-i] != (unsigned char)(0x3a ^ i);
+                                        }
+                        }
+        }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 /*
         memory_first_of's windows for a short count and the first sixty four
@@ -48626,6 +48735,10 @@ static fn ranged_tier(string_address tier)
               "bytes, two newlines, bytes and UTF-8, against rev a line at a time, the rooms ending at a page that faults "
               "and the source starting just after one",
               ranged_rev_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
+        check("memory_fold_lines__room_64: every count to 300 and long ones, tabs, controls and bytes past ASCII, widths "
+              "one to 4100, bytes and columns, C and UTF-8, against fold a line at a time, the rooms ending at a page "
+              "that faults and the source starting just after one",
+              ranged_fold_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
 }
 
 /*
@@ -48949,11 +49062,13 @@ int main(void)
         unsigned long long lines = ranged_lines_cases(d_end, s_end);
         unsigned long long cuts = ranged_cut_cases(d_end, s_end);
         unsigned long long revs = ranged_rev_cases(d_end, s_end, s_front);
+        unsigned long long folds = ranged_fold_cases(d_end, s_end, s_front);
         ranged_time();
-        printf("arm64 ranged: 9 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
-               "lines %llu | cuts %llu | revs %llu\n",
-               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts, revs);
-        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts + revs !=
+        printf("arm64 ranged: 10 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
+               "lines %llu | cuts %llu | revs %llu | folds %llu\n",
+               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts, revs, folds);
+        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts + revs +
+                   folds !=
                0;
 }
 #endif
@@ -126545,7 +126660,8 @@ b32 main(void)
    block against the routine and then every line moved, and
    memory_cut_fields__room_64 over 4 MiB of records against the walk cut -f
    had, memory_reverse_lines__room_64 over src/lib.c against the walk rev
-   had, below -- and
+   had, memory_fold_lines__room_64 over the first 4 MiB of it against
+   GNU's walk, below -- and
    memory_copy_apart__room_64 over the lines of
    src/lib.c (every length to 128, in order) into a buffer nothing reads and
    into one buffer read at once, and at a fixed 40 and 76 bytes hidden from
@@ -126753,6 +126869,56 @@ static p64 rev_run(positive side)
         return get_cpu_time() - start;
 }
 
+/*      fold -w 60 over the whole lines of src/lib.c's first 4 MiB, in C: GNU's
+        walk, a byte at a time with its column, against
+        memory_fold_lines__room_64, whose output may be twice its input. */
+static positive fold_length;
+
+static positive fold_walk(p8 address_to into, const p8 address_to from, positive length, positive width)
+{
+        positive made = 0, column = 0, line = 0;
+
+        for (positive at = 0; at < length; at++)
+        {
+                p8 c = from[at];
+
+                if (c == '\n')
+                {
+                        into[made++] = c;
+                        column = 0;
+                        line = made;
+                        continue;
+                }
+                positive after = c == '\t' ? (column | 7) + 1 : column + 1;
+                if (after > width && made > line)
+                {
+                        into[made++] = '\n';
+                        line = made;
+                        after = c == '\t' ? 8 : 1;
+                }
+                into[made++] = c;
+                column = after;
+        }
+        return made;
+}
+
+static p64 fold_run(positive side)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < 2; round++)
+        {
+                positive made = 0;
+
+                if (side)
+                        memory_fold_lines__room_64(out, address_of made, text, fold_length, 60, 0);
+                else
+                        made = fold_walk(out, text, fold_length, 60);
+                sink += made + out[made / 2];
+        }
+        return get_cpu_time() - start;
+}
+
 static p64 run(positive side, positive shape)
 {
         p64 start = get_cpu_time(), sum = 0;
@@ -126799,6 +126965,9 @@ b32 main(void)
         }
         cut_records();
         text_length = (positive)got;
+        fold_length = text_length < (positive)1 << 22 ? text_length : (positive)1 << 22;
+        while (fold_length && text[fold_length - 1] != '\n')
+                fold_length--;
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
         for (p32 tier = 0; tier < 2; tier++)
@@ -126827,6 +126996,20 @@ b32 main(void)
 
                         BENCH_PAIRED(ratios, walked, rev_run(0), engine, rev_run(1));
                         string_format(log, "memory_reverse_lines__room_64 src/lib.c%s: paired median engine/walk %p.",
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, walked, fold_run(0), engine, fold_run(1));
+                        string_format(log, "memory_fold_lines__room_64 -w 60 src/lib.c%s: paired median engine/walk %p.",
 #if X64
                                       cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
 #else

@@ -20531,6 +20531,45 @@ static b32 text_fold()
                 text_line_stream_now = false;
                 for (;;)
                 {
+                        /*
+                                Whole lines a read at a time without -s:
+                                memory_fold_lines__room_64 breaks them as the
+                                walk below does, and stops before a line it
+                                leaves to the walk -- one with a backspace, a
+                                return or a NUL, or past ASCII in UTF-8 -- or
+                                the last, unended. The output may be twice
+                                the input, so half a reservation is taken. A
+                                backspace measures what came before it: one
+                                column, where that was a byte and not a tab.
+                        */
+                        if (!windowed && !spaces && text_fill())
+                        {
+                                positive left = text_input.filled - text_input.position;
+                                positive half = (TEXT_OUT_MAX - TEXT_ROOM) / 2;
+                                p8 address_to at = text_input.buffer + text_input.position;
+                                p8 address_to into = text_reserve(2 * (left < half ? left : half));
+                                positive made = 0;
+
+                                left = left < half ? left : half;
+                                if (into)
+                                {
+                                        positive took = MEMORY_FOLD_LINES__ROOM(
+                                            TEXT_ROOM, into, address_of made, at, left, width,
+                                            (positive)bytes | (positive)utf8 << 1);
+
+                                        text_out_used -= 2 * left - made;
+                                        for (positive back = took; back--;)
+                                                if (at[back] != '\n' && at[back] != '\t')
+                                                {
+                                                        last_width = 1;
+                                                        break;
+                                                }
+                                        text_input.position += took;
+                                        if (took)
+                                                continue;
+                                }
+                        }
+
                         if (!windowed)
                         {
                                 if (!text_line_view(address_of line, address_of length, null, 0, null))

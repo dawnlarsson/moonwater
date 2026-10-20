@@ -300,6 +300,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_reverse_lines__r
       'paired timing against the walk rev had, every line end from '
       'memory_offsets_of_either and each line copied and turned over with '
       'memory_reverse, over src/lib.c, with AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_fold_lines__room_64',
+      'paired timing against the walk GNU fold has, in C, a byte at a time '
+      'with its column, at -w 60 over the whole lines of the first 4 MiB of src/lib.c, '
+      'with AVX2 and SSE2')
 cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_cut_fields__room_64',
       'paired timing against the walk cut -f had, every boundary from '
       'memory_offsets_of_either and the kept fields copied, over 4 MiB of '
