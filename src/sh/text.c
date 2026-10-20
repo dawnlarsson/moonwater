@@ -6108,6 +6108,37 @@ static b32 text_join()
 
 static positive cat_flags HOT_STATE;
 static positive cat_line_number;
+/*
+        The number as -n writes it, kept as its own text and stepped in place:
+        the field and its tab, left aligned, at least six wide as GNU's %6d.
+        Formatting each line's number from binary was two fifths of cat -n.
+        A field is copied out as one fixed move of the whole buffer, which the
+        room a line reserves always holds, and only its length is kept.
+*/
+static p8 cat_numeral[24];
+static positive cat_numeral_length;
+
+static fn cat_numeral_set(positive number)
+{
+        cat_numeral_length = positive_into_padded(cat_numeral, number, 6, ' ');
+        cat_numeral[cat_numeral_length++] = '\t';
+}
+
+// The next number: a carry through nines that runs past the field's first
+// digit widens it, which happens at 1000000 and each power of ten after.
+static inline INLINE fn cat_numeral_step(positive next)
+{
+        b64 at = (b64)cat_numeral_length - 2;
+
+        while (at >= 0 && cat_numeral[at] == '9')
+                cat_numeral[at--] = '0';
+        if (at < 0)
+                cat_numeral_set(next);
+        else if (cat_numeral[at] == ' ')
+                cat_numeral[at] = '1';
+        else
+                cat_numeral[at]++;
+}
 static bool cat_blank_before;
 static bool cat_at_line_start;
 
@@ -6316,9 +6347,10 @@ static fn cat_walked()
                                 blank_before = blank;
                                 if ((cat_flags & CAT_NUMBER_FULL) ? !blank : (cat_flags & CAT_NUMBER))
                                 {
-                                        into += positive_into_padded(into, number, 6, ' ');
-                                        *into++ = '\t';
+                                        __builtin_memcpy(into, cat_numeral, sizeof(cat_numeral));
+                                        into += cat_numeral_length;
                                         number++;
+                                        cat_numeral_step(number);
                                 }
                                 line_start = false;
                         }
@@ -6661,6 +6693,7 @@ static b32 text_cat()
 
         cat_flags = 0;
         cat_line_number = 1;
+        cat_numeral_set(1);
         cat_blank_before = false;
         cat_at_line_start = true;
         cat_pending_cr = false;
