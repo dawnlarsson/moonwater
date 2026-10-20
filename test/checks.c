@@ -48070,6 +48070,7 @@ typedef address_any ranged_copy_call(address_any, const address_any, positive);
 #include "ranged.h"
 void *memory_copy_apart__room_64(void *, const void *, unsigned long long);
 void *memory_copy_apart(void *, const void *, unsigned long long);
+unsigned long long string_length(const char *);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48164,6 +48165,49 @@ static void ranged_copy_cases(unsigned char *d_end, unsigned char *s_end, unsign
         }
 }
 
+/*
+        string_length's short window reads thirty two bytes where the string
+        starts, and only when they cannot leave its page; past that the scan.
+        Every length to 100 starting at each of the last 96 bytes before a
+        page that faults, so the window's page test is walked across, with
+        zeros and non-zeros in front of the start that must not count; then
+        every length to 300 at every alignment in the middle of a page, the
+        bytes after the terminator zeros and not.
+*/
+static unsigned long long ranged_length_cases(unsigned char *page_end)
+{
+        unsigned long long faults = 0;
+
+        for (unsigned long long back = 1; back <= 96; back++)
+                for (unsigned long long n = 0; n < back && n <= 100; n++)
+                {
+                        unsigned char *start = page_end - back;
+
+                        for (unsigned long long i = 0; i < 64; i++)
+                                start[(long long)i - 64] = (unsigned char)(i & 1 ? 0 : 'x');
+                        for (unsigned long long i = 0; i < n; i++)
+                                start[i] = (unsigned char)(1 + ranged_byte() % 255);
+                        start[n] = 0;
+                        for (unsigned long long i = n + 1; i < back; i++)
+                                start[i] = (unsigned char)(i & 3 ? 'y' : 0);
+                        //      In brackets, the routine and not lib.util.c's macro of it.
+                        faults += (string_length)((const char *)start) != n;
+                }
+        for (unsigned long long align = 0; align < 64; align++)
+                for (unsigned long long n = 0; n <= 300; n++)
+                {
+                        unsigned char *start = page_end - 4096 + 1024 + align;
+
+                        for (unsigned long long i = 0; i < n; i++)
+                                start[i] = (unsigned char)(1 + ranged_byte() % 255);
+                        start[n] = 0;
+                        for (unsigned long long i = n + 1; i < n + 40; i++)
+                                start[i] = (unsigned char)(i & 1 ? 0 : 'z');
+                        faults += (string_length)((const char *)start) != n;
+                }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 //      A run of RANGED_SPAN bytes whose end is a page that faults, or whose
 //      start is just after one.
@@ -48203,6 +48247,9 @@ static fn ranged_tier(string_address tier)
         check("memory_copy_apart__room_64: nothing before a start or past the room touched", faults.outside == 0);
         check("memory_copy_apart__room_64: the source as it was", faults.source == 0);
         check("memory_copy_apart__room_64: both runs just after a page that faults", faults.front == 0);
+        check("string_length: every length to 100 at each of the last 96 starts before a page that faults, and to 300 "
+              "at every alignment",
+              ranged_length_cases(ranged_d_end) == 0);
 }
 
 /*
@@ -48252,6 +48299,37 @@ static fn ranged_macros(void)
                 fine = fine && memory_copy_apart__room_64(d, s, n) == d && ranged_same(d, s, n) && ranged_spoiled(d + n);
         }
         check("memory_copy_apart__room_64(...): every count to 300 through the macro, the room spoiled", fine);
+}
+
+/*
+        string_span's first byte is placed at the call site ahead of the
+        routine: through lib.util.c's macro and through the routine by its
+        own name, over tables of every density (an empty set to every byte
+        but the terminator) and strings with spans of nothing to their whole
+        length, the two answers and the reference agree.
+*/
+static fn ranged_spans(void)
+{
+        static b8 table[256];
+        static p8 text[80];
+        bool fine = true;
+
+        for (positive density = 0; density <= 256; density += 16)
+                for (positive round = 0; round < 64; round++)
+                {
+                        for (positive i = 0; i < 256; i++)
+                                table[i] = (b8)(i && ranged_byte() < density);
+                        positive n = ranged_byte() % 64;
+                        for (positive i = 0; i < n; i++)
+                                text[i] = (p8)(1 + ranged_byte() % 255);
+                        text[n] = 0;
+                        positive want = 0;
+                        while (table[text[want]])
+                                want++;
+                        fine = fine && string_span((string_address)text, table) == want &&
+                               (string_span)((string_address)text, table) == want;
+                }
+        check("string_span: the placed first byte and the routine agree with the walk, empty spans and whole ones", fine);
 }
 
 //      The checked macro reads the last byte of the source's room first, so
@@ -48320,6 +48398,7 @@ b32 main(void)
         ranged_tier("neon");
 #endif
         ranged_macros();
+        ranged_spans();
         ranged_promise_broken();
         return test_report(null);
 }
@@ -48490,10 +48569,11 @@ int main(void)
                 return 1;
         }
         ranged_copy_cases(d_end, s_end, d_front, s_front, &faults);
+        unsigned long long lengths = ranged_length_cases(d_end);
         ranged_time();
-        printf("arm64 ranged: 5 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu\n", faults.copied,
-               faults.answer, faults.outside, faults.source, faults.front);
-        return faults.copied + faults.answer + faults.outside + faults.source + faults.front != 0;
+        printf("arm64 ranged: 6 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu\n",
+               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths);
+        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths != 0;
 }
 #endif
 #endif /* CHECK_ranged || CHECK_native_ranged */

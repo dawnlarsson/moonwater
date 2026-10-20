@@ -8080,6 +8080,29 @@ static inline INLINE address_any copy_apart_room(library_copy_entry entry,
         was built all zeros: it stopped nothing and held nothing, and lsfd
         -p read an empty list. The routine answers instead.
 */
+/*
+        A span over a table the caller built, which is how the shell's lexer
+        and expander ask how many of these bytes come next. The answer their
+        calls get most is none -- 60 to 100 percent of about a million calls a
+        workload at expand_into, expand_double and shell_match_core -- and the
+        routine is a byte loop that finds that out in its first turn, behind a
+        call. So the first byte is looked up here. A table's entry for the
+        terminator is a stopping one by the routine's own contract, so a source
+        at its end answers nought here the same way. Handing the routine the
+        byte after, with one added to its answer, is two instructions fewer a
+        call and measured slower: sh-case 6.3% and sh-strvars 7.5% more
+        cycles with SSE2, over four layouts of each binary.
+*/
+static inline INLINE positive span_table_first(string_address source,
+                                               const b8 address_to set)
+{
+        return set[(p8)source[0]] ? string_span(source, set) : 0;
+}
+
+#define string_span(source, set)                                              \
+        (LIBRARY_INLINE_STRING ? span_table_first((source), (set))            \
+                               : string_span((source), (set)))
+
 #define string_span_of_set(source, accept)                                    \
         (!LIBRARY_INLINE_STRING || !set_known(accept)                         \
                  ? string_span_of_set((source), (accept))                     \

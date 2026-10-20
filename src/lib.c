@@ -6373,7 +6373,25 @@ __asm__(
     //      a processor without AVX2, and it is reached and tested here: see
     //      the note over check_hunts_wide in verify.c.
     //
+    //      A short string first, in thirty two bytes read where they are and
+    //      not aligned down, when they cannot leave the page the string starts
+    //      in: two xmm compares and one mask answer every length to thirty
+    //      one with no branch on it. The names and words a shell measures are
+    //      one to twenty one bytes, and there the aligned scans below branch
+    //      on where the string happens to start. Core cycles a call on a
+    //      9950X over lengths 1 to 21 at seven alignments, each length added
+    //      up and then each feeding the next string's index: AVX-512 13.2 to
+    //      6.2 and 34.2 to 25.3, AVX2 18.8 to 6.2 and 28.7 to 25.4, SSE2 27.7
+    //      to 6.3 and 23.1 to 25.4 -- the one loss, the word body's shorter
+    //      load having the shorter chain. Anything longer or near the end of
+    //      its page pays the eight instructions and goes on as it did.
+    //
     ASM_USERSPACE_WIDE(
+        "mov %edi, %ecx\n   and $4095, %ecx\n   cmp $4064, %ecx\n   ja .Lstring_length_x64_long\n"
+        "movdqu (%rdi), %xmm1\n   movdqu 16(%rdi), %xmm2\n   pxor %xmm0, %xmm0\n   pcmpeqb %xmm0, %xmm1\n   pcmpeqb %xmm0, %xmm2\n"
+        "pmovmskb %xmm1, %eax\n   pmovmskb %xmm2, %ecx\n   shl $16, %ecx\n   or %ecx, %eax\n   jz .Lstring_length_x64_long\n"
+        "bsf %eax, %eax\n" ASM_RET
+        ".Lstring_length_x64_long:\n"
         WIDE_PICK
         WIDE_LENGTH(AVX2_WIDTH, AVX2_ZEROED, AVX2_ZEROS_AT, AVX2_QUAD,
                     AVX2_QUAD_WHICH, AVX2_LEAVE)
@@ -18717,6 +18735,18 @@ __asm__(
     // coverage instead of hiding raw inline-assembly reads from KASAN.
     "b strlen\n"
 #else
+    //
+    //       A short string first, as on x86_64: thirty two bytes where they
+    //       are, when they cannot leave the page, both halves' syndromes in
+    //       one register and the earlier picked by csel, so every length to
+    //       thirty one is one path. Past that, or near a page's end, the scan.
+    //
+    "and x1, x0, #0xfff\n   cmp x1, #4064\n   b.hi 9f\n"
+    "ldp q0, q1, [x0]\n   cmeq v0.16b, v0.16b, #0\n   cmeq v1.16b, v1.16b, #0\n"
+    "shrn v0.8b, v0.8h, #4\n   shrn2 v0.16b, v1.8h, #4\n   fmov x1, d0\n   mov x2, v0.d[1]\n"
+    "orr x3, x1, x2\n   cbz x3, 9f\n   cmp x1, #0\n   csel x3, x1, x2, ne\n   cset x4, eq\n"
+    "rbit x3, x3\n   clz x3, x3\n   lsr x3, x3, #2\n   add x0, x3, x4, lsl #4\n" ASM_RET
+    "9:\n"
     NEON_SCAN(NEON_ZERO)
     "sub x0, x5, x0  // minus where we started\n" ASM_RET
 #endif

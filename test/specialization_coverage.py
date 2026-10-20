@@ -456,6 +456,14 @@ cover('placed', None, 'memory_span_byte_reverse',
       'the parenthesized name reaches the routine itself for the checks',
       expansion='_reverse_byte', evidence='test/checks.c#CHECK_standard')
 
+# The third, for a table: the first byte is looked up at the call site and
+# an empty span, the commonest answer the shell's lexer and expander get,
+# costs no call.
+cover('placed', None, 'string_span',
+      'the first-byte test is placed at the call site ahead of the routine; '
+      'the parenthesized name reaches the routine itself for the checks',
+      expansion='span_table_first', evidence='test/checks.c#CHECK_ranged')
+
 cover('nothing_to_fold', None, '''
 string_append_bounded string_copy_bounded string_duplicate string_duplicate_max
 string_search_folded string_split_next string_token string_token_next
@@ -650,7 +658,7 @@ cover('folds_already', 'source', '''
 string_length string_compare string_copy string_append
 string_first_of string_first_of_or_end string_last_of string_last_of_or_end
 string_compare_folded string_digits
-string_digits_exact string_bipolar string_span
+string_digits_exact string_bipolar
 ''', 'the string is foldable only as a literal, and a literal argument to an '
      'unbounded walk folds the answer rather than shortening the walk; the '
      'bounded forms above are where the bound is the useful literal')
