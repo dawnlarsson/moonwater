@@ -10214,9 +10214,9 @@ static string_address exec_inline_dollar(string_address at)
 /*
         The utilities of this image that run here as well as in a child: each
         answers by returning, never by exiting, starts from nothing of its own
-        each time, reads no input, and writes only to standard output and
-        standard error. A name goes on this list only once its code has been
-        read for all four.
+        each time, reads no input, and writes only to standard error and,
+        through system_write_all, to standard output. A name goes on this list
+        only once its code has been read for all four.
 */
 static const string_address exec_inline_tools[] = {"basename", "dirname", "expr", null};
 
@@ -10424,69 +10424,36 @@ static fn exec_inline_write(address_any data, positive length)
 }
 
 /*
-        A utility writes to standard output itself, through lib.c's writer and
-        text.c's, so what it writes is caught where it goes: descriptor 1 is
-        a memory file for the call, made once and emptied after each.
+        A utility writes to standard output itself, through lib.c's log and
+        text.c's writer, and both end in system_write_all: with
+        standard_output_sink set, what it writes there comes here, and no
+        descriptor is touched.
 */
-static bipolar exec_inline_file = -1;
-
 static bool exec_inline_tool(positive which, b32 address_to status)
 {
         string_address address_to kept_list = program_argument_list();
         b32 kept_count = program_argument_count();
-        bool kept_waited = exec_coproc_waited;
-        bipolar saved;
-        bipolar size;
 
         //      A utility the register confines needs the child the filter
-        //      goes on; asked before anything has run.
-        if (floodlight_launch_decide(null, shell_argv, shell_argc, true, false, false,
+        //      goes on: asked the way shell_tool_call asks it in a process
+        //      that goes on afterwards, before anything has run, and once.
+        if (floodlight_launch_decide(null, shell_argv, shell_argc, true, false, true,
                                      null) != FLOODLIGHT_LAUNCH_ALLOW)
                 return false;
 
-        if (exec_inline_file < 0)
-        {
-                exec_inline_file = system_call_2(
-                    syscall(memfd_create), (positive)(string_address) "shell-inline",
-                    SHELL_PARSER_MFD_CLOEXEC);
-                if (exec_inline_file < 0)
-                        return false;
-        }
-
+        //      What this shell has buffered is the shell's, and goes where
+        //      its own output goes.
         log_flush();
-        saved = exec_save_duplicate(1, null, 10);
-        if (saved < 0)
-                return false;
-        if (system_duplicate(exec_inline_file, 1, 0) < 0)
-        {
-                system_close(saved);
-                return false;
-        }
-
-        program_arguments_use(shell_argv, (b32)shell_argc);
-        address_to status = shell_tool_call(which);
-        program_arguments_use(kept_list, kept_count);
-        exec_coproc_waited = kept_waited;
-
-        log_flush();
-        system_duplicate(saved, 1, 0);
-        system_close(saved);
-
         exec_inline_out_used = 0;
         exec_inline_out_lost = false;
-        size = system_seek(exec_inline_file, 0, FILE_SEEK_CUR);
-        if (size > 0)
-        {
-                if (!shell_room((address_any address_to)address_of exec_inline_out,
-                                address_of exec_inline_out_room, (positive)size, 1) ||
-                    system_call_4(syscall(pread64), (positive)exec_inline_file,
-                                  (positive)exec_inline_out, (positive)size, 0) != size)
-                        exec_inline_out_lost = true;
-                else
-                        exec_inline_out_used = (positive)size;
-        }
-        system_call_2(syscall(ftruncate), (positive)exec_inline_file, 0);
-        system_seek(exec_inline_file, 0, FILE_SEEK_SET);
+        standard_output_sink = exec_inline_write;
+
+        program_arguments_use(shell_argv, (b32)shell_argc);
+        address_to status = shell_tool_call_decided(which, shell_argv, shell_argc);
+        program_arguments_use(kept_list, kept_count);
+
+        log_flush();
+        standard_output_sink = null;
         return true;
 }
 

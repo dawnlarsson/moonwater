@@ -45586,6 +45586,9 @@ __asm__(
     ASM_BSS_OBJECT_BEGIN(log_writer_buffer_length, 8)
     ".zero 8\n"
     ASM_OBJECT_END(log_writer_buffer_length)
+    ASM_BSS_OBJECT_BEGIN(standard_output_sink, 8)
+    ".zero 8\n"
+    ASM_OBJECT_END(standard_output_sink)
     ASM_BSS_OBJECT_BEGIN(log_writer_failed, 1)
     ".zero 1\n"
     ASM_OBJECT_END(log_writer_failed)
@@ -46626,6 +46629,14 @@ struct linux_dirent64
 
 positive2 term_size();
 typedef struct { positive bytes; bipolar error; } system_write_result;
+/*
+        Where descriptor 1 goes while a program runs one of its own utilities
+        in its own process and keeps what it writes: set, every write of
+        system_write_all and system_write_all_checked to descriptor 1 is
+        handed to it whole and answered as written, with no syscall. log,
+        buffered_flush and text.c's writer all end there.
+*/
+extern writer standard_output_sink;
 positive system_write_all(positive handle, const address_any data, positive length);
 system_write_result system_write_all_checked(positive handle, const address_any data,
                                              positive length);
@@ -46853,12 +46864,15 @@ bipolar thread_wake(b32 address_to word, b32 count);
 __asm__(
     ASM_SECTION
     ASM_FUNC(system_write_all)
-    "xor %r8d, %r8d\n   test %rdx, %rdx\n   jz .Lsystem_write_all_x64_done\n"
+    "cmp $1, %rdi\n   je .Lsystem_write_all_x64_sink\n"
+    ".Lsystem_write_all_x64_write:  xor %r8d, %r8d\n   test %rdx, %rdx\n   jz .Lsystem_write_all_x64_done\n"
     ".Lsystem_write_all_x64_more:\n"
     "mov $" LINUX_RUNTIME_TEXT(syscall(write)) ", %eax\n   syscall\n"
     "test %rax, %rax\n   jle .Lsystem_write_all_x64_failed\n   add %rax, %r8\n   add %rax, %rsi\n   sub %rax, %rdx\n   jnz .Lsystem_write_all_x64_more\n"
     ".Lsystem_write_all_x64_done:  mov %r8, %rax\n" ASM_RET
     ".Lsystem_write_all_x64_failed:  mov %rax, %rdx\n   mov %r8, %rax\n" ASM_RET
+    ".Lsystem_write_all_x64_sink:  mov standard_output_sink(%rip), %rax\n   test %rax, %rax\n   jz .Lsystem_write_all_x64_write\n"
+    "push %rdx\n   mov %rsi, %rdi\n   mov %rdx, %rsi\n   call *%rax\n   pop %rax\n   xor %edx, %edx\n" ASM_RET
     ASM_END(system_write_all)
     ASM_ALIAS(system_write_all_checked, system_write_all)
 
@@ -46955,13 +46969,16 @@ __asm__(
 __asm__(
     ASM_SECTION
     ASM_FUNC(system_write_all)
-    "mov x3, x0\n   mov x4, xzr\n   cbz x2, .Lsystem_write_all_arm64_done\n"
+    "cmp x0, #1\n   b.eq .Lsystem_write_all_arm64_sink\n"
+    ".Lsystem_write_all_arm64_write:  mov x3, x0\n   mov x4, xzr\n   cbz x2, .Lsystem_write_all_arm64_done\n"
     ".Lsystem_write_all_arm64_more:  mov x0, x3\n"
     "mov " SYSCALL_NUMBER_REGISTER ", #" LINUX_RUNTIME_TEXT(syscall(write)) "\n"
     SYSCALL_INSTRUCTION "\n   cmp x0, #0\n"
     "b.le .Lsystem_write_all_arm64_failed\n   add x4, x4, x0\n   add x1, x1, x0\n   sub x2, x2, x0\n   cbnz x2, .Lsystem_write_all_arm64_more\n"
     ".Lsystem_write_all_arm64_done:  mov x1, xzr\n   mov x0, x4\n" ASM_RET
     ".Lsystem_write_all_arm64_failed:  mov x1, x0\n   mov x0, x4\n" ASM_RET
+    ".Lsystem_write_all_arm64_sink:  adrp x5, standard_output_sink\n   ldr x5, [x5, :lo12:standard_output_sink]\n   cbz x5, .Lsystem_write_all_arm64_write\n"
+    "stp x2, x30, [sp, #-16]!\n   mov x0, x1\n   mov x1, x2\n   blr x5\n   ldp x0, x30, [sp], #16\n   mov x1, xzr\n" ASM_RET
     ASM_END(system_write_all)
     ASM_ALIAS(system_write_all_checked, system_write_all)
 
@@ -47056,12 +47073,16 @@ __asm__(
 __asm__(
     ASM_SECTION
     ASM_FUNC(system_write_all)
-    "mv t0, a0\n   li t1, 0\n   beqz a2, .Lsystem_write_all_riscv64_done\n"
+    "li t2, 1\n   beq a0, t2, .Lsystem_write_all_riscv64_sink\n"
+    ".Lsystem_write_all_riscv64_write:  mv t0, a0\n   li t1, 0\n   beqz a2, .Lsystem_write_all_riscv64_done\n"
     ".Lsystem_write_all_riscv64_more:\n"
     "mv a0, t0\n   li a7, " LINUX_RUNTIME_TEXT(syscall(write)) "\n   ecall\n"
     "blez a0, .Lsystem_write_all_riscv64_failed\n   add t1, t1, a0\n   add a1, a1, a0\n   sub a2, a2, a0\n   bnez a2, .Lsystem_write_all_riscv64_more\n"
     ".Lsystem_write_all_riscv64_done:  li a1, 0\n   mv a0, t1\n" ASM_RET
     ".Lsystem_write_all_riscv64_failed:  mv a1, a0\n   mv a0, t1\n" ASM_RET
+    ".Lsystem_write_all_riscv64_sink:  lla t2, standard_output_sink\n   ld t2, 0(t2)\n   beqz t2, .Lsystem_write_all_riscv64_write\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a2, 0(sp)\n   mv a0, a1\n   mv a1, a2\n   jalr t2\n"
+    "ld a0, 0(sp)\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   li a1, 0\n" ASM_RET
     ASM_END(system_write_all)
     ASM_ALIAS(system_write_all_checked, system_write_all)
 

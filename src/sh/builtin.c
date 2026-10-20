@@ -20479,6 +20479,10 @@ static b32 shell_tool_meta(positive which, string_address address_to arguments,
 //      coprocesses that ended.
 static bool exec_coproc_waited HOT_STATE;
 
+static HOT b32 shell_tool_call_decided(positive which,
+                                       string_address address_to arguments,
+                                       positive count);
+
 static HOT b32 shell_tool_call_in(positive which, bool own_process)
 {
         string_address address_to arguments = program_argument_list();
@@ -20487,7 +20491,6 @@ static HOT b32 shell_tool_call_in(positive which, bool own_process)
                 exec_coproc_waited = true;
 
         positive count = (positive)program_argument_count();
-        b32 answered;
 
         /* Borrowed argument vectors may run an unrestricted applet, but an
            irreversible filter cannot be attached to a process that continues
@@ -20496,6 +20499,17 @@ static HOT b32 shell_tool_call_in(positive which, bool own_process)
                                      own_process, true, null) !=
             FLOODLIGHT_LAUNCH_ALLOW)
                 return 126;
+
+        return shell_tool_call_decided(which, arguments, count);
+}
+
+/* The tool itself, once the register has allowed it in this process: the
+   caller that asked already has its answer and asks nothing twice. */
+static HOT b32 shell_tool_call_decided(positive which,
+                                       string_address address_to arguments,
+                                       positive count)
+{
+        b32 answered;
 
         /* After the launch decision: a tool that policy refuses is refused
            for --version as for anything else. */
