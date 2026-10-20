@@ -561,7 +561,7 @@ cover('folds_already', 'bytes', 'memory_from_hex_exact',
       'the uuid parser and the wifi key; the literal sizes at those sites (32 for '
       'a wifi key, the uuid runs of 4, 2, 2, 2 and 6) share the one assembly body '
       'and its nibble table, with no per-site expansion of the loop')
-cover('folds_already', 'groups', 'memory_encode_power2 memory_decode_power2',
+cover('folds_already', 'groups', 'memory_encode_power2 memory_decode_power2 memory_encode_power2_lines',
       'production group counts and input bytes are runtime; shape selection '
       'happens once per batch, with no per-utility codec expansion')
 cover('folds_already', 'size', 'memory_escape_index memory_into_escaped',

@@ -1868,6 +1868,55 @@ static bool encoding_groups(const encoding_codec address_to codec,
         if (!into)
                 return false;
 
+        //      A wrap that is whole quanta, from a column on a quantum, which
+        //      is base64's 76 and base32's 72 and every wrap a script asks for
+        //      that divides: the rest of this line, then whole lines written
+        //      where they go, and the padded quantum a symbol at a time. The
+        //      walk below moved every line up a byte instead.
+        if (output->wrap && codec->bits != 4 && output->wrap % codec->output == 0 &&
+            output->column % codec->output == 0)
+        {
+                positive line = output->wrap / codec->output;
+                positive head = min(groups, (output->wrap - output->column) / codec->output);
+                positive bits = codec->low_bit_first ? 9 : codec->bits;
+
+                memory_encode_power2(into, input, head, codec->alphabet, bits);
+                into += head * codec->output;
+                input += head * codec->input;
+                output->column += head * codec->output;
+                if (output->column == output->wrap)
+                {
+                        *into++ = '\n';
+                        output->column = 0;
+                }
+                if (groups > head)
+                {
+                        positive rest = groups - head;
+
+                        into += memory_encode_power2_lines(into, input, rest, codec->alphabet, bits, line);
+                        input += rest * codec->input;
+                        output->column = rest % line * codec->output;
+                }
+                length -= groups * codec->input;
+                if (length)
+                {
+                        positive tail = (length * 8 + codec->bits - 1) / codec->bits;
+                        positive value = 0;
+
+                        for (positive byte = 0; byte < length; byte++)
+                                value = (value << 8) | *input++;
+                        value <<= codec->output * codec->bits - length * 8;
+                        for (positive symbol = 0; symbol < codec->output; symbol++)
+                        {
+                                positive shift = (codec->output - symbol - 1) * codec->bits;
+
+                                into = encoding_symbol(into, output, symbol < tail ? codec->alphabet[(value >> shift) & mask] : '=');
+                        }
+                }
+                output->wrote = true;
+                return true;
+        }
+
         if (codec->bits == 4)
                 memory_into_hex_case(into, input, length, true);
         else

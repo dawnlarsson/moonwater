@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        418 routines (394 public, 24 local), 408 of them on all three and 10 local to one.
+        419 routines (395 public, 24 local), 409 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -236,6 +236,7 @@
           memory_delete_bytes            public  yes     yes     yes
           memory_double_u32              public  yes     yes     yes
           memory_encode_power2           public  yes     yes     yes
+          memory_encode_power2_lines     public  yes     yes     yes
           memory_escape_index            public  yes     yes     yes
           memory_exchange_apart          public  yes     yes     yes
           memory_fill                    public  yes     yes     yes
@@ -40142,6 +40143,148 @@ __asm__(
 #endif
     ASM_END(memory_copy_apart__room_64)
     ".option pop\n"
+);
+#endif
+#endif
+
+/*
+        memory_encode_power2 with the lines a wrapping encoder writes.
+
+        memory_encode_power2_lines(destination, source, groups, alphabet,
+        bits, line) encodes groups quanta exactly as memory_encode_power2
+        does and writes a newline after every line of them, the last too
+        when groups is a whole number of lines; it answers the bytes written,
+        newlines included. line is at least one; bits and the spans are as
+        memory_encode_power2 has them, and the destination must hold the
+        newlines as well. A caller part way through a line finishes it with
+        memory_encode_power2 first.
+
+        base64's 76 columns are nineteen groups, so an encoder that wrapped
+        after the fact moved every line up a byte to make room for the one
+        before it, an overlapping copy of seventy six bytes a line -- base64
+        spent 35% of its cycles in those copies. Here the line is written
+        where it goes: with AVX2 (x86_64) or NEON (arm64) a line of at least
+        a vector's groups is whole vectors and then one more ending at the
+        line's end over the groups before it, encoded again to the same
+        bytes, so there is no scalar tail; anything else is
+        memory_encode_power2 a line at a time.
+*/
+#ifndef KERNEL_MODE
+positive memory_encode_power2_lines(address_any destination, address_any source,
+                                    positive groups, string_address alphabet,
+                                    positive bits, positive line);
+#if X64
+//      Eight base64 quanta, twenty four bytes from rsi, thirty two symbols to
+//      rdi, with memory_encode_power2's constants in ymm4 to ymm15.
+#define CODEC_X64_ENCODE24                                                    \
+    "vmovdqu (%rsi), %xmm0\n   vinserti128 $1, 8(%rsi), %ymm0, %ymm0\n   vpshufb %ymm15, %ymm0, %ymm0\n   vpand %ymm8, %ymm0, %ymm1\n   vpmulhuw %ymm10, %ymm1, %ymm1\n" \
+    "vpand %ymm9, %ymm0, %ymm0\n   vpmullw %ymm11, %ymm0, %ymm0\n   vpor %ymm1, %ymm0, %ymm0\n   vpshufb %ymm0, %ymm4, %ymm1\n" \
+    "vpshufb %ymm0, %ymm5, %ymm2\n   vpcmpgtb %ymm12, %ymm0, %ymm3\n   vpblendvb %ymm3, %ymm2, %ymm1, %ymm1\n   vpshufb %ymm0, %ymm6, %ymm2\n   vpcmpgtb %ymm13, %ymm0, %ymm3\n" \
+    "vpblendvb %ymm3, %ymm2, %ymm1, %ymm1\n   vpshufb %ymm0, %ymm7, %ymm2\n   vpcmpgtb %ymm14, %ymm0, %ymm3\n   vpblendvb %ymm3, %ymm2, %ymm1, %ymm1\n   vmovdqu %ymm1, (%rdi)\n"
+__asm__(
+    ASM_SECTION
+    //      memory_encode_power2_lines: rdi destination, rsi source, rdx
+    //      groups, rcx alphabet, r8 bits, r9 line; rax the bytes written.
+    ASM_FUNC(memory_encode_power2_lines)
+    "xor %eax, %eax\n   test %rdx, %rdx\n   jz 9f\n   test %r9, %r9\n   jz 9f\n   cmp $6, %r8\n   jne 50f\n"
+    ASM_NARROW("cpu_has_avx2", "50f")
+    "cmp $8, %r9\n   jb 50f\n   mov %rdi, %r8  # the start, for the answer\n"
+    "vbroadcasti128 (%rcx), %ymm4\n   vbroadcasti128 16(%rcx), %ymm5\n   vbroadcasti128 32(%rcx), %ymm6\n   vbroadcasti128 48(%rcx), %ymm7\n"
+    "vpbroadcastd .Lcodec_encode_x64_mask_a(%rip), %ymm8\n   vpbroadcastd .Lcodec_encode_x64_mask_b(%rip), %ymm9\n   vpbroadcastd .Lcodec_encode_x64_mul_a(%rip), %ymm10\n"
+    "vpbroadcastd .Lcodec_encode_x64_mul_b(%rip), %ymm11\n   vpbroadcastb .Lcodec_encode_x64_limits(%rip), %ymm12\n   vpbroadcastb .Lcodec_encode_x64_limits+1(%rip), %ymm13\n"
+    "vpbroadcastb .Lcodec_encode_x64_limits+2(%rip), %ymm14\n   vmovdqu .Lcodec_encode_x64_shuffle(%rip), %ymm15\n"
+    "1:  mov %r9, %r10\n   cmp %rdx, %r10\n   cmova %rdx, %r10  # this line's groups\n   sub %r10, %rdx\n   mov %r10, %r11\n   cmp $8, %r10\n   jb 6f\n"
+    ".balign 16\n"
+    "2:  " CODEC_X64_ENCODE24 "   add $24, %rsi\n   add $32, %rdi\n   sub $8, %r11\n   cmp $8, %r11\n   jae 2b\n   test %r11, %r11\n   jz 3f\n"
+    //      The line's last groups: back to eight before its end and those
+    //      eight again, the ones already written coming out the same.
+    "mov $8, %eax\n   sub %r11, %rax\n   lea (%rax,%rax,2), %r11\n   sub %r11, %rsi\n   shl $2, %rax\n   sub %rax, %rdi\n"
+    CODEC_X64_ENCODE24 "   add $24, %rsi\n   add $32, %rdi\n"
+    "3:  cmp %r9, %r10\n   jne 4f\n   movb $10, (%rdi)\n   inc %rdi\n"
+    "4:  test %rdx, %rdx\n   jnz 1b\n"
+    "5:  vzeroupper\n   mov %rdi, %rax\n   sub %r8, %rax\n" ASM_RET
+    //      A last line too short for a vector is never a whole one: a group at a time, and no newline.
+    "6:  movzwl (%rsi), %eax\n   rolw $8, %ax\n   shl $8, %eax\n   movzbl 2(%rsi), %r10d\n   or %r10d, %eax\n"
+    "mov %rax, %r10\n   shr $18, %r10\n   and $63, %r10d\n   movzbl (%rcx,%r10), %r10d\n   mov %r10b, 0(%rdi)\n"
+    "mov %rax, %r10\n   shr $12, %r10\n   and $63, %r10d\n   movzbl (%rcx,%r10), %r10d\n   mov %r10b, 1(%rdi)\n"
+    "mov %rax, %r10\n   shr $6, %r10\n   and $63, %r10d\n   movzbl (%rcx,%r10), %r10d\n   mov %r10b, 2(%rdi)\n"
+    "and $63, %eax\n   movzbl (%rcx,%rax), %eax\n   mov %al, 3(%rdi)\n   add $3, %rsi\n   add $4, %rdi\n   dec %r11\n   jnz 6b\n   jmp 5b\n"
+    //      Any other alphabet, tier or line: memory_encode_power2 a line at a time. A quantum's bytes in and symbols
+    //      out by its bits: 6 is three and four, 5 five and eight, 4 one and two, 1 and 9 one and eight.
+    "50: cmp $6, %r8\n   je 51f\n   cmp $5, %r8\n   je 52f\n   cmp $4, %r8\n   je 53f\n   cmp $1, %r8\n   je 54f\n   cmp $9, %r8\n   jne 9f\n"
+    "54: mov $1, %r10d\n   mov $8, %r11d\n   jmp 55f\n"
+    "51: mov $3, %r10d\n   mov $4, %r11d\n   jmp 55f\n"
+    "52: mov $5, %r10d\n   mov $8, %r11d\n   jmp 55f\n"
+    "53: mov $1, %r10d\n   mov $2, %r11d\n"
+    "55: push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $40, %rsp\n"
+    "mov %rdi, (%rsp)\n   mov %r10, 8(%rsp)\n   mov %r11, 16(%rsp)\n"
+    "mov %rdi, %rbx\n   mov %rsi, %r12\n   mov %rdx, %r13\n   mov %rcx, %r14\n   mov %r8, %r15\n   mov %r9, %rbp\n"
+    "56: mov %rbp, %rdx\n   cmp %r13, %rdx\n   cmova %r13, %rdx\n   sub %rdx, %r13\n   mov %rdx, 24(%rsp)\n"
+    "mov %rbx, %rdi\n   mov %r12, %rsi\n   mov %r14, %rcx\n   mov %r15, %r8\n   call memory_encode_power2\n"
+    "mov 24(%rsp), %rax\n   imul 16(%rsp), %rax\n   add %rax, %rbx\n   mov 24(%rsp), %rax\n   imul 8(%rsp), %rax\n   add %rax, %r12\n"
+    "cmp %rbp, 24(%rsp)\n   jne 57f\n   movb $10, (%rbx)\n   inc %rbx\n"
+    "57: test %r13, %r13\n   jnz 56b\n"
+    "mov %rbx, %rax\n   sub (%rsp), %rax\n   add $40, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "9:  " ASM_RET
+    ASM_END(memory_encode_power2_lines)
+);
+#elif ARM64
+__asm__(
+    ASM_SECTION
+    //      memory_encode_power2_lines: x0 destination, x1 source, x2 groups,
+    //      x3 alphabet, x4 bits, x5 line; x0 the bytes written. A line of
+    //      sixteen groups or more is memory_encode_power2's ld3/tbl/st4 turns
+    //      and one more ending at its end; anything else is the routine a line
+    //      at a time, as on x86_64.
+    ASM_FUNC(memory_encode_power2_lines)
+    "mov x9, x0\n   cbz x2, 8f\n   cbz x5, 8f\n   cmp x4, #6\n   b.ne 50f\n   cmp x5, #16\n   b.lo 50f\n"
+    "ld1 {v16.16b, v17.16b, v18.16b, v19.16b}, [x3]\n   movi v20.16b, #63\n"
+    "1:  cmp x2, x5\n   csel x10, x2, x5, lo  // this line's groups\n   sub x2, x2, x10\n   mov x11, x10\n   cmp x10, #16\n   b.lo 6f\n"
+    "2:  ld3 {v0.16b, v1.16b, v2.16b}, [x1], #48\n   ushr v4.16b, v0.16b, #2\n   shl v5.16b, v0.16b, #4\n   sri v5.16b, v1.16b, #4\n   and v5.16b, v5.16b, v20.16b\n"
+    "shl v6.16b, v1.16b, #2\n   sri v6.16b, v2.16b, #6\n   and v6.16b, v6.16b, v20.16b\n   and v7.16b, v2.16b, v20.16b\n   tbl v4.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v4.16b\n"
+    "tbl v5.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v5.16b\n   tbl v6.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v6.16b\n   tbl v7.16b, {v16.16b, v17.16b, v18.16b, v19.16b}, v7.16b\n"
+    "st4 {v4.16b, v5.16b, v6.16b, v7.16b}, [x0], #64\n   sub x11, x11, #16\n   cmp x11, #16\n   b.hs 2b\n   cbz x11, 3f\n"
+    //      The line's last groups: back to sixteen before its end, as on x86_64.
+    "mov x12, #16\n   sub x12, x12, x11\n   add x13, x12, x12, lsl #1\n   sub x1, x1, x13\n   sub x0, x0, x12, lsl #2\n   mov x11, #16\n   b 2b\n"
+    "3:  cmp x10, x5\n   b.ne 4f\n   mov w12, #10\n   strb w12, [x0], #1\n"
+    "4:  cbnz x2, 1b\n"
+    "5:  sub x0, x0, x9\n" ASM_RET
+    //      A last line too short for the vectors is never a whole one: a group at a time.
+    "6:  ldrb w7, [x1]\n   ldrb w8, [x1, #1]\n   ldrb w12, [x1, #2]\n   lsl w7, w7, #16\n   orr w7, w7, w8, lsl #8\n   orr w7, w7, w12\n"
+    "ubfx x8, x7, #18, #6\n   ldrb w8, [x3, x8]\n   strb w8, [x0]\n   ubfx x8, x7, #12, #6\n   ldrb w8, [x3, x8]\n   strb w8, [x0, #1]\n"
+    "ubfx x8, x7, #6, #6\n   ldrb w8, [x3, x8]\n   strb w8, [x0, #2]\n   and x8, x7, #63\n   ldrb w8, [x3, x8]\n   strb w8, [x0, #3]\n"
+    "add x1, x1, #3\n   add x0, x0, #4\n   subs x11, x11, #1\n   b.ne 6b\n   b 5b\n"
+    "8:  mov x0, #0\n" ASM_RET
+    //      Anything else: the routine a line at a time, a quantum's bytes in x21 and symbols out x22 by its bits.
+    "50: mov x10, #3\n   mov x11, #4\n   cmp x4, #6\n   b.eq 51f\n   mov x10, #5\n   mov x11, #8\n   cmp x4, #5\n   b.eq 51f\n"
+    "mov x10, #1\n   mov x11, #2\n   cmp x4, #4\n   b.eq 51f\n   mov x11, #8\n   cmp x4, #1\n   b.eq 51f\n   cmp x4, #9\n   b.ne 8b\n"
+    "51: stp x29, x30, [sp, #-96]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n"
+    "mov x19, x0\n   mov x20, x1\n   mov x23, x2\n   mov x24, x3\n   mov x25, x4\n   mov x26, x5\n   mov x21, x10\n   mov x22, x11\n   str x9, [sp, #80]\n"
+    "52: cmp x23, x26\n   csel x2, x23, x26, lo\n   sub x23, x23, x2\n   str x2, [sp, #88]\n   mov x0, x19\n   mov x1, x20\n   mov x3, x24\n   mov x4, x25\n   bl memory_encode_power2\n"
+    "ldr x2, [sp, #88]\n   madd x19, x2, x22, x19\n   madd x20, x2, x21, x20\n   cmp x2, x26\n   b.ne 53f\n   mov w12, #10\n   strb w12, [x19], #1\n"
+    "53: cbnz x23, 52b\n"
+    "ldr x9, [sp, #80]\n   sub x0, x19, x9\n   ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n   ldp x25, x26, [sp, #64]\n   ldp x29, x30, [sp], #96\n" ASM_RET
+    ASM_END(memory_encode_power2_lines)
+);
+#elif RISCV64
+__asm__(
+    ASM_SECTION
+    //      memory_encode_power2_lines: a0 destination, a1 source, a2 groups,
+    //      a3 alphabet, a4 bits, a5 line; a0 the bytes written. The routine is
+    //      a group at a time here, so this is it a line at a time.
+    ASM_FUNC(memory_encode_power2_lines)
+    "beqz a2, 8f\n   beqz a5, 8f\n"
+    "li t0, 6\n   li t1, 3\n   li t2, 4\n   beq a4, t0, 51f\n   li t0, 5\n   li t1, 5\n   li t2, 8\n   beq a4, t0, 51f\n"
+    "li t0, 4\n   li t1, 1\n   li t2, 2\n   beq a4, t0, 51f\n   li t2, 8\n   li t0, 1\n   beq a4, t0, 51f\n   li t0, 9\n   bne a4, t0, 8f\n"
+    "51: addi sp, sp, -96\n   sd ra, 88(sp)\n   sd s0, 80(sp)\n   sd s1, 72(sp)\n   sd s2, 64(sp)\n   sd s3, 56(sp)\n   sd s4, 48(sp)\n   sd s5, 40(sp)\n   sd s6, 32(sp)\n   sd s7, 24(sp)\n   sd s8, 16(sp)\n"
+    "mv s0, a0\n   mv s1, a1\n   mv s2, a2\n   mv s3, a3\n   mv s4, a4\n   mv s5, a5\n   mv s6, t1\n   mv s7, t2\n   mv s8, a0\n"
+    "52: mv a2, s5\n   bgeu s2, s5, 53f\n   mv a2, s2\n"
+    "53: sub s2, s2, a2\n   sd a2, 0(sp)\n   mv a0, s0\n   mv a1, s1\n   mv a3, s3\n   mv a4, s4\n   call memory_encode_power2\n"
+    "ld a2, 0(sp)\n   mul t0, a2, s7\n   add s0, s0, t0\n   mul t0, a2, s6\n   add s1, s1, t0\n   bne a2, s5, 54f\n   li t0, 10\n   sb t0, 0(s0)\n   addi s0, s0, 1\n"
+    "54: bnez s2, 52b\n"
+    "sub a0, s0, s8\n   ld ra, 88(sp)\n   ld s0, 80(sp)\n   ld s1, 72(sp)\n   ld s2, 64(sp)\n   ld s3, 56(sp)\n   ld s4, 48(sp)\n   ld s5, 40(sp)\n   ld s6, 32(sp)\n   ld s7, 24(sp)\n   ld s8, 16(sp)\n   addi sp, sp, 96\n" ASM_RET
+    "8:  li a0, 0\n" ASM_RET
+    ASM_END(memory_encode_power2_lines)
 );
 #endif
 #endif

@@ -48071,6 +48071,9 @@ typedef address_any ranged_copy_call(address_any, const address_any, positive);
 void *memory_copy_apart__room_64(void *, const void *, unsigned long long);
 void *memory_copy_apart(void *, const void *, unsigned long long);
 unsigned long long string_length(const char *);
+unsigned long long memory_encode_power2(void *, const void *, unsigned long long, const char *, unsigned long long);
+unsigned long long memory_encode_power2_lines(void *, const void *, unsigned long long, const char *, unsigned long long,
+                                              unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48208,6 +48211,59 @@ static unsigned long long ranged_length_cases(unsigned char *page_end)
         return faults;
 }
 
+/*
+        memory_encode_power2_lines against memory_encode_power2 into a buffer
+        of its own with the newlines put in afterwards: every bits value
+        (base64, base32, hex, binary both ways), groups to 100 and long ones,
+        lines of one to seventy seven groups, the destination ending exactly
+        at a page that faults with sixteen guard bytes in front, the source
+        ending at one too, and the answer the bytes written.
+*/
+static unsigned char ranged_reference[8192 * 9];
+
+static unsigned long long ranged_lines_cases(unsigned char *d_end, unsigned char *s_end)
+{
+        static const char *alphabets[] = {"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+                                          "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", "0123456789abcdef", "01", "01"};
+        static const unsigned long long bits_of[] = {6, 5, 4, 1, 9}, in_of[] = {3, 5, 1, 1, 1}, out_of[] = {4, 8, 2, 8, 8};
+        static const unsigned long long lines[] = {1, 2, 3, 7, 8, 9, 15, 16, 17, 18, 19, 20, 31, 32, 33, 47, 77};
+        static const unsigned long long long_groups[] = {127, 128, 129, 255, 257, 1000, 2047};
+        unsigned long long faults = 0;
+
+        for (unsigned long long kind = 0; kind < 5; kind++)
+                for (unsigned long long at = 0; at < 101 + sizeof(long_groups) / sizeof(long_groups[0]); at++)
+                {
+                        unsigned long long groups = at <= 100 ? at : long_groups[at - 101];
+                        unsigned long long in = groups * in_of[kind], symbols = groups * out_of[kind];
+                        unsigned char *source = s_end - in;
+
+                        for (unsigned long long i = 0; i < in; i++)
+                                source[i] = ranged_byte();
+                        (memory_encode_power2)(ranged_reference, source, groups, alphabets[kind], bits_of[kind]);
+                        for (unsigned long long l = 0; l < sizeof(lines) / sizeof(lines[0]); l++)
+                        {
+                                unsigned long long line = lines[l], want = symbols + groups / line * 1;
+                                unsigned char *into = d_end - want;
+
+                                for (int i = 1; i <= 16; i++)
+                                        into[-i] = (unsigned char)(0xc3 ^ i);
+                                faults += (memory_encode_power2_lines)(into, source, groups, alphabets[kind], bits_of[kind], line) !=
+                                          want;
+                                unsigned long long made = 0;
+                                for (unsigned long long g = 0; g < groups; g++)
+                                {
+                                        for (unsigned long long k = 0; k < out_of[kind]; k++)
+                                                faults += into[made++] != ranged_reference[g * out_of[kind] + k];
+                                        if ((g + 1) % line == 0)
+                                                faults += into[made++] != '\n';
+                                }
+                                for (int i = 1; i <= 16; i++)
+                                        faults += into[-i] != (unsigned char)(0xc3 ^ i);
+                        }
+                }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 //      A run of RANGED_SPAN bytes whose end is a page that faults, or whose
 //      start is just after one.
@@ -48250,6 +48306,8 @@ static fn ranged_tier(string_address tier)
         check("string_length: every length to 100 at each of the last 96 starts before a page that faults, and to 300 "
               "at every alignment",
               ranged_length_cases(ranged_d_end) == 0);
+        check("memory_encode_power2_lines: every bits, groups and line, against the routine with the newlines put in",
+              ranged_lines_cases(ranged_d_end, ranged_s_end) == 0);
 }
 
 /*
@@ -48570,10 +48628,12 @@ int main(void)
         }
         ranged_copy_cases(d_end, s_end, d_front, s_front, &faults);
         unsigned long long lengths = ranged_length_cases(d_end);
+        unsigned long long lines = ranged_lines_cases(d_end, s_end);
         ranged_time();
-        printf("arm64 ranged: 6 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu\n",
-               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths);
-        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths != 0;
+        printf("arm64 ranged: 7 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
+               "lines %llu\n",
+               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines);
+        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines != 0;
 }
 #endif
 #endif /* CHECK_ranged || CHECK_native_ranged */
@@ -126160,7 +126220,9 @@ b32 main(void)
 
 #ifdef BENCH_ranged
 /* The call-site entries at the shapes their callers have, against what the
-   same callers got before: memory_copy_apart__room_64 over the lines of
+   same callers got before -- memory_encode_power2_lines a 76-column base64
+   block against the routine and then every line moved, below -- and
+   memory_copy_apart__room_64 over the lines of
    src/lib.c (every length to 128, in order) into a buffer nothing reads and
    into one buffer read at once, and at a fixed 40 and 76 bytes hidden from
    the compiler, against lib.util.c's memory_copy_apart (the inline pair
@@ -126179,6 +126241,39 @@ static p32 line_at[LINES], line_size[LINES];
 static positive lines;
 static volatile positive fixed_size[2] = {40, 76};
 static volatile p64 sink;
+
+/*      base64 at 76 columns: the encoder as it was -- every quantum, then each
+        line moved up a byte for the newline before it, from the last line back
+        -- against memory_encode_power2_lines. 57,000 bytes, a thousand lines. */
+#define WRAP_LINES 1000
+static p8 wrap_out[WRAP_LINES * 77 + 64];
+
+static p64 wrap_run(positive side)
+{
+        static const string_address alphabet = (string_address) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        positive groups = WRAP_LINES * 19, symbols = groups * 4, reserved = symbols + WRAP_LINES;
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < 64; round++)
+                if (side)
+                        sink += memory_encode_power2_lines(wrap_out, text, groups, alphabet, 6, 19);
+                else
+                {
+                        memory_encode_power2(wrap_out, text, groups, alphabet, 6);
+                        positive left = symbols, ending = reserved, take = 0;
+
+                        while (ending > left)
+                        {
+                                ending -= take;
+                                left -= take;
+                                memory_copy(wrap_out + ending, wrap_out + left, take);
+                                wrap_out[--ending] = '\n';
+                                take = min(left, (positive)76);
+                        }
+                        sink += wrap_out[ending];
+                }
+        return get_cpu_time() - start;
+}
 
 static p64 run(positive side, positive shape)
 {
@@ -126233,6 +126328,20 @@ b32 main(void)
                 if (tier == 0 && !wide2)
                         continue;
 #endif
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, walked, wrap_run(0), lined, wrap_run(1));
+                        string_format(log, "memory_encode_power2_lines base64 at 76 columns%s: paired median lines/walked %p.",
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
                 for (positive shape = 0; shape < 4; shape++)
                 {
                         positive ratios[TRIES];

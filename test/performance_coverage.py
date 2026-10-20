@@ -293,6 +293,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fast_argmax_f32',
 cover('direct_benchmark', 'test/checks.c#BENCH_translate_planes', 'memory_translate_planes_u32_rect',
       'paired timing against the C loop it replaced over a terminal strip and '
       'two cell sizes, grey and colour tables, with VBMI and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_encode_power2_lines',
+      'paired timing of a 76-column base64 block against the routine and then '
+      'every line moved up for its newline, which is what the encoder did')
 cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_copy_apart__room_64',
       'paired timing against the memory_copy_apart its callers had, over the lines '
       'of src/lib.c into a buffer nothing reads and one read at once, and at fixed '
