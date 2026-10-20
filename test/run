@@ -14609,7 +14609,10 @@ says transcript 'changed environment'  'cache-second'
 says transcript 'cache process owner'  'owner-parent'
 says transcript 'monitor at root'     'hs.rotinom/'
 says transcript 'each program has a stack of its own' 'rlsa-kcats'
-says transcript 'a 32-bit caller starts a spark image' 'ko-edom'
+#       The 32-bit caller is i386 code, so only an x86_64 guest can run it.
+if [ "$boot_emulator" = qemu-system-x86_64 ]; then
+        says transcript 'a 32-bit caller starts a spark image' 'ko-edom'
+fi
 says transcript 'mointor alias'       'alias-hs.rotinom'
 says transcript 'monitor linked'      'path-hs.rotinom/'
 says transcript 'mount linked'        'mount-link-llehs/'
