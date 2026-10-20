@@ -70,7 +70,13 @@
 #       are syscall wrappers and were measured spawning in 7.6 us. The kernel
 #       is a different case: it is compiled with -mno-sse, so v2 there means
 #       integer instructions only and there is no vector code to trip over.
-#> program_flags -march=x86-64 -mno-avx -mno-bmi -mno-bmi2 -falign-functions=1
+#
+#       Functions start on 32 bytes. The shell's loops are bound by fetch, and
+#       with the loops' functions first in the hot blocks (spark.ld) a start
+#       on any byte left a loop's branch targets wherever they fell: sh-case
+#       took 96M cycles packed and 88M aligned, sh-param, sh-read and cut -c
+#       a few percent less again, for under 200 KB of image.
+#> program_flags -march=x86-64 -mno-avx -mno-bmi -mno-bmi2 -falign-functions=32
 #> program_flags -ffunction-sections
 
 

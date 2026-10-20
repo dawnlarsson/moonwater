@@ -2566,12 +2566,12 @@ def self_test():
             #      openssl verify's, which no lane may depend on.
             #
             #      bowl_matrix needs a booted guest and a disk of five bowl
-            #      distributions it provisions; hot_order rewrites the order
-            #      in src/build/spark.ld from a profiled shell; and
+            #      distributions it provisions; hot_order and hot_loop rewrite
+            #      the order in src/build/spark.ld from a profiled shell; and
             #      network_campaign and network_integration write their
             #      reports and corpora into a directory they are given.
             BY_HAND = {"https_bench", "tls_verify_fuzz", "x509_corpus",
-                       "bowl_matrix", "hot_order", "network_campaign",
+                       "bowl_matrix", "hot_order", "hot_loop", "network_campaign",
                        "network_integration"}
 
             unrun = sorted(set(registered) - asked - BY_HAND)
@@ -85376,6 +85376,104 @@ HOT_ORDER_COMMANDS = [
 ]
 
 
+#       The loops a script spends its time in: floorhot's sh-strvars, sh-func,
+#       sh-forsplit, sh-case, sh-echopipe, sh-arrayish, sh-printf, sh-param
+#       and sh-read, and the substitutions this shell runs in itself.
+HOT_LOOP_COMMANDS = [
+    'i=0; while [ $i -lt 60000 ]; do x="abc$i-def-ghi"; y=${x%-*}; z=${x#abc}; w=${z##*-}; i=$((i+1)); done',
+    'f() { local a="$1$2"; b=${a%x}; }; i=0; while [ $i -lt 60000 ]; do f foo$i barxx; i=$((i+1)); done',
+    'i=0; while [ $i -lt 12000 ]; do for w in alpha bb ccc dddd eeeeeeee fffffffffffffff; do v=$w; u="$v:$w"; done; i=$((i+1)); done',
+    'i=0; while [ $i -lt 60000 ]; do case "file$i.txt" in *.c) a=1;; *.txt) a=2;; esac; case $i in 1*) b=1;; *9) b=2;; esac; i=$((i+1)); done',
+    'i=0; while [ $i -lt 3000 ]; do echo "line $i of text" | while read a b c; do d="$a$b"; done; i=$((i+1)); done',
+    'set -- one two three four five six seven eight nine ten; i=0; while [ $i -lt 30000 ]; do for a in "$@"; do b="$a$i"; done; i=$((i+1)); done',
+    'i=0; while [ $i -lt 20000 ]; do s=$(printf "%s-%05d-%x" name $i $i); i=$((i+1)); done',
+    'i=0; s="the quick brown fox jumps over the lazy dog"; while [ $i -lt 30000 ]; do t=${s#* }; u=${t%% *}; v=${#s}; i=$((i+1)); done',
+    'i=0; while [ $i -lt 30 ]; do n=0; while read -r a b c; do n=$((n+1)); done < /etc/passwd; i=$((i+1)); done',
+    'i=0; while [ $i -lt 2000 ]; do x=$(basename /a/b/c$i.c .c); y=$(dirname /a/b/c$i); i=$((i+1)); done',
+]
+
+
+def harness_hot_loop(argv):
+    """Write the shell loops' functions in src/build/spark.ld.
+
+        python3 test/differential.py --harness hot_loop SHELL MAP [--write]
+
+    SHELL is a shell built for x86_64 with symbols and -ffunction-sections,
+    MAP its link map. Each command of HOT_LOOP_COMMANDS runs under perf on
+    this machine's cycles, every function's share of each loop is averaged,
+    and the functions with any share come out by it, C and assembly apart,
+    between the hot_loop and hot_loop_asm markers. Cycles and not counted
+    blocks: a block that misses costs what a dozen that hit do, and ordering
+    by blocks put sh-case twenty percent behind ordering by cycles. Without
+    --write the blocks are printed."""
+    args = [a for a in argv if not a.startswith("--")]
+    if len(args) != 2:
+        print("hot_loop: SHELL MAP [--write]", file=sys.stderr)
+        return 2
+    shell, mapfile = args
+    sections = set(re.findall(r"^ (\.text[^\s]*)", Path(mapfile).read_text(errors="replace"),
+                              re.M))
+    asm = set()
+    for source in (HARNESS_ROOT / "src").rglob("*"):
+        if source.suffix in (".c", ".inc"):
+            asm.update(re.findall(r"ASM_(?:LOCAL_)?FUNC\((\w+)\)", source.read_text(errors="replace")))
+    share = {}
+    with tempfile.TemporaryDirectory(prefix="moonwater-hot-loop-") as temporary:
+        data = Path(temporary) / "perf.data"
+        for command in HOT_LOOP_COMMANDS:
+            subprocess.run(["perf", "record", "-q", "-e", "cycles:u", "-F", "20000", "-o", str(data),
+                            "--", shell, "-c", command], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=600)
+            report = subprocess.run(["perf", "report", "-i", str(data), "--no-children", "--sort",
+                                     "symbol", "--stdio", "-F", "overhead,sym"], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+            for line in report.splitlines():
+                found = re.match(r"\s*([0-9.]+)%\s+\[\.\]\s+(\S+)", line)
+                if found:
+                    name = found.group(2)
+                    share[name] = share.get(name, 0.0) + float(found.group(1)) / len(HOT_LOOP_COMMANDS)
+
+    def section_for(name):
+        if name.endswith(".cold"):
+            candidate = ".text.unlikely." + name[:-5]
+            return candidate if candidate in sections else None
+        for candidate in (".text.hot." + name, ".text." + name, ".text.startup." + name,
+                          ".text.unlikely." + name):
+            if candidate in sections:
+                return candidate
+        return None
+
+    ordered = []
+    ordered_asm = []
+    for name in sorted(share, key=lambda name: (-share[name], name)):
+        base = re.sub(r"(\.(part|constprop|isra|cold)(\.[0-9]+)*)+$", "", name)
+        if base in asm or name in asm:
+            found = ".text." + base
+            if found in sections and found not in ordered_asm:
+                ordered_asm.append(found)
+            continue
+        found = section_for(name)
+        if found and found not in ordered:
+            ordered.append(found)
+    block = "".join("                *(%s)\n" % found for found in ordered)
+    block_asm = "".join("                *(%s)\n" % found for found in ordered_asm)
+    if "--write" not in argv:
+        print(block, end="")
+        print("# assembly")
+        print(block_asm, end="")
+        return 0
+    path = HARNESS_ROOT / "src/build/spark.ld"
+    text = path.read_text()
+    for begin_marker, end_marker, made in (("/* hot_loop begin */\n", "                /* hot_loop end */", block),
+                                           ("/* hot_loop_asm begin */\n", "                /* hot_loop_asm end */", block_asm)):
+        begin = text.index(begin_marker) + len(begin_marker)
+        end = text.index(end_marker)
+        text = text[:begin] + made + text[end:]
+    path.write_text(text)
+    print("hot loop: %d functions and %d assembly routines, written" % (len(ordered), len(ordered_asm)))
+    return 0
+
+
 def harness_hot_order(argv):
     """Write the order of the hot functions in src/build/spark.ld.
 
@@ -90105,6 +90203,7 @@ HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
     "scale": harness_scale,
     "hot_order": harness_hot_order,
+    "hot_loop": harness_hot_loop,
     "https_bench": harness_https_bench,
     "compression": harness_compression,
     "engines": harness_engines_main,
