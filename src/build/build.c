@@ -82,28 +82,28 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 To move to a new release: take the .sign file from the
                 mirror's linux-VERSION.tar.sign and paste it here along with
                 the version. */
-        {"kernel_version", "7.2.8"},
+        {"kernel_version", "7.3"},
         {"kernel_mirror", "https://cdn.kernel.org/pub/linux/kernel"},
         {"kernel_keys", "torvalds@kernel.org gregkh@kernel.org"},
         {"kernel_signature",
          "-----BEGIN PGP SIGNATURE-----\n"
          "Comment: This signature is for the .tar version of the archive\n"
-         "Comment: git archive --format tar --prefix=linux-7.2.8/ v7.2.8\n"
-         "Comment: git version 2.55.0\n"
+         "Comment: git archive --format tar --prefix=linux-7.3/ v7.3\n"
+         "Comment: git version 2.56.0\n"
          "\n"
-         "iQIzBAABCgAdFiEEZH8oZUiU471FcZm+ONu9yGCSaT4FAmq2h9kACgkQONu9yGCS\n"
-         "aT7KOxAApH+1Ya5tF2JhFtUWm8EqNZ9Ai9i6IkZ8h8OECVvhQs4KiutLVy6gLJpE\n"
-         "xh7ywEXWf6dFZqBW3pTHDlmLC+zAiqQpXKvU+BJnoVorE0d61BoQZlPaMFesIEJ7\n"
-         "+qp4kvzN+3LUVU0n1PZLDLaPq/L71TkEnioT5U0uEJcBN3C/YhFil4jfRGzvJxPu\n"
-         "+VXUnMTdC6MMuZaODbXBQP+OUfzVTnsL3Vr495kY68oqj3mOdixggpTKX9/YncP0\n"
-         "4f7du8U28dtg5FUt+vGpVtDWHcDVjIrUvioH7CYZDecDkrsNxtJkGUJysDL66IYd\n"
-         "ybHRcxKfbIlb0cADtE0yKy+QaV4ydi55kWrrxpl+Up/i9TvEqtg3yll2zBlXQHuG\n"
-         "P+Fz+rS4DiesMj0gGpqP0XgOEOffjilM1HNSwlYw/18LRroBK4Wga1wS4uPbvzK5\n"
-         "rapAZsJnpv4r9V8PqFSRZWMmcuBT4ZSN3IjeSiiWZ4fQa5POVntHGZ6Oiu+Dqpui\n"
-         "SRDNNr1PnOl4g/7xW4xuGKPnfauMhtxjz6EnlxDLnkRyP6ftAhYoohoQ+UAbrJ1u\n"
-         "VV0ExYB+n5h1LBxTbM37sykYzDucDNZs7wiAx2m1u4XjBxc9/FxSgCdaQCs4cGpl\n"
-         "Y6KlHCyOMxd4gPfx6VW/d1OU0/ZdTXkaOv+CJRGGZVgqMJLoTWU=\n"
-         "=FDcG\n"
+         "iQIzBAABCgAdFiEEZH8oZUiU471FcZm+ONu9yGCSaT4FAmrVrnYACgkQONu9yGCS\n"
+         "aT4SNxAAqzfP8ifT9McZZppOD1b/RLx4nM8NHj3AjXxSq8LJCYX3x3axbkrFuuUw\n"
+         "Dh1m9JgwB1EB+J53ZBpGQXkfWCL1lPxBMCiIedRixy/noluXqz8Eo82ETtCkag4p\n"
+         "dY2LYUUMMYcWB/jFdYUYtrzxaTIVySggUt+pUPcdmldNYrcncKZl5PJ98yli6eoF\n"
+         "buqL6flY5n3Mx+9YjhBsuhc5Y0KDKZLBetk6L3i2eIFZfbkrFHNRZ2jFJQPFxrdt\n"
+         "GlwO2+JuvM6SoyGspu4Kjc6E1J/bFX4b833vAttVec/ODZf1g2cPQQyrClu1pu+a\n"
+         "w/S9zrV68fKLdQOhmSWsEhMwi3I/EVuwD5fqvAlgZpbYpIxDpsdKPFf09YEq1Ykf\n"
+         "0tHvgjPp3QHVbaD4ttCq6ncQ93BIqFRkurRR0+mwSTNrpTVaS7J3fmm66gt3Exn3\n"
+         "kZHeQ1jeZp1B8DsJt9FeGqV4uYGwJ0hUMYuAp3ljrqCtnV8mNE/J8PHjCiuvEZCg\n"
+         "+q8SA9dFBiiur8hO4h7t5XoTUDVifd3XnmwjMO4ugoUJ0KoRTrhYTEWMsnzIrp7d\n"
+         "9aYrQ2AZJqw1cNbCwPucNku13/OwhqR1HK1vhnpHbM2li9uSnqS52AT3UmpyBDhA\n"
+         "n73umJLI01SYCoP/aCLfvCrPGRWVRg3VqSzYzaF9cXT3tzeGgiA=\n"
+         "=WFPR\n"
          "-----END PGP SIGNATURE-----\n"},
 
         /*      Linking a freestanding binary of this tree's own shape.

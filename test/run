@@ -14372,6 +14372,18 @@ rm -f /root/timezone
 printf 'hserf-%s\n' "$(moonwater timezone | grep -c 'auto, waiting')" | rev
 moonwater timezone UTC > /dev/null 2>&1
 #
+#       A program the shell starts, alone or as a pipeline's stage, runs in
+#       the shell's directory. Linux 7.3 gives a task user_mode_thread starts
+#       /init's root and directory, and every spawned command ran in / while
+#       the shell stood elsewhere.
+#
+mkdir -p /tmp/spawn-alone /tmp/spawn-piped
+cd /tmp/spawn-alone
+ls -l /proc/self/cwd
+cd /tmp/spawn-piped
+ls -l /proc/self/cwd | cat
+cd /
+#
 #       A fresh shell waits until the live register changes, then asks for the
 #       same denied image directly and through a #! line.  Starting it before
 #       the write keeps this test independent of the parent's cached report;
@@ -14641,6 +14653,8 @@ says transcript 'monitor was clean'   'monitor-clean'
 says transcript 'plain text script'   'plain-alpha'
 says transcript 'plain text status'   '71text'
 says transcript 'shebang policy'      'fl-policy-126-126'
+says transcript "a spawned program runs in the shell's directory" 'cwd -> /tmp/spawn-alone'
+says transcript "and so does a pipeline's stage" 'cwd -> /tmp/spawn-piped'
 says transcript 'powered down'        'reboot: Power down'
 
 never transcript 'no panic'           'Kernel panic'

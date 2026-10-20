@@ -27767,10 +27767,23 @@ typedef long atomic_long_t;
 #define ATOMIC_LONG_INIT(v) (v)
 static long atomic_long_add_return(long n, atomic_long_t *p) { *p += n; return *p; }
 static void atomic_long_sub(long n, atomic_long_t *p) { *p -= n; }
-#define user_mode_thread(fn, arg, sig) \
-        ((void)(sig), spawn_handed=(arg), spawn_entered++, spawn_pid)
+#ifndef CLONE_VM
+#define CLONE_VM 0x00000100
+#endif
+#ifndef CLONE_UNTRACED
+#define CLONE_UNTRACED 0x00800000
+#endif
+struct kernel_clone_args { u64 flags; int exit_signal; int (*fn)(void *); void *fn_arg; };
+/* The new task's half, which execs; this harness stops at the handing over. */
+static int spawn_enter(void *data) { (void)data; return 0; }
+static int kernel_clone(struct kernel_clone_args *args) {
+    (void)args->flags; (void)args->exit_signal;
+    spawn_handed = args->fn_arg;
+    spawn_entered++;
+    return spawn_pid;
+}
 '''
-    source += section(spark, "struct spawn_work\n", "/*\n        A program starts able to be interrupted.")
+    source += section(spark, "struct spawn_work\n","/*\n        A program starts able to be interrupted.")
     source += section(spark, "static bool spawn_keeps", "static void spawn_default_signals")
     source += section(spark, "static int copy_strings", "static long do_spawn")
     source += section(spark, "static long do_spawn", "static long report_stats")
@@ -30128,7 +30141,7 @@ int main(void) {
                 "\t/* Check a recently used CPU as a potential idle candidate: */\n"
                 "\trecent_used_cpu = p->recent_used_cpu;\n}\n"
                 "static void wakeup_preempt_fair(struct rq *rq, struct task_struct *p, int wake_flags)\n{\n"
-                "\tif (test_tsk_need_resched(rq->curr))\n\t\treturn;\n}\n",
+                "\tif (!sched_feat(PREEMPT_SHORT) && test_tsk_need_resched(rq->curr))\n\t\treturn;\n}\n",
             "linux/fs/overlayfs/super.c":
                 "static const struct dentry_operations ovl_dentry_operations = {\n"
                 "\t.d_real = ovl_d_real,\n};\n",
@@ -30192,7 +30205,7 @@ int main(void) {
             return (fair.index("lockdep_assert_held(&p->pi_lock);") < start <
                     fair.index("if (wake_flags & WF_TTWU)") <
                     exiting < fair.index("/* Check a recently used CPU") <
-                    preempt < fair.index("if (test_tsk_need_resched(rq->curr))") and
+                    preempt < fair.index("if (!sched_feat(PREEMPT_SHORT) && test_tsk_need_resched(rq->curr))") and
                     "(wake_flags & WF_EXEC) ||" in fair and
                     fair.count("!current->mm && in_task()") == 2)
 
@@ -30313,7 +30326,7 @@ line_add_padded() { line_add "$@"; }
         tree = Path(work) / "patch-moved-scheduler"
         patch_tree(tree, makefile_lines)
         fair = tree / "linux/kernel/sched/fair.c"
-        fair.write_text(fair.read_text().replace("\tif (test_tsk_need_resched(rq->curr))\n", ""))
+        fair.write_text(fair.read_text().replace("\tif (!sched_feat(PREEMPT_SHORT) && test_tsk_need_resched(rq->curr))\n", ""))
         result = subprocess.run(["sh", str(patch)], cwd=tree,
                                 env={**os.environ, "MOONWATER_STOCK": ""},
                                 text=True, capture_output=True)

@@ -250,6 +250,7 @@ static inline void canvas_client_release(struct file *file) {}
 #include <linux/file.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
+#include <linux/fs_struct.h>
 #include <linux/notifier.h>
 #include <linux/workqueue.h>
 #include <linux/delay.h>
@@ -2568,7 +2569,10 @@ static COLD void canvas_probe(struct work_struct *work)
 {
         _Bool was_on = canvas_is_on();
 
-        canvas_claim_all(NULL, NULL);
+        // A kernel worker's root is the empty nullfs, where /dev/dri is
+        // not; the cards are looked up from the root /init sees.
+        scoped_with_init_fs()
+                canvas_claim_all(NULL, NULL);
         if (!was_on && canvas_is_on())
                 moonwater_bind_fire(SPARK_BIND_CANVAS_ON);
         canvas_attempts++;

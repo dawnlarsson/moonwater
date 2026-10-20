@@ -97,6 +97,7 @@ CONFIG_FUTEX=y
 CONFIG_AIO=y
 CONFIG_ADVISE_SYSCALLS=y
 CONFIG_MEMBARRIER=y
-CONFIG_PROC_SYSCTL=y
+# /proc/sys is not a separate option any more -- SYSCTL brings it.
+CONFIG_SYSCTL=y
 # devpts is not a separate option any more -- UNIX98_PTYS above brings it.
 CONFIG_UNIX98_PTYS=y

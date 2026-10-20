@@ -884,7 +884,7 @@ ${tab}${tab}return;
 
 EOF
 settings_insert linux/kernel/sched/fair.c "Moonwater: nor does it preempt that task" \
-        "${tab}if (test_tsk_need_resched(rq->curr))" before "$settings_work/yield" scheduler
+        "${tab}if (!sched_feat(PREEMPT_SHORT) && test_tsk_need_resched(rq->curr))" before "$settings_work/yield" scheduler
 
 #       Fault-around, sixteen pages to four.
 #

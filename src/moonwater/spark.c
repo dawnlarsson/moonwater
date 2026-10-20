@@ -194,7 +194,7 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
 
 struct stats {
         unsigned long spawns;
-        unsigned long task_ns; // time inside user_mode_thread
+        unsigned long task_ns; // time inside kernel_clone
         unsigned long exec_ns;   // time inside kernel_execve
         unsigned long loader_ns; // time inside the spark binfmt handler
         unsigned long loads;     // binfmt invocations, which exceed spawns:
@@ -1223,7 +1223,7 @@ int execute_spark(struct linux_binprm *bprm)
                     // The bss is fixed per-tool arenas of which a program
                     // touches a few pages (see lib.util.c's start): ordinary
                     // pages, said once here rather than by a call per start.
-                    i == 2 ? VM_NOHUGEPAGE : 0,
+                    i == 2 ? mk_vma_flags(VMA_NOHUGEPAGE_BIT) : EMPTY_VMA_FLAGS,
                     i == 2 ? 0 : (address - header->base) >> PAGE_SHIFT,
                     &populate[i], NULL);
                 if (IS_ERR_VALUE(mapped))
@@ -1358,10 +1358,16 @@ fatal:
         tables and file table -- and then execs, which immediately tears the
         address space back down. Nothing ever reads the copy.
 
-        user_mode_thread creates a task with no address space to copy, and
-        kernel_execve then builds the new one directly. It is the same pair the
-        kernel uses to start /init. The result is a normal child of the caller:
-        it reports through SIGCHLD and is reaped with wait4 like any other.
+        kernel_clone with a function to run creates a task with no address
+        space to copy, and kernel_execve then builds the new one directly. It
+        is the pair the kernel uses to start /init. The result is a normal
+        child of the caller: it reports through SIGCHLD and is reaped with
+        wait4 like any other.
+
+        It is user_mode_thread without the umh bit. That bit gives the task
+        /init's root and working directory, and refuses a caller in a mount
+        namespace of its own; a spawn is the caller's child, in the caller's
+        directory, under the caller's root, wherever the caller is.
 */
 
 struct spawn_work
@@ -1765,8 +1771,14 @@ static long do_spawn(struct file *file, struct spawn __user *request)
         // SIGCHLD alone, so the new task is an ordinary child of the caller
         // and wait4 works on it the same way it does for a fork.
         {
+                struct kernel_clone_args clone = {
+                        .flags = CLONE_VM | CLONE_UNTRACED,
+                        .exit_signal = SIGCHLD,
+                        .fn = spawn_enter,
+                        .fn_arg = work,
+                };
                 u64 started = ktime_get_ns();
-                pid = user_mode_thread(spawn_enter, work, SIGCHLD);
+                pid = kernel_clone(&clone);
                 this_cpu_add(spark_tally.task_ns, ktime_get_ns() - started);
                 this_cpu_inc(spark_tally.spawns);
         }
