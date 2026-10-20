@@ -8604,65 +8604,59 @@ static inline INLINE fn rev_characters(p8 address_to at, positive length)
 
 /*
         Whole lines reversed at once, into an output the caller reserved as
-        long as the lines are: every line end in the read comes from one
-        library pass and each line is copied and turned over where it lands.
-        What is answered is how many bytes of the read were taken, all whole
-        lines. The line reader's way keeps the lines this does not take, and
-        the pool's jobs run it over a piece with an offsets array of their own.
+        long as the lines are, and the room past both: every line of the read
+        turned over by memory_reverse_lines__room_64 in one pass, by its
+        characters in a UTF-8 locale. A line that is not well-formed UTF-8
+        there it leaves, and that line is rev_characters' here, its bytes
+        that begin no character each a character, before the routine goes on
+        after it. What is answered is how many bytes of the read were taken,
+        all whole lines; the line reader's way keeps the lines this does not
+        take.
 */
-#define REV_OFFSETS 4096
-
 static inline INLINE positive rev_lines_into(p8 address_to out, positive address_to made_out,
-                                             p32 address_to offsets, p8 address_to base,
-                                             positive left, bool utf8)
+                                             p8 address_to base, positive left, bool utf8)
 {
+        positive taken = 0;
         positive made = 0;
-        positive line_start = 0;
-        positive scan = 0;
 
         for (;;)
         {
-                positive count = memory_offsets_of_either(offsets, base + scan, left - scan,
-                                                          text_delimiter, text_delimiter,
-                                                          REV_OFFSETS);
+                positive part = 0;
 
-                for (positive i = 0; i < count; i++)
-                {
-                        positive ending = scan + offsets[i];
-                        positive length = ending - line_start;
+                taken += MEMORY_REVERSE_LINES__ROOM(TEXT_ROOM, out + made, address_of part,
+                                                    base + taken, left - taken,
+                                                    text_delimiter | (positive)utf8 << 8);
+                made += part;
 
-                        memory_copy_apart(out + made, base + line_start, length);
+                p8 address_to ending = utf8 && taken < left
+                                        ? memory_first_of(base + taken, text_delimiter, left - taken)
+                                        : null;
 
-                        if (utf8)
-                                rev_characters(out + made, length);
-                        else
-                                memory_reverse(out + made, length);
-
-                        made += length;
-                        out[made++] = text_delimiter;
-                        line_start = ending + 1;
-                }
-
-                if (count < REV_OFFSETS)
+                if (!ending)
                         break;
 
-                scan += offsets[count - 1] + 1;
+                positive length = (positive)(ending - (base + taken));
+
+                memory_copy_apart(out + made, base + taken, length);
+                rev_characters(out + made, length);
+                made += length;
+                out[made++] = text_delimiter;
+                taken += length + 1;
         }
 
         address_to made_out = made;
-        return line_start;
+        return taken;
 }
 
 static positive rev_lines(p8 address_to base, positive left, bool utf8)
 {
-        static p32 offsets[REV_OFFSETS];
         p8 address_to out = text_reserve(left);
         positive made = 0;
 
         if (!out)
                 return 0;
 
-        positive took = rev_lines_into(out, address_of made, offsets, base, left, utf8);
+        positive took = rev_lines_into(out, address_of made, base, left, utf8);
 
         text_out_used -= left - made;
         return took;
@@ -8675,9 +8669,8 @@ static bool rev_pieces_emit(address_any context, positive index, p8 address_to l
                             positive length, positive offset,
                             parallel_output address_to output)
 {
-        p32 offsets[REV_OFFSETS];
         positive made = 0;
-        p8 address_to out = parallel_reserve(output, length);
+        p8 address_to out = parallel_reserve(output, length + TEXT_ROOM);
 
         (void)context;
         (void)index;
@@ -8686,10 +8679,9 @@ static bool rev_pieces_emit(address_any context, positive index, p8 address_to l
         if (!out)
                 return false;
 
-        positive took = rev_lines_into(out, address_of made, offsets, lines, length,
-                                       rev_pieces_utf8);
+        positive took = rev_lines_into(out, address_of made, lines, length, rev_pieces_utf8);
 
-        output->used -= length - made;
+        output->used -= length + TEXT_ROOM - made;
         return took == length;
 }
 

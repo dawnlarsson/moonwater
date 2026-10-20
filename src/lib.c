@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        420 routines (396 public, 24 local), 410 of them on all three and 10 local to one.
+        421 routines (397 public, 24 local), 411 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -278,6 +278,7 @@
           memory_release                 public  yes     yes     yes
           memory_reserve                 public  yes     yes     yes
           memory_reverse                 public  yes     yes     yes
+          memory_reverse_lines__room_64  public  yes     yes     yes
           memory_search                  public  yes     yes     yes
           memory_search_ascii_case       public  yes     yes     yes
           memory_search_ascii_case_prepared public  yes     yes     yes
@@ -40641,6 +40642,383 @@ __asm__(
     "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
     ".popsection\n"
     ASM_END(memory_cut_fields__room_64)
+    ".option pop\n"
+);
+#endif
+#endif
+
+/*
+        rev over whole lines: every line of a read turned over into the
+        output in one pass.
+
+        memory_reverse_lines__room_64(destination, made, source, length,
+        control) writes each whole line of source -- through the last
+        newline in length -- in the opposite order with its newline after
+        it, and answers how many bytes of source that is; *made is how many
+        it wrote, the same count. control is the newline in bits 0 to 7, and
+        1 at bit 8 for a UTF-8 locale, where a line is turned over by its
+        characters: a sequence's bytes stay in their order. A line that is
+        not well-formed UTF-8 there is the caller's, whose rule for a byte
+        that begins no character this does not repeat: the routine stops
+        before it. Both buffers run 64 bytes past the length. Nothing before
+        the source is read but, on riscv64 without V, the rest of the aligned
+        word it begins in, which shares its page. What is written past *made
+        is unspecified. There is no plain routine; every caller has the room.
+
+        Sixty four bytes give the newlines and the bytes past ASCII, and each
+        line to sixty four bytes is the same sixty four turned over, whatever
+        its length, its bytes from before the line and what lands past its
+        end written over by the next: the length tested at thirty two was a
+        coin on C source, 0.73 mispredicts a line, and 68M cycles became 50M
+        here for one more turn on a short line. A line past ASCII in a UTF-8
+        locale is asked of memory_utf8_valid_span once and its sequences
+        turned back after the turns.
+
+        rev over 64 MB of C source on a 9950X, user cycles against the walk
+        rev had (every line end from memory_offsets_of_either, a copy and
+        memory_reverse a line, and rev_characters' decoding in a UTF-8
+        locale): C 150.1M to 50.1M, C.UTF-8 169.8M to 49.8M; 33 MB of mixed
+        UTF-8 281.3M to 155.2M in C.UTF-8 and 59.0M to 24.7M in C; with SSE2
+        alone 177.0M to 71.3M, 207.8M to 71.8M and 68.3M to 33.0M, the mixed
+        UTF-8 the same 301M either way, memory_utf8_valid_span being its
+        scalar walk there. M2 Pro, lifted, src/lib.c: 20.6 to 10.2 ns a line.
+        qemu instructions a line, C source in C and C.UTF-8 and mixed UTF-8:
+        aarch64 149, 199 and 1063 to 59, 60 and 495; riscv64 330, 459 and
+        1580 to 218, 218 and 1346, with V 238, 367 and 1446 to 49, 50 and 589.
+*/
+#ifndef KERNEL_MODE
+positive memory_reverse_lines__room_64(p8 address_to destination, positive address_to made,
+                                       const p8 address_to source, positive length,
+                                       positive control);
+#if X64
+/*
+        The walk, for a tier's masks and turns. rdx the block, r12 the end,
+        r9 the source; rsi where the line starts, r10 its newline, r13 its
+        length, rdi the cursor; rax the newlines still to take in the block,
+        rbx its bytes of 0x80 or more past the line taken last in a UTF-8
+        locale (nought otherwise), rbp whether the line so far held one in an
+        earlier block; r8b the newline; r14, r15 and rcx spent. A line of at
+        least a turn is turned a turn at a time from its end, and what is
+        left is one more turn ending at the line's start, read from before it
+        -- the bytes of the line before, written past this line's end where
+        the newline and the next line go -- unless that would read before the
+        source, where it is a byte at a time.
+
+        A line holding a byte past ASCII in a UTF-8 locale is asked of
+        memory_utf8_valid_span, and if it is whole sequences it is turned
+        over as any other and then each sequence turned back: a lead byte of
+        the source line, found in its own mask, says where its sequence
+        landed and how long it is -- two bytes a rotate, three an exchange of
+        the outer two, four a bswap.
+*/
+#define REVL_X64_WALK(P, STEP, SHORT, SHORTTURNS, MASKS, TURN, BITS, CLEAR, LEADS, CLIP, LOWCLEAR, LOAD, END) \
+    P "_block:\n   cmp %r12, %rdx\n   jae " END "\n" MASKS                      \
+    "mov %r12, %r14\n   sub %rdx, %r14\n   cmp $64, %r14\n   jb " P "_clip\n"  \
+    P "_clipped:\n   and %r11, %rbx\n   test %rax, %rax\n   jz " P "_carry\n"   \
+    ".balign 16\n"                                                             \
+    P "_line:\n   tzcnt %rax, %r13\n   " BITS "   lea (%rdx,%r13), %r10\n   mov %r10, %r13\n   sub %rsi, %r13\n" \
+    "test %r14, %rbx\n   jnz " P "_wide\n   test %rbp, %rbp\n   jnz " P "_wide\n" CLEAR \
+    P "_go:\n   mov %r10, %r15\n   mov %rdi, %rcx\n   lea -" SHORT "(%r10), %r14\n   cmp %r9, %r14\n   jb " P "_bytes\n" \
+    SHORTTURNS "   cmp $" SHORT ", %r13\n   ja " P "_long\n"                    \
+    P "_ended:\n   test %rbp, %rbp\n   jnz " P "_fix\n"                          \
+    P "_fixed:\n   mov %r8b, (%rdi,%r13)\n   lea 1(%rdi,%r13), %rdi\n   lea 1(%rsi,%r13), %rsi\n   xor %ebp, %ebp\n" \
+    "test %rax, %rax\n   jnz " P "_line\n"                                      \
+    P "_carry:\n   or %rbx, %rbp\n   add $64, %rdx\n   jmp " P "_block\n"         \
+    /* A line longer than the short turns: a turn at a time on from them, */  \
+    /* the last reading from before the line where the source has it.    */  \
+    P "_long:\n   lea -" SHORT "(%r10), %r15\n   lea " SHORT "(%rdi), %rcx\n"   \
+    P "_turn:\n   sub $" STEP ", %r15\n   cmp %r9, %r15\n   jb " P "_near\n" TURN "   add $" STEP ", %rcx\n" \
+    "mov %rcx, %r14\n   sub %rdi, %r14\n   cmp %r13, %r14\n   jb " P "_turn\n   jmp " P "_ended\n" \
+    P "_near:\n   add $" STEP ", %r15\n"                                         \
+    /* Near the source's start: what is left a byte at a time.           */   \
+    P "_bytes:\n   cmp %rsi, %r15\n   jbe " P "_ended\n"                       \
+    P "_byte:\n   dec %r15\n   movzbl (%r15), %r14d\n   mov %r14b, (%rcx)\n   inc %rcx\n   cmp %rsi, %r15\n   ja " P "_byte\n   jmp " P "_ended\n" \
+    P "_clip:\n   xor %r15d, %r15d\n   bts %r14, %r15\n   dec %r15\n   and %r15, %rax\n   and %r15, %rbx\n   jmp " P "_clipped\n" \
+    /* A line past ASCII: whole sequences, or the caller's.              */   \
+    P "_wide:\n" CLEAR "   push %rax\n   push %rdx\n   push %rsi\n   push %rdi\n   push %r8\n   push %r9\n   push %r10\n   push %r11\n" \
+    "mov %rsi, %rdi\n   mov %r13, %rsi\n   call memory_utf8_valid_span\n   mov %rax, %rcx\n" \
+    "pop %r11\n   pop %r10\n   pop %r9\n   pop %r8\n   pop %rdi\n   pop %rsi\n   pop %rdx\n   pop %rax\n" LOAD \
+    "cmp %r13, %rcx\n   jne " END "\n   mov $1, %ebp\n   jmp " P "_go\n"     \
+    /* Each sequence turned back: rcx through the source line, r15 the   */   \
+    /* byte after where its lead landed, r10 and rbp spent.              */   \
+    P "_fix:\n   xor %ecx, %ecx\n"                                            \
+    P "_fixturn:\n" LEADS "   mov %r13, %r15\n   sub %rcx, %r15\n   cmp $" STEP ", %r15\n   jae 1f\n" CLIP "1:  test %r14, %r14\n   jz " P "_fixnext\n" \
+    P "_fixlead:\n   tzcnt %r14, %r15\n   " LOWCLEAR "   add %rcx, %r15\n   movzbl (%rsi,%r15), %r10d\n   neg %r15\n   add %r13, %r15\n   add %rdi, %r15\n" \
+    "cmp $0xe0, %r10d\n   jb 2f\n   cmp $0xf0, %r10d\n   jb 3f\n   mov -4(%r15), %r10d\n   bswap %r10d\n   mov %r10d, -4(%r15)\n   jmp 4f\n" \
+    "3:  movzbl -3(%r15), %r10d\n   movzbl -1(%r15), %ebp\n   mov %bpl, -3(%r15)\n   mov %r10b, -1(%r15)\n   jmp 4f\n" \
+    "2:  rolw $8, -2(%r15)\n"                                                  \
+    "4:  test %r14, %r14\n   jnz " P "_fixlead\n"                             \
+    P "_fixnext:\n   add $" STEP ", %rcx\n   cmp %r13, %rcx\n   jb " P "_fixturn\n   jmp " P "_fixed\n"
+#define REVL_X64_YMASKS                                                         \
+    "vmovdqu (%rdx), %ymm0\n   vmovdqu 32(%rdx), %ymm1\n   vpcmpeqb %ymm2, %ymm0, %ymm3\n   vpcmpeqb %ymm2, %ymm1, %ymm4\n" \
+    "vpmovmskb %ymm3, %eax\n   vpmovmskb %ymm4, %r14d\n   shl $32, %r14\n   or %r14, %rax\n" \
+    "vpmovmskb %ymm0, %ebx\n   vpmovmskb %ymm1, %r14d\n   shl $32, %r14\n   or %r14, %rbx\n"
+//      Sixty four bytes ending at r10 turned over to rdi: every line to sixty four is these and nothing else.
+#define REVL_X64_YSHORT                                                         \
+    "vmovdqu -32(%r10), %ymm5\n   vmovdqu -64(%r10), %ymm8\n   vpshufb %ymm6, %ymm5, %ymm5\n   vpshufb %ymm6, %ymm8, %ymm8\n" \
+    "vpermq $0x4e, %ymm5, %ymm5\n   vpermq $0x4e, %ymm8, %ymm8\n   vmovdqu %ymm5, (%rdi)\n   vmovdqu %ymm8, 32(%rdi)\n"
+//      Thirty two bytes from r15 turned over to rcx.
+#define REVL_X64_YTURN                                                          \
+    "vmovdqu (%r15), %ymm5\n   vpshufb %ymm6, %ymm5, %ymm5\n   vpermq $0x4e, %ymm5, %ymm5\n   vmovdqu %ymm5, (%rcx)\n"
+//      The lead bytes, 0xc0 and up, of the source line's thirty two at rcx.
+#define REVL_X64_YLEADS                                                         \
+    "vmovdqu (%rsi,%rcx), %ymm5\n   vpand %ymm7, %ymm5, %ymm5\n   vpcmpeqb %ymm7, %ymm5, %ymm5\n   vpmovmskb %ymm5, %r14d\n"
+#define REVL_X64_YLOAD                                                          \
+    "movzbl %r8b, %r15d\n   vmovd %r15d, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   vmovdqu .Lrevl_x64_mask(%rip), %ymm6\n" \
+    "vpbroadcastb .Lrevl_x64_leads(%rip), %ymm7\n"
+#define REVL_X64_XMASKS                                                         \
+    REVL_X64_XFLAGS("0", "%eax", "%ebx")                                        \
+    REVL_X64_XFLAGS("16", "%r14d", "%r15d")                                     \
+    "shl $16, %r14d\n   or %r14, %rax\n   shl $16, %r15d\n   or %r15, %rbx\n"   \
+    REVL_X64_XFLAGS("32", "%r14d", "%r15d")                                     \
+    "shl $32, %r14\n   or %r14, %rax\n   shl $32, %r15\n   or %r15, %rbx\n"     \
+    REVL_X64_XFLAGS("48", "%r14d", "%r15d")                                     \
+    "shl $48, %r14\n   or %r14, %rax\n   shl $48, %r15\n   or %r15, %rbx\n"
+#define REVL_X64_XFLAGS(OFFSET, LINES, HIGH)                                    \
+    "movdqu " OFFSET "(%rdx), %xmm0\n   movdqa %xmm0, %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, " LINES "\n   pmovmskb %xmm0, " HIGH "\n"
+//      Thirty two bytes ending at r10 turned over to rdi.
+#define REVL_X64_XSHORT                                                         \
+    "mov -8(%r10), %r14\n   mov -16(%r10), %r15\n   bswap %r14\n   bswap %r15\n   mov %r14, (%rdi)\n   mov %r15, 8(%rdi)\n" \
+    "mov -24(%r10), %r14\n   mov -32(%r10), %r15\n   bswap %r14\n   bswap %r15\n   mov %r14, 16(%rdi)\n   mov %r15, 24(%rdi)\n"
+//      Sixteen bytes from r15 turned over to rcx, a word and bswap at a time.
+#define REVL_X64_XTURN                                                          \
+    "mov 8(%r15), %r14\n   bswap %r14\n   mov %r14, (%rcx)\n   mov (%r15), %r14\n   bswap %r14\n   mov %r14, 8(%rcx)\n"
+#define REVL_X64_XLEADS                                                         \
+    "movdqu (%rsi,%rcx), %xmm5\n   pand %xmm7, %xmm5\n   pcmpeqb %xmm7, %xmm5\n   pmovmskb %xmm5, %r14d\n"
+#define REVL_X64_XLOAD                                                          \
+    "movzbl %r8b, %r15d\n   imul $0x01010101, %r15d, %r15d\n   movd %r15d, %xmm2\n   pshufd $0, %xmm2, %xmm2\n" \
+    "movdqa .Lrevl_x64_leads(%rip), %xmm7\n"
+__asm__(
+    ASM_SECTION
+    //      memory_reverse_lines__room_64: rdi destination, rsi made, rdx
+    //      source, rcx length, r8 control; rax the bytes taken.
+    ASM_FUNC(memory_reverse_lines__room_64)
+    "test %rcx, %rcx\n   jnz 1f\n   movq $0, (%rsi)\n   xor %eax, %eax\n" ASM_RET
+    "1:  push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $24, %rsp\n"
+    "mov %rsi, (%rsp)\n   mov %rdi, 8(%rsp)\n   mov %rdx, %r9\n   lea (%rdx,%rcx), %r12\n   mov %rdx, %rsi\n   xor %ebp, %ebp\n"
+    //      r11 keeps the high bytes' mask in a UTF-8 locale.
+    "mov %r8, %r11\n   shr $8, %r11\n   and $1, %r11d\n   neg %r11\n"
+    ASM_NARROW("cpu_has_avx2", ".Lrevl_x64_sse2")
+    REVL_X64_YLOAD
+    REVL_X64_WALK(".Lrevl_x64_a", "32", "64", REVL_X64_YSHORT, REVL_X64_YMASKS, REVL_X64_YTURN, "blsmsk %rax, %r14\n   blsr %rax, %rax\n",
+                  "andn %rbx, %r14, %rbx\n", REVL_X64_YLEADS, "bzhi %r15, %r14, %r14\n", "blsr %r14, %r14\n", REVL_X64_YLOAD,
+                  ".Lrevl_x64_a_end")
+    ".Lrevl_x64_a_end:\n   vzeroupper\n   jmp .Lrevl_x64_end\n"
+    ".Lrevl_x64_sse2:\n" REVL_X64_XLOAD
+    REVL_X64_WALK(".Lrevl_x64_x", "16", "32", REVL_X64_XSHORT, REVL_X64_XMASKS, REVL_X64_XTURN,
+                  "lea -1(%rax), %r15\n   mov %rax, %r14\n   xor %r15, %r14\n   and %r15, %rax\n", "not %r14\n   and %r14, %rbx\n",
+                  REVL_X64_XLEADS, "xor %r10d, %r10d\n   bts %r15, %r10\n   dec %r10\n   and %r10, %r14\n",
+                  "lea -1(%r14), %r10\n   and %r10, %r14\n", REVL_X64_XLOAD, ".Lrevl_x64_end")
+    ".Lrevl_x64_end:\n   mov (%rsp), %rax\n   mov %rdi, %rdx\n   sub 8(%rsp), %rdx\n   mov %rdx, (%rax)\n   mov %rsi, %rax\n   sub %r9, %rax\n"
+    "add $24, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ".pushsection .rodata\n   .balign 32\n"
+    ".Lrevl_x64_mask:\n   .byte 15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0\n"
+    ".Lrevl_x64_leads:\n   .byte 0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0\n"
+    ".popsection\n"
+    ASM_END(memory_reverse_lines__room_64)
+);
+#elif ARM64
+/*
+        The same walk: x21 the block, x22 the end, x23 the source; x20 where
+        the line starts, x28 its newline, x27 its length, x19 the cursor;
+        x24 the newlines still to take, x25 the bytes past ASCII past the
+        line taken last in a UTF-8 locale, x26 whether the line so far held
+        one in an earlier block; w15 the newline and x14 the UTF-8 mask,
+        both kept on the stack too for after memory_utf8_valid_span, as the
+        vectors are rebuilt: v1 the newline, v5 the lanes' bits, v6 0xc0 and
+        v7 the indices that turn sixteen bytes over with tbl. A line to sixty
+        four bytes is four tbl and the stores; past that a turn of thirty two
+        at a time, the last reading from before the line where the source
+        has it, as on x86_64. The turns are in v16 to v19, which hold the
+        block only until its masks are made.
+*/
+#define NEON_REVL_LOAD                                                         \
+    "dup v1.16b, w15\n   movz x9, #0x0201\n   movk x9, #0x0804, lsl #16\n   movk x9, #0x2010, lsl #32\n   movk x9, #0x8040, lsl #48\n   dup v5.2d, x9\n" \
+    "movi v6.16b, #0xc0\n   movz x9, #0x0e0f\n   movk x9, #0x0c0d, lsl #16\n   movk x9, #0x0a0b, lsl #32\n   movk x9, #0x0809, lsl #48\n" \
+    "movz x10, #0x0607\n   movk x10, #0x0405, lsl #16\n   movk x10, #0x0203, lsl #32\n   movk x10, #0x0001, lsl #48\n   fmov d7, x9\n   mov v7.d[1], x10\n"
+__asm__(
+    ASM_SECTION
+    //      memory_reverse_lines__room_64: x0 destination, x1 made, x2
+    //      source, x3 length, x4 control; x0 the bytes taken.
+    ASM_FUNC(memory_reverse_lines__room_64)
+    "cbnz x3, 1f\n   str xzr, [x1]\n   mov x0, #0\n" ASM_RET
+    "1:  stp x29, x30, [sp, #-128]!\n   mov x29, sp\n   stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n"
+    "stp x25, x26, [sp, #64]\n   stp x27, x28, [sp, #80]\n   stp x0, x1, [sp, #96]\n"
+    "and w15, w4, #255\n   ubfx x14, x4, #8, #1\n   neg x14, x14\n   stp x15, x14, [sp, #112]\n"
+    "mov x19, x0\n   mov x20, x2\n   mov x21, x2\n   add x22, x2, x3\n   mov x23, x2\n   mov x26, xzr\n"
+    NEON_REVL_LOAD
+    ".Lrevl_arm64_block:\n   cmp x21, x22\n   b.hs .Lrevl_arm64_end\n"
+    "ldp q16, q17, [x21]\n   ldp q18, q19, [x21, #32]\n"
+    "cmeq v20.16b, v16.16b, v1.16b\n   cmeq v21.16b, v17.16b, v1.16b\n   cmeq v22.16b, v18.16b, v1.16b\n   cmeq v23.16b, v19.16b, v1.16b\n"
+    "cmlt v24.16b, v16.16b, #0\n   cmlt v25.16b, v17.16b, #0\n   cmlt v26.16b, v18.16b, #0\n   cmlt v27.16b, v19.16b, #0\n"
+    "and v20.16b, v20.16b, v5.16b\n   and v21.16b, v21.16b, v5.16b\n   and v22.16b, v22.16b, v5.16b\n   and v23.16b, v23.16b, v5.16b\n"
+    "and v24.16b, v24.16b, v5.16b\n   and v25.16b, v25.16b, v5.16b\n   and v26.16b, v26.16b, v5.16b\n   and v27.16b, v27.16b, v5.16b\n"
+    "addp v20.16b, v20.16b, v21.16b\n   addp v22.16b, v22.16b, v23.16b\n   addp v24.16b, v24.16b, v25.16b\n   addp v26.16b, v26.16b, v27.16b\n"
+    "addp v20.16b, v20.16b, v22.16b\n   addp v24.16b, v24.16b, v26.16b\n   addp v20.16b, v20.16b, v24.16b\n"
+    "fmov x24, d20\n   mov x25, v20.d[1]\n"
+    "sub x9, x22, x21\n   cmp x9, #64\n   b.hs 2f\n   mov x10, #1\n   lsl x10, x10, x9\n   sub x10, x10, #1\n   and x24, x24, x10\n   and x25, x25, x10\n"
+    "2:  and x25, x25, x14\n   cbz x24, .Lrevl_arm64_carry\n"
+    ".balign 16\n"
+    ".Lrevl_arm64_line:\n   rbit x9, x24\n   clz x9, x9\n   sub x10, x24, #1\n   eor x11, x24, x10\n   and x24, x24, x10\n"
+    "add x28, x21, x9\n   sub x27, x28, x20\n   tst x11, x25\n   b.ne .Lrevl_arm64_wide\n   cbnz x26, .Lrevl_arm64_wide\n   bic x25, x25, x11\n"
+    ".Lrevl_arm64_go:\n   mov x12, x28\n   mov x13, x19\n   sub x9, x28, #64\n   cmp x9, x23\n   b.lo .Lrevl_arm64_bytes\n"
+    "ldp q16, q17, [x28, #-32]\n   ldp q18, q19, [x28, #-64]\n   tbl v16.16b, {v16.16b}, v7.16b\n   tbl v17.16b, {v17.16b}, v7.16b\n"
+    "tbl v18.16b, {v18.16b}, v7.16b\n   tbl v19.16b, {v19.16b}, v7.16b\n   stp q17, q16, [x19]\n   stp q19, q18, [x19, #32]\n"
+    "cmp x27, #64\n   b.hi .Lrevl_arm64_long\n"
+    ".Lrevl_arm64_ended:\n   cbnz x26, .Lrevl_arm64_fix\n"
+    ".Lrevl_arm64_fixed:\n   strb w15, [x19, x27]\n   add x19, x19, x27\n   add x19, x19, #1\n   add x20, x20, x27\n   add x20, x20, #1\n   mov x26, xzr\n"
+    "cbnz x24, .Lrevl_arm64_line\n"
+    ".Lrevl_arm64_carry:\n   orr x26, x26, x25\n   add x21, x21, #64\n   b .Lrevl_arm64_block\n"
+    //      Past sixty four: thirty two at a time on from them.
+    ".Lrevl_arm64_long:\n   sub x12, x28, #64\n   add x13, x19, #64\n"
+    ".Lrevl_arm64_turn:\n   sub x12, x12, #32\n   cmp x12, x23\n   b.lo .Lrevl_arm64_near\n   ldp q16, q17, [x12]\n   tbl v16.16b, {v16.16b}, v7.16b\n"
+    "tbl v17.16b, {v17.16b}, v7.16b\n   stp q17, q16, [x13], #32\n   sub x9, x13, x19\n   cmp x9, x27\n   b.lo .Lrevl_arm64_turn\n   b .Lrevl_arm64_ended\n"
+    ".Lrevl_arm64_near:\n   add x12, x12, #32\n"
+    //      Near the source's start: what is left a byte at a time.
+    ".Lrevl_arm64_bytes:\n   cmp x12, x20\n   b.ls .Lrevl_arm64_ended\n"
+    "1:  ldrb w9, [x12, #-1]!\n   strb w9, [x13], #1\n   cmp x12, x20\n   b.hi 1b\n   b .Lrevl_arm64_ended\n"
+    //      A line past ASCII: whole sequences, or the caller's.
+    ".Lrevl_arm64_wide:\n   bic x25, x25, x11\n   mov x0, x20\n   mov x1, x27\n   bl memory_utf8_valid_span\n"
+    "ldp x15, x14, [sp, #112]\n" NEON_REVL_LOAD
+    "cmp x0, x27\n   b.ne .Lrevl_arm64_end\n   mov x26, #1\n   b .Lrevl_arm64_go\n"
+    //      Each sequence turned back: x10 through the source line, x13 the byte after where its lead landed.
+    ".Lrevl_arm64_fix:\n   mov x10, xzr\n"
+    ".Lrevl_arm64_fixturn:\n   ldr q16, [x20, x10]\n   and v16.16b, v16.16b, v6.16b\n   cmeq v16.16b, v16.16b, v6.16b\n   shrn v16.8b, v16.8h, #4\n   fmov x11, d16\n"
+    "and x11, x11, #0x8888888888888888\n   sub x12, x27, x10\n   cmp x12, #16\n   b.hs 1f\n   lsl x9, x12, #2\n   mov x13, #1\n   lsl x13, x13, x9\n   sub x13, x13, #1\n   and x11, x11, x13\n"
+    "1:  cbz x11, .Lrevl_arm64_fixnext\n"
+    ".Lrevl_arm64_fixlead:\n   rbit x9, x11\n   clz x9, x9\n   lsr x9, x9, #2\n   sub x12, x11, #1\n   and x11, x11, x12\n   add x9, x9, x10\n"
+    "ldrb w12, [x20, x9]\n   sub x13, x27, x9\n   add x13, x19, x13\n   cmp w12, #0xe0\n   b.lo 2f\n   cmp w12, #0xf0\n   b.lo 3f\n"
+    "ldur w12, [x13, #-4]\n   rev w12, w12\n   stur w12, [x13, #-4]\n   b 4f\n"
+    "3:  ldurb w12, [x13, #-3]\n   ldurb w9, [x13, #-1]\n   sturb w9, [x13, #-3]\n   sturb w12, [x13, #-1]\n   b 4f\n"
+    "2:  ldurh w12, [x13, #-2]\n   rev16 w12, w12\n   sturh w12, [x13, #-2]\n"
+    "4:  cbnz x11, .Lrevl_arm64_fixlead\n"
+    ".Lrevl_arm64_fixnext:\n   add x10, x10, #16\n   cmp x10, x27\n   b.lo .Lrevl_arm64_fixturn\n   b .Lrevl_arm64_fixed\n"
+    ".Lrevl_arm64_end:\n   ldp x0, x1, [sp, #96]\n   sub x9, x19, x0\n   str x9, [x1]\n   sub x0, x20, x23\n"
+    "ldp x19, x20, [sp, #16]\n   ldp x21, x22, [sp, #32]\n   ldp x23, x24, [sp, #48]\n   ldp x25, x26, [sp, #64]\n   ldp x27, x28, [sp, #80]\n   ldp x29, x30, [sp], #128\n" ASM_RET
+    ASM_END(memory_reverse_lines__room_64)
+);
+#elif RISCV64
+/*
+        The same walk again, on the scalar masks either path makes, the walk
+        in callee-saved registers so that memory_utf8_valid_span costs only
+        the constants: s2 the block, s3 the end, s4 the source; s1 where the
+        line starts, s9 its newline, s8 its length, s0 the cursor; s5 the
+        newlines still to take, s6 the bytes past ASCII past the line taken
+        last in a UTF-8 locale, s7 whether the line so far held one in an
+        earlier block; s10 the newline, s11 the UTF-8 mask. With V the block
+        is sixty four bytes, masks a bit a byte read out with vmv.x.s and a
+        bit found by de Bruijn's multiply (a5, its table a6), and a line is
+        turned over sixty four bytes at a time by vrgather with the indices
+        63 to 0 in v16, less what the turn is short of sixty four: exact,
+        so no room is used. Without V the block is a word, the masks bit
+        seven of a byte as memory_cut_fields__room_64 makes them, and a line
+        is eight bytes a turn a byte at a time, from before the line where
+        the source has them. A line past ASCII has its leads found sixty four
+        bytes or a word at a time and its sequences turned back with bytes.
+*/
+#define REVL_RV_WALK(P, STEP, BLOCK, INDEX, TURNS, LOAD, LEADS)                 \
+    BLOCK                                                                      \
+    P "_clipped:\n   and s6, s6, s11\n   beqz s5, " P "_carry\n"                \
+    P "_line:\n   neg t0, s5\n   and t0, t0, s5\n   xor s5, s5, t0\n   addi t1, t0, -1\n   or t1, t1, t0\n" \
+    INDEX "   add s9, s2, t2\n   sub s8, s9, s1\n   and t3, t1, s6\n   bnez t3, " P "_wide\n   bnez s7, " P "_wide\n" \
+    "not t1, t1\n   and s6, s6, t1\n"                                         \
+    P "_go:\n" TURNS                                                           \
+    P "_ended:\n   bnez s7, " P "_fix\n"                                        \
+    P "_fixed:\n   add t0, s0, s8\n   sb s10, 0(t0)\n   addi s0, t0, 1\n   add s1, s1, s8\n   addi s1, s1, 1\n   li s7, 0\n" \
+    "bnez s5, " P "_line\n"                                                     \
+    P "_carry:\n   or s7, s7, s6\n   addi s2, s2, " STEP "\n   j " P "_block\n"  \
+    P "_wide:\n   not t1, t1\n   and s6, s6, t1\n   mv a0, s1\n   mv a1, s8\n   call memory_utf8_valid_span\n" LOAD \
+    "bne a0, s8, .Lrevl_rv_end\n   li s7, 1\n   j " P "_go\n"                  \
+    /* Each lead of the source line, from its tier's mask of them in t5 */  \
+    /* for the bytes at t4: t3 the byte after where it landed.           */  \
+    P "_fix:\n" LEADS                                                          \
+    P "_lead:\n   neg t0, t5\n   and t0, t0, t5\n   xor t5, t5, t0\n" INDEX "   add t2, t2, t4\n   add t1, s1, t2\n   lbu t1, 0(t1)\n" \
+    "sub t3, s8, t2\n   add t3, t3, s0\n   li t0, 0xe0\n   bltu t1, t0, 2f\n   li t0, 0xf0\n   bltu t1, t0, 3f\n" \
+    "lbu t0, -4(t3)\n   lbu t1, -3(t3)\n   lbu t2, -2(t3)\n   lbu t6, -1(t3)\n   sb t6, -4(t3)\n   sb t2, -3(t3)\n   sb t1, -2(t3)\n   sb t0, -1(t3)\n   j 4f\n" \
+    "3:  lbu t0, -3(t3)\n   lbu t1, -1(t3)\n   sb t1, -3(t3)\n   sb t0, -1(t3)\n   j 4f\n" \
+    "2:  lbu t0, -2(t3)\n   lbu t1, -1(t3)\n   sb t1, -2(t3)\n   sb t0, -1(t3)\n" \
+    "4:  bnez t5, " P "_lead\n   j " P "_leads\n"
+//      With V the leads of sixty four bytes of the line at a time, t4 their offset in it; the bits past a short
+//      turn are tail, which ta leaves to the machine, and are cleared.
+#define REVL_RV_VLEADS                                                          \
+    "li t4, 0\n   j 5f\n"                                                       \
+    ".Lrevl_rv_v_leads:\n   add t4, t4, a7\n"                                    \
+    "5:  bgeu t4, s8, .Lrevl_rv_v_fixed\n   sub t6, s8, t4\n   bltu t6, a7, 6f\n   mv t6, a7\n"   \
+    "6:  vsetvli zero, t6, e8, m4, ta, ma\n   add t0, s1, t4\n   vle8.v v8, (t0)\n   li t1, 0xc0\n   vand.vx v8, v8, t1\n" \
+    "vmseq.vx v0, v8, t1\n   vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s t5, v0\n   bgeu t6, a7, 7f\n   li t0, 1\n" \
+    "sll t0, t0, t6\n   addi t0, t0, -1\n   and t5, t5, t0\n"                  \
+    "7:  beqz t5, .Lrevl_rv_v_leads\n"
+//      Without, a word at a time from the one the line starts in, bit seven of a byte where its top two are set;
+//      t4 the word's offset from the line, negative for the first, and the bytes outside the line cleared.
+#define REVL_RV_SLEADS                                                          \
+    "andi t4, s1, 7\n   neg t4, t4\n   j 5f\n"                                 \
+    ".Lrevl_rv_s_leads:\n   addi t4, t4, 8\n"                                   \
+    "5:  bge t4, s8, .Lrevl_rv_s_fixed\n   add t0, s1, t4\n   ld t5, 0(t0)\n   slli t1, t5, 1\n   and t5, t5, t1\n   and t5, t5, a4\n" \
+    "bgez t4, 6f\n   neg t0, t4\n   slli t0, t0, 3\n   li t1, -1\n   sll t1, t1, t0\n   and t5, t5, t1\n" \
+    "6:  sub t0, s8, t4\n   li t1, 8\n   bgeu t0, t1, 7f\n   slli t0, t0, 3\n   li t1, 1\n   sll t1, t1, t0\n   addi t1, t1, -1\n   and t5, t5, t1\n" \
+    "7:  beqz t5, .Lrevl_rv_s_leads\n"
+#define REVL_RV_VLOAD                                                           \
+    "li a7, 64\n   li a5, 0x03f79d71b4cb0a89\n   lla a6, .Lrevl_rv_bits\n   vsetvli zero, a7, e8, m4, ta, ma\n   vid.v v16\n   li t0, 63\n   vrsub.vx v16, v16, t0\n"
+#define REVL_RV_VBLOCK                                                          \
+    ".Lrevl_rv_v_block:\n   bgeu s2, s3, .Lrevl_rv_end\n   vsetvli zero, a7, e8, m4, ta, ma\n   vle8.v v8, (s2)\n   vmseq.vx v0, v8, s10\n" \
+    "vmslt.vx v1, v8, zero\n   vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s s5, v0\n   vmv.x.s s6, v1\n" \
+    "sub t0, s3, s2\n   bgeu t0, a7, .Lrevl_rv_v_clipped\n   li t1, 1\n   sll t1, t1, t0\n   addi t1, t1, -1\n   and s5, s5, t1\n   and s6, s6, t1\n"
+#define REVL_RV_VTURNS                                                          \
+    "li t4, 0\n   beqz s8, .Lrevl_rv_v_ended\n"                                  \
+    "1:  sub t5, s8, t4\n   bltu t5, a7, 2f\n   mv t5, a7\n"                     \
+    "2:  vsetvli zero, t5, e8, m4, ta, ma\n   sub t3, s9, t4\n   sub t3, t3, t5\n   vle8.v v8, (t3)\n   sub t6, a7, t5\n" \
+    "vsub.vx v12, v16, t6\n   vrgather.vv v24, v8, v12\n   add t3, s0, t4\n   vse8.v v24, (t3)\n   add t4, t4, t5\n   bltu t4, s8, 1b\n"
+#define REVL_RV_SLOAD                                                           \
+    "li a3, 0x7f7f7f7f7f7f7f7f\n   not a4, a3\n   li t0, 0x0101010101010101\n   mul a2, s10, t0\n   li a5, 0x0001020304050607\n   addi a6, s3, -8\n"
+#define REVL_RV_SMASKS                                                          \
+    "ld t0, 0(s2)\n   xor t1, t0, a2\n   and t2, t1, a3\n   add t2, t2, a3\n   or t2, t2, t1\n   or t2, t2, a3\n   not s5, t2\n   and s6, t0, a4\n"
+#define REVL_RV_SBLOCK                                                          \
+    ".Lrevl_rv_s_block:\n   bgtu s2, a6, .Lrevl_rv_s_last\n" REVL_RV_SMASKS
+//      Eight bytes ending at t4 turned over to t5, the room taking what is past the line.
+#define REVL_RV_STURNS                                                          \
+    "mv t4, s9\n   mv t5, s0\n"                                                  \
+    "1:  bgeu s1, t4, .Lrevl_rv_s_ended\n   addi t6, t4, -8\n   bltu t6, s4, 3f\n" \
+    "lbu t0, -1(t4)\n   lbu t1, -2(t4)\n   lbu t2, -3(t4)\n   lbu t3, -4(t4)\n   sb t0, 0(t5)\n   sb t1, 1(t5)\n   sb t2, 2(t5)\n   sb t3, 3(t5)\n" \
+    "lbu t0, -5(t4)\n   lbu t1, -6(t4)\n   lbu t2, -7(t4)\n   lbu t3, -8(t4)\n   sb t0, 4(t5)\n   sb t1, 5(t5)\n   sb t2, 6(t5)\n   sb t3, 7(t5)\n" \
+    "mv t4, t6\n   addi t5, t5, 8\n   j 1b\n"                                   \
+    /* Near the source's start: a byte at a time. */                         \
+    "3:  lbu t0, -1(t4)\n   sb t0, 0(t5)\n   addi t4, t4, -1\n   addi t5, t5, 1\n   bltu s1, t4, 3b\n"
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      memory_reverse_lines__room_64: a0 destination, a1 made, a2
+    //      source, a3 length, a4 control; a0 the bytes taken.
+    ASM_FUNC(memory_reverse_lines__room_64)
+    "bnez a3, 1f\n   sd zero, 0(a1)\n   li a0, 0\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "1:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 2f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a4, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a4, 0(sp)\n   addi sp, sp, 16\n   j memory_reverse_lines__room_64\n"
+#else
+    "1:  li t3, 1\n"
+#endif
+    "2:  addi sp, sp, -128\n   sd ra, 120(sp)\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n   sd a0, 96(sp)\n   sd a1, 104(sp)\n"
+    "mv s0, a0\n   mv s1, a2\n   mv s4, a2\n   add s3, a2, a3\n   andi s10, a4, 255\n   srli s11, a4, 8\n   andi s11, s11, 1\n   neg s11, s11\n   li s7, 0\n"
+    "li t4, 2\n   bne t3, t4, .Lrevl_rv_scalar\n   mv s2, a2\n" REVL_RV_VLOAD
+    REVL_RV_WALK(".Lrevl_rv_v", "64", REVL_RV_VBLOCK, "mul t2, t0, a5\n   srli t2, t2, 58\n   add t2, t2, a6\n   lbu t2, 0(t2)\n",
+                 REVL_RV_VTURNS, REVL_RV_VLOAD, REVL_RV_VLEADS)
+    //      Without V: words, from the one the source starts in, the bytes before it dropped from the first and
+    //      the bytes past the end from the last; a6 is the last word that is all inside.
+    ".Lrevl_rv_scalar:\n   andi s2, a2, -8\n" REVL_RV_SLOAD REVL_RV_SMASKS
+    "sub t0, s4, s2\n   slli t0, t0, 3\n   li t1, -1\n   sll t1, t1, t0\n   and s5, s5, t1\n   and s6, s6, t1\n   bgtu s2, a6, .Lrevl_rv_s_edge\n   j .Lrevl_rv_s_clipped\n"
+    REVL_RV_WALK(".Lrevl_rv_s", "8", REVL_RV_SBLOCK, "srli t2, t0, 7\n   mul t2, t2, a5\n   srli t2, t2, 56\n", REVL_RV_STURNS,
+                 REVL_RV_SLOAD, REVL_RV_SLEADS)
+    ".Lrevl_rv_s_last:\n   bgeu s2, s3, .Lrevl_rv_end\n" REVL_RV_SMASKS
+    ".Lrevl_rv_s_edge:\n   sub t0, s3, s2\n   slli t0, t0, 3\n   li t1, 1\n   sll t1, t1, t0\n   addi t1, t1, -1\n   and s5, s5, t1\n   and s6, s6, t1\n   j .Lrevl_rv_s_clipped\n"
+    ".Lrevl_rv_end:\n   ld a0, 96(sp)\n   ld a1, 104(sp)\n   sub t0, s0, a0\n   sd t0, 0(a1)\n   sub a0, s1, s4\n"
+    "ld ra, 120(sp)\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 128\n" ASM_RET
+    ".pushsection .rodata\n"
+    //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
+    ".Lrevl_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
+    "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
+    ".popsection\n"
+    ASM_END(memory_reverse_lines__room_64)
     ".option pop\n"
 );
 #endif

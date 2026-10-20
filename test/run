@@ -5067,7 +5067,7 @@ human lib positive_into_human_1024_string positive_to_human_1024
 human_nearest lib positive_into_human_nearest_string wait_status_code_base wait_status_code
 fields lib positive_into_padded positive_into_pair
 train lib fused_residual_add_f32 f32_to_bf16 bf16_to_f32 fast_argmax_f32
-ranged lib memory_copy_apart__room_64 memory_copy_apart string_length memory_encode_power2 memory_encode_power2_lines memory_cut_fields__room_64
+ranged lib memory_copy_apart__room_64 memory_copy_apart string_length memory_encode_power2 memory_encode_power2_lines memory_cut_fields__room_64 memory_reverse_lines__room_64 memory_utf8_valid_span
 input_bases lib string_digits_max string_digits_octal_escape_max string_digits_octal_max string_digits_hexadecimal_escape_max string_digits_hexadecimal_max string_digits_base_max
 network lib network_load_16 network_load_32 network_store_16 network_store_32
 tensor lib swiglu_forward_f32 rmsnorm_forward_f32 rmsnorm_backward_f32
@@ -5758,6 +5758,7 @@ lane_ranged()
 : <<'RANGED_SITES_END'
 RANGED_SITES
 src/sh/text.c|1|cat-n|cat -n "$IN3"; cat -nA "$IN3"; cat -b "$IN"; cat -nT "$IN"
+src/sh/text.c|1|rev|rev "$IN3"; LC_ALL=C.UTF-8 rev "$IN3"; rev -0 < "$IN"; rev "$BIG"; LC_ALL=C.UTF-8 rev < "$BIG"
 src/sh/text.c|2|cut-f|cut -d: -f2,4 "$FIELDS"; cut -s -d: -f3- < "$FIELDS"; cut -d: --complement -f1 "$BIG"; cut -d: -f2 "$BIG"
 RANGED_SITES_END
 

@@ -48076,6 +48076,8 @@ unsigned long long memory_encode_power2_lines(void *, const void *, unsigned lon
                                               unsigned long long);
 unsigned long long memory_cut_fields__room_64(unsigned char *, unsigned long long *, const unsigned char *,
                                               unsigned long long, const unsigned char *, unsigned long long);
+unsigned long long memory_reverse_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
+                                                 unsigned long long, unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48385,6 +48387,147 @@ static unsigned long long ranged_cut_cases(unsigned char *d_end, unsigned char *
         return faults;
 }
 
+/*
+        memory_reverse_lines__room_64 against rev a line at a time: lines of
+        every length to 300 and long ones of printable bytes, two to four
+        byte sequences of every lead class (E0, ED, F0 and F4 at their
+        edges) and, in some, a byte that begins nothing, a cut sequence, an
+        overlong form or a surrogate; '\n' and NUL for the newline; bytes and
+        UTF-8. Under UTF-8 a line that is not well formed is where the
+        routine stops. The source's room and the destination's end against a
+        page that faults, and then the source starts just after one, which
+        is what proves the turns never read before it.
+*/
+static int ranged_rev_valid(const unsigned char *line, unsigned long long length)
+{
+        for (unsigned long long i = 0; i < length;)
+        {
+                unsigned char b = line[i];
+                unsigned long long n = b < 0x80 ? 1 : b >= 0xc2 && b <= 0xdf ? 2 : b >= 0xe0 && b <= 0xef ? 3
+                                                    : b >= 0xf0 && b <= 0xf4 ? 4 : 0;
+                if (!n || i + n > length)
+                        return 0;
+                for (unsigned long long k = 1; k < n; k++)
+                        if ((line[i + k] & 0xc0) != 0x80)
+                                return 0;
+                if (n > 2)
+                {
+                        unsigned char second = line[i + 1];
+                        if ((b == 0xe0 && second < 0xa0) || (b == 0xed && second > 0x9f) ||
+                            (b == 0xf0 && second < 0x90) || (b == 0xf4 && second > 0x8f))
+                                return 0;
+                }
+                i += n;
+        }
+        return 1;
+}
+
+static unsigned long long ranged_rev_reference(unsigned char *out, const unsigned char *in, unsigned long long length,
+                                               unsigned long long control, unsigned long long *taken)
+{
+        unsigned char newline = (unsigned char)control;
+        int utf8 = (int)(control >> 8 & 1);
+        unsigned long long made = 0, start = 0;
+
+        for (unsigned long long at = 0; at < length; at++)
+        {
+                if (in[at] != newline)
+                        continue;
+                unsigned long long size = at - start;
+                if (utf8 && !ranged_rev_valid(in + start, size))
+                        break;
+                for (unsigned long long i = 0; i < size;)
+                {
+                        unsigned char b = in[start + i];
+                        unsigned long long n = !utf8 || b < 0x80 ? 1 : b < 0xe0 ? 2 : b < 0xf0 ? 3 : 4;
+                        for (unsigned long long k = 0; k < n; k++)
+                                out[made + size - i - n + k] = in[start + i + k];
+                        i += n;
+                }
+                made += size;
+                out[made++] = newline;
+                start = at + 1;
+        }
+        *taken = start;
+        return made;
+}
+
+static unsigned char ranged_rev_want[20000 + 64];
+
+static unsigned long long ranged_rev_fill(unsigned char *source, unsigned long long length, unsigned char newline,
+                                          unsigned mode)
+{
+        static const unsigned char sequences[][4] = {
+            {0xc3, 0xa9}, {0xd0, 0xbf}, {0xc2, 0x80}, {0xdf, 0xbf}, {0xe0, 0xa0, 0x80}, {0xe6, 0x97, 0xa5}, {0xed, 0x9f, 0xbf},
+            {0xef, 0xbf, 0xbd}, {0xf0, 0x90, 0x80, 0x80}, {0xf0, 0x9f, 0x98, 0x80}, {0xf4, 0x8f, 0xbf, 0xbf}};
+        static const unsigned char broken[][3] = {{0xff}, {0x80}, {0xc3}, {0xe6, 0x97}, {0xc0, 0xaf}, {0xed, 0xa0, 0x80}, {0xf5}};
+        static const unsigned sizes[] = {2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4}, broken_sizes[] = {1, 1, 1, 2, 2, 3, 1};
+        unsigned long long at = 0;
+
+        while (at < length)
+        {
+                unsigned r = ranged_byte();
+                if (r < (mode & 1 ? 12u : 3u))
+                        source[at++] = newline;
+                else if (mode & 2 && r < 80)
+                {
+                        unsigned which = ranged_byte() % 11;
+                        for (unsigned k = 0; k < sizes[which] && at < length; k++)
+                                source[at++] = sequences[which][k];
+                }
+                else if (mode & 4 && r == 255)
+                {
+                        unsigned which = ranged_byte() % 7;
+                        for (unsigned k = 0; k < broken_sizes[which] && at < length; k++)
+                                source[at++] = broken[which][k];
+                }
+                else
+                        source[at++] = (unsigned char)(' ' + r % 95);
+        }
+        return at;
+}
+
+static unsigned long long ranged_rev_cases(unsigned char *d_end, unsigned char *s_end, unsigned char *s_front)
+{
+        static const unsigned long long longs[] = {1000, 4096, 5000, 20000};
+        unsigned long long faults = 0;
+
+        for (unsigned long long at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
+        {
+                unsigned long long length = at <= 300 ? at : longs[at - 301];
+
+                for (unsigned mode = 0; mode < 8; mode++)
+                        for (unsigned place = 0; place < 2; place++)
+                        {
+                                unsigned char newline = mode & 1 ? '\n' : 0;
+                                unsigned char *source = place ? s_front : s_end - 64 - length;
+
+                                if (place && length > 16384 - 64)
+                                        continue;
+                                ranged_rev_fill(source, length, newline, mode);
+                                for (unsigned long long i = length; i < length + 64; i++)
+                                        source[i] = newline;
+                                for (unsigned long long utf8 = 0; utf8 < 2; utf8++)
+                                {
+                                        unsigned long long control = newline | utf8 << 8, want_taken = 0, made = ~0ull;
+                                        unsigned long long want = ranged_rev_reference(ranged_rev_want, source, length, control,
+                                                                                       &want_taken);
+                                        unsigned char *into = d_end - 64 - length;
+
+                                        for (int i = 1; i <= 16; i++)
+                                                into[-i] = (unsigned char)(0x3a ^ i);
+                                        unsigned long long taken = (memory_reverse_lines__room_64)(into, &made, source, length,
+                                                                                                   control);
+                                        faults += taken != want_taken || made != want ||
+                                                  (made == want && !ranged_same(into, ranged_rev_want, want));
+                                        for (int i = 1; i <= 16; i++)
+                                                faults += into[-i] != (unsigned char)(0x3a ^ i);
+                                }
+                        }
+        }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 /*
         memory_first_of's windows for a short count and the first sixty four
@@ -48479,6 +48622,10 @@ static fn ranged_tier(string_address tier)
         check("memory_cut_fields__room_64: every count to 300 and long ones, four densities, four delimiter and line end "
               "pairs, caps one to ten and 4100, -s, against cut a line at a time with both rooms ending at a page that faults",
               ranged_cut_cases(ranged_d_end, ranged_s_end) == 0);
+        check("memory_reverse_lines__room_64: every count to 300 and long ones, ASCII, UTF-8 of every lead class and broken "
+              "bytes, two newlines, bytes and UTF-8, against rev a line at a time, the rooms ending at a page that faults "
+              "and the source starting just after one",
+              ranged_rev_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
 }
 
 /*
@@ -48801,11 +48948,13 @@ int main(void)
         unsigned long long lengths = ranged_length_cases(d_end);
         unsigned long long lines = ranged_lines_cases(d_end, s_end);
         unsigned long long cuts = ranged_cut_cases(d_end, s_end);
+        unsigned long long revs = ranged_rev_cases(d_end, s_end, s_front);
         ranged_time();
-        printf("arm64 ranged: 8 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
-               "lines %llu | cuts %llu\n",
-               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts);
-        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts != 0;
+        printf("arm64 ranged: 9 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
+               "lines %llu | cuts %llu | revs %llu\n",
+               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts, revs);
+        return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts + revs !=
+               0;
 }
 #endif
 #endif /* CHECK_ranged || CHECK_native_ranged */
@@ -126395,6 +126544,7 @@ b32 main(void)
    same callers got before -- memory_encode_power2_lines a 76-column base64
    block against the routine and then every line moved, and
    memory_cut_fields__room_64 over 4 MiB of records against the walk cut -f
+   had, memory_reverse_lines__room_64 over src/lib.c against the walk rev
    had, below -- and
    memory_copy_apart__room_64 over the lines of
    src/lib.c (every length to 128, in order) into a buffer nothing reads and
@@ -126497,7 +126647,7 @@ static positive cut_walk(p8 address_to into, const p8 address_to base, positive 
 
         for (;;)
         {
-                positive count = memory_offsets_of_either(cut_offsets, base + scan, left - scan, ':', '\n', 4096);
+                positive count = memory_offsets_of_either(cut_offsets, (address_any)(base + scan), left - scan, ':', '\n', 4096);
 
                 for (positive i = 0; i < count; i++)
                 {
@@ -126556,6 +126706,53 @@ static p64 cut_run(positive side, positive list)
         return get_cpu_time() - start;
 }
 
+/*      rev over src/lib.c in bytes: the walk rev had -- every line end of the
+        read from memory_offsets_of_either, each line copied and turned over
+        in place with memory_reverse -- against memory_reverse_lines__room_64. */
+static positive text_length;
+
+static positive rev_walk(p8 address_to into, const p8 address_to base, positive left)
+{
+        positive made = 0, line_start = 0, scan = 0;
+
+        for (;;)
+        {
+                positive count = memory_offsets_of_either(cut_offsets, (address_any)(base + scan), left - scan, '\n', '\n', 4096);
+
+                for (positive i = 0; i < count; i++)
+                {
+                        positive ending = scan + cut_offsets[i], length = ending - line_start;
+
+                        memory_copy_apart(into + made, base + line_start, length);
+                        memory_reverse(into + made, length);
+                        made += length;
+                        into[made++] = '\n';
+                        line_start = ending + 1;
+                }
+                if (count < 4096)
+                        break;
+                scan += cut_offsets[count - 1] + 1;
+        }
+        return made;
+}
+
+static p64 rev_run(positive side)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < 2; round++)
+        {
+                positive made = 0;
+
+                if (side)
+                        memory_reverse_lines__room_64(out, address_of made, text, text_length, '\n');
+                else
+                        made = rev_walk(out, text, text_length);
+                sink += made + out[made / 2];
+        }
+        return get_cpu_time() - start;
+}
+
 static p64 run(positive side, positive shape)
 {
         p64 start = get_cpu_time(), sum = 0;
@@ -126601,6 +126798,7 @@ b32 main(void)
                 return 1;
         }
         cut_records();
+        text_length = (positive)got;
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
         for (p32 tier = 0; tier < 2; tier++)
@@ -126615,6 +126813,20 @@ b32 main(void)
 
                         BENCH_PAIRED(ratios, walked, wrap_run(0), lined, wrap_run(1));
                         string_format(log, "memory_encode_power2_lines base64 at 76 columns%s: paired median lines/walked %p.",
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, walked, rev_run(0), engine, rev_run(1));
+                        string_format(log, "memory_reverse_lines__room_64 src/lib.c%s: paired median engine/walk %p.",
 #if X64
                                       cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
 #else

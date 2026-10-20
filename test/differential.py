@@ -32252,7 +32252,7 @@ def harness_native_extract(argv):
     # not compile. A definition runs until a line that does not end in a backslash.
     i = 0
     while i < len(lines):
-        if lines[i].startswith(('#define NEON_', '#define WIDE_', '#define LZ_', '#define RV_')):
+        if lines[i].startswith(('#define NEON_', '#define WIDE_', '#define LZ_', '#define RV_', '#define UTF8_VALID_')):
             while True:
                 # A macro that holds a branch target spells it as ELF does; Mach-O's local
                 # label is L, as in the bodies darwin() rewrites.
@@ -32263,7 +32263,7 @@ def harness_native_extract(argv):
         i += 1
     if os.path.basename(lib) != 'lib.c':
         print_used_defines(lines, [l for b in bodies.values() for l in b],
-                           skip=('NEON_', 'WIDE_', 'LZ_', 'RV_'))
+                           skip=('NEON_', 'WIDE_', 'LZ_', 'RV_', 'UTF8_VALID_'))
 
     for n in names:
         if n in aliases:

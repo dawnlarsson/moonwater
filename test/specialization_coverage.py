@@ -140,6 +140,13 @@ cover('ranged', 'length', 'memory_cut_fields__room_64',
       'aarch64 281 to 86, riscv64 401 to 172, with V 306 to 94. There is no '
       'plain routine: every caller has the room',
       expansion='cut_fields_room', evidence='test/checks.c#CHECK_ranged')
+cover('ranged', 'length', 'memory_reverse_lines__room_64',
+      'Measured. rev over whole lines for a read and an output that both run '
+      '64 bytes past: sixty four bytes turned over for every line to that '
+      'length, a UTF-8 line asked of memory_utf8_valid_span once and its '
+      'sequences turned back. Numbers in lib.c. No plain routine: every '
+      'caller has the room',
+      expansion='reverse_lines_room', evidence='test/checks.c#CHECK_ranged')
 
 # ----------------------------------------------------------------------
 #       worth_it -- measured

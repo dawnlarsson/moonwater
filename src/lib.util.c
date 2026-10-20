@@ -8093,6 +8093,39 @@ static inline INLINE positive cut_fields_room(library_cut_entry entry,
         cut_fields_room(memory_cut_fields__room_64, (destination), (made), (source),  \
                         (length), (keep), (control), 64)
 
+#define MEMORY_REVERSE_LINES__ROOM(room, destination, made, source, length, control) \
+        LIBRARY_PASTE(memory_reverse_lines__room_, room)((destination), (made), (source), \
+                                                        (length), (control))
+
+typedef positive (*library_lines_entry)(p8 address_to, positive address_to, const p8 address_to,
+                                        positive, positive);
+
+//      And for rev's: the source to its room, the destination's after what it made.
+static inline INLINE positive reverse_lines_room(library_lines_entry entry,
+                                                 p8 address_to destination,
+                                                 positive address_to made,
+                                                 const p8 address_to source, positive length,
+                                                 positive control, positive room)
+{
+#ifdef MOONWATER_RANGES_CHECKED
+        if (__builtin_dynamic_object_size(source, 1) < length + room ||
+            __builtin_dynamic_object_size(destination, 1) < length + room)
+                __builtin_trap();
+        (void)((const volatile p8 address_to)source)[length + room - 1];
+#endif
+        positive taken = entry(destination, made, source, length, control);
+#ifdef MOONWATER_RANGES_CHECKED
+        volatile p8 address_to spoiled = destination + address_to made;
+        for (positive at = 0; at < room; at++)
+                spoiled[at] = 0xa5;
+#endif
+        return taken;
+}
+
+#define memory_reverse_lines__room_64(destination, made, source, length, control)  \
+        reverse_lines_room(memory_reverse_lines__room_64, (destination), (made),     \
+                           (source), (length), (control), 64)
+
 //      set-literal
 /*
         A macro names itself in its own replacement, which the preprocessor
