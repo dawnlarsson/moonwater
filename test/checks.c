@@ -14813,25 +14813,39 @@ fn check_delete_bytes()
         memory_squeeze_bytes against the byte loop tr used to run: every size
         across the vector edges, every residue, marks from none to nearly all,
         bytes drawn from a four-letter alphabet so that repeats are the rule,
-        and the byte before the block absent, equal to the first byte and
-        different from it. On x86_64 each body in turn, as for deletion.
+        and the byte before the block absent, equal to the first byte,
+        different from it, and absent as a value past 255 whose low byte is
+        the first byte. The table against a page that faults, on eight and
+        off it, and marks of any nonzero byte, 0x80 among them. On x86_64
+        each body in turn, as for deletion; on riscv64 every call the first
+        in a process, which asks for V, then without V.
 */
 fn check_squeeze_bytes()
 {
         static const positive sizes[] = {
-            0, 1, 2, 3, 4, 5, 7, 8, 63, 64, 65, 66, 67, 127, 128, 129,
-            191, 255, 256, 257, 1000, 4095, 4096,
+            0, 1, 2, 3, 4, 5, 7, 8, 31, 32, 33, 63, 64, 65, 66, 67, 127, 128, 129,
+            191, 255, 256, 257, 511, 512, 513, 519, 1000, 4095, 4096,
         };
-        static p8 want[4096], table[256];
+        static p8 want[4096];
         p8 address_to pages = guard_pages("memory_squeeze_bytes");
+        p8 address_to tables = guard_pages("memory_squeeze_bytes' table");
 
-        if (!pages)
+        if (!pages || !tables)
+        {
+                if (pages)
+                        memory_free(pages, 3 * 4096);
+                if (tables)
+                        memory_free(tables, 3 * 4096);
                 return;
+        }
         p8 address_to got = pages + 4096;
         p64 seed = 0x2545f4914f6cdd1dull;
 #if X64
         p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2;
         positive tiers = 3;
+#elif RISCV64
+        p8 vector = 0;
+        positive tiers = 2;
 #else
         positive tiers = 1;
 #endif
@@ -14840,21 +14854,30 @@ fn check_squeeze_bytes()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi2 = tier == 1 ? 1 : vbmi2;
+#elif RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
 #endif
+                VECTOR_FIRST_CALL(tier == 0);
                 same("memory_squeeze_bytes", "null zero-sized answer",
                      (memory_squeeze_bytes)(null, 0, null, 256), 0);
                 for (positive s = 0; s < array_count(sizes); s++)
                         for (positive residue = 0; residue <= 64; residue += residue < 8 ? 1 : 7)
                                 for (positive density = 0; density < 4; density++)
-                                        for (positive before = 0; before < 3; before++)
+                                        for (positive before = 0; before < 4; before++)
                                 {
                                         positive size = sizes[s];
                                         positive offset = residue == 64 || size + residue > 4096
                                                               ? 4096 - size : residue;
+                                        p8 address_to table = tables + 8192 - 256 - (s + residue + before) % 8;
                                         for (positive i = 0; i < 256; i++)
                                         {
                                                 XORSHIFT64(seed);
-                                                p8 mark = (p8)(seed >> 24) | 1;
+                                                // Any nonzero byte, 0x80 (no low bit set) a quarter of the time.
+                                                p8 mark = i % 4 == 0 || !(p8)(seed >> 24) ? 0x80 : (p8)(seed >> 24);
                                                 bool marked = density == 3 ? (seed & 15) != 0
                                                               : density == 2 ? (seed & 1) != 0
                                                               : density == 1 ? i == 'a' || i == 0xf1
@@ -14870,7 +14893,8 @@ fn check_squeeze_bytes()
                                         }
                                         positive previous = before == 0 ? 256
                                                             : before == 1 && size ? want[offset]
-                                                                              : 'z';
+                                                            : before == 3 ? 0x100 | (size ? want[offset] : 'a')
+                                                                          : 'z';
                                         positive kept = 0;
                                         positive last = previous;
                                         for (positive i = 0; i < size; i++)
@@ -14880,6 +14904,7 @@ fn check_squeeze_bytes()
                                                         want[offset + kept++] = value;
                                                 last = value;
                                         }
+                                        VECTOR_FIRST_CALL(tier == 0);
                                         positive answer = (memory_squeeze_bytes)(got + offset, size,
                                                                                 table, previous);
                                         same("memory_squeeze_bytes", "kept count", answer, kept);
@@ -14893,8 +14918,11 @@ fn check_squeeze_bytes()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi2 = vbmi2;
+#elif RISCV64
+        cpu_has_vector = vector;
 #endif
         memory_free(pages, 3 * 4096);
+        memory_free(tables, 3 * 4096);
 }
 
 /*

@@ -31715,6 +31715,21 @@ __asm__(
 #endif
 
     //
+    //       RV_FLAG_TABLE(FLIP, TEST): the caller's 256-byte table at a2 made a
+    //       table of 0 and 1 at sp, 1 where the entry is nonzero (FLIP empty,
+    //       TEST snez) or where it is nought (FLIP "not a5, a5", TEST seqz). A
+    //       word at a time where a2 is on eight, a nonzero byte's bit seven
+    //       being that of ((w & 0x7f..) + 0x7f..) | w; a byte at a time where
+    //       it is not. Spends t1 to t4, t6, a4 and a5, and ends at 4:.
+    //
+#define RV_FLAG_TABLE(FLIP, TEST)                                                                                     \
+    "mv t2, sp\n   addi t3, sp, 256\n   mv t6, a2\n   andi t1, a2, 7\n   bnez t1, 3f\n"                                   \
+    "li t1, 0x7f7f7f7f7f7f7f7f\n   li t4, 0x0101010101010101\n"                                                       \
+    "2:  ld a4, 0(t6)\n   and a5, a4, t1\n   add a5, a5, t1\n   or a5, a5, a4\n   " FLIP "srli a5, a5, 7\n"               \
+    "and a5, a5, t4\n   sd a5, 0(t2)\n   addi t6, t6, 8\n   addi t2, t2, 8\n   bne t2, t3, 2b\n   j 4f\n"                  \
+    "3:  lbu a4, 0(t6)\n   " TEST " a4, a4\n   sb a4, 0(t2)\n   addi t6, t6, 1\n   addi t2, t2, 1\n   bne t2, t3, 3b\n"     \
+    "4:\n"
+    //
     //       memory_delete_bytes. With V, from 32 bytes: a strip of the block
     //       is gathered from the table by its own bytes (vluxei8), the bytes
     //       whose entry is nought are compressed (vcompress) and stored at the
@@ -31760,13 +31775,10 @@ __asm__(
     ".Lmemory_delete_rv_done:\n   sub a0, t0, t5\n" ASM_RET
     //  The table of what to add to the cursor, at sp; s0 to s4 kept above it.
     ".Lmemory_delete_rv_kept:\n   addi sp, sp, -304\n   sd s0, 256(sp)\n   sd s1, 264(sp)\n   sd s2, 272(sp)\n   sd s3, 280(sp)\n"
-    "sd s4, 288(sp)\n   mv t2, sp\n   addi t3, sp, 256\n   mv t6, a2\n   andi t1, a2, 7\n   bnez t1, 3f\n"
-    "li t1, 0x7f7f7f7f7f7f7f7f\n   li t4, 0x0101010101010101\n"
-    "2:  ld a3, 0(t6)\n   and a4, a3, t1\n   add a4, a4, t1\n   or a4, a4, a3\n   not a4, a4\n   srli a4, a4, 7\n   and a4, a4, t4\n"
-    "sd a4, 0(t2)\n   addi t6, t6, 8\n   addi t2, t2, 8\n   bne t2, t3, 2b\n   j 4f\n"
-    "3:  lbu a3, 0(t6)\n   seqz a3, a3\n   sb a3, 0(t2)\n   addi t6, t6, 1\n   addi t2, t2, 1\n   bne t2, t3, 3b\n"
+    "sd s4, 288(sp)\n"
+    RV_FLAG_TABLE("not a5, a5\n   ", "seqz")
     //  Eight a turn while eight are left, a1 the last place a turn may start.
-    "4:  add a1, a0, a1\n   addi a1, a1, -8\n"
+    "add a1, a0, a1\n   addi a1, a1, -8\n"
     "5:  lbu t1, 0(a0)\n   lbu t2, 1(a0)\n   lbu t3, 2(a0)\n   lbu t4, 3(a0)\n   lbu t6, 4(a0)\n   lbu a2, 5(a0)\n   lbu a3, 6(a0)\n   lbu a4, 7(a0)\n"
     "add a5, sp, t1\n   add a6, sp, t2\n   add a7, sp, t3\n   add s0, sp, t4\n   add s1, sp, t6\n   add s2, sp, a2\n   add s3, sp, a3\n   add s4, sp, a4\n"
     "lbu a5, 0(a5)\n   lbu a6, 0(a6)\n   lbu a7, 0(a7)\n   lbu s0, 0(s0)\n   lbu s1, 0(s1)\n   lbu s2, 0(s2)\n   lbu s3, 0(s3)\n   lbu s4, 0(s4)\n"
@@ -31783,15 +31795,73 @@ __asm__(
     ".option pop\n"
 #endif
 
-    // memory_squeeze_bytes: a byte at a time with no branch on the data, the
-    // cursor moved by one less the and of "repeats" and "marked" -- seqz and
-    // snez, so neither C nor Zbb. The x86_64 block carries the full contract.
+    //
+    //       memory_squeeze_bytes. A byte goes when the table marks it and it
+    //       repeats the byte before it in the input, previous before the
+    //       first (past 255, none). With V, from 32 bytes: a strip is slid up
+    //       a byte with the byte before it in front (vslide1up) and compared
+    //       with itself for the repeats, the table gathered by the bytes
+    //       (vluxei8) for the marks, and the bytes that are not both
+    //       compressed and stored at the cursor. The strip's last byte is the
+    //       one before the next strip, and the store, which writes the kept
+    //       bytes alone, leaves it as it was. With no byte before the block,
+    //       the first byte xor 1 stands for one.
+    //
+    //       Without V, from 512 bytes: the table is made a table of 0 and 1, 1
+    //       for a marked byte, on the stack (RV_FLAG_TABLE), then eight bytes
+    //       a turn. Each is stored at the cursor, and the cursor is pulled
+    //       back by sltu of its xor with the byte before against its mark,
+    //       under 1 only when they are equal and it is marked: seven
+    //       instructions a byte. Under 512 the byte loop below, the cursor
+    //       moved by one less the and of "repeats" and "marked", fourteen.
+    //       The x86_64 block carries the full contract.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_squeeze_bytes)
-    "mv t5, a0\n   mv t0, a0\n   beqz a1, .Lmemory_squeeze_rv_done\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "li t3, 32\n   bltu a1, t3, .Lmemory_squeeze_rv_narrow\n   lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n"
+    "beq t3, t4, .Lmemory_squeeze_rv_vector\n   bnez t3, .Lmemory_squeeze_rv_narrow\n"
+    //  The detect keeps a0-a4 and a7, and its return starts the routine again.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_squeeze_bytes\n"
+    ".Lmemory_squeeze_rv_vector:\n   mv t0, a0\n   mv t5, a0\n   li t3, 256\n   bltu a3, t3, 1f\n   lbu a3, 0(a0)\n   xori a3, a3, 1\n"
+    "1:  vsetvli t3, a1, e8, m8, ta, ma\n   vle8.v v8, (a0)\n   vslide1up.vx v16, v8, a3\n   vmseq.vv v0, v8, v16\n"
+    "vluxei8.v v24, (a2), v8\n   vmsne.vi v1, v24, 0\n   vmnand.mm v0, v0, v1\n   vcompress.vm v16, v8, v0\n   vcpop.m t4, v0\n"
+    "add a0, a0, t3\n   lbu a3, -1(a0)\n   vsetvli zero, t4, e8, m8, ta, ma\n   vse8.v v16, (t0)\n"
+    "add t0, t0, t4\n   sub a1, a1, t3\n   bnez a1, 1b\n   sub a0, t0, t5\n" ASM_RET
+    ".Lmemory_squeeze_rv_narrow:\n"
+#endif
+    "mv t5, a0\n   mv t0, a0\n   li t6, 512\n   bgeu a1, t6, .Lmemory_squeeze_rv_marked\n   beqz a1, .Lmemory_squeeze_rv_done\n"
     ".Lmemory_squeeze_rv_one:  lbu t1, 0(a0)\n   sb t1, 0(t0)\n   add t2, a2, t1\n   lbu t2, 0(t2)\n   xor t3, t1, a3\n   seqz t3, t3\n   snez t2, t2\n   and t3, t3, t2\n"
     "xori t3, t3, 1\n   add t0, t0, t3\n   mv a3, t1\n   addi a0, a0, 1\n   addi a1, a1, -1\n   bnez a1, .Lmemory_squeeze_rv_one\n"
     ".Lmemory_squeeze_rv_done:\n   sub a0, t0, t5\n" ASM_RET
+    //  The marks at sp; s0 to s6 kept above them.
+    ".Lmemory_squeeze_rv_marked:\n   addi sp, sp, -320\n   sd s0, 256(sp)\n   sd s1, 264(sp)\n   sd s2, 272(sp)\n   sd s3, 280(sp)\n"
+    "sd s4, 288(sp)\n   sd s5, 296(sp)\n   sd s6, 304(sp)\n"
+    RV_FLAG_TABLE("", "snez")
+    //  Eight a turn while eight are left, a1 the last place a turn may start, a3 the byte before.
+    "add a1, a0, a1\n   addi a1, a1, -8\n"
+    "5:  lbu t1, 0(a0)\n   lbu t2, 1(a0)\n   lbu t3, 2(a0)\n   lbu t4, 3(a0)\n   lbu t6, 4(a0)\n   lbu a2, 5(a0)\n   lbu a4, 6(a0)\n   lbu a5, 7(a0)\n"
+    "add a6, sp, t1\n   add a7, sp, t2\n   add s0, sp, t3\n   add s1, sp, t4\n   add s2, sp, t6\n   add s3, sp, a2\n   add s4, sp, a4\n   add s5, sp, a5\n"
+    "lbu a6, 0(a6)\n   lbu a7, 0(a7)\n   lbu s0, 0(s0)\n   lbu s1, 0(s1)\n   lbu s2, 0(s2)\n   lbu s3, 0(s3)\n   lbu s4, 0(s4)\n   lbu s5, 0(s5)\n"
+    //  Byte i is stored at i past the cursor, and the cursor pulled back by one when it goes.
+    "xor s6, t1, a3\n   sltu a6, s6, a6\n   sb t1, 0(t0)\n   sub t0, t0, a6\n   xor s6, t2, t1\n   sltu a7, s6, a7\n   sb t2, 1(t0)\n   sub t0, t0, a7\n"
+    "xor s6, t3, t2\n   sltu s0, s6, s0\n   sb t3, 2(t0)\n   sub t0, t0, s0\n   xor s6, t4, t3\n   sltu s1, s6, s1\n   sb t4, 3(t0)\n   sub t0, t0, s1\n"
+    "xor s6, t6, t4\n   sltu s2, s6, s2\n   sb t6, 4(t0)\n   sub t0, t0, s2\n   xor s6, a2, t6\n   sltu s3, s6, s3\n   sb a2, 5(t0)\n   sub t0, t0, s3\n"
+    "xor s6, a4, a2\n   sltu s4, s6, s4\n   sb a4, 6(t0)\n   sub t0, t0, s4\n   xor s6, a5, a4\n   sltu s5, s6, s5\n   sb a5, 7(t0)\n   sub t0, t0, s5\n"
+    "mv a3, a5\n   addi t0, t0, 8\n   addi a0, a0, 8\n   bgeu a1, a0, 5b\n"
+    //  The last seven or fewer, a1 the end.
+    "addi a1, a1, 8\n   beq a0, a1, 7f\n"
+    "6:  lbu t1, 0(a0)\n   add t2, sp, t1\n   lbu t2, 0(t2)\n   xor t3, t1, a3\n   sltu t2, t3, t2\n   sb t1, 0(t0)\n   addi t0, t0, 1\n"
+    "sub t0, t0, t2\n   mv a3, t1\n   addi a0, a0, 1\n   bne a0, a1, 6b\n"
+    "7:  ld s0, 256(sp)\n   ld s1, 264(sp)\n   ld s2, 272(sp)\n   ld s3, 280(sp)\n   ld s4, 288(sp)\n   ld s5, 296(sp)\n   ld s6, 304(sp)\n"
+    "addi sp, sp, 320\n   sub a0, t0, t5\n" ASM_RET
     ASM_END(memory_squeeze_bytes)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
+#undef RV_FLAG_TABLE
 
     // memory_offsets_of_either: with V the bytes a turn as one mask of the two, the turn's indices made by
     // vid, added to where the turn began and compressed by the mask, and stored at most the room's worth.
