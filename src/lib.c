@@ -31762,7 +31762,7 @@ __asm__(
     "4:  li t4, 16\n   bltu a2, t4, 5f\n   ld t0, 0(a1)\n   ld t1, 8(a1)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n   addi a0, a0, 16\n   addi a1, a1, 16\n   addi a2, a2, -16\n"
     "5:  li t4, 8\n   bltu a2, t4, 6f\n   ld t0, 0(a1)\n   sd t0, 0(a0)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -8\n"
     "6:  li t4, 4\n   bltu a2, t4, 8f\n   lw t0, 0(a1)\n   sw t0, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -4\n"
-    "8:  beqz a2, 9f\n   lbu t0, 0(a1)\n   sb t0, 0(a0)\n   li t4, 17\n   bgeu a2, t4, 7f  # enough left that merging words earns the setup\n"
+    "8:  beqz a2, 9f\n   lbu t0, 0(a1)\n   sb t0, 0(a0)\n   li t4, 8\n   bgeu a2, t4, 7f  # a word left: the merge, its head and tail from the tables\n"
     "addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   beqz a2, 9f\n"
     "81: lbu t0, 0(a1)\n   sb t0, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   bnez a2, 81b\n"
     "9:  mv a0, a3\n" ASM_RET
@@ -31776,24 +31776,28 @@ __asm__(
     //       across a one byte skew counted 32807 guest instructions against
     //       the C loop's 20486.
     //
-    //       The stores are what has to be aligned, so the destination is
-    //       walked up to a word boundary and every output word after that is
-    //       built from the two source words it straddles: the first shifted
-    //       down by the residue, the second shifted up by the rest of the
-    //       word, ored together. Ten instructions for eight bytes, and the
-    //       same copy counts 9366.
+    //       The stores are what has to be aligned. The bytes up to the
+    //       destination's word come from one word of the source, made of the
+    //       two aligned words it starts in, and are stored by jumping into a
+    //       table of byte stores at their count, an srli and an sb a byte.
+    //       Every output word after that is built from the two source words
+    //       it straddles: the first shifted down by the residue, the second
+    //       shifted up by the rest of the word, ored together, four words a
+    //       turn with the last load carried to the next, six instructions
+    //       for eight bytes. The bytes left under eight come from one more
+    //       such word through a second table. Across a one byte skew 4096
+    //       bytes count 3238 (5158 a word a turn, 32807 a byte), 1024 838
+    //       (1318), 64 88 (118) and 16 58 (119, which was a byte at a time).
     //
-    //       Both loads are aligned, which is what baseline RV64I asks for and
-    //       what every other riscv body here is written around. The second
-    //       load reaches up to seven bytes past the last byte the caller owns
-    //       and cannot fault for it: those bytes share a word, and so a page,
-    //       with bytes this very output word is built from.
+    //       Every load is aligned, which is what baseline RV64I asks for and
+    //       what every other riscv body here is written around, and every
+    //       one is of a word holding a byte of the source: one that reaches
+    //       past the last byte the caller owns cannot fault for it, as those
+    //       bytes share a word, and so a page, with bytes this copy reads.
     //
-    //       Under seventeen bytes it is not worth the setup, since aligning
-    //       the destination can eat seven of them by itself, so those stay
-    //       with the byte walk. The byte the walk has already stored is
-    //       simply stored again by the merge, which is cheaper than teaching
-    //       the entry not to.
+    //       From eight bytes on: under that the head alone could be all of
+    //       it. The byte the walk has already stored is simply stored again
+    //       by the merge, which is cheaper than teaching the entry not to.
     //
     //       Note for the next audit: the residue branch at the top of this
     //       routine still lands on the byte walk, which is what the riscv
@@ -31803,14 +31807,51 @@ __asm__(
     //       for the reason above rather than because the gate says so.
     //
     "7:  andi t5, a0, 7\n   beqz t5, .Lmemory_copy_apart_rv_aligned\n"
-    "70: lbu t1, 0(a1)\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   andi t5, a0, 7\n   bnez t5, 70b\n"
+    //       The bytes up to the destination's word, from one word of the
+    //       source made of the aligned two it starts in, stored by jumping
+    //       into the table below at the count: an srli and an sb a byte.
+    "li t6, 8\n   sub t6, t6, t5\n   andi a4, a1, 7\n   andi a1, a1, -8\n   slli a5, a4, 3\n   ld t0, 0(a1)\n"
+    "beqz a5, 1f\n   ld t1, 8(a1)\n   srl t0, t0, a5\n   neg a6, a5\n   sll t1, t1, a6\n   or t0, t0, t1\n"
+    "1:  add a1, a1, a4\n   lla t3, .Lmemory_copy_apart_rv_head_end\n   slli t1, t6, 3\n   sub t3, t3, t1\n   jr t3\n"
+    ".option push\n   .option norvc\n"
+    "srli t1, t0, 48\n   sb t1, 6(a0)\n"
+    "srli t1, t0, 40\n   sb t1, 5(a0)\n"
+    "srli t1, t0, 32\n   sb t1, 4(a0)\n"
+    "srli t1, t0, 24\n   sb t1, 3(a0)\n"
+    "srli t1, t0, 16\n   sb t1, 2(a0)\n"
+    "srli t1, t0, 8\n   sb t1, 1(a0)\n"
+    "srli t1, t0, 0\n   sb t1, 0(a0)\n"
+    ".Lmemory_copy_apart_rv_head_end:\n   .option pop\n"
+    "add a0, a0, t6\n   add a1, a1, t6\n   sub a2, a2, t6\n"
     ".Lmemory_copy_apart_rv_aligned:  andi a4, a1, 7  # what the source is short of a word\n"
     "beqz a4, 2b  # they agree after all, so the ladder above is the one\n"
-    "andi a1, a1, -8\n   slli a5, a4, 3\n   li a6, 64\n   sub a6, a6, a5\n   li t4, 8\n   bltu a2, t4, .Lmemory_copy_apart_rv_rest\n   ld t0, 0(a1)\n"
+    //       Four output words a turn, each from the two source words it
+    //       straddles, the last of the four loads carried to the next turn.
+    "andi a1, a1, -8\n   slli a5, a4, 3\n   neg a6, a5\n   ld t0, 0(a1)\n   li t4, 32\n   bltu a2, t4, .Lmemory_copy_apart_rv_one\n"
+    ".Lmemory_copy_apart_rv_four:  ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   ld t6, 32(a1)\n"
+    "srl t5, t0, a5\n   sll a7, t1, a6\n   or t5, t5, a7\n   sd t5, 0(a0)\n   srl t5, t1, a5\n   sll a7, t2, a6\n   or t5, t5, a7\n"
+    "sd t5, 8(a0)\n   srl t5, t2, a5\n   sll a7, t3, a6\n   or t5, t5, a7\n   sd t5, 16(a0)\n   srl t5, t3, a5\n   sll a7, t6, a6\n"
+    "or t5, t5, a7\n   sd t5, 24(a0)\n   mv t0, t6\n   addi a0, a0, 32\n   addi a1, a1, 32\n   addi a2, a2, -32\n"
+    "bgeu a2, t4, .Lmemory_copy_apart_rv_four\n"
+    ".Lmemory_copy_apart_rv_one:  li t4, 8\n   bltu a2, t4, .Lmemory_copy_apart_rv_rest\n"
     ".Lmemory_copy_apart_rv_merge:  ld t1, 8(a1)\n   srl t2, t0, a5\n   sll t3, t1, a6\n   or t2, t2, t3\n   sd t2, 0(a0)\n   addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -8\n"
     "mv t0, t1\n   bgeu a2, t4, .Lmemory_copy_apart_rv_merge\n"
-    ".Lmemory_copy_apart_rv_rest:  add a1, a1, a4  # the source pointer the byte walk is expecting\n"
-    "beqz a2, 9b\n   j 81b\n"
+    //       Under eight left: the rest of t0's word and, where the bytes
+    //       run into the next one, that word too, stored by the table at the
+    //       count. A byte in the next word is the source's, so the load is.
+    ".Lmemory_copy_apart_rv_rest:  beqz a2, 9b\n   srl t2, t0, a5\n   li t3, 8\n   sub t3, t3, a4\n   bgeu t3, a2, 1f\n"
+    "ld t3, 8(a1)\n   sll t3, t3, a6\n   or t2, t2, t3\n"
+    "1:  lla t3, .Lmemory_copy_apart_rv_tail_end\n   slli t1, a2, 3\n   sub t3, t3, t1\n   jr t3\n"
+    ".option push\n   .option norvc\n"
+    "srli t1, t2, 48\n   sb t1, 6(a0)\n"
+    "srli t1, t2, 40\n   sb t1, 5(a0)\n"
+    "srli t1, t2, 32\n   sb t1, 4(a0)\n"
+    "srli t1, t2, 24\n   sb t1, 3(a0)\n"
+    "srli t1, t2, 16\n   sb t1, 2(a0)\n"
+    "srli t1, t2, 8\n   sb t1, 1(a0)\n"
+    "srli t1, t2, 0\n   sb t1, 0(a0)\n"
+    ".Lmemory_copy_apart_rv_tail_end:\n   .option pop\n"
+    "j 9b\n"
     ASM_END(memory_copy_apart)
 
     // memory_copy_apart_end: exact non-overlapping copy, one terminator, and
@@ -31856,20 +31897,61 @@ __asm__(
     "7:  li t6, 8\n   bltu a2, t6, 0f\n   addi a4, a4, -8\n   addi a5, a5, -8\n   ld t0, 0(a5)\n   sd t0, 0(a4)\n   addi a2, a2, -8\n"
     "0:  li t6, 4\n   bltu a2, t6, 8f\n   addi a4, a4, -4\n   addi a5, a5, -4\n   lw t0, 0(a5)\n   sw t0, 0(a4)\n   addi a2, a2, -4\n"
     //
-    //       A byte a turn, and the only path in this routine that is not a win.
-    //       When the two ends do not agree modulo eight there is no aligned
-    //       load that spans a whole word of the source, and
-    //       arch/riscv/lib/memmove.S answers that by loading aligned words and
-    //       shifting the halves together: 3647 instructions for four kilobytes
-    //       against 28681 here, or 0.13x. memory_copy_apart falls back the same
-    //       way and measures 28679 on the same shape, so this is not memmove's
-    //       to fix alone -- it is the whole riscv64 half of this file having no
-    //       shift-merge loop, and writing one is a new routine rather than a
-    //       change of shape.
+    //       Ends that disagree modulo eight: the first byte down as the
+    //       residue gate's fallback has it, and then, eight or more left, a
+    //       shift-merge down from there -- the bytes above the destination's
+    //       word from one word of the source made of the aligned two it
+    //       ends in, every output word below that from the two source words
+    //       it straddles, four a turn, and the bytes left under eight from
+    //       one more. Each source word is loaded before the turn that writes
+    //       over it, as the destination is above the source: the top one of
+    //       a turn is carried from the turn before, and a turn loads its four
+    //       before it stores any. Every load is of a word holding a byte of
+    //       the source. Under eight bytes, a byte a turn. A move of 4096
+    //       bytes up by nine counts 3282 instructions (28695 a byte a turn,
+    //       and memmove.S 3647), 1024 882 (7191), 64 132 (471).
     //
-    "8:  beqz a2, 9f\n   addi a4, a4, -1\n   addi a5, a5, -1\n   lbu t0, 0(a5)\n   sb t0, 0(a4)\n   addi a2, a2, -1\n   j 8b\n"
+    "8:  beqz a2, 9f\n   addi a4, a4, -1\n   addi a5, a5, -1\n   lbu t0, 0(a5)\n   sb t0, 0(a4)\n   addi a2, a2, -1\n"
+    "li t6, 8\n   bgeu a2, t6, .Lmemory_copy_rv_back\n"
+    "80: beqz a2, 9f\n   addi a4, a4, -1\n   addi a5, a5, -1\n   lbu t0, 0(a5)\n   sb t0, 0(a4)\n   addi a2, a2, -1\n   j 80b\n"
     "9:  "
     ASM_RET
+    ".Lmemory_copy_rv_back:  andi t6, a4, 7\n   beqz t6, .Lmemory_copy_rv_back_aligned\n"
+    "andi a6, a5, 7\n   andi a5, a5, -8\n   ld t0, -8(a5)\n   beqz a6, 1f\n   ld t1, 0(a5)\n   slli a3, a6, 3\n   srl t0, t0, a3\n"
+    "neg a3, a3\n   sll t1, t1, a3\n   or t0, t0, t1\n"
+    "1:  add a5, a5, a6\n   lla t3, .Lmemory_copy_rv_back_head_end\n   slli t1, t6, 3\n   sub t3, t3, t1\n   jr t3\n"
+    ".option push\n   .option norvc\n"
+    "srli t1, t0, 8\n   sb t1, -7(a4)\n"
+    "srli t1, t0, 16\n   sb t1, -6(a4)\n"
+    "srli t1, t0, 24\n   sb t1, -5(a4)\n"
+    "srli t1, t0, 32\n   sb t1, -4(a4)\n"
+    "srli t1, t0, 40\n   sb t1, -3(a4)\n"
+    "srli t1, t0, 48\n   sb t1, -2(a4)\n"
+    "srli t1, t0, 56\n   sb t1, -1(a4)\n"
+    ".Lmemory_copy_rv_back_head_end:\n   .option pop\n"
+    "sub a4, a4, t6\n   sub a5, a5, t6\n   sub a2, a2, t6\n"
+    ".Lmemory_copy_rv_back_aligned:  andi a6, a5, 7\n   andi a5, a5, -8\n   slli a3, a6, 3\n   neg a7, a3\n   ld t0, 0(a5)\n"
+    "li a1, 32\n   bltu a2, a1, .Lmemory_copy_rv_back_one\n"
+    ".Lmemory_copy_rv_back_four:  ld t1, -8(a5)\n   ld t2, -16(a5)\n   ld t3, -24(a5)\n   ld t4, -32(a5)\n"
+    "srl t5, t1, a3\n   sll t6, t0, a7\n   or t5, t5, t6\n   sd t5, -8(a4)\n   srl t5, t2, a3\n   sll t6, t1, a7\n   or t5, t5, t6\n"
+    "sd t5, -16(a4)\n   srl t5, t3, a3\n   sll t6, t2, a7\n   or t5, t5, t6\n   sd t5, -24(a4)\n   srl t5, t4, a3\n   sll t6, t3, a7\n"
+    "or t5, t5, t6\n   sd t5, -32(a4)\n   mv t0, t4\n   addi a4, a4, -32\n   addi a5, a5, -32\n   addi a2, a2, -32\n"
+    "bgeu a2, a1, .Lmemory_copy_rv_back_four\n"
+    ".Lmemory_copy_rv_back_one:  li a1, 8\n   bltu a2, a1, .Lmemory_copy_rv_back_rest\n"
+    ".Lmemory_copy_rv_back_merge:  ld t1, -8(a5)\n   srl t2, t1, a3\n   sll t3, t0, a7\n   or t2, t2, t3\n   sd t2, -8(a4)\n   mv t0, t1\n"
+    "addi a4, a4, -8\n   addi a5, a5, -8\n   addi a2, a2, -8\n   bgeu a2, a1, .Lmemory_copy_rv_back_merge\n"
+    ".Lmemory_copy_rv_back_rest:  beqz a2, 9b\n   sll t2, t0, a7\n   bgeu a6, a2, 1f\n   ld t1, -8(a5)\n   srl t1, t1, a3\n   or t2, t2, t1\n"
+    "1:  lla t3, .Lmemory_copy_rv_back_tail_end\n   slli t1, a2, 3\n   sub t3, t3, t1\n   jr t3\n"
+    ".option push\n   .option norvc\n"
+    "srli t1, t2, 8\n   sb t1, -7(a4)\n"
+    "srli t1, t2, 16\n   sb t1, -6(a4)\n"
+    "srli t1, t2, 24\n   sb t1, -5(a4)\n"
+    "srli t1, t2, 32\n   sb t1, -4(a4)\n"
+    "srli t1, t2, 40\n   sb t1, -3(a4)\n"
+    "srli t1, t2, 48\n   sb t1, -2(a4)\n"
+    "srli t1, t2, 56\n   sb t1, -1(a4)\n"
+    ".Lmemory_copy_rv_back_tail_end:\n   .option pop\n"
+    "j 9b\n"
     ASM_END(memory_copy)
 
     /* See the x86_64 body. Unaligned loads go through bytes: no unaligned ld. */
