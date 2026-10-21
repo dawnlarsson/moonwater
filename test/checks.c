@@ -37557,6 +37557,9 @@ static const char *alphabets[] = {
 };
 static const p8 widths[] = {6, 6, 5, 5, 4, 1, 9, 4, 9, 6};
 
+// Every decode the first in a process, on riscv64's first tier.
+static bool codec_first;
+
 static fn codec_check(p8 address_to source, p8 address_to output,
                       p8 address_to decoded, positive groups, positive kind)
 {
@@ -37587,6 +37590,7 @@ static fn codec_check(p8 address_to source, p8 address_to output,
                                 valid = false;
                 }
         check("codec independent bit oracle", valid);
+        VECTOR_FIRST_CALL(codec_first);
         check("codec decoded groups", memory_decode_power2(decoded, output,
               groups, values, widths[kind]) == groups);
         check("codec round trip", !memory_compare(source, decoded, groups * bytes));
@@ -38059,7 +38063,7 @@ static fn control_checks(void)
 
 b32 main(void)
 {
-        p8 source[400], output[640], decoded[400];
+        p8 source[700], output[1100], decoded[700];
         vli_checks();
         span_checks();
         control_checks();
@@ -38073,6 +38077,18 @@ b32 main(void)
                 cpu_has_avx2 = mode ? vector : 0;
                 cpu_has_avx512 = mode > 1 ? wide : 0;
                 cpu_has_avx512_vbmi = mode > 2 ? vbmi : 0;
+#elif RISCV64
+        //      Every decode the first in a process, which asks for V and
+        //      comes back to the routine's entry; then without V.
+        p8 vector = 0;
+        for (positive mode = 0; mode < 2; mode++)
+        {
+                codec_first = mode == 0;
+                if (mode == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
 #endif
         for (positive kind = 0; kind < sizeof(widths); kind++)
         {
@@ -38083,9 +38099,12 @@ b32 main(void)
                       address_bad, address_bad, 0, address_bad, widths[kind]) == 0);
                 check("codec empty inaccessible decode", memory_decode_power2(
                       address_bad, address_bad, 0, address_bad, widths[kind]) == 0);
+                // Every count to 64, and past a strip of V at 128 bits whatever the width.
+                static const positive longer[] = {100, 129};
                 for (positive offset = 1; offset <= 16; offset++)
-                        for (positive groups = 0; groups <= 64; groups++)
+                        for (positive g = 0; g <= 64 + array_count(longer); g++)
                         {
+                                positive groups = g <= 64 ? g : longer[g - 65];
                                 for (positive at = 0; at < sizeof(source); at++)
                                         source[at] = (p8)(at * 197 + groups * 47);
                                 memory_fill(output, 0xa5, sizeof(output));
@@ -38107,13 +38126,18 @@ b32 main(void)
                         values[(p8)alphabets[kind][at]] = (p8)at;
                 for (positive invalid = 0; invalid < 256; invalid++)
                         if (values[invalid] == 255)
-                                for (positive at = 0; at < symbols * 16; at++)
+                                for (positive at = 0; at < symbols * 40; at++)
                                 {
-                                        memory_fill(output, alphabets[kind][0], symbols * 16);
+                                        // Past the sixteenth quantum, a strip of V at 128 bits
+                                        // for the widest, one malformed byte in eight.
+                                        if (at >= symbols * 16 && invalid % 8 != 1)
+                                                continue;
+                                        memory_fill(output, alphabets[kind][0], symbols * 40);
                                         memory_fill(decoded, 0xa5, sizeof(decoded));
                                         output[at] = (p8)invalid;
+                                        VECTOR_FIRST_CALL(codec_first);
                                         positive done = memory_decode_power2(decoded,
-                                            output, 16, values, widths[kind]);
+                                            output, 40, values, widths[kind]);
                                         check("codec first malformed quantum", done == at / symbols);
                                         bool valid = true;
                                         for (positive byte = done * bytes; byte < sizeof(decoded); byte++)
@@ -38167,6 +38191,7 @@ b32 main(void)
                                         memory_fill(map, 255, 256);
                                         for (positive at = 0; at < ((positive)1 << bits); at++)
                                                 map[(p8)alphabets[kind][at]] = (p8)at;
+                                        VECTOR_FIRST_CALL(codec_first);
                                         check("codec exact table guard", memory_decode_power2(
                                               back, out, groups, map, widths[kind]) == groups);
                                         check("codec table guard decoded bytes",
@@ -38181,6 +38206,10 @@ b32 main(void)
         cpu_has_avx2 = vector;
         cpu_has_avx512 = wide;
         cpu_has_avx512_vbmi = vbmi;
+#elif RISCV64
+        }
+        codec_first = false;
+        cpu_has_vector = vector;
 #endif
         return test_report(null);
 }

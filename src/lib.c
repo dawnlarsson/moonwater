@@ -37640,45 +37640,127 @@ __asm__(
     "addi a1, a1, 1\naddi a5, a5, 8\naddi a2, a2, -1\nbnez a2, .Lcodec_encode_rv_9\nmv a0, a6\nj .Lcodec_encode_rv_done\n"
     ".Lcodec_encode_rv_done:\n" ASM_RET
     ASM_END(memory_encode_power2)
+    //
+    //       memory_decode_power2. With V, from eight quanta: a strip of quanta
+    //       is loaded as a segment (vlseg), its fields one register each,
+    //       every symbol gathered from the table by itself (vluxei8), and the
+    //       strip cut to the quanta before the first that holds a value past
+    //       127 -- the sentinel, 255 -- found by vfirst of their or. The bytes
+    //       are each a shift or two and an or of the fields, the shifts being
+    //       eight bits wide so a field's bits above the byte fall away, and
+    //       are stored as a segment (vsseg) or, one a quantum, straight.
+    //
+    //       Without V a quantum at a time, its symbols looked up and or'd into
+    //       the sentinel test and shifted into one word, the bytes stored from
+    //       it high first. The count is the groups less those left.
+    //
+#define CODEC_RV_V_EIGHT(CUT)                                                                                         \
+    "vsetvli t3, a2, e8, m1, ta, ma\n   vlseg8e8.v v8, (a1)\n   vluxei8.v v16, (a3), v8\n   vluxei8.v v17, (a3), v9\n"     \
+    "vluxei8.v v18, (a3), v10\n   vluxei8.v v19, (a3), v11\n   vluxei8.v v20, (a3), v12\n   vluxei8.v v21, (a3), v13\n" \
+    "vluxei8.v v22, (a3), v14\n   vluxei8.v v23, (a3), v15\n   vor.vv v24, v16, v17\n   vor.vv v24, v24, v18\n"          \
+    "vor.vv v24, v24, v19\n   vor.vv v24, v24, v20\n   vor.vv v24, v24, v21\n   vor.vv v24, v24, v22\n"                  \
+    "vor.vv v24, v24, v23\n   vmsgtu.vx v0, v24, t6\n   vfirst.m t4, v0\n   bltz t4, " CUT "\n   mv t3, t4\n"         \
+    "vsetvli zero, t3, e8, m1, ta, ma\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_decode_power2)
-    "mv a5, a0\nli a0, 0\nbeqz a2, .Lcodec_decode_rv_done\n   li t0, 6\nbeq a4, t0, .Lcodec_decode_rv_6\n   li t0, 5\nbeq a4, t0, .Lcodec_decode_rv_5\n"
-    "li t0, 4\nbeq a4, t0, .Lcodec_decode_rv_4\n   li t0, 1\nbeq a4, t0, .Lcodec_decode_rv_1\n   li t0, 9\nbeq a4, t0, .Lcodec_decode_rv_9\n   j .Lcodec_decode_rv_done\n"
-    ".balign 16\n.Lcodec_decode_rv_6:\nli t0, 0\nli t2, 0\n"
-    "lbu t1, 0(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 0\nor t0, t0, t1\n"
-    "lbu t1, 1(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 6\nor t0, t0, t1\n"
-    "lbu t1, 2(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 6\nor t0, t0, t1\n"
-    "lbu t1, 3(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 6\nor t0, t0, t1\n   andi t2, t2, 128\nbnez t2, .Lcodec_decode_rv_done\n   srli t1, t0, 16\nsb t1, 0(a5)\n"
-    "srli t1, t0, 8\nsb t1, 1(a5)\n   srli t1, t0, 0\nsb t1, 2(a5)\n"
-    "addi a1, a1, 4\naddi a5, a5, 3\naddi a0, a0, 1\naddi a2, a2, -1\nbnez a2, .Lcodec_decode_rv_6\nj .Lcodec_decode_rv_done\n"
-    ".balign 16\n.Lcodec_decode_rv_5:\nli t0, 0\nli t2, 0\n"
-    "lbu t1, 0(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 0\nor t0, t0, t1\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "li t0, 8\n   bltu a2, t0, .Lcodec_decode_rv_scalar\n   lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n"
+    "beq t3, t4, .Lcodec_decode_rv_vector\n   bnez t3, .Lcodec_decode_rv_scalar\n"
+    //  The detect keeps a0-a4 and a7, and its return starts the routine again.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_decode_power2\n"
+    ".Lcodec_decode_rv_vector:\n   mv a5, a0\n   mv a6, a2\n   li t6, 127\n"
+    "li t0, 6\n   beq a4, t0, .Lcodec_decode_rv_v6\n   li t0, 4\n   beq a4, t0, .Lcodec_decode_rv_v4\n   li t0, 5\n"
+    "beq a4, t0, .Lcodec_decode_rv_v5\n   li t0, 1\n   beq a4, t0, .Lcodec_decode_rv_v1\n   li t0, 9\n"
+    "beq a4, t0, .Lcodec_decode_rv_v9\n   j .Lcodec_decode_rv_done\n"
+    //  Four symbols, three bytes.
+    ".Lcodec_decode_rv_v6:\n"
+    "11: vsetvli t3, a2, e8, m2, ta, ma\n   vlseg4e8.v v8, (a1)\n   vluxei8.v v16, (a3), v8\n   vluxei8.v v18, (a3), v10\n"
+    "vluxei8.v v20, (a3), v12\n   vluxei8.v v22, (a3), v14\n   vor.vv v24, v16, v18\n   vor.vv v24, v24, v20\n   vor.vv v24, v24, v22\n"
+    "vmsgtu.vx v0, v24, t6\n   vfirst.m t4, v0\n   bltz t4, 12f\n   mv t3, t4\n   vsetvli zero, t3, e8, m2, ta, ma\n"
+    "12: vsll.vi v8, v16, 2\n   vsrl.vi v24, v18, 4\n   vor.vv v8, v8, v24\n   vsll.vi v10, v18, 4\n   vsrl.vi v24, v20, 2\n"
+    "vor.vv v10, v10, v24\n   vsll.vi v12, v20, 6\n   vor.vv v12, v12, v22\n   vsseg3e8.v v8, (a5)\n"
+    "slli t5, t3, 2\n   add a1, a1, t5\n   slli t5, t3, 1\n   add t5, t5, t3\n   add a5, a5, t5\n   sub a2, a2, t3\n"
+    "bgez t4, .Lcodec_decode_rv_done\n   bnez a2, 11b\n   j .Lcodec_decode_rv_done\n"
+    //  Two symbols, a byte.
+    ".Lcodec_decode_rv_v4:\n"
+    "13: vsetvli t3, a2, e8, m4, ta, ma\n   vlseg2e8.v v8, (a1)\n   vluxei8.v v16, (a3), v8\n   vluxei8.v v20, (a3), v12\n"
+    "vor.vv v24, v16, v20\n   vmsgtu.vx v0, v24, t6\n   vfirst.m t4, v0\n   bltz t4, 14f\n   mv t3, t4\n   vsetvli zero, t3, e8, m4, ta, ma\n"
+    "14: vsll.vi v8, v16, 4\n   vor.vv v8, v8, v20\n   vse8.v v8, (a5)\n"
+    "slli t5, t3, 1\n   add a1, a1, t5\n   add a5, a5, t3\n   sub a2, a2, t3\n"
+    "bgez t4, .Lcodec_decode_rv_done\n   bnez a2, 13b\n   j .Lcodec_decode_rv_done\n"
+    //  Eight symbols, five bytes.
+    ".Lcodec_decode_rv_v5:\n"
+    "15: " CODEC_RV_V_EIGHT("16f")
+    "16: vsll.vi v8, v16, 3\n   vsrl.vi v24, v17, 2\n   vor.vv v8, v8, v24\n   vsll.vi v9, v17, 6\n   vsll.vi v24, v18, 1\n"
+    "vor.vv v9, v9, v24\n   vsrl.vi v24, v19, 4\n   vor.vv v9, v9, v24\n   vsll.vi v10, v19, 4\n   vsrl.vi v24, v20, 1\n"
+    "vor.vv v10, v10, v24\n   vsll.vi v11, v20, 7\n   vsll.vi v24, v21, 2\n   vor.vv v11, v11, v24\n   vsrl.vi v24, v22, 3\n"
+    "vor.vv v11, v11, v24\n   vsll.vi v12, v22, 5\n   vor.vv v12, v12, v23\n   vsseg5e8.v v8, (a5)\n"
+    "slli t5, t3, 3\n   add a1, a1, t5\n   slli t5, t3, 2\n   add t5, t5, t3\n   add a5, a5, t5\n   sub a2, a2, t3\n"
+    "bgez t4, .Lcodec_decode_rv_done\n   bnez a2, 15b\n   j .Lcodec_decode_rv_done\n"
+    //  Eight bits, a byte, the first the highest.
+    ".Lcodec_decode_rv_v1:\n"
+    "17: " CODEC_RV_V_EIGHT("18f")
+    "18: vsll.vi v8, v16, 7\n"
+    ".irp r,17,18,19,20,21,22\n   vsll.vi v24, v\\r, 23-\\r\n   vor.vv v8, v8, v24\n.endr\n"
+    "vor.vv v8, v8, v23\n   vse8.v v8, (a5)\n"
+    "slli t5, t3, 3\n   add a1, a1, t5\n   add a5, a5, t3\n   sub a2, a2, t3\n"
+    "bgez t4, .Lcodec_decode_rv_done\n   bnez a2, 17b\n   j .Lcodec_decode_rv_done\n"
+    //  Eight bits, a byte, the first the lowest.
+    ".Lcodec_decode_rv_v9:\n"
+    "19: " CODEC_RV_V_EIGHT("20f")
+    "20: vmv.v.v v8, v16\n"
+    ".irp r,17,18,19,20,21,22,23\n   vsll.vi v24, v\\r, \\r-16\n   vor.vv v8, v8, v24\n.endr\n"
+    "vse8.v v8, (a5)\n"
+    "slli t5, t3, 3\n   add a1, a1, t5\n   add a5, a5, t3\n   sub a2, a2, t3\n"
+    "bgez t4, .Lcodec_decode_rv_done\n   bnez a2, 19b\n   j .Lcodec_decode_rv_done\n"
+    ".Lcodec_decode_rv_scalar:\n"
+#endif
+    "mv a5, a0\n   mv a6, a2\n   li t6, 128\n   beqz a2, .Lcodec_decode_rv_done\n   li t0, 6\n   beq a4, t0, .Lcodec_decode_rv_6\n"
+    "li t0, 5\n   beq a4, t0, .Lcodec_decode_rv_5\n   li t0, 4\n   beq a4, t0, .Lcodec_decode_rv_4\n   li t0, 1\n"
+    "beq a4, t0, .Lcodec_decode_rv_1\n   li t0, 9\n   beq a4, t0, .Lcodec_decode_rv_9\n   j .Lcodec_decode_rv_done\n"
+    ".balign 16\n.Lcodec_decode_rv_6:\n"
+    "lbu t0, 0(a1)\n   add t0, t0, a3\n   lbu t0, 0(t0)\n   mv t2, t0\n"
+    ".irp lane,1,2,3\n"
+    "lbu t1, \\lane(a1)\n   add t1, t1, a3\n   lbu t1, 0(t1)\n   or t2, t2, t1\n   slli t0, t0, 6\n   or t0, t0, t1\n"
+    ".endr\n"
+    "bgeu t2, t6, .Lcodec_decode_rv_done\n   srli t1, t0, 16\n   sb t1, 0(a5)\n   srli t1, t0, 8\n   sb t1, 1(a5)\n   sb t0, 2(a5)\n"
+    "addi a1, a1, 4\n   addi a5, a5, 3\n   addi a2, a2, -1\n   bnez a2, .Lcodec_decode_rv_6\n   j .Lcodec_decode_rv_done\n"
+    ".balign 16\n.Lcodec_decode_rv_5:\n"
+    "lbu t0, 0(a1)\n   add t0, t0, a3\n   lbu t0, 0(t0)\n   mv t2, t0\n"
     ".irp lane,1,2,3,4,5,6,7\n"
-    "lbu t1, \\lane(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 5\nor t0, t0, t1\n"
+    "lbu t1, \\lane(a1)\n   add t1, t1, a3\n   lbu t1, 0(t1)\n   or t2, t2, t1\n   slli t0, t0, 5\n   or t0, t0, t1\n"
     ".endr\n"
-    "andi t2, t2, 128\nbnez t2, .Lcodec_decode_rv_done\n"
-    ".irp lane,0,1,2,3,4\n"
-    "srli t1, t0, (4-\\lane)*8\nsb t1, \\lane(a5)\n"
+    "bgeu t2, t6, .Lcodec_decode_rv_done\n"
+    ".irp lane,0,1,2,3\n"
+    "srli t1, t0, (4-\\lane)*8\n   sb t1, \\lane(a5)\n"
     ".endr\n"
-    "addi a1, a1, 8\naddi a5, a5, 5\naddi a0, a0, 1\naddi a2, a2, -1\nbnez a2, .Lcodec_decode_rv_5\nj .Lcodec_decode_rv_done\n"
-    ".balign 16\n.Lcodec_decode_rv_4:\nli t0, 0\nli t2, 0\n"
-    "lbu t1, 0(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 0\nor t0, t0, t1\n"
-    "lbu t1, 1(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 4\nor t0, t0, t1\n   andi t2, t2, 128\nbnez t2, .Lcodec_decode_rv_done\n   srli t1, t0, 0\nsb t1, 0(a5)\n"
-    "addi a1, a1, 2\naddi a5, a5, 1\naddi a0, a0, 1\naddi a2, a2, -1\nbnez a2, .Lcodec_decode_rv_4\nj .Lcodec_decode_rv_done\n"
-    ".balign 16\n.Lcodec_decode_rv_1:\nli t0, 0\nli t2, 0\n"
-    "lbu t1, 0(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 0\nor t0, t0, t1\n"
+    "sb t0, 4(a5)\n   addi a1, a1, 8\n   addi a5, a5, 5\n   addi a2, a2, -1\n   bnez a2, .Lcodec_decode_rv_5\n   j .Lcodec_decode_rv_done\n"
+    ".balign 16\n.Lcodec_decode_rv_4:\n"
+    "lbu t0, 0(a1)\n   add t0, t0, a3\n   lbu t0, 0(t0)\n   lbu t1, 1(a1)\n   add t1, t1, a3\n   lbu t1, 0(t1)\n   or t2, t0, t1\n"
+    "slli t0, t0, 4\n   or t0, t0, t1\n   bgeu t2, t6, .Lcodec_decode_rv_done\n   sb t0, 0(a5)\n"
+    "addi a1, a1, 2\n   addi a5, a5, 1\n   addi a2, a2, -1\n   bnez a2, .Lcodec_decode_rv_4\n   j .Lcodec_decode_rv_done\n"
+    ".balign 16\n.Lcodec_decode_rv_1:\n"
+    "lbu t0, 0(a1)\n   add t0, t0, a3\n   lbu t0, 0(t0)\n   mv t2, t0\n"
     ".irp lane,1,2,3,4,5,6,7\n"
-    "lbu t1, \\lane(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t0, t0, 1\nor t0, t0, t1\n"
+    "lbu t1, \\lane(a1)\n   add t1, t1, a3\n   lbu t1, 0(t1)\n   or t2, t2, t1\n   slli t0, t0, 1\n   or t0, t0, t1\n"
     ".endr\n"
-    "andi t2, t2, 128\nbnez t2, .Lcodec_decode_rv_done\n   srli t1, t0, 0\nsb t1, 0(a5)\n"
-    "addi a1, a1, 8\naddi a5, a5, 1\naddi a0, a0, 1\naddi a2, a2, -1\nbnez a2, .Lcodec_decode_rv_1\nj .Lcodec_decode_rv_done\n"
-    ".balign 16\n.Lcodec_decode_rv_9:\nli t0, 0\nli t2, 0\n"
-    ".irp lane,0,1,2,3,4,5,6,7\n"
-    "lbu t1, \\lane(a1)\nadd t1, t1, a3\nlbu t1, 0(t1)\nor t2, t2, t1\nslli t1, t1, \\lane\nor t0, t0, t1\n"
+    "bgeu t2, t6, .Lcodec_decode_rv_done\n   sb t0, 0(a5)\n"
+    "addi a1, a1, 8\n   addi a5, a5, 1\n   addi a2, a2, -1\n   bnez a2, .Lcodec_decode_rv_1\n   j .Lcodec_decode_rv_done\n"
+    ".balign 16\n.Lcodec_decode_rv_9:\n"
+    "lbu t0, 0(a1)\n   add t0, t0, a3\n   lbu t0, 0(t0)\n   mv t2, t0\n"
+    ".irp lane,1,2,3,4,5,6,7\n"
+    "lbu t1, \\lane(a1)\n   add t1, t1, a3\n   lbu t1, 0(t1)\n   or t2, t2, t1\n   slli t1, t1, \\lane\n   or t0, t0, t1\n"
     ".endr\n"
-    "andi t2, t2, 128\nbnez t2, .Lcodec_decode_rv_done\n   srli t1, t0, 0\nsb t1, 0(a5)\n"
-    "addi a1, a1, 8\naddi a5, a5, 1\naddi a0, a0, 1\naddi a2, a2, -1\nbnez a2, .Lcodec_decode_rv_9\nj .Lcodec_decode_rv_done\n"
-    ".Lcodec_decode_rv_done:\n" ASM_RET
+    "bgeu t2, t6, .Lcodec_decode_rv_done\n   sb t0, 0(a5)\n"
+    "addi a1, a1, 8\n   addi a5, a5, 1\n   addi a2, a2, -1\n   bnez a2, .Lcodec_decode_rv_9\n   j .Lcodec_decode_rv_done\n"
+    ".Lcodec_decode_rv_done:\n   sub a0, a6, a2\n" ASM_RET
     ASM_END(memory_decode_power2)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
+#undef CODEC_RV_V_EIGHT
 #ifndef KERNEL_MODE
     ASM_FUNC(memory_from_hex_exact)
     "mv a5, a0\n"
