@@ -31345,9 +31345,43 @@ __asm__(
     ".option pop\n"
     ASM_SIMD_SECTION_END
 
-    // RV64I has no required vector gather; four base-ISA chains overlap.
+    //
+    //       memory_translate. A table that overlaps the block keeps the order
+    //       of four-byte groups -- four loaded, looked up and stored -- as the
+    //       x86_64 block does, tested with subtractions that cannot overflow
+    //       an end. Otherwise, with V from 32 bytes, a strip is gathered from
+    //       the table by its own bytes (vluxei8) and stored back; without V,
+    //       eight bytes a turn, all eight looked up before the first is
+    //       stored, four and a quarter instructions a byte where the groups
+    //       of four take four and three quarters. qemu, instructions a byte,
+    //       tr a-z A-Z over C source: 5.12 before, 4.62 without V and 0.43
+    //       with V at VLEN 128. The x86_64 block carries the contract.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_translate)
-    "mv t0, a0\n   li t6, 4\n   bltu a1, t6, .Lmemory_translate_rv_tail\n"
+    "mv t0, a0\n   li t6, 8\n   bltu a1, t6, .Lmemory_translate_rv_four_from\n"
+    "bltu a0, a2, 1f\n   sub t3, a0, a2\n   li t4, 256\n   bltu t3, t4, .Lmemory_translate_rv_four_from\n   j 2f\n"
+    "1:  sub t3, a2, a0\n   bltu t3, a1, .Lmemory_translate_rv_four_from\n"
+    "2:\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "li t3, 32\n   bltu a1, t3, .Lmemory_translate_rv_eight_from\n   lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n"
+    "beq t3, t4, .Lmemory_translate_rv_vector\n   bnez t3, .Lmemory_translate_rv_eight_from\n"
+    //  The detect keeps a0-a4 and a7, and its return starts the routine again.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_translate\n"
+    ".Lmemory_translate_rv_vector:\n"
+    "5:  vsetvli t3, a1, e8, m8, ta, ma\n   vle8.v v8, (t0)\n   vluxei8.v v16, (a2), v8\n   vse8.v v16, (t0)\n"
+    "add t0, t0, t3\n   sub a1, a1, t3\n   bnez a1, 5b\n" ASM_RET
+#endif
+    //  Eight a turn while eight are left, t5 the last place a turn may start.
+    ".Lmemory_translate_rv_eight_from:\n   add a1, a0, a1\n   addi t5, a1, -8\n"
+    "6:  lbu t1, 0(t0)\n   lbu t2, 1(t0)\n   lbu t3, 2(t0)\n   lbu t4, 3(t0)\n   lbu a3, 4(t0)\n   lbu a4, 5(t0)\n   lbu a5, 6(t0)\n   lbu a6, 7(t0)\n"
+    "add t1, a2, t1\n   add t2, a2, t2\n   add t3, a2, t3\n   add t4, a2, t4\n   add a3, a2, a3\n   add a4, a2, a4\n   add a5, a2, a5\n   add a6, a2, a6\n"
+    "lbu t1, 0(t1)\n   lbu t2, 0(t2)\n   lbu t3, 0(t3)\n   lbu t4, 0(t4)\n   lbu a3, 0(a3)\n   lbu a4, 0(a4)\n   lbu a5, 0(a5)\n   lbu a6, 0(a6)\n"
+    "sb t1, 0(t0)\n   sb t2, 1(t0)\n   sb t3, 2(t0)\n   sb t4, 3(t0)\n   sb a3, 4(t0)\n   sb a4, 5(t0)\n   sb a5, 6(t0)\n   sb a6, 7(t0)\n"
+    "addi t0, t0, 8\n   bgeu t5, t0, 6b\n   sub a1, a1, t0\n   j .Lmemory_translate_rv_tail\n"
+    ".Lmemory_translate_rv_four_from:\n   li t6, 4\n   bltu a1, t6, .Lmemory_translate_rv_tail\n"
     ".Lmemory_translate_rv_four:  lbu t1, 0(t0)\n   lbu t2, 1(t0)\n   lbu t3, 2(t0)\n   lbu t4, 3(t0)\n   add t1, a2, t1\n   add t2, a2, t2\n   add t3, a2, t3\n   add t4, a2, t4\n"
     "lbu t1, 0(t1)\n   lbu t2, 0(t2)\n   lbu t3, 0(t3)\n   lbu t4, 0(t4)\n   sb t1, 0(t0)\n   sb t2, 1(t0)\n   sb t3, 2(t0)\n   sb t4, 3(t0)\n   addi t0, t0, 4\n   addi a1, a1, -4\n"
     "bgeu a1, t6, .Lmemory_translate_rv_four\n"
@@ -31355,6 +31389,9 @@ __asm__(
     ".Lmemory_translate_rv_one:\n   lbu t1, 0(t0)\n   add t1, a2, t1\n   lbu t1, 0(t1)\n   sb t1, 0(t0)\n   addi t0, t0, 1\n   addi a1, a1, -1\n   bnez a1, .Lmemory_translate_rv_one\n"
     ".Lmemory_translate_rv_done:\n" ASM_RET
     ASM_END(memory_translate)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
 
 #ifndef KERNEL_MODE
     //       memory_average_ahead: with V, as many bytes as eight registers

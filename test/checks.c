@@ -14389,12 +14389,14 @@ fn check_reverse()
 /*
         Call the assembly entry even for compile-time small sizes. Disjoint
         maps cover every byte value and noninjective maps; aliased maps retain
-        the original four-byte load-all-then-store-all contract.
+        the original four-byte load-all-then-store-all contract. On x86_64
+        each body; on riscv64 every call the first in a process, which asks
+        for V, then without V.
 */
 fn check_translate()
 {
         static const positive sizes[] = {
-            0, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 65, 127, 128,
+            0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 39, 40, 63, 64, 65, 127, 128,
             129, 255, 256, 257, 511, 512, 513, 4095, 4096,
         };
         static const bipolar deltas[] = {
@@ -14431,6 +14433,9 @@ fn check_translate()
         p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
         p8 vbmi = cpu_has_avx512_vbmi;
         positive tiers = 4;
+#elif RISCV64
+        p8 vector = 0;
+        positive tiers = 2;
 #else
         positive tiers = 1;
 #endif
@@ -14440,6 +14445,12 @@ fn check_translate()
                 cpu_has_avx2 = tier < 3 ? avx2 : 0;
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi = tier < 1 ? vbmi : 0;
+#elif RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
 #endif
                 same("memory_translate", "null zero-sized return",
                      (positive)(memory_translate)(null, 0, null), 0);
@@ -14461,6 +14472,7 @@ fn check_translate()
                                         got[i] = want[i] = (p8)(i * 197 + residue);
                                 for (positive i = 0; i < size; i++)
                                         want[offset + i] = palette[want[offset + i]];
+                                VECTOR_FIRST_CALL(tier == 0);
                                 same("memory_translate", "returned original address",
                                      (positive)(memory_translate)(got + offset, size, table),
                                      (positive)(got + offset));
@@ -14475,6 +14487,10 @@ fn check_translate()
                                 positive size = sizes[s], i = 0;
                                 for (positive at = 0; at < 4096; at++)
                                         got[at] = want[at] = (p8)((at * 37) ^ (at >> 3));
+                                // 255 early in the block: a table ending at the block's first
+                                // byte gives it the first group's answer only.
+                                got[1024 + 5] = want[1024 + 5] = 255;
+                                got[1024 + 70] = want[1024 + 70] = 255;
                                 p8 address_to block = want + 1024;
                                 p8 address_to table = block + deltas[d];
                                 for (; i + 4 <= size; i += 4)
@@ -14485,6 +14501,7 @@ fn check_translate()
                                         block[i + 2] = c; block[i + 3] = e;
                                 }
                                 for (; i < size; i++) block[i] = table[block[i]];
+                                VECTOR_FIRST_CALL(tier == 0);
                                 same("memory_translate", "aliased return address",
                                      (positive)(memory_translate)(got + 1024, size,
                                                                  got + 1024 + deltas[d]),
@@ -14497,6 +14514,8 @@ fn check_translate()
         cpu_has_avx2 = avx2;
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
+#elif RISCV64
+        cpu_has_vector = vector;
 #endif
         memory_free(pages, 3 * 4096);
         memory_free(tables, 3 * 4096);
