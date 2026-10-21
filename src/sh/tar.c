@@ -1104,6 +1104,9 @@ static path_table tar_materialized = {.stride = sizeof(tar_materialized_file)};
    that largest record, so every archive this tar writes reads back. */
 #define TAR_TRAILING_LIMIT (TAR_RECORD * 8192)
 #define TAR_TRAILING_REFUSED (MOONWATER_STRICT_FILES >= STRICT_TIGHT)
+/* Data after the end marker decoded to reach the codec trailer, at least
+   what GNU's codec writes into its pipe before its reader stops. */
+#define TAR_JUNK_READ (TAR_RECORD * 16)
 #define TAR_ADVISE_SEQUENTIAL 2
 
 /* The size from which a member's bytes go from file to archive in the kernel
@@ -2717,22 +2720,28 @@ static fn tar_codec_end_read(bipolar handle)
            TAR_TRAILING_LIMIT past it: a tiny compressed suffix could
            otherwise demand unbounded expansion solely to reach the codec
            trailer. Data after the marker, a second archive cat put after
-           the first, is not this archive's, as GNU tar reads it: the codec
-           is left unfinished there and past the limit, as GNU's reader
-           stops at the marker. STRICT_TIGHT refuses both. */
+           the first, is not this archive's, as GNU tar reads it, and is
+           decoded TAR_JUNK_READ further: GNU's codec runs on into its pipe
+           and a trailer it meets there still fails the run, while past
+           that its reader has stopped and the codec is left unfinished, as
+           it is here past either limit. STRICT_TIGHT refuses both. */
         if (tar_status != 2)
         {
                 positive trailing = tar_have - tar_at;
+                positive limit = TAR_TRAILING_LIMIT;
                 bipolar got = 0;
 
-                if (trailing > TAR_TRAILING_LIMIT)
+                if (trailing > limit)
                         excess = true;
                 else if (!tar_bytes_zero(tar_record + tar_at, trailing))
-                        nonzero = true;
-
-                while (!excess && !nonzero)
                 {
-                        positive remaining = TAR_TRAILING_LIMIT - trailing;
+                        nonzero = true;
+                        limit = trailing + TAR_JUNK_READ;
+                }
+
+                while (!excess && !(nonzero && TAR_TRAILING_REFUSED))
+                {
+                        positive remaining = limit - trailing;
                         positive ask = remaining < sizeof(tar_record)
                                            ? remaining + 1
                                            : sizeof(tar_record);
@@ -2740,13 +2749,13 @@ static fn tar_codec_end_read(bipolar handle)
                         got = tar_read_bytes(handle, tar_record, ask);
                         if (got <= 0)
                                 break;
-                        if (!tar_bytes_zero(tar_record, (positive)got))
+                        if (!nonzero && !tar_bytes_zero(tar_record, (positive)got))
                         {
                                 nonzero = true;
-                                break;
+                                limit = trailing + (positive)got + TAR_JUNK_READ;
                         }
                         trailing += (positive)got;
-                        if (trailing > TAR_TRAILING_LIMIT)
+                        if (trailing > limit)
                                 excess = true;
                 }
                 if (got < 0)
@@ -2755,9 +2764,9 @@ static fn tar_codec_end_read(bipolar handle)
 
         bool finished = tar_ring_finish(tar_decoder);
 
-        if ((!excess && !nonzero) || TAR_TRAILING_REFUSED)
+        if (!excess || TAR_TRAILING_REFUSED)
                 ok = finished && ok;
-        if (excess && TAR_TRAILING_REFUSED)
+        if (excess && !nonzero && TAR_TRAILING_REFUSED)
                 tar_refuse("compressed archive padding exceeds limit");
         else if (nonzero && TAR_TRAILING_REFUSED)
                 tar_refuse("nonzero data follows archive end marker");
