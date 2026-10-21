@@ -31767,6 +31767,83 @@ __asm__(
     "3:  lbu a4, 0(t6)\n   " TEST " a4, a4\n   sb a4, 0(t2)\n   addi t6, t6, 1\n   addi t2, t2, 1\n   bne t2, t3, 3b\n"     \
     "4:\n"
     //
+    //       RV_TABLE_MEMBERS(TABLE, P, MORE): the 256-byte table at TABLE read
+    //       a word at a time where it sits on eight and a byte at a time where
+    //       it does not, as far as its third member, which goes to MORE. Else
+    //       it ends at .LP_found with t1 the members, nought to two, and t2
+    //       and t3 the first two. Spends t4 to t6 and a5.
+    //
+#define RV_TABLE_MEMBERS(TABLE, P, MORE)                                                                                 \
+    "li t1, 0\n   li t4, 0\n   andi t5, " TABLE ", 7\n   bnez t5, .L" P "_bytes\n"                                           \
+    ".L" P "_words:\n   add t5, " TABLE ", t4\n   ld t5, 0(t5)\n   bnez t5, .L" P "_word\n"                                  \
+    ".L" P "_words_next:\n   addi t4, t4, 8\n   li t5, 256\n   bltu t4, t5, .L" P "_words\n   j .L" P "_found\n"            \
+    ".L" P "_word:\n   mv t6, t4\n"                                                                                         \
+    "1:  andi a5, t5, 255\n   beqz a5, 2f\n   li a5, 2\n   beq t1, a5, " MORE "\n   mv t3, t6\n"                              \
+    "bnez t1, 3f\n   mv t2, t6\n3:  addi t1, t1, 1\n"                                                                       \
+    "2:  srli t5, t5, 8\n   addi t6, t6, 1\n   bnez t5, 1b\n   j .L" P "_words_next\n"                                      \
+    ".L" P "_bytes:\n   add t5, " TABLE ", t4\n   lbu t5, 0(t5)\n   beqz t5, 2f\n   li a5, 2\n"                              \
+    "beq t1, a5, " MORE "\n   mv t3, t4\n   bnez t1, 3f\n   mv t2, t4\n3:  addi t1, t1, 1\n"                                \
+    "2:  addi t4, t4, 1\n   li t5, 256\n   bltu t4, t5, .L" P "_bytes\n"                                                     \
+    ".L" P "_found:\n"
+    //
+    //       DELETE_RV_STREAM(P, TEST, FIRST): memory_delete_bytes of one or
+    //       two bytes, a3 and a4 each in every byte of a word, a5 0x7f in every
+    //       byte, a2 what TEST and FIRST need, a6 the block, a1 its end and
+    //       0(sp) its start. TEST makes t3 the bytes of the word in t2 that go,
+    //       at bit seven, spending t4 and t5; FIRST makes t4 eight times the
+    //       place of the lowest of them. Until the first byte that goes
+    //       nothing is stored (_a). From it the output is a stream (_b): a7
+    //       the aligned word it is in, t0 eight times the bytes of it written,
+    //       t1 those bytes, the rest nought, stored whole when it fills; its
+    //       first word's earlier bytes are read back, so that store writes
+    //       them as they were. A word of input with nothing to go is put on
+    //       the stream whole; one with something to go is put on a piece at
+    //       a time, the bytes below each that goes, t6 the bits of it left.
+    //       In the word loops a0 is the last place a whole word starts. A
+    //       byte at a time before the words and after them.
+    //
+#define DELETE_RV_STREAM(P, TEST, FIRST)                                                                                 \
+    ".L" P "_a_peel:\n   andi t4, a6, 7\n   beqz t4, .L" P "_a_words\n   bgeu a6, a1, .Lmemory_delete_rv_all\n"              \
+    "lbu t2, 0(a6)\n   andi t3, a3, 255\n   beq t2, t3, .L" P "_b_start\n   andi t3, a4, 255\n   beq t2, t3, .L" P "_b_start\n"  \
+    "addi a6, a6, 1\n   j .L" P "_a_peel\n"                                                                                 \
+    ".L" P "_a_words:\n   addi a0, a1, -8\n   bltu a0, a6, .L" P "_a_tail\n"                                               \
+    ".L" P "_a_word:\n   ld t2, 0(a6)\n" TEST "bnez t3, .L" P "_a_hit\n   addi a6, a6, 8\n   bgeu a0, a6, .L" P "_a_word\n"     \
+    "j .L" P "_a_tail\n"                                                                                                \
+    ".L" P "_a_hit:\n" FIRST "srli t4, t4, 3\n   add a6, a6, t4\n   j .L" P "_b_start\n"                                    \
+    ".L" P "_a_tail:\n   bgeu a6, a1, .Lmemory_delete_rv_all\n   lbu t2, 0(a6)\n   andi t3, a3, 255\n"                       \
+    "beq t2, t3, .L" P "_b_start\n   andi t3, a4, 255\n   beq t2, t3, .L" P "_b_start\n   addi a6, a6, 1\n   j .L" P "_a_tail\n" \
+    ".L" P "_b_start:\n   andi a7, a6, -8\n   andi t0, a6, 7\n   slli t0, t0, 3\n   ld t1, 0(a7)\n   li t4, -1\n"            \
+    "sll t4, t4, t0\n   not t4, t4\n   and t1, t1, t4\n   addi a6, a6, 1\n"                                                  \
+    ".L" P "_b_peel:\n   andi t4, a6, 7\n   beqz t4, .L" P "_b_words\n   bgeu a6, a1, .Lmemory_delete_rv_stream_end\n"       \
+    "lbu t2, 0(a6)\n   addi a6, a6, 1\n   andi t3, a3, 255\n   beq t2, t3, .L" P "_b_peel\n   andi t3, a4, 255\n"            \
+    "beq t2, t3, .L" P "_b_peel\n   sll t4, t2, t0\n   or t1, t1, t4\n   addi t0, t0, 8\n   srli t4, t0, 6\n"                \
+    "beqz t4, .L" P "_b_peel\n   sd t1, 0(a7)\n   addi a7, a7, 8\n   li t0, 0\n   li t1, 0\n   j .L" P "_b_peel\n"          \
+    ".L" P "_b_words:\n   addi a0, a1, -8\n   bltu a0, a6, .L" P "_b_tail\n"                                               \
+    ".L" P "_b_word:\n   ld t2, 0(a6)\n   addi a6, a6, 8\n" TEST                                                            \
+    "bnez t3, .L" P "_b_hits\n   sll t4, t2, t0\n   or t1, t1, t4\n   sd t1, 0(a7)\n   addi a7, a7, 8\n   srli t4, t2, 1\n"  \
+    "xori t5, t0, 63\n   srl t1, t4, t5\n   bgeu a0, a6, .L" P "_b_word\n   j .L" P "_b_tail\n"                               \
+    ".L" P "_b_hits:\n   li t6, 64\n"                                                                                     \
+    ".L" P "_b_hit:\n" FIRST "li t5, -1\n   sll t5, t5, t4\n   not t5, t5\n   and t5, t5, t2\n   sll a0, t5, t0\n"            \
+    "or t1, t1, a0\n   add t0, t0, t4\n   srli a0, t0, 6\n   beqz a0, 1f\n   sd t1, 0(a7)\n   addi a7, a7, 8\n"            \
+    "addi t0, t0, -64\n   sub a0, t4, t0\n   srl t1, t5, a0\n"                                                            \
+    "1:  sub t6, t6, t4\n   addi t6, t6, -8\n   srl t2, t2, t4\n   srli t2, t2, 8\n   srl t3, t3, t4\n   srli t3, t3, 8\n"    \
+    "bnez t3, .L" P "_b_hit\n   sll a0, t2, t0\n   or t1, t1, a0\n   add t0, t0, t6\n   srli a0, t0, 6\n"                   \
+    "beqz a0, .L" P "_b_words\n   sd t1, 0(a7)\n   addi a7, a7, 8\n   addi t0, t0, -64\n   sub a0, t6, t0\n"              \
+    "srl t1, t2, a0\n   j .L" P "_b_words\n"                                                                                \
+    ".L" P "_b_tail:\n   bgeu a6, a1, .Lmemory_delete_rv_stream_end\n   lbu t2, 0(a6)\n   addi a6, a6, 1\n"                 \
+    "andi t3, a3, 255\n   beq t2, t3, .L" P "_b_tail\n   andi t3, a4, 255\n   beq t2, t3, .L" P "_b_tail\n"                  \
+    "sll t4, t2, t0\n   or t1, t1, t4\n   addi t0, t0, 8\n   srli t4, t0, 6\n   beqz t4, .L" P "_b_tail\n   sd t1, 0(a7)\n"   \
+    "addi a7, a7, 8\n   li t0, 0\n   li t1, 0\n   j .L" P "_b_tail\n"
+    //  Bit seven of each byte that is either, without Zbb: the carry free zero test of the word xor each.
+#define DELETE_RV_TEST                                                                                                   \
+    "xor t3, t2, a3\n   and t4, t3, a5\n   add t4, t4, a5\n   or t4, t4, t3\n   xor t3, t2, a4\n   and t5, t3, a5\n"           \
+    "add t5, t5, a5\n   or t5, t5, t3\n   and t4, t4, t5\n   or t4, t4, a5\n   not t3, t4\n"
+    //  The lowest's place, the isolated bit moved to bit nought of its byte times 0x0001020304050607 (a2).
+#define DELETE_RV_FIRST "neg t4, t3\n   and t4, t4, t3\n   srli t4, t4, 7\n   mul t4, t4, a2\n   srli t4, t4, 56\n   slli t4, t4, 3\n"
+    //  With Zbb, either byte where orc.b of the word xor each is nought, its bit seven from 0x80 in every byte (a2).
+#define DELETE_RV_ZTEST "xor t3, t2, a3\n   orc.b t3, t3\n   xor t4, t2, a4\n   orc.b t4, t4\n   and t4, t3, t4\n   andn t3, a2, t4\n"
+#define DELETE_RV_ZFIRST "ctz t4, t3\n   andi t4, t4, -8\n"
+    //
     //       memory_delete_bytes. With V, from 32 bytes: a strip of the block
     //       is gathered from the table by its own bytes (vluxei8), the bytes
     //       whose entry is nought are compressed (vcompress) and stored at the
@@ -31810,8 +31887,31 @@ __asm__(
     ".Lmemory_delete_rv_one:\n   lbu t1, 0(a0)\n   sb t1, 0(t0)\n   add t1, a2, t1\n   lbu t1, 0(t1)\n   seqz t1, t1\n   add t0, t0, t1\n"
     "addi a0, a0, 1\n   addi a1, a1, -1\n   bnez a1, .Lmemory_delete_rv_one\n"
     ".Lmemory_delete_rv_done:\n   sub a0, t0, t5\n" ASM_RET
+    //  The table read first: one byte or two to go is the stream, none is nothing to do, and more the table
+    //  of what to add to the cursor.
+    ".Lmemory_delete_rv_kept:\n"
+    RV_TABLE_MEMBERS("a2", "memory_delete_rv_scan", ".Lmemory_delete_rv_flags")
+    "bnez t1, 1f\n   mv a0, a1\n" ASM_RET
+    "1:  li t4, 1\n   bne t1, t4, 2f\n   mv t3, t2\n"
+    "2:  addi sp, sp, -16\n   sd a0, 0(sp)\n   mv a6, a0\n   add a1, a0, a1\n   li t4, 0x0101010101010101\n   mul a3, t2, t4\n"
+    "mul a4, t3, t4\n   li a5, 0x7f7f7f7f7f7f7f7f\n"
+    RV_ZBB_ASK("t4", ".Lmemory_delete_rv_zstream")
+    "li a2, 0x0001020304050607\n"
+    DELETE_RV_STREAM("memory_delete_rv_s", DELETE_RV_TEST, DELETE_RV_FIRST)
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lmemory_delete_rv_zstream:\n   li a2, 0x8080808080808080\n"
+    DELETE_RV_STREAM("memory_delete_rv_z", DELETE_RV_ZTEST, DELETE_RV_ZFIRST)
+    RV_ZBB_END
+#endif
+    //  The stream's last word a byte at a time; the count is where it ends less the start.
+    ".Lmemory_delete_rv_stream_end:\n   srli t4, t0, 3\n   mv t5, a7\n   beqz t4, 2f\n"
+    "1:  sb t1, 0(t5)\n   srli t1, t1, 8\n   addi t5, t5, 1\n   addi t4, t4, -1\n   bnez t4, 1b\n"
+    "2:  ld a0, 0(sp)\n   addi sp, sp, 16\n   sub a0, t5, a0\n" ASM_RET
+    //  Nothing went.
+    ".Lmemory_delete_rv_all:\n   ld a0, 0(sp)\n   addi sp, sp, 16\n   sub a0, a1, a0\n" ASM_RET
     //  The table of what to add to the cursor, at sp; s0 to s4 kept above it.
-    ".Lmemory_delete_rv_kept:\n   addi sp, sp, -304\n   sd s0, 256(sp)\n   sd s1, 264(sp)\n   sd s2, 272(sp)\n   sd s3, 280(sp)\n"
+    ".Lmemory_delete_rv_flags:\n   mv t5, a0\n   mv t0, a0\n   addi sp, sp, -304\n   sd s0, 256(sp)\n   sd s1, 264(sp)\n   sd s2, 272(sp)\n   sd s3, 280(sp)\n"
     "sd s4, 288(sp)\n"
     RV_FLAG_TABLE("not a5, a5\n   ", "seqz")
     //  Eight a turn while eight are left, a1 the last place a turn may start.
@@ -32081,19 +32181,8 @@ __asm__(
 #endif
     ASM_FUNC(memory_offsets_in_set)
     "li t0, 0\n   beqz a4, .Lmemory_offsets_set_rv_done\n   beqz a2, .Lmemory_offsets_set_rv_done\n"
-    //  t1 the members found, t2 and t3 the first two, t4 where the table is read.
-    "li t1, 0\n   li t4, 0\n   andi t5, a3, 7\n   bnez t5, .Lmemory_offsets_set_rv_bytes\n"
-    ".Lmemory_offsets_set_rv_words:\n   add t5, a3, t4\n   ld t5, 0(t5)\n   bnez t5, .Lmemory_offsets_set_rv_word\n"
-    ".Lmemory_offsets_set_rv_words_next:\n   addi t4, t4, 8\n   li t5, 256\n   bltu t4, t5, .Lmemory_offsets_set_rv_words\n"
-    "j .Lmemory_offsets_set_rv_either\n"
-    //  A word with a member in it: its bytes, lowest first.
-    ".Lmemory_offsets_set_rv_word:\n   mv t6, t4\n"
-    "1:  andi a5, t5, 255\n   beqz a5, 2f\n   li a5, 2\n   beq t1, a5, .Lmemory_offsets_set_rv_lookup\n   mv t3, t6\n"
-    "bnez t1, 3f\n   mv t2, t6\n3:  addi t1, t1, 1\n"
-    "2:  srli t5, t5, 8\n   addi t6, t6, 1\n   bnez t5, 1b\n   j .Lmemory_offsets_set_rv_words_next\n"
-    ".Lmemory_offsets_set_rv_bytes:\n   add t5, a3, t4\n   lbu t5, 0(t5)\n   beqz t5, 2f\n   li a5, 2\n"
-    "beq t1, a5, .Lmemory_offsets_set_rv_lookup\n   mv t3, t4\n   bnez t1, 3f\n   mv t2, t4\n3:  addi t1, t1, 1\n"
-    "2:  addi t4, t4, 1\n   li t5, 256\n   bltu t4, t5, .Lmemory_offsets_set_rv_bytes\n"
+    //  t1 the members found, t2 and t3 the first two.
+    RV_TABLE_MEMBERS("a3", "memory_offsets_set_rv_scan", ".Lmemory_offsets_set_rv_lookup")
     //  None, one or two: the offsets of either byte, the one twice for one.
     ".Lmemory_offsets_set_rv_either:\n   beqz t1, .Lmemory_offsets_set_rv_done\n   li t5, 1\n   bne t1, t5, 4f\n   mv t3, t2\n"
     "4:  mv a5, a4\n   mv a3, t2\n   mv a4, t3\n   tail memory_offsets_of_either\n"
@@ -32129,6 +32218,12 @@ __asm__(
     ".option pop\n"
 #endif
 #undef RV_OFFSETS_V_STORE
+#undef RV_TABLE_MEMBERS
+#undef DELETE_RV_STREAM
+#undef DELETE_RV_TEST
+#undef DELETE_RV_FIRST
+#undef DELETE_RV_ZTEST
+#undef DELETE_RV_ZFIRST
 
     // memory_exchange_apart: disjoint exchange with equal and zero-sized
     // no-op cases. The x86_64 block carries the full contract. RV64 may trap
