@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        423 routines (399 public, 24 local), 413 of them on all three and 10 local to one.
+        424 routines (400 public, 24 local), 414 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -276,6 +276,7 @@
           memory_offsets_of_either       public  yes     yes     yes
           memory_offsets_outside         public  yes     yes     yes
           memory_offsets_range_x64       local   yes     --      --
+          memory_paste_lines__room_64    public  yes     yes     yes
           memory_release                 public  yes     yes     yes
           memory_reserve                 public  yes     yes     yes
           memory_reverse                 public  yes     yes     yes
@@ -42050,6 +42051,303 @@ __asm__(
     "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
     ".popsection\n"
     ASM_END(memory_unique_lines__room_64)
+    ".option pop\n"
+);
+#endif
+#endif
+
+/*
+        paste over whole lines: two inputs' reads joined a line of each at
+        a time in one pass.
+
+        memory_paste_lines__room_64(destination, taken, left, left_length,
+        right, right_length, control) writes, for each line of left and the
+        line of right beside it, the left line, the delimiter in bits 0 to 7
+        of control, the right line and the line end in bits 8 to 15, as paste
+        writes two files' lines, and answers how many bytes it wrote; taken
+        gets how many bytes of each input that was, the left's first. It
+        stops where either has no whole line left. With bit 16 the left has
+        ended and its fields are empty, the delimiter then the right line;
+        with bit 17 the right has, the left line then the delimiter; with
+        both there is nothing to write. Both inputs run 64 bytes past their
+        lengths, and the destination 64 past twice their sum. What is
+        written past the answer is unspecified. There is no plain routine;
+        every caller has the room.
+
+        Each input's line ends come sixty four bytes at a time as a mask, a
+        line's the lowest bit left in it, so a line's end does not wait on
+        the one before; a pair's two are found before either is taken from
+        its mask, so a pair the reads cannot finish writes nothing. A line
+        is copied thirty two bytes a turn, one load and one store to thirty
+        one bytes, its bytes past it written over by what follows.
+
+        paste of 600,000 lines of seven digits beside 400,000 on a 9950X,
+        user cycles against the walk paste had, the mean of eight layouts of
+        lib.c: 22.9M to 3.96M, with SSE2 alone 23.8M to 4.13M; of 30,000
+        lines of random length, most under 300, beside 21,000 under 120,
+        4.25M to 2.24M and with SSE2 5.36M to 2.33M. M2 Pro, lifted, against
+        the walk in C: the lines of src/lib.c's first 2 MiB beside its next,
+        34.5 to 18.4 ns a pair; lines of six letters 13.4 to 2.0. qemu
+        instructions a pair, the digits and the random lines: aarch64 278
+        and 323 to 40 and 91; riscv64 360 and 656 to 107 and 568, with V to
+        55 and 79.
+*/
+#ifndef KERNEL_MODE
+positive memory_paste_lines__room_64(p8 address_to destination, positive address_to taken,
+                                     const p8 address_to left, positive left_length,
+                                     const p8 address_to right, positive right_length,
+                                     positive control);
+#if X64
+/*
+        rdx where the left line begins, r10 the left's end, rbx the sixty
+        four its mask is of and rbp the mask, r9 the line end found; r8,
+        r11, rsi, r12 and r13 the same for the right. rdi the cursor; r15
+        the control and r14 the delimiter and the line end in its low two
+        bytes. The frame keeps taken, where each input began and where the
+        output did.
+*/
+//      The next line end of an input into OUT, from its mask M of the sixty four at B, the next sixty four when
+//      that is spent, or FAIL at END; rax and rcx spent.
+#define PASTE_X64_NEXT(B, M, END, OUT, FAIL, MASK, CLIP)                       \
+    "1:  test " M ", " M "\n   jnz 2f\n   add $64, " B "\n   cmp " END ", " B "\n   jae " FAIL "\n" MASK(B, M) \
+    "mov " END ", %rcx\n   sub " B ", %rcx\n   cmp $64, %rcx\n   jae 1b\n" CLIP(M) "jmp 1b\n"          \
+    "2:  tzcnt " M ", " OUT "\n   add " B ", " OUT "\n"
+//      The bytes from FROM to TO (before it) at rdi, thirty two a turn; rax and rcx spent.
+#define PASTE_X64_COPY(FROM, TO, TURN)                                         \
+    "mov " TO ", %rcx\n   sub " FROM ", %rcx\n   xor %eax, %eax\n1:  " TURN(FROM) "   add $32, %rax\n"   \
+    "cmp %rcx, %rax\n   jb 1b\n   add %rcx, %rdi\n"
+//      An input's first mask: of the sixty four at P, cut at END, or none at or past it.
+#define PASTE_X64_START(P, END, B, M, MASK, CLIP)                              \
+    "mov " P ", " B "\n   xor %eax, %eax\n   mov %rax, " M "\n   cmp " END ", " B "\n   jae 3f\n" MASK(B, M)  \
+    "mov " END ", %rcx\n   sub " B ", %rcx\n   cmp $64, %rcx\n   jae 3f\n" CLIP(M) "3:\n"
+#define PASTE_X64_WALK(P, MASK, CLIP, CLEAR, TURN, STOP)                       \
+    P "_pair:\n   test $0x10000, %r15d\n   jnz " P "_left_empty\n"                                     \
+    PASTE_X64_NEXT("%rbx", "%rbp", "%r10", "%r9", STOP, MASK, CLIP)                               \
+    "test $0x20000, %r15d\n   jnz " P "_right_empty\n"                                                \
+    PASTE_X64_NEXT("%rsi", "%r12", "%r11", "%r13", STOP, MASK, CLIP) CLEAR("%rbp") CLEAR("%r12")    \
+    PASTE_X64_COPY("%rdx", "%r9", TURN) "mov %r14b, (%rdi)\n   inc %rdi\n"                          \
+    PASTE_X64_COPY("%r8", "%r13", TURN) "mov %r14d, %eax\n   mov %ah, (%rdi)\n   inc %rdi\n"        \
+    "lea 1(%r9), %rdx\n   lea 1(%r13), %r8\n   jmp " P "_pair\n"                                      \
+    /* The left ended: the delimiter, then the right line. */                                       \
+    P "_left_empty:\n   test $0x20000, %r15d\n   jnz " STOP "\n"                                        \
+    PASTE_X64_NEXT("%rsi", "%r12", "%r11", "%r13", STOP, MASK, CLIP) CLEAR("%r12")                  \
+    "mov %r14b, (%rdi)\n   inc %rdi\n" PASTE_X64_COPY("%r8", "%r13", TURN)                            \
+    "mov %r14d, %eax\n   mov %ah, (%rdi)\n   inc %rdi\n   lea 1(%r13), %r8\n   jmp " P "_pair\n"      \
+    /* The right ended: the left line, then the delimiter. */                                       \
+    P "_right_empty:\n" CLEAR("%rbp") PASTE_X64_COPY("%rdx", "%r9", TURN)                             \
+    "mov %r14b, (%rdi)\n   inc %rdi\n   mov %r14d, %eax\n   mov %ah, (%rdi)\n   inc %rdi\n"           \
+    "lea 1(%r9), %rdx\n   jmp " P "_pair\n"
+//      AVX2: the line end in ymm1; the mask of the sixty four at B into M.
+#define PASTE_X64_YMASK(B, M)                                                  \
+    "vpcmpeqb (" B "), %ymm1, %ymm0\n   vpcmpeqb 32(" B "), %ymm1, %ymm2\n   vpmovmskb %ymm0, %eax\n"          \
+    "vpmovmskb %ymm2, %ecx\n   shl $32, %rcx\n   or %rcx, %rax\n   mov %rax, " M "\n"
+#define PASTE_X64_YCLIP(M) "bzhi %rcx, " M ", " M "\n"
+#define PASTE_X64_YCLEAR(M) "blsr " M ", " M "\n"
+#define PASTE_X64_YTURN(FROM) "vmovdqu (" FROM ",%rax), %ymm0\n   vmovdqu %ymm0, (%rdi,%rax)\n"
+//      SSE2: in xmm1, sixteen bytes a quarter.
+#define PASTE_X64_XQ(B, OFF, SHIFT)                                            \
+    "movdqu " OFF "(" B "), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   shl $" SHIFT ", %rcx\n"   \
+    "or %rcx, %rax\n"
+#define PASTE_X64_XMASK(B, M)                                                  \
+    "movdqu (" B "), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %eax\n"                               \
+    PASTE_X64_XQ(B, "16", "16") PASTE_X64_XQ(B, "32", "32") PASTE_X64_XQ(B, "48", "48") "mov %rax, " M "\n"
+#define PASTE_X64_XCLIP(M) "mov $1, %eax\n   shl %cl, %rax\n   dec %rax\n   and %rax, " M "\n"
+#define PASTE_X64_XCLEAR(M) "lea -1(" M "), %rax\n   and %rax, " M "\n"
+#define PASTE_X64_XTURN(FROM)                                                  \
+    "movdqu (" FROM ",%rax), %xmm0\n   movdqu 16(" FROM ",%rax), %xmm2\n   movdqu %xmm0, (%rdi,%rax)\n"          \
+    "movdqu %xmm2, 16(%rdi,%rax)\n"
+__asm__(
+    ASM_SECTION
+    //      memory_paste_lines__room_64: rdi destination, rsi taken, rdx left,
+    //      rcx left length, r8 right, r9 right length, the control on the
+    //      stack; rax the bytes written.
+    ASM_FUNC(memory_paste_lines__room_64)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $40, %rsp\n"
+    "mov 96(%rsp), %r15\n   mov %rsi, (%rsp)\n   mov %rdx, 8(%rsp)\n   mov %r8, 16(%rsp)\n   mov %rdi, 24(%rsp)\n"
+    "lea (%rdx,%rcx), %r10\n   lea (%r8,%r9), %r11\n   movzwl %r15w, %r14d\n   mov %r14d, %eax\n   shr $8, %eax\n"
+    ASM_NARROW("cpu_has_avx2", ".Lpaste_x64_sse2")
+    "vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
+    PASTE_X64_START("%rdx", "%r10", "%rbx", "%rbp", PASTE_X64_YMASK, PASTE_X64_YCLIP)
+    PASTE_X64_START("%r8", "%r11", "%rsi", "%r12", PASTE_X64_YMASK, PASTE_X64_YCLIP)
+    PASTE_X64_WALK(".Lpaste_x64_a", PASTE_X64_YMASK, PASTE_X64_YCLIP, PASTE_X64_YCLEAR, PASTE_X64_YTURN,
+                   ".Lpaste_x64_a_stop")
+    ".Lpaste_x64_a_stop:\n   vzeroupper\n   jmp .Lpaste_x64_stop\n"
+    ".Lpaste_x64_sse2:\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+    PASTE_X64_START("%rdx", "%r10", "%rbx", "%rbp", PASTE_X64_XMASK, PASTE_X64_XCLIP)
+    PASTE_X64_START("%r8", "%r11", "%rsi", "%r12", PASTE_X64_XMASK, PASTE_X64_XCLIP)
+    PASTE_X64_WALK(".Lpaste_x64_x", PASTE_X64_XMASK, PASTE_X64_XCLIP, PASTE_X64_XCLEAR, PASTE_X64_XTURN,
+                   ".Lpaste_x64_stop")
+    //      Stopped before the pair at rdx and r8.
+    ".Lpaste_x64_stop:\n   mov (%rsp), %rsi\n   mov %rdx, %rax\n   sub 8(%rsp), %rax\n   mov %rax, (%rsi)\n"
+    "mov %r8, %rax\n   sub 16(%rsp), %rax\n   mov %rax, 8(%rsi)\n   mov %rdi, %rax\n   sub 24(%rsp), %rax\n"
+    "add $40, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_paste_lines__room_64)
+);
+
+#elif ARM64
+/*
+        The same walk: x7 where the left line begins, x8 the left's end, x9
+        the sixty four its mask is of, x10 the mask, x11 the line end found;
+        x12 to x16 the same for the right. x0 the cursor and x3 where it
+        began; w21 the delimiter, w22 the line end and x6 the control; v30
+        the line end in every byte, v31 the lanes' bits. Copies are q16 and
+        q17, from x19 to x20.
+*/
+//      The mask of the sixty four at B into M; v0 to v7 spent.
+#define NEON_PASTE_MASK(B, M)                                                  \
+    "ldp q0, q1, [" B "]\n   ldp q2, q3, [" B ", #32]\n   cmeq v4.16b, v0.16b, v30.16b\n   cmeq v5.16b, v1.16b, v30.16b\n" \
+    "cmeq v6.16b, v2.16b, v30.16b\n   cmeq v7.16b, v3.16b, v30.16b\n   and v4.16b, v4.16b, v31.16b\n"                 \
+    "and v5.16b, v5.16b, v31.16b\n   and v6.16b, v6.16b, v31.16b\n   and v7.16b, v7.16b, v31.16b\n"                 \
+    "addp v4.16b, v4.16b, v5.16b\n   addp v6.16b, v6.16b, v7.16b\n   addp v4.16b, v4.16b, v6.16b\n"                 \
+    "addp v4.16b, v4.16b, v4.16b\n   fmov " M ", d4\n"
+//      M cut at END when the sixty four at B run past it; x17 and x19 spent.
+#define NEON_PASTE_CLIP(B, M, END, DONE)                                       \
+    "sub x17, " END ", " B "\n   cmp x17, #64\n   b.hs " DONE "\n   mov x19, #1\n   lsl x19, x19, x17\n"     \
+    "sub x19, x19, #1\n   and " M ", " M ", x19\n"
+#define NEON_PASTE_NEXT(B, M, END, OUT, FAIL)                                  \
+    "1:  cbnz " M ", 2f\n   add " B ", " B ", #64\n   cmp " B ", " END "\n   b.hs " FAIL "\n" NEON_PASTE_MASK(B, M) \
+    NEON_PASTE_CLIP(B, M, END, "1b") "b 1b\n2:  rbit " OUT ", " M "\n   clz " OUT ", " OUT "\n   add " OUT ", " B ", " OUT "\n"
+#define NEON_PASTE_CLEAR(M) "sub x17, " M ", #1\n   and " M ", " M ", x17\n"
+//      The bytes from FROM to TO (before it) at x0, thirty two a turn; x19 and x20 spent.
+#define NEON_PASTE_COPY(FROM, TO)                                              \
+    "mov x19, " FROM "\n   sub x20, " TO ", " FROM "\n   add x20, x0, x20\n"                                       \
+    "1:  ldp q16, q17, [x19], #32\n   stp q16, q17, [x0], #32\n   cmp x0, x20\n   b.lo 1b\n   mov x0, x20\n"
+#define NEON_PASTE_START(P, END, B, M)                                         \
+    "mov " B ", " P "\n   mov " M ", #0\n   cmp " B ", " END "\n   b.hs 3f\n" NEON_PASTE_MASK(B, M)                \
+    NEON_PASTE_CLIP(B, M, END, "3f") "3:\n"
+__asm__(
+    ASM_SECTION
+    //      memory_paste_lines__room_64: x0 destination, x1 taken, x2 left,
+    //      x3 left length, x4 right, x5 right length, x6 control; x0 the
+    //      bytes written.
+    ASM_FUNC(memory_paste_lines__room_64)
+    "stp x19, x20, [sp, #-48]!\n   stp x21, x22, [sp, #16]\n   add x8, x2, x3\n   add x13, x4, x5\n   mov x3, x0\n"
+    "mov x7, x2\n   mov x12, x4\n   and w21, w6, #255\n   ubfx w22, w6, #8, #8\n   dup v30.16b, w22\n"
+    "movz x17, #0x0201\n   movk x17, #0x0804, lsl #16\n   movk x17, #0x2010, lsl #32\n   movk x17, #0x8040, lsl #48\n"
+    "dup v31.2d, x17\n"
+    NEON_PASTE_START("x7", "x8", "x9", "x10") NEON_PASTE_START("x12", "x13", "x14", "x15")
+    ".Lpaste_arm64_pair:\n   tbnz x6, #16, .Lpaste_arm64_left_empty\n"
+    NEON_PASTE_NEXT("x9", "x10", "x8", "x11", ".Lpaste_arm64_stop")
+    "tbnz x6, #17, .Lpaste_arm64_right_empty\n"
+    NEON_PASTE_NEXT("x14", "x15", "x13", "x16", ".Lpaste_arm64_stop") NEON_PASTE_CLEAR("x10") NEON_PASTE_CLEAR("x15")
+    NEON_PASTE_COPY("x7", "x11") "strb w21, [x0], #1\n" NEON_PASTE_COPY("x12", "x16") "strb w22, [x0], #1\n"
+    "add x7, x11, #1\n   add x12, x16, #1\n   b .Lpaste_arm64_pair\n"
+    //      The left ended: the delimiter, then the right line.
+    ".Lpaste_arm64_left_empty:\n   tbnz x6, #17, .Lpaste_arm64_stop\n"
+    NEON_PASTE_NEXT("x14", "x15", "x13", "x16", ".Lpaste_arm64_stop") NEON_PASTE_CLEAR("x15")
+    "strb w21, [x0], #1\n" NEON_PASTE_COPY("x12", "x16") "strb w22, [x0], #1\n   add x12, x16, #1\n   b .Lpaste_arm64_pair\n"
+    //      The right ended: the left line, then the delimiter.
+    ".Lpaste_arm64_right_empty:\n" NEON_PASTE_CLEAR("x10") NEON_PASTE_COPY("x7", "x11")
+    "strb w21, [x0], #1\n   strb w22, [x0], #1\n   add x7, x11, #1\n   b .Lpaste_arm64_pair\n"
+    ".Lpaste_arm64_stop:\n   sub x17, x7, x2\n   str x17, [x1]\n   sub x17, x12, x4\n   str x17, [x1, #8]\n   sub x0, x0, x3\n"
+    "ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #48\n" ASM_RET
+    ASM_END(memory_paste_lines__room_64)
+);
+#elif RISCV64
+/*
+        With V, the same walk: t0 where the left line begins, t1 the left's
+        end, t2 the sixty four its mask is of, t3 the mask, t4 the line end
+        found; t5, t6, s1, s2 and s3 the same for the right. a0 the cursor
+        and s7 where it began; s4 the delimiter, s5 the line end and a6 the
+        control; s8 sixty four. Masks are a bit a byte, read out with
+        vmv.x.s, a bit's place de Bruijn's multiply by s9 into the table at
+        s10, and copies exact, a vsetvli a turn.
+
+        Without V the blocks are the aligned words the inputs are in, eight
+        bytes and a mask of bit seven of each byte that is the line end --
+        the carry free zero test of the word xor the line end in every byte,
+        s10, with s6 0x7f in every byte -- a bit's place the multiply by s9;
+        a line is copied eight bytes a turn, the room taking what is past it.
+*/
+#define PASTE_RV_VINDEX(BIT, OUT)                                              \
+    "mul " OUT ", " BIT ", s9\n   srli " OUT ", " OUT ", 58\n   add " OUT ", " OUT ", s10\n   lbu " OUT ", 0(" OUT ")\n"
+#define PASTE_RV_VMASK(B, M)                                                   \
+    "vsetvli zero, s8, e8, m4, ta, ma\n   vle8.v v8, (" B ")\n   vmseq.vx v0, v8, s5\n"                               \
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s " M ", v0\n"
+//      M cut at END when the block at B runs past it; STEP the block, a7 and s11 spent.
+#define PASTE_RV_CLIP(B, M, END, STEP, DONE, CUT)                              \
+    "sub a7, " END ", " B "\n   li s11, " STEP "\n   bgeu a7, s11, " DONE "\n" CUT(M)
+#define PASTE_RV_VCUT(M) "li s11, 1\n   sll s11, s11, a7\n   addi s11, s11, -1\n   and " M ", " M ", s11\n"
+#define PASTE_RV_SCUT(M) "slli a7, a7, 3\n   li s11, 1\n   sll s11, s11, a7\n   addi s11, s11, -1\n   and " M ", " M ", s11\n"
+//      The next line end into OUT from the mask M of the block at B, the next block when it is spent, or FAIL.
+#define PASTE_RV_NEXT(B, M, END, OUT, FAIL, STEP, MASK, CUT, INDEX)            \
+    "1:  bnez " M ", 2f\n   addi " B ", " B ", " STEP "\n   bgeu " B ", " END ", " FAIL "\n" MASK(B, M)             \
+    PASTE_RV_CLIP(B, M, END, STEP, "1b", CUT) "j 1b\n2:  neg a7, " M "\n   and a7, a7, " M "\n" INDEX("a7", OUT)       \
+    "add " OUT ", " B ", " OUT "\n"
+#define PASTE_RV_CLEAR(M) "addi a7, " M ", -1\n   and " M ", " M ", a7\n"
+//      V: the bytes from FROM to TO (before it) at a0, exact; a7, s11 and a3 spent.
+#define PASTE_RV_VCOPY(FROM, TO)                                               \
+    "mv a3, " FROM "\n   sub a7, " TO ", " FROM "\n   beqz a7, 4f\n"                                              \
+    "1:  vsetvli s11, a7, e8, m8, ta, ma\n   vle8.v v16, (a3)\n   vse8.v v16, (a0)\n   add a3, a3, s11\n"            \
+    "add a0, a0, s11\n   sub a7, a7, s11\n   bnez a7, 1b\n4:\n"
+//      Without V: eight bytes a turn, the room taking what is past the end; a7, s11 and a3 spent.
+#define PASTE_RV_SCOPY(FROM, TO)                                               \
+    "mv a3, " FROM "\n   sub a7, " TO ", " FROM "\n   add a7, a0, a7\n"                                             \
+    "1:  bgeu a0, a7, 4f\n   lbu s11, 0(a3)\n   sb s11, 0(a0)\n   lbu s11, 1(a3)\n   sb s11, 1(a0)\n"             \
+    "lbu s11, 2(a3)\n   sb s11, 2(a0)\n   lbu s11, 3(a3)\n   sb s11, 3(a0)\n   lbu s11, 4(a3)\n   sb s11, 4(a0)\n"   \
+    "lbu s11, 5(a3)\n   sb s11, 5(a0)\n   lbu s11, 6(a3)\n   sb s11, 6(a0)\n   lbu s11, 7(a3)\n   sb s11, 7(a0)\n"   \
+    "addi a3, a3, 8\n   addi a0, a0, 8\n   j 1b\n4:  mv a0, a7\n"
+#define PASTE_RV_WALK(P, STEP, MASK, CUT, INDEX, COPY)                         \
+    P "_pair:\n   srli a7, a6, 16\n   andi a7, a7, 1\n   bnez a7, " P "_left_empty\n"                                \
+    PASTE_RV_NEXT("t2", "t3", "t1", "t4", ".Lpaste_rv_stop", STEP, MASK, CUT, INDEX)                              \
+    "srli a7, a6, 17\n   andi a7, a7, 1\n   bnez a7, " P "_right_empty\n"                                            \
+    PASTE_RV_NEXT("s1", "s2", "t6", "s3", ".Lpaste_rv_stop", STEP, MASK, CUT, INDEX)                              \
+    PASTE_RV_CLEAR("t3") PASTE_RV_CLEAR("s2") COPY("t0", "t4") "sb s4, 0(a0)\n   addi a0, a0, 1\n"                \
+    COPY("t5", "s3") "sb s5, 0(a0)\n   addi a0, a0, 1\n   addi t0, t4, 1\n   addi t5, s3, 1\n   j " P "_pair\n"     \
+    P "_left_empty:\n   srli a7, a6, 17\n   andi a7, a7, 1\n   bnez a7, .Lpaste_rv_stop\n"                          \
+    PASTE_RV_NEXT("s1", "s2", "t6", "s3", ".Lpaste_rv_stop", STEP, MASK, CUT, INDEX) PASTE_RV_CLEAR("s2")         \
+    "sb s4, 0(a0)\n   addi a0, a0, 1\n" COPY("t5", "s3") "sb s5, 0(a0)\n   addi a0, a0, 1\n   addi t5, s3, 1\n"     \
+    "j " P "_pair\n"                                                                                               \
+    P "_right_empty:\n" PASTE_RV_CLEAR("t3") COPY("t0", "t4") "sb s4, 0(a0)\n   sb s5, 1(a0)\n   addi a0, a0, 2\n" \
+    "addi t0, t4, 1\n   j " P "_pair\n"
+//      Without V, the mask of the aligned word at B into M; a7 and s11 spent.
+#define PASTE_RV_SMASK(B, M)                                                   \
+    "ld a7, 0(" B ")\n   xor a7, a7, s10\n   and " M ", a7, s6\n   add " M ", " M ", s6\n   or " M ", " M ", a7\n"      \
+    "or " M ", " M ", s6\n   not " M ", " M "\n"
+#define PASTE_RV_SINDEX(BIT, OUT) "srli " OUT ", " BIT ", 7\n   mul " OUT ", " OUT ", s9\n   srli " OUT ", " OUT ", 56\n"
+//      Without V, an input's first mask: the aligned word P is in, its bytes before P dropped, cut at END.
+#define PASTE_RV_SSTART(P, END, B, M)                                          \
+    "andi " B ", " P ", -8\n   li " M ", 0\n   bgeu " P ", " END ", 3f\n" PASTE_RV_SMASK(B, M)                         \
+    "sub a7, " P ", " B "\n   slli a7, a7, 3\n   li s11, -1\n   sll s11, s11, a7\n   and " M ", " M ", s11\n"           \
+    PASTE_RV_CLIP(B, M, END, "8", "3f", PASTE_RV_SCUT) "3:\n"
+#define PASTE_RV_VSTART(P, END, B, M)                                          \
+    "mv " B ", " P "\n   li " M ", 0\n   bgeu " B ", " END ", 3f\n" PASTE_RV_VMASK(B, M)                              \
+    PASTE_RV_CLIP(B, M, END, "64", "3f", PASTE_RV_VCUT) "3:\n"
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      memory_paste_lines__room_64: a0 destination, a1 taken, a2 left,
+    //      a3 left length, a4 right, a5 right length, a6 control; a0 the
+    //      bytes written.
+    ASM_FUNC(memory_paste_lines__room_64)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 2f\n"
+    "addi sp, sp, -32\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   sd a6, 16(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n"
+    "ld a5, 0(sp)\n   ld a6, 16(sp)\n   addi sp, sp, 32\n   j memory_paste_lines__room_64\n"
+#else
+    "li t3, 1\n"
+#endif
+    "2:  addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "add t1, a2, a3\n   add t6, a4, a5\n   mv t0, a2\n   mv t5, a4\n   mv s7, a0\n   andi s4, a6, 255\n   srli s5, a6, 8\n"
+    "andi s5, s5, 255\n   li s8, 64\n   li s0, 2\n   bne t3, s0, .Lpaste_rv_scalar\n"
+    "li s9, 0x03f79d71b4cb0a89\n   lla s10, .Lpaste_rv_bits\n"
+    PASTE_RV_VSTART("t0", "t1", "t2", "t3") PASTE_RV_VSTART("t5", "t6", "s1", "s2")
+    PASTE_RV_WALK(".Lpaste_rv_v", "64", PASTE_RV_VMASK, PASTE_RV_VCUT, PASTE_RV_VINDEX, PASTE_RV_VCOPY)
+    ".Lpaste_rv_scalar:\n   li s0, 0x0101010101010101\n   mul s10, s5, s0\n   li s6, 0x7f7f7f7f7f7f7f7f\n"
+    "li s9, 0x0001020304050607\n"
+    PASTE_RV_SSTART("t0", "t1", "t2", "t3") PASTE_RV_SSTART("t5", "t6", "s1", "s2")
+    PASTE_RV_WALK(".Lpaste_rv_s", "8", PASTE_RV_SMASK, PASTE_RV_SCUT, PASTE_RV_SINDEX, PASTE_RV_SCOPY)
+    //      Stopped before the pair at t0 and t5.
+    ".Lpaste_rv_stop:\n   sub a7, t0, a2\n   sd a7, 0(a1)\n   sub a7, t5, a4\n   sd a7, 8(a1)\n   sub a0, a0, s7\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    ".pushsection .rodata\n"
+    //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
+    ".Lpaste_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
+    "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
+    ".popsection\n"
+    ASM_END(memory_paste_lines__room_64)
     ".option pop\n"
 );
 #endif

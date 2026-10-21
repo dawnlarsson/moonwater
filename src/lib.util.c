@@ -8194,6 +8194,40 @@ static inline INLINE positive unique_lines_room(library_unique_entry entry, p8 a
         unique_lines_room(memory_unique_lines__room_64, (destination), (made), (source),   \
                           (length), (state), (control), 64)
 
+#define MEMORY_PASTE_LINES__ROOM(room, destination, taken, left, left_length, right, right_length, control) \
+        LIBRARY_PASTE(memory_paste_lines__room_, room)((destination), (taken), (left), (left_length),        \
+                                                      (right), (right_length), (control))
+
+typedef positive (*library_paste_entry)(p8 address_to, positive address_to, const p8 address_to, positive,
+                                        const p8 address_to, positive, positive);
+
+//      And for paste's, which reads two inputs and may write twice what it takes of them.
+static inline INLINE positive paste_lines_room(library_paste_entry entry, p8 address_to destination,
+                                               positive address_to taken, const p8 address_to left,
+                                               positive left_length, const p8 address_to right,
+                                               positive right_length, positive control, positive room)
+{
+#ifdef MOONWATER_RANGES_CHECKED
+        if (__builtin_dynamic_object_size(left, 1) < left_length + room ||
+            __builtin_dynamic_object_size(right, 1) < right_length + room ||
+            __builtin_dynamic_object_size(destination, 1) < 2 * (left_length + right_length) + room)
+                __builtin_trap();
+        (void)((const volatile p8 address_to)left)[left_length + room - 1];
+        (void)((const volatile p8 address_to)right)[right_length + room - 1];
+#endif
+        positive made = entry(destination, taken, left, left_length, right, right_length, control);
+#ifdef MOONWATER_RANGES_CHECKED
+        volatile p8 address_to spoiled = destination + made;
+        for (positive at = 0; at < room; at++)
+                spoiled[at] = 0xa5;
+#endif
+        return made;
+}
+
+#define memory_paste_lines__room_64(destination, taken, left, left_length, right, right_length, control) \
+        paste_lines_room(memory_paste_lines__room_64, (destination), (taken), (left), (left_length),       \
+                         (right), (right_length), (control), 64)
+
 //      set-literal
 /*
         A macro names itself in its own replacement, which the preprocessor

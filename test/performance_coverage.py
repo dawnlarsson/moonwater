@@ -309,6 +309,11 @@ cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_unique_lines__ro
       'memory_first_of, its length and memory_compare against the line '
       'before and a line that differs copied, over the first MiB of '
       'src/lib.c and over that with every line four times, with AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_paste_lines__room_64',
+      'paired timing against the walk paste had, each line end from '
+      'memory_first_of, the line copied, a tab between and a newline after, '
+      'over the lines of the first MiB of src/lib.c beside those of the next, '
+      'with AVX2 and SSE2')
 cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_cut_fields__room_64',
       'paired timing against the walk cut -f had, every boundary from '
       'memory_offsets_of_either and the kept fields copied, over 4 MiB of '

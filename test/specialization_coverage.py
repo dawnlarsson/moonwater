@@ -161,6 +161,12 @@ cover('ranged', 'length', 'memory_unique_lines__room_64',
       'to itself a line back, the line ending it from the same delimiters. '
       'Numbers in lib.c. No plain routine: every caller has the room',
       expansion='unique_lines_room', evidence='test/checks.c#CHECK_ranged')
+cover('ranged', 'left_length', 'memory_paste_lines__room_64',
+      'Measured. paste of two inputs over whole lines for reads and an output '
+      'that run 64 bytes past them and past twice their sum: each input\'s '
+      'line ends sixty four bytes a mask, a line copied thirty two bytes a '
+      'turn. Numbers in lib.c. No plain routine: every caller has the room',
+      expansion='paste_lines_room', evidence='test/checks.c#CHECK_ranged')
 
 # ----------------------------------------------------------------------
 #       worth_it -- measured

@@ -4758,8 +4758,46 @@ static b32 text_paste()
         }
         else
         {
+                /*
+                        Two files and one delimiter of a byte: the lines of
+                        both reads a pair at a time through
+                        memory_paste_lines__room_64, a file that has ended
+                        an empty field, until either read has no whole line
+                        left for the walk below to finish.
+                */
+                bool pair = inputs == 2 && cursors[0].source == 0 && cursors[1].source == 1 &&
+                            delimiter_count == 1 && (delimiters[0] >> 32) == 1;
+
                 for (;;)
                 {
+                        if (pair)
+                        {
+                                text_reader address_to one = address_of cursors[0].reader;
+                                text_reader address_to two = address_of cursors[1].reader;
+                                bool one_has = !one->failed && text_reader_fill(one);
+                                bool two_has = !two->failed && text_reader_fill(two);
+                                positive most = (TEXT_OUT_MAX - TEXT_ROOM) / 4;
+                                positive left = one_has ? min(one->filled - one->position, most) : 0;
+                                positive right = two_has ? min(two->filled - two->position, most) : 0;
+                                p8 address_to into = (one_has || two_has) ? text_reserve(2 * (left + right)) : null;
+
+                                if (into)
+                                {
+                                        positive taken[2] = {0, 0};
+                                        positive made = MEMORY_PASTE_LINES__ROOM(
+                                            TEXT_ROOM, into, taken, one->buffer + one->position, left,
+                                            two->buffer + two->position, right,
+                                            (positive)(p8)delimiters[0] | (positive)text_delimiter << 8 |
+                                                (positive)!one_has << 16 | (positive)!two_has << 17);
+
+                                        text_out_used -= 2 * (left + right) - made;
+                                        one->position += taken[0];
+                                        two->position += taken[1];
+                                        if (taken[0] || taken[1])
+                                                continue;
+                                }
+                        }
+
                         bool any = false;
                         positive next_separator = 0;
 

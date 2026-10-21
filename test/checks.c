@@ -48082,6 +48082,9 @@ unsigned long long memory_fold_lines__room_64(unsigned char *, unsigned long lon
                                               unsigned long long, unsigned long long, unsigned long long);
 unsigned long long memory_unique_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
                                                 unsigned long long, unsigned long long *, unsigned long long);
+unsigned long long memory_paste_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
+                                               unsigned long long, const unsigned char *, unsigned long long,
+                                               unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48808,6 +48811,123 @@ static unsigned long long ranged_uniq_cases(unsigned char *d_end, unsigned char 
         return faults;
 }
 
+/*
+        memory_paste_lines__room_64 against paste a pair of lines at a time:
+        two inputs of lines of every length to 300 and of long ones, either
+        holding more lines, the tab, a comma and NUL for the delimiter, the
+        newline and NUL for the line end, and each, the other or both inputs
+        ended. Each input's room holds the line end, so a pair that took a
+        line from the room would answer wrong; the left ends against a page
+        that faults, the right starts just after one, and the destination's
+        room ends against one.
+*/
+static unsigned long long ranged_paste_reference(unsigned char *out, const unsigned char *left, unsigned long long left_length,
+                                                 const unsigned char *right, unsigned long long right_length,
+                                                 unsigned long long control, unsigned long long *taken)
+{
+        unsigned char delimiter = (unsigned char)control, line_end = (unsigned char)(control >> 8);
+        int left_ended = (int)(control >> 16 & 1), right_ended = (int)(control >> 17 & 1);
+        unsigned long long made = 0, l = 0, r = 0;
+
+        while (!(left_ended && right_ended))
+        {
+                unsigned long long le = l, re = r;
+                if (!left_ended)
+                {
+                        while (le < left_length && left[le] != line_end)
+                                le++;
+                        if (le >= left_length)
+                                break;
+                }
+                if (!right_ended)
+                {
+                        while (re < right_length && right[re] != line_end)
+                                re++;
+                        if (re >= right_length)
+                                break;
+                }
+                if (!left_ended)
+                        for (unsigned long long i = l; i < le; i++)
+                                out[made++] = left[i];
+                out[made++] = delimiter;
+                if (!right_ended)
+                        for (unsigned long long i = r; i < re; i++)
+                                out[made++] = right[i];
+                out[made++] = line_end;
+                if (!left_ended)
+                        l = le + 1;
+                if (!right_ended)
+                        r = re + 1;
+        }
+        taken[0] = l;
+        taken[1] = r;
+        return made;
+}
+
+static unsigned char ranged_paste_want[2 * 2 * 20000 + 1024];
+
+static void ranged_paste_fill(unsigned char *run, unsigned long long length, unsigned char line_end, unsigned mode)
+{
+        unsigned long long at = 0;
+
+        while (at < length)
+        {
+                unsigned r = ranged_byte();
+                unsigned long long size = mode & 1 ? r % 9 : (unsigned long long)r * ranged_byte() / 217;
+
+                if (ranged_byte() == 5)
+                        size = 64 + ranged_byte() % 400;
+                for (unsigned long long i = 0; i < size && at < length; i++)
+                        run[at++] = (unsigned char)(' ' + ranged_byte() % 95);
+                if (at < length)
+                        run[at++] = line_end;
+        }
+}
+
+static unsigned long long ranged_paste_cases(unsigned char *d_end, unsigned char *s_end, unsigned char *s_front)
+{
+        static const unsigned long long longs[] = {1000, 4096, 5000};
+        static const unsigned char delimiters[] = {'\t', ',', 0};
+        unsigned long long faults = 0;
+
+        for (unsigned long long at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
+        {
+                unsigned long long left_length = at <= 300 ? at : longs[at - 301];
+
+                for (unsigned mode = 0; mode < 4; mode++)
+                        for (unsigned ended = 0; ended < 4; ended++)
+                        {
+                                unsigned long long right_length = (left_length * (1 + mode) + at * 7) % 4300;
+                                unsigned char line_end = (at + mode) % 5 == 4 ? 0 : '\n';
+                                unsigned long long control = delimiters[(at + ended) % 3] | (unsigned long long)line_end << 8 |
+                                                             (unsigned long long)ended << 16;
+                                unsigned char *left = s_end - 64 - left_length, *right = s_front;
+
+                                if (right_length > 16384 - 64)
+                                        continue;
+                                ranged_paste_fill(left, left_length, line_end, mode);
+                                ranged_paste_fill(right, right_length, line_end, mode >> 1);
+                                for (unsigned long long i = 0; i < 64; i++)
+                                        left[left_length + i] = right[right_length + i] = line_end;
+
+                                unsigned long long want_taken[2], taken[2] = {~0ull, ~0ull};
+                                unsigned long long want = ranged_paste_reference(ranged_paste_want, left, left_length, right,
+                                                                                 right_length, control, want_taken);
+                                unsigned char *into = d_end - 64 - 2 * (left_length + right_length);
+
+                                for (int i = 1; i <= 16; i++)
+                                        into[-i] = (unsigned char)(0x3a ^ i);
+                                unsigned long long made = (memory_paste_lines__room_64)(into, taken, left, left_length, right,
+                                                                                        right_length, control);
+                                faults += made != want || taken[0] != want_taken[0] || taken[1] != want_taken[1] ||
+                                          (made == want && !ranged_same(into, ranged_paste_want, want));
+                                for (int i = 1; i <= 16; i++)
+                                        faults += into[-i] != (unsigned char)(0x3a ^ i);
+                        }
+        }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 /*
         memory_first_of's windows for a short count and the first sixty four
@@ -48915,6 +49035,10 @@ static fn ranged_tier(string_address tier)
               "to ten million lines, against uniq a line at a time, the rooms ending at a page that faults and the "
               "line before the source starting just after one",
               ranged_uniq_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
+        check("memory_paste_lines__room_64: every count to 300 and long ones, lines of every length, the tab, a comma "
+              "and NUL between, the newline and NUL at the end, either input or both ended, against paste a pair at a "
+              "time, the left ending at a page that faults and the right starting just after one",
+              ranged_paste_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
 }
 
 /*
@@ -49240,13 +49364,14 @@ int main(void)
         unsigned long long revs = ranged_rev_cases(d_end, s_end, s_front);
         unsigned long long folds = ranged_fold_cases(d_end, s_end, s_front);
         unsigned long long uniqs = ranged_uniq_cases(d_end, s_end, s_front);
+        unsigned long long pastes = ranged_paste_cases(d_end, s_end, s_front);
         ranged_time();
-        printf("arm64 ranged: 11 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
-               "lines %llu | cuts %llu | revs %llu | folds %llu | uniqs %llu\n",
+        printf("arm64 ranged: 12 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
+               "lines %llu | cuts %llu | revs %llu | folds %llu | uniqs %llu | pastes %llu\n",
                faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts, revs, folds,
-               uniqs);
+               uniqs, pastes);
         return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts + revs +
-                   folds + uniqs !=
+                   folds + uniqs + pastes !=
                0;
 }
 #endif
@@ -126840,7 +126965,9 @@ b32 main(void)
    had, memory_reverse_lines__room_64 over src/lib.c against the walk rev
    had, memory_fold_lines__room_64 over the first 4 MiB of it against
    GNU's walk, memory_unique_lines__room_64 over its first MiB and over
-   that with every line four times against the walk uniq had, below -- and
+   that with every line four times against the walk uniq had,
+   memory_paste_lines__room_64 over its first MiB beside its second
+   against the walk paste had, below -- and
    memory_copy_apart__room_64 over the lines of
    src/lib.c (every length to 128, in order) into a buffer nothing reads and
    into one buffer read at once, and at a fixed 40 and 76 bytes hidden from
@@ -127156,6 +127283,54 @@ static p64 uniq_run(positive side, positive shape)
         return get_cpu_time() - start;
 }
 
+/*      paste of the lines of src/lib.c's first MiB beside those of its
+        second: the walk paste had -- each line's end from memory_first_of,
+        the line copied, a tab between and a newline after -- against
+        memory_paste_lines__room_64. */
+static positive paste_left, paste_right;
+
+static positive paste_walk(p8 address_to into, const p8 address_to left, positive left_length,
+                           const p8 address_to right, positive right_length)
+{
+        positive made = 0, l = 0, r = 0;
+
+        for (;;)
+        {
+                const p8 address_to le = memory_first_of((address_any)(left + l), '\n', left_length - l);
+                const p8 address_to re = memory_first_of((address_any)(right + r), '\n', right_length - r);
+
+                if (!le || !re)
+                        break;
+                memory_copy(into + made, left + l, (positive)(le - (left + l)));
+                made += (positive)(le - (left + l));
+                into[made++] = '\t';
+                memory_copy(into + made, right + r, (positive)(re - (right + r)));
+                made += (positive)(re - (right + r));
+                into[made++] = '\n';
+                l = (positive)(le - left) + 1;
+                r = (positive)(re - right) + 1;
+        }
+        return made;
+}
+
+static p64 paste_run(positive side)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < 2; round++)
+        {
+                positive made, taken[2];
+
+                if (side)
+                        made = memory_paste_lines__room_64(out, taken, text, paste_left, text + paste_left, paste_right,
+                                                           '\t' | '\n' << 8);
+                else
+                        made = paste_walk(out, text, paste_left, text + paste_left, paste_right);
+                sink += made + out[made / 2];
+        }
+        return get_cpu_time() - start;
+}
+
 static p64 run(positive side, positive shape)
 {
         p64 start = get_cpu_time(), sum = 0;
@@ -127206,6 +127381,12 @@ b32 main(void)
         while (fold_length && text[fold_length - 1] != '\n')
                 fold_length--;
         uniq_once = text_length < (positive)1 << 20 ? text_length : (positive)1 << 20;
+        paste_left = uniq_once;
+        while (paste_left && text[paste_left - 1] != '\n')
+                paste_left--;
+        paste_right = text_length - paste_left < (positive)1 << 20 ? text_length - paste_left : (positive)1 << 20;
+        while (paste_right && text[paste_left + paste_right - 1] != '\n')
+                paste_right--;
         while (uniq_once && text[uniq_once - 1] != '\n')
                 uniq_once--;
         for (positive at = 0, line = 0; at < uniq_once; at++)
@@ -127260,6 +127441,20 @@ b32 main(void)
 
                         BENCH_PAIRED(ratios, walked, fold_run(0), engine, fold_run(1));
                         string_format(log, "memory_fold_lines__room_64 -w 60 src/lib.c%s: paired median engine/walk %p.",
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, walked, paste_run(0), engine, paste_run(1));
+                        string_format(log, "memory_paste_lines__room_64 src/lib.c%s: paired median engine/walk %p.",
 #if X64
                                       cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
 #else
