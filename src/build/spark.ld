@@ -675,7 +675,17 @@ SECTIONS
                    on riscv64 is a jal, which reaches a megabyte, so they
                    stay together instead of going to the front, and a
                    command touches this part of the image as one run of
-                   pages rather than one a routine. */
+                   pages rather than one a routine.
+
+                   On a page of its own start: the instruction cache picks a
+                   line's set from its place in a page, so the cold code ahead
+                   growing by any amount moves this group in whole pages and
+                   none of its lines changes set. Thirty-eight bytes more of
+                   text_fold.cold moved it by 32 and sh-param by 1.4 percent.
+                   0x6e0 into the page is where it stood when the loops were
+                   measured and placed (1f557f21): at the page's start,
+                   sh-strvars and sh-param took 5 and 7 percent more. */
+                . = ALIGN(4096) + 0x6e0;
                 *(.text._start)
                 /* hot_loop_asm begin */
                 *(.text.env_find_hashed_span_probe)
