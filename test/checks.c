@@ -14704,29 +14704,42 @@ fn check_cells_from_ascii()
 }
 
 /*
-        Every size across the four-lane and 64-byte boundaries, every residue
-        against a protected page on either side, tables that mark with any
-        nonzero byte at four densities, and on x86_64 each body in turn: all
-        features, the lazily asked VBMI2 answer forced to absent, and AVX-512
-        off. Bytes the routine leaves past the kept ones inside the block are
-        unspecified; everything before and after is compared exactly.
+        Every size across the four-lane, 32, 64 and 512-byte boundaries,
+        every residue against a protected page on either side, tables that
+        mark with any nonzero byte at four densities, the table against a
+        page that faults on eight and a byte to seven short of it off eight,
+        and on x86_64 each body in turn: all features, the lazily asked VBMI2
+        answer forced to absent, and AVX-512 off; on riscv64 every call the
+        first in a process, which asks for V, then without V. Bytes the
+        routine leaves past the kept ones inside the block are unspecified;
+        everything before and after is compared exactly.
 */
 fn check_delete_bytes()
 {
         static const positive sizes[] = {
-            0, 1, 2, 3, 4, 5, 7, 8, 63, 64, 65, 67, 127, 128, 129,
-            255, 256, 257, 1000, 4095, 4096,
+            0, 1, 2, 3, 4, 5, 7, 8, 31, 32, 33, 63, 64, 65, 67, 127, 128, 129,
+            255, 256, 257, 511, 512, 513, 519, 1000, 4095, 4096,
         };
-        static p8 want[4096], table[256];
+        static p8 want[4096];
         p8 address_to pages = guard_pages("memory_delete_bytes");
+        p8 address_to tables = guard_pages("memory_delete_bytes' table");
 
-        if (!pages)
+        if (!pages || !tables)
+        {
+                if (pages)
+                        memory_free(pages, 3 * 4096);
+                if (tables)
+                        memory_free(tables, 3 * 4096);
                 return;
+        }
         p8 address_to got = pages + 4096;
         p64 seed = 0x9e3779b97f4a7c15ull;
 #if X64
         p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2;
         positive tiers = 3;
+#elif RISCV64
+        p8 vector = 0;
+        positive tiers = 2;
 #else
         positive tiers = 1;
 #endif
@@ -14735,7 +14748,14 @@ fn check_delete_bytes()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi2 = tier == 1 ? 1 : vbmi2;
+#elif RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
 #endif
+                VECTOR_FIRST_CALL(tier == 0);
                 same("memory_delete_bytes", "null zero-sized answer",
                      (memory_delete_bytes)(null, 0, null), 0);
                 for (positive s = 0; s < array_count(sizes); s++)
@@ -14745,10 +14765,12 @@ fn check_delete_bytes()
                                         positive size = sizes[s];
                                         positive offset = residue == 64 || size + residue > 4096
                                                               ? 4096 - size : residue;
+                                        p8 address_to table = tables + 8192 - 256 - (s + residue + density) % 8;
                                         for (positive i = 0; i < 256; i++)
                                         {
                                                 XORSHIFT64(seed);
-                                                p8 mark = (p8)(seed >> 24) | 1;
+                                                // Any nonzero byte, 0x80 (no low bit set) a quarter of the time.
+                                                p8 mark = i % 4 == 0 || !(p8)(seed >> 24) ? 0x80 : (p8)(seed >> 24);
                                                 bool marked = density == 3 ? (seed & 15) != 0
                                                               : density == 2 ? (seed & 1) != 0
                                                               : density == 1 ? i == 'a' || i >= 0xf0
@@ -14767,6 +14789,7 @@ fn check_delete_bytes()
                                                 if (!table[value])
                                                         want[offset + kept++] = value;
                                         }
+                                        VECTOR_FIRST_CALL(tier == 0);
                                         positive answer = (memory_delete_bytes)(got + offset, size, table);
                                         same("memory_delete_bytes", "kept count", answer, kept);
                                         same_bytes("memory_delete_bytes", "kept bytes and those before",
@@ -14779,8 +14802,11 @@ fn check_delete_bytes()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi2 = vbmi2;
+#elif RISCV64
+        cpu_has_vector = vector;
 #endif
         memory_free(pages, 3 * 4096);
+        memory_free(tables, 3 * 4096);
 }
 
 /*
