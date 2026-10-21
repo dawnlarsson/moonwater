@@ -7554,6 +7554,54 @@ __asm__(
     ".Lmemory_search_icase_x64_empty:\n   mov %rdi, %rax\n" ASM_RET
     ".Lmemory_search_icase_x64_absent:\n   xor %eax, %eax\n" ASM_RET
     ASM_END(memory_search_ascii_case_prepared)
+    //
+    //       ICASE_X64_BLOCKS(LAST, STEP, WORDS, BROADCAST, BLOCK, LEAVE): the
+    //       block loop of the folded search, STEP starts a block, for the AVX2
+    //       registers and the SSE2 ones. BROADCAST(N, AT) fills register N with
+    //       the byte at AT(%rsp): each anchor's byte and the or that folds it
+    //       sit at 24 to 27. BLOCK leaves in rax the starts of the block at r14
+    //       where both anchors are, and LEAVE is what the registers need before
+    //       the routine returns. Past the last whole block, one block back
+    //       from the last start rather than a byte loop, as the exact search
+    //       does: every start before it was rejected, so the first match in it
+    //       is still first. The mask of a block's survivors is kept at 32, the
+    //       start being proved at 40, because the proving call writes every
+    //       vector register and the four broadcasts are made again after it.
+    //
+#define ICASE_X64_BLOCKS(LAST, STEP, WORDS, BROADCAST, BLOCK, LEAVE)                                                   \
+    "mov %r13, %rax\n   sub %r12, %rax\n   cmp $" LAST ", %rax\n   jb 60f\n   sub $" LAST ", %rax\n"                        \
+    "mov %rax, 16(%rsp)  # where the last block of " WORDS " starts\n"                                                     \
+    "movzbl (%rbp,%r8), %eax\n   mov %eax, %ecx\n   or $32, %ecx\n   lea -97(%rcx), %edx\n   mov $0, %esi\n   cmp $25, %edx\n"  \
+    "ja 11f\n   mov %ecx, %eax\n   mov $32, %esi\n"                                                                      \
+    "11:  mov %al, 24(%rsp)\n   mov %sil, 25(%rsp)\n   movzbl (%rbp,%r9), %eax\n   mov %eax, %ecx\n   or $32, %ecx\n"           \
+    "lea -97(%rcx), %edx\n   mov $0, %esi\n   cmp $25, %edx\n   ja 12f\n   mov %ecx, %eax\n   mov $32, %esi\n"                  \
+    "12:  mov %al, 26(%rsp)\n   mov %sil, 27(%rsp)\n   xor %r14d, %r14d\n   xor %r15d, %r15d\n"                             \
+    BROADCAST("1", "24") BROADCAST("3", "25") BROADCAST("2", "26") BROADCAST("4", "27")                                \
+    "mov 0(%rsp), %r10\n   add %rbx, %r10\n   mov 8(%rsp), %r11\n   add %rbx, %r11\n"                                     \
+    "1:  " BLOCK "test %rax, %rax\n   jnz 3f\n"                                                                           \
+    "4:  add $" STEP ", %r14\n   cmp 16(%rsp), %r14\n   jbe 1b\n   test %r15d, %r15d\n   jnz 80f\n   mov 16(%rsp), %r14\n"    \
+    "mov $1, %r15d\n   jmp 1b\n"                                                                                         \
+    "3:  mov %rax, 32(%rsp)\n"                                                                                           \
+    "31:  mov 32(%rsp), %rax\n   bsf %rax, %rcx\n   lea -1(%rax), %rdx\n   and %rdx, %rax\n   mov %rax, 32(%rsp)\n"           \
+    "lea (%rbx,%r14), %rdi\n   add %rcx, %rdi\n   mov %rdi, 40(%rsp)\n   mov %rbp, %rsi\n   mov %r12, %rdx\n"               \
+    "call memory_compare_ascii_case\n   test %eax, %eax\n   jz 70f\n   cmpq $0, 32(%rsp)\n   jne 31b\n"                       \
+    BROADCAST("1", "24") BROADCAST("3", "25") BROADCAST("2", "26") BROADCAST("4", "27")                                \
+    "mov 0(%rsp), %r10\n   add %rbx, %r10\n   mov 8(%rsp), %r11\n   add %rbx, %r11\n   jmp 4b\n"                          \
+    "70:  mov 40(%rsp), %rax\n   " LEAVE "jmp 9f\n"                                                                  \
+    "80:  " LEAVE "jmp 8f\n"
+#define ICASE_X64_AVX2_BROADCAST(N, AT) "movzbl " AT "(%rsp), %eax\n   vmovd %eax, %xmm" N "\n   vpbroadcastb %xmm" N ", %ymm" N "\n"
+#define ICASE_X64_SSE2_BROADCAST(N, AT)                                                                               \
+    "movzbl " AT "(%rsp), %eax\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm" N "\n   pshufd $0, %xmm" N ", %xmm" N "\n"
+//  Sixteen starts at OFFSET of the block, each anchor's bytes or-ed with its fold: register A the rarer anchor, then
+//  A where both are.
+#define ICASE_X64_SSE2_FIRST(A, OFFSET)                                                                                \
+    "movdqu " OFFSET "(%r10,%r14), %xmm" A "\n   por %xmm3, %xmm" A "\n   pcmpeqb %xmm1, %xmm" A "\n"
+#define ICASE_X64_SSE2_SECOND(A, OFFSET)                                                                               \
+    "movdqu " OFFSET "(%r11,%r14), %xmm5\n   por %xmm4, %xmm5\n   pcmpeqb %xmm2, %xmm5\n   pand %xmm5, %xmm" A "\n"
+//  Whether any of the four registers has a start, THEN what follows.
+#define ICASE_X64_SSE2_ANY(THEN)                                                                                     \
+    "movdqa %xmm0, %xmm12\n   por %xmm6, %xmm12\n   por %xmm8, %xmm12\n   por %xmm10, %xmm12\n   pmovmskb %xmm12, %eax\n"      \
+    "test %eax, %eax\n   " THEN
     ASM_LOCAL_FUNC(memory_search_ascii_case_prepared_core)
     //
     //       The folded search with both prepared anchors, the shape the exact
@@ -7580,30 +7628,35 @@ __asm__(
     "mov %rcx, %r12  # its length\n   mov %rsi, %r13  # the haystack's\n"
     "mov %r8, 0(%rsp)\n   mov %r9, 8(%rsp)\n"
     ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", "60f")
-    "mov %r13, %rax\n   sub %r12, %rax\n   cmp $31, %rax\n   jb 60f\n   sub $31, %rax\n   mov %rax, 16(%rsp)  # where the last block of thirty two starts\n"
-    "movzbl (%rbp,%r8), %eax\n   mov %eax, %ecx\n   or $32, %ecx\n   lea -97(%rcx), %edx\n   mov $0, %esi\n   cmp $25, %edx\n   ja 11f\n   mov %ecx, %eax\n   mov $32, %esi\n"
-    "11:  mov %al, 24(%rsp)\n   mov %sil, 25(%rsp)\n   movzbl (%rbp,%r9), %eax\n   mov %eax, %ecx\n   or $32, %ecx\n   lea -97(%rcx), %edx\n"
-    "mov $0, %esi\n   cmp $25, %edx\n   ja 12f\n   mov %ecx, %eax\n   mov $32, %esi\n"
-    "12:  mov %al, 26(%rsp)\n   mov %sil, 27(%rsp)\n   xor %r14d, %r14d\n   xor %r15d, %r15d\n   movzbl 24(%rsp), %eax\n   vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
-    "movzbl 25(%rsp), %eax\n   vmovd %eax, %xmm3\n   vpbroadcastb %xmm3, %ymm3\n   movzbl 26(%rsp), %eax\n   vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
-    "movzbl 27(%rsp), %eax\n   vmovd %eax, %xmm4\n   vpbroadcastb %xmm4, %ymm4\n   mov 0(%rsp), %r10\n   add %rbx, %r10\n   mov 8(%rsp), %r11\n   add %rbx, %r11\n"
-    "1:  vpor (%r10,%r14), %ymm3, %ymm0\n   vpcmpeqb %ymm1, %ymm0, %ymm0\n   vpor (%r11,%r14), %ymm4, %ymm5\n   vpcmpeqb %ymm2, %ymm5, %ymm5\n"
-    "vpand %ymm5, %ymm0, %ymm0\n   vpmovmskb %ymm0, %eax\n   test %eax, %eax\n   jnz 3f\n"
+    ASM_NARROW("cpu_has_avx2", "50f")
+    ICASE_X64_BLOCKS("31", "32", "thirty two", ICASE_X64_AVX2_BROADCAST,
+                     "vpor (%r10,%r14), %ymm3, %ymm0\n   vpcmpeqb %ymm1, %ymm0, %ymm0\n   vpor (%r11,%r14), %ymm4, %ymm5\n"
+                     "vpcmpeqb %ymm2, %ymm5, %ymm5\n   vpand %ymm5, %ymm0, %ymm0\n   vpmovmskb %ymm0, %eax\n",
+                     "vzeroupper\n")
     //
-    //       Past the last whole block, one block back from the last start
-    //       rather than a byte loop, as the exact search does: every start
-    //       before it was rejected, so the first match in it is still first.
+    //       Without AVX2, sixty four starts a block in the SSE2 registers, as
+    //       the exact search has them: four of sixteen and one test of their
+    //       or, the rarer anchor alone first unless the bucket, at 48(%rsp)
+    //       here, says it is not rare. Before, this took the narrow path below
+    //       at every length. grep
+    //       -ic 'static ' over 64 MiB of C source cost nine times what it does
+    //       with AVX-512.
     //
-    "4:  add $32, %r14\n   cmp 16(%rsp), %r14\n   jbe 1b\n   test %r15d, %r15d\n   jnz 80f\n   mov 16(%rsp), %r14\n   mov $1, %r15d\n   jmp 1b\n"
-    "3:  mov %eax, 32(%rsp)\n"
-    "31:  mov 32(%rsp), %eax\n   bsf %eax, %ecx\n   lea -1(%rax), %edx\n   and %edx, %eax\n   mov %eax, 32(%rsp)\n   lea (%rbx,%r14), %rdi\n   add %rcx, %rdi\n   mov %rdi, 40(%rsp)\n"
-    "mov %rbp, %rsi\n   mov %r12, %rdx\n   call memory_compare_ascii_case\n   test %eax, %eax\n   jz 70f\n   cmpl $0, 32(%rsp)\n   jne 31b\n"
-    "movzbl 24(%rsp), %eax\n   vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   movzbl 25(%rsp), %eax\n   vmovd %eax, %xmm3\n   vpbroadcastb %xmm3, %ymm3\n"
-    "movzbl 26(%rsp), %eax\n   vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   movzbl 27(%rsp), %eax\n   vmovd %eax, %xmm4\n   vpbroadcastb %xmm4, %ymm4\n"
-    "mov 0(%rsp), %r10\n   add %rbx, %r10\n   mov 8(%rsp), %r11\n   add %rbx, %r11\n   jmp 4b\n"
-    "70:  mov 40(%rsp), %rax\n   vzeroupper\n   jmp 9f\n"
-    "80:  vzeroupper\n   jmp 8f\n"
+    "50:  movq $-2048, 48(%rsp)\n"
+    ICASE_X64_BLOCKS("63", "64", "sixty four", ICASE_X64_SSE2_BROADCAST,
+                     "cmp %r14, 48(%rsp)\n   jg 21f\n"
+                     ICASE_X64_SSE2_FIRST("0", "0") ICASE_X64_SSE2_FIRST("6", "16") ICASE_X64_SSE2_FIRST("8", "32")
+                     ICASE_X64_SSE2_FIRST("10", "48") ICASE_X64_SSE2_ANY("jz 4f\n   addq $512, 48(%rsp)\n")
+                     ICASE_X64_SSE2_SECOND("0", "0") ICASE_X64_SSE2_SECOND("6", "16") ICASE_X64_SSE2_SECOND("8", "32")
+                     ICASE_X64_SSE2_SECOND("10", "48") "jmp 22f\n"
+                     "21:  "
+                     ICASE_X64_SSE2_FIRST("0", "0") ICASE_X64_SSE2_FIRST("6", "16") ICASE_X64_SSE2_FIRST("8", "32")
+                     ICASE_X64_SSE2_FIRST("10", "48")
+                     ICASE_X64_SSE2_SECOND("0", "0") ICASE_X64_SSE2_SECOND("6", "16") ICASE_X64_SSE2_SECOND("8", "32")
+                     ICASE_X64_SSE2_SECOND("10", "48") ICASE_X64_SSE2_ANY("jz 4f\n")
+                     "22:  pmovmskb %xmm0, %eax\n   pmovmskb %xmm6, %ecx\n   shl $16, %ecx\n   or %rcx, %rax\n"
+                     "pmovmskb %xmm8, %ecx\n   shl $32, %rcx\n   or %rcx, %rax\n   pmovmskb %xmm10, %ecx\n   shl $48, %rcx\n   or %rcx, %rax\n",
+                     "")
     )
     //
     //       The narrow path, and the whole routine in a kernel build: the
@@ -7622,6 +7675,12 @@ __asm__(
     "7:  mov %r15, %rax\n"
     "9:  add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     ASM_LOCAL_END(memory_search_ascii_case_prepared_core)
+#undef ICASE_X64_BLOCKS
+#undef ICASE_X64_AVX2_BROADCAST
+#undef ICASE_X64_SSE2_BROADCAST
+#undef ICASE_X64_SSE2_FIRST
+#undef ICASE_X64_SSE2_SECOND
+#undef ICASE_X64_SSE2_ANY
     ASM_FUNC(memory_search)
     "test %rcx, %rcx\n   jz .Lmemory_search_x64_empty_general\n   cmp %rcx, %rsi\n   jb .Lmemory_search_x64_absent_general\n   cmp $1, %rcx\n   je .Lmemory_search_x64_one_general\n"
     "cmp $4, %rcx\n   jb .Lmemory_search_x64_short_general\n   sub $40, %rsp\n   mov %rdi, 0(%rsp)\n   mov %rsi, 8(%rsp)\n   mov %rdx, 16(%rsp)\n   mov %rcx, 24(%rsp)\n"
@@ -7639,6 +7698,83 @@ __asm__(
     ".Lmemory_search_prepared_x64_empty:\n   mov %rdi, %rax\n" ASM_RET
     ".Lmemory_search_prepared_x64_absent:\n   xor %eax, %eax\n" ASM_RET
     ASM_END(memory_search_prepared)
+    //
+    //       SEARCH_X64_BLOCKS(LAST, STEP, BROADCAST1, BROADCAST2, BLOCK, LEAVE):
+    //       the block loop of memory_search_prepared_core, STEP starts a block,
+    //       for the AVX2 registers and the SSE2 ones. BROADCASTn fills register
+    //       n with the byte in eax, BLOCK leaves in r13d the starts of the block
+    //       at r9 where both anchors are, and LEAVE is what the registers need
+    //       before the routine returns.
+    //
+    //       How far the block loop may go. The last position a match could
+    //       start at is hay_size - needle_size; a block there reads STEP bytes
+    //       from it and STEP from up to needle_size - 1 further along, so the
+    //       last block may start LAST = STEP - 1 positions before it. Under
+    //       LAST there is no whole block and the narrow path takes it -- and the
+    //       subtraction is in that order because hay_size - needle_size - LAST
+    //       on a short haystack is not a small number, it is a very large one.
+    //
+    //       Which byte of a three byte needle neither probe covers: the three
+    //       offsets are 0, 1 and 2 and two of them are taken, so the third is
+    //       what is left of their sum. Nothing reads it at any other length.
+    //
+    //       Past the end of the block loop, one block back from the last
+    //       position rather than a byte loop for what is left. It looks at
+    //       positions already looked at, which costs a block and cannot change
+    //       the answer: everything before them was rejected, so the first match
+    //       found in it is still the first match there is.
+    //
+    //       The survivors of one block, lowest position first. Four bytes by
+    //       hand before the call, because a call for a candidate that differs
+    //       in its second byte costs more than the block it came from. Then
+    //       where the last candidate failed, if one has. A zero says none has,
+    //       and it is also what a needle under sixteen bytes leaves there,
+    //       because nothing writes the slot for one. The eight bytes are inside
+    //       the needle either way: the offset is never more than its length
+    //       less eight. Two and three bytes: both probes are ends of the
+    //       needle, so a three has one byte left in the middle and a two has
+    //       none.
+    //
+    //       Back to the block loop. What a call may have written comes off the
+    //       stack, and the two broadcasts are built again: memory_compare may
+    //       write every vector register, and its wide path ends with a
+    //       vzeroupper that leaves the upper halves zero.
+    //
+#define SEARCH_X64_BLOCKS(LAST, STEP, BROADCAST1, BROADCAST2, BLOCK, LEAVE)                                            \
+    "mov %rsi, %r8\n   sub %r12, %r8\n   cmp $" LAST ", %r8\n   jb 6f\n   sub $" LAST ", %r8\n   mov %r8, 8(%rsp)\n"            \
+    "mov 32(%rsp), %rdi\n   mov 40(%rsp), %r10\n   movzbl (%rdx,%rdi), %eax\n" BROADCAST1 "movzbl (%rdx,%r10), %eax\n"         \
+    BROADCAST2 "lea (%rbx,%rdi), %rax\n   mov %rax, 16(%rsp)\n   lea (%rbx,%r10), %rax\n   mov %rax, 24(%rsp)\n"             \
+    "mov %rdi, 32(%rsp)\n   mov %r10, 40(%rsp)\n   mov $3, %rax\n   sub %rdi, %rax\n   sub %r10, %rax\n   mov %rax, 48(%rsp)\n"  \
+    "mov 16(%rsp), %r10\n   mov 24(%rsp), %r11\n   xor %r9, %r9\n   xor %r14d, %r14d\n"                                    \
+    "1:  " BLOCK "test %r13, %r13\n   jnz 3f\n"                                                                            \
+    "4:  add $" STEP ", %r9\n   cmp %r8, %r9\n   jbe 1b\n   test %r14, %r14\n   jnz 80f\n   mov %r8, %r9\n   mov $1, %r14d\n" \
+    "jmp 1b\n"                                                                                                           \
+    "3:  mov %r9, (%rsp)\n"                                                                                              \
+    "31:  mov (%rsp), %r9\n   bsf %r13, %rax\n   lea (%rbx,%r9), %r15\n   add %rax, %r15\n   cmp $4, %r12\n   jb 33f\n"        \
+    "mov 64(%rsp), %rcx\n   mov (%rcx), %eax\n   cmp (%r15), %eax\n   jne 32f\n   cmp $5, %r12\n   jb 70f\n"                  \
+    "mov 56(%rsp), %rax\n   test %rax, %rax\n   jz 34f\n   mov (%rcx,%rax), %rcx\n   cmp (%r15,%rax), %rcx\n   jne 32f\n"     \
+    "34:  lea 4(%r15), %rdi\n   mov 64(%rsp), %rsi\n   add $4, %rsi\n   lea -4(%r12), %rdx\n   call memory_compare\n"         \
+    "test %eax, %eax\n   jz 70f\n   cmp $16, %r12\n   jb 32f\n   mov 56(%rsp), %rax\n   cmp $8, %rax\n   jae 35f\n"            \
+    "mov %r12, %rax\n"                                                                                                   \
+    "35:  sub $8, %rax\n   mov %rax, 56(%rsp)\n   jmp 32f\n"                                                             \
+    "33:  cmp $2, %r12\n   jbe 70f\n   mov 48(%rsp), %rax\n   mov 64(%rsp), %rcx\n   movzbl (%rcx,%rax), %ecx\n"            \
+    "cmp %cl, (%r15,%rax)\n   je 70f\n"                                                                              \
+    "32:  lea -1(%r13), %rax\n   and %rax, %r13\n   jnz 31b\n"                                                         \
+    "mov (%rsp), %r9\n   mov 8(%rsp), %r8\n   mov 16(%rsp), %r10\n   mov 24(%rsp), %r11\n   mov 64(%rsp), %rdx\n"           \
+    "mov 32(%rsp), %rax\n   movzbl (%rdx,%rax), %eax\n" BROADCAST1 "mov 40(%rsp), %rax\n   movzbl (%rdx,%rax), %eax\n"      \
+    BROADCAST2 "jmp 4b\n"                                                                                                \
+    "70:  " LEAVE "jmp 7f\n"                                                                                             \
+    "80:  " LEAVE "jmp 8f\n"
+#define SEARCH_X64_AVX2_BROADCAST(N) "vmovd %eax, %xmm" N "\n   vpbroadcastb %xmm" N ", %ymm" N "\n"
+#define SEARCH_X64_SSE2_BROADCAST(N) "imul $0x01010101, %eax, %eax\n   movd %eax, %xmm" N "\n   pshufd $0, %xmm" N ", %xmm" N "\n"
+//  Sixteen starts at OFFSET of the block: register A where the rarer anchor is, then A where both are.
+#define SEARCH_X64_SSE2_FIRST(A, OFFSET) "movdqu " OFFSET "(%r10,%r9), %xmm" A "\n   pcmpeqb %xmm1, %xmm" A "\n"
+//  Whether any of the four registers has a start, THEN what follows.
+#define SEARCH_X64_SSE2_ANY(THEN)                                                                                    \
+    "movdqa %xmm0, %xmm7\n   por %xmm4, %xmm7\n   por %xmm5, %xmm7\n   por %xmm6, %xmm7\n   pmovmskb %xmm7, %r13d\n"          \
+    "test %r13d, %r13d\n   " THEN
+#define SEARCH_X64_SSE2_SECOND(A, OFFSET)                                                                              \
+    "movdqu " OFFSET "(%r11,%r9), %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pand %xmm3, %xmm" A "\n"
     ASM_LOCAL_FUNC(memory_search_prepared_core)
     //
     //       The algorithm, which matters more here than the instructions.
@@ -7737,72 +7873,43 @@ __asm__(
     "mov %rcx, %r12  # its length\n"
     "mov %r8, 32(%rsp)\n   mov %r9, 40(%rsp)\n   movq $0, 56(%rsp)  # nothing has failed yet, so nothing is known\n"
     ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", "6f")
+    ASM_NARROW("cpu_has_avx2", "50f")
+    SEARCH_X64_BLOCKS("31", "32", SEARCH_X64_AVX2_BROADCAST("1"), SEARCH_X64_AVX2_BROADCAST("2"),
+                      "vpcmpeqb (%r10,%r9), %ymm1, %ymm0\n   vpcmpeqb (%r11,%r9), %ymm2, %ymm3\n   vpand %ymm3, %ymm0, %ymm0\n"
+                      "vpmovmskb %ymm0, %r13d\n",
+                      "vzeroupper\n")
     //
-    //       How far the block loop may go. The last position a match could
-    //       start at is hay_size - needle_size; a block there reads thirty
-    //       two bytes from it and thirty two from up to needle_size - 1
-    //       further along, so the last block may start thirty one positions
-    //       before it. Under thirty one there is no whole block and the
-    //       narrow path takes it -- and the subtraction is in that order
-    //       because hay_size - needle_size - 31 on a short haystack is not a
-    //       small number, it is a very large one.
+    //       Without AVX2, sixty four starts a block in the SSE2 registers every
+    //       x86_64 has, four registers of sixteen and one test of their or. A
+    //       block is first tested at the rarer anchor alone, four compares,
+    //       and only one where it is somewhere at the second: a needle whose
+    //       rarer byte is rare pays four compares a block, as memory_first_of
+    //       would. Where it is not rare, the block that passes the first test
+    //       is most of them and the branch is wrong half the time, so a leaky
+    //       bucket at 72(%rsp) counts against the position: a pass adds eight
+    //       blocks' worth, and while the bucket is ahead the blocks test both
+    //       anchors at once. Before, this took the narrow path below at every
+    //       length:
+    //       the rarest anchor hunted by memory_first_of and every place it
+    //       appears proved by a call. grep -c 'static ' over 64 MiB of C
+    //       source spent 61 percent of its cycles in memory_compare and 35 in
+    //       memory_first_of that way.
     //
-    "mov %rsi, %r8\n   sub %r12, %r8\n   cmp $31, %r8\n   jb 6f\n   sub $31, %r8\n   mov %r8, 8(%rsp)\n   mov 32(%rsp), %rdi\n   mov 40(%rsp), %r10\n"
-    "movzbl (%rdx,%rdi), %eax\n   vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   movzbl (%rdx,%r10), %eax\n"
-    "vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   lea (%rbx,%rdi), %rax\n   mov %rax, 16(%rsp)\n"
-    "lea (%rbx,%r10), %rax\n   mov %rax, 24(%rsp)\n   mov %rdi, 32(%rsp)\n   mov %r10, 40(%rsp)\n"
-    //
-    //      Which byte of a three byte needle neither probe covers. The three
-    //      offsets are 0, 1 and 2 and two of them are taken, so the third is
-    //      what is left of their sum. Nothing reads it at any other length.
-    //
-    "mov $3, %rax\n   sub %rdi, %rax\n   sub %r10, %rax\n   mov %rax, 48(%rsp)\n   mov 16(%rsp), %r10\n   mov 24(%rsp), %r11\n   xor %r9, %r9\n   xor %r14d, %r14d\n"
-    "1:  vpcmpeqb (%r10,%r9), %ymm1, %ymm0\n   vpcmpeqb (%r11,%r9), %ymm2, %ymm3\n   vpand %ymm3, %ymm0, %ymm0\n   vpmovmskb %ymm0, %r13d\n   test %r13d, %r13d\n   jnz 3f\n"
-    //
-    //       Past the end of the block loop, one block back from the last
-    //       position rather than a byte loop for what is left. It looks at
-    //       positions already looked at, which costs a block and cannot
-    //       change the answer: everything before them was rejected, so the
-    //       first match found in it is still the first match there is.
-    //
-    "4:  add $32, %r9\n   cmp %r8, %r9\n   jbe 1b\n   test %r14, %r14\n   jnz 80f\n   mov %r8, %r9\n   mov $1, %r14d\n   jmp 1b\n"
-    //
-    //       The survivors of one block, lowest position first. Four bytes by
-    //       hand before the call, because a call for a candidate that differs
-    //       in its second byte costs more than the block it came from.
-    //
-    "3:  mov %r9, (%rsp)\n"
-    "31:  mov (%rsp), %r9\n   bsf %r13d, %eax\n   lea (%rbx,%r9), %r15\n   add %rax, %r15\n   cmp $4, %r12\n   jb 33f\n   mov 64(%rsp), %rcx\n   mov (%rcx), %eax\n   cmp (%r15), %eax\n"
-    "jne 32f\n   cmp $5, %r12\n   jb 70f  # the four were all of it\n"
-    //
-    //      Where the last candidate failed, if one has. A zero says
-    //      none has, and it is also what a needle under sixteen bytes
-    //      leaves here, because nothing below writes the slot for one.
-    //      The eight bytes are inside the needle either way: the
-    //      offset is never more than its length less eight.
-    //
-    "mov 56(%rsp), %rax\n   test %rax, %rax\n   jz 34f\n   mov (%rcx,%rax), %rcx\n   cmp (%r15,%rax), %rcx\n   jne 32f\n"
-    "34:  lea 4(%r15), %rdi\n   mov 64(%rsp), %rsi\n   add $4, %rsi\n   lea -4(%r12), %rdx\n   call memory_compare\n   test %eax, %eax\n   jz 70f\n   cmp $16, %r12\n   jb 32f\n"
-    "mov 56(%rsp), %rax\n   cmp $8, %rax\n   jae 35f\n   mov %r12, %rax\n"
-    "35:  sub $8, %rax\n   mov %rax, 56(%rsp)\n   jmp 32f\n"
-    //
-    //      Two and three bytes: both probes are ends of the needle, so a
-    //      three has one byte left in the middle and a two has none.
-    //
-    "33:  cmp $2, %r12\n   jbe 70f\n   mov 48(%rsp), %rax\n   mov 64(%rsp), %rcx\n   movzbl (%rcx,%rax), %ecx\n   cmp %cl, (%r15,%rax)\n   je 70f\n"
-    "32:  mov %r13d, %eax\n   dec %eax\n   and %eax, %r13d\n   jnz 31b\n"
-    //
-    //      Back to the block loop. What a call may have written comes off
-    //      the stack, and the two broadcasts are built again because
-    //      memory_compare ends its wide path with a vzeroupper and leaves
-    //      the upper halves zero.
-    //
-    "mov (%rsp), %r9\n   mov 8(%rsp), %r8\n   mov 16(%rsp), %r10\n   mov 24(%rsp), %r11\n"
-    "mov 64(%rsp), %rdx\n   mov 32(%rsp), %rax\n   movzbl (%rdx,%rax), %eax\n   vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
-    "mov 40(%rsp), %rax\n   movzbl (%rdx,%rax), %eax\n   vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   jmp 4b\n"
-    "70:  vzeroupper\n   jmp 7f\n"
-    "80:  vzeroupper\n   jmp 8f\n"
+    "50:  movq $-2048, 72(%rsp)\n"
+    SEARCH_X64_BLOCKS("63", "64", SEARCH_X64_SSE2_BROADCAST("1"), SEARCH_X64_SSE2_BROADCAST("2"),
+                      "cmp %r9, 72(%rsp)\n   jg 21f\n"
+                      SEARCH_X64_SSE2_FIRST("0", "0") SEARCH_X64_SSE2_FIRST("4", "16") SEARCH_X64_SSE2_FIRST("5", "32")
+                      SEARCH_X64_SSE2_FIRST("6", "48") SEARCH_X64_SSE2_ANY("jz 4f\n   addq $512, 72(%rsp)\n")
+                      SEARCH_X64_SSE2_SECOND("0", "0") SEARCH_X64_SSE2_SECOND("4", "16") SEARCH_X64_SSE2_SECOND("5", "32")
+                      SEARCH_X64_SSE2_SECOND("6", "48") "jmp 22f\n"
+                      "21:  "
+                      SEARCH_X64_SSE2_FIRST("0", "0") SEARCH_X64_SSE2_FIRST("4", "16") SEARCH_X64_SSE2_FIRST("5", "32")
+                      SEARCH_X64_SSE2_FIRST("6", "48")
+                      SEARCH_X64_SSE2_SECOND("0", "0") SEARCH_X64_SSE2_SECOND("4", "16") SEARCH_X64_SSE2_SECOND("5", "32")
+                      SEARCH_X64_SSE2_SECOND("6", "48") SEARCH_X64_SSE2_ANY("jz 4f\n")
+                      "22:  pmovmskb %xmm0, %r13d\n   pmovmskb %xmm4, %eax\n   shl $16, %eax\n   or %rax, %r13\n"
+                      "pmovmskb %xmm5, %eax\n   shl $32, %rax\n   or %rax, %r13\n   pmovmskb %xmm6, %eax\n   shl $48, %rax\n   or %rax, %r13\n",
+                      "")
     )
     //
     //       The narrow path: a machine without the wide registers, and every
@@ -7877,6 +7984,12 @@ __asm__(
     "7:  mov %r15, %rax\n"
     "9:  add $80, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_LOCAL_END(memory_search_prepared_core)
+#undef SEARCH_X64_BLOCKS
+#undef SEARCH_X64_AVX2_BROADCAST
+#undef SEARCH_X64_SSE2_BROADCAST
+#undef SEARCH_X64_SSE2_FIRST
+#undef SEARCH_X64_SSE2_ANY
+#undef SEARCH_X64_SSE2_SECOND
     //
     //       Count delimiter-separated records containing a fixed needle.
     //
@@ -7896,6 +8009,14 @@ __asm__(
     //       delimiters are touched only after a proven match. No byte is
     //       copied and no per-record search frame is built.
     //
+    //  Sixteen candidate starts at OFFSET: register A where the rarer anchor is, then A where both are.
+#define RECORDS_X64_SSE2_FIRST(A, OFFSET) "movdqu " OFFSET "(%rbx,%r8), %xmm" A "\n   pcmpeqb %xmm1, %xmm" A "\n"
+#define RECORDS_X64_SSE2_SECOND(A, OFFSET)                                                                             \
+    "movdqu " OFFSET "(%rbx,%r9), %xmm4\n   pcmpeqb %xmm2, %xmm4\n   pand %xmm4, %xmm" A "\n"
+    //  Whether any of the four registers has a start, THEN what follows.
+#define RECORDS_X64_SSE2_ANY(THEN)                                                                                   \
+    "movdqa %xmm0, %xmm11\n   por %xmm5, %xmm11\n   por %xmm7, %xmm11\n   por %xmm9, %xmm11\n   pmovmskb %xmm11, %r15d\n"       \
+    "test %r15d, %r15d\n   " THEN
     ASM_FUNC(memory_count_records_with_prepared)
     "movzbl 8(%rsp), %r11d\n   xor %eax, %eax\n   test %rcx, %rcx\n   jnz .Lmemory_records_x64_have_needle\n"
     // Empty needle: every delimiter ends a record and a nonempty suffix is
@@ -7911,7 +8032,7 @@ __asm__(
     "xor %r14d, %r14d  # records found\n"
     "mov %r8, 0(%rsp)\n   mov %r9, 8(%rsp)\n   mov %r11, 16(%rsp)\n   lea (%rdi,%rsi), %rax\n   mov %rax, 24(%rsp)  # end of the exact input span\n"
     ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", ".Lmemory_records_x64_scalar")
+    ASM_NARROW("cpu_has_avx2", ".Lmemory_records_x64_sse2_prepare")
     ASM_WIDER("cpu_has_avx512", ".Lmemory_records_x64_avx512_prepare")
     "movq $32, 32(%rsp)\n   movzbl (%rbp,%r8), %eax\n   vmovd %eax, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   movzbl (%rbp,%r9), %eax\n   vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
     "vmovd %r11d, %xmm3\n   vpbroadcastb %xmm3, %ymm3\n"
@@ -7941,7 +8062,8 @@ __asm__(
     /* Dense matches spend more time finding the record end than rejecting
        anchors. Reuse the selected ISA here, bounded by the exact input end;
        the retained anchor mask still skips later hits in this same record. */
-    ".Lmemory_records_x64_delimiter_wide:  mov 24(%rsp), %rax\n   sub %rbx, %rax\n   cmp $64, %rax\n   jb .Lmemory_records_x64_delimiter_32\n"
+    ".Lmemory_records_x64_delimiter_wide:  cmpq $16, 32(%rsp)\n   je .Lmemory_records_x64_sse2_delimiter\n"
+    "mov 24(%rsp), %rax\n   sub %rbx, %rax\n   cmp $64, %rax\n   jb .Lmemory_records_x64_delimiter_32\n"
     "cmpq $64, 32(%rsp)\n   jne .Lmemory_records_x64_delimiter_32\n   vpcmpeqb (%rbx), %zmm3, %k3\n   kmovq %k3, %rax\n   test %rax, %rax\n   jnz .Lmemory_records_x64_delimiter_found\n"
     "add $64, %rbx\n   jmp .Lmemory_records_x64_delimiter_wide\n"
     ".Lmemory_records_x64_delimiter_32:\n   cmp $32, %rax\n   jb .Lmemory_records_x64_to_delimiter\n   vpcmpeqb (%rbx), %ymm3, %ymm0\n   vpmovmskb %ymm0, %eax\n"
@@ -7949,7 +8071,7 @@ __asm__(
     ".Lmemory_records_x64_delimiter_found:\n   bsf %rax, %rax\n   add %rax, %rbx\n   jmp .Lmemory_records_x64_after_delimiter\n"
     ".Lmemory_records_x64_to_delimiter:\n   cmp 24(%rsp), %rbx\n   jae .Lmemory_records_x64_done_wide\n   mov 16(%rsp), %r11\n"
     "cmpb %r11b, (%rbx)\n   je .Lmemory_records_x64_after_delimiter\n   inc %rbx\n   jmp .Lmemory_records_x64_to_delimiter\n"
-    ".Lmemory_records_x64_after_delimiter:\n   inc %rbx\n   mov 0(%rsp), %r8\n   mov 8(%rsp), %r9\n   cmpq $64, 32(%rsp)\n   je .Lmemory_records_x64_retain\n"
+    ".Lmemory_records_x64_after_delimiter:\n   inc %rbx\n   mov 0(%rsp), %r8\n   mov 8(%rsp), %r9\n   cmpq $32, 32(%rsp)\n   jne .Lmemory_records_x64_retain\n"
     "jmp .Lmemory_records_x64_resume\n"
     /* The anchor mask may already describe matches in following records.
        Keep that work: rebase its remaining bits after the delimiter instead
@@ -7959,12 +8081,48 @@ __asm__(
     ".Lmemory_records_x64_retain:  cmp 48(%rsp), %rbx\n   jae .Lmemory_records_x64_resume\n   mov %rbx, %rcx\n   sub 40(%rsp), %rcx\n   shr %cl, %r15\n"
     "mov %rbx, 40(%rsp)\n   test %r15, %r15\n   jnz .Lmemory_records_x64_prove\n   jmp .Lmemory_records_x64_next_vector\n"
     ".Lmemory_records_x64_avx2_next:\n   add $32, %rbx\n   lea 32(%rbx), %rax\n   cmp %r13, %rax\n   jbe .Lmemory_records_x64_vector_load\n   jmp .Lmemory_records_x64_vector_done\n"
-    ".Lmemory_records_x64_next_vector:\n   cmpq $64, 32(%rsp)\n   je .Lmemory_records_x64_avx512_next\n   add $32, %rbx\n   lea 32(%rbx), %rax\n   cmp %r13, %rax\n"
+    ".Lmemory_records_x64_next_vector:\n   cmpq $64, 32(%rsp)\n   je .Lmemory_records_x64_avx512_next\n   cmpq $16, 32(%rsp)\n   je .Lmemory_records_x64_sse2_next\n   add $32, %rbx\n   lea 32(%rbx), %rax\n   cmp %r13, %rax\n"
     "jbe .Lmemory_records_x64_vector_load\n   jmp .Lmemory_records_x64_vector_done\n"
     ".Lmemory_records_x64_avx512_next:\n   mov 48(%rsp), %rbx\n   lea 64(%rbx), %rax\n   cmp %r13, %rax\n   jbe .Lmemory_records_x64_avx512_load\n"
     ".Lmemory_records_x64_avx512_tail:\n   movq $32, 32(%rsp)\n"
-    ".Lmemory_records_x64_resume:  cmpq $64, 32(%rsp)\n   je .Lmemory_records_x64_avx512\n   jmp .Lmemory_records_x64_vector\n"
-    ".Lmemory_records_x64_vector_done:\n   vzeroupper\n"
+    ".Lmemory_records_x64_resume:  cmpq $64, 32(%rsp)\n   je .Lmemory_records_x64_avx512\n   cmpq $16, 32(%rsp)\n   je .Lmemory_records_x64_sse2\n"
+    "jmp .Lmemory_records_x64_vector\n"
+    ".Lmemory_records_x64_vector_done:\n   vzeroupper\n   jmp .Lmemory_records_x64_scalar\n"
+    //
+    //      Without AVX2: sixty four candidate starts a turn in the SSE2
+    //      registers every x86_64 has, four of sixteen and one test of their
+    //      or, where this was the byte loop below; the rarer anchor alone
+    //      first, as memory_search_prepared_core has it, unless the bucket,
+    //      r10 here against the turn's start, says it is not rare. 32(%rsp) holds 16 for this
+    //      lane, which keeps its mask past a proved record and walks to the
+    //      record's end as the AVX-512 lane does, sixteen bytes a turn, and
+    //      leaves for the byte loop with nothing to clear. grep -c 'static '
+    //      over 64 MiB of C source took 9.7 instructions a byte that way.
+    //
+    ".Lmemory_records_x64_sse2_prepare:\n   movq $16, 32(%rsp)\n   movzbl (%rbp,%r8), %eax\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm1\n"
+    "pshufd $0, %xmm1, %xmm1\n   movzbl (%rbp,%r9), %eax\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    "imul $0x01010101, %r11d, %eax\n   movd %eax, %xmm3\n   pshufd $0, %xmm3, %xmm3\n"
+    "lea -2048(%rbx), %r10\n"
+    ".Lmemory_records_x64_sse2:\n   lea 64(%rbx), %rax\n   cmp %r13, %rax\n   ja .Lmemory_records_x64_scalar\n"
+    ".Lmemory_records_x64_sse2_load:  mov %rbx, 40(%rsp)\n   lea 64(%rbx), %rax\n   mov %rax, 48(%rsp)\n   cmp %rbx, %r10\n"
+    "jg .Lmemory_records_x64_sse2_both\n"
+    RECORDS_X64_SSE2_FIRST("0", "0") RECORDS_X64_SSE2_FIRST("5", "16") RECORDS_X64_SSE2_FIRST("7", "32")
+    RECORDS_X64_SSE2_FIRST("9", "48") RECORDS_X64_SSE2_ANY("jz .Lmemory_records_x64_sse2_next\n   add $512, %r10\n")
+    RECORDS_X64_SSE2_SECOND("0", "0") RECORDS_X64_SSE2_SECOND("5", "16") RECORDS_X64_SSE2_SECOND("7", "32")
+    RECORDS_X64_SSE2_SECOND("9", "48") "jmp .Lmemory_records_x64_sse2_mask\n"
+    ".Lmemory_records_x64_sse2_both:\n"
+    RECORDS_X64_SSE2_FIRST("0", "0") RECORDS_X64_SSE2_FIRST("5", "16") RECORDS_X64_SSE2_FIRST("7", "32")
+    RECORDS_X64_SSE2_FIRST("9", "48")
+    RECORDS_X64_SSE2_SECOND("0", "0") RECORDS_X64_SSE2_SECOND("5", "16") RECORDS_X64_SSE2_SECOND("7", "32")
+    RECORDS_X64_SSE2_SECOND("9", "48") RECORDS_X64_SSE2_ANY("jz .Lmemory_records_x64_sse2_next\n")
+    ".Lmemory_records_x64_sse2_mask:\n   pmovmskb %xmm0, %r15d\n   pmovmskb %xmm5, %eax\n   shl $16, %eax\n   or %rax, %r15\n"
+    "pmovmskb %xmm7, %eax\n   shl $32, %rax\n   or %rax, %r15\n   pmovmskb %xmm9, %eax\n   shl $48, %rax\n   or %rax, %r15\n"
+    "jmp .Lmemory_records_x64_prove\n"
+    ".Lmemory_records_x64_sse2_next:\n   mov 48(%rsp), %rbx\n   lea 64(%rbx), %rax\n   cmp %r13, %rax\n   jbe .Lmemory_records_x64_sse2_load\n"
+    "jmp .Lmemory_records_x64_scalar\n"
+    ".Lmemory_records_x64_sse2_delimiter:\n   mov 24(%rsp), %rax\n   sub %rbx, %rax\n   cmp $16, %rax\n   jb .Lmemory_records_x64_to_delimiter\n"
+    "movdqu (%rbx), %xmm0\n   pcmpeqb %xmm3, %xmm0\n   pmovmskb %xmm0, %eax\n   test %eax, %eax\n   jnz .Lmemory_records_x64_delimiter_found\n"
+    "add $16, %rbx\n   jmp .Lmemory_records_x64_sse2_delimiter\n"
     )
     // Baseline tail, and the entire kernel/no-AVX body.  Anchor rejection is
     // straight line; only an anchor pair survivor walks the exact needle.
@@ -7977,12 +8135,15 @@ __asm__(
     ".Lmemory_records_x64_scalar_after_delimiter:\n   inc %rbx\n   jmp .Lmemory_records_x64_scalar\n"
     ".Lmemory_records_x64_scalar_next:\n   inc %rbx\n   jmp .Lmemory_records_x64_scalar\n"
     ASM_USERSPACE_WIDE(
-    ".Lmemory_records_x64_done_wide:\n   vzeroupper\n"
+    ".Lmemory_records_x64_done_wide:\n   cmpq $16, 32(%rsp)\n   je .Lmemory_records_x64_done\n   vzeroupper\n"
     )
     ".Lmemory_records_x64_done:\n   mov %r14, %rax\n   add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
     ".Lmemory_records_x64_return:\n" ASM_RET
     ".Lmemory_records_x64_zero:\n   xor %eax, %eax\n" ASM_RET
     ASM_END(memory_count_records_with_prepared)
+#undef RECORDS_X64_SSE2_FIRST
+#undef RECORDS_X64_SSE2_SECOND
+#undef RECORDS_X64_SSE2_ANY
     //
     //       string_first_of_or_end, string_first_of_max and string_last_of_or_end -- the rest of the byte hunts.
     //

@@ -25707,6 +25707,83 @@ static p8 search_needle[200];
 static const positive search_lengths[] = {1,  2,  3,  4,  5,  6,  7,  8,  15, 16,
                                           17, 31, 32, 33, 40, 63, 64, 65, 100};
 
+/*
+        memory_search and memory_search_ascii_case against the byte loops
+        with the haystack against a page that faults at either end: every
+        size to 200 and long ones, needles of two bytes to thirty three cut
+        from the haystack, so present, and the same with one byte changed, so
+        mostly near misses, the folded search's needle with letters in the
+        other case at random, over bytes from an alphabet of four and of all
+        256. On x86_64 with AVX2 and without, where the SSE2 block loops take
+        sixty four starts a block.
+*/
+static address_any reference_memory_search_ascii_case(address_any block, positive size,
+                                                        address_any needle,
+                                                        positive needle_size);
+
+fn check_memory_search_pages()
+{
+        static const positive needles[] = {2, 3, 4, 5, 8, 15, 16, 17, 33};
+        static const positive longer[] = {511, 1000, 4096};
+        static p8 needle[64];
+        p8 address_to pages = guard_pages("memory_search pages");
+
+        if (!pages)
+                return;
+        p64 seed = 0x7a3c5e1f9b2d4c68ull;
+#if X64
+        p8 avx2 = cpu_has_avx2;
+        positive tiers = 2;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx2 = tier ? 0 : avx2;
+#endif
+                for (positive s = 0; s <= 200 + array_count(longer); s++)
+                        for (positive edge = 0; edge < 2; edge++)
+                                for (positive shape = 0; shape < 2; shape++)
+                                        for (positive n = 0; n < array_count(needles); n++)
+                                        {
+                                                positive size = s <= 200 ? s : longer[s - 201];
+                                                positive needle_size = needles[n];
+                                                p8 address_to hay = edge ? pages + 8192 - size : pages + 4096;
+
+                                                for (positive i = 0; i < size; i++)
+                                                {
+                                                        XORSHIFT64(seed);
+                                                        hay[i] = shape ? (p8)seed : (p8)("abcd"[seed % 4]);
+                                                }
+                                                for (positive miss = 0; miss < 2; miss++)
+                                                {
+                                                        XORSHIFT64(seed);
+                                                        positive from = size >= needle_size ? (positive)(seed % (size - needle_size + 1)) : 0;
+                                                        for (positive i = 0; i < needle_size; i++)
+                                                                needle[i] = i + from < size ? hay[from + i] : 'a';
+                                                        if (miss)
+                                                                needle[(seed >> 32) % needle_size] ^= 1;
+                                                        same("memory_search pages", "answer",
+                                                             (positive)memory_search(hay, size, needle, needle_size),
+                                                             (positive)reference_memory_search(hay, size, needle, needle_size));
+                                                        // Folded: the letters of the needle in the other case at random.
+                                                        for (positive i = 0; i < needle_size; i++)
+                                                                if (((seed >> (i % 64)) & 1) && byte_is_alpha(needle[i]))
+                                                                        needle[i] ^= 0x20;
+                                                        same("memory_search_ascii_case pages", "answer",
+                                                             (positive)memory_search_ascii_case(hay, size, needle, needle_size),
+                                                             (positive)reference_memory_search_ascii_case(hay, size, needle,
+                                                                                                          needle_size));
+                                                }
+                                        }
+        }
+#if X64
+        cpu_has_avx2 = avx2;
+#endif
+        memory_free(pages, 3 * 4096);
+}
+
 fn check_memory_search()
 {
         static const string_address alphabets[] = {"ab", "abc", "aaab"};
@@ -29179,6 +29256,7 @@ b32 main()
         check_riscv_alignment_floor();
 #endif
         check_memory_search();
+        check_memory_search_pages();
         check_memory_search_ascii_case();
         check_find_long();
 #if X64
