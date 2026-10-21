@@ -37742,8 +37742,9 @@ __asm__(
     //      sixteen and eight, because the last turn may be the last thing the caller owns. 12 KiB of base64 with
     //      AVX-512 off, ticks on a 9950X: 27,398 for the loops and 7,639 for this (0.44 and 1.6 bytes a tick;
     //      7.3 to 8 with VBMI). Under 32 quanta the top of the call, which finds the rows, costs more than the
-    //      symbols, and base64 -d decodes one wrapped line of 19 at a time, so it is the long unwrapped input
-    //      that this is for.
+    //      symbols. base64 -d hands a call all the quanta its buffer holds, and a call stops before the quantum
+    //      that holds a line's newline, so each wrapped line of 19 pays the top of the call, two turns, a third
+    //      that meets the newline and is thrown away, and its last three quanta in the loops below.
     //
     ".Lcodec_decode_x64_avx2:\n   cmp $6, %r8\n   je 2f\n   cmp $4, %r8\n   jne .Lcodec_decode_x64_scalar\n"
     "2:  cmp $32, %rdx\n   jb .Lcodec_decode_x64_scalar\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lcodec_decode_x64_scalar\n   push %rbx\n   push %r12\n"
