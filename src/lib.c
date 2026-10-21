@@ -40664,6 +40664,8 @@ __asm__(
         the source is read but, on riscv64 without V, the rest of the aligned
         word it begins in, which shares its page. What is written past *made
         is unspecified. There is no plain routine; every caller has the room.
+        It is the platform's, as memory_utf8_valid_span is, which it calls: a
+        build with no platform under it has neither.
 
         Sixty four bytes give the newlines and the bytes past ASCII, and each
         line to sixty four bytes is the same sixty four turned over, whatever
@@ -40686,7 +40688,7 @@ __asm__(
         aarch64 149, 199 and 1063 to 59, 60 and 495; riscv64 330, 459 and
         1580 to 218, 218 and 1346, with V 238, 367 and 1446 to 49, 50 and 589.
 */
-#ifndef KERNEL_MODE
+#if !defined(KERNEL_MODE) && !defined(STANDARD_NO_PLATFORM)
 positive memory_reverse_lines__room_64(p8 address_to destination, positive address_to made,
                                        const p8 address_to source, positive length,
                                        positive control);
