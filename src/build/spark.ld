@@ -882,6 +882,26 @@ SECTIONS
                 /* The pool tables and store blocks are carved from (lib.c), after
                    the statics so that its first page is the last of theirs. */
                 *(.bss.memory_pool_block)
+                /* The text tools' reader and output (src/sh/text.c), half a
+                   page apart mod 4096: the reader on a page, its buffer 56
+                   bytes in, and the output 2112 bytes into a page of its
+                   own, the nearest its 32-byte alignment allows. A
+                   tool that copies what it reads stores about as far into
+                   the output as it has read into the input, and where the
+                   two were 72 bytes apart, as the link happened to put them,
+                   a store landed where the next load read, mod 4096, and
+                   the load waited on it: uniq over C source took 16 percent
+                   more cycles, rev 11, head 12 with SSE2 alone. Their
+                   sections are named where they are declared; the offset is
+                   here and not in an alignment there, because any change to
+                   the objects themselves moved the whole-program build's code
+                   by a kilobyte or more and other tools by up to two percent
+                   either way. Named before the rest, which would otherwise
+                   take them, and after everything hot, which stays put. */
+                . = ALIGN(4096);
+                *(.bss.text_input)
+                . = ALIGN(4096) + 2048 + 64;
+                *(.bss.text_out_buffer)
                 *(.bss .bss.*)
                 *(.sbss .sbss.*)
                 *(COMMON)

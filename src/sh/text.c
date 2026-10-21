@@ -75,7 +75,22 @@ static bipolar sort_compare_bytes(p8 address_to one,
 #define TEXT_PATH_MAX 4096
 #define TEXT_UNSET ((positive)-1)
 
-static p8 text_out_buffer[TEXT_OUT_MAX + TEXT_ROOM];
+/*
+        The reader and the output each in a section of its own, which
+        src/build/spark.ld places half a page apart mod 4096: a tool that
+        copies what it reads stores about as far into the output as it has
+        read into the input, and a store half a page from the loads ahead of
+        it and behind it is never taken for one of them. The sections are
+        named here rather than left to -fdata-sections, which the image is
+        not built with.
+*/
+#if defined(KERNEL_MODE) || defined(__APPLE__)
+#define TEXT_PLACED(name)
+#else
+#define TEXT_PLACED(name) __attribute__((section(".bss." name)))
+#endif
+
+static p8 text_out_buffer[TEXT_OUT_MAX + TEXT_ROOM] TEXT_PLACED("text_out_buffer");
 static positive text_out_used HOT_STATE;
 static positive text_out_handle HOT_DATA = 1;
 static string_address text_name HOT_DATA = "text";
@@ -563,7 +578,11 @@ typedef struct
         p8 buffer[TEXT_READ_MAX + TEXT_ROOM];
 } text_reader;
 
-static text_reader text_input;
+// src/build/spark.ld puts this on a page and text_out_buffer half a page
+// past its buffer, mod 4096, which it counts from here.
+static text_reader text_input TEXT_PLACED("text_input");
+_Static_assert(__builtin_offsetof(text_reader, buffer) == 56,
+               "spark.ld places text_out_buffer from where text_input's buffer starts on its page");
 /* pr -r is the one line tool which deliberately suppresses an open
    diagnostic.  Keep that policy at the shared reader boundary so its merge
    cursors do not grow a second open path. */
