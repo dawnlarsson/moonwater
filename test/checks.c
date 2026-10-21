@@ -141205,9 +141205,11 @@ static fn floor_deflate_tokens(void)
 /* deflate_parse_fast against gzip's level 1 walk written out a position at
    a time: the same pairs, literals, counts, table and stopping place from
    blocks of random bytes, of a few symbols, of copies of earlier bytes, of
-   runs and of short periods, started anywhere from the first byte to past
-   the first window, with a pair limit that bites, and with a nice the
-   routine leaves to the caller. */
+   runs, of short periods and of short stretches copied in turn from 100
+   back and from exactly the window's reach (so the search past a near
+   match meets a candidate 32768 back), started anywhere from the first
+   byte to past the first window, with a pair limit that bites, and with a
+   nice the routine leaves to the caller. */
 typedef struct
 {
         p8 address_to base;
@@ -141325,9 +141327,9 @@ static fn floor_deflate_parse(void)
                 return;
         }
 #define FLOOR_RANDOM() (random ^= random << 13, random ^= random >> 17, random ^= random << 5, random)
-        for (positive trial = 0; trial < 180; trial++)
+        for (positive trial = 0; trial < 210; trial++)
         {
-                positive shape = trial % 6, total = 70000 + FLOOR_RANDOM() % 900, at = 0;
+                positive shape = trial < 180 ? trial % 6 : 6, total = 70000 + FLOOR_RANDOM() % 900, at = 0, turn = 0;
                 static const positive starts[5] = {0, 3, 4096, 33000, 41000};
                 positive pos = starts[trial % 5], start, limit;
                 floor_fast_job got, want;
@@ -141356,6 +141358,19 @@ static fn floor_deflate_parse(void)
                                                 data[at] = data[at - from];
                                                 at++;
                                         }
+                                }
+                        }
+                        else if (shape == 6)
+                        {
+                                positive from = turn++ % 2 ? 32768 : 100;
+
+                                run = 5 + FLOOR_RANDOM() % 8;
+                                if (at < 32768 + 16)
+                                        data[at++] = (p8)FLOOR_RANDOM();
+                                while (at >= 32768 + 16 && run-- && at < total)
+                                {
+                                        data[at] = data[at - from];
+                                        at++;
                                 }
                         }
                         else if (shape == 3)

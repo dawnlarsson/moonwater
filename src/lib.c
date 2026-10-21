@@ -14702,21 +14702,39 @@ __asm__(
        goes on by eight bytes a turn. The hash is (four bytes * 0x1e35a7bd)
        >> 17 as gzip.c's gzip_hash. Measured, user cycles from perf stat on a
        9950X with the walk in C as the shipped build had it, level 1, builds
-       alternated: text -10.5 percent, source tar -10.1, binary tar -21.0,
-       libdeflate -1 beaten by 5, 1 and 10 percent. Tried and not kept on
+       alternated: text -10.5 percent, source tar -10.1, binary tar -21.0.
+       After a match the search at the position past it (its hash, its
+       bucket, both sixteen byte compares and the pick) runs before the
+       insert loop. That loop's exit mispredicts about once a match, and the
+       next search's loads, which wait on the match's length, used to start
+       only after the pipeline had refilled; now they overlap it. After the
+       loop come the stop checks, then the bucket is compared with what the
+       search read (an insert into it changes both halves), and a bucket that
+       changed or a length of sixteen or more goes to the top to be searched
+       again: 5, 1.7 and 0.5 percent of matches change the bucket on text,
+       source and binary tar, and 1, 19 and 0.5 percent are long. The limit
+       is kept on the stack to free r12. Against the walk that searched at
+       the top, user cycles of gzip -1 over 64 MiB, 11 runs alternated: text
+       700.7M to 628.3M (-10.3 percent), source tar -7.3, binary tar -3.7,
+       with the same output; libdeflate 1.26 -1 takes 646.9M, 808.5M and
+       1307.8M, so 2.9, 5.1 and 16.8 percent more. Tried and not kept on
        x86-64: the insert loop as groups of eight with the last slots kept by
        cmov (branch misses fall from 10.3M to 2.0M on text but the
        instructions rise by a fifth: no change in cycles), a sixteen-bit
        table (a C experiment: 2 to 5 percent slower), a bucket read as one
-       qword inside C (no change). The arm64 and riscv64 bodies follow. */
+       qword inside C (no change), the bucket past a match prefetched as soon
+       as its length is known (text 3 percent slower), half the table (no
+       change), and a long match found by the early search extended there
+       and not at the top (0.4 to 1.1 percent slower). The arm64 and riscv64
+       bodies follow. */
     ASM_FUNC(deflate_parse_fast)
 #ifdef KERNEL_MODE
     ASM_RET
 #else
     "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   mov (%rdi), %r8\n   mov 8(%rdi), %r9\n   mov 32(%rdi), %r10\n   mov 104(%rdi), %r11d\n   mov 88(%rdi), %r14\n"
-    "mov 16(%rdi), %rax\n   xor %ecx, %ecx\n   sub $299, %rax\n   cmovb %rcx, %rax\n   mov 40(%rdi), %r12\n   cmp %rax, %r12\n   cmova %rax, %r12\n   cmpq $16, 48(%rdi)\n   jb .Ldpf_x64_done\n"
+    "mov 16(%rdi), %rax\n   xor %ecx, %ecx\n   sub $299, %rax\n   cmovb %rcx, %rax\n   mov 40(%rdi), %r12\n   cmp %rax, %r12\n   cmova %rax, %r12\n   push %r12\n   cmpq $16, 48(%rdi)\n   jb .Ldpf_x64_done\n"
     ".balign 16\n"
-    ".Ldpf_x64_top:  cmp %r12, %r10\n   jae .Ldpf_x64_done\n   mov 56(%rdi), %rax\n   cmp 112(%rdi), %rax\n   jae .Ldpf_x64_done\n"
+    ".Ldpf_x64_top:  cmp (%rsp), %r10\n   jae .Ldpf_x64_done\n   mov 56(%rdi), %rax\n   cmp 112(%rdi), %rax\n   jae .Ldpf_x64_done\n"
     "lea (%r8,%r10), %rsi\n   lea 1(%r10), %ecx\n   mov (%r9,%r11,8), %rdx\n   mov %rdx, %rax\n   shl $32, %rax\n   or %rcx, %rax\n   mov %rax, (%r9,%r11,8)\n"
     LZ_HASH_X64("1(%rsi)", "0x1e35a7bd", "17", "%r15d") "prefetcht0 (%r9,%r15,8)\n   lea -32768(%rcx), %eax\n   mov $1, %ebp\n   cmp $32768, %ecx\n   cmova %eax, %ebp\n"
     "mov %rdx, %r13\n   shr $32, %r13\n   mov %edx, %edx\n   movdqu (%rsi), %xmm0\n"
@@ -14726,10 +14744,16 @@ __asm__(
     ".Ldpf_x64_match:  mov 56(%rdi), %rbx\n   lea 1(%rbx), %rbp\n   mov %rbp, 56(%rdi)\n   mov 64(%rdi), %rbp\n   mov %r10d, %r13d\n   sub 24(%rdi), %r13d\n   mov %r13d, (%rbp,%rbx,4)\n"
     "mov 72(%rdi), %rbp\n   mov %ax, (%rbp,%rbx,2)\n   mov 80(%rdi), %rbp\n   mov %dx, (%rbp,%rbx,2)\n   lea deflate_symbol_tab(%rip), %rbp\n   lea -3(%rax), %r13d\n   movzbl (%rbp,%r13), %r13d\n   incl 1028(%r14,%r13,4)\n"
     "lea -1(%rdx), %r13d\n   mov %r13d, %ebx\n   shr $7, %ebx\n   add $256, %ebx\n   cmp $256, %r13d\n   cmovb %r13d, %ebx\n   movzbl 256(%rbp,%rbx), %ebx\n   mov 96(%rdi), %r13\n   incl (%r13,%rbx,4)\n"
-    "lea 2(%r10), %rbx\n   lea -1(%rax,%rbx), %rdx\n"
+    "lea 2(%r10), %rbx\n   add %rax, %r10\n   lea (%r8,%r10), %rsi\n   lea 1(%r10), %eax\n   " LZ_HASH_X64("(%rsi)", "0x1e35a7bd", "17", "%r11d")
+    "mov (%r9,%r11,8), %rcx\n   lea -32768(%rax), %r12d\n   mov $1, %ebp\n   cmp $32768, %eax\n   cmova %r12d, %ebp\n   movdqu (%rsi), %xmm0\n   mov %ecx, %r13d\n   mov %rcx, %rax\n   shr $32, %rax\n"
+    LZ_CAND16_X64("%r8", "%r13d", "%r13", "%ebp", "%rsi", "%xmm0", "%xmm1", "%r12", "%r12d", "%edx")
+    LZ_CAND16_X64("%r8", "%eax", "%rax", "%ebp", "%rsi", "%xmm0", "%xmm2", "%rdx", "%edx", "%ebp")
+    "cmp %r12d, %edx\n   cmova %edx, %r12d\n   cmova %eax, %r13d\n   lea 1(%r10), %rdx\n"
     ".balign 16\n"
     ".Ldpf_x64_ins:  mov (%r9,%r15,8), %rbp\n   shl $32, %rbp\n   or %rbx, %rbp\n   mov %rbp, (%r9,%r15,8)\n   " LZ_HASH_X64("(%r8,%rbx)", "0x1e35a7bd", "17", "%r15d") "   inc %rbx\n   cmp %rdx, %rbx\n   jne .Ldpf_x64_ins\n"
-    "prefetcht0 (%r9,%r15,8)\n   add %rax, %r10\n   mov %r15d, %r11d\n   jmp .Ldpf_x64_top\n"
+    "cmp (%rsp), %r10\n   jae .Ldpf_x64_done\n   mov 56(%rdi), %rax\n   cmp 112(%rdi), %rax\n   jae .Ldpf_x64_done\n   cmp (%r9,%r11,8), %rcx\n   jne .Ldpf_x64_top\n   cmp $16, %r12d\n   jae .Ldpf_x64_top\n"
+    "shl $32, %rcx\n   or %rdx, %rcx\n   mov %rcx, (%r9,%r11,8)\n   " LZ_HASH_X64("1(%rsi)", "0x1e35a7bd", "17", "%r15d") "prefetcht0 (%r9,%r15,8)\n"
+    "cmp $4, %r12d\n   jb .Ldpf_x64_literal\n   mov %r12d, %eax\n   sub %r13d, %edx\n   jmp .Ldpf_x64_match\n"
     ".Ldpf_x64_literal:  movzbl (%rsi), %eax\n   incl (%r14,%rax,4)\n   inc %r10\n   mov %r15d, %r11d\n   jmp .Ldpf_x64_top\n"
     ".Ldpf_x64_slow:  push %r12\n   push %r14\n   movd %xmm3, %eax\n   mov %ebx, %ebp\n   cmp $16, %eax\n   jne .Ldpf_x64_only2\n   mov %ecx, %r14d\n   sub %edx, %r14d\n   lea -1(%r8,%rdx), %rax\n   call .Ldpf_x64_ext\n   mov %eax, %r12d\n"
     "cmp $16, %ebp\n   jne .Ldpf_x64_sdone\n   cmp 48(%rdi), %r12\n   jae .Ldpf_x64_sdone\n   cmp $258, %r12d\n   jae .Ldpf_x64_sdone\n   lea -1(%r8,%r13), %rax\n   call .Ldpf_x64_ext\n   cmp %r12d, %eax\n   jbe .Ldpf_x64_sdone\n"
@@ -14741,7 +14765,7 @@ __asm__(
     ".Ldpf_x64_extb:  cmp $258, %ebx\n   jae .Ldpf_x64_extd\n   movzbl (%rsi,%rbx), %edx\n   cmp %dl, (%rax,%rbx)\n   jne .Ldpf_x64_extd\n   inc %ebx\n   jmp .Ldpf_x64_extb\n"
     ".Ldpf_x64_extx:  bsf %rdx, %rdx\n   shr $3, %edx\n   add %edx, %ebx\n"
     ".Ldpf_x64_extd:  mov %ebx, %eax\n   ret\n"
-    ".Ldpf_x64_done:  mov %r10, 32(%rdi)\n   mov %r11d, 104(%rdi)\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ".Ldpf_x64_done:  add $8, %rsp\n   mov %r10, 32(%rdi)\n   mov %r11d, 104(%rdi)\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
 #endif
     ASM_END(deflate_parse_fast)
     /* deflate_parse_chain walks gzip's chain levels (2 to 9: greedy, lazy and
