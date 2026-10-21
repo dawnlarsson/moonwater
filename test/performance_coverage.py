@@ -304,6 +304,11 @@ cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_fold_lines__room
       'paired timing against the walk GNU fold has, in C, a byte at a time '
       'with its column, at -w 60 over the whole lines of the first 4 MiB of src/lib.c, '
       'with AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_unique_lines__room_64',
+      'paired timing against the walk uniq had, each line end from '
+      'memory_first_of, its length and memory_compare against the line '
+      'before and a line that differs copied, over the first MiB of '
+      'src/lib.c and over that with every line four times, with AVX2 and SSE2')
 cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_cut_fields__room_64',
       'paired timing against the walk cut -f had, every boundary from '
       'memory_offsets_of_either and the kept fields copied, over 4 MiB of '

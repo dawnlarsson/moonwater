@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        422 routines (398 public, 24 local), 412 of them on all three and 10 local to one.
+        423 routines (399 public, 24 local), 413 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -300,6 +300,7 @@
           memory_translate               public  yes     yes     yes
           memory_translate_planes_u32_rect public  yes     yes     yes
           memory_translate_u32_rect      public  yes     yes     yes
+          memory_unique_lines__room_64   public  yes     yes     yes
           memory_utf8_span               public  yes     yes     yes
           memory_utf8_span_wide          local   yes     yes     yes
           memory_utf8_valid_span         public  yes     yes     yes
@@ -41410,6 +41411,401 @@ __asm__(
     "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
     ".popsection\n"
     ASM_END(memory_fold_lines__room_64)
+    ".option pop\n"
+);
+#endif
+#endif
+
+/*
+        uniq over whole lines: every line of a read set against the one
+        before it in one pass.
+
+        memory_unique_lines__room_64(destination, made, source, length,
+        state, control) takes each whole line of source -- through the last
+        delimiter in length -- as uniq takes it without -f, -s, -w, -i, -D or
+        --group, and answers how many bytes of source that is; *made is how
+        many it wrote. The line just before source, state[1] bytes and then
+        the delimiter at source[-1], is the last line read, and the group it
+        ends has state[0] lines so far; both come back for the line before
+        what was taken. control is 1 at bit 0 for -c, at bit 1 for -d and at
+        bit 2 for -u, and the delimiter in bits 8 to 15. With none of the
+        three a line that starts a group is written as it is taken, the
+        caller having written the one before source; with any, a group is
+        written when the line after it shows it has ended -- under -c its
+        count first, right in seven columns or as many as it needs, and a
+        space; not under -d if it is one line, nor under -u if it is more --
+        and the group still open when the routine stops is not. The source
+        runs 64 bytes past its length, and the destination 64 past what it
+        may be given: length with none of the three, state[1] + 1 more with
+        -d or -u, and nine times length and state[1] + 22 with -c. What is
+        written past *made is unspecified. There is no plain routine; every
+        caller has the room.
+
+        A run of lines equal to the one before them is the source equal to
+        itself a line's length back, so it is found sixty four bytes at a
+        time: each sixty four against the sixty four that far before, and
+        where they first differ is in the line that ends the run. The lines
+        before that one are counted with one division, and the line itself
+        is found from the delimiters of the same sixty four. Under -c a count
+        under ten million is its eight bytes made in a register and stored
+        once; written a byte at a time and moved, it stalled every group on
+        the store.
+
+        uniq over 52 MB of sorted words (7.5M lines in groups of about 25)
+        on a 9950X, user cycles against the walk uniq had, the mean of eight
+        layouts of lib.c: 169.7M to 69.7M, -c 175.1M to 71.2M, -d and -u the
+        same; over 64 MB of C source, nearly every line a group of its own,
+        115.9M to 96.1M and -c 143.6M to 71.0M; with SSE2 alone the words
+        172.2M to 73.2M and the source 153.1M to 98.3M. M2 Pro, lifted, the
+        lines of the first 2 MiB of src/lib.c against the walk in C: 31.4 to
+        22.3 ns a line, and with every line twenty five times 11.4 to 2.4.
+        qemu instructions a line, sorted words and C source: aarch64 101 and
+        122 to 5 and 84; riscv64 135 and 270 to 18 and 202, with V to 3 and
+        56.
+*/
+#ifndef KERNEL_MODE
+positive memory_unique_lines__room_64(p8 address_to destination, positive address_to made,
+                                      const p8 address_to source, positive length,
+                                      positive address_to state, positive control);
+#if X64
+/*
+        The walk, for a tier's masks, clips and turns. rsi the sixty four
+        being compared, rbp where the run of lines began, rbx the length of
+        a line of it and its delimiter, r13 the lines of the group, r12 the
+        end, r9 the source, rdi the cursor, r8 the control; r10 the bytes of
+        the sixty four unlike those rbx before, r11 the delimiters, r14 the
+        line that ends the run and r15 where it differs, then its delimiter.
+        The frame holds made at 0, state at 8, the output's start at 16, and
+        a count's digits from 24.
+*/
+#define UNQ_X64_COPY(TURN)                                                     \
+    "xor %eax, %eax\n1:  " TURN "   add $32, %rax\n   cmp %r11, %rax\n   jb 1b\n   add %r11, %rdi\n"
+//      The count in r13, right in seven columns and a space, at rdi: under
+//      ten million the eight bytes are made in r10, each digit ORed into
+//      spaces as 0x10 more than it, and stored at once; past that the digits
+//      are written on the stack and moved, which is rare enough to wait on.
+#define UNQ_X64_COUNT(FIELD)                                                   \
+    "cmp $10000000, %r13\n   jae 8f\n   mov $0x2020202020202020, %r10\n   mov $48, %ecx\n   mov %r13, %rax\n" \
+    "6:  mov %rax, %r11\n   mov $0xcccccccccccccccd, %rdx\n   mul %rdx\n   shr $3, %rdx\n"                \
+    "lea (%rdx,%rdx,4), %rax\n   add %rax, %rax\n   sub %rax, %r11\n   add $16, %r11\n   shl %cl, %r11\n"  \
+    "or %r11, %r10\n   sub $8, %ecx\n   mov %rdx, %rax\n   test %rax, %rax\n   jnz 6b\n"                     \
+    "mov %r10, (%rdi)\n   add $8, %rdi\n   jmp 9f\n"                       \
+    "8:  mov $0x2020202020202020, %rax\n   mov %rax, 24(%rsp)\n   mov %rax, 32(%rsp)\n   mov %rax, 40(%rsp)\n" \
+    "movb $32, 48(%rsp)\n   lea 48(%rsp), %r10\n   mov %r13, %rax\n"        \
+    "7:  mov %rax, %r11\n   mov $0xcccccccccccccccd, %rdx\n   mul %rdx\n   shr $3, %rdx\n"                \
+    "lea (%rdx,%rdx,4), %rax\n   add %rax, %rax\n   sub %rax, %r11\n   add $48, %r11d\n   dec %r10\n"     \
+    "mov %r11b, (%r10)\n   mov %rdx, %rax\n   test %rax, %rax\n   jnz 7b\n" \
+    "lea 48(%rsp), %rcx\n   sub %r10, %rcx\n" FIELD "   lea 1(%rdi,%rcx), %rdi\n9:\n"
+#define UNQ_X64_WALK(P, RUNMASK, CLIPRUN, DELIM, CLIPN, SHIFTN, SEEKMASK, TURN, FIELD, STOP) \
+    P "_run:\n   cmp %r12, %rsi\n   jae " P "_through\n" RUNMASK           \
+    "mov %r12, %rcx\n   sub %rsi, %rcx\n   cmp $64, %rcx\n   jb " P "_clip\n" \
+    "test %r10, %r10\n   jnz " P "_miss\n   add $64, %rsi\n   jmp " P "_run\n" \
+    P "_clip:\n" CLIPRUN                                                      \
+    P "_miss:\n   tzcnt %r10, %r15\n" DELIM "   cmp $64, %rcx\n   jae 2f\n" CLIPN \
+    "2:  mov %r15, %rcx\n" SHIFTN "   add %rsi, %r15\n   jmp " P "_ended\n"  \
+    P "_through:\n   mov %r12, %r15\n   xor %r11d, %r11d\n"                 \
+    /* The lines of the run before the one that ends it are the group's. */ \
+    P "_ended:\n   mov %r15, %rax\n   sub %rbp, %rax\n   mov %rbp, %r14\n   cmp %rbx, %rax\n   jb 3f\n" \
+    "xor %edx, %edx\n   div %rbx\n   add %rax, %r13\n   mov %r15, %r14\n   sub %rdx, %r14\n" \
+    "3:  cmp %r12, %r15\n   jae " STOP "\n   test %r11, %r11\n   jz " P "_seeks\n" \
+    "tzcnt %r11, %r11\n   add %r11, %r15\n   jmp " P "_found\n"             \
+    P "_seeks:\n   lea 64(%rsi), %r15\n"                                       \
+    P "_seek:\n   cmp %r12, %r15\n   jae " STOP "\n" SEEKMASK                  \
+    "mov %r12, %rcx\n   sub %r15, %rcx\n   cmp $64, %rcx\n   jae 2f\n" CLIPN   \
+    "2:  test %r11, %r11\n   jnz 4f\n   add $64, %r15\n   jmp " P "_seek\n"   \
+    "4:  tzcnt %r11, %r11\n   add %r11, %r15\n"                              \
+    /* A line that starts a group: written now, or the group it ends is.  */ \
+    P "_found:\n   test $7, %r8b\n   jnz " P "_group\n"                        \
+    "mov %r14, %r10\n   mov %r15, %r11\n   sub %r14, %r11\n   inc %r11\n" UNQ_X64_COPY(TURN) \
+    P "_new:\n   mov %r15, %rbx\n   sub %r14, %rbx\n   inc %rbx\n   mov $1, %r13d\n" \
+    "lea 1(%r15), %rsi\n   mov %rsi, %rbp\n   jmp " P "_run\n"              \
+    P "_group:\n   test $2, %r8b\n   jz 4f\n   cmp $2, %r13\n   jb " P "_new\n" \
+    "4:  test $4, %r8b\n   jz 4f\n   cmp $1, %r13\n   ja " P "_new\n"     \
+    "4:  test $1, %r8b\n   jz 5f\n" UNQ_X64_COUNT(FIELD)                   \
+    "5:  mov %r14, %r10\n   sub %rbx, %r10\n   mov %rbx, %r11\n" UNQ_X64_COPY(TURN) "jmp " P "_new\n"
+//      AVX2: the sixty four in ymm0 and ymm1, the delimiter in ymm2.
+#define UNQ_X64_YRUN                                                           \
+    "vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n   mov %rsi, %rax\n   sub %rbx, %rax\n"          \
+    "vpcmpeqb (%rax), %ymm0, %ymm3\n   vpcmpeqb 32(%rax), %ymm1, %ymm4\n   vpmovmskb %ymm3, %r10d\n"   \
+    "vpmovmskb %ymm4, %edx\n   shl $32, %rdx\n   or %rdx, %r10\n   not %r10\n"
+#define UNQ_X64_YDELIM                                                         \
+    "vpcmpeqb %ymm2, %ymm0, %ymm3\n   vpcmpeqb %ymm2, %ymm1, %ymm4\n   vpmovmskb %ymm3, %r11d\n"         \
+    "vpmovmskb %ymm4, %eax\n   shl $32, %rax\n   or %rax, %r11\n"
+#define UNQ_X64_YSEEK                                                          \
+    "vpcmpeqb (%r15), %ymm2, %ymm3\n   vpcmpeqb 32(%r15), %ymm2, %ymm4\n   vpmovmskb %ymm3, %r11d\n"     \
+    "vpmovmskb %ymm4, %eax\n   shl $32, %rax\n   or %rax, %r11\n"
+#define UNQ_X64_YTURN "vmovdqu (%r10,%rax), %ymm5\n   vmovdqu %ymm5, (%rdi,%rax)\n"
+#define UNQ_X64_YFIELD "vmovdqu (%r10), %ymm5\n   vmovdqu %ymm5, (%rdi)\n"
+//      SSE2: the sixty four in xmm0, xmm1, xmm6 and xmm7.
+#define UNQ_X64_XRUNQ(OFF, REG, SHIFT)                                         \
+    "movdqu " OFF "(%rax), %xmm3\n   pcmpeqb " REG ", %xmm3\n   pmovmskb %xmm3, %edx\n   shl $" SHIFT ", %rdx\n   or %rdx, %r10\n"
+#define UNQ_X64_XRUN                                                           \
+    "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm6\n   movdqu 48(%rsi), %xmm7\n" \
+    "mov %rsi, %rax\n   sub %rbx, %rax\n   movdqu (%rax), %xmm3\n   pcmpeqb %xmm0, %xmm3\n   pmovmskb %xmm3, %r10d\n" \
+    UNQ_X64_XRUNQ("16", "%xmm1", "16") UNQ_X64_XRUNQ("32", "%xmm6", "32") UNQ_X64_XRUNQ("48", "%xmm7", "48") \
+    "not %r10\n"
+#define UNQ_X64_XDELIMQ(REG, SHIFT)                                            \
+    "movdqa " REG ", %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, %eax\n   shl $" SHIFT ", %rax\n   or %rax, %r11\n"
+#define UNQ_X64_XDELIM                                                         \
+    "movdqa %xmm0, %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, %r11d\n"                            \
+    UNQ_X64_XDELIMQ("%xmm1", "16") UNQ_X64_XDELIMQ("%xmm6", "32") UNQ_X64_XDELIMQ("%xmm7", "48")
+#define UNQ_X64_XSEEKQ(OFF, SHIFT)                                             \
+    "movdqu " OFF "(%r15), %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, %eax\n   shl $" SHIFT ", %rax\n   or %rax, %r11\n"
+#define UNQ_X64_XSEEK                                                          \
+    "movdqu (%r15), %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, %r11d\n"                           \
+    UNQ_X64_XSEEKQ("16", "16") UNQ_X64_XSEEKQ("32", "32") UNQ_X64_XSEEKQ("48", "48")
+#define UNQ_X64_XTURN                                                          \
+    "movdqu (%r10,%rax), %xmm5\n   movdqu 16(%r10,%rax), %xmm4\n   movdqu %xmm5, (%rdi,%rax)\n   movdqu %xmm4, 16(%rdi,%rax)\n"
+#define UNQ_X64_XFIELD                                                         \
+    "movdqu (%r10), %xmm5\n   movdqu 16(%r10), %xmm4\n   movdqu %xmm5, (%rdi)\n   movdqu %xmm4, 16(%rdi)\n"
+__asm__(
+    ASM_SECTION
+    //      memory_unique_lines__room_64: rdi destination, rsi made, rdx
+    //      source, rcx length, r8 state, r9 control; rax the bytes taken.
+    ASM_FUNC(memory_unique_lines__room_64)
+    "test %rcx, %rcx\n   jnz 1f\n   movq $0, (%rsi)\n   xor %eax, %eax\n" ASM_RET
+    "1:  push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $64, %rsp\n"
+    "mov %rsi, (%rsp)\n   mov %r8, 8(%rsp)\n   mov %rdi, 16(%rsp)\n   lea (%rdx,%rcx), %r12\n"
+    "mov (%r8), %r13\n   mov 8(%r8), %rbx\n   inc %rbx\n   mov %r9, %r8\n   mov %rdx, %r9\n   mov %rdx, %rsi\n   mov %rdx, %rbp\n"
+    "mov %r8, %rax\n   shr $8, %eax\n   movzbl %al, %eax\n"
+    ASM_NARROW("cpu_has_avx2", ".Lunq_x64_sse2")
+    "vmovd %eax, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
+    UNQ_X64_WALK(".Lunq_x64_a", UNQ_X64_YRUN, "mov $-1, %rax\n   shlx %rcx, %rax, %rax\n   or %rax, %r10\n",
+                 UNQ_X64_YDELIM, "bzhi %rcx, %r11, %r11\n", "shrx %rcx, %r11, %r11\n", UNQ_X64_YSEEK, UNQ_X64_YTURN,
+                 UNQ_X64_YFIELD, ".Lunq_x64_a_stop")
+    ".Lunq_x64_a_stop:\n   vzeroupper\n   jmp .Lunq_x64_stop\n"
+    ".Lunq_x64_sse2:\n   imul $0x01010101, %eax, %eax\n   movd %eax, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    UNQ_X64_WALK(".Lunq_x64_x", UNQ_X64_XRUN, "mov $-1, %rax\n   shl %cl, %rax\n   or %rax, %r10\n", UNQ_X64_XDELIM,
+                 "mov $1, %eax\n   shl %cl, %rax\n   dec %rax\n   and %rax, %r11\n", "shr %cl, %r11\n", UNQ_X64_XSEEK,
+                 UNQ_X64_XTURN, UNQ_X64_XFIELD, ".Lunq_x64_stop")
+    //      Stopped before the line at r14: the one before it is the last taken.
+    ".Lunq_x64_stop:\n   mov 8(%rsp), %rax\n   mov %r13, (%rax)\n   lea -1(%rbx), %rdx\n   mov %rdx, 8(%rax)\n"
+    "mov (%rsp), %rax\n   mov %rdi, %rdx\n   sub 16(%rsp), %rdx\n   mov %rdx, (%rax)\n   mov %r14, %rax\n   sub %r9, %rax\n"
+    "add $64, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_unique_lines__room_64)
+);
+
+#elif ARM64
+/*
+        The same walk: x6 the sixty four being compared, x7 where the run of
+        lines began, x8 the length of a line of it and its delimiter, x9 the
+        lines of the group, x10 the end, x2 the source, x0 the cursor and x3
+        where it started, x4 the state and x5 the control; x13 the bytes
+        unlike those x8 before, x14 the delimiters, x11 the line that ends
+        the run and x12 where it differs, then its delimiter. The sixty four
+        are v0 to v3 and those before them v4 to v7, a run of equal ones
+        told by the least of their compares before any mask is made; v28 the
+        delimiter, v31 the lanes' bits, copies in q16 and q17.
+*/
+#define NEON_UNQ_MASK(OUT)                                                     \
+    "and v4.16b, v4.16b, v31.16b\n   and v5.16b, v5.16b, v31.16b\n   and v6.16b, v6.16b, v31.16b\n"    \
+    "and v7.16b, v7.16b, v31.16b\n   addp v4.16b, v4.16b, v5.16b\n   addp v6.16b, v6.16b, v7.16b\n"      \
+    "addp v4.16b, v4.16b, v6.16b\n   addp v4.16b, v4.16b, v4.16b\n   fmov " OUT ", d4\n"
+#define NEON_UNQ_DELIMS                                                        \
+    "cmeq v4.16b, v0.16b, v28.16b\n   cmeq v5.16b, v1.16b, v28.16b\n   cmeq v6.16b, v2.16b, v28.16b\n"   \
+    "cmeq v7.16b, v3.16b, v28.16b\n" NEON_UNQ_MASK("x14")
+//      LEN bytes from SRC at x0, thirty two a turn, the room taking what is past them; x15 and x16 spent.
+#define NEON_UNQ_COPY(SRC, LEN)                                                \
+    "mov x16, " SRC "\n   add x15, x0, " LEN "\n"                                 \
+    "1:  ldp q16, q17, [x16], #32\n   stp q16, q17, [x0], #32\n   cmp x0, x15\n   b.lo 1b\n   mov x0, x15\n"
+//      x14 &= the bits below x15 when x15 is under sixty four; x16 spent.
+#define NEON_UNQ_CLIP                                                          \
+    "cmp x15, #64\n   b.hs 2f\n   mov x16, #1\n   lsl x16, x16, x15\n   sub x16, x16, #1\n   and x14, x14, x16\n2:\n"
+//      The count in x9 as on x86_64: under ten million eight bytes made in x13; past it digits on the stack.
+#define NEON_UNQ_COUNT                                                         \
+    "movz x17, #0xcccd\n   movk x17, #0xcccc, lsl #16\n   movk x17, #0xcccc, lsl #32\n   movk x17, #0xcccc, lsl #48\n" \
+    "movz x16, #0x9680\n   movk x16, #0x98, lsl #16\n   cmp x9, x16\n   b.hs 8f\n"                            \
+    "mov x13, #0x2020202020202020\n   mov x14, #48\n   mov x15, x9\n"                                         \
+    "6:  umulh x16, x15, x17\n   lsr x16, x16, #3\n   add x6, x16, x16, lsl #2\n   sub x6, x15, x6, lsl #1\n" \
+    "add x6, x6, #16\n   lsl x6, x6, x14\n   orr x13, x13, x6\n   sub x14, x14, #8\n   mov x15, x16\n   cbnz x15, 6b\n" \
+    "str x13, [x0], #8\n   b 9f\n"                                         \
+    "8:  sub sp, sp, #64\n   mov x13, #0x2020202020202020\n   stp x13, x13, [sp, #16]\n   stp x13, x13, [sp, #32]\n" \
+    "mov w13, #32\n   strb w13, [sp, #48]\n   add x7, sp, #48\n   mov x15, x9\n"                              \
+    "7:  umulh x16, x15, x17\n   lsr x16, x16, #3\n   add x6, x16, x16, lsl #2\n   sub x6, x15, x6, lsl #1\n" \
+    "add x6, x6, #48\n   strb w6, [x7, #-1]!\n   mov x15, x16\n   cbnz x15, 7b\n"                            \
+    "add x13, sp, #49\n   sub x13, x13, x7\n   ldp q16, q17, [x7]\n   stp q16, q17, [x0]\n   add x0, x0, x13\n" \
+    "add sp, sp, #64\n9:\n"
+__asm__(
+    ASM_SECTION
+    //      memory_unique_lines__room_64: x0 destination, x1 made, x2 source,
+    //      x3 length, x4 state, x5 control; x0 the bytes taken.
+    ASM_FUNC(memory_unique_lines__room_64)
+    "cbnz x3, 1f\n   str xzr, [x1]\n   mov x0, #0\n" ASM_RET
+    "1:  add x10, x2, x3\n   mov x3, x0\n   ldp x9, x8, [x4]\n   add x8, x8, #1\n   mov x6, x2\n   mov x7, x2\n"
+    "ubfx x13, x5, #8, #8\n   dup v28.16b, w13\n   movz x13, #0x0201\n   movk x13, #0x0804, lsl #16\n"
+    "movk x13, #0x2010, lsl #32\n   movk x13, #0x8040, lsl #48\n   dup v31.2d, x13\n"
+    ".Lunq_arm64_run:\n   cmp x6, x10\n   b.hs .Lunq_arm64_through\n"
+    "ldp q0, q1, [x6]\n   ldp q2, q3, [x6, #32]\n   sub x13, x6, x8\n   ldp q4, q5, [x13]\n   ldp q6, q7, [x13, #32]\n"
+    "cmeq v4.16b, v0.16b, v4.16b\n   cmeq v5.16b, v1.16b, v5.16b\n   cmeq v6.16b, v2.16b, v6.16b\n   cmeq v7.16b, v3.16b, v7.16b\n"
+    "and v18.16b, v4.16b, v5.16b\n   and v19.16b, v6.16b, v7.16b\n   and v18.16b, v18.16b, v19.16b\n   uminv b18, v18.16b\n"
+    "fmov w13, s18\n   sub x15, x10, x6\n   cmp x15, #64\n   b.lo .Lunq_arm64_mask\n   cmp w13, #255\n   b.ne .Lunq_arm64_mask\n"
+    "add x6, x6, #64\n   b .Lunq_arm64_run\n"
+    ".Lunq_arm64_mask:\n" NEON_UNQ_MASK("x13") "mvn x13, x13\n   cmp x15, #64\n   b.hs .Lunq_arm64_miss\n"
+    "mov x16, #-1\n   lsl x16, x16, x15\n   orr x13, x13, x16\n"
+    ".Lunq_arm64_miss:\n   rbit x12, x13\n   clz x12, x12\n" NEON_UNQ_DELIMS NEON_UNQ_CLIP
+    "lsr x14, x14, x12\n   add x12, x12, x6\n   b .Lunq_arm64_ended\n"
+    ".Lunq_arm64_through:\n   mov x12, x10\n   mov x14, #0\n"
+    //      The lines of the run before the one that ends it are the group's.
+    ".Lunq_arm64_ended:\n   sub x15, x12, x7\n   mov x11, x7\n   cmp x15, x8\n   b.lo 3f\n"
+    "udiv x16, x15, x8\n   add x9, x9, x16\n   msub x17, x16, x8, x15\n   sub x11, x12, x17\n"
+    "3:  cmp x12, x10\n   b.hs .Lunq_arm64_stop\n   cbz x14, .Lunq_arm64_seeks\n   rbit x14, x14\n   clz x14, x14\n"
+    "add x12, x12, x14\n   b .Lunq_arm64_found\n"
+    ".Lunq_arm64_seeks:\n   add x12, x6, #64\n"
+    ".Lunq_arm64_seek:\n   cmp x12, x10\n   b.hs .Lunq_arm64_stop\n   ldp q0, q1, [x12]\n   ldp q2, q3, [x12, #32]\n"
+    NEON_UNQ_DELIMS "sub x15, x10, x12\n" NEON_UNQ_CLIP "cbnz x14, 4f\n   add x12, x12, #64\n   b .Lunq_arm64_seek\n"
+    "4:  rbit x14, x14\n   clz x14, x14\n   add x12, x12, x14\n"
+    //      A line that starts a group: written now, or the group it ends is.
+    ".Lunq_arm64_found:\n   tst x5, #7\n   b.ne .Lunq_arm64_group\n   sub x13, x12, x11\n   add x13, x13, #1\n"
+    NEON_UNQ_COPY("x11", "x13")
+    ".Lunq_arm64_new:\n   sub x8, x12, x11\n   add x8, x8, #1\n   mov x9, #1\n   add x6, x12, #1\n   mov x7, x6\n   b .Lunq_arm64_run\n"
+    ".Lunq_arm64_group:\n   tbz x5, #1, 4f\n   cmp x9, #2\n   b.lo .Lunq_arm64_new\n"
+    "4:  tbz x5, #2, 4f\n   cmp x9, #1\n   b.hi .Lunq_arm64_new\n"
+    "4:  tbz x5, #0, 5f\n" NEON_UNQ_COUNT
+    "5:  sub x13, x11, x8\n" NEON_UNQ_COPY("x13", "x8") "b .Lunq_arm64_new\n"
+    //      Stopped before the line at x11: the one before it is the last taken.
+    ".Lunq_arm64_stop:\n   str x9, [x4]\n   sub x13, x8, #1\n   str x13, [x4, #8]\n   sub x13, x0, x3\n   str x13, [x1]\n"
+    "sub x0, x11, x2\n" ASM_RET
+    ASM_END(memory_unique_lines__room_64)
+);
+#elif RISCV64
+/*
+        With V, the same walk: t0 the sixty four being compared, t1 where
+        the run of lines began, t2 the length of a line of it and its
+        delimiter, t3 the lines of the group, a3 the end, a2 the source, a0
+        the cursor and s3 where it started, a4 the state and a5 the control,
+        s4 the delimiter; a6 the bytes unlike those t2 before, a7 the
+        delimiters, t4 the line that ends the run and t5 where it differs,
+        then its delimiter. Masks are a bit a byte, read out with vmv.x.s,
+        and a bit's place is de Bruijn's multiply by s0 into the table at s1;
+        copies are exact, a vsetvli a turn of up to a hundred and twenty
+        eight bytes at the smallest VLEN.
+
+        Without V the run is compared a byte at a time, four a turn, the
+        delimiter found a word at a time in the aligned words from where the
+        run differs -- the carry free zero test of the word xor the
+        delimiter in each byte, s10 -- and a line copied eight bytes a turn,
+        the room taking what is past it.
+*/
+#define UNQ_RV_INDEX(BIT, OUT)                                                 \
+    "mul " OUT ", " BIT ", s0\n   srli " OUT ", " OUT ", 58\n   add " OUT ", " OUT ", s1\n   lbu " OUT ", 0(" OUT ")\n"
+//      a7 &= the bits below s5 when s5 is under sixty four; t6 spent.
+#define UNQ_RV_CLIP                                                            \
+    "bgeu s5, s2, 2f\n   li t6, 1\n   sll t6, t6, s5\n   addi t6, t6, -1\n   and a7, a7, t6\n2:\n"
+//      LEN bytes from SRC at a0, both consumed; s8 spent.
+#define UNQ_RV_VCOPY(SRC, LEN)                                                 \
+    "1:  vsetvli s8, " LEN ", e8, m8, ta, ma\n   vle8.v v16, (" SRC ")\n   vse8.v v16, (a0)\n   add " SRC ", " SRC ", s8\n" \
+    "add a0, a0, s8\n   sub " LEN ", " LEN ", s8\n   bnez " LEN ", 1b\n"
+//      Eight bytes a turn, the room taking what is past the length; LEN, s7 and s8 spent.
+#define UNQ_RV_SCOPY(SRC, LEN)                                                 \
+    "add s7, a0, " LEN "\n1:  lbu " LEN ", 0(" SRC ")\n   lbu s8, 1(" SRC ")\n   sb " LEN ", 0(a0)\n   sb s8, 1(a0)\n" \
+    "lbu " LEN ", 2(" SRC ")\n   lbu s8, 3(" SRC ")\n   sb " LEN ", 2(a0)\n   sb s8, 3(a0)\n"            \
+    "lbu " LEN ", 4(" SRC ")\n   lbu s8, 5(" SRC ")\n   sb " LEN ", 4(a0)\n   sb s8, 5(a0)\n"            \
+    "lbu " LEN ", 6(" SRC ")\n   lbu s8, 7(" SRC ")\n   sb " LEN ", 6(a0)\n   sb s8, 7(a0)\n"            \
+    "addi " SRC ", " SRC ", 8\n   addi a0, a0, 8\n   bltu a0, s7, 1b\n   mv a0, s7\n"
+/*
+        The count in t3 as on the others, into s6 under ten million: the
+        digits from s9's multiply, ORed into spaces as 0x10 more than each;
+        past that on the stack. STORE puts s6's eight bytes at a0.
+*/
+#define UNQ_RV_COUNT(STORE, MOVE)                                              \
+    "li s5, 10000000\n   bgeu t3, s5, 8f\n   li s6, 0x2020202020202020\n   li s7, 48\n   mv s8, t3\n"     \
+    "6:  mulhu t6, s8, s9\n   srli t6, t6, 3\n   slli s5, t6, 3\n   sub s5, s8, s5\n   slli a6, t6, 1\n"      \
+    "sub s5, s5, a6\n   addi s5, s5, 16\n   sll s5, s5, s7\n   or s6, s6, s5\n   addi s7, s7, -8\n   mv s8, t6\n" \
+    "bnez s8, 6b\n" STORE "   addi a0, a0, 8\n   j 9f\n"                    \
+    "8:  addi sp, sp, -64\n   li s6, 0x2020202020202020\n   sd s6, 16(sp)\n   sd s6, 24(sp)\n   sd s6, 32(sp)\n" \
+    "sd s6, 40(sp)\n   li s6, 32\n   sb s6, 48(sp)\n   addi a7, sp, 48\n   mv s8, t3\n"                       \
+    "7:  mulhu t6, s8, s9\n   srli t6, t6, 3\n   slli s5, t6, 3\n   sub s5, s8, s5\n   slli a6, t6, 1\n"      \
+    "sub s5, s5, a6\n   addi s5, s5, 48\n   addi a7, a7, -1\n   sb s5, 0(a7)\n   mv s8, t6\n   bnez s8, 7b\n" \
+    "addi s7, sp, 49\n   sub s7, s7, a7\n" MOVE "   addi sp, sp, 64\n9:\n"
+#define UNQ_RV_VSTORE                                                          \
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.s.x v2, s6\n   vsetivli zero, 8, e8, m1, ta, ma\n   vse8.v v2, (a0)\n"
+#define UNQ_RV_SSTORE                                                          \
+    "sb s6, 0(a0)\n   srli s6, s6, 8\n   sb s6, 1(a0)\n   srli s6, s6, 8\n   sb s6, 2(a0)\n   srli s6, s6, 8\n"    \
+    "sb s6, 3(a0)\n   srli s6, s6, 8\n   sb s6, 4(a0)\n   srli s6, s6, 8\n   sb s6, 5(a0)\n   srli s6, s6, 8\n"    \
+    "sb s6, 6(a0)\n   srli s6, s6, 8\n   sb s6, 7(a0)\n"
+//      The digits at a7 and the space, s7 bytes, moved to a0 and the cursor past them.
+#define UNQ_RV_VMOVE "mv s6, a7\n   mv s5, s7\n" UNQ_RV_VCOPY("s6", "s5")
+#define UNQ_RV_SMOVE "mv s6, a7\n   mv s5, s7\n" "1:  lbu s8, 0(s6)\n   sb s8, 0(a0)\n   addi s6, s6, 1\n   addi a0, a0, 1\n   addi s5, s5, -1\n   bnez s5, 1b\n"
+/*
+        From t5 found (where its line is t4, ending a run of t3 lines of t2
+        each): a line that starts a group is written now, or the group it
+        ends is; then the line is the run's first. The control's tests are
+        the same for either path.
+*/
+#define UNQ_RV_FOUND(P, COPY, COUNT)                                           \
+    P "_found:\n   andi t6, a5, 7\n   bnez t6, " P "_group\n   mv s6, t4\n   sub s5, t5, t4\n   addi s5, s5, 1\n" COPY("s6", "s5") \
+    P "_new:\n   sub t2, t5, t4\n   addi t2, t2, 1\n   li t3, 1\n   addi t0, t5, 1\n   mv t1, t0\n   j " P "_run\n" \
+    P "_group:\n   andi t6, a5, 2\n   beqz t6, 4f\n   li t6, 2\n   bltu t3, t6, " P "_new\n"                    \
+    "4:  andi t6, a5, 4\n   beqz t6, 4f\n   li t6, 1\n   bltu t6, t3, " P "_new\n"                             \
+    "4:  andi t6, a5, 1\n   beqz t6, 5f\n" COUNT                                                                    \
+    "5:  sub s6, t4, t2\n   mv s5, t2\n" COPY("s6", "s5") "j " P "_new\n"
+//      The lines of the run before the one that ends it at t5 are the group's.
+#define UNQ_RV_ENDED(P)                                                        \
+    P "_ended:\n   sub s5, t5, t1\n   mv t4, t1\n   bltu s5, t2, 3f\n   divu t6, s5, t2\n   add t3, t3, t6\n"           \
+    "mul s6, t6, t2\n   add t4, t1, s6\n3:  bgeu t5, a3, .Lunq_rv_stop\n"
+__asm__(
+    ASM_SECTION
+    ".option push\n   .option arch, +v\n"
+    //      memory_unique_lines__room_64: a0 destination, a1 made, a2 source,
+    //      a3 length, a4 state, a5 control; a0 the bytes taken.
+    ASM_FUNC(memory_unique_lines__room_64)
+    "bnez a3, 1f\n   sd zero, 0(a1)\n   li a0, 0\n" ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "1:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 2f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n   addi sp, sp, 16\n   j memory_unique_lines__room_64\n"
+#else
+    "1:  li t3, 1\n"
+#endif
+    "2:  addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "li s5, 2\n   mv s6, t3\n   mv s3, a0\n   add a3, a2, a3\n   ld t3, 0(a4)\n   ld t2, 8(a4)\n   addi t2, t2, 1\n   mv t0, a2\n   mv t1, a2\n"
+    "srli s4, a5, 8\n   andi s4, s4, 255\n   li s2, 64\n   li s9, 0xcccccccccccccccd\n   bne s6, s5, .Lunq_rv_scalar\n"
+    "li s0, 0x03f79d71b4cb0a89\n   lla s1, .Lunq_rv_bits\n"
+    ".Lunq_rv_v_run:\n   bgeu t0, a3, .Lunq_rv_v_through\n   vsetvli zero, s2, e8, m4, ta, ma\n   vle8.v v8, (t0)\n"
+    "sub t6, t0, t2\n   vle8.v v12, (t6)\n   vmsne.vv v0, v8, v12\n   vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s a6, v0\n"
+    "sub s5, a3, t0\n   bltu s5, s2, .Lunq_rv_v_clip\n   bnez a6, .Lunq_rv_v_miss\n   addi t0, t0, 64\n   j .Lunq_rv_v_run\n"
+    ".Lunq_rv_v_clip:\n   li t6, -1\n   sll t6, t6, s5\n   or a6, a6, t6\n"
+    ".Lunq_rv_v_miss:\n   neg t6, a6\n   and t6, t6, a6\n" UNQ_RV_INDEX("t6", "t5")
+    "vsetvli zero, s2, e8, m4, ta, ma\n   vmseq.vx v1, v8, s4\n   vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s a7, v1\n" UNQ_RV_CLIP
+    "srl a7, a7, t5\n   add t5, t5, t0\n   j .Lunq_rv_v_ended\n"
+    ".Lunq_rv_v_through:\n   mv t5, a3\n   li a7, 0\n"
+    UNQ_RV_ENDED(".Lunq_rv_v")
+    "beqz a7, .Lunq_rv_v_seeks\n   neg t6, a7\n   and t6, t6, a7\n" UNQ_RV_INDEX("t6", "s6") "add t5, t5, s6\n   j .Lunq_rv_v_found\n"
+    ".Lunq_rv_v_seeks:\n   addi t5, t0, 64\n"
+    ".Lunq_rv_v_seek:\n   bgeu t5, a3, .Lunq_rv_stop\n   vsetvli zero, s2, e8, m4, ta, ma\n   vle8.v v8, (t5)\n   vmseq.vx v1, v8, s4\n"
+    "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s a7, v1\n   sub s5, a3, t5\n" UNQ_RV_CLIP
+    "bnez a7, 4f\n   addi t5, t5, 64\n   j .Lunq_rv_v_seek\n"
+    "4:  neg t6, a7\n   and t6, t6, a7\n" UNQ_RV_INDEX("t6", "s6") "add t5, t5, s6\n"
+    UNQ_RV_FOUND(".Lunq_rv_v", UNQ_RV_VCOPY, UNQ_RV_COUNT(UNQ_RV_VSTORE, UNQ_RV_VMOVE))
+    //      Without V: s10 the delimiter in every byte, s11 0x7f in every byte, s0 the byte index's multiplier.
+    ".Lunq_rv_scalar:\n   li s5, 0x0101010101010101\n   mul s10, s4, s5\n   li s11, 0x7f7f7f7f7f7f7f7f\n   li s0, 0x0001020304050607\n"
+    ".Lunq_rv_s_run:\n   sub t6, t0, t2\n   addi s7, a3, -4\n"
+    "1:  bgtu t0, s7, 2f\n   lbu s5, 0(t0)\n   lbu s6, 0(t6)\n   bne s5, s6, .Lunq_rv_s_miss\n   lbu s5, 1(t0)\n   lbu s6, 1(t6)\n"
+    "bne s5, s6, 3f\n   lbu s5, 2(t0)\n   lbu s6, 2(t6)\n   bne s5, s6, 4f\n   lbu s5, 3(t0)\n   lbu s6, 3(t6)\n   bne s5, s6, 5f\n"
+    "addi t0, t0, 4\n   addi t6, t6, 4\n   j 1b\n"
+    "5:  addi t0, t0, 1\n4:  addi t0, t0, 1\n3:  addi t0, t0, 1\n   j .Lunq_rv_s_miss\n"
+    "2:  bgeu t0, a3, .Lunq_rv_s_through\n   lbu s5, 0(t0)\n   lbu s6, 0(t6)\n   bne s5, s6, .Lunq_rv_s_miss\n"
+    "addi t0, t0, 1\n   addi t6, t6, 1\n   j 2b\n"
+    ".Lunq_rv_s_through:\n   mv t5, a3\n   j .Lunq_rv_s_ended\n"
+    ".Lunq_rv_s_miss:\n   mv t5, t0\n"
+    UNQ_RV_ENDED(".Lunq_rv_s")
+    //      The delimiter at or after t5: the aligned word it is in, the bytes before t5 dropped, then the words on.
+    "andi s5, t5, -8\n   sub s6, t5, s5\n   slli s6, s6, 3\n   li s7, -1\n   sll s7, s7, s6\n"
+    "6:  ld s6, 0(s5)\n   xor s6, s6, s10\n   and s8, s6, s11\n   add s8, s8, s11\n   or s8, s8, s6\n   or s8, s8, s11\n"
+    "not s8, s8\n   and s8, s8, s7\n   bnez s8, 7f\n   addi s5, s5, 8\n   li s7, -1\n   bltu s5, a3, 6b\n   j .Lunq_rv_stop\n"
+    "7:  neg s6, s8\n   and s8, s8, s6\n   srli s8, s8, 7\n   mul s8, s8, s0\n   srli s8, s8, 56\n   add t5, s5, s8\n"
+    "bgeu t5, a3, .Lunq_rv_stop\n"
+    UNQ_RV_FOUND(".Lunq_rv_s", UNQ_RV_SCOPY, UNQ_RV_COUNT(UNQ_RV_SSTORE, UNQ_RV_SMOVE))
+    //      Stopped before the line at t4: the one before it is the last taken.
+    ".Lunq_rv_stop:\n   sd t3, 0(a4)\n   addi t6, t2, -1\n   sd t6, 8(a4)\n   sub t6, a0, s3\n   sd t6, 0(a1)\n   sub a0, t4, a2\n"
+    "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    ".pushsection .rodata\n"
+    //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
+    ".Lunq_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
+    "   .byte 63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6\n"
+    ".popsection\n"
+    ASM_END(memory_unique_lines__room_64)
     ".option pop\n"
 );
 #endif

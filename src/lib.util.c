@@ -8158,6 +8158,42 @@ static inline INLINE positive fold_lines_room(library_fold_entry entry, p8 addre
         fold_lines_room(memory_fold_lines__room_64, (destination), (made), (source),   \
                         (length), (width), (control), 64)
 
+#define MEMORY_UNIQUE_LINES__ROOM(room, destination, made, source, length, state, control) \
+        LIBRARY_PASTE(memory_unique_lines__room_, room)((destination), (made), (source),    \
+                                                       (length), (state), (control))
+
+typedef positive (*library_unique_entry)(p8 address_to, positive address_to, const p8 address_to,
+                                         positive, positive address_to, positive);
+
+//      And for uniq's, whose output is bounded by its mode: the destination's room is past that bound.
+static inline INLINE positive unique_lines_room(library_unique_entry entry, p8 address_to destination,
+                                                positive address_to made, const p8 address_to source,
+                                                positive length, positive address_to state,
+                                                positive control, positive room)
+{
+#ifdef MOONWATER_RANGES_CHECKED
+        positive most = control & 1   ? 9 * length + state[1] + 22
+                        : control & 6 ? length + state[1] + 1
+                                      : length;
+
+        if (__builtin_dynamic_object_size(source, 1) < length + room ||
+            __builtin_dynamic_object_size(destination, 1) < most + room)
+                __builtin_trap();
+        (void)((const volatile p8 address_to)source)[length + room - 1];
+#endif
+        positive taken = entry(destination, made, source, length, state, control);
+#ifdef MOONWATER_RANGES_CHECKED
+        volatile p8 address_to spoiled = destination + address_to made;
+        for (positive at = 0; at < room; at++)
+                spoiled[at] = 0xa5;
+#endif
+        return taken;
+}
+
+#define memory_unique_lines__room_64(destination, made, source, length, state, control) \
+        unique_lines_room(memory_unique_lines__room_64, (destination), (made), (source),   \
+                          (length), (state), (control), 64)
+
 //      set-literal
 /*
         A macro names itself in its own replacement, which the preprocessor

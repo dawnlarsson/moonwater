@@ -48080,6 +48080,8 @@ unsigned long long memory_reverse_lines__room_64(unsigned char *, unsigned long 
                                                  unsigned long long, unsigned long long);
 unsigned long long memory_fold_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
                                               unsigned long long, unsigned long long, unsigned long long);
+unsigned long long memory_unique_lines__room_64(unsigned char *, unsigned long long *, const unsigned char *,
+                                                unsigned long long, unsigned long long *, unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
 
@@ -48637,6 +48639,175 @@ static unsigned long long ranged_fold_cases(unsigned char *d_end, unsigned char 
         return faults;
 }
 
+/*
+        memory_unique_lines__room_64 against uniq a line at a time: groups of
+        one to thirty lines and now and then two hundred, of every length to
+        300 and of long ones, from an alphabet of three so that lines alike
+        but for a byte or a length are common; every mix of -c, -d and -u,
+        the newline and NUL for the delimiter; the group open on entry of one
+        line, of five, and of just under and just at ten million, its line
+        the source's first or not. The line before the source is in the same
+        run, and the source's room holds the delimiter, so a run that took a
+        line from the room would answer wrong; the rooms end at a page that
+        faults, and then the line before the source starts just after one,
+        which is what proves nothing before it is read.
+*/
+static unsigned long long ranged_uniq_count(unsigned char *out, unsigned long long count)
+{
+        unsigned char digits[24];
+        unsigned long long n = 0, made = 0;
+
+        do
+                digits[n++] = (unsigned char)('0' + count % 10);
+        while (count /= 10);
+        for (unsigned long long pad = n; pad < 7; pad++)
+                out[made++] = ' ';
+        while (n)
+                out[made++] = digits[--n];
+        out[made++] = ' ';
+        return made;
+}
+
+static unsigned long long ranged_uniq_reference(unsigned char *out, const unsigned char *in, unsigned long long length,
+                                                unsigned long long *state, unsigned long long control,
+                                                unsigned long long *taken)
+{
+        unsigned char delimiter = (unsigned char)(control >> 8);
+        int counting = (int)(control & 1), repeated = (int)(control >> 1 & 1), unique = (int)(control >> 2 & 1);
+        const unsigned char *previous = in - state[1] - 1;
+        unsigned long long previous_length = state[1], count = state[0], made = 0, start = 0;
+
+        for (unsigned long long at = 0; at < length; at++)
+        {
+                if (in[at] != delimiter)
+                        continue;
+                const unsigned char *line = in + start;
+                unsigned long long size = at - start;
+
+                if (size == previous_length && ranged_same(line, previous, size))
+                        count++;
+                else
+                {
+                        if (!(control & 7))
+                        {
+                                for (unsigned long long i = 0; i <= size; i++)
+                                        out[made++] = line[i];
+                        }
+                        else if (!(repeated && count < 2) && !(unique && count > 1))
+                        {
+                                if (counting)
+                                        made += ranged_uniq_count(out + made, count);
+                                for (unsigned long long i = 0; i <= previous_length; i++)
+                                        out[made++] = previous[i];
+                        }
+                        count = 1;
+                }
+                previous = line;
+                previous_length = size;
+                start = at + 1;
+        }
+        *taken = start;
+        state[0] = count;
+        state[1] = previous_length;
+        return made;
+}
+
+static unsigned char ranged_uniq_want[9 * 20000 + 1024];
+
+//      Lines from an alphabet of three in groups, and now and then one alike but for its last byte.
+static void ranged_uniq_fill(unsigned char *run, unsigned long long length, unsigned char delimiter, unsigned mode)
+{
+        unsigned char line[300];
+        unsigned long long at = 0;
+
+        while (at < length)
+        {
+                unsigned r = ranged_byte();
+                unsigned long long size = mode & 1 ? r % 12 : (unsigned long long)r * ranged_byte() / 217;
+                unsigned repeat = 1 + ranged_byte() % (mode & 2 ? 30 : 3);
+
+                if (ranged_byte() == 7)
+                        size = 64 + ranged_byte() % 200;
+                if (ranged_byte() == 9)
+                        repeat = 200;
+                for (unsigned long long i = 0; i < size; i++)
+                        line[i] = (unsigned char)('a' + ranged_byte() % 3);
+                line[size] = delimiter;
+                for (unsigned k = 0; k < repeat && at < length; k++)
+                {
+                        if (k && size && ranged_byte() < 8)
+                                line[size - 1] ^= 1;
+                        for (unsigned long long i = 0; i <= size && at < length; i++)
+                                run[at++] = line[i];
+                }
+        }
+}
+
+static unsigned char ranged_uniq_made[20000];
+
+static unsigned long long ranged_uniq_cases(unsigned char *d_end, unsigned char *s_end, unsigned char *s_front)
+{
+        static const unsigned long long longs[] = {1000, 4096, 5000, 20000};
+        static const unsigned long long counts[] = {1, 5, 9999999, 10000000};
+        unsigned long long faults = 0;
+
+        for (unsigned long long at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
+        {
+                unsigned long long length = at <= 300 ? at : longs[at - 301];
+
+                for (unsigned mode = 0; mode < 4; mode++)
+                        for (unsigned place = 0; place < 2; place++)
+                                for (unsigned pick = 0; pick < 4; pick++)
+                                {
+                                        unsigned long long control = (at * 3 + mode * 5 + place + pick * 2) % 8;
+                                        unsigned char delimiter = (at + pick) % 4 == 3 ? 0 : '\n';
+                                        unsigned long long base = 1 + (at * 7 + pick) % 9, first = 0;
+
+                                        ranged_uniq_fill(ranged_uniq_made, length, delimiter, mode);
+                                        while (first < length && ranged_uniq_made[first] != delimiter)
+                                                first++;
+                                        //      Half the time the line before is the source's first, when that is whole.
+                                        if (pick & 1 && first < length)
+                                                base = first + 1;
+                                        if ((control & 1) && 9 * length + 4096 > RANGED_SPAN)
+                                                control &= 6;
+                                        unsigned char *run = place ? s_front : s_end - 64 - length - base;
+
+                                        if (place && length + base > 16384 - 64)
+                                                continue;
+                                        for (unsigned long long i = 0; i + 1 < base; i++)
+                                                run[i] = pick & 1 && first < length ? ranged_uniq_made[i]
+                                                                                    : (unsigned char)('a' + ranged_byte() % 3);
+                                        run[base - 1] = delimiter;
+                                        for (unsigned long long i = 0; i < length; i++)
+                                                run[base + i] = ranged_uniq_made[i];
+                                        for (unsigned long long i = 0; i < 64; i++)
+                                                run[base + length + i] = delimiter;
+                                        control |= (unsigned long long)delimiter << 8;
+
+                                        unsigned long long want_state[2] = {counts[pick], base - 1}, state[2] = {counts[pick], base - 1};
+                                        unsigned long long want_taken = 0, made = ~0ull;
+                                        unsigned long long want = ranged_uniq_reference(ranged_uniq_want, run + base, length,
+                                                                                        want_state, control, &want_taken);
+                                        unsigned long long most = control & 1   ? 9 * length + base + 21
+                                                                  : control & 6 ? length + base
+                                                                                : length;
+                                        unsigned char *into = d_end - 64 - most;
+
+                                        for (int i = 1; i <= 16; i++)
+                                                into[-i] = (unsigned char)(0x3a ^ i);
+                                        unsigned long long taken = (memory_unique_lines__room_64)(into, &made, run + base,
+                                                                                                 length, state, control);
+                                        faults += taken != want_taken || made != want || state[0] != want_state[0] ||
+                                                  state[1] != want_state[1] ||
+                                                  (made == want && !ranged_same(into, ranged_uniq_want, want));
+                                        for (int i = 1; i <= 16; i++)
+                                                faults += into[-i] != (unsigned char)(0x3a ^ i);
+                                }
+        }
+        return faults;
+}
+
 #ifdef CHECK_ranged
 /*
         memory_first_of's windows for a short count and the first sixty four
@@ -48739,6 +48910,11 @@ static fn ranged_tier(string_address tier)
               "one to 4100, bytes and columns, C and UTF-8, against fold a line at a time, the rooms ending at a page "
               "that faults and the source starting just after one",
               ranged_fold_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
+        check("memory_unique_lines__room_64: every count to 300 and long ones, groups of one to two hundred lines "
+              "alike or all but a byte, every mix of -c, -d and -u, the newline and NUL, groups open on entry of one "
+              "to ten million lines, against uniq a line at a time, the rooms ending at a page that faults and the "
+              "line before the source starting just after one",
+              ranged_uniq_cases(ranged_d_end, ranged_s_end, ranged_s_front) == 0);
 }
 
 /*
@@ -49063,12 +49239,14 @@ int main(void)
         unsigned long long cuts = ranged_cut_cases(d_end, s_end);
         unsigned long long revs = ranged_rev_cases(d_end, s_end, s_front);
         unsigned long long folds = ranged_fold_cases(d_end, s_end, s_front);
+        unsigned long long uniqs = ranged_uniq_cases(d_end, s_end, s_front);
         ranged_time();
-        printf("arm64 ranged: 10 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
-               "lines %llu | cuts %llu | revs %llu | folds %llu\n",
-               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts, revs, folds);
+        printf("arm64 ranged: 11 checks | copied %llu | answer %llu | outside %llu | source %llu | front %llu | lengths %llu | "
+               "lines %llu | cuts %llu | revs %llu | folds %llu | uniqs %llu\n",
+               faults.copied, faults.answer, faults.outside, faults.source, faults.front, lengths, lines, cuts, revs, folds,
+               uniqs);
         return faults.copied + faults.answer + faults.outside + faults.source + faults.front + lengths + lines + cuts + revs +
-                   folds !=
+                   folds + uniqs !=
                0;
 }
 #endif
@@ -126661,7 +126839,8 @@ b32 main(void)
    memory_cut_fields__room_64 over 4 MiB of records against the walk cut -f
    had, memory_reverse_lines__room_64 over src/lib.c against the walk rev
    had, memory_fold_lines__room_64 over the first 4 MiB of it against
-   GNU's walk, below -- and
+   GNU's walk, memory_unique_lines__room_64 over its first MiB and over
+   that with every line four times against the walk uniq had, below -- and
    memory_copy_apart__room_64 over the lines of
    src/lib.c (every length to 128, in order) into a buffer nothing reads and
    into one buffer read at once, and at a fixed 40 and 76 bytes hidden from
@@ -126919,6 +127098,64 @@ static p64 fold_run(positive side)
         return get_cpu_time() - start;
 }
 
+/*      uniq over the whole lines of src/lib.c's first MiB, and of that with
+        each line four times: the walk uniq had -- each line's end from
+        memory_first_of, its length and memory_compare against the one
+        before, and a line that differs copied -- against
+        memory_unique_lines__room_64 from the first line on. */
+static p8 uniq_text[(1 << 22) + 4096];
+static positive uniq_once, uniq_four;
+
+static positive uniq_walk(p8 address_to into, const p8 address_to base, positive left)
+{
+        positive made = 0, at = 0, previous = 0, previous_length = (positive)-1;
+
+        while (at < left)
+        {
+                const p8 address_to found = memory_first_of((address_any)(base + at), '\n', left - at);
+
+                if (!found)
+                        break;
+                positive length = (positive)(found - (base + at));
+                if (length != previous_length || memory_compare(base + at, base + previous, length))
+                {
+                        memory_copy(into + made, base + at, length + 1);
+                        made += length + 1;
+                }
+                previous = at;
+                previous_length = length;
+                at += length + 1;
+        }
+        return made;
+}
+
+static p64 uniq_run(positive side, positive shape)
+{
+        const p8 address_to base = shape ? uniq_text : text;
+        positive length = shape ? uniq_four : uniq_once;
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < 2; round++)
+        {
+                positive made = 0;
+
+                if (side)
+                {
+                        positive first = (positive)((const p8 address_to)memory_first_of((address_any)base, '\n', length) - base);
+                        positive state[2] = {1, first};
+
+                        memory_copy(out, base, first + 1);
+                        memory_unique_lines__room_64(out + first + 1, address_of made, base + first + 1, length - first - 1,
+                                                     state, '\n' << 8);
+                        made += first + 1;
+                }
+                else
+                        made = uniq_walk(out, base, length);
+                sink += made + out[made / 2];
+        }
+        return get_cpu_time() - start;
+}
+
 static p64 run(positive side, positive shape)
 {
         p64 start = get_cpu_time(), sum = 0;
@@ -126968,6 +127205,19 @@ b32 main(void)
         fold_length = text_length < (positive)1 << 22 ? text_length : (positive)1 << 22;
         while (fold_length && text[fold_length - 1] != '\n')
                 fold_length--;
+        uniq_once = text_length < (positive)1 << 20 ? text_length : (positive)1 << 20;
+        while (uniq_once && text[uniq_once - 1] != '\n')
+                uniq_once--;
+        for (positive at = 0, line = 0; at < uniq_once; at++)
+                if (text[at] == '\n')
+                {
+                        for (positive turn = 0; turn < 4; turn++)
+                        {
+                                memory_copy(uniq_text + uniq_four, text + line, at + 1 - line);
+                                uniq_four += at + 1 - line;
+                        }
+                        line = at + 1;
+                }
 #if X64
         p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
         for (p32 tier = 0; tier < 2; tier++)
@@ -127010,6 +127260,22 @@ b32 main(void)
 
                         BENCH_PAIRED(ratios, walked, fold_run(0), engine, fold_run(1));
                         string_format(log, "memory_fold_lines__room_64 -w 60 src/lib.c%s: paired median engine/walk %p.",
+#if X64
+                                      cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
+#else
+                                      (string_address) "",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+                for (positive shape = 0; shape < 2; shape++)
+                {
+                        positive ratios[TRIES];
+
+                        BENCH_PAIRED(ratios, walked, uniq_run(0, shape), engine, uniq_run(1, shape));
+                        string_format(log, "memory_unique_lines__room_64 src/lib.c%s%s: paired median engine/walk %p.",
+                                      shape ? (string_address) ", each line four times" : (string_address) "",
 #if X64
                                       cpu_has_avx2 ? (string_address) " avx2" : (string_address) " sse2",
 #else

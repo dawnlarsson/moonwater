@@ -24321,9 +24321,56 @@ static b32 text_uniq()
                      !all_repeated && !grouping;
         positive count = 0;
         positive gap = grouping ? group_how : all_how;
+        bool whole = !skip_fields && !skip_characters && !bounded && !fold && !all_repeated && !grouping;
+        positive control = (positive)counting | (positive)repeated_only << 1 | (positive)unique_only << 2 |
+                           (positive)text_delimiter << 8;
 
         for (;;)
         {
+                /*
+                        Whole lines a read at a time, where nothing is
+                        skipped, narrowed or folded and a group goes out as
+                        one: memory_unique_lines__room_64 sets each against
+                        the one before it while that one is in the reader just
+                        behind them, and stops before a line that is not whole
+                        there. What it may write is bounded by the mode, and
+                        the reservation is that bound, given back to what it
+                        wrote.
+                */
+                if (unlikely(whole && have_previous && previous_length < TEXT_OUT_MAX / 4 &&
+                             text_input.position < text_input.filled &&
+                             previous + previous_length + 1 == text_input.buffer + text_input.position))
+                {
+                        p8 address_to at = text_input.buffer + text_input.position;
+                        positive left = text_input.filled - text_input.position;
+                        positive cap = counting ? (TEXT_OUT_MAX - previous_length - 22) / 9
+                                                : TEXT_OUT_MAX - previous_length - 1;
+                        positive state[2] = {count, previous_length};
+                        positive made = 0;
+
+                        left = min(left, cap);
+                        positive most = counting ? 9 * left + previous_length + 22
+                                        : plain  ? left
+                                                 : left + previous_length + 1;
+                        p8 address_to into = text_reserve(most);
+
+                        if (into)
+                        {
+                                positive took = MEMORY_UNIQUE_LINES__ROOM(TEXT_ROOM, into, address_of made, at,
+                                                                          left, state, control);
+
+                                text_out_used -= most - made;
+                                if (took)
+                                {
+                                        text_input.position += took;
+                                        count = state[0];
+                                        previous_length = state[1];
+                                        previous = at + took - previous_length - 1;
+                                        continue;
+                                }
+                        }
+                }
+
                 p8 address_to line = null;
                 positive line_length = 0;
                 bool more = text_line_view(address_of line,

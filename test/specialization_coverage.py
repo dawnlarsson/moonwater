@@ -154,6 +154,13 @@ cover('ranged', 'length', 'memory_fold_lines__room_64',
       'backspace, a return, a NUL or a byte past ASCII in UTF-8 left to the '
       'caller. Numbers in lib.c. No plain routine: every caller has the room',
       expansion='fold_lines_room', evidence='test/checks.c#CHECK_ranged')
+cover('ranged', 'length', 'memory_unique_lines__room_64',
+      'Measured. uniq over whole lines for a read and an output that run 64 '
+      'bytes past it and past what the mode may write: a run of lines equal '
+      'to the one before found sixty four bytes at a time as the source equal '
+      'to itself a line back, the line ending it from the same delimiters. '
+      'Numbers in lib.c. No plain routine: every caller has the room',
+      expansion='unique_lines_room', evidence='test/checks.c#CHECK_ranged')
 
 # ----------------------------------------------------------------------
 #       worth_it -- measured
