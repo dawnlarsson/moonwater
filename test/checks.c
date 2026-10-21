@@ -78,6 +78,21 @@
         ((state) ^= (state) << 13, (state) ^= (state) >> 17, (state) ^= (state) << 5)
 
 /*
+        VECTOR_FIRST_CALL(yes), when yes holds, makes the call after it the
+        first a riscv64 process makes: it forgets cpu_has_vector, so a body
+        that asks for V when it does not know yet calls cpu_vector_detect and
+        comes back from it with what the detect left in its registers. A
+        guard-page walk's first-call tier says yes before every call of such a
+        body. On the other machines it is nothing. A tier that forces a body
+        (cpu_has_vector = 1) never says yes, or the detect would undo it.
+*/
+#if defined(__riscv) && __riscv_xlen == 64
+#define VECTOR_FIRST_CALL(yes) ((yes) ? (void)(cpu_has_vector = 0) : (void)0)
+#else
+#define VECTOR_FIRST_CALL(yes) ((void)0)
+#endif
+
+/*
         BENCH_PAIRED fills ratios[] with one measurement per trial and sorts
         it, so ratios[TRIES / 2] is the paired median: each trial takes one
         (the baseline) and two (what is under test) in the order BENCH_ALTERNATE
@@ -14862,7 +14877,9 @@ fn check_squeeze_bytes()
         the two bytes equal and different, and limits from zero to past the
         count, so that stopping at the limit and resuming after the last
         offset is exercised at every vector position. On x86_64 with and
-        without AVX-512.
+        without AVX-512. On riscv64 with every call the first in a process,
+        which asks for V, then the word body on the processor's Zbb and
+        without it.
 */
 fn check_offsets_of_either()
 {
@@ -14879,11 +14896,11 @@ fn check_offsets_of_either()
         p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2, avx2 = cpu_has_avx2;
         positive tiers = 4;
 #elif RISCV64
-        // V, asked for by the first call, then the word body without it, on
-        // the processor's Zbb and then without.
+        // Every call the first in a process, which asks for V and comes back
+        // to the routine's entry; then the word body without V, on the
+        // processor's Zbb and then without.
         p8 vector = 0, zbb = cpu_has_zbb;
         positive tiers = 3;
-        cpu_has_vector = 0;
 #else
         positive tiers = 1;
 #endif
@@ -14906,6 +14923,7 @@ fn check_offsets_of_either()
                         cpu_has_zbb = 0;
                 }
 #endif
+                VECTOR_FIRST_CALL(tier == 0);
                 same("memory_offsets_of_either", "no room",
                      (memory_offsets_of_either)(got, bytes, 16, 'a', 'b', 0), 0);
                 // Every size to 200, so that each short block, each wide loop
@@ -14959,6 +14977,7 @@ fn check_offsets_of_either()
                                                                 for (positive i = 0; i < 80; i++)
                                                                         got[limit + i] = 0xdeadbeefu;
 
+                                                        VECTOR_FIRST_CALL(tier == 0);
                                                         positive answer = (memory_offsets_of_either)(
                                                             got, bytes + offset + from, size - from,
                                                             first, second, limit);
@@ -17232,10 +17251,11 @@ fn check_record_scans()
         against a page that faults: every size to 200 and long ones, every
         residue, tables of no member, one, two (both orders of use), three,
         cat -v's and half the bytes at random, and limits from one to past
-        the count with the slots past the limit fenced. On riscv64 with V,
-        without V on the processor's Zbb, and without either, since a table
-        of one or two members is memory_offsets_of_either's and the rest is
-        the routine's own.
+        the count with the slots past the limit fenced. On riscv64 with every
+        call the first in a process, which asks for V and comes back to the
+        lookup, with V known, without V on the processor's Zbb, and without
+        either, since a table of one or two members is
+        memory_offsets_of_either's and the rest is the routine's own.
 */
 fn check_offsets_in_set_pages()
 {
@@ -17261,20 +17281,19 @@ fn check_offsets_in_set_pages()
         }
 #if RISCV64
         p8 vector = 0, zbb = cpu_has_zbb;
-        positive tiers = 3;
-        cpu_has_vector = 0;
+        positive tiers = 4;
 #else
         positive tiers = 1;
 #endif
         for (positive tier = 0; tier < tiers; tier++)
         {
 #if RISCV64
-                if (tier == 1)
+                if (tier == 2)
                 {
                         vector = cpu_has_vector;
                         cpu_has_vector = 1;
                 }
-                if (tier == 2)
+                if (tier == 3)
                 {
                         if (!zbb)
                                 continue;
@@ -17283,13 +17302,6 @@ fn check_offsets_in_set_pages()
 #endif
                 for (positive t = 0; t < array_count(sets); t++)
                 {
-#if RISCV64
-                        // A table of three or more as the first to ask for V:
-                        // the detect's return must not leave its registers in
-                        // the count.
-                        if (tier == 0 && t >= 3)
-                                cpu_has_vector = 0;
-#endif
                         for (positive s = 0; s < 201 + array_count(sizes); s += s < 70 ? 1 : 7)
                                 for (positive residue = 0; residue <= 64; residue += residue < 9 ? 1 : 11)
                                 {
@@ -17322,6 +17334,9 @@ fn check_offsets_in_set_pages()
                                                         if (fenced)
                                                                 for (positive i = 0; i < 80; i++)
                                                                         got[limit + i] = 0xdeadbeefu;
+                                                        // The detect's return must not leave its
+                                                        // registers in the count or the offset.
+                                                        VECTOR_FIRST_CALL(tier == 0);
                                                         positive answer = (memory_offsets_in_set)(
                                                             got, bytes + offset + from, size - from, sets[t], limit);
                                                         if (answer > limit)
@@ -26957,15 +26972,21 @@ static positive2 reference_words(p8 address_to bytes, positive size, bool inside
         return result;
 }
 
+// Every call the first in a process, on riscv64's first sweep.
+static bool words_first;
+
 static fn words_case(p8 address_to bytes, positive size, bool inside)
 {
         positive2 want = reference_words(bytes, size, inside);
+        VECTOR_FIRST_CALL(words_first);
         positive2 got = memory_count_words(bytes, size, inside);
         same("memory_count_words", "count", got.x, want.x);
         same("memory_count_words", "outgoing state", got.y, want.y);
 
         positive split = size / 2;
+        VECTOR_FIRST_CALL(words_first);
         positive2 first = memory_count_words(bytes, split, inside);
+        VECTOR_FIRST_CALL(words_first);
         positive2 rest = memory_count_words(bytes + split, size - split,
                                             (bool)first.y);
         same("memory_count_words", "split count", first.x + rest.x, want.x);
@@ -27049,9 +27070,11 @@ static fn check_count_words()
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
 #elif RISCV64
-        // The first call asks for V; then the word body without it.
-        cpu_has_vector = 0;
+        // Every call the first in a process, which asks for V and comes back
+        // to the routine's entry; then the word body without it.
+        words_first = true;
         words_sweep();
+        words_first = false;
         p8 vector = cpu_has_vector;
         cpu_has_vector = 1;
         words_sweep();
@@ -36053,6 +36076,9 @@ static positive utf8_reference_width(p8 address_to data, positive size)
                        (value >= 0xd800 && value <= 0xdfff) ? 1 : width;
 }
 
+// Every call the first in a process, in riscv64's walks against the guards.
+static bool utf8_first;
+
 static fn utf8_span_check(p8 address_to bytes, positive size, positive count)
 {
         positive at = 0, characters = 0;
@@ -36061,6 +36087,7 @@ static fn utf8_span_check(p8 address_to bytes, positive size, positive count)
                 at += utf8_reference_width(bytes + at, size - at);
                 characters++;
         }
+        VECTOR_FIRST_CALL(utf8_first);
         positive2 got = memory_utf8_span(bytes, size, count);
         check("bounded UTF-8 span", got.x == at && got.y == characters);
 }
@@ -36083,6 +36110,7 @@ static fn utf8_valid_check(p8 address_to bytes, positive size)
                 at += width;
                 characters++;
         }
+        VECTOR_FIRST_CALL(utf8_first);
         positive2 got = memory_utf8_valid_span(bytes, size);
         checks++;
         if (got.x != at || got.y != characters)
@@ -36411,8 +36439,13 @@ static fn utf8_valid_tiers(p8 address_to guarded, positive quantum)
         cpu_has_avx2 = avx2;
         cpu_has_avx512 = avx512;
 #else
+        //      On riscv64 every call of the walks the first in a process,
+        //      which asks for V and comes back to the routine's entry; the
+        //      fuzz asks once.
+        utf8_first = true;
         utf8_valid_checks(guarded, quantum);
         utf8_span_long_checks(guarded, quantum);
+        utf8_first = false;
         utf8_fuzz(100000, 0x9e3779b9);
 #endif
 }
@@ -37023,17 +37056,19 @@ static fn hex_suite(void)
 /*
         memory_into_spelled against a C encoder written from the contract:
         every size to 300 at sixteen source residues, then the lengths either
-        side of the wide path's 512 and past, over four tables -- the caret
+        side of the wide path's 512 and past, over five tables -- the caret
         spelling cat -v uses, a substitution whose specials are {1, '?'},
-        random lengths with junk above each spelling, and a mix of literal,
-        translated and long entries -- and three input shapes. Every answer
+        random lengths with junk above each spelling, a mix of literal,
+        translated and long entries, and printable ASCII literal with every
+        other byte seven long, the most eight bytes can grow by -- and three
+        input shapes. Every answer
         is compared whole, the bytes before the destination and the 64 at and
         after destination + capacity must be untouched, and the capacity runs
         through full, exact, exact less one to eight and a spread below, so
         the exact-length tail meets every length. Guard pages hold the source,
         the destination and the table each at a page end.
 */
-static p64 spelled_tables[4][256];
+static p64 spelled_tables[5][256];
 static p64 spelled_seed = 0x243f6a8885a308d3ull;
 
 static p64 spelled_random(void)
@@ -37063,6 +37098,8 @@ static fn spelled_tables_build(void)
                     : r % 3 == 1 ? ((p64)(p8)(byte ^ (1 + (r >> 8) % 255)) << 8 | 1 |
                                     (spelled_random() & ~(p64)0xffff))
                                  : spelled_junk_entry(2 + (r >> 8) % 6);
+                spelled_tables[4][byte] = byte >= 0x20 && byte < 0x7f ? ((p64)byte << 8 | 1)
+                                                                      : spelled_junk_entry(7);
         }
 }
 
@@ -37100,6 +37137,9 @@ static fn spelled_input(p8 address_to in, positive size, positive shape)
         }
 }
 
+// Every call the first in a process, on riscv64's first suite.
+static bool spelled_first;
+
 static bool spelled_one(p8 address_to in, positive size, positive capacity,
                         p64 address_to table, positive shift)
 {
@@ -37109,6 +37149,7 @@ static bool spelled_one(p8 address_to in, positive size, positive capacity,
                 span = sizeof(spelled_out) - 16 - shift;
         memory_fill(spelled_out, 0xa5, 16 + shift + span);
         positive2 want = spelled_oracle(spelled_expected, in, size, capacity, table);
+        VECTOR_FIRST_CALL(spelled_first);
         positive2 got = memory_into_spelled(out, in, size, capacity, table);
         bool right = got.x == want.x && got.y == want.y &&
                      !memory_compare(out, spelled_expected, want.y);
@@ -37197,8 +37238,8 @@ static fn spelled_fuzz(positive rounds)
         for (positive round = 0; round < rounds; round++)
         {
                 positive r = (positive)spelled_random();
-                positive pick = r % 5;
-                p64 address_to table = pick < 4 ? spelled_tables[pick]
+                positive pick = r % 6;
+                p64 address_to table = pick < 5 ? spelled_tables[pick]
                                                 : spelling_caret((positive)(r >> 8) & 7);
                 memory_copy(mutated, table, 2048);
                 for (positive flips = (r >> 16) % 5; flips; flips--)
@@ -37311,7 +37352,7 @@ static fn spelled_suite(void)
                                           777, 1024, 1100, 2047, 4096, SPELLED_MOST};
         spelled_caret_check();
         spelled_fuzz(40000);
-        for (positive t = 0; t < 4; t++)
+        for (positive t = 0; t < 5; t++)
         {
                 p64 address_to table = spelled_tables[t];
                 for (positive size = 0; size <= 300; size++)
@@ -37350,7 +37391,7 @@ static fn spelled_suite(void)
         }
         static const positive sizes[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33,
                                           63, 64, 65, 100, 511, 512, 513, 600, 1000};
-        for (positive t = 0; t < 4; t++)
+        for (positive t = 0; t < 5; t++)
         {
                 // The table at the end of a page, the rest well inside.
                 p64 address_to table = (p64 address_to)(guarded[0] + quantum * 2 - 2048);
@@ -37359,7 +37400,7 @@ static fn spelled_suite(void)
                 {
                         positive size = sizes[s];
                         p8 address_to in = guarded[0] + quantum * 2 - 2048 - size;
-                        spelled_input(in, size, t % 3);
+                        spelled_input(in, size, t == 4 ? 0 : t % 3);
                         positive full = spelled_oracle(spelled_expected, in, size,
                                                        positive_max, table).y;
                         // Every capacity to 80, then steps, with the output
@@ -37370,6 +37411,7 @@ static fn spelled_suite(void)
                                 p8 address_to into = guarded[1] + quantum * 2 - capacity;
                                 positive2 want = spelled_oracle(spelled_expected, in, size,
                                                                 capacity, table);
+                                VECTOR_FIRST_CALL(spelled_first);
                                 positive2 got = memory_into_spelled(into, in, size, capacity, table);
                                 check("spelled source, destination and table at page ends",
                                       got.x == want.x && got.y == want.y &&
@@ -37406,6 +37448,18 @@ b32 main(void)
                 if (wide && vbmi)
                         spelled_suite();
         }
+#elif RISCV64
+        // Every call the first in a process, which asks for V and comes back
+        // to the strip; then V known; then the stream body without it.
+        hex_suite();
+        spelled_first = true;
+        spelled_suite();
+        spelled_first = false;
+        spelled_suite();
+        p8 vector = cpu_has_vector;
+        cpu_has_vector = 1;
+        spelled_suite();
+        cpu_has_vector = vector;
 #else
         hex_suite();
         spelled_suite();
@@ -46983,9 +47037,13 @@ static void matrix_narrow(matrix_call *routine, matrix_wide_call *wide, matrix_f
 #define MATRIX_FULL 0
 #endif
 
+// Every call the first in a process, on riscv64's short pass.
+static bool matrix_first;
+
 static void matrix_gemm(float *C, const float *A, const float *B, unsigned long long M, unsigned long long N,
                         unsigned long long K, unsigned trans, float beta)
 {
+        VECTOR_FIRST_CALL(matrix_first);
         gemm_f32(C, A, B, M, N, K, trans, beta);
 }
 
@@ -47035,6 +47093,26 @@ b32 main()
         }
         p8 vector = cpu_has_vector;
 
+        //      Every call the first in a process, which asks for V and comes
+        //      back to the body with its state in the frame, the operands
+        //      against pages that fault.
+        {
+                matrix_faults faults = {0, 0, 0, 0, 0, 0};
+
+                matrix_first = true;
+                for (unsigned long long M = 0; M <= 13; M++)
+                        for (unsigned long long N = 0; N <= 9; N++)
+                                for (unsigned trans = 0; trans < 2; trans++)
+                                {
+                                        matrix_one(matrix_gemm, M, N, M + N, trans, 0.0f, 0, 0, &faults);
+                                        matrix_one(matrix_gemm, M, N, 2 * N + 1, trans, 1.0f, 1, 0, &faults);
+                                }
+                matrix_one(matrix_gemm, 19, 682, 257, 1, -0.75f, 0, 0, &faults);
+                matrix_one(matrix_gemm, 13, 256, 600, 0, 0.0f, 2, 512, &faults);
+                matrix_first = false;
+                check("gemm_f32: every call the first in a process", faults.values == 0 && faults.outside == 0 &&
+                                                                      cpu_has_vector == vector);
+        }
         matrix_tier(vector == 2 ? "V" : "no V");
         if (vector == 2)
         {
@@ -48014,23 +48092,30 @@ static bool train_guard(void)
         return true;
 }
 
+// Every call the first in a process, on riscv64's first tier.
+static bool train_first;
+
 static fn train_call_residual(float *x, const float *h, unsigned long long count, float alpha)
 {
+        VECTOR_FIRST_CALL(train_first);
         fused_residual_add_f32(x, h, count, alpha);
 }
 
 static fn train_call_to_bf16(unsigned short *to, const float *from, unsigned long long count)
 {
+        VECTOR_FIRST_CALL(train_first);
         f32_to_bf16(to, from, count);
 }
 
 static fn train_call_from_bf16(float *to, const unsigned short *from, unsigned long long count)
 {
+        VECTOR_FIRST_CALL(train_first);
         bf16_to_f32(to, from, count);
 }
 
 static unsigned long long train_call_argmax(const float *logits, unsigned long long length)
 {
+        VECTOR_FIRST_CALL(train_first);
         return fast_argmax_f32(logits, length);
 }
 
@@ -48153,13 +48238,17 @@ b32 main(void)
         }
         p8 vector = cpu_has_vector;
 
+        //      Every call of the first tier the first in a process, which
+        //      asks for V and comes back to the routine's entry: with V where
+        //      the machine has it and the scalar bodies where it has not.
         for (p32 tier = 0; tier < 2; tier++)
         {
-                if (tier == 0 && vector != 2)
-                        continue;
                 cpu_has_vector = tier ? 1 : vector;
-                train_tier(cpu_has_vector == 2 ? "V" : "no V", true, TRAIN_RESIDUAL | TRAIN_BF16 | TRAIN_ARGMAX);
+                train_first = tier == 0;
+                train_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first", true,
+                           TRAIN_RESIDUAL | TRAIN_BF16 | TRAIN_ARGMAX);
         }
+        train_first = false;
         cpu_has_vector = vector;
 #else
         //      The first call asks for FEAT_BF16; then each of the two bodies.
@@ -48223,6 +48312,9 @@ unsigned long long memory_paste_lines__room_64(unsigned char *, unsigned long lo
                                                unsigned long long);
 typedef void *ranged_copy_call(void *, const void *, unsigned long long);
 #endif
+
+// Every call the first in a process, on riscv64's first tier.
+static int ranged_first;
 
 /*
         lib.c's call-site entries against what their names promise.
@@ -48297,6 +48389,7 @@ static void ranged_copy_cases(unsigned char *d_end, unsigned char *s_end, unsign
                         for (long long i = -16; i < into_span; i++)
                                 d[i] = (unsigned char)(0x3c ^ i);
                         //      In brackets, the routine and not lib.util.c's macro of it.
+                        VECTOR_FIRST_CALL(ranged_first);
                         faults->answer += (memory_copy_apart__room_64)(d, s, n) != d;
                         faults->copied += !ranged_same(d, s, n);
                         for (long long i = -16; i < 0; i++)
@@ -48309,6 +48402,7 @@ static void ranged_copy_cases(unsigned char *d_end, unsigned char *s_end, unsign
                 {
                         for (unsigned long long i = 0; i < n + 64; i++)
                                 s_front[i] = ranged_byte(), d_front[i] = 0;
+                        VECTOR_FIRST_CALL(ranged_first);
                         faults->front += (memory_copy_apart__room_64)(d_front, s_front, n) != d_front ||
                                          !ranged_same(d_front, s_front, n);
                 }
@@ -48517,6 +48611,7 @@ static unsigned long long ranged_cut_cases(unsigned char *d_end, unsigned char *
 
                                         for (int i = 1; i <= 16; i++)
                                                 into[-i] = (unsigned char)(0x5c ^ i);
+                                        VECTOR_FIRST_CALL(ranged_first);
                                         unsigned long long taken = (memory_cut_fields__room_64)(into, &made, source, length,
                                                                                                 ranged_cut_keep, control);
                                         faults += taken != want_taken || made != want ||
@@ -48659,6 +48754,7 @@ static unsigned long long ranged_rev_cases(unsigned char *d_end, unsigned char *
 
                                         for (int i = 1; i <= 16; i++)
                                                 into[-i] = (unsigned char)(0x3a ^ i);
+                                        VECTOR_FIRST_CALL(ranged_first);
                                         unsigned long long taken = (memory_reverse_lines__room_64)(into, &made, source, length,
                                                                                                    control);
                                         faults += taken != want_taken || made != want ||
@@ -48766,6 +48862,7 @@ static unsigned long long ranged_fold_cases(unsigned char *d_end, unsigned char 
 
                                                 for (int i = 1; i <= 16; i++)
                                                         into[-i] = (unsigned char)(0x3a ^ i);
+                                                VECTOR_FIRST_CALL(ranged_first);
                                                 unsigned long long taken = (memory_fold_lines__room_64)(into, &made, source,
                                                                                                        length, width, control);
                                                 faults += taken != want_taken || made != want ||
@@ -48935,6 +49032,7 @@ static unsigned long long ranged_uniq_cases(unsigned char *d_end, unsigned char 
 
                                         for (int i = 1; i <= 16; i++)
                                                 into[-i] = (unsigned char)(0x3a ^ i);
+                                        VECTOR_FIRST_CALL(ranged_first);
                                         unsigned long long taken = (memory_unique_lines__room_64)(into, &made, run + base,
                                                                                                  length, state, control);
                                         faults += taken != want_taken || made != want || state[0] != want_state[0] ||
@@ -49053,6 +49151,7 @@ static unsigned long long ranged_paste_cases(unsigned char *d_end, unsigned char
 
                                 for (int i = 1; i <= 16; i++)
                                         into[-i] = (unsigned char)(0x3a ^ i);
+                                VECTOR_FIRST_CALL(ranged_first);
                                 unsigned long long made = (memory_paste_lines__room_64)(into, taken, left, left_length, right,
                                                                                         right_length, control);
                                 faults += made != want || taken[0] != want_taken[0] || taken[1] != want_taken[1] ||
@@ -49402,14 +49501,20 @@ b32 main(void)
 
                 check("cpu_has_zbb: _start wrote what riscv_hwprobe says", zbb == said);
         }
+        //      Every call of the first tier the first in a process, which asks
+        //      for V and comes back to the routine's entry: with V where the
+        //      machine has it and the word bodies where it has not.
         for (p32 tier = 0; tier < 3; tier++)
         {
-                if ((tier == 0 && vector != 2) || (tier == 2 && !zbb))
+                if (tier == 2 && !zbb)
                         continue;
                 cpu_has_vector = tier ? 1 : vector;
                 cpu_has_zbb = tier == 2 ? 0 : zbb;
-                ranged_tier(tier == 0 ? "V" : tier == 2 ? "no V, no Zbb" : zbb ? "no V, Zbb" : "no V");
+                ranged_first = tier == 0;
+                ranged_tier(tier == 0 ? vector == 2 ? "V, every call the first" : "no V, every call the first"
+                            : tier == 2 ? "no V, no Zbb" : zbb ? "no V, Zbb" : "no V");
         }
+        ranged_first = 0;
         cpu_has_vector = vector;
         cpu_has_zbb = zbb;
 #else
@@ -109517,19 +109622,25 @@ static bool tensor_guard(void)
         return true;
 }
 
+// Every call the first in a process, on riscv64's first tier.
+static bool tensor_first;
+
 static fn tensor_call_swiglu_forward(float *out, const float *gate, const float *up, unsigned long long n)
 {
+        VECTOR_FIRST_CALL(tensor_first);
         swiglu_forward_f32(out, gate, up, n);
 }
 
 static float tensor_call_rmsnorm_forward(float *y, const float *x, const float *w, unsigned long long n, float eps)
 {
+        VECTOR_FIRST_CALL(tensor_first);
         return rmsnorm_forward_f32(y, x, w, n, eps);
 }
 
 static fn tensor_call_rmsnorm_backward(float *dx, float *dw, const float *dy, const float *x, const float *w,
                                        unsigned long long n, float r)
 {
+        VECTOR_FIRST_CALL(tensor_first);
         rmsnorm_backward_f32(dx, dw, dy, x, w, n, r);
 }
 
@@ -109631,11 +109742,15 @@ b32 main()
         }
         p8 vector = cpu_has_vector;
 
+        //      Every call of the first tier the first in a process, which
+        //      asks for V and comes back to the routine's entry.
         for (p32 tier = 0; tier < 2; tier++)
         {
                 cpu_has_vector = tier ? 1 : vector;
-                tensor_tier(cpu_has_vector == 2 ? "V" : "no V");
+                tensor_first = tier == 0;
+                tensor_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
         }
+        tensor_first = false;
         cpu_has_vector = vector;
 #else
         tensor_tier("neon");
@@ -111324,7 +111439,8 @@ static fn check_drawing(const font_face address_to one, const font_face address_
         empty), the source's last row ending against a page that faults and
         the destination's too, the words between and before the rows held to
         a canary. On x86_64 once with the planes body and once with the narrow
-        one; test/run runs riscv64 with V at two lengths and without it. Three
+        one; test/run runs riscv64 with V at two lengths and without it, every
+        call there the first in a process, which asks for V. Three
         tables, which the planes body tells apart and draws three ways: words
         of four random bytes, three random bytes and a zero fourth (the text
         engine's), and a grey, its three low bytes alike.
@@ -111390,6 +111506,7 @@ static fn check_translate_table(p32 kind)
                                         }
                                         for (positive i = 0; i < span + 16; i++)
                                                 to[(b64)i - 16] = 0xdeadbeef;
+                                        VECTOR_FIRST_CALL(true);
                                         memory_translate_u32_rect(to, stride, from, stride, width, height, table);
                                         for (b64 i = -16; i < (b64)span; i++)
                                         {
@@ -111411,8 +111528,8 @@ static fn check_translate_table(p32 kind)
         fault, the words around the rows held to a canary. Three tables:
         four random bytes a word, a zero fourth byte (the text engine's), and
         grey, its three low planes alike (arm64's one-plane body). On x86_64
-        with VBMI and without, on riscv64 with V and without, and the first
-        riscv64 call that asks for V.
+        with VBMI and without, on riscv64 with every call the first in a
+        process, which asks for V, and without V.
 */
 static fn check_translate_planes()
 {
@@ -111475,6 +111592,7 @@ static fn check_translate_planes()
                                                 }
                                                 for (positive i = 0; i < words + 16; i++)
                                                         to[(b64)i - 16] = 0xdeadbeef;
+                                                VECTOR_FIRST_CALL(tier == 0);
                                                 memory_translate_planes_u32_rect(to, stride, from, from_stride, width, height, table);
                                                 for (b64 i = -16; i < (b64)words; i++)
                                                 {
@@ -111508,8 +111626,8 @@ static fn check_translate_planes()
         coverage half zero, the pixels the ground but for a few that another
         glyph drew (none, one, or one in sixty), the bytes' last row and the
         pixels' last against pages that fault; the index it answers, every
-        pixel before it written, none after. Both x86_64 bodies, and the first
-        riscv64 call that asks for V.
+        pixel before it written, none after. Both x86_64 bodies, and on
+        riscv64 every call the first in a process, which asks for V.
 */
 static positive blend_reference(p32 address_to into, positive stride, const p8 address_to from, positive from_stride,
                                 positive width, positive height, const p32 address_to table)
@@ -111584,6 +111702,7 @@ static fn check_blend()
                                                 want[i] = to[i];
                                         }
                                         positive expected = blend_reference(want, stride, from, stride, width, height, table);
+                                        VECTOR_FIRST_CALL(true);
                                         positive answered = memory_blend_u32_rect(to, stride, from, stride, width, height, table);
 
                                         fine = fine && answered == expected && !memory_compare(to, want, span * 4);
@@ -111600,8 +111719,8 @@ static fn check_blend()
         and a few long ones, distances of a byte to a glass row's three and
         a half pages, the last byte it reads against a page that faults and
         the distance's bytes after the count left as they were; the three
-        x86_64 bodies, and riscv64 with V, without it and the first call,
-        which asks for it.
+        x86_64 bodies, and riscv64 with every call the first in a process,
+        which asks for V, and without V.
 */
 static fn check_average_ahead()
 {
@@ -111650,6 +111769,7 @@ static fn check_average_ahead()
                                 }
                                 for (positive i = 0; i < count; i++)
                                         want[i] = (p8)((want[i] + want[i + distance] + 1) >> 1);
+                                VECTOR_FIRST_CALL(tier == 0);
                                 memory_average_ahead(data, count, distance);
                                 fine = fine && !memory_compare(data, want, span);
                         }
@@ -111671,7 +111791,8 @@ static fn check_average_ahead()
         names, and a premultiplied picture over a ground with its grain;
         widths to 40 and heights to 5 at pitches past them, against a page
         that faults after the last thing each reads or writes; the x86_64
-        bodies with AVX2 and without, and riscv64 with V and without.
+        bodies with AVX2 and without, and riscv64 with every call the first in
+        a process, which asks for V, and without V.
 */
 static p32 glass_mean(p32 a, p32 b)
 {
@@ -111806,12 +111927,14 @@ static fn check_glass_routines()
                                 memory_fill(want, 0x5a, sizeof(want));
                                 memory_fill(into, 0x5a, height * into_pitch * 4);
                                 glass_halve_reference(want, into_pitch, from, pitch, width, height);
+                                VECTOR_FIRST_CALL(tier == 0);
                                 memory_halve_u32(into, into_pitch, from, pitch, width, height);
                                 halved = halved && !memory_compare(into, want, height * into_pitch * 4);
 
                                 // In place, at the same pitch.
                                 memory_copy(want, from, (2 * height * pitch + 2) * 4);
                                 glass_halve_reference(want, pitch, want, pitch, width, height);
+                                VECTOR_FIRST_CALL(tier == 0);
                                 memory_halve_u32(from, pitch, from, pitch, width, height);
                                 in_place = in_place && !memory_compare(from, want, (2 * height * pitch + 2) * 4);
 
@@ -111832,6 +111955,7 @@ static fn check_glass_routines()
                                                 memory_fill(want, 0x5a, sizeof(want));
                                                 memory_fill(into, 0x5a, 2 * height * dinto * 4);
                                                 glass_double_reference(want, dinto, named, dpitch, width, height);
+                                                VECTOR_FIRST_CALL(tier == 0);
                                                 memory_double_u32(into, dinto, named, dpitch, width, height);
                                                 doubled = doubled && !memory_compare(into, want, 2 * height * dinto * 4);
                                         }
@@ -111857,6 +111981,7 @@ static fn check_glass_routines()
                                         }
                                         into = target + 2048 - count;
                                         glass_over_reference(want, picture, ground, count, grain + start);
+                                        VECTOR_FIRST_CALL(tier == 0);
                                         memory_glass_over_u32(into, picture, ground, count, grain + start);
                                         laid = laid && !memory_compare(into, want, count * 4);
                                 }
@@ -111879,7 +112004,8 @@ static fn check_glass_routines()
         memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
         heights to 6, two strides, the last row against a page that faults,
         the words between rows and before the first held to a canary; with
-        AVX-512 and without on x86_64, and the first riscv64 call.
+        AVX-512 and without on x86_64, and on riscv64 every call the first in
+        a process, which asks for V.
 */
 static fn check_fill_rect()
 {
@@ -111913,6 +112039,7 @@ static fn check_fill_rect()
 
                                         for (positive i = 0; i < span + 16; i++)
                                                 to[(b64)i - 16] = 0xdeadbeef;
+                                        VECTOR_FIRST_CALL(true);
                                         memory_fill_u32_rect(to, stride, width, height, 0x00c0ffee + (p32)width);
                                         for (b64 i = -16; i < (b64)span; i++)
                                                 fine = fine && to[i] == (i >= 0 && (positive)i % stride < width ? 0x00c0ffee + (p32)width
@@ -111933,7 +112060,8 @@ static fn check_fill_rect()
         from or its own words elsewhere, nothing before or after any run
         touched, the ends of from, mirror and into against pages that fault,
         and into as mirror itself; on x86_64 with AVX-512, AVX2 and SSE2,
-        on riscv64 with V and without.
+        on riscv64 with every call the first in a process, which asks for V,
+        and without V.
 */
 static fn check_copy_changed()
 {
@@ -112002,6 +112130,7 @@ static fn check_copy_changed()
 
                                 for (positive i = 0; i < count; i++)
                                         kept[i] = mirror[i];
+                                VECTOR_FIRST_CALL(tier == 0);
                                 answers = answers && memory_copy_changed_u32(into, mirror, from, count) == want;
                                 for (positive i = 0; i < count; i++)
                                 {
@@ -112039,6 +112168,7 @@ static fn check_copy_changed()
                                                 differs = differs || i % 37 == 0;
                                         want += differs;
                                 }
+                                VECTOR_FIRST_CALL(tier == 0);
                                 same = same && memory_copy_changed_u32(mirror, mirror, from, count) == want;
                                 for (positive i = 0; i < count; i++)
                                         same = same && mirror[i] == from[i];
@@ -112067,7 +112197,8 @@ static fn check_copy_changed()
         that fault, the bytes before and after held to a canary, the cells
         past the count untouched, every cell in the count cleared, and the
         sum it answers. On x86_64 with AVX-512, with AVX2 alone and with
-        neither; on riscv64 the first call asks for V itself.
+        neither; on riscv64 every call is the first in a process, which asks
+        for V itself.
 */
 static p32 sweep_level(p32 sum)
 {
@@ -112137,6 +112268,7 @@ static fn check_sweep()
                                 for (positive i = 0; i < count + pad; i++)
                                         want_cells[i] = i < count ? 0 : run[i];
 
+                                VECTOR_FIRST_CALL(true);
                                 p32 answered = memory_sweep_coverage(into, run, count, sum);
 
                                 fine = fine && answered == expected && !memory_compare(into, want_bytes, count) &&

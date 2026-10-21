@@ -39471,16 +39471,94 @@ __asm__(
     ".Lescape_into_r_done:\n" ASM_RET
     ASM_END(memory_into_escaped)
 #ifndef KERNEL_MODE
-    // memory_into_spelled: a spelling at a time, its length's bytes stored
-    // one by one (a misaligned sd is a trap to emulate here), and one that
-    // does not fit stops. The x86_64 block carries the contract.
+    //
+    //       memory_into_spelled. A table whose printable ASCII, 0x20 to 0x7e,
+    //       is literal -- every table cat builds -- is asked once a call (an
+    //       entry is literal when its first two bytes are 1 and the byte), and
+    //       a run of those bytes is then copied as it is.
+    //
+    //       With V a strip of the input is compared with the range, the bytes
+    //       before its first special stored straight, and the special spelled
+    //       on its own, capacity asked at every store.
+    //
+    //       Without V the output is a stream, as RV64 may trap on an unaligned
+    //       wide store: s0 the aligned word it is in, s1 eight times the bytes
+    //       of that word written and s11 that xor 63, s2 those bytes, the
+    //       rest nought, stored whole when it fills. The input is taken eight
+    //       bytes a group from the aligned words it is in (s3 the next, s4
+    //       the last loaded, s5 eight times the input's residue and s6 that
+    //       xor 63), and a group of printable ASCII is put on the stream whole
+    //       -- bit seven of each byte at least 0x20, not 0x7f and under 0x80,
+    //       from s7 0x7f in every byte, s8 0x60, s9 0x01 and s10 0x80 -- or
+    //       else spelled a byte at a time onto it. A group is taken while its
+    //       fifty six bytes of output at most fit the capacity, so no stored
+    //       word reaches past it; what is left of the stream's last word is
+    //       stored a byte at a time, and the byte loop below does the rest.
+    //
+    //       Otherwise a spelling at a time, its length's bytes stored one by
+    //       one, and one that does not fit stops. qemu, instructions a byte,
+    //       cat -v over C source: 20.0 before. The x86_64 block carries the
+    //       contract.
+    //
+    ".option push\n   .option arch, +v\n"
     ASM_FUNC(memory_into_spelled)
     "li t0, 0\n   li t1, 0\n   beqz a2, .Lspell_r_done\n   beqz a3, .Lspell_r_done\n"
+    "li t2, 256\n   bltu a2, t2, .Lspell_r_one\n   bltu a3, t2, .Lspell_r_one\n"
+    //  0x20 to 0x7e literal, each entry's first two bytes 1 and the byte.
+    "addi t2, a4, 256\n   li t3, 0x2001\n   li t4, 0x7f01\n   lui t6, 16\n   addi t6, t6, -1\n"
+    "1:  ld t5, 0(t2)\n   and t5, t5, t6\n   bne t5, t3, .Lspell_r_one\n   addi t3, t3, 0x100\n   addi t2, t2, 8\n   bne t3, t4, 1b\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  The detect spends t0 to t2, so its return comes back here and they start again.
+    ".Lspell_r_ask:\n   li t0, 0\n   li t1, 0\n   lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lspell_r_vector\n   bnez t3, .Lspell_r_stream\n"
+    //  The detect keeps a0-a4 and a7.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j .Lspell_r_ask\n"
+    //  V: the bytes before a strip's first special stored straight, the special spelled alone.
+    ".Lspell_r_vector:\n   li t6, 0x1f\n   li a7, 0x7e\n"
+    ".Lspell_r_strip:\n   bgeu t0, a2, .Lspell_r_done\n   sub t2, a2, t0\n   sub t3, a3, t1\n   bgeu t3, t2, 2f\n   mv t2, t3\n"
+    "2:  beqz t2, .Lspell_r_done\n   vsetvli t3, t2, e8, m8, ta, ma\n   add t4, a1, t0\n   vle8.v v8, (t4)\n   vmsleu.vx v0, v8, t6\n"
+    "vmsgtu.vx v1, v8, a7\n   vmor.mm v0, v0, v1\n   vfirst.m t5, v0\n   add t4, a0, t1\n   bltz t5, 3f\n   mv t3, t5\n"
+    "beqz t3, 4f\n   vsetvli zero, t3, e8, m8, ta, ma\n"
+    "3:  vse8.v v8, (t4)\n   add t0, t0, t3\n   add t1, t1, t3\n   bltz t5, .Lspell_r_strip\n"
+    //  The special: its spelling whole or not at all.
+    "4:  add t2, a1, t0\n   lbu t2, 0(t2)\n   slli t2, t2, 3\n   add t2, a4, t2\n   ld t3, 0(t2)\n   andi t4, t3, 255\n   srli t3, t3, 8\n"
+    "add t5, t1, t4\n   bltu a3, t5, .Lspell_r_done\n   add t5, a0, t1\n   add t1, t1, t4\n   addi t0, t0, 1\n   beqz t4, .Lspell_r_strip\n"
+    "5:  sb t3, 0(t5)\n   srli t3, t3, 8\n   addi t5, t5, 1\n   addi t4, t4, -1\n   bnez t4, 5b\n   j .Lspell_r_strip\n"
+#endif
+    //  Without V: the stream, groups of eight while their output fits.
+    ".Lspell_r_stream:\n   addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n"
+    "sd s5, 40(sp)\n   sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
+    "andi s0, a0, -8\n   sub s1, a0, s0\n   slli s1, s1, 3\n   ld s2, 0(s0)\n   li t2, -1\n   sll t2, t2, s1\n   not t2, t2\n   and s2, s2, t2\n"
+    "xori s11, s1, 63\n   andi s3, a1, -8\n   sub s5, a1, s3\n   slli s5, s5, 3\n   xori s6, s5, 63\n   beqz s5, 1f\n   ld s4, 0(s3)\n   addi s3, s3, 8\n1:\n"
+    "li s7, 0x7f7f7f7f7f7f7f7f\n   li s8, 0x6060606060606060\n   li s9, 0x0101010101010101\n   slli s10, s9, 7\n"
+    "addi a5, a2, -8\n   addi a6, a3, -56\n"
+    ".Lspell_r_group:\n   bgtu t0, a5, .Lspell_r_stream_end\n   bgtu t1, a6, .Lspell_r_stream_end\n"
+    //  The group's eight bytes from the two aligned words they are in.
+    //  On a word the group is the word; off one it is the two it is in, the next always holding group bytes.
+    "ld t2, 0(s3)\n   mv t3, t2\n   beqz s5, 1f\n   srl t3, s4, s5\n   slli t4, t2, 1\n   sll t4, t4, s6\n   or t3, t3, t4\n   mv s4, t2\n"
+    "1:  addi s3, s3, 8\n"
+    "and t4, t3, s7\n   add t5, t4, s8\n   add t4, t4, s9\n   not t4, t4\n   and t5, t5, t4\n   not t4, t3\n   and t5, t5, t4\n   and t5, t5, s10\n"
+    "bne t5, s10, .Lspell_r_spell\n"
+    "sll t4, t3, s1\n   or s2, s2, t4\n   sd s2, 0(s0)\n   addi s0, s0, 8\n   srli t4, t3, 1\n   srl s2, t4, s11\n"
+    "addi t0, t0, 8\n   addi t1, t1, 8\n   j .Lspell_r_group\n"
+    //  A group with a special in it: its bytes spelled one by one onto the stream.
+    ".Lspell_r_spell:\n   li a7, 8\n"
+    "6:  andi t2, t3, 255\n   srli t3, t3, 8\n   slli t2, t2, 3\n   add t2, a4, t2\n   ld t4, 0(t2)\n   andi t5, t4, 255\n   srli t4, t4, 8\n"
+    //  The spelling cut to its length: the bytes above it in the entry are anything.
+    "add t1, t1, t5\n   slli t5, t5, 3\n   li t6, -1\n   sll t6, t6, t5\n   not t6, t6\n   and t4, t4, t6\n"
+    "sll t6, t4, s1\n   or s2, s2, t6\n   add s1, s1, t5\n   li t6, 64\n   bltu s1, t6, 7f\n"
+    "sd s2, 0(s0)\n   addi s0, s0, 8\n   addi s1, s1, -64\n   sub t6, t5, s1\n   srl s2, t4, t6\n"
+    "7:  addi a7, a7, -1\n   bnez a7, 6b\n   xori s11, s1, 63\n   addi t0, t0, 8\n   j .Lspell_r_group\n"
+    //  The stream's last word a byte at a time, then the byte loop.
+    ".Lspell_r_stream_end:\n   srli t2, s1, 3\n   beqz t2, 9f\n"
+    "8:  sb s2, 0(s0)\n   srli s2, s2, 8\n   addi s0, s0, 1\n   addi t2, t2, -1\n   bnez t2, 8b\n"
+    "9:  ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n   ld s6, 48(sp)\n"
+    "ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n"
     ".Lspell_r_one:\n   bgeu t0, a2, .Lspell_r_done\n   add t2, a1, t0\n   lbu t2, 0(t2)\n   slli t2, t2, 3\n   add t2, a4, t2\n   ld t3, 0(t2)\n   andi t4, t3, 255\n   srli t3, t3, 8\n"
     "add t5, t1, t4\n   bltu a3, t5, .Lspell_r_done\n   add t5, a0, t1\n   add t1, t1, t4\n   addi t0, t0, 1\n   beqz t4, .Lspell_r_one\n"
     "1:  sb t3, 0(t5)\n   srli t3, t3, 8\n   addi t5, t5, 1\n   addi t4, t4, -1\n   bnez t4, 1b\n   j .Lspell_r_one\n"
     ".Lspell_r_done:\n   mv a0, t0\n   mv a1, t1\n" ASM_RET
     ASM_END(memory_into_spelled)
+    ".option pop\n"
 #endif
 );
 #endif
