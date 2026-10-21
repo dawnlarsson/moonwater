@@ -2173,7 +2173,10 @@ riscv_alignment_audit()
 #       reference from outside the section into it, so a narrow body cannot
 #       fall into a wide one. The module's side is held in canvas.c: the wide
 #       names appear there only in their declarations and in TARGET_PICK,
-#       and every canvas_simd_begin is closed by a canvas_simd_end.
+#       and every canvas_simd_begin is closed by a canvas_simd_end. Since
+#       c29fc881 Canvas draws nothing itself and has no wide bodies, no
+#       TARGET_PICK and no bracket; a bracket is owed again only when the
+#       dispatch it guards is back.
 kernel_simd_boundary()
 {
         awk -v arch="$1" '
@@ -2309,6 +2312,9 @@ kernel_simd_callers()
                 FILENAME ~ /kernel\.c$/ && /^[[:space:]]*"[^#]*call[[:space:]]+kernel_fpu_end\\n/ { kernel_ends++; kernel_held = 0 }
                 FILENAME ~ /canvas\.c$/ && /canvas_simd_begin\(&/ { begins++; held = 1 }
                 FILENAME ~ /canvas\.c$/ && /canvas_simd_end\(&/ { ends++; held = 0 }
+                # The dispatch a bracket guards: with none of it in Canvas,
+                # there is nothing for a bracket to open, and none is owed.
+                /^#define (TARGET_PICK|TERM_PICK)\(/ { picks++ }
                 # The emulator takes its wide bodies on term_simd, which only
                 # the bracket may set, and only from what the bracket says.
                 /term_simd = / && !/term_simd = false;/ &&
@@ -2317,7 +2323,7 @@ kernel_simd_callers()
                         bad = 1
                 }
                 END {
-                        if (begins != ends || !begins) {
+                        if (begins != ends || (!begins && picks)) {
                                 print "canvas_simd_begin " begins + 0 " times, canvas_simd_end " ends + 0
                                 bad = 1
                         }
