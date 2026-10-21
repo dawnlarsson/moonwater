@@ -23727,13 +23727,18 @@ __asm__(
     // by 9 percent where the registers version wins by 8. A match of sixteen or more leaves for an
     // exact rule that reuses the two lengths already known: one candidate full is the winner,
     // both full goes on by eight bytes a turn and the second is not looked at once the first
-    // reaches nice. A match of nine or fewer bytes inserts its positions in one group of eight
-    // with the last ones kept as they were by csel (no loop to leave, which the predictor misses
-    // on every token); a longer one runs the loop. The pair count, the limits and the output
-    // arrays live in x25 to x28 for the whole walk. Registers: x1 base, x2 table, x3 pos, x4
-    // hash, x5 limit, x6 lit_freq, x7 the hash multiplier, x8 deflate_symbol_tab.
+    // reaches nice. As on x86-64 the search past a match (x21 its hash, x22 the bucket as read,
+    // x23 the longer length and x24 its candidate) runs before the match's inserts, and the
+    // bucket is compared with what it read after them. With that, the group of eight inserts
+    // that kept matches of nine or fewer bytes out of the loop (the loop's exit is missed about
+    // once a match) no longer pays: every match runs the loop. The walk lifted natively, 32 MiB,
+    // M2 Pro, best of 25 alternated: text 67.5 to 62.7 ms (-7.0 percent), source tar 79.9 to
+    // 74.1 (-7.3), binary tar 106.4 to 103.0 (-3.2); with the group kept the hoist gave -3.2,
+    // -4.5 and -3.1. The pair count, the limits and the output arrays live in x25 to x28 for
+    // the whole walk. Registers: x1 base, x2 table, x3 pos, x4 hash, x5 limit, x6 lit_freq, x7
+    // the hash multiplier, x8 deflate_symbol_tab; x29 is saved and spent.
     ASM_FUNC(deflate_parse_fast)
-    "stp x19, x20, [sp, #-112]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp x25, x26, [sp, #48]\n   stp x27, x28, [sp, #64]\n   str x30, [sp, #80]\n   ldr x1, [x0]\n   ldr x2, [x0, #8]\n   ldr x3, [x0, #32]\n   ldr w4, [x0, #104]\n   ldr x6, [x0, #88]\n"
+    "stp x19, x20, [sp, #-112]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp x25, x26, [sp, #48]\n   stp x27, x28, [sp, #64]\n   stp x30, x29, [sp, #80]\n   ldr x1, [x0]\n   ldr x2, [x0, #8]\n   ldr x3, [x0, #32]\n   ldr w4, [x0, #104]\n   ldr x6, [x0, #88]\n"
     "adrp x8, deflate_symbol_tab\n   add x8, x8, :lo12:deflate_symbol_tab\n   mov w7, #0xa7bd\n   movk w7, #0x1e35, lsl #16\n   ldr x9, [x0, #16]\n   subs x9, x9, #299\n   csel x9, xzr, x9, lo\n"
     "ldr x5, [x0, #40]\n   cmp x5, x9\n   csel x5, x9, x5, hi\n   ldr x25, [x0, #56]\n   ldr x9, [x0, #48]\n   cmp x9, #16\n   b.lo .Ldpf_arm64_done\n   ldr x25, [x0, #56]\n   ldr x26, [x0, #112]\n   ldr x27, [x0, #64]\n   ldr x28, [x0, #72]\n"
     ".balign 16\n"
@@ -23747,20 +23752,19 @@ __asm__(
     ".Ldpf_arm64_match:  mov x11, x25\n   add x25, x25, #1\n   ldr x14, [x0, #24]\n   sub w14, w3, w14\n   str w14, [x27, x11, lsl #2]\n"
     "strh w16, [x28, x11, lsl #1]\n   ldr x13, [x0, #80]\n   strh w17, [x13, x11, lsl #1]\n   sub w13, w16, #3\n   ldrb w13, [x8, x13]\n   add x13, x6, x13, lsl #2\n   ldr w14, [x13, #1028]\n"
     "add w14, w14, #1\n   str w14, [x13, #1028]\n   sub w13, w17, #1\n   lsr w14, w13, #7\n   add w14, w14, #256\n   cmp w13, #256\n   csel w13, w13, w14, lo\n   add x13, x8, x13\n   ldrb w13, [x13, #256]\n"
-    "ldr x14, [x0, #96]\n   ldr w15, [x14, x13, lsl #2]\n   add w15, w15, #1\n   str w15, [x14, x13, lsl #2]\n   cmp w16, #9\n   b.hi .Ldpf_arm64_long\n   add x10, x3, #2\n   sub w13, w16, #1\n   add x15, x1, x10\n   sub x15, x15, #1\n"
-    "ldr w12, [x15, #0]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #0\n   orr x20, x19, x17, lsl #32\n   cmp w13, #0\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #1]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #1\n   orr x20, x19, x17, lsl #32\n   cmp w13, #1\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #2]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #2\n   orr x20, x19, x17, lsl #32\n   cmp w13, #2\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #3]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #3\n   orr x20, x19, x17, lsl #32\n   cmp w13, #3\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #4]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #4\n   orr x20, x19, x17, lsl #32\n   cmp w13, #4\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #5]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #5\n   orr x20, x19, x17, lsl #32\n   cmp w13, #5\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #6]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #6\n   orr x20, x19, x17, lsl #32\n   cmp w13, #6\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "ldr w12, [x15, #7]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   ldr x17, [x2, x12, lsl #3]\n   add x19, x10, #7\n   orr x20, x19, x17, lsl #32\n   cmp w13, #7\n   csel x20, x17, x20, le\n   str x20, [x2, x12, lsl #3]\n"
-    "add x14, x3, x16\n   ldr w12, [x1, x14]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   b .Ldpf_arm64_insdone\n"
-    ".Ldpf_arm64_long:  add x10, x3, #2\n   add x13, x10, x16\n   sub x13, x13, #1\n"
+    "ldr x14, [x0, #96]\n   ldr w15, [x14, x13, lsl #2]\n   add w15, w15, #1\n   str w15, [x14, x13, lsl #2]\n"
+    "add x9, x1, x3\n   add x9, x9, x16\n   add w10, w3, w16\n   add w10, w10, #1\n   ldr w21, [x9]\n   mul w21, w21, w7\n   lsr w21, w21, #17\n   ldr x22, [x2, x21, lsl #3]\n"
+    "sub w13, w10, #8, lsl #12\n   mov w17, #1\n   cmp w10, #8, lsl #12\n   csel w13, w13, w17, hi\n   mov w14, w22\n   lsr x15, x22, #32\n   ldp x11, x17, [x9]\n"
+    LZ_CAND16_A64("1", "14", "13", "9", "11", "17", "19", "20", "23", "24", "10")
+    LZ_CAND16_A64("1", "15", "13", "9", "11", "17", "19", "20", "23", "29", "10")
+    "cmp w29, w24\n   csel w23, w29, w24, hi\n   csel w24, w15, w14, hi\n"
+    "add x10, x3, #2\n   add x13, x10, x16\n   sub x13, x13, #1\n"
     ".balign 16\n"
     ".Ldpf_arm64_ins:  ldr x14, [x2, x12, lsl #3]\n   orr x14, x10, x14, lsl #32\n   str x14, [x2, x12, lsl #3]\n   ldr w12, [x1, x10]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n   add x10, x10, #1\n   cmp x10, x13\n   b.ne .Ldpf_arm64_ins\n"
-    ".Ldpf_arm64_insdone:  add x17, x2, x12, lsl #3\n   prfm pstl1keep, [x17]\n   add x3, x3, x16\n   mov x4, x12\n   b .Ldpf_arm64_top\n"
+    "add x3, x3, x16\n   mov x4, x21\n   cmp x3, x5\n   b.hs .Ldpf_arm64_done\n   cmp x25, x26\n   b.hs .Ldpf_arm64_done\n"
+    "ldr x17, [x2, x21, lsl #3]\n   cmp x17, x22\n   b.ne .Ldpf_arm64_top\n   cmp w23, #16\n   b.hs .Ldpf_arm64_top\n"
+    "add x9, x1, x3\n   add w10, w3, #1\n   orr x17, x10, x22, lsl #32\n   str x17, [x2, x21, lsl #3]\n   ldr w12, [x9, #1]\n   mul w12, w12, w7\n   lsr w12, w12, #17\n"
+    "add x17, x2, x12, lsl #3\n   prfm pstl1keep, [x17]\n   cmp w23, #4\n   b.lo .Ldpf_arm64_literal\n   mov w16, w23\n   sub w17, w10, w24\n   b .Ldpf_arm64_match\n"
     ".Ldpf_arm64_literal:  ldrb w13, [x9]\n   add x13, x6, x13, lsl #2\n   ldr w14, [x13]\n   add w14, w14, #1\n   str w14, [x13]\n   add x3, x3, #1\n   mov x4, x12\n   b .Ldpf_arm64_top\n"
     ".Ldpf_arm64_slow:  sub x13, x14, #1\n   add x13, x1, x13\n   cmp w22, #16\n   b.ne .Ldpf_arm64_only2\n   bl .Ldpf_arm64_ext\n   mov w19, w13\n   sub w20, w10, w14\n   cmp w23, #16\n   b.ne .Ldpf_arm64_sdone\n"
     "ldr x16, [x0, #48]\n   cmp x19, x16\n   b.hs .Ldpf_arm64_sdone\n   cmp w19, #258\n   b.hs .Ldpf_arm64_sdone\n   sub x13, x15, #1\n   add x13, x1, x13\n   bl .Ldpf_arm64_ext\n   cmp w13, w19\n   b.ls .Ldpf_arm64_sdone\n   mov w19, w13\n   sub w20, w10, w15\n   b .Ldpf_arm64_sdone\n"
@@ -23771,7 +23775,7 @@ __asm__(
     ".Ldpf_arm64_extb:  cmp x16, #258\n   b.hs .Ldpf_arm64_extd\n   ldrb w17, [x9, x16]\n   ldrb w21, [x13, x16]\n   cmp w17, w21\n   b.ne .Ldpf_arm64_extd\n   add x16, x16, #1\n   b .Ldpf_arm64_extb\n"
     ".Ldpf_arm64_extx:  rbit x17, x17\n   clz x17, x17\n   lsr x17, x17, #3\n   add x16, x16, x17\n"
     ".Ldpf_arm64_extd:  mov x13, x16\n   ret\n"
-    ".Ldpf_arm64_done:  str x25, [x0, #56]\n   str x3, [x0, #32]\n   str w4, [x0, #104]\n   ldr x30, [sp, #80]\n   ldp x27, x28, [sp, #64]\n   ldp x25, x26, [sp, #48]\n   ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #112\n" ASM_RET
+    ".Ldpf_arm64_done:  str x25, [x0, #56]\n   str x3, [x0, #32]\n   str w4, [x0, #104]\n   ldp x30, x29, [sp, #80]\n   ldp x27, x28, [sp, #64]\n   ldp x25, x26, [sp, #48]\n   ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #112\n" ASM_RET
     ASM_END(deflate_parse_fast)
     // deflate_parse_chain (the job and the walk are described with the x86-64 body). The same
     // steps in the registers arm64 has to spare: the tables' bases, the window, the hash
