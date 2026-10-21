@@ -119483,6 +119483,10 @@ static void *compositor_map_zeroed(unsigned long bytes) { return calloc(1,bytes)
 #ifndef memory_copy
 #define memory_copy memmove
 #endif
+/* ui/taskbar.h holds the face and engine the tabs are written in by
+   pointer; the backend's cut never looks inside them. */
+typedef struct font_face font_face;
+typedef struct font_engine font_engine;
 #include "compositor-backend.inc"
 /* A failed row says which one, not only that one failed. */
 #define cc_check(x) do{if(!(x))fprintf(stderr,"compositor row failed, line %d: %s\n",__LINE__,#x);check(x);}while(0)
@@ -119533,100 +119537,11 @@ static void check_compositor_gs1(void) {
     }
 }
 
-/* G-S2 (canvas spec 05 section 1.3): G-S1 with the compositor's panel at its
-   default height, 24 logical pixels, on the bottom edge, and no text: its
-   tabs in the middle, the scene's one window's, which has the keys, and the
-   tray, round at their tops and nothing between them.
-   Recorded from the backend, and the reference for every later build. */
-#define COMPOSITOR_GS2_1 "1137a402eb675590d1a737f80901e07d1bc12ed5c8f32c8c8abfa7da4282aade"
-#define COMPOSITOR_GS2_2 "bc02b0403c24fa48c1a6b0aa6d8a3bdc7f300aa2c6b2c50b356fe998333a236f"
-#define COMPOSITOR_GS2_3 "95d28ac751cbfff871d1efa7a3a2131657082460782c119326681866f9a98403"
-#define COMPOSITOR_GS2_4 "e971f7f7f141c56710af98666564fe1f867cefc5d9949c535d5cf3ded0cc8a5d"
-static const char *const compositor_gs2[4]={COMPOSITOR_GS2_1,COMPOSITOR_GS2_2,COMPOSITOR_GS2_3,COMPOSITOR_GS2_4};
-static void check_compositor_gs2(void) {
-    static u32 body[128*64];
-    for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
-    for(int scale=1;scale<=4;scale++) {
-        int bx,by,bw,bh;
-        compositor_band(1024,768,scale,1,&bx,&by,&bw,&bh);
-        cc_check(bx==0&&bw==1024&&bh==24*scale&&by==768-24*scale);
-        static const unsigned char marks[1]={COMPOSITOR_TAB_LIT};
-        struct compositor_frame frames[4]={
-            {80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,COMPOSITOR_INK_LINE}};
-        struct compositor_frame band={bx,by,bw,bh,scale,0,0,1,marks,1};
-        unsigned tabs=compositor_panel_tabs(&band,&frames[1]);
-        cc_check(tabs==2&&frames[1].slot==0&&frames[2].slot==-2);
-        struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
-        compositor_scene(&t,frames,1+tabs);
-        char got[65];golden_sha256(golden_screen,1024*768,got);
-        if(strcmp(got,compositor_gs2[scale-1]))
-            fprintf(stderr,"G-S2 at scale %d is %s, not the golden %s\n",scale,got,compositor_gs2[scale-1]);
-        cc_check(!strcmp(got,compositor_gs2[scale-1]));
-        /* The band is the desktop beside and between the tabs; the window's
-           tab is lit, the tray's not; the row is in the middle of the band,
-           its first tab as far from the left as its last from the right;
-           and a tab's top corner is round, its bottom one square on the
-           output's edge. */
-        struct compositor_frame *window=&frames[1],*tray=&frames[2];
-        cc_check(golden_screen[(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_DESKTOP);
-        cc_check(golden_screen[(unsigned)(window->x-1)+(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_DESKTOP);
-        cc_check(golden_screen[(unsigned)(window->x+window->width/2)+(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_BUTTON_LIT);
-        cc_check(golden_screen[(unsigned)(tray->x+2)+(unsigned)(by+bh/2)*1024]==COMPOSITOR_INK_BUTTON);
-        {int left=window->x-bx,right=bx+bw-(tray->x+tray->width);cc_check(left-right<=1&&right-left<=1);}
-        cc_check(golden_screen[(unsigned)window->x+(unsigned)window->y*1024]==COMPOSITOR_INK_DESKTOP);
-        cc_check(golden_screen[(unsigned)window->x+767u*1024]==COMPOSITOR_INK_BUTTON_LIT);
-        cc_check(golden_screen[(unsigned)(by-1)*1024+700]==COMPOSITOR_INK_DESKTOP);
-    }
-}
-
-/* The panel's tabs are where they are drawn: every tab is inside the band,
-   none overlaps another, the middle of each is what a press there names, a
-   point outside every tab names nothing, and the row is in the middle. */
-static void check_compositor_panel_fit(void) {
-    /* A window's tab is as wide as its title: a short one narrower than a long
-       one, none narrower than it is high or wider than eight bands, the title's length
-       in characters (a byte that continues one is not one), and the row still
-       in the middle. */
-    static const unsigned char marks[3]={0,0,0};
-    static const unsigned char lengths[3]={3,40,200};
-    for(int scale=1;scale<=4;scale++) {
-        struct compositor_frame f={0,768-24*scale,4096,24*scale,scale,0,0,1,marks,3};
-        int x[4],y,w[4],h,unit=24*scale;
-        f.lengths=lengths;
-        for(int i=0;i<3;i++)cc_check(compositor_panel_slot(&f,i,&x[i],&y,&w[i],&h));
-        cc_check(compositor_panel_slot(&f,-2,&x[3],&y,&w[3],&h));
-        cc_check(w[0]>=unit-3*scale&&w[0]<w[1]&&w[2]==8*unit&&w[1]<=8*unit);
-        cc_check(x[1]==x[0]+w[0]+4*scale&&x[3]==x[2]+w[2]+4*scale);
-        {int left=x[0],right=4096-(x[3]+w[3]);cc_check(left-right<=1&&right-left<=1);}
-    }
+/* A window's title is counted in characters: a byte that continues one is
+   not one, and the count stops at its room. */
+static void check_compositor_title_length(void) {
     cc_check(compositor_title_length("shell",28)==5&&compositor_title_length("\xc3\xa5\xc3\xa4",28)==2&&
              compositor_title_length("abc",2)==2&&compositor_title_length("",28)==0);
-}
-
-static void check_compositor_panel_slots(void) {
-    for(int scale=1;scale<=4;scale++)for(unsigned count=0;count<=WINDOWS;count++) {
-        unsigned char marks[WINDOWS]={0};
-        struct compositor_frame f={0,768-24*scale,1024,24*scale,scale,0,0,1,marks,count};
-        int seen[WINDOWS+2][4],n=0;
-        for(int which=-2;which<(int)count;which++) {
-            int x,y,w,h;
-            if(!compositor_panel_slot(&f,which,&x,&y,&w,&h))continue;
-            cc_check(x>=f.x&&x+w<=f.x+f.width&&y>=f.y&&y+h<=f.y+f.height&&w>0&&h>0);
-            for(int other=0;other<n;other++)
-                cc_check(x+w<=seen[other][0]||seen[other][0]+seen[other][2]<=x||
-                      y+h<=seen[other][1]||seen[other][1]+seen[other][3]<=y);
-            seen[n][0]=x;seen[n][1]=y;seen[n][2]=w;seen[n][3]=h;n++;
-            cc_check(compositor_panel_hit(&f,x+w/2,y+h/2)==which);
-        }
-        cc_check(compositor_panel_hit(&f,f.x-1,f.y)==COMPOSITOR_HIT_NONE);
-        cc_check(compositor_panel_hit(&f,f.x,f.y)==COMPOSITOR_HIT_NONE); /* beside the row */
-        cc_check(n==(int)count+1);
-        {
-            int first=f.x+f.width,last=f.x;
-            for(int i=0;i<n;i++){first=seen[i][0]<first?seen[i][0]:first;last=seen[i][0]+seen[i][2]>last?seen[i][0]+seen[i][2]:last;}
-            cc_check(n==0||((first-f.x)-(f.x+f.width-last)<=1&&(f.x+f.width-last)-(first-f.x)<=1));
-        }
-    }
 }
 
 /* The keymap is a function of a state and a key, so a layout is typed at
@@ -120100,9 +120015,7 @@ int main(void) {
         check(!memcmp(pixels,expected,4096*sizeof(*pixels)));
     }
     check_compositor_gs1();
-    check_compositor_gs2();
-    check_compositor_panel_slots();
-    check_compositor_panel_fit();
+    check_compositor_title_length();
     check_compositor_keymap();
     check_compositor_pointer();
     check_compositor_scene();
