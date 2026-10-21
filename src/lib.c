@@ -12962,17 +12962,22 @@ __asm__(
     "movzwl %cx, %ecx\n   cmp $0xffff, %ecx\n   setne %cl\n   movzbl %cl, %ecx\n   shl $(2*\\half), %ecx\n   or %ecx, %r9d\n"
     ".endr\n"
     "test %r9d, %r9d\n   jz .Lmemory_translate_x64_avx2_done\n"
-    //      The rows that differ, as sixteen bytes on the stack, and how many.
+    //      The rows that differ, as sixteen bytes on the stack, and how many. A row is kept as row << 4, its
+    //      table row's offset, and twice that is its nibbles row's, as memory_decode_power2 keeps them: a row
+    //      is then eight instructions, not ten, and the row loop is 35 bytes. The block head starts a 64-byte
+    //      line (its padding runs once a call), which keeps the row loop inside that line. tr a-z A-Z over
+    //      7.1 MB, AVX-512 off, eight layouts a side: 9.58 to 7.93 million cycles, the slowest layout now
+    //      quicker than the quickest before; four rows (rot13) 14.0 to 13.7, the rows' blends being a chain.
     "sub $24, %rsp\n   xor %r10d, %r10d\n"
-    ".Lmemory_translate_x64_avx2_list:\n   bsf %r9d, %ecx\n   mov %cl, (%rsp,%r10)\n   inc %r10d\n   lea -1(%r9), %ecx\n   and %ecx, %r9d\n   jnz .Lmemory_translate_x64_avx2_list\n"
+    ".Lmemory_translate_x64_avx2_list:\n   bsf %r9d, %ecx\n   shl $4, %ecx\n   mov %cl, (%rsp,%r10)\n   inc %r10d\n   lea -1(%r9), %ecx\n   and %ecx, %r9d\n   jnz .Lmemory_translate_x64_avx2_list\n"
     //      Each row that differs costs about 2.2 ticks a 32 bytes and the four-byte groups 31 for the same
     //      32, so past ten rows (a permutation of the alphabet is sixteen) the groups are the quicker.
     "cmp $10, %r10d\n   ja .Lmemory_translate_x64_avx2_dense\n   lea (%rsp,%r10), %r11\n   lea .Lmemory_translate_x64_nibbles(%rip), %r10\n"
     "mov $0x0f0f0f0f, %ecx\n   vmovd %ecx, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n"
-    ".balign 16\n.Lmemory_translate_x64_avx2_block:\n"
+    ".p2align 6\n.Lmemory_translate_x64_avx2_block:\n"
     "vmovdqu (%rdi), %ymm0\n   vpsrlw $4, %ymm0, %ymm1\n   vpand %ymm15, %ymm1, %ymm1\n   vpand %ymm15, %ymm0, %ymm2\n   mov %rsp, %r8\n"
-    ".Lmemory_translate_x64_avx2_row:\n   movzbl (%r8), %r9d\n   mov %r9d, %ecx\n   shl $4, %ecx\n   vbroadcasti128 (%rdx,%rcx), %ymm4\n   vpshufb %ymm2, %ymm4, %ymm4\n"
-    "shl $5, %r9d\n   vpcmpeqb (%r10,%r9), %ymm1, %ymm5\n   vpblendvb %ymm5, %ymm4, %ymm0, %ymm0\n   inc %r8\n   cmp %r11, %r8\n   jb .Lmemory_translate_x64_avx2_row\n"
+    ".Lmemory_translate_x64_avx2_row:\n   movzbl (%r8), %ecx\n   vbroadcasti128 (%rdx,%rcx), %ymm4\n   vpshufb %ymm2, %ymm4, %ymm4\n"
+    "vpcmpeqb (%r10,%rcx,2), %ymm1, %ymm5\n   vpblendvb %ymm5, %ymm4, %ymm0, %ymm0\n   inc %r8\n   cmp %r11, %r8\n   jb .Lmemory_translate_x64_avx2_row\n"
     "vmovdqu %ymm0, (%rdi)\n   add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n   jae .Lmemory_translate_x64_avx2_block\n"
     "add $24, %rsp\n   vzeroupper\n   cmp $4, %rsi\n   jb .Lmemory_translate_x64_tail\n   jmp .Lmemory_translate_x64_four\n"
     ".Lmemory_translate_x64_avx2_dense:\n   add $24, %rsp\n   vzeroupper\n   jmp .Lmemory_translate_x64_four\n"

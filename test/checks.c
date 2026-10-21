@@ -14509,6 +14509,34 @@ fn check_translate()
                                 same_bytes("memory_translate", "aliased four-byte ordering",
                                            got, want, 4096);
                         }
+                //      Tables a few rows from the identity, as tr a-z A-Z's is: the AVX2 body walks only
+                //      the rows that differ, up to ten of them, and the four-byte groups take more.
+                for (positive rows = 1; rows <= 12; rows++)
+                        for (positive s = 0; s < 4; s++)
+                        {
+                                static const positive sparse[4] = {1024, 1055, 2065, 4096};
+                                positive size = sparse[s], offset = 4096 - size;
+                                p8 address_to table = tables + 8192 - 256;
+
+                                for (positive i = 0; i < 256; i++)
+                                        table[i] = palette[i] = (p8)i;
+                                for (positive r = 0; r < rows; r++)
+                                {
+                                        positive row = (r * 7 + s * 3 + rows) & 15;
+
+                                        for (positive i = 0; i < 16; i++)
+                                                table[row * 16 + i] = palette[row * 16 + i] =
+                                                    (p8)((row * 16 + i) ^ (0x5a + r + i));
+                                }
+                                for (positive i = 0; i < 4096; i++)
+                                        got[i] = want[i] = (p8)(i * 197 + rows);
+                                for (positive i = 0; i < size; i++)
+                                        want[offset + i] = palette[want[offset + i]];
+                                VECTOR_FIRST_CALL(tier == 0);
+                                (memory_translate)(got + offset, size, table);
+                                same_bytes("memory_translate", "tables a few rows from the identity",
+                                           got, want, 4096);
+                        }
         }
 #if X64
         cpu_has_avx2 = avx2;
