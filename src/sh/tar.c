@@ -1103,6 +1103,7 @@ static path_table tar_materialized = {.stride = sizeof(tar_materialized_file)};
    blocking factor, up to 2^20 blocks (512 MiB, the -b limit). The bound is
    that largest record, so every archive this tar writes reads back. */
 #define TAR_TRAILING_LIMIT (TAR_RECORD * 8192)
+#define TAR_TRAILING_REFUSED (MOONWATER_STRICT_FILES >= STRICT_TIGHT)
 #define TAR_ADVISE_SEQUENTIAL 2
 
 /* The size from which a member's bytes go from file to archive in the kernel
@@ -2440,10 +2441,20 @@ static fn tar_directories_finish(void)
         path_table_clear(address_of tar_directories);
 }
 
+/* Blocks handed out so far in this archive: a header cut short before the
+   first one is no archive at all, as GNU tar says. */
+static positive tar_blocks_taken;
+/* Archive bytes taken in, by any road: the record, a seek, a copy straight
+   to the file. Less what the record still holds, it is where the walk is,
+   the block GNU names in "A lone zero block at". */
+static p64 tar_stream_taken;
+
 static fn tar_reset(void)
 {
         tar_have = 0;
         tar_at = 0;
+        tar_blocks_taken = 0;
+        tar_stream_taken = 0;
         tar_seen_used = 0;
         tar_seen_fill = 0;
         if (tar_seen)
@@ -2588,6 +2599,7 @@ static bipolar tar_ring_view(tar_ring address_to ring,
 
 static fn tar_ring_consume(tar_ring address_to ring, positive n)
 {
+        tar_stream_taken += n;
         ring->taken += n;
         if (ring->taken < (positive)ring->length[ring->tail])
                 return;
@@ -2645,11 +2657,16 @@ static bipolar tar_read_bytes(bipolar handle, p8 address_to into, positive n)
         if (tar_ring_state.running)
                 return tar_ring_read(address_of tar_ring_state, into, n);
         if (!tar_decoder)
-                return system_read_retry((positive)handle, into, n);
-        if (tar_decoder_failed)
+                got = system_read_retry((positive)handle, into, n);
+        else if (tar_decoder_failed)
                 return -1;
-        got = tar_decoder->read(into, n);
-        tar_decoder_failed = got < 0;
+        else
+        {
+                got = tar_decoder->read(into, n);
+                tar_decoder_failed = got < 0;
+        }
+        if (got > 0)
+                tar_stream_taken += (p64)got;
         return got;
 }
 
@@ -2696,9 +2713,13 @@ static fn tar_codec_end_read(bipolar handle)
                 return;
 
         /* Finish the codec so truncation and checksum failures cannot hide
-           behind the tar end marker. Padding is permitted, but it must be
-           zero and bounded: otherwise a tiny compressed suffix can demand
-           unbounded expansion solely to reach the codec trailer. */
+           behind the tar end marker, reading zero padding up to
+           TAR_TRAILING_LIMIT past it: a tiny compressed suffix could
+           otherwise demand unbounded expansion solely to reach the codec
+           trailer. Data after the marker, a second archive cat put after
+           the first, is not this archive's, as GNU tar reads it: the codec
+           is left unfinished there and past the limit, as GNU's reader
+           stops at the marker. STRICT_TIGHT refuses both. */
         if (tar_status != 2)
         {
                 positive trailing = tar_have - tar_at;
@@ -2732,10 +2753,13 @@ static fn tar_codec_end_read(bipolar handle)
                         ok = false;
         }
 
-        ok = tar_ring_finish(tar_decoder) && ok;
-        if (excess)
+        bool finished = tar_ring_finish(tar_decoder);
+
+        if ((!excess && !nonzero) || TAR_TRAILING_REFUSED)
+                ok = finished && ok;
+        if (excess && TAR_TRAILING_REFUSED)
                 tar_refuse("compressed archive padding exceeds limit");
-        else if (nonzero)
+        else if (nonzero && TAR_TRAILING_REFUSED)
                 tar_refuse("nonzero data follows archive end marker");
         else if (!ok)
                 tar_refuse(*tar_decoder->why ? *tar_decoder->why
@@ -2811,10 +2835,6 @@ static bipolar tar_fill(bipolar handle)
    whose last block there is cut short ends quietly, as GNU tar drops an
    incomplete trailing block; a compressed archive still meets the trailer
    check on those bytes.  Any other block cut short is an error. */
-/* Blocks handed out so far in this archive: a header cut short before the
-   first one is no archive at all, as GNU tar says. */
-static positive tar_blocks_taken;
-
 static p8 address_to tar_next_block(bipolar handle, bool header)
 {
         p8 address_to block;
@@ -2880,7 +2900,10 @@ static bool tar_skip(bipolar handle, p64 bytes, bool seekable)
                         return false;
                 }
                 if (reached >= 0)
+                {
+                        tar_stream_taken += bytes;
                         return true;
+                }
         }
 
         while (bytes)
@@ -2927,6 +2950,7 @@ static bool tar_rewind_unread(bipolar handle)
         if (system_seek(handle, -(bipolar)unread, FILE_SEEK_CUR) < 0)
                 return false;
 
+        tar_stream_taken -= unread;
         tar_at = 0;
         tar_have = 0;
         return true;
@@ -2982,12 +3006,16 @@ static bool tar_copy_n(bipolar archive, bipolar out, p64 size, bool seekable)
                             !tar_copy_out(archive, out, left,
                                           address_of stopped))
                         {
+                                if (stopped.failure)
+                                        tar_stream_taken += left - stopped.unmoved;
                                 if (stopped.failure &&
                                     tar_skip(archive, stopped.unmoved,
                                              seekable))
                                         tar_write_failure = stopped.failure;
                                 return false;
                         }
+                        if (out >= 0)
+                                tar_stream_taken += left;
 
                         if (out < 0 && !tar_skip(archive, left, seekable))
                                 return false;
@@ -4928,23 +4956,30 @@ static fn tar_read_members(tar_members address_to run)
 
                 if (total == 0)
                 {
+                        /* A lone zero block ends the archive, as GNU
+                           reads it: said with the block past it, and not
+                           a failure, whether data or the end of the
+                           archive follows it. At STRICT_TIGHT an archive
+                           that stops there is refused as cut short. */
+                        p64 at = (tar_stream_taken - (tar_have - tar_at)) / TAR_BLOCK;
                         p8 address_to second = tar_next_block(handle, false);
 
+                        if (second && tar_header_zero(second))
+                                break;
+                        if (!second && tar_status == 2)
+                                break;
+#if MOONWATER_STRICT_FILES >= STRICT_TIGHT
                         if (!second)
                         {
-                                if (tar_status != 2)
-                                        tar_refuse("archive end marker is incomplete");
+                                tar_refuse("archive end marker is incomplete");
+                                break;
                         }
-                        else if (!tar_header_zero(second))
-                        {
-                                /* A lone zero block ends the archive, as GNU
-                                   reads it: said, and not a failure. */
-                                p8 shown[24];
+#endif
+                        p8 shown[24];
 
-                                shown[positive_into(shown, tar_blocks_taken - 1)] = end;
-                                string_format(log_error, "tar: A lone zero block at %s\n",
-                                              (string_address)shown);
-                        }
+                        shown[positive_into(shown, at)] = end;
+                        string_format(log_error, "tar: A lone zero block at %s\n",
+                                      (string_address)shown);
                         break;
                 }
 
@@ -5328,6 +5363,7 @@ static b32 tar_read_archive(struct tar_options address_to options)
                         memory_copy(tar_record, magic, (positive)got);
                         tar_have = (positive)got;
                         tar_at = 0;
+                        tar_stream_taken = (p64)got;
                 }
         }
         /* GNU: -p / root restores MODE_ALL; otherwise only 0777 & ~umask. */

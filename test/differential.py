@@ -38842,8 +38842,11 @@ def harness_compression(argv):
                   (opt / 'stdin' / 'tree' / 'repeat').read_bytes() == expected['repeat'],
                   (piped_out.stderr + piped_in.stderr).decode(errors='replace'))
 
-            mode = b"tar: you must specify one of the '-c', '-t', or '-x' options\n" \
-                   b"Try 'tar --help' for more information.\n"
+            # GNU's wording; the hint names the tar as it was called, as
+            # GNU's does.
+            called = str(farms[label] / 'tar').encode()
+            mode = b"tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options\n" \
+                   b"Try '%s --help' or '%s --usage' for more information.\n" % (called, called)
             for args, said in (
                     (['-cf'], b"tar: option requires an argument -- 'f'\n"),
                     (['cf'], b"tar: option requires an argument -- 'f'\n"),
@@ -39231,31 +39234,38 @@ def harness_compression(argv):
                 incomplete.write_bytes(wrap_codec(bytes(512), codec))
                 incomplete_result = call(
                     our_tar + ['-tf', str(incomplete)])
+                # One zero block where two end the archive: GNU says so and
+                # lists nothing, with status 0. STRICT_TIGHT refuses it.
                 check(label + '/tar-security/' + codec + '/two-end-blocks',
-                      incomplete_result.returncode != 0 and
-                      b'end marker' in incomplete_result.stderr.lower(),
-                      incomplete_result.stderr.decode(errors='replace'))
+                      incomplete_result.returncode == 0 and
+                      incomplete_result.stderr == b'tar: A lone zero block at 1\n' and
+                      not incomplete_result.stdout,
+                      '%r %r' % (incomplete_result.returncode, incomplete_result.stderr))
 
                 suffix = scratch_base / ('nonzero-suffix.' + codec)
                 suffix.write_bytes(wrap_codec(security_raw + b'not padding',
                                               codec))
                 suffix_result = call(our_tar + ['-tf', str(suffix)])
+                # Data after the end marker is not the archive's: GNU lists
+                # the member and stops there. STRICT_TIGHT refuses it.
                 check(label + '/tar-security/' + codec + '/nonzero-suffix',
-                      suffix_result.returncode != 0 and
-                      b'follows archive end marker' in
-                      suffix_result.stderr.lower(),
-                      suffix_result.stderr.decode(errors='replace'))
+                      suffix_result.returncode == 0 and
+                      suffix_result.stdout == b'safe.txt\n' and
+                      not suffix_result.stderr,
+                      '%r %r' % (suffix_result.returncode, suffix_result.stderr))
 
                 expansion = scratch_base / ('expanded-padding.' + codec)
                 expansion.write_bytes(wrap_codec(
                     security_raw + bytes(1024 * 1024 + 1), codec))
                 expansion_result = call(
                     our_tar + ['-tf', str(expansion)])
+                # Zero padding reads back up to the largest record a -b
+                # writes (512 MiB), so a megabyte of it is an archive.
                 check(label + '/tar-security/' + codec + '/padding-budget',
-                      expansion_result.returncode != 0 and
-                      b'padding exceeds limit' in
-                      expansion_result.stderr.lower(),
-                      expansion_result.stderr.decode(errors='replace'))
+                      expansion_result.returncode == 0 and
+                      expansion_result.stdout == b'safe.txt\n' and
+                      not expansion_result.stderr,
+                      '%r %r' % (expansion_result.returncode, expansion_result.stderr))
 
             directory_root = scratch_base / 'directory-root'
             directory_root.mkdir()
@@ -39267,19 +39277,22 @@ def harness_compression(argv):
             through_link = call(
                 our_tar + ['-xf', str(directory_archive),
                            '-C', str(directory_link)])
-            check(label + '/tar-security/directory-symlink-refused',
-                  through_link.returncode != 0 and
-                  not (directory_root / 'safe.txt').exists(),
+            # -C follows a link to a directory, as GNU's does; only
+            # STRICT_TIGHT refuses a linked component.
+            check(label + '/tar-security/directory-symlink-followed',
+                  through_link.returncode == 0 and
+                  (directory_root / 'safe.txt').read_bytes() == b'safe\n',
                   through_link.stderr.decode(errors='replace'))
+            (directory_root / 'safe.txt').unlink()
             source_member = directory_root / 'source.txt'
             source_member.write_bytes(b'source\n')
             create_through_link = scratch_base / 'created-through-link.tar'
             linked_create = call(
                 our_tar + ['-cf', str(create_through_link),
                            '-C', str(directory_link), source_member.name])
-            check(label + '/tar-security/create-directory-symlink-refused',
-                  linked_create.returncode != 0 and
-                  not create_through_link.exists(),
+            check(label + '/tar-security/create-directory-symlink-followed',
+                  linked_create.returncode == 0 and
+                  create_through_link.read_bytes()[:9] == b'source.tx',
                   linked_create.stderr.decode(errors='replace'))
             trailing_directory = call(
                 our_tar + ['-xf', str(directory_archive),
