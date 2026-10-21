@@ -1508,6 +1508,33 @@ static bool rx_fixed(const rx_node *nodes, rx_ref first, rx_hints *hints, positi
 
 static bool rx_single(const regex_program *program, const rx_node *node, p8 byte);
 
+/*
+        Whether every match begins at a ^: the sequence opens with one, or
+        with a group or an alternation every branch of which does -- ^a|^b
+        is anchored as ^(a|b) is, and the walk and the machine try the
+        line's start alone. The right branch of an alternation of three or
+        more is the alternation of the rest, so that spine is a loop.
+*/
+static bool rx_begins_anchored(const rx_node *nodes, rx_ref at)
+{
+        while (at)
+        {
+                if (nodes[at].kind == RX_BEGIN)
+                        return true;
+                if (nodes[at].kind == RX_CAPTURE)
+                        at = nodes[at].left;
+                else if (nodes[at].kind == RX_ALT)
+                {
+                        if (!rx_begins_anchored(nodes, nodes[at].left))
+                                return false;
+                        at = nodes[at].right;
+                }
+                else
+                        return false;
+        }
+        return false;
+}
+
 static p32 rx_compiles;
 
 // Why the last compile refused its pattern, when it did.
@@ -1574,7 +1601,7 @@ static bool rx_compile_length(rx_pool *pool, regex_program *out, string_address 
                 c.program.flags |= RX_LAST_KNOWN;
         }
         // Under M a ^ is also at each line's start, so the walk tries every start.
-        if (root.first && pool->nodes[root.first].kind == RX_BEGIN && !(policy & REGEX_LINE_ANCHORS))
+        if (root.first && rx_begins_anchored(pool->nodes, root.first) && !(policy & REGEX_LINE_ANCHORS))
                 c.program.flags |= RX_ANCHORED;
         rx_required_two(pool->nodes, root.first, hints->literal, address_of hints->literal_length,
                         hints->extra, address_of hints->extra_length);

@@ -25919,6 +25919,209 @@ typedef struct
 
 static grep_set grep_literals;
 
+// What a run hunts when the set has taken the place of its string: nothing.
+static const rx_hints grep_no_literal;
+
+// Whether every string of the set is longer than `than` bytes.
+static bool grep_set_longer(positive than)
+{
+        for (positive i = 0; i < grep_literals.count; i++)
+                if (grep_literals.size[i] <= than)
+                        return false;
+        return true;
+}
+
+/*
+        An alternation of strings with bytes beside it -- (static|extern)
+        and the space after it, a(b|c)d -- is the strings its branches make
+        with those bytes: every match holds one of them, and where the
+        alternations and the bytes are the whole sequence, a match is one of
+        them, so the set proves it as it proves a|b. Where the sequence
+        holds more, an anchor or a repeat, the run of bytes and alternations
+        around its first alternation is what a match cannot do without, and
+        the set only finds the lines worth asking.
+
+        A piece of a sequence is a byte, a group of bytes, or an
+        alternation, bare or in a group, whose every branch is bytes or
+        nothing. GREP_SET_CHAIN is how long a sequence is looked at and
+        GREP_SET_STRING how long a string of the product may be.
+        GREP_SET_PRODUCT is how many strings one sequence may make: each is
+        a pass over the span, and (a|e|i|o|u)(n|r)t's ten, every one of them
+        on a line of C in three, took 11 percent more cycles than the
+        machine reading the span once.
+*/
+#define GREP_SET_CHAIN 64
+#define GREP_SET_STRING 128
+#define GREP_SET_SHORT 4
+#define GREP_SET_PRODUCT 8
+
+typedef struct
+{
+        positive count;
+        positive size[GREP_SET_MAX];
+        p8 bytes[GREP_SET_MAX][GREP_SET_STRING];
+} grep_strings;
+
+static grep_strings grep_piece, grep_product, grep_product_next;
+
+// Whether the node is an alternation, bare or in a group.
+static bool grep_set_alternation(const rx_node address_to nodes, rx_ref node)
+{
+        if (nodes[node].kind == RX_ALT)
+                return true;
+        if (nodes[node].kind != RX_CAPTURE)
+                return false;
+        node = nodes[node].left;
+        return node && nodes[node].kind == RX_ALT && !nodes[node].next;
+}
+
+// A branch's bytes onto the end of one string of `out`, or false.
+static bool grep_set_bytes(const rx_node address_to nodes, rx_ref at, grep_strings address_to out)
+{
+        positive k = out->count;
+
+        out->size[k] = 0;
+        for (; at; at = nodes[at].next)
+        {
+                if (nodes[at].kind != RX_BYTE || out->size[k] == GREP_SET_STRING)
+                        return false;
+                out->bytes[k][out->size[k]++] = (p8)nodes[at].argument;
+        }
+        out->count++;
+        return true;
+}
+
+// The node's strings into `out`; false when it is not a piece or has too many.
+static bool grep_set_piece(const rx_node address_to nodes, rx_ref node, grep_strings address_to out)
+{
+        rx_ref pending[GREP_SET_MAX + 1];
+        positive waiting = 0;
+        rx_ref inner = node;
+
+        out->count = 0;
+        if (nodes[node].kind == RX_BYTE)
+        {
+                out->size[0] = 1;
+                out->bytes[0][0] = (p8)nodes[node].argument;
+                out->count = 1;
+                return true;
+        }
+        if (nodes[node].kind == RX_CAPTURE)
+        {
+                inner = nodes[node].left;
+                if (!inner)
+                        return false;
+                // A group of bytes is its bytes.
+                if (nodes[inner].kind != RX_ALT || nodes[inner].next)
+                        return grep_set_bytes(nodes, inner, out);
+        }
+        if (nodes[inner].kind != RX_ALT)
+                return false;
+
+        //      The branches in order, an alternation's right one being the
+        //      alternation of the rest when there are three or more.
+        pending[waiting++] = inner;
+        while (waiting)
+        {
+                rx_ref at = pending[--waiting];
+
+                if (at && nodes[at].kind == RX_ALT && (at == inner || !nodes[at].next))
+                {
+                        if (waiting + 2 > GREP_SET_MAX + 1)
+                                return false;
+                        pending[waiting++] = nodes[at].right;
+                        pending[waiting++] = nodes[at].left;
+                        continue;
+                }
+                if (out->count == GREP_SET_MAX || !grep_set_bytes(nodes, at, out))
+                        return false;
+        }
+        return true;
+}
+
+/*
+        The sequence from `node` distributed into the set: all of it when
+        `exact`, else the run of pieces around its first alternation, each
+        string longer than `beside`, the single string the sequence cannot
+        do without, which hunts better than a set of strings no longer.
+*/
+static bool grep_set_distribute(const regex_program address_to program, rx_ref node,
+                                bool icase, bool exact, positive beside)
+{
+        const rx_node address_to nodes = program->nodes;
+        grep_set address_to set = address_of grep_literals;
+        rx_ref element[GREP_SET_CHAIN];
+        positive elements = 0, first, from, to;
+
+        for (rx_ref at = node; at; at = nodes[at].next)
+        {
+                if (elements == GREP_SET_CHAIN)
+                        return false;
+                element[elements++] = at;
+        }
+        for (first = 0; first < elements && !grep_set_alternation(nodes, element[first]); first++)
+                ;
+        if (first == elements)
+                return false;
+        from = exact ? 0 : first;
+        to = exact ? elements : first + 1;
+        while (!exact && from && grep_set_piece(nodes, element[from - 1], address_of grep_piece))
+                from--;
+        while (!exact && to < elements && grep_set_piece(nodes, element[to], address_of grep_piece))
+                to++;
+
+        grep_product.count = 1;
+        grep_product.size[0] = 0;
+        for (positive e = from; e < to; e++)
+        {
+                if (!grep_set_piece(nodes, element[e], address_of grep_piece) ||
+                    grep_product.count * grep_piece.count > GREP_SET_MAX - set->count ||
+                    grep_product.count * grep_piece.count > GREP_SET_PRODUCT)
+                        return false;
+                grep_product_next.count = 0;
+                for (positive i = 0; i < grep_product.count; i++)
+                        for (positive j = 0; j < grep_piece.count; j++)
+                        {
+                                positive k = grep_product_next.count++;
+                                positive size = grep_product.size[i] + grep_piece.size[j];
+
+                                if (size > GREP_SET_STRING)
+                                        return false;
+                                memory_copy_apart(grep_product_next.bytes[k], grep_product.bytes[i],
+                                                  grep_product.size[i]);
+                                memory_copy_apart(grep_product_next.bytes[k] + grep_product.size[i],
+                                                  grep_piece.bytes[j], grep_piece.size[j]);
+                                grep_product_next.size[k] = size;
+                        }
+                grep_product = grep_product_next;
+        }
+
+        positive bytes = 0;
+
+        for (positive i = 0; i < grep_product.count; i++)
+        {
+                // An empty string is every line, which no hunt finds.
+                if (!grep_product.size[i] || (!exact && grep_product.size[i] <= beside))
+                        return false;
+                bytes += grep_product.size[i];
+        }
+        if (set->used + bytes > GREP_SET_BYTES)
+                return false;
+        for (positive i = 0; i < grep_product.count; i++)
+        {
+                positive start = set->used;
+
+                memory_copy_apart(set->bytes + start, grep_product.bytes[i], grep_product.size[i]);
+                set->used += grep_product.size[i];
+                set->at[set->count] = start;
+                set->size[set->count] = grep_product.size[i];
+                set->anchors[set->count] = memory_search_prepare(set->bytes + start,
+                                                                 grep_product.size[i], icase);
+                set->count++;
+        }
+        return true;
+}
+
 /*
         False when some branch is not bytes alone, or the set would not fit.
         With `exact` false the set is only where a match must be: each branch
@@ -25946,6 +26149,29 @@ static bool grep_set_gather(const regex_program address_to program, rx_ref node,
 
         positive start = set->used;
         positive grown = 0;
+
+        //      A sequence with an alternation in it, distributed over the
+        //      bytes beside it, where the one string it cannot do without is
+        //      short; a refusal leaves the set as it was.
+        bool alternating = false;
+
+        for (rx_ref at = node; at && !alternating; at = nodes[at].next)
+                alternating = grep_set_alternation(nodes, at);
+        if (alternating)
+        {
+                positive count = set->count;
+                positive single = 0;
+
+                if (!exact && set->used + RX_LITERAL_MAX <= GREP_SET_BYTES)
+                        rx_required(nodes, node, set->bytes + start, address_of single);
+                if ((exact || single < GREP_SET_SHORT) &&
+                    grep_set_distribute(program, node, icase, exact, single))
+                        return true;
+                set->count = count;
+                set->used = start;
+                if (exact)
+                        return false;
+        }
 
         if (exact)
                 for (rx_ref at = node; at; at = nodes[at].next)
@@ -30917,23 +31143,33 @@ static b32 text_grep_run()
         grep_literals.used = 0;
         grep_graph_won = grep_machine_won = false;
 
-        bool literal_set = !never && !many && !literal_proves && !literal->literal_length &&
+        // A string of a few bytes that every match holds hunts no better
+        // than a set of longer ones, the space after (static|extern) than
+        // the two words with it: the set is gathered beside it and takes
+        // its place when every string of it is longer.
+        bool short_literal = literal->literal_length < GREP_SET_SHORT;
+        bool literal_set = !never && !many && !literal_proves && short_literal &&
                            (regex_current.flags & RX_BRANCHING) &&
                            !(regex_current.flags & RX_HAS_BACKREF) &&
                            grep_set_gather(address_of regex_current,
                                            regex_current.first, icase, true) &&
-                           grep_literals.count > 1;
+                           grep_literals.count > 1 && grep_set_longer(literal->literal_length);
 
         // No string is the whole program, but every match holds one of a few.
         grep_literals.count = literal_set ? grep_literals.count : 0;
         grep_literals.used = literal_set ? grep_literals.used : 0;
 
         bool literal_hunt = !never && !many && !literal_proves && !literal_set &&
-                            !literal->literal_length &&
+                            short_literal &&
                             (regex_current.flags & RX_BRANCHING) &&
                             grep_set_gather(address_of regex_current,
                                             regex_current.first, icase, false) &&
-                            grep_literals.count > 1;
+                            grep_literals.count > 1 && grep_set_longer(literal->literal_length);
+
+        grep_literals.count = literal_set || literal_hunt ? grep_literals.count : 0;
+        grep_literals.used = literal_set || literal_hunt ? grep_literals.used : 0;
+        if (literal_set || literal_hunt)
+                literal = address_of grep_no_literal;
 
         return_if(before && !grep_hold_make(before), text_done(2));
 
