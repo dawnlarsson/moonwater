@@ -31747,7 +31747,10 @@ __asm__(
     // 0x0001020304050607, read from the top byte; a byte at a time otherwise, every offset stored and the count
     // moved on by the or of two seqz. qemu, instructions a call: a 22-byte record 354 before, 249 by the word
     // and 55 with V; 64 KiB of text with a hit every six bytes 334,925, 112,592 and 18,156 at VLEN 128 (9,095
-    // at 256). The x86_64 block carries the full contract.
+    // at 256). The word loop asks for its bounds once a word and for the room only of a word with a hit; with
+    // Zbb a word is two orc.b of it xor each byte, and a hit's place ctz of its bit seven. cat -E over C source,
+    // instructions a byte: 18.1 before, 7.0 without Zbb, 6.2 with it, 3.4 with V. The x86_64 block carries the
+    // full contract.
 #if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     ".option push\n   .option arch, +v\n"
 #endif
@@ -31768,14 +31771,34 @@ __asm__(
     ".Lmemory_offsets_rv_peel:\n   andi t2, a1, 7\n   add t2, t2, t1\n   andi t2, t2, 7\n   beqz t2, .Lmemory_offsets_rv_words\n"
     "bgeu t1, a2, .Lmemory_offsets_rv_done\n   bgeu t0, a5, .Lmemory_offsets_rv_done\n   add t2, a1, t1\n   lbu t2, 0(t2)\n   slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n"
     "xor t4, t2, a3\n   seqz t4, t4\n   xor t5, t2, a4\n   seqz t5, t5\n   or t4, t4, t5\n   add t0, t0, t4\n   addi t1, t1, 1\n   j .Lmemory_offsets_rv_peel\n"
-    ".Lmemory_offsets_rv_words:\n   li a6, 0x0101010101010101\n   mul t5, a3, a6\n   mul t6, a4, a6\n   li a6, 0x7f7f7f7f7f7f7f7f\n   li a7, 0x0001020304050607\n"
-    ".Lmemory_offsets_rv_word:\n   sub t2, a2, t1\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_rv_one\n   sub t2, a5, t0\n   bltu t2, t3, .Lmemory_offsets_rv_one\n"
-    "add t2, a1, t1\n   ld t2, 0(t2)\n   xor t3, t2, t5\n   and t4, t3, a6\n   add t4, t4, a6\n   or t4, t4, t3\n"
+    //  The words while a whole one is left, a3 the offset of the last that is; the room for a word's eight
+    //  offsets is asked only of a word with a hit in it, and too little leaves the rest to the byte loop.
+    ".Lmemory_offsets_rv_words:\n   sub t2, a2, t1\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_rv_one\n   li a6, 0x0101010101010101\n"
+    "mul t5, a3, a6\n   mul t6, a4, a6\n   addi a3, a2, -8\n"
+    RV_ZBB_ASK("t2", ".Lmemory_offsets_rv_zwords")
+    "li a6, 0x7f7f7f7f7f7f7f7f\n   li a7, 0x0001020304050607\n"
+    ".Lmemory_offsets_rv_word:\n   add t2, a1, t1\n   ld t2, 0(t2)\n   xor t3, t2, t5\n   and t4, t3, a6\n   add t4, t4, a6\n   or t4, t4, t3\n"
     "xor t3, t2, t6\n   and t2, t3, a6\n   add t2, t2, a6\n   or t2, t2, t3\n   and t4, t4, t2  # bit seven clear where either matched\n"
-    "or t4, t4, a6\n   not t4, t4  # set exactly there\n   beqz t4, .Lmemory_offsets_rv_word_next\n   slli t3, t0, 2\n   add t3, a0, t3\n"
+    "or t4, t4, a6\n   not t4, t4  # set exactly there\n   bnez t4, .Lmemory_offsets_rv_hits\n"
+    ".Lmemory_offsets_rv_word_next:\n   addi t1, t1, 8\n   bgeu a3, t1, .Lmemory_offsets_rv_word\n"
+    //  Out of the words: a3 its byte again, from the low byte of t5.
+    ".Lmemory_offsets_rv_words_end:\n   andi a3, t5, 255\n   j .Lmemory_offsets_rv_one\n"
+    ".Lmemory_offsets_rv_hits:\n   sub t2, a5, t0\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_rv_words_end\n   slli t3, t0, 2\n   add t3, a0, t3\n"
     ".Lmemory_offsets_rv_hit:\n   neg t2, t4\n   and t2, t2, t4\n   srli t2, t2, 7\n   mul t2, t2, a7\n   srli t2, t2, 56\n   add t2, t2, t1\n   sw t2, 0(t3)\n"
-    "addi t3, t3, 4\n   addi t0, t0, 1\n   addi t2, t4, -1\n   and t4, t4, t2\n   bnez t4, .Lmemory_offsets_rv_hit\n"
-    ".Lmemory_offsets_rv_word_next:\n   addi t1, t1, 8\n   j .Lmemory_offsets_rv_word\n"
+    "addi t3, t3, 4\n   addi t0, t0, 1\n   addi t2, t4, -1\n   and t4, t4, t2\n   bnez t4, .Lmemory_offsets_rv_hit\n   j .Lmemory_offsets_rv_word_next\n"
+#ifndef KERNEL_MODE
+    //  With Zbb a word is neither byte where orc.b of it xor each is all ones, a hit's place ctz of bit seven.
+    RV_ZBB_BEGIN
+    ".Lmemory_offsets_rv_zwords:\n   li a6, -1\n   li a7, 0x8080808080808080\n"
+    ".Lmemory_offsets_rv_zword:\n   add t2, a1, t1\n   ld t2, 0(t2)\n   xor t3, t2, t5\n   orc.b t3, t3\n   xor t4, t2, t6\n   orc.b t4, t4\n"
+    "and t4, t3, t4\n   bne t4, a6, .Lmemory_offsets_rv_zhits\n"
+    ".Lmemory_offsets_rv_zword_next:\n   addi t1, t1, 8\n   bgeu a3, t1, .Lmemory_offsets_rv_zword\n   j .Lmemory_offsets_rv_words_end\n"
+    ".Lmemory_offsets_rv_zhits:\n   sub t2, a5, t0\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_rv_words_end\n   slli t3, t0, 2\n   add t3, a0, t3\n"
+    "andn t4, a7, t4\n"
+    ".Lmemory_offsets_rv_zhit:\n   ctz t2, t4\n   srli t2, t2, 3\n   add t2, t2, t1\n   sw t2, 0(t3)\n   addi t3, t3, 4\n   addi t0, t0, 1\n"
+    "addi t2, t4, -1\n   and t4, t4, t2\n   bnez t4, .Lmemory_offsets_rv_zhit\n   j .Lmemory_offsets_rv_zword_next\n"
+    RV_ZBB_END
+#endif
     ".Lmemory_offsets_rv_one:  bgeu t1, a2, .Lmemory_offsets_rv_done\n   bgeu t0, a5, .Lmemory_offsets_rv_done\n"
     "add t2, a1, t1\n   lbu t2, 0(t2)\n   slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n   xor t4, t2, a3\n   seqz t4, t4\n   xor t5, t2, a4\n   seqz t5, t5\n   or t4, t4, t5\n"
     "add t0, t0, t4\n   addi t1, t1, 1\n   j .Lmemory_offsets_rv_one\n"
@@ -31800,16 +31823,76 @@ __asm__(
     ".Lmemory_offsets_range_rv_done:\n   mv a0, t0\n" ASM_RET
     ASM_END(memory_offsets_outside)
 
-    // memory_offsets_in_set: a byte at a time, every offset stored and the
-    // count moved on by snez of the byte's entry. The x86_64 block carries
-    // the full contract.
+    //
+    //       memory_offsets_in_set: the table is read first, once a call, a
+    //       word at a time where it sits on eight and a byte at a time where
+    //       it does not, as far as its third member. A set of one byte or two
+    //       -- cat -n's newline, cat -T's tab and newline -- is
+    //       memory_offsets_of_either's, which this tail-calls with the bytes:
+    //       its words and its V body find the hits, where a lookup a byte was
+    //       all this had. A set of more is looked up: with V the bytes a turn
+    //       gathered from the table (vluxei8 by the bytes themselves),
+    //       compared with nought, their offsets compressed as
+    //       memory_offsets_of_either compresses its own; without V four bytes
+    //       a turn, every offset stored and the cursor moved on by snez of its
+    //       entry, the room for four asked once. qemu, instructions a byte,
+    //       cat -n over C source: 24.2 before, 10.4 without V or Zbb, 9.4
+    //       with Zbb; with V 22.4 to 6.3. The rest of cat -n is its own C
+    //       and the line copies. The x86_64 block carries the full contract.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_offsets_in_set)
-    "li t0, 0\n   li t1, 0\n"
+    "li t0, 0\n   beqz a4, .Lmemory_offsets_set_rv_done\n   beqz a2, .Lmemory_offsets_set_rv_done\n"
+    //  t1 the members found, t2 and t3 the first two, t4 where the table is read.
+    "li t1, 0\n   li t4, 0\n   andi t5, a3, 7\n   bnez t5, .Lmemory_offsets_set_rv_bytes\n"
+    ".Lmemory_offsets_set_rv_words:\n   add t5, a3, t4\n   ld t5, 0(t5)\n   bnez t5, .Lmemory_offsets_set_rv_word\n"
+    ".Lmemory_offsets_set_rv_words_next:\n   addi t4, t4, 8\n   li t5, 256\n   bltu t4, t5, .Lmemory_offsets_set_rv_words\n"
+    "j .Lmemory_offsets_set_rv_either\n"
+    //  A word with a member in it: its bytes, lowest first.
+    ".Lmemory_offsets_set_rv_word:\n   mv t6, t4\n"
+    "1:  andi a5, t5, 255\n   beqz a5, 2f\n   li a5, 2\n   beq t1, a5, .Lmemory_offsets_set_rv_lookup\n   mv t3, t6\n"
+    "bnez t1, 3f\n   mv t2, t6\n3:  addi t1, t1, 1\n"
+    "2:  srli t5, t5, 8\n   addi t6, t6, 1\n   bnez t5, 1b\n   j .Lmemory_offsets_set_rv_words_next\n"
+    ".Lmemory_offsets_set_rv_bytes:\n   add t5, a3, t4\n   lbu t5, 0(t5)\n   beqz t5, 2f\n   li a5, 2\n"
+    "beq t1, a5, .Lmemory_offsets_set_rv_lookup\n   mv t3, t4\n   bnez t1, 3f\n   mv t2, t4\n3:  addi t1, t1, 1\n"
+    "2:  addi t4, t4, 1\n   li t5, 256\n   bltu t4, t5, .Lmemory_offsets_set_rv_bytes\n"
+    //  None, one or two: the offsets of either byte, the one twice for one.
+    ".Lmemory_offsets_set_rv_either:\n   beqz t1, .Lmemory_offsets_set_rv_done\n   li t5, 1\n   bne t1, t5, 4f\n   mv t3, t2\n"
+    "4:  mv a5, a4\n   mv a3, t2\n   mv a4, t3\n   tail memory_offsets_of_either\n"
+    //  Three or more: looked up.
+    ".Lmemory_offsets_set_rv_lookup:\n   li t1, 0\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lmemory_offsets_set_rv_vector\n   bnez t3, .Lmemory_offsets_set_rv_four\n"
+    //  The detect keeps a0-a4 and a7.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j .Lmemory_offsets_set_rv_lookup\n"
+    ".Lmemory_offsets_set_rv_vector:\n   bgeu t1, a2, .Lmemory_offsets_set_rv_done\n   bgeu t0, a4, .Lmemory_offsets_set_rv_done\n   sub t2, a2, t1\n"
+    "vsetvli t3, t2, e8, m2, ta, ma\n   add t4, a1, t1\n   vle8.v v8, (t4)\n   vluxei8.v v12, (a3), v8\n   vmsne.vi v0, v12, 0\n   vcpop.m t5, v0\n"
+    "beqz t5, .Lmemory_offsets_set_rv_vector_next\n   sub t6, a4, t0\n   bltu t6, t5, 5f  # more than the room: as many as it holds\n   mv t6, t5\n"
+    "5:  vsetvli zero, t3, e32, m8, ta, ma\n   vid.v v16\n   vadd.vx v16, v16, t1\n   vcompress.vm v24, v16, v0\n"
+    "vsetvli zero, t6, e32, m8, ta, ma\n   slli t2, t0, 2\n   add t2, a0, t2\n   vse32.v v24, (t2)\n   add t0, t0, t6\n   bltu t6, t5, .Lmemory_offsets_set_rv_done\n"
+    ".Lmemory_offsets_set_rv_vector_next:\n   add t1, t1, t3\n   j .Lmemory_offsets_set_rv_vector\n"
+#endif
+    //  Four a turn while four bytes and four offsets of room are left: t2 where the next offset goes.
+    ".Lmemory_offsets_set_rv_four:\n   li a7, 4\n   bltu a2, a7, .Lmemory_offsets_set_rv_one\n   bltu a4, a7, .Lmemory_offsets_set_rv_one\n"
+    "slli t2, t0, 2\n   add t2, a0, t2\n   addi a5, a2, -4\n   addi a6, a4, -4\n"
+    "6:  bltu a5, t1, .Lmemory_offsets_set_rv_one_from\n   bltu a6, t0, .Lmemory_offsets_set_rv_one_from\n   add t3, a1, t1\n"
+    "lbu t4, 0(t3)\n   lbu t5, 1(t3)\n   lbu t6, 2(t3)\n   lbu t3, 3(t3)\n   add t4, a3, t4\n   add t5, a3, t5\n   add t6, a3, t6\n   add t3, a3, t3\n"
+    "lbu t4, 0(t4)\n   lbu t5, 0(t5)\n   lbu t6, 0(t6)\n   lbu t3, 0(t3)\n"
+    "sw t1, 0(t2)\n   snez t4, t4\n   slli a7, t4, 2\n   add t2, t2, a7\n   add t0, t0, t4\n   addi t1, t1, 1\n"
+    "sw t1, 0(t2)\n   snez t5, t5\n   slli a7, t5, 2\n   add t2, t2, a7\n   add t0, t0, t5\n   addi t1, t1, 1\n"
+    "sw t1, 0(t2)\n   snez t6, t6\n   slli a7, t6, 2\n   add t2, t2, a7\n   add t0, t0, t6\n   addi t1, t1, 1\n"
+    "sw t1, 0(t2)\n   snez t3, t3\n   slli a7, t3, 2\n   add t2, t2, a7\n   add t0, t0, t3\n   addi t1, t1, 1\n   j 6b\n"
+    ".Lmemory_offsets_set_rv_one_from:\n"
     ".Lmemory_offsets_set_rv_one:  bgeu t1, a2, .Lmemory_offsets_set_rv_done\n   bgeu t0, a4, .Lmemory_offsets_set_rv_done\n"
     "add t2, a1, t1\n   lbu t2, 0(t2)\n   slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n   add t2, a3, t2\n   lbu t2, 0(t2)\n   snez t2, t2\n"
     "add t0, t0, t2\n   addi t1, t1, 1\n   j .Lmemory_offsets_set_rv_one\n"
     ".Lmemory_offsets_set_rv_done:\n   mv a0, t0\n" ASM_RET
     ASM_END(memory_offsets_in_set)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
 
     // memory_exchange_apart: disjoint exchange with equal and zero-sized
     // no-op cases. The x86_64 block carries the full contract. RV64 may trap

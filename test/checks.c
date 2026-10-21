@@ -14879,9 +14879,10 @@ fn check_offsets_of_either()
         p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2, avx2 = cpu_has_avx2;
         positive tiers = 4;
 #elif RISCV64
-        // V, asked for by the first call, then the word body without it.
-        p8 vector = 0;
-        positive tiers = 2;
+        // V, asked for by the first call, then the word body without it, on
+        // the processor's Zbb and then without.
+        p8 vector = 0, zbb = cpu_has_zbb;
+        positive tiers = 3;
         cpu_has_vector = 0;
 #else
         positive tiers = 1;
@@ -14897,6 +14898,12 @@ fn check_offsets_of_either()
                 {
                         vector = cpu_has_vector;
                         cpu_has_vector = 1;
+                }
+                if (tier == 2)
+                {
+                        if (!zbb)
+                                continue;
+                        cpu_has_zbb = 0;
                 }
 #endif
                 same("memory_offsets_of_either", "no room",
@@ -14984,6 +14991,7 @@ fn check_offsets_of_either()
         cpu_has_avx2 = avx2;
 #elif RISCV64
         cpu_has_vector = vector;
+        cpu_has_zbb = zbb;
 #endif
         memory_free(pages, 3 * 4096);
 }
@@ -17217,6 +17225,124 @@ fn check_record_scans()
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
 #endif
+}
+
+/*
+        memory_offsets_in_set against a byte loop with the block ending
+        against a page that faults: every size to 200 and long ones, every
+        residue, tables of no member, one, two (both orders of use), three,
+        cat -v's and half the bytes at random, and limits from one to past
+        the count with the slots past the limit fenced. On riscv64 with V,
+        without V on the processor's Zbb, and without either, since a table
+        of one or two members is memory_offsets_of_either's and the rest is
+        the routine's own.
+*/
+fn check_offsets_in_set_pages()
+{
+        static const positive sizes[] = {1000, 4096};
+        static p32 got[4200], want[4200];
+        static b8 sets[6][256];
+        p8 address_to pages = guard_pages("memory_offsets_in_set");
+
+        if (!pages)
+                return;
+        p8 address_to bytes = pages + 4096;
+        p64 seed = 0x452821e638d01377ull;
+
+        for (positive i = 0; i < 256; i++)
+        {
+                sets[0][i] = 0;
+                sets[1][i] = i == '\n';
+                sets[2][i] = i == '\t' || i == ',';
+                sets[3][i] = i == ',' || i == '\n' || i == 'x';
+                sets[4][i] = i < 9 || (i > 10 && i < 32) || i > 126;
+                XORSHIFT64(seed);
+                sets[5][i] = (b8)(seed & 1);
+        }
+#if RISCV64
+        p8 vector = 0, zbb = cpu_has_zbb;
+        positive tiers = 3;
+        cpu_has_vector = 0;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
+                if (tier == 2)
+                {
+                        if (!zbb)
+                                continue;
+                        cpu_has_zbb = 0;
+                }
+#endif
+                for (positive t = 0; t < array_count(sets); t++)
+                        for (positive s = 0; s < 201 + array_count(sizes); s += s < 70 ? 1 : 7)
+                                for (positive residue = 0; residue <= 64; residue += residue < 9 ? 1 : 11)
+                                {
+                                        positive size = s <= 200 ? s : sizes[s - 201];
+                                        // The block's end against the page that faults, or a few bytes short.
+                                        positive back = residue % 9 < 4096 - size ? residue % 9 : 4096 - size;
+                                        positive offset = 4096 - size - back;
+
+                                        for (positive i = offset > 64 ? offset - 64 : 0; i < 4096; i++)
+                                        {
+                                                XORSHIFT64(seed);
+                                                positive pick = (positive)(seed % 16);
+                                                bytes[i] = pick == 0 ? ',' : pick == 1 ? '\n' : pick == 2 ? '\t'
+                                                           : pick == 3 ? 'x' : (p8)(seed >> 8);
+                                        }
+                                        positive count = 0;
+                                        for (positive i = 0; i < size; i++)
+                                                if (sets[t][bytes[offset + i]])
+                                                        want[count++] = (p32)i;
+
+                                        static const positive limits[] = {1, 2, 3, 4, 7, 64, 65, 5000};
+                                        for (positive l = 0; l < array_count(limits); l++)
+                                        {
+                                                positive limit = limits[l], have = 0, from = 0;
+                                                bool ok = true;
+
+                                                for (;;)
+                                                {
+                                                        bool fenced = limit + 80 <= array_count(got);
+                                                        if (fenced)
+                                                                for (positive i = 0; i < 80; i++)
+                                                                        got[limit + i] = 0xdeadbeefu;
+                                                        positive answer = (memory_offsets_in_set)(
+                                                            got, bytes + offset + from, size - from, sets[t], limit);
+                                                        if (answer > limit)
+                                                        {
+                                                                ok = false;
+                                                                break;
+                                                        }
+                                                        if (fenced)
+                                                                for (positive i = 0; i < 80; i++)
+                                                                        if (got[limit + i] != 0xdeadbeefu)
+                                                                                ok = false;
+                                                        for (positive i = 0; i < answer; i++)
+                                                                if (have + i >= count || got[i] + from != want[have + i])
+                                                                        ok = false;
+                                                        have += answer;
+                                                        if (answer < limit || !ok)
+                                                                break;
+                                                        from += got[answer - 1] + 1;
+                                                }
+                                                same("memory_offsets_in_set pages", "offsets", ok, 1);
+                                                same("memory_offsets_in_set pages", "count", have, count);
+                                        }
+                                }
+        }
+#if RISCV64
+        cpu_has_vector = vector;
+        cpu_has_zbb = zbb;
+#endif
+        memory_free(pages, 3 * 4096);
 }
 
 /*
@@ -28869,6 +28995,7 @@ b32 main()
         check_span_byte();
         check_dirty_arguments();
         check_offsets_range();
+        check_offsets_in_set_pages();
         check_record_scans();
         check_record_guards();
         check_checksums();
