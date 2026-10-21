@@ -41060,7 +41060,7 @@ __asm__(
         and -b 166.3M to 71.9M. M2 Pro, lifted, the whole lines of the first
         4 MiB of src/lib.c against GNU's walk in C: 113.8 to 14.8 ns a line.
         qemu instructions a line, C source at -w 60 and at -b -w 60: aarch64
-        251 and 174 to 79 and 78; riscv64 864 and 306 to 213 and 212, with V
+        251 and 174 to 79 and 78; riscv64 864 and 306 to 145 and 144, with V
         864 and 306 to 52 and 52.
 */
 #ifndef KERNEL_MODE
@@ -41301,13 +41301,27 @@ __asm__(
         exact, a vsetvli each to a hundred and twenty eight bytes at the
         smallest VLEN.
 
-        Without V, a byte at a time, four a turn, written as it is read: t0
-        the byte, t1 where the line begins and t6 where its output does, t3
-        where the output line under way began, t2 its column. A run of bytes
-        of fourteen and up is as many as the width has room for, bounded by
-        the end; a byte under fourteen is the newline, the tab, a stop or a
-        column. A line that stops the routine, and the last when it has no
-        newline, gives back what it wrote.
+        Without V the output is a stream, as RV64 may trap on an unaligned
+        wide store: s6 the aligned word it is in, s7 eight times the bytes of
+        that word written so far and s8 those bytes, the rest of it nought,
+        stored whole when it fills -- so a run of the source is eight bytes
+        a chunk, two shifts, an OR and a store, and a byte is a shift and an
+        OR. The source is read in chunks of eight from the aligned words it
+        is in: t0 the byte, a6 the aligned word, a7 the word, t3 eight times
+        t0's place in it and s1 the shift the next word takes, s2 the last
+        aligned word a whole chunk may start in before s0, the end of what
+        the width has room for or of the source. A chunk is taken whole when
+        every byte of it is at least fourteen, and not past ASCII under
+        UTF-8: the carry free test (s9 0x7f in every byte, s10 0x72, s11
+        0x80, s5 the bytes past ASCII that stop the routine) sets bit seven
+        of each such byte, and the chunk is all of them when that is s11.
+        Otherwise the first one that is not is found by the multiply by s4,
+        and the bytes before it go on alone; so do the bytes of the chunk
+        before s0. t1 is where the line begins and t2 its column. The frame
+        keeps the stream's three at 96 for where the line's output begins,
+        which a line that stops the routine, or the last when it has no
+        newline, goes back to, and at 120 where the output line under way
+        began.
 */
 //      s0 bytes from t0 to a0; s2, t2 and t6 spent.
 #define FOLD_RV_VCOPY                                                          \
@@ -41322,6 +41336,50 @@ __asm__(
     "vmand.mm v2, v2, v28\n   vmsle.vi v3, v8, -1\n   vmand.mm v3, v3, v29\n   vmor.mm v2, v2, v3\n"                \
     "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s t5, v0\n   vmv.x.s t3, v1\n   vmv.x.s t4, v2\n   and t3, t3, s5\n"
 //      The tabs of the sixty four bytes at s4 into s11, those at or past the newline dropped; s0 and s2 spent.
+//      Bit seven of each byte of X at least fourteen, and not past ASCII where s5 says those stop, into M; T spent.
+#define FOLD_RV_PLAIN(X, M, T)                                                 \
+    "and " M ", " X ", s9\n   add " M ", " M ", s10\n   or " M ", " M ", " X "\n   and " T ", " X ", s5\n"       \
+    "xor " M ", " M ", " T "\n   and " M ", " M ", s11\n"
+//      The same for C, where no byte past ASCII stops: four instructions.
+#define FOLD_RV_PLAIN_C(X, M, T)                                               \
+    "and " M ", " X ", s9\n   add " M ", " M ", s10\n   or " M ", " M ", " X "\n   and " M ", " M ", s11\n"
+//      And for UTF-8, where every one does: bit seven of the sum and of X flipped, five.
+#define FOLD_RV_PLAIN_UTF8(X, M, T)                                            \
+    "and " M ", " X ", s9\n   add " M ", " M ", s10\n   xor " T ", " X ", s11\n   and " M ", " M ", " T "\n"     \
+    "and " M ", " M ", s11\n"
+/*
+        A run's chunks from t0 while a whole one fits before s0, for a
+        locale's plain test: from the aligned word when t0 is on one, and
+        otherwise from two, two chunks a turn so that neither word is moved.
+*/
+#define FOLD_RV_CHUNKS(P, PLAIN)                                               \
+    "bnez t3, " P "_shifted\n"                                                 \
+    P "_aligned:\n   bgtu a6, s2, .Lfold_rv_s_tail\n   ld t5, 0(a6)\n" PLAIN("t5", "t6", "a0")                  \
+    "bne t6, s11, .Lfold_rv_s_stop\n" FOLD_RV_WCHUNK_RUN("t5", "t6") "addi a6, a6, 8\n   j " P "_aligned\n"     \
+    P "_shifted:\n   bgtu a6, s2, .Lfold_rv_s_tail\n   ld t4, 8(a6)\n   srl t5, a7, t3\n   sll t6, t4, s1\n"    \
+    "or t5, t5, t6\n" PLAIN("t5", "t6", "a0") "bne t6, s11, .Lfold_rv_s_stop\n" FOLD_RV_WCHUNK_RUN("t5", "t6")  \
+    "addi a6, a6, 8\n   bgtu a6, s2, .Lfold_rv_s_tail\n   ld a7, 8(a6)\n   srl t5, t4, t3\n   sll t6, a7, s1\n"  \
+    "or t5, t5, t6\n" PLAIN("t5", "t6", "a0") "bne t6, s11, .Lfold_rv_s_stop\n" FOLD_RV_WCHUNK_RUN("t5", "t6")  \
+    "addi a6, a6, 8\n   j " P "_shifted\n"
+//      The stream: byte B onto it, T spent.
+#define FOLD_RV_WBYTE(B, T)                                                    \
+    "sll " T ", " B ", s7\n   or s8, s8, " T "\n   addi s7, s7, 8\n   andi " T ", s7, 64\n   beqz " T ", 4f\n"       \
+    "sd s8, 0(s6)\n   addi s6, s6, 8\n   li s8, 0\n   li s7, 0\n4:\n"
+//      Eight bytes W onto it, T and U spent: what of W is past the word goes on as W >> (64 - s7), in two shifts.
+#define FOLD_RV_WCHUNK(W, T, U)                                                \
+    "sll " T ", " W ", s7\n   or s8, s8, " T "\n   sd s8, 0(s6)\n   addi s6, s6, 8\n   srli " T ", " W ", 1\n"      \
+    "xori " U ", s7, 63\n   srl s8, " T ", " U "\n"
+//      The same with 63 - s7 in a1, as the chunk loops have it.
+#define FOLD_RV_WCHUNK_RUN(W, T)                                               \
+    "sll " T ", " W ", s7\n   or s8, s8, " T "\n   sd s8, 0(s6)\n   addi s6, s6, 8\n   srli " T ", " W ", 1\n"      \
+    "srl s8, " T ", a1\n"
+//      The first NB8 / 8 bytes of W onto it, W cut to them, T spent.
+#define FOLD_RV_WPART(W, NB8, T)                                               \
+    "li " T ", -1\n   sll " T ", " T ", " NB8 "\n   not " T ", " T "\n   and " W ", " W ", " T "\n   sll " T ", " W ", s7\n" \
+    "or s8, s8, " T "\n   add s7, s7, " NB8 "\n   li " T ", 64\n   bltu s7, " T ", 3f\n   sd s8, 0(s6)\n"           \
+    "addi s6, s6, 8\n   addi s7, s7, -64\n   sub " T ", " NB8 ", s7\n   srl s8, " W ", " T "\n3:\n"
+//      Where the stream is, into D; T spent.
+#define FOLD_RV_WPOS(D, T) "srli " T ", s7, 3\n   add " D ", s6, " T "\n"
 #define FOLD_RV_VTABS                                                          \
     "vsetvli zero, a7, e8, m4, ta, ma\n   vle8.v v8, (s4)\n   vmseq.vi v1, v8, 9\n"                              \
     "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s s11, v1\n   sub s0, t1, s4\n   bgeu s0, a7, 6f\n"           \
@@ -41339,7 +41397,7 @@ __asm__(
 #else
     "1:  li t3, 1\n"
 #endif
-    "2:  addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "2:  addi sp, sp, -144\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
     "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
     "mv s3, a0\n   andi s5, a5, 1\n   addi s5, s5, -1\n   add a3, a2, a3\n   mv t0, a2\n   li t2, 0\n   li s0, 2\n   bne t3, s0, .Lfold_rv_scalar\n"
     "mv a6, a2\n   li a7, 64\n   li s9, 0x03f79d71b4cb0a89\n   lla s10, .Lfold_rv_bits\n"
@@ -41371,40 +41429,56 @@ __asm__(
     "add a0, a0, s0\n   li s0, 10\n   sb s0, 0(a0)\n   addi a0, a0, 1\n   mv t0, s6\n   li s1, 8\n"
     "3:  mv s7, s1\n   addi s6, s6, 1\n   addi s0, s11, -1\n   and s11, s11, s0\n   j .Lfold_rv_v_next\n"
     ".Lfold_rv_v_last:\n   sub s0, t1, t0\n   addi s0, s0, 1\n" FOLD_RV_VCOPY "add a0, a0, s0\n   j .Lfold_rv_v_ended\n"
-    //      Without V: s1 fourteen, s2 the first byte that stops the routine (0x80 under UTF-8, none
-    //      otherwise), s4 -b, s6 where the run began and s11 the last place a turn of four may, s7 the newline
-    //      and s8 the tab.
-    ".Lfold_rv_scalar:\n   mv t1, a2\n   mv t6, a0\n   mv t3, a0\n   li s1, 14\n   li s2, 256\n   andi s0, a5, 2\n   beqz s0, 1f\n   li s2, 128\n"
-    "1:  andi s4, a5, 1\n   li s7, 10\n   li s8, 9\n"
+    //      Without V: the constants, then the stream from where the destination is.
+    ".Lfold_rv_scalar:\n   mv t1, a2\n   li s9, 0x7f7f7f7f7f7f7f7f\n   li s10, 0x7272727272727272\n   li s11, 0x8080808080808080\n"
+    "li s4, 0x0001020304050607\n   li s5, 0\n   andi t5, a5, 2\n   beqz t5, 1f\n   mv s5, s11\n"
+    "1:  andi s6, a0, -8\n   sub s7, a0, s6\n   slli s7, s7, 3\n   ld s8, 0(s6)\n   li t5, -1\n   sll t5, t5, s7\n   not t5, t5\n"
+    "and s8, s8, t5\n   sd a1, 128(sp)\n   sd a0, 120(sp)\n   sd s6, 96(sp)\n   sd s7, 104(sp)\n   sd s8, 112(sp)\n"
     ".Lfold_rv_s_run:\n   sub s0, a4, t2\n   bgez s0, 1f\n   li s0, 0\n1:  add s0, t0, s0\n   bleu s0, a3, 2f\n   mv s0, a3\n"
-    "2:  mv s6, t0\n   addi s11, s0, -4\n   bgtu t0, s11, .Lfold_rv_s_tail\n"
-    ".Lfold_rv_s_four:\n   lbu t4, 0(t0)\n   bltu t4, s1, .Lfold_rv_s_low\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 0(a0)\n"
-    "lbu t4, 1(t0)\n   bltu t4, s1, .Lfold_rv_s_low1\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 1(a0)\n"
-    "lbu t4, 2(t0)\n   bltu t4, s1, .Lfold_rv_s_low2\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 2(a0)\n"
-    "lbu t4, 3(t0)\n   bltu t4, s1, .Lfold_rv_s_low3\n   bgeu t4, s2, .Lfold_rv_s_back\n   sb t4, 3(a0)\n"
-    "addi t0, t0, 4\n   addi a0, a0, 4\n   bleu t0, s11, .Lfold_rv_s_four\n"
-    ".Lfold_rv_s_tail:\n   bgeu t0, s0, .Lfold_rv_s_edge\n"
-    ".Lfold_rv_s_byte:\n   lbu t4, 0(t0)\n   bltu t4, s1, .Lfold_rv_s_low\n   bgeu t4, s2, .Lfold_rv_s_back\n"
-    "sb t4, 0(a0)\n   addi t0, t0, 1\n   addi a0, a0, 1\n   bltu t0, s0, .Lfold_rv_s_byte\n"
+    "2:\n"
+    ".Lfold_rv_s_started:\n   bgeu t0, s0, .Lfold_rv_s_edge\n   xori a1, s7, 63\n   andi a6, t0, -8\n   andi t3, t0, 7\n   sub s2, s0, t3\n   addi s2, s2, -8\n"
+    "slli t3, t3, 3\n   ld a7, 0(a6)\n   neg s1, t3\n   bnez s5, .Lfold_rv_su\n"
+    FOLD_RV_CHUNKS(".Lfold_rv_sc", FOLD_RV_PLAIN_C)
+    ".Lfold_rv_su:\n"
+    FOLD_RV_CHUNKS(".Lfold_rv_su", FOLD_RV_PLAIN_UTF8)
+    //      Under eight bytes before s0: the chunk there, its bytes from s0 on not plain.
+    ".Lfold_rv_s_tail:\n   andi t4, t0, -8\n   sub t4, a6, t4\n   add t0, t0, t4\n   add t2, t2, t4\n   bgeu t0, s0, .Lfold_rv_s_edge\n"
+    "andi a6, t0, -8\n   ld a7, 0(a6)\n   ld t4, 8(a6)\n   srl t5, a7, t3\n   beqz t3, 1f\n   sll t6, t4, s1\n   or t5, t5, t6\n"
+    "1:\n" FOLD_RV_PLAIN("t5", "t6", "a0") "sub a0, s0, t0\n   slli a0, a0, 3\n   li t4, -1\n   sll t4, t4, a0\n   not t4, t4\n"
+    "and t6, t6, t4\n   j .Lfold_rv_s_part\n"
+    //      A chunk not plain throughout: t0 and t2 moved on to it, then the bytes before its first stop.
+    ".Lfold_rv_s_stop:\n   andi t4, t0, -8\n   sub t4, a6, t4\n   add t0, t0, t4\n   add t2, t2, t4\n"
+    ".Lfold_rv_s_part:\n   xor t6, t6, s11\n   neg a0, t6\n   and t6, t6, a0\n   srli t6, t6, 7\n   mul t6, t6, s4\n   srli t6, t6, 56\n"
+    //      The newline, and in the source: the line through it on the stream, and the next line's run.
+    "slli a0, t6, 3\n   srl a0, t5, a0\n   andi a0, a0, 255\n   addi a0, a0, -10\n   bnez a0, 5f\n   add a0, t0, t6\n"
+    "bgeu a0, a3, 5f\n   addi t0, a0, 1\n   addi t6, t6, 1\n   slli t6, t6, 3\n   li a0, 64\n   beq t6, a0, 6f\n"
+    FOLD_RV_WPART("t5", "t6", "a0") "j 7f\n"
+    "6:\n" FOLD_RV_WCHUNK("t5", "t6", "a0")
+    "7:  mv t1, t0\n   sd s6, 96(sp)\n   sd s7, 104(sp)\n   sd s8, 112(sp)\n" FOLD_RV_WPOS("t5", "a0") "sd t5, 120(sp)\n"
+    "li t2, 0\n   add s0, t0, a4\n   bleu s0, a3, .Lfold_rv_s_started\n   mv s0, a3\n   j .Lfold_rv_s_started\n"
+    "5:  beqz t6, 2f\n   add t0, t0, t6\n   add t2, t2, t6\n   slli t6, t6, 3\n" FOLD_RV_WPART("t5", "t6", "a0")
+    "2:  bgeu t0, s0, .Lfold_rv_s_edge\n   lbu t4, 0(t0)\n   li t5, 14\n   bltu t4, t5, .Lfold_rv_s_control\n   j .Lfold_rv_s_back\n"
     //      The width reached, or the end: the next byte breaks the line unless it is under fourteen.
-    ".Lfold_rv_s_edge:\n   sub s0, t0, s6\n   add t2, t2, s0\n   bgeu t0, a3, .Lfold_rv_s_back\n   lbu t4, 0(t0)\n"
-    "bltu t4, s1, .Lfold_rv_s_control\n   bgeu t4, s2, .Lfold_rv_s_back\n"
-    "sb s7, 0(a0)\n   addi a0, a0, 1\n   mv t3, a0\n   li t2, 0\n   j .Lfold_rv_s_run\n"
-    ".Lfold_rv_s_low3:\n   addi t0, t0, 1\n   addi a0, a0, 1\n"
-    ".Lfold_rv_s_low2:\n   addi t0, t0, 1\n   addi a0, a0, 1\n"
-    ".Lfold_rv_s_low1:\n   addi t0, t0, 1\n   addi a0, a0, 1\n"
-    ".Lfold_rv_s_low:\n   sub s0, t0, s6\n   add t2, t2, s0\n"
-    ".Lfold_rv_s_control:\n   beq t4, s7, .Lfold_rv_s_newline\n   bnez s4, .Lfold_rv_s_column\n   beq t4, s8, .Lfold_rv_s_tab\n"
-    "beqz t4, .Lfold_rv_s_back\n   li t5, 8\n   beq t4, t5, .Lfold_rv_s_back\n   li t5, 13\n   beq t4, t5, .Lfold_rv_s_back\n"
-    ".Lfold_rv_s_column:\n   bltu t2, a4, 1f\n   bgeu t3, a0, 1f\n   sb s7, 0(a0)\n   addi a0, a0, 1\n   mv t3, a0\n   li t2, 0\n"
-    "1:  sb t4, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, 1\n   addi t2, t2, 1\n   j .Lfold_rv_s_run\n"
-    ".Lfold_rv_s_tab:\n   ori t5, t2, 7\n   addi t5, t5, 1\n   bgeu a4, t5, 1f\n   bgeu t3, a0, 1f\n   sb s7, 0(a0)\n   addi a0, a0, 1\n   mv t3, a0\n   li t5, 8\n"
-    "1:  sb t4, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, 1\n   mv t2, t5\n   j .Lfold_rv_s_run\n"
-    ".Lfold_rv_s_newline:\n   sb t4, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, 1\n   mv t1, t0\n   mv t6, a0\n   mv t3, a0\n   li t2, 0\n   j .Lfold_rv_s_run\n"
-    ".Lfold_rv_s_back:\n   mv a0, t6\n   mv t0, t1\n"
+    ".Lfold_rv_s_edge:\n   bgeu t0, a3, .Lfold_rv_s_back\n   lbu t4, 0(t0)\n   li t5, 14\n   bltu t4, t5, .Lfold_rv_s_control\n"
+    "li t5, 128\n   bltu t4, t5, 6f\n   bnez s5, .Lfold_rv_s_back\n"
+    "6:  li t5, 10\n" FOLD_RV_WBYTE("t5", "a0") FOLD_RV_WPOS("t5", "a0") "sd t5, 120(sp)\n" "li t2, 0\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_control:\n   li t5, 10\n   beq t4, t5, .Lfold_rv_s_newline\n   andi t5, a5, 1\n   bnez t5, .Lfold_rv_s_column\n"
+    "li t5, 9\n   beq t4, t5, .Lfold_rv_s_tab\n   beqz t4, .Lfold_rv_s_back\n   li t5, 8\n   beq t4, t5, .Lfold_rv_s_back\n"
+    "li t5, 13\n   beq t4, t5, .Lfold_rv_s_back\n"
+    ".Lfold_rv_s_column:\n   bltu t2, a4, 1f\n" FOLD_RV_WPOS("t5", "a0") "ld a0, 120(sp)\n   bgeu a0, t5, 1f\n   li t5, 10\n"
+    FOLD_RV_WBYTE("t5", "a0") FOLD_RV_WPOS("t5", "a0") "sd t5, 120(sp)\n" "li t2, 0\n"
+    "1:\n" FOLD_RV_WBYTE("t4", "a0") "addi t0, t0, 1\n   addi t2, t2, 1\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_tab:\n   ori t3, t2, 7\n   addi t3, t3, 1\n   bgeu a4, t3, 1f\n" FOLD_RV_WPOS("t5", "a0") "ld a0, 120(sp)\n   bgeu a0, t5, 1f\n"
+    "li t5, 10\n" FOLD_RV_WBYTE("t5", "a0") FOLD_RV_WPOS("t5", "a0") "sd t5, 120(sp)\n" "li t3, 8\n"
+    "1:\n" FOLD_RV_WBYTE("t4", "a0") "addi t0, t0, 1\n   mv t2, t3\n   j .Lfold_rv_s_run\n"
+    ".Lfold_rv_s_newline:\n" FOLD_RV_WBYTE("t4", "a0") "addi t0, t0, 1\n   mv t1, t0\n   sd s6, 96(sp)\n   sd s7, 104(sp)\n"
+    "sd s8, 112(sp)\n" FOLD_RV_WPOS("t5", "a0") "sd t5, 120(sp)\n" "li t2, 0\n   j .Lfold_rv_s_run\n"
+    //      What the line under way wrote is not taken: the stream goes back to where it began, and is stored.
+    ".Lfold_rv_s_back:\n   ld a1, 128(sp)\n   ld s6, 96(sp)\n   ld s7, 104(sp)\n   ld s8, 112(sp)\n   sd s8, 0(s6)\n" FOLD_RV_WPOS("a0", "t5")
+    "mv t0, t1\n"
     ".Lfold_rv_end:\n   sub s0, a0, s3\n   sd s0, 0(a1)\n   sub a0, t0, a2\n"
     "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
-    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 144\n" ASM_RET
     ".pushsection .rodata\n"
     //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
     ".Lfold_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
