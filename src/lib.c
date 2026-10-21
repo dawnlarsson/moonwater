@@ -31862,7 +31862,8 @@ __asm__(
     ".Lmemory_offsets_set_rv_either:\n   beqz t1, .Lmemory_offsets_set_rv_done\n   li t5, 1\n   bne t1, t5, 4f\n   mv t3, t2\n"
     "4:  mv a5, a4\n   mv a3, t2\n   mv a4, t3\n   tail memory_offsets_of_either\n"
     //  Three or more: looked up.
-    ".Lmemory_offsets_set_rv_lookup:\n   li t1, 0\n"
+    //  The detect spends t0 to t2, so its return comes back here and they start again.
+    ".Lmemory_offsets_set_rv_lookup:\n   li t0, 0\n   li t1, 0\n"
 #if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lmemory_offsets_set_rv_vector\n   bnez t3, .Lmemory_offsets_set_rv_four\n"
     //  The detect keeps a0-a4 and a7.

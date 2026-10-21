@@ -17282,6 +17282,14 @@ fn check_offsets_in_set_pages()
                 }
 #endif
                 for (positive t = 0; t < array_count(sets); t++)
+                {
+#if RISCV64
+                        // A table of three or more as the first to ask for V:
+                        // the detect's return must not leave its registers in
+                        // the count.
+                        if (tier == 0 && t >= 3)
+                                cpu_has_vector = 0;
+#endif
                         for (positive s = 0; s < 201 + array_count(sizes); s += s < 70 ? 1 : 7)
                                 for (positive residue = 0; residue <= 64; residue += residue < 9 ? 1 : 11)
                                 {
@@ -17337,6 +17345,7 @@ fn check_offsets_in_set_pages()
                                                 same("memory_offsets_in_set pages", "count", have, count);
                                         }
                                 }
+                }
         }
 #if RISCV64
         cpu_has_vector = vector;
