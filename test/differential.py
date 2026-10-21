@@ -30645,6 +30645,44 @@ int main(int argc, char **argv) {
         write_tally("spark-personality", results, gate)
         if results != gate:
             return 1
+        #   riscv64's word, asked at each exec: every combination of Zbc,
+        #   Zvkned, Zbb, V and whether the task may use V, against its lanes.
+        start = spark.index("static unsigned long spark_cpu_features_now(void)")
+        lanes = spark[start:spark.index("#endif", start)]
+        riscv_source = r'''
+#include <stdio.h>
+enum { RISCV_ISA_EXT_ZBC, RISCV_ISA_EXT_ZVKNED, RISCV_ISA_EXT_ZBB };
+static unsigned extensions;
+static int vector, allowed;
+#define riscv_has_extension_unlikely(extension) ((extensions >> (extension)) & 1)
+#define has_vector() vector
+#define riscv_v_vstate_ctrl_user_allowed() allowed
+''' + '#include "' + str(root / "src/platform/spark.inc") + '"\n' + lanes + r'''
+int main(void) {
+    unsigned count = 0;
+    for (extensions = 0; extensions < 8; extensions++)
+    for (vector = 0; vector < 2; vector++)
+    for (allowed = 0; allowed < 2; allowed++) {
+        unsigned long expected = (extensions & 1 ? 0x1UL : 0) |
+                                 (vector && allowed && (extensions & 2) ? 0x100UL : 0) |
+                                 (extensions & 4 ? 0x10000UL : 0);
+        if (spark_cpu_features_now() != expected)
+            return 1;
+        count++;
+    }
+    printf("spark riscv64 kernel lanes: %u of %u\n", count, count);
+    return 0;
+}
+'''
+        (work / "riscv.c").write_text(riscv_source)
+        build_run([compiler, "-O2", "-w", str(work / "riscv.c"), "-o", str(work / "riscv")], check=True)
+        riscv_lanes = subprocess.run([str(work / "riscv")], text=True, stdout=subprocess.PIPE)
+        print(riscv_lanes.stdout, end="", flush=True)
+        if riscv_lanes.returncode:
+            print("  FAIL the riscv64 feature word does not say what the kernel has")
+            return 1
+        write_tally("spark-riscv64-lanes", *re.search(r"(\d+) of (\d+)", riscv_lanes.stdout).groups())
+        outcome = 0
         if platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64"):
             binary = work / "entry"
             build_run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",
@@ -30657,8 +30695,32 @@ int main(int argc, char **argv) {
                          for mode in range(15))
             print(f"spark old/new/fallback entry: {passed} of 15")
             write_tally("spark-entry", passed, 15)
-            return 0 if passed == 15 else 1
-        print("spark x86 entry: not run (requires native Linux x86-64)")
+            outcome = 0 if passed == 15 else 1
+        else:
+            print("spark x86 entry: not run (requires native Linux x86-64)")
+        #   And riscv64's _start under qemu, on a cpu with Zbb: the word's
+        #   three bytes published as they come, and riscv_hwprobe asked
+        #   without the magic.
+        riscv_compiler = shutil.which("riscv64-linux-gnu-gcc")
+        riscv_runner = shutil.which("qemu-riscv64")
+        if riscv_compiler and riscv_runner:
+            binary = work / "entry-riscv64"
+            build_run([riscv_compiler, "-O2", "-static", "-nostdlib", "-nostartfiles",
+                            "-fno-stack-protector", "-fno-builtin", "-w",
+                            "-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d",
+                            "-T", str(root / "src/build/spark.ld"), "-Wl,-e,spark_entry_probe",
+                            "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments",
+                            "-DCHECK_spark_entry", str(root / "test/checks.c"),
+                            "-o", str(binary)], check=True)
+            passed = sum(subprocess.run([riscv_runner, "-cpu", "rv64", str(binary), chr(48 + mode)]).returncode == 0
+                         for mode in range(9))
+            print(f"spark riscv64 entry: {passed} of 9")
+            write_tally("spark-entry-riscv64", passed, 9)
+            if passed != 9:
+                outcome = 1
+        else:
+            print("spark riscv64 entry: not run (no riscv64-linux-gnu-gcc or qemu-riscv64)")
+        return outcome
     return 0
 
 

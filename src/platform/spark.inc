@@ -41,7 +41,9 @@
 
    arm64 (x20) and riscv64 (s3) use the same byte lanes from the bottom: the
    carry-less multiply (PMULL, Zbc) in byte 0 and AES (the AES extension,
-   Zvkned with usable V) in byte 1. */
+   Zvkned with usable V) in byte 1. riscv64 has Zbb in byte 2 (orc.b, ctz,
+   andn and the rotates), which the string scans and the hash cores take a
+   body of their own for; arm64 leaves it zero. */
 #define SPARK_CPU_AVX2 0x0001UL
 #define SPARK_CPU_AVX512 0x0100UL
 #define SPARK_CPU_AVX512_VBMI 0x010000UL
@@ -52,6 +54,7 @@
 #define SPARK_CPU_VAES 0x0100000000000000UL
 #define SPARK_CPU_CLMUL_LANE 0x0001UL
 #define SPARK_CPU_AES_LANE 0x0100UL
+#define SPARK_CPU_ZBB_LANE 0x010000UL
 
 /* Final exec still applies its rlimit-dependent argument ceiling. This is
    only the device-copy ceiling, kept at Linux's ordinary ARG_MAX floor. */

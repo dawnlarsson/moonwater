@@ -48973,6 +48973,83 @@ static unsigned long long ranged_first_of_cases(p8 address_to page_end, p8 addre
         return faults;
 }
 
+/*
+        The terminated hunts beside string_length -- string_first_of,
+        string_first_of_or_end, string_first_of_max and string_length_max --
+        over every string to 100 bytes at each of the last 96 starts before a
+        page that faults and to 300 at every alignment, the byte hunted
+        nowhere, first, in the middle, last and just past the terminator, and
+        bounds short of the string, at it and past it.
+*/
+static unsigned long long ranged_scans_one(p8 address_to start, positive n, b64 hit)
+{
+        unsigned long long faults = 0;
+        p8 address_to want = hit >= 0 && hit < (b64)n ? start + hit : null;
+        positive bounds[] = {0, n / 2, n, n + 1, n + 4096};
+
+        faults += (p8 address_to)(string_first_of)((string_address)start, 0x2a) != want;
+        faults += (p8 address_to)(string_first_of_or_end)((string_address)start, 0x2a) != (want ? want : start + n);
+        faults += (p8 address_to)(string_first_of)((string_address)start, 0) != start + n;
+        for (positive b = 0; b < sizeof(bounds) / sizeof(bounds[0]); b++)
+        {
+                positive bound = bounds[b];
+
+                faults += (string_length_max)((string_address)start, bound) != (bound < n ? bound : n);
+                faults += (p8 address_to)(string_first_of_max)((string_address)start, bound, 0x2a) !=
+                          (want && (positive)hit < bound ? want : null);
+        }
+        return faults;
+}
+
+static unsigned long long ranged_scans_cases(p8 address_to page_end)
+{
+        unsigned long long faults = 0;
+
+        for (positive back = 1; back <= 96; back++)
+                for (positive n = 0; n < back && n <= 100; n++)
+                {
+                        p8 address_to start = page_end - back;
+                        b64 hits[] = {-1, 0, (b64)n / 2, (b64)n - 1, (b64)n + 1};
+
+                        for (positive h = 0; h < sizeof(hits) / sizeof(hits[0]); h++)
+                        {
+                                for (positive i = 0; i < 64; i++)
+                                        start[(b64)i - 64] = (p8)(i & 1 ? 0 : 0x2a);
+                                for (positive i = 0; i < n; i++)
+                                        start[i] = (p8)(ranged_byte() % 254 + 1);
+                                for (positive i = 0; i < n; i++)
+                                        start[i] = start[i] == 0x2a ? 0x2d : start[i];
+                                start[n] = 0;
+                                for (positive i = n + 1; i < back; i++)
+                                        start[i] = (p8)(i & 3 ? 0x2a : 0);
+                                if (hits[h] >= 0 && hits[h] < (b64)back && hits[h] != (b64)n)
+                                        start[hits[h]] = 0x2a;
+                                faults += ranged_scans_one(start, n, hits[h]);
+                        }
+                }
+        for (positive align = 0; align < 64; align++)
+                for (positive n = 0; n <= 300; n++)
+                {
+                        p8 address_to start = page_end - 4096 + 1024 + align;
+                        b64 hits[] = {-1, (b64)(ranged_byte() % (n + 1)) - 1, (b64)n - 1};
+
+                        for (positive h = 0; h < sizeof(hits) / sizeof(hits[0]); h++)
+                        {
+                                for (positive i = 0; i < n; i++)
+                                        start[i] = (p8)(ranged_byte() % 254 + 1);
+                                for (positive i = 0; i < n; i++)
+                                        start[i] = start[i] == 0x2a ? 0x2d : start[i];
+                                start[n] = 0;
+                                for (positive i = n + 1; i < n + 40; i++)
+                                        start[i] = (p8)(i & 1 ? 0 : 0x2a);
+                                if (hits[h] >= 0)
+                                        start[hits[h]] = 0x2a;
+                                faults += ranged_scans_one(start, n, hits[h]);
+                        }
+                }
+        return faults;
+}
+
 //      A run of RANGED_SPAN bytes whose end is a page that faults, or whose
 //      start is just after one.
 static unsigned char *ranged_end(void)
@@ -49014,6 +49091,10 @@ static fn ranged_tier(string_address tier)
         check("string_length: every length to 100 at each of the last 96 starts before a page that faults, and to 300 "
               "at every alignment",
               ranged_length_cases(ranged_d_end) == 0);
+        check("string_first_of, string_first_of_or_end, string_first_of_max and string_length_max: every string to "
+              "100 at each of the last 96 starts before a page that faults and to 300 at every alignment, the byte "
+              "nowhere, first, in the middle, last and past the end, bounds short of the string, at it and past it",
+              ranged_scans_cases(ranged_d_end) == 0);
         check("memory_encode_power2_lines: every bits, groups and line, against the routine with the newlines put in",
               ranged_lines_cases(ranged_d_end, ranged_s_end) == 0);
         check("memory_first_of: every count to 300 and long ones, the byte at each end's every place and nowhere, against "
@@ -49175,14 +49256,26 @@ b32 main(void)
                       cpu_has_vector != 0 && ranged_same(d, s, 40));
                 vector = cpu_has_vector;
         }
-        for (p32 tier = 0; tier < 2; tier++)
+        //      _start wrote cpu_has_zbb from riscv_hwprobe (syscall 258, key 4,
+        //      Zbb at bit 4) before main; the third tier takes it away.
+        p8 zbb = cpu_has_zbb;
         {
-                if (tier == 0 && vector != 2)
+                positive pair[2] = {4, 0};
+                b64 asked = (b64)system_call_5(258, (positive)pair, 1, 0, 0, 0);
+                p8 said = asked == 0 && pair[0] == 4 ? (p8)(pair[1] >> 4 & 1) : 0;
+
+                check("cpu_has_zbb: _start wrote what riscv_hwprobe says", zbb == said);
+        }
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                if ((tier == 0 && vector != 2) || (tier == 2 && !zbb))
                         continue;
                 cpu_has_vector = tier ? 1 : vector;
-                ranged_tier(cpu_has_vector == 2 ? "V" : "no V");
+                cpu_has_zbb = tier == 2 ? 0 : zbb;
+                ranged_tier(tier == 0 ? "V" : tier == 2 ? "no V, no Zbb" : zbb ? "no V, Zbb" : "no V");
         }
         cpu_has_vector = vector;
+        cpu_has_zbb = zbb;
 #else
         ranged_tier("neon");
 #endif
@@ -118911,6 +119004,59 @@ b32 main(void)
         // scalar-only CPUs can still verify every publication combination.
         return mode >= array_count(words) || got != words[mode] ||
                facts != (mode == 10 ? SPARK_ENTRY_UNFILTERED : 0) ||
+               program_initial_identity() != 123456789 ||
+               program_argument_count() != 2 || !program_environment_list();
+}
+#elif RISCV64
+#define SPARK_TEST_TEXT_(value) #value
+#define SPARK_TEST_TEXT(value) SPARK_TEST_TEXT_(value)
+/* The same on riscv64, where a loader hands _start the magic in s2, the
+   feature word in s3 -- Zbc in byte 0, Zvkned in byte 1, Zbb in byte 2 --
+   the identity in s4 and the facts in s5. Mode 7 carries no magic and
+   proves riscv_hwprobe was asked; 8 is version 3 with the facts. */
+__asm__(
+    ASM_SECTION
+    ASM_FUNC(spark_entry_probe)
+    "ld t0, 16(sp)\n   lbu t0, 0(t0)\n   addi t0, t0, -48\n   li t1, 9\n   bgeu t0, t1, 1f\n   slli t0, t0, 3\n"
+    "lla t1, spark_entry_words\n   add t1, t1, t0\n   ld s3, 0(t1)\n   lla t1, spark_entry_magics\n   add t1, t1, t0\n"
+    "ld s2, 0(t1)\n   lla t1, spark_entry_facts_in\n   add t1, t1, t0\n   ld s5, 0(t1)\n   li s4, 123456789\n   j _start\n"
+    "1:  li s2, 0\n   j _start\n"
+    ASM_END(spark_entry_probe)
+    ASM_RODATA_OBJECT_BEGIN(spark_entry_words, 8)
+    ".quad 0, 1, 0x100, 0x10000, 0x10101, 0x10001, 0x10100, 0x10101, 0x10000\n"
+    ASM_OBJECT_END(spark_entry_words)
+    ASM_RODATA_OBJECT_BEGIN(spark_entry_magics, 8)
+    ".quad " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", "
+    SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) "\n"
+    ".quad " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", " SPARK_TEST_TEXT(SPARK_START_MAGIC) ", "
+    SPARK_TEST_TEXT(SPARK_START_MAGIC) ", 0, " SPARK_TEST_TEXT(SPARK_START_MAGIC_FACTS) "\n"
+    ASM_OBJECT_END(spark_entry_magics)
+    ASM_RODATA_OBJECT_BEGIN(spark_entry_facts_in, 8)
+    ".quad 0, 0, 0, 0, 0, 0, 0, 0, 1\n"
+    ASM_OBJECT_END(spark_entry_facts_in)
+);
+
+static positive spark_entry_published(void)
+{
+        return cpu_has_pclmul | ((positive)cpu_has_aes << 8) | ((positive)cpu_has_zbb << 16);
+}
+
+b32 main(void)
+{
+        static positive words[] = {0, 1, 0x100, 0x10000, 0x10101, 0x10001, 0x10100, 0, 0x10000};
+        positive mode = program_argument(1)[0] - '0';
+        positive got = spark_entry_published();
+        p8 facts = program_entry_facts;
+
+        if (mode == 7)
+        {
+                cpu_has_pclmul = cpu_has_aes = cpu_has_zbb = 0;
+                moonwater_cpu_detect();
+                return got != spark_entry_published() || facts != 0 || program_vdso_clock != 1 ||
+                       program_initial_identity() != (positive)system_call_1(syscall(getpid), 0);
+        }
+        return mode >= array_count(words) || got != words[mode] ||
+               facts != (mode == 8 ? SPARK_ENTRY_UNFILTERED : 0) ||
                program_initial_identity() != 123456789 ||
                program_argument_count() != 2 || !program_environment_list();
 }

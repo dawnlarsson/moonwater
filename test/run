@@ -3433,6 +3433,26 @@ freestanding_checks_vector_lane()
 }
 
 #
+#       qemu's rv64 cpu has Zbb, and riscv_hwprobe says so, so every run
+#       above takes the Zbb bodies wherever a routine has one and a check
+#       that walks the floor does it by clearing cpu_has_zbb. This runs the
+#       check once more on a cpu without Zbb, where the detect answers 0 the
+#       way it does on such a board, and an orc.b or a ctz left on a floor
+#       path is an illegal instruction.
+#
+freestanding_checks_no_zbb()
+{
+        target_tools riscv64 || return 0
+        target=riscv64
+        target_runner="qemu-riscv64 -cpu rv64,zbb=false"
+        target_label=riscv64-rv64-nozbb
+        no_zbb_outcome=0
+        freestanding_checks_one "$1" "$2" || no_zbb_outcome=1
+        target_label=
+        return "$no_zbb_outcome"
+}
+
+#
 #       The f32 transformer kernels of lib.c's tensor block, against a
 #       double-precision model on generated cases; the x86_64 run walks the
 #       AVX-512, AVX2 + FMA and SSE2 bodies itself.
@@ -5682,7 +5702,15 @@ esac
 [ "$failed" = 0 ]
 )
 
-lane_checksum() { freestanding_checks_lane checksum_crc checksum_crc; }
+#       The crcs and the hash cores, whose riscv64 floor bodies also run
+#       once on a cpu without Zbb.
+lane_checksum()
+{
+        freestanding_checks_lane checksum_crc checksum_crc
+        checksum_outcome=$?
+        freestanding_checks_no_zbb checksum_crc checksum_crc || checksum_outcome=1
+        return "$checksum_outcome"
+}
 
 #
 #       The training and inference routines, CHECK_train: every body each
@@ -5706,6 +5734,7 @@ lane_ranged()
 (
         freestanding_checks_vector_lane ranged ranged
         ranged_outcome=$?
+        freestanding_checks_no_zbb ranged ranged || ranged_outcome=1
         need_shell || exit 1
         if [ ! -x "$work/ranged-shell" ]; then
                 freestanding programs/shell.c "$work/ranged-shell" "$host_arch" \

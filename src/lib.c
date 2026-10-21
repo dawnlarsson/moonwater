@@ -26109,6 +26109,33 @@ ASM_EXPORT(memset32);
 ASM_EXPORT(memset64);
 #endif
 #elif RISCV64
+/*
+        The string scans' Zbb bodies. A scan tests its first word the floor's
+        way, and only a string that goes on past it asks cpu_has_zbb, which
+        _start has written: a string that ends in the word it starts in
+        costs a machine without Zbb nothing more, and one that goes on pays
+        a load and a branch once. With Zbb a word is orc.b, which leaves 0xff
+        in each byte that is not zero and 0 in each that is, one compare
+        against all ones, and ctz of the inverse for the byte -- four
+        instructions a word where the carry free test is seven, and three on
+        the way out where the multiply is seven. In the kernel there is no
+        flag and the floor runs.
+
+        qemu instructions a call with the driver's, a string or a count of
+        64 and of 4096, the floor before, the floor now and with Zbb:
+        string_length 88, 3616 to 91, 3619 and 64, 2080; memory_first_of
+        125, 5166 to 119, 4656 and 92, 3117; string_first_of 146, 6698 to
+        141, 6189 and 98, 3626. The floor's word loops lost the jump that
+        came back to the first word's test, which pays for the ask in all
+        of them but string_length.
+*/
+#ifndef KERNEL_MODE
+#define RV_ZBB_ASK(T, LABEL) "lbu " T ", cpu_has_zbb\n   bnez " T ", " LABEL "\n"
+#define RV_ZBB_BEGIN ".option push\n   .option arch, +zbb\n"
+#define RV_ZBB_END ".option pop\n"
+#else
+#define RV_ZBB_ASK(T, LABEL) ""
+#endif
 __asm__(
     ASM_SECTION
     //
@@ -26190,20 +26217,27 @@ __asm__(
     //       no branch it did not need.
     //
     "3:  sub t2, a6, t0\n   not t3, a6\n   and t2, t2, t3\n   and t2, t2, t1\n   bnez t2, 2f\n"
+    RV_ZBB_ASK("t3", ".Lstring_length_rv_zbb")
     "1:  addi a5, a5, 8\n   ld a6, 0(a5)\n   sub t2, a6, t0\n   not t3, a6\n   and t2, t2, t3\n   and t2, t2, t1\n   beqz t2, 1b\n"
     //
     //      Where x86 has bsf and arm64 has rbit+clz, base rv64 has
-    //      neither: ctz is Zbb, and QEMU's virt machine does not have it,
-    //      so requiring it would mean an illegal instruction on the machine
-    //      this is developed on. The byte index comes out of the multiply
-    //      the M extension already guarantees, exactly as string_first_of_or_end below
-    //      does it, and it is seven instructions on the way out rather than
-    //      anything in the loop.
+    //      neither: ctz is Zbb, which the floor does not have. The byte
+    //      index comes out of the multiply the M extension already
+    //      guarantees, exactly as string_first_of_or_end below does it, and
+    //      it is seven instructions on the way out rather than anything in
+    //      the loop.
     //
     "2:  sub t3, zero, t2\n   and t2, t2, t3  # lowest set high bit\n"
     "addi t2, t2, -1\n   and t2, t2, t0\n   mul t2, t2, t0\n   srli t2, t2, 56\n   addi t2, t2, -1  # its byte within the word\n"
     "add t2, a5, t2  # address of the terminator\n"
     "sub a0, t2, a0  # minus where we started\n" ASM_RET
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lstring_length_rv_zbb:\n   li t1, -1\n"
+    "4:  addi a5, a5, 8\n   ld a6, 0(a5)\n   orc.b t2, a6\n   beq t2, t1, 4b\n"
+    "not t2, t2\n   ctz t2, t2\n   srli t2, t2, 3\n   add a5, a5, t2\n   sub a0, a5, a0\n" ASM_RET
+    RV_ZBB_END
+#endif
     ASM_END(string_length)
     ASM_SECTION
     //
@@ -26352,7 +26386,10 @@ __asm__(
     "1:  xor t2, a6, a3  # the byte that matched is now zero\n"
     "sub t3, t2, t0\n   not t4, t2\n   and t3, t3, t4\n   sub t5, a6, t0  # and the terminator, the same way\n"
     "not t6, a6\n   and t5, t5, t6\n   or t3, t3, t5\n   and t3, t3, t1  # either of the two, in one test\n"
-    "bnez t3, 2f\n   addi a5, a5, 8\n   ld a6, 0(a5)\n   j 1b\n"
+    "bnez t3, 2f\n"
+    RV_ZBB_ASK("t4", ".Lstring_first_of_rv_zbb")
+    "5:  addi a5, a5, 8\n   ld a6, 0(a5)\n   xor t2, a6, a3\n   sub t3, t2, t0\n   not t4, t2\n   and t3, t3, t4\n   sub t5, a6, t0\n"
+    "not t6, a6\n   and t5, t5, t6\n   or t3, t3, t5\n   and t3, t3, t1\n   beqz t3, 5b\n"
     //
     //      The same count-the-bytes-below sequence string_first_of_or_end uses, because
     //      base rv64 has no count-trailing-zeros to reach for.
@@ -26362,6 +26399,16 @@ __asm__(
     "add a0, a5, t3  # the byte or the terminator, whichever\n"
     "lbu t4, 0(a0)\n   beq t4, a1, 3f\n   li a0, 0  # it was the terminator: not found\n"
     "3:\n" ASM_RET
+#ifndef KERNEL_MODE
+    //      With Zbb a word is neither hunt's when orc.b of it and of it xor
+    //      the byte are both all ones: seven instructions where it is twelve.
+    RV_ZBB_BEGIN
+    ".Lstring_first_of_rv_zbb:\n   li t1, -1\n"
+    "4:  addi a5, a5, 8\n   ld a6, 0(a5)\n   xor t2, a6, a3\n   orc.b t3, t2\n   orc.b t5, a6\n   and t3, t3, t5\n   beq t3, t1, 4b\n"
+    "not t3, t3\n   ctz t3, t3\n   srli t3, t3, 3\n   add a0, a5, t3\n   lbu t4, 0(a0)\n   beq t4, a1, 6f\n   li a0, 0\n"
+    "6:\n" ASM_RET
+    RV_ZBB_END
+#endif
     ASM_END(string_first_of)
     //
     //       void *memchr(const void *s, int c, size_t n)
@@ -26440,11 +26487,21 @@ __asm__(
     "not t2, a7\n   and a2, a2, t2  # only in front of the string\n"
     "and a6, a6, a7\n   or a6, a6, a2\n"
     "1:  xor t2, a6, a3  # the byte that matched is now zero\n"
-    "sub t3, t2, t0\n   not t4, t2\n   and t3, t3, t4\n   and t3, t3, t1\n   sub t5, a6, t0  # and the terminator, the same way\n"
-    "not t6, a6\n   and t5, t5, t6\n   and t5, t5, t1\n   or t3, t3, t5\n   bnez t3, 2f\n   addi a5, a5, 8\n   ld a6, 0(a5)\n   j 1b\n"
+    "sub t3, t2, t0\n   not t4, t2\n   and t3, t3, t4\n   sub t5, a6, t0  # and the terminator, the same way\n"
+    "not t6, a6\n   and t5, t5, t6\n   or t3, t3, t5\n   and t3, t3, t1  # either, the high bits once\n   bnez t3, 2f\n"
+    RV_ZBB_ASK("t4", ".Lstring_first_of_or_end_rv_zbb")
+    "5:  addi a5, a5, 8\n   ld a6, 0(a5)\n   xor t2, a6, a3\n   sub t3, t2, t0\n   not t4, t2\n   and t3, t3, t4\n   sub t5, a6, t0\n"
+    "not t6, a6\n   and t5, t5, t6\n   or t3, t3, t5\n   and t3, t3, t1\n   beqz t3, 5b\n"
     "2:  sub t5, zero, t3\n   and t3, t3, t5  # lowest set high bit\n"
     "addi t3, t3, -1\n   and t3, t3, t0\n   mul t3, t3, t0\n   srli t3, t3, 56\n   addi t3, t3, -1  # its byte within the word\n"
     "add a0, a5, t3\n   ret\n"
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lstring_first_of_or_end_rv_zbb:\n   li t1, -1\n"
+    "4:  addi a5, a5, 8\n   ld a6, 0(a5)\n   xor t2, a6, a3\n   orc.b t3, t2\n   orc.b t5, a6\n   and t3, t3, t5\n   beq t3, t1, 4b\n"
+    "not t3, t3\n   ctz t3, t3\n   srli t3, t3, 3\n   add a0, a5, t3\n" ASM_RET
+    RV_ZBB_END
+#endif
     ASM_END(string_first_of_or_end)
     //
     //       char *strnchr(const char *s, size_t count, int c)
@@ -26462,14 +26519,27 @@ __asm__(
     "seqz t2, a1\n   add a1, a1, t2  # never zero, never it\n"
     "mul a1, a1, t0\n   not t2, a7\n   and a1, a1, t2  # only in front of the string\n"
     "and a6, a6, a7\n   or a6, a6, a1\n"
-    "1:  xor t3, a6, a3\n   sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   sub t6, a6, t0\n   not t2, a6\n   and t6, t6, t2\n"
-    "and t6, t6, t1\n   or t4, t4, t6\n   bnez t4, 2f\n   addi a5, a5, 8\n   bgeu a5, a4, 8f\n   ld a6, 0(a5)\n   j 1b\n"
+    "1:  xor t3, a6, a3\n   sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   sub t6, a6, t0\n   not t2, a6\n   and t6, t6, t2\n"
+    "or t4, t4, t6\n   and t4, t4, t1\n   bnez t4, 2f\n   addi a5, a5, 8\n   bgeu a5, a4, 8f\n"
+    RV_ZBB_ASK("t5", ".Lstring_first_of_max_rv_zbb")
+    "5:  ld a6, 0(a5)\n   xor t3, a6, a3\n   sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   sub t6, a6, t0\n   not t2, a6\n   and t6, t6, t2\n"
+    "or t4, t4, t6\n   and t4, t4, t1\n   bnez t4, 2f\n   addi a5, a5, 8\n   bltu a5, a4, 5b\n"
+    "8:  li a0, 0\n   ret\n"
     "2:  sub t5, zero, t4\n   and t4, t4, t5  # lowest set high bit\n"
     "addi t4, t4, -1\n   and t4, t4, t0\n   mul t4, t4, t0\n   srli t4, t4, 56\n   addi t4, t4, -1  # its byte within the word\n"
-    "add t4, a5, t4\n   bgeu t4, a4, 8f  # beyond the count\n"
-    "lbu t5, 0(t4)\n   bne t5, a2, 8f  # the terminator, not the byte\n"
+    "add t4, a5, t4\n   bgeu t4, a4, 8b  # beyond the count\n"
+    "lbu t5, 0(t4)\n   bne t5, a2, 8b  # the terminator, not the byte\n"
     "mv a0, t4\n   ret\n"
-    "8:  li a0, 0\n   ret\n"
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lstring_first_of_max_rv_zbb:\n   li t1, -1\n"
+    "4:  ld a6, 0(a5)\n   xor t3, a6, a3\n   orc.b t4, t3\n   orc.b t6, a6\n   and t4, t4, t6\n   bne t4, t1, 6f\n   addi a5, a5, 8\n"
+    "bltu a5, a4, 4b\n   li a0, 0\n   ret\n"
+    "6:  not t4, t4\n   ctz t4, t4\n   srli t4, t4, 3\n   add t4, a5, t4\n   bgeu t4, a4, 7f\n   lbu t5, 0(t4)\n   bne t5, a2, 7f\n"
+    "mv a0, t4\n   ret\n"
+    "7:  li a0, 0\n" ASM_RET
+    RV_ZBB_END
+#endif
     ASM_END(string_first_of_max)
     //
     //       string_last_of_or_end, string_compare_max, string_length_max and
@@ -26587,11 +26657,12 @@ __asm__(
     //       at boot with __ALTERNATIVE_CFG: one that turns a word into a byte
     //       mask with orc.b and finds the byte with ctz, and a byte loop for
     //       machines without Zbb. The floor this library is built to is
-    //       rv64imafd_zicsr_zicntr, which test/run pins and then reads
-    //       back out of the ELF attributes, so orc.b and ctz are not ours to
-    //       emit. Coming in at half the Zbb body is not a loss that better
-    //       code here can close; it closes when the floor gains Zbb, and until
-    //       then this paragraph is the answer to it.
+    //       rv64imafd_zicsr_zicntr, which test/run pins and then reads back
+    //       out of the ELF attributes, so orc.b and ctz run only behind
+    //       cpu_has_zbb, asked once the first word is past: a string of 4096
+    //       bytes under a larger bound is 2598 instructions a call with Zbb
+    //       and 4137 without, where the word loop with its jump was 4646
+    //       (the driver's own instructions in all three).
     //
     //       The byte loop is the one this actually replaces, and against it
     //       this is ahead everywhere the bound is worth a word. Guest
@@ -26636,15 +26707,24 @@ __asm__(
     "andi a3, a0, 7\n   andi a5, a0, -8  # align down: same page, cannot fault\n"
     "ld a6, 0(a5)\n   beqz a3, 1f\n   slli a3, a3, 3\n   li a7, 1\n   sll a7, a7, a3\n   addi a7, a7, -1\n   or a6, a6, a7  # ones below the string, so it cannot end there\n"
     "1:  sub t2, a6, t0\n   not t3, a6\n   and t2, t2, t3\n   and t2, t2, t1\n   bnez t2, 2f\n   addi a5, a5, 8\n   bgeu a5, a4, 8f  # nothing within the bound\n"
-    "ld a6, 0(a5)\n   j 1b\n"
+    RV_ZBB_ASK("t3", ".Lstring_length_max_rv_zbb")
+    "5:  ld a6, 0(a5)\n   sub t2, a6, t0\n   not t3, a6\n   and t2, t2, t3\n   and t2, t2, t1\n   bnez t2, 2f\n   addi a5, a5, 8\n   bltu a5, a4, 5b\n"
+    "8:  mv a0, a1\n   ret\n"
     "2:  sub t3, zero, t2\n   and t2, t2, t3  # lowest set high bit\n"
     "addi t2, t2, -1\n   and t2, t2, t0\n   mul t2, t2, t0\n   srli t2, t2, 56\n   addi t2, t2, -1  # its byte within the word\n"
     "add t2, a5, t2  # address of the terminator\n"
     "sub a0, t2, a0  # how far in that is\n"
-    "bgeu a0, a1, 8f  # never more than n\n"
+    "bgeu a0, a1, 8b  # never more than n\n"
     "ret\n"
-    "8:  mv a0, a1\n   ret\n"
     "9:  li a0, 0\n" ASM_RET
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lstring_length_max_rv_zbb:\n   li t1, -1\n"
+    "4:  ld a6, 0(a5)\n   orc.b t2, a6\n   bne t2, t1, 6f\n   addi a5, a5, 8\n   bltu a5, a4, 4b\n   mv a0, a1\n   ret\n"
+    "6:  not t2, t2\n   ctz t2, t2\n   srli t2, t2, 3\n   add t2, a5, t2\n   sub a0, t2, a0\n   bgeu a0, a1, 7f\n   ret\n"
+    "7:  mv a0, a1\n" ASM_RET
+    RV_ZBB_END
+#endif
     ASM_END(string_length_max)
     //       memory_first_of: the arm64 block carries the reasoning.
     ASM_FUNC(memory_first_of)
@@ -26654,14 +26734,23 @@ __asm__(
     "andi t2, a0, 7\n   andi a5, a0, -8  # align down: same page, cannot fault\n"
     "ld a6, 0(a5)\n   slli t2, t2, 3\n   li a7, -1\n   sll a7, a7, t2\n   not a7, a7  # ones where the prefix is\n"
     "xor t3, a6, a3\n   or t3, t3, a7  # the prefix differs from the byte everywhere\n"
-    "j 2f\n"
-    "1:  xor t3, a6, a3\n"
-    "2:  sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   bnez t4, 3f\n   addi a5, a5, 8\n   bgeu a5, a4, 8f\n   ld a6, 0(a5)\n   j 1b\n"
+    "sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   bnez t4, 3f\n   addi a5, a5, 8\n   bgeu a5, a4, 8f\n"
+    RV_ZBB_ASK("t5", ".Lmemory_first_of_rv_zbb")
+    "1:  ld a6, 0(a5)\n   xor t3, a6, a3\n   sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   bnez t4, 3f\n"
+    "addi a5, a5, 8\n   bltu a5, a4, 1b\n"
+    "8:  li a0, 0\n   ret\n"
     "3:  sub t5, zero, t4\n   and t4, t4, t5  # lowest set high bit\n"
     "addi t4, t4, -1\n   and t4, t4, t0\n   mul t4, t4, t0\n   srli t4, t4, 56\n   addi t4, t4, -1  # its byte within the word\n"
-    "add t4, a5, t4\n   bgeu t4, a4, 8f  # the word reached past the bound\n"
-    "mv a0, t4\n   ret\n"
-    "8:  li a0, 0\n" ASM_RET
+    "add t4, a5, t4\n   bgeu t4, a4, 8b  # the word reached past the bound\n"
+    "mv a0, t4\n" ASM_RET
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lmemory_first_of_rv_zbb:\n   li t1, -1\n"
+    "4:  ld a6, 0(a5)\n   xor t3, a6, a3\n   orc.b t4, t3\n   bne t4, t1, 6f\n   addi a5, a5, 8\n   bltu a5, a4, 4b\n   li a0, 0\n   ret\n"
+    "6:  not t4, t4\n   ctz t4, t4\n   srli t4, t4, 3\n   add t4, a5, t4\n   bgeu t4, a4, 7f\n   mv a0, t4\n   ret\n"
+    "7:  li a0, 0\n" ASM_RET
+    RV_ZBB_END
+#endif
     ASM_END(memory_first_of)
     ASM_FUNC(memory_last_of)
     "andi a1, a1, 0xff\n   beqz a2, .Lmemory_last_rv_none\n   add a3, a0, a2\n   andi t0, a3, 7\n   beqz t0, .Lmemory_last_rv_words_setup\n"
@@ -26993,21 +27082,24 @@ __asm__(
     ".Lmemory_records_rv_zero:\n   li a0, 0\n" ASM_RET
     ASM_END(memory_count_records_with_prepared)
     //
-    //       moonwater_cpu_detect -- Zbc, V and Zvkned, from riscv_hwprobe.
+    //       moonwater_cpu_detect -- Zbc, V and Zvkned, and Zbb, from
+    //       riscv_hwprobe.
     //
     //       Every extension above the floor is optional here, and the kernel
     //       answers for all harts at once: syscall 258 with key 4,
-    //       IMA_EXT_0, whose value has V at bit 2, Zbc at bit 7 and Zvkned at
-    //       bit 21. An older kernel answers ENOSYS, or leaves the key as -1,
-    //       and both bytes stay zero. A Spark loader hands _start the same
-    //       two answers in s3 instead and this is not called.
+    //       IMA_EXT_0, whose value has Zbb at bit 4, V at bit 2, Zbc at bit 7
+    //       and Zvkned at bit 21. An older kernel answers ENOSYS, or leaves
+    //       the key as -1, and the bytes stay zero. A Spark loader hands
+    //       _start the same three answers in s3 instead and this is not
+    //       called. Zbb is known before main, so the string scans ask for it
+    //       with one load and no first-call probe.
     //
     ASM_FUNC(moonwater_cpu_detect)
 #ifndef KERNEL_MODE
     "addi sp, sp, -16\n   li t0, 4\n   sd t0, 0(sp)\n   sd zero, 8(sp)\n   mv a0, sp\n   li a1, 1\n   li a2, 0\n   li a3, 0\n   li a4, 0\n   li a7, 258\n   ecall\n"
     "bnez a0, .Lcpu_detect_rv_done\n   ld t0, 0(sp)\n   li t1, 4\n   bne t0, t1, .Lcpu_detect_rv_done\n   ld t0, 8(sp)\n"
     "srli t1, t0, 7\n   andi t1, t1, 1\n   lla t2, cpu_has_pclmul\n   sb t1, 0(t2)\n   srli t1, t0, 21\n   srli t2, t0, 2\n   and t1, t1, t2\n   andi t1, t1, 1\n"
-    "lla t2, cpu_has_aes\n   sb t1, 0(t2)\n"
+    "lla t2, cpu_has_aes\n   sb t1, 0(t2)\n   srli t1, t0, 4\n   andi t1, t1, 1\n   lla t2, cpu_has_zbb\n   sb t1, 0(t2)\n"
     ".Lcpu_detect_rv_done:  addi sp, sp, 16\n"
 #endif
     ASM_RET
@@ -42089,8 +42181,8 @@ __asm__(
         the walk in C: the lines of src/lib.c's first 2 MiB beside its next,
         34.5 to 18.4 ns a pair; lines of six letters 13.4 to 2.0. qemu
         instructions a pair, the digits and the random lines: aarch64 278
-        and 323 to 40 and 91; riscv64 360 and 656 to 107 and 568, with V to
-        55 and 79.
+        and 323 to 40 and 91; riscv64 360 and 656 to 93 and 393, with Zbb
+        to 81 and 322, with V to 55 and 79.
 */
 #ifndef KERNEL_MODE
 positive memory_paste_lines__room_64(p8 address_to destination, positive address_to taken,
@@ -42253,11 +42345,22 @@ __asm__(
         vmv.x.s, a bit's place de Bruijn's multiply by s9 into the table at
         s10, and copies exact, a vsetvli a turn.
 
-        Without V the blocks are the aligned words the inputs are in, eight
-        bytes and a mask of bit seven of each byte that is the line end --
-        the carry free zero test of the word xor the line end in every byte,
-        s10, with s6 0x7f in every byte -- a bit's place the multiply by s9;
-        a line is copied eight bytes a turn, the room taking what is past it.
+        Without V there is one pass, and the output is a stream, as RV64 may
+        trap on an unaligned wide store: s6 the aligned word it is in, s7
+        eight times the bytes of that word written so far and s0 that xor
+        63, s8 those bytes, the rest nought, stored whole when it fills. A
+        line goes on it eight bytes a chunk from the aligned words it is in
+        (t2 the word, t3 eight times where the line starts in it and t4 its
+        negation, a7 and s2 the two words a chunk is shifted out of), each
+        chunk asked for the line end as it goes -- s10 the line end in every
+        byte -- and its last chunk through the line end: the right's as it
+        is, the left's with the delimiter in its place, so a pair is two
+        appends and nothing a byte. The ask is the carry free zero test, s11
+        0x7f in every byte and a bit's place the multiply by s9, or with Zbb
+        orc.b against s11 all ones and ctz. A pair that finds a read's end
+        before a line end takes the stream, and the right's place, back to
+        where the pair began, kept in the frame at 96; the left's goes in s1
+        and is t0 only once the pair is whole.
 */
 #define PASTE_RV_VINDEX(BIT, OUT)                                              \
     "mul " OUT ", " BIT ", s9\n   srli " OUT ", " OUT ", 58\n   add " OUT ", " OUT ", s10\n   lbu " OUT ", 0(" OUT ")\n"
@@ -42268,7 +42371,6 @@ __asm__(
 #define PASTE_RV_CLIP(B, M, END, STEP, DONE, CUT)                              \
     "sub a7, " END ", " B "\n   li s11, " STEP "\n   bgeu a7, s11, " DONE "\n" CUT(M)
 #define PASTE_RV_VCUT(M) "li s11, 1\n   sll s11, s11, a7\n   addi s11, s11, -1\n   and " M ", " M ", s11\n"
-#define PASTE_RV_SCUT(M) "slli a7, a7, 3\n   li s11, 1\n   sll s11, s11, a7\n   addi s11, s11, -1\n   and " M ", " M ", s11\n"
 //      The next line end into OUT from the mask M of the block at B, the next block when it is spent, or FAIL.
 #define PASTE_RV_NEXT(B, M, END, OUT, FAIL, STEP, MASK, CUT, INDEX)            \
     "1:  bnez " M ", 2f\n   addi " B ", " B ", " STEP "\n   bgeu " B ", " END ", " FAIL "\n" MASK(B, M)             \
@@ -42280,13 +42382,6 @@ __asm__(
     "mv a3, " FROM "\n   sub a7, " TO ", " FROM "\n   beqz a7, 4f\n"                                              \
     "1:  vsetvli s11, a7, e8, m8, ta, ma\n   vle8.v v16, (a3)\n   vse8.v v16, (a0)\n   add a3, a3, s11\n"            \
     "add a0, a0, s11\n   sub a7, a7, s11\n   bnez a7, 1b\n4:\n"
-//      Without V: eight bytes a turn, the room taking what is past the end; a7, s11 and a3 spent.
-#define PASTE_RV_SCOPY(FROM, TO)                                               \
-    "mv a3, " FROM "\n   sub a7, " TO ", " FROM "\n   add a7, a0, a7\n"                                             \
-    "1:  bgeu a0, a7, 4f\n   lbu s11, 0(a3)\n   sb s11, 0(a0)\n   lbu s11, 1(a3)\n   sb s11, 1(a0)\n"             \
-    "lbu s11, 2(a3)\n   sb s11, 2(a0)\n   lbu s11, 3(a3)\n   sb s11, 3(a0)\n   lbu s11, 4(a3)\n   sb s11, 4(a0)\n"   \
-    "lbu s11, 5(a3)\n   sb s11, 5(a0)\n   lbu s11, 6(a3)\n   sb s11, 6(a0)\n   lbu s11, 7(a3)\n   sb s11, 7(a0)\n"   \
-    "addi a3, a3, 8\n   addi a0, a0, 8\n   j 1b\n4:  mv a0, a7\n"
 #define PASTE_RV_WALK(P, STEP, MASK, CUT, INDEX, COPY)                         \
     P "_pair:\n   srli a7, a6, 16\n   andi a7, a7, 1\n   bnez a7, " P "_left_empty\n"                                \
     PASTE_RV_NEXT("t2", "t3", "t1", "t4", ".Lpaste_rv_stop", STEP, MASK, CUT, INDEX)                              \
@@ -42300,16 +42395,65 @@ __asm__(
     "j " P "_pair\n"                                                                                               \
     P "_right_empty:\n" PASTE_RV_CLEAR("t3") COPY("t0", "t4") "sb s4, 0(a0)\n   sb s5, 1(a0)\n   addi a0, a0, 2\n" \
     "addi t0, t4, 1\n   j " P "_pair\n"
-//      Without V, the mask of the aligned word at B into M; a7 and s11 spent.
-#define PASTE_RV_SMASK(B, M)                                                   \
-    "ld a7, 0(" B ")\n   xor a7, a7, s10\n   and " M ", a7, s6\n   add " M ", " M ", s6\n   or " M ", " M ", a7\n"      \
-    "or " M ", " M ", s6\n   not " M ", " M "\n"
-#define PASTE_RV_SINDEX(BIT, OUT) "srli " OUT ", " BIT ", 7\n   mul " OUT ", " OUT ", s9\n   srli " OUT ", " OUT ", 56\n"
-//      Without V, an input's first mask: the aligned word P is in, its bytes before P dropped, cut at END.
-#define PASTE_RV_SSTART(P, END, B, M)                                          \
-    "andi " B ", " P ", -8\n   li " M ", 0\n   bgeu " P ", " END ", 3f\n" PASTE_RV_SMASK(B, M)                         \
-    "sub a7, " P ", " B "\n   slli a7, a7, 3\n   li s11, -1\n   sll s11, s11, a7\n   and " M ", " M ", s11\n"           \
-    PASTE_RV_CLIP(B, M, END, "8", "3f", PASTE_RV_SCUT) "3:\n"
+/*
+        Without V. The ask of a chunk C for the line end: to FOUND with M
+        the ask's answer when C holds one, T spent; and the place of the
+        first from M into OUT. With Zbb M is orc.b of C xor the line end, all
+        ones but where the line end is; without it, bit seven of each byte
+        that is the line end.
+*/
+#define PASTE_RV_ZTEST(C, M, T, FOUND) "xor " M ", " C ", s10\n   orc.b " M ", " M "\n   bne " M ", s11, " FOUND "\n"
+#define PASTE_RV_ZINDEX(M, OUT) "not " OUT ", " M "\n   ctz " OUT ", " OUT "\n   srli " OUT ", " OUT ", 3\n"
+#define PASTE_RV_FTEST(C, M, T, FOUND)                                         \
+    "xor " M ", " C ", s10\n   and " T ", " M ", s11\n   add " T ", " T ", s11\n   or " T ", " T ", " M "\n"       \
+    "or " M ", " T ", s11\n   not " M ", " M "\n   bnez " M ", " FOUND "\n"
+#define PASTE_RV_FINDEX(M, OUT)                                                \
+    "neg " OUT ", " M "\n   and " OUT ", " OUT ", " M "\n   srli " OUT ", " OUT ", 7\n   mul " OUT ", " OUT ", s9\n"     \
+    "srli " OUT ", " OUT ", 56\n"
+//      Eight bytes C onto the stream, T spent: what of C is past the word goes on as C >> (64 - s7), in two shifts.
+#define PASTE_RV_SCHUNK(C, T)                                                  \
+    "sll " T ", " C ", s7\n   or s8, s8, " T "\n   sd s8, 0(s6)\n   addi s6, s6, 8\n   srli " T ", " C ", 1\n"      \
+    "srl s8, " T ", s0\n"
+//      The NB8 / 8 bytes of C onto it, one to eight, C nought past them; T spent.
+#define PASTE_RV_SAPPEND(C, NB8, T)                                            \
+    "sll " T ", " C ", s7\n   or s8, s8, " T "\n   add s7, s7, " NB8 "\n   li " T ", 64\n   bltu s7, " T ", 3f\n"       \
+    "sd s8, 0(s6)\n   addi s6, s6, 8\n   addi s7, s7, -64\n   srli " T ", " C ", 1\n   srl s8, " T ", s0\n"          \
+    "3:  xori s0, s7, 63\n"
+//      The left's line end made the delimiter: byte A8 / 8 of s3.
+#define PASTE_RV_SDELIMIT(A8) "xor a3, s4, s5\n   sll a3, a3, " A8 "\n   xor s3, s3, a3\n"
+#define PASTE_RV_SKEEP(A8) ""
+/*
+        The line from X onto the stream through its line end, which SWAP
+        makes what goes there, and X past it; FAIL with X anywhere when the
+        read ends at END first. t2, t3, t4, a7, s2, s3, a3 and a5 spent.
+*/
+#define PASTE_RV_SLINE(X, END, FAIL, TEST, INDEX, SWAP, L)                     \
+    "andi t2, " X ", -8\n   andi t3, " X ", 7\n   slli t3, t3, 3\n   beqz t3, " L "_aligned\n   neg t4, t3\n"       \
+    "ld a7, 0(t2)\n"                                                                                              \
+    L "_shifted:\n   ld s2, 8(t2)\n   srl s3, a7, t3\n   sll a5, s2, t4\n   or s3, s3, a5\n"                    \
+    TEST("s3", "a3", "a5", L "_found") "addi " X ", " X ", 8\n   bgeu " X ", " END ", " FAIL "\n"                \
+    PASTE_RV_SCHUNK("s3", "a5") "addi t2, t2, 8\n   ld a7, 8(t2)\n   srl s3, s2, t3\n   sll a5, a7, t4\n"        \
+    "or s3, s3, a5\n" TEST("s3", "a3", "a5", L "_found") "addi " X ", " X ", 8\n   bgeu " X ", " END ", " FAIL "\n" \
+    PASTE_RV_SCHUNK("s3", "a5") "addi t2, t2, 8\n   j " L "_shifted\n"                                            \
+    L "_aligned:\n   ld s3, 0(t2)\n" TEST("s3", "a3", "a5", L "_found") "addi " X ", " X ", 8\n"                   \
+    "bgeu " X ", " END ", " FAIL "\n" PASTE_RV_SCHUNK("s3", "a5") "addi t2, t2, 8\n   j " L "_aligned\n"         \
+    L "_found:\n" INDEX("a3", "a5") "add " X ", " X ", a5\n   bgeu " X ", " END ", " FAIL "\n   slli a5, a5, 3\n"   \
+    SWAP("a5") "addi a5, a5, 8\n   neg a3, a5\n   li t4, -1\n   srl t4, t4, a3\n   and s3, s3, t4\n"           \
+    PASTE_RV_SAPPEND("s3", "a5", "t4") "addi " X ", " X ", 1\n"
+/*
+        The pairs without V: the stream and the right's place kept, the
+        left's line into s1, the right's, and the left's place taken. An
+        input that has ended puts its delimiter or line end alone.
+*/
+#define PASTE_RV_SWALK(P, TEST, INDEX)                                         \
+    P "_pair:\n   srli a7, a6, 16\n   andi a7, a7, 3\n   li a5, 3\n   beq a7, a5, .Lpaste_rv_s_stop\n"             \
+    "sd s6, 96(sp)\n   sd s7, 104(sp)\n   sd s8, 112(sp)\n   sd t5, 120(sp)\n   mv s1, t0\n   andi a5, a7, 1\n"    \
+    "beqz a5, " P "_left\n   li a5, 8\n" PASTE_RV_SAPPEND("s4", "a5", "t4") "j " P "_right\n"                     \
+    P "_left:\n" PASTE_RV_SLINE("s1", "t1", ".Lpaste_rv_s_back", TEST, INDEX, PASTE_RV_SDELIMIT, P "_l")             \
+    P "_right:\n   srli a7, a6, 17\n   andi a7, a7, 1\n   beqz a7, " P "_rline\n   li a5, 8\n"                     \
+    PASTE_RV_SAPPEND("s5", "a5", "t4") "mv t0, s1\n   j " P "_pair\n"                                              \
+    P "_rline:\n" PASTE_RV_SLINE("t5", "t6", ".Lpaste_rv_s_back", TEST, INDEX, PASTE_RV_SKEEP, P "_r")              \
+    "mv t0, s1\n   j " P "_pair\n"
 #define PASTE_RV_VSTART(P, END, B, M)                                          \
     "mv " B ", " P "\n   li " M ", 0\n   bgeu " B ", " END ", 3f\n" PASTE_RV_VMASK(B, M)                              \
     PASTE_RV_CLIP(B, M, END, "64", "3f", PASTE_RV_VCUT) "3:\n"
@@ -42327,21 +42471,33 @@ __asm__(
 #else
     "li t3, 1\n"
 #endif
-    "2:  addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "2:  addi sp, sp, -144\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
     "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
     "add t1, a2, a3\n   add t6, a4, a5\n   mv t0, a2\n   mv t5, a4\n   mv s7, a0\n   andi s4, a6, 255\n   srli s5, a6, 8\n"
     "andi s5, s5, 255\n   li s8, 64\n   li s0, 2\n   bne t3, s0, .Lpaste_rv_scalar\n"
     "li s9, 0x03f79d71b4cb0a89\n   lla s10, .Lpaste_rv_bits\n"
     PASTE_RV_VSTART("t0", "t1", "t2", "t3") PASTE_RV_VSTART("t5", "t6", "s1", "s2")
     PASTE_RV_WALK(".Lpaste_rv_v", "64", PASTE_RV_VMASK, PASTE_RV_VCUT, PASTE_RV_VINDEX, PASTE_RV_VCOPY)
-    ".Lpaste_rv_scalar:\n   li s0, 0x0101010101010101\n   mul s10, s5, s0\n   li s6, 0x7f7f7f7f7f7f7f7f\n"
-    "li s9, 0x0001020304050607\n"
-    PASTE_RV_SSTART("t0", "t1", "t2", "t3") PASTE_RV_SSTART("t5", "t6", "s1", "s2")
-    PASTE_RV_WALK(".Lpaste_rv_s", "8", PASTE_RV_SMASK, PASTE_RV_SCUT, PASTE_RV_SINDEX, PASTE_RV_SCOPY)
+    //      Without V: the stream begins in the word the destination is in,
+    //      with what is before the destination in it kept.
+    ".Lpaste_rv_scalar:\n   li s0, 0x0101010101010101\n   mul s10, s5, s0\n   sd a0, 128(sp)\n   andi s6, a0, -8\n"
+    "sub s7, a0, s6\n   slli s7, s7, 3\n   ld s8, 0(s6)\n   li a7, -1\n   sll a7, a7, s7\n   not a7, a7\n   and s8, s8, a7\n"
+    "xori s0, s7, 63\n"
+    RV_ZBB_ASK("a7", ".Lpaste_rv_sz")
+    "li s11, 0x7f7f7f7f7f7f7f7f\n   li s9, 0x0001020304050607\n"
+    PASTE_RV_SWALK(".Lpaste_rv_sf", PASTE_RV_FTEST, PASTE_RV_FINDEX)
+    RV_ZBB_BEGIN
+    ".Lpaste_rv_sz:\n   li s11, -1\n"
+    PASTE_RV_SWALK(".Lpaste_rv_sz", PASTE_RV_ZTEST, PASTE_RV_ZINDEX)
+    RV_ZBB_END
+    //      A pair the reads could not finish: the stream and the right where
+    //      it began. Then the stream's last word stored, and where it is.
+    ".Lpaste_rv_s_back:\n   ld s6, 96(sp)\n   ld s7, 104(sp)\n   ld s8, 112(sp)\n   ld t5, 120(sp)\n   xori s0, s7, 63\n"
+    ".Lpaste_rv_s_stop:\n   sd s8, 0(s6)\n   srli a7, s7, 3\n   add a0, s6, a7\n   ld s7, 128(sp)\n"
     //      Stopped before the pair at t0 and t5.
     ".Lpaste_rv_stop:\n   sub a7, t0, a2\n   sd a7, 0(a1)\n   sub a7, t5, a4\n   sd a7, 8(a1)\n   sub a0, a0, s7\n"
     "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
-    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 144\n" ASM_RET
     ".pushsection .rodata\n"
     //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
     ".Lpaste_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
@@ -45037,9 +45193,12 @@ extern p8 cpu_has_sse42;
 extern p8 cpu_has_sha3;
 extern p8 cpu_has_sm3;
 extern p8 cpu_has_crc32;
-/* RISC-V's Zbb (rori, andn, min and max), from the same riscv_hwprobe call as
-   cpu_has_sha: the baseline target has none, so the cores that rotate keep a
-   floor body for it and a Zbb body beside it. 0 on x86_64 and arm64. */
+/* RISC-V's Zbb (rori, andn, orc.b, ctz, min and max): the baseline target has
+   none, so the cores that rotate and the string scans keep a floor body for
+   it and a Zbb body beside it. _start writes it before main, from
+   riscv_hwprobe or the Spark feature word, and cpu_hash_detect writes it
+   again from the same riscv_hwprobe call as cpu_has_sha. 0 on x86_64 and
+   arm64. */
 extern p8 cpu_has_zbb;
 // RISC-V's V, asked lazily the same way (0 unasked, 1 absent, 2 present) by
 // the routines that have a vector body, from riscv_hwprobe; x86_64 and arm64
@@ -49189,8 +49348,9 @@ __asm__(
     /* SPARK_ENTRY_AUXV: this loader wrote an auxiliary vector too. */
     "srli t1, t1, 1\n   andi t1, t1, 1\n   lla t0, program_vdso_clock\n   sd t1, 0(t0)\n   lla t0, program_entry_identity\n   sd s4, 0(t0)\n"
     /* The Spark feature word: Zbc in the low byte, Zvkned with usable V in
-       the next, published as they come. */
+       the next and Zbb in the one after, published as they come. */
     "lla t0, cpu_has_pclmul\n   sb s3, 0(t0)\n   srli s3, s3, 8\n   lla t0, cpu_has_aes\n   sb s3, 0(t0)\n"
+    "srli s3, s3, 8\n   lla t0, cpu_has_zbb\n   sb s3, 0(t0)\n"
     ".Lstart_riscv64_ready:  andi sp, sp, -16\n   call main\n   call exit\n   ebreak\n"
     /* An ordinary ELF asks riscv_hwprobe. */
     ".Lstart_riscv64_detect:\n   call moonwater_cpu_detect\n   li t1, 1\n   lla t0, program_vdso_clock\n   sd t1, 0(t0)\n   j .Lstart_riscv64_ready\n"

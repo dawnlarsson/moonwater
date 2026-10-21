@@ -840,9 +840,9 @@ static void __init spark_cpu_features_start(void)
                 spark_cpu_features |= SPARK_CPU_AES_LANE;
 }
 #elif defined(CONFIG_RISCV)
-/* Zbc, then Zvkned with the vector state this task may use. Asked at each
-   exec rather than once, because whether userspace may touch V is a per-task
-   control. */
+/* Zbc, then Zvkned with the vector state this task may use, then Zbb. Asked
+   at each exec rather than once, because whether userspace may touch V is a
+   per-task control. */
 static unsigned long spark_cpu_features_now(void)
 {
         unsigned long lanes = 0;
@@ -852,6 +852,8 @@ static unsigned long spark_cpu_features_now(void)
         if (has_vector() && riscv_v_vstate_ctrl_user_allowed() &&
             riscv_has_extension_unlikely(RISCV_ISA_EXT_ZVKNED))
                 lanes |= SPARK_CPU_AES_LANE;
+        if (riscv_has_extension_unlikely(RISCV_ISA_EXT_ZBB))
+                lanes |= SPARK_CPU_ZBB_LANE;
         return lanes;
 }
 #endif
