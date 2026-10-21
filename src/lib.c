@@ -7699,12 +7699,17 @@ __asm__(
     ".Lmemory_search_prepared_x64_absent:\n   xor %eax, %eax\n" ASM_RET
     ASM_END(memory_search_prepared)
     //
-    //       SEARCH_X64_BLOCKS(LAST, STEP, BROADCAST1, BROADCAST2, BLOCK, LEAVE):
+    //       SEARCH_X64_BLOCKS(LAST, STEP, BROADCAST1, BROADCAST2, BLOCK, LEAVE, HEAD):
     //       the block loop of memory_search_prepared_core, STEP starts a block,
     //       for the AVX2 registers and the SSE2 ones. BROADCASTn fills register
     //       n with the byte in eax, BLOCK leaves in r13d the starts of the block
-    //       at r9 where both anchors are, and LEAVE is what the registers need
-    //       before the routine returns.
+    //       at r9 where both anchors are, LEAVE is what the registers need
+    //       before the routine returns, and HEAD comes before the block loop's
+    //       head. The AVX2 loop is 34 bytes and HEAD jumps over a padding that
+    //       starts it on a 64-byte line: wherever growth elsewhere in the file
+    //       left it, grep -c of an absent needle over 7.1 MB with AVX-512 off
+    //       took 7.37 to 9.44 million cycles across eight layouts, and 7.37 to
+    //       7.69 aligned. The SSE2 loop is longer than a line; its HEAD is empty.
     //
     //       How far the block loop may go. The last position a match could
     //       start at is hay_size - needle_size; a block there reads STEP bytes
@@ -7740,13 +7745,13 @@ __asm__(
     //       write every vector register, and its wide path ends with a
     //       vzeroupper that leaves the upper halves zero.
     //
-#define SEARCH_X64_BLOCKS(LAST, STEP, BROADCAST1, BROADCAST2, BLOCK, LEAVE)                                            \
+#define SEARCH_X64_BLOCKS(LAST, STEP, BROADCAST1, BROADCAST2, BLOCK, LEAVE, HEAD)                                          \
     "mov %rsi, %r8\n   sub %r12, %r8\n   cmp $" LAST ", %r8\n   jb 6f\n   sub $" LAST ", %r8\n   mov %r8, 8(%rsp)\n"            \
     "mov 32(%rsp), %rdi\n   mov 40(%rsp), %r10\n   movzbl (%rdx,%rdi), %eax\n" BROADCAST1 "movzbl (%rdx,%r10), %eax\n"         \
     BROADCAST2 "lea (%rbx,%rdi), %rax\n   mov %rax, 16(%rsp)\n   lea (%rbx,%r10), %rax\n   mov %rax, 24(%rsp)\n"             \
     "mov %rdi, 32(%rsp)\n   mov %r10, 40(%rsp)\n   mov $3, %rax\n   sub %rdi, %rax\n   sub %r10, %rax\n   mov %rax, 48(%rsp)\n"  \
     "mov 16(%rsp), %r10\n   mov 24(%rsp), %r11\n   xor %r9, %r9\n   xor %r14d, %r14d\n"                                    \
-    "1:  " BLOCK "test %r13, %r13\n   jnz 3f\n"                                                                            \
+    HEAD "1:  " BLOCK "test %r13, %r13\n   jnz 3f\n"                                                                            \
     "4:  add $" STEP ", %r9\n   cmp %r8, %r9\n   jbe 1b\n   test %r14, %r14\n   jnz 80f\n   mov %r8, %r9\n   mov $1, %r14d\n" \
     "jmp 1b\n"                                                                                                           \
     "3:  mov %r9, (%rsp)\n"                                                                                              \
@@ -7877,7 +7882,7 @@ __asm__(
     SEARCH_X64_BLOCKS("31", "32", SEARCH_X64_AVX2_BROADCAST("1"), SEARCH_X64_AVX2_BROADCAST("2"),
                       "vpcmpeqb (%r10,%r9), %ymm1, %ymm0\n   vpcmpeqb (%r11,%r9), %ymm2, %ymm3\n   vpand %ymm3, %ymm0, %ymm0\n"
                       "vpmovmskb %ymm0, %r13d\n",
-                      "vzeroupper\n")
+                      "vzeroupper\n", "jmp 1f\n   .p2align 6\n")
     //
     //       Without AVX2, sixty four starts a block in the SSE2 registers every
     //       x86_64 has, four registers of sixteen and one test of their or. A
@@ -7909,7 +7914,7 @@ __asm__(
                       SEARCH_X64_SSE2_SECOND("6", "48") SEARCH_X64_SSE2_ANY("jz 4f\n")
                       "22:  pmovmskb %xmm0, %r13d\n   pmovmskb %xmm4, %eax\n   shl $16, %eax\n   or %rax, %r13\n"
                       "pmovmskb %xmm5, %eax\n   shl $32, %rax\n   or %rax, %r13\n   pmovmskb %xmm6, %eax\n   shl $48, %rax\n   or %rax, %r13\n",
-                      "")
+                      "", "")
     )
     //
     //       The narrow path: a machine without the wide registers, and every
