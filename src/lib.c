@@ -31846,8 +31846,28 @@ __asm__(
     ".Lmemory_exchange_apart_rv_done:\n" ASM_RET
     ASM_END(memory_exchange_apart)
 
+    //
+    //       Equal residues and an unaligned start: from eight bytes on, the
+    //       run-up to the word is at most three moves, each as wide as the
+    //       bit of the destination's address it clears -- a byte where bit 0
+    //       is set, a halfword where bit 1 is, a word where bit 2 is -- so
+    //       each is naturally aligned on both sides, the source sharing the
+    //       destination's residue, and the run-up of seven bytes is three
+    //       moves where it was seven turns of the byte loop. qemu, a call
+    //       with the driver's instructions: 17 bytes at a residue of one 106
+    //       to 74, at three 81 to 60; 33 at one 113 to 81; 64 at two 117 to
+    //       88. At a residue of seven the run-up is one byte, which the loop
+    //       took in eight instructions and the moves take in thirteen: 17
+    //       bytes there are 46 to 51. Under eight bytes the copy may end
+    //       inside the run-up, and the byte loop takes it, two instructions
+    //       later than it did.
+    //
     ASM_FUNC(memory_copy_apart)
     "mv a3, a0\n   beqz a2, 9f\n   xor t0, a0, a1\n   andi t0, t0, 7\n   bnez t0, 8f\n   andi t0, a0, 7\n   beqz t0, 2f\n"
+    "li t4, 8\n   bltu a2, t4, 1f\n"
+    "andi t1, a0, 1\n   beqz t1, 11f\n   lbu t1, 0(a1)\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n"
+    "11: andi t1, a0, 2\n   beqz t1, 12f\n   lhu t1, 0(a1)\n   sh t1, 0(a0)\n   addi a0, a0, 2\n   addi a1, a1, 2\n   addi a2, a2, -2\n"
+    "12: andi t1, a0, 4\n   beqz t1, 2f\n   lw t1, 0(a1)\n   sw t1, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -4\n   j 2f\n"
     "1:  lbu t1, 0(a1)\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   beqz a2, 9f\n   andi t0, a0, 7\n   bnez t0, 1b\n"
     "2:  li t4, 32\n   bltu a2, t4, 4f\n"
     "3:\n   ld t0, 0(a1)\n   ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n   sd t2, 16(a0)\n"
@@ -31971,17 +31991,22 @@ __asm__(
     //
     //       Four instructions off every overlapping call, which is what turns
     //       17 bytes from 0.89x of arch/riscv/lib/memmove.S into parity and 16
-    //       from 0.97x into 1.12x. The run-up below is where the rest of the
-    //       difference is and it is not touched: test/run's riscv alignment
-    //       audit pins its shape instruction for instruction -- two exact
-    //       t0 = a4 & 7 gates with exactly six instructions of peel between
-    //       them -- and that is the tree's proof that no ld or sd here can
-    //       land on an unaligned pointer. A run-up that stops on a pointer
-    //       worked out once is three instructions a byte cheaper and reaches
-    //       parity at every length; it also leaves one gate instead of two, so
-    //       it is not here.
+    //       from 0.97x into 1.12x. test/run's riscv alignment audit pins the
+    //       run-up below instruction for instruction, and that is the tree's
+    //       proof that no ld or sd here can land on an unaligned pointer: two
+    //       exact t0 = a4 & 7 gates with exactly six instructions of byte peel
+    //       between them, and, from eight bytes on, the three moves of
+    //       memory_copy_apart's run-up taken downward -- a byte where bit 0 of
+    //       the end is set, a halfword where bit 1 is, a word where bit 2 is,
+    //       each naturally aligned at both ends and each loaded before it is
+    //       stored, the destination being above the source. qemu, a call with
+    //       the driver's: 33 bytes up by 16, 90 to 72; 64 up by 8, 119 to 98.
     //
     "2:  add a4, a0, a2\n   add a5, a1, a2\n   xor t0, a4, a5\n   andi t0, t0, 7\n   bnez t0, 8f\n   andi t0, a4, 7\n   beqz t0, 3f\n"
+    "li t6, 8\n   bltu a2, t6, 6f\n"
+    "andi t1, a4, 1\n   beqz t1, 61f\n   addi a4, a4, -1\n   addi a5, a5, -1\n   lbu t1, 0(a5)\n   sb t1, 0(a4)\n   addi a2, a2, -1\n"
+    "61: andi t1, a4, 2\n   beqz t1, 62f\n   addi a4, a4, -2\n   addi a5, a5, -2\n   lhu t1, 0(a5)\n   sh t1, 0(a4)\n   addi a2, a2, -2\n"
+    "62: andi t1, a4, 4\n   beqz t1, 3f\n   addi a4, a4, -4\n   addi a5, a5, -4\n   lw t1, 0(a5)\n   sw t1, 0(a4)\n   addi a2, a2, -4\n   j 3f\n"
     "6:  addi a4, a4, -1\n   addi a5, a5, -1\n   lbu t1, 0(a5)\n   sb t1, 0(a4)\n   addi a2, a2, -1\n   beqz a2, 9f\n   andi t0, a4, 7\n   bnez t0, 6b\n"
     "3:  li t6, 32\n   bltu a2, t6, 5f\n"
     "4:  addi a4, a4, -32\n   addi a5, a5, -32\n   ld t0, 0(a5)\n   ld t1, 8(a5)\n   ld t2, 16(a5)\n   ld t3, 24(a5)\n   sd t0, 0(a4)\n   sd t1, 8(a4)\n"

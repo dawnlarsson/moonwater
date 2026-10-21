@@ -1439,6 +1439,48 @@ riscv_alignment_gate_audit()
                                        zero_memory_is(slot + 1, "lbu", "t1", "a0")
                         return 0
                 }
+                #       memory_copy_apart and memory_copy run up to the word,
+                #       from eight bytes on, in at most three moves: a byte, a
+                #       halfword and a word, each behind its own bit of the
+                #       destination address (forward) or end (backward), so
+                #       each is aligned at its width on both sides, the residue
+                #       gate having shown the two agree mod eight. Every slot is
+                #       pinned: a move that skipped its bit test, took another
+                #       bit, or fell anywhere but the next move or the aligned
+                #       path would be an unaligned access the base and
+                #       displacement checks below could not see.
+                function run_up_is(slot, wide, peel,
+                                   width, step, d, s, load, store, forward, pieces) {
+                        forward = routine == "memory_copy_apart"
+                        d = forward ? "a0" : "a4"
+                        s = forward ? "a1" : "a5"
+                        for (step = 0; step < 3; step++) {
+                                width = step == 0 ? 1 : step == 1 ? 2 : 4
+                                load = step == 0 ? "lbu" : step == 1 ? "lhu" : "lw"
+                                store = step == 0 ? "sb" : step == 1 ? "sh" : "sw"
+                                split(operand[slot], pieces, ",")
+                                if (mnemonic[slot] != "andi" || pieces[1] != "t1" ||
+                                    pieces[2] != d || !immediate_is(pieces[3], width) ||
+                                    !branch_is(slot + 1, "beqz", "t1") ||
+                                    branch_target_slot(slot + 1, 2) != (step < 2 ? slot + 7 : wide))
+                                        return 0
+                                if (forward) {
+                                        if (!zero_memory_is(slot + 2, load, "t1", s) ||
+                                            !zero_memory_is(slot + 3, store, "t1", d) ||
+                                            !addi_is(slot + 4, d, d, width) ||
+                                            !addi_is(slot + 5, s, s, width))
+                                                return 0
+                                } else if (!addi_is(slot + 2, d, d, "-" width) ||
+                                           !addi_is(slot + 3, s, s, "-" width) ||
+                                           !zero_memory_is(slot + 4, load, "t1", s) ||
+                                           !zero_memory_is(slot + 5, store, "t1", d))
+                                        return 0
+                                if (!addi_is(slot + 6, "a2", "a2", "-" width))
+                                        return 0
+                                slot += 7
+                        }
+                        return jump_targets(slot, wide) && peel == slot + 1
+                }
                 function natural_peel_span() {
                         if (routine == "string_compare_max") return 6
                         if (routine == "memory_count")       return 6
@@ -1621,6 +1663,21 @@ riscv_alignment_gate_audit()
 
                         second_natural = natural_index[2]
                         peel_entry = first_natural + 2
+                        if (routine == "memory_copy_apart" || routine == "memory_copy") {
+                                run_up_register = routine == "memory_copy" ? "t6" : "t4"
+                                split(operand[first_natural + 3], pieces, ",")
+                                if (!li_is(first_natural + 2, run_up_register, "8") ||
+                                    mnemonic[first_natural + 3] != "bltu" ||
+                                    pieces[1] != "a2" || pieces[2] != run_up_register) {
+                                        print routine ": the run-up lost its eight-byte gate"
+                                        exit 1
+                                }
+                                peel_entry = branch_target_slot(first_natural + 3, 3)
+                                if (!run_up_is(first_natural + 4, wide_entry, peel_entry)) {
+                                        print routine ": the run-up lost its exact byte, halfword and word moves"
+                                        exit 1
+                                }
+                        }
                         if (!natural_peel_is(peel_entry)) {
                                 print routine ": natural gate lost its exact byte peel"
                                 exit 1
@@ -2004,6 +2061,35 @@ riscv_alignment_audit()
                 memory_copy_apart t0 a0 a1 t0 a0 > "$alignment_error"
         then
                 note "the RISC-V alignment audit accepted bnez-to-beqz inversion"
+                alignment_failed=1
+        fi
+
+        #       And the run-up: a halfword move whose bit test is flipped
+        #       stores a halfword at an odd address, which the base and
+        #       displacement checks cannot see.
+        alignment_mutation="$work/riscv-alignment.inverted-run-up.dis"
+        if ! awk '
+                {
+                        compact = $0
+                        gsub(/[[:space:]]/, "", compact)
+                        if (!seen && (index(compact, "andit1,a0,2") || index(compact, "andit1,a0,0x2")))
+                                seen = 1
+                        else if (seen == 1 && $0 ~ /[[:space:]]beqz[[:space:]]+t1,/) {
+                                sub(/beqz/, "bnez")
+                                changed = 1
+                                seen = 2
+                        }
+                        print
+                }
+                END { if (!changed) exit 1 }
+        ' "$work/riscv-alignment.memory_copy_apart.dis" > "$alignment_mutation"
+        then
+                note "the RISC-V run-up mutation could not be constructed"
+                alignment_failed=1
+        elif riscv_alignment_gate_audit "$alignment_mutation" \
+                memory_copy_apart t0 a0 a1 t0 a0 > "$alignment_error"
+        then
+                note "the RISC-V alignment audit accepted a run-up move without its bit test"
                 alignment_failed=1
         fi
 
