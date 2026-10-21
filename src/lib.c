@@ -31902,6 +31902,15 @@ __asm__(
 
     // memory_offsets_of_either: with V the bytes a turn as one mask of the two, the turn's indices made by
     // vid, added to where the turn began and compressed by the mask, and stored at most the room's worth.
+    //  RV_OFFSETS_V_STORE(LIMIT, NEXT, DONE): v0 a strip's hits, t3 its length, t1 where it begins and t0 the
+    //  offsets stored so far: the hits' offsets, made by vid, added to where the strip began and compressed by the
+    //  mask, stored at most the room's worth, then on to NEXT, or to DONE when the room ran out. Spends t2, t4,
+    //  t5, v16 and v24; e32 at m8 holds as many as e8 at m2.
+#define RV_OFFSETS_V_STORE(LIMIT, NEXT, DONE)                                                                      \
+    "vcpop.m t5, v0\n   beqz t5, " NEXT "\n   sub t4, " LIMIT ", t0\n   bltu t4, t5, 5f\n   mv t4, t5\n"                  \
+    "5:  vsetvli zero, t3, e32, m8, ta, ma\n   vid.v v16\n   vadd.vx v16, v16, t1\n   vcompress.vm v24, v16, v0\n"   \
+    "vsetvli zero, t4, e32, m8, ta, ma\n   slli t2, t0, 2\n   add t2, a0, t2\n   vse32.v v24, (t2)\n   add t0, t0, t4\n" \
+    "bltu t4, t5, " DONE "\n"
     // Without V a word of bytes at a time once the pointer is on eight, with eight offsets of room: each byte
     // flagged at bit seven when it is either byte (the carry free zero test of the word xor each), the flags
     // read off lowest first, the byte's index being the isolated flag moved to bit zero of its byte times
@@ -31922,10 +31931,8 @@ __asm__(
     //  The detect keeps a0-a4 and a7; the limit is a5.
     "addi sp, sp, -16\n   sd ra, 8(sp)\n   sd a5, 0(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   ld a5, 0(sp)\n   addi sp, sp, 16\n   j memory_offsets_of_either\n"
     ".Lmemory_offsets_rv_vector:\n   bgeu t1, a2, .Lmemory_offsets_rv_done\n   bgeu t0, a5, .Lmemory_offsets_rv_done\n   sub t2, a2, t1\n   vsetvli t3, t2, e8, m2, ta, ma\n"
-    "add t4, a1, t1\n   vle8.v v8, (t4)\n   vmseq.vx v0, v8, a3\n   vmseq.vx v1, v8, a4\n   vmor.mm v0, v0, v1\n   vcpop.m t5, v0\n   beqz t5, .Lmemory_offsets_rv_vector_next\n"
-    "sub t6, a5, t0\n   bltu t6, t5, .Lmemory_offsets_rv_vector_store  # more than the room: as many as it holds\n   mv t6, t5\n"
-    ".Lmemory_offsets_rv_vector_store:\n   vsetvli zero, t3, e32, m8, ta, ma\n   vid.v v16\n   vadd.vx v16, v16, t1\n   vcompress.vm v24, v16, v0\n"
-    "vsetvli zero, t6, e32, m8, ta, ma\n   slli t2, t0, 2\n   add t2, a0, t2\n   vse32.v v24, (t2)\n   add t0, t0, t6\n   bltu t6, t5, .Lmemory_offsets_rv_done\n"
+    "add t4, a1, t1\n   vle8.v v8, (t4)\n   vmseq.vx v0, v8, a3\n   vmseq.vx v1, v8, a4\n   vmor.mm v0, v0, v1\n"
+    RV_OFFSETS_V_STORE("a5", ".Lmemory_offsets_rv_vector_next", ".Lmemory_offsets_rv_done")
     ".Lmemory_offsets_rv_vector_next:\n   add t1, t1, t3\n   j .Lmemory_offsets_rv_vector\n"
     ".Lmemory_offsets_rv_scalar:\n"
 #endif
@@ -31969,20 +31976,88 @@ __asm__(
     ".option pop\n"
 #endif
 
-    // memory_offsets_between / _outside: a byte at a time, the byte less low
-    // held against the width with sltu and flipped for outside. The x86_64
-    // block carries the full contract.
+    //
+    //       memory_offsets_between / _outside: inside is the byte less low,
+    //       mod 256, at most the width, high less low; t6 is 1 for outside.
+    //       With V a strip's bytes less low compared with the width
+    //       (vmsleu, or vmsgtu for outside), and their offsets stored as
+    //       memory_offsets_of_either stores its own (RV_OFFSETS_V_STORE).
+    //
+    //       Without V a word of bytes at a time once the pointer is on eight,
+    //       with no carry between bytes: d, the word less low a byte at a
+    //       time, is ((x | H) - (L & ~H)) ^ ((x ^ ~L) & H), H 0x80 in every
+    //       byte; y is d for a width under 128 and ~d past it, so that the
+    //       test is y against c, the width and one or 255 less the width,
+    //       which is at most 128; then bit seven of y | ((y | H) - c) is set
+    //       exactly where y >= c -- outside for the first, inside for the
+    //       second -- and a word's hits are that, or its complement in bit
+    //       seven, read off as memory_offsets_of_either reads its own. A
+    //       byte at a time before the words and after them: the byte less
+    //       low held against the width with sltu and flipped for outside.
+    //       qemu, instructions a byte over C source: wc -L 15.5 before, 2.95
+    //       without V and 1.23 with V at VLEN 128; expand 18.1, 5.59 and
+    //       3.90. The x86_64 block carries the full contract.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_offsets_between)
     "li t6, 0\n   j .Lmemory_offsets_range_rv\n"
     ASM_END(memory_offsets_between)
     ASM_FUNC(memory_offsets_outside)
     "li t6, 1\n"
-    ".Lmemory_offsets_range_rv:  andi a3, a3, 255\n   andi a4, a4, 255\n   sub a4, a4, a3\n   andi a4, a4, 255\n   li t0, 0\n   li t1, 0\n"
+    ".Lmemory_offsets_range_rv:\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, .Lmemory_offsets_range_rv_start\n"
+    //  The detect keeps a0-a4 and a7 and leaves a5 and t6 alone; its return asks again.
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j .Lmemory_offsets_range_rv\n"
+#endif
+    ".Lmemory_offsets_range_rv_start:\n   andi a3, a3, 255\n   andi a4, a4, 255\n   sub a4, a4, a3\n   andi a4, a4, 255\n   li t0, 0\n   li t1, 0\n"
+    "beqz a5, .Lmemory_offsets_range_rv_done\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   bne t3, t4, .Lmemory_offsets_range_rv_peel\n"
+    ".Lmemory_offsets_range_rv_vector:\n   bgeu t1, a2, .Lmemory_offsets_range_rv_done\n   bgeu t0, a5, .Lmemory_offsets_range_rv_done\n"
+    "sub t2, a2, t1\n   vsetvli t3, t2, e8, m2, ta, ma\n   add t4, a1, t1\n   vle8.v v8, (t4)\n   vsub.vx v8, v8, a3\n"
+    "bnez t6, 1f\n   vmsleu.vx v0, v8, a4\n   j 2f\n"
+    "1:  vmsgtu.vx v0, v8, a4\n"
+    "2:\n"
+    RV_OFFSETS_V_STORE("a5", "3f", ".Lmemory_offsets_range_rv_done")
+    "3:  add t1, t1, t3\n   j .Lmemory_offsets_range_rv_vector\n"
+#endif
+    //  A byte at a time until the pointer is on eight.
+    ".Lmemory_offsets_range_rv_peel:\n   add t2, a1, t1\n   andi t2, t2, 7\n   beqz t2, .Lmemory_offsets_range_rv_words\n"
+    "bgeu t1, a2, .Lmemory_offsets_range_rv_done\n   bgeu t0, a5, .Lmemory_offsets_range_rv_done\n   add t2, a1, t1\n   lbu t2, 0(t2)\n"
+    "slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n   sub t2, t2, a3\n   andi t2, t2, 255\n   sltu t4, a4, t2\n   xori t4, t4, 1\n"
+    "xor t4, t4, t6\n   add t0, t0, t4\n   addi t1, t1, 1\n   j .Lmemory_offsets_range_rv_peel\n"
+    //  The words while a whole one is left, a3 the offset of the last that is; low and the width kept in the
+    //  frame for the bytes after, s0 to s3 above them. a4 H, a6 L & ~H, a7 ~L, s0 c in every byte, s1 the flip
+    //  that makes y, s2 the flip of the hits (0 or H), s3 the multiplier that reads a hit's place.
+    ".Lmemory_offsets_range_rv_words:\n   sub t2, a2, t1\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_range_rv_one\n"
+    "addi sp, sp, -48\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd a3, 32(sp)\n   sd a4, 40(sp)\n"
+    "li t5, 0x0101010101010101\n   mul t2, a3, t5\n   addi t3, a4, 1\n   li s1, 0\n   li s2, 1\n   li t4, 128\n   bltu a4, t4, 4f\n"
+    "li t3, 255\n   sub t3, t3, a4\n   li s1, -1\n   li s2, 0\n"
+    "4:  xor s2, s2, t6\n   neg s2, s2\n   mul s0, t3, t5\n   slli a4, t5, 7\n   and s2, s2, a4\n   not t4, a4\n   and a6, t2, t4\n"
+    "not a7, t2\n   li s3, 0x0001020304050607\n   addi a3, a2, -8\n"
+    ".Lmemory_offsets_range_rv_word:\n   add t2, a1, t1\n   ld t2, 0(t2)\n   or t3, t2, a4\n   sub t3, t3, a6\n   xor t4, t2, a7\n"
+    "and t4, t4, a4\n   xor t3, t3, t4\n   xor t3, t3, s1\n   or t4, t3, a4\n   sub t4, t4, s0\n   or t4, t4, t3\n   and t4, t4, a4\n"
+    "xor t4, t4, s2\n   bnez t4, .Lmemory_offsets_range_rv_hits\n"
+    ".Lmemory_offsets_range_rv_word_next:\n   addi t1, t1, 8\n   bgeu a3, t1, .Lmemory_offsets_range_rv_word\n"
+    //  Out of the words: low, the width and s0 to s3 back, then the bytes.
+    ".Lmemory_offsets_range_rv_words_end:\n   ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld a3, 32(sp)\n"
+    "ld a4, 40(sp)\n   addi sp, sp, 48\n   j .Lmemory_offsets_range_rv_one\n"
+    //  A word with a hit: the room for its eight asked once, and too little leaves the rest to the bytes.
+    ".Lmemory_offsets_range_rv_hits:\n   sub t2, a5, t0\n   li t3, 8\n   bltu t2, t3, .Lmemory_offsets_range_rv_words_end\n"
+    "slli t3, t0, 2\n   add t3, a0, t3\n"
+    "5:  neg t2, t4\n   and t2, t2, t4\n   srli t2, t2, 7\n   mul t2, t2, s3\n   srli t2, t2, 56\n   add t2, t2, t1\n   sw t2, 0(t3)\n"
+    "addi t3, t3, 4\n   addi t0, t0, 1\n   addi t2, t4, -1\n   and t4, t4, t2\n   bnez t4, 5b\n   j .Lmemory_offsets_range_rv_word_next\n"
     ".Lmemory_offsets_range_rv_one:  bgeu t1, a2, .Lmemory_offsets_range_rv_done\n   bgeu t0, a5, .Lmemory_offsets_range_rv_done\n"
     "add t2, a1, t1\n   lbu t2, 0(t2)\n   slli t3, t0, 2\n   add t3, a0, t3\n   sw t1, 0(t3)\n"
     "sub t2, t2, a3\n   andi t2, t2, 255\n   sltu t4, a4, t2\n   xori t4, t4, 1\n   xor t4, t4, t6\n   add t0, t0, t4\n   addi t1, t1, 1\n   j .Lmemory_offsets_range_rv_one\n"
     ".Lmemory_offsets_range_rv_done:\n   mv a0, t0\n" ASM_RET
     ASM_END(memory_offsets_outside)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
 
     //
     //       memory_offsets_in_set: the table is read first, once a call, a
@@ -32030,10 +32105,8 @@ __asm__(
     //  The detect keeps a0-a4 and a7.
     "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j .Lmemory_offsets_set_rv_lookup\n"
     ".Lmemory_offsets_set_rv_vector:\n   bgeu t1, a2, .Lmemory_offsets_set_rv_done\n   bgeu t0, a4, .Lmemory_offsets_set_rv_done\n   sub t2, a2, t1\n"
-    "vsetvli t3, t2, e8, m2, ta, ma\n   add t4, a1, t1\n   vle8.v v8, (t4)\n   vluxei8.v v12, (a3), v8\n   vmsne.vi v0, v12, 0\n   vcpop.m t5, v0\n"
-    "beqz t5, .Lmemory_offsets_set_rv_vector_next\n   sub t6, a4, t0\n   bltu t6, t5, 5f  # more than the room: as many as it holds\n   mv t6, t5\n"
-    "5:  vsetvli zero, t3, e32, m8, ta, ma\n   vid.v v16\n   vadd.vx v16, v16, t1\n   vcompress.vm v24, v16, v0\n"
-    "vsetvli zero, t6, e32, m8, ta, ma\n   slli t2, t0, 2\n   add t2, a0, t2\n   vse32.v v24, (t2)\n   add t0, t0, t6\n   bltu t6, t5, .Lmemory_offsets_set_rv_done\n"
+    "vsetvli t3, t2, e8, m2, ta, ma\n   add t4, a1, t1\n   vle8.v v8, (t4)\n   vluxei8.v v12, (a3), v8\n   vmsne.vi v0, v12, 0\n"
+    RV_OFFSETS_V_STORE("a4", ".Lmemory_offsets_set_rv_vector_next", ".Lmemory_offsets_set_rv_done")
     ".Lmemory_offsets_set_rv_vector_next:\n   add t1, t1, t3\n   j .Lmemory_offsets_set_rv_vector\n"
 #endif
     //  Four a turn while four bytes and four offsets of room are left: t2 where the next offset goes.
@@ -32055,6 +32128,7 @@ __asm__(
 #if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
     ".option pop\n"
 #endif
+#undef RV_OFFSETS_V_STORE
 
     // memory_exchange_apart: disjoint exchange with equal and zero-sized
     // no-op cases. The x86_64 block carries the full contract. RV64 may trap

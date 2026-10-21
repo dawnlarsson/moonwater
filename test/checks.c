@@ -17443,6 +17443,114 @@ fn check_offsets_in_set_pages()
 }
 
 /*
+        memory_offsets_between and memory_offsets_outside against a byte loop
+        with the block ending against a page that faults: every size to 200
+        and long ones, every residue, ranges of one value to all of them and
+        either side of a width of 128 -- the word body tests the width, or
+        255 less it, against a byte of at most 128 -- and limits from one to
+        past the count with the slots past the limit fenced. On riscv64 every
+        call the first in a process, which asks for V, then without V; there
+        is no Zbb body.
+*/
+fn check_offsets_range_pages()
+{
+        static const positive sizes[] = {1000, 4096};
+        static const p8 ranges[][2] = {{0x20, 0x7e}, {8, 10}, {0, 0}, {0xff, 0xff}, {0, 0xff}, {'a', 'z'},
+                                       {0x80, 0xff}, {0x7f, 0xfe}, {0x10, 0x8f}, {0x10, 0x90}, {1, 0xfe},
+                                       {0x40, 0xbf}, {0x40, 0xc0}, {0, 0x7f}, {0, 0x80}};
+        static p32 got[4200], want[4200];
+        p8 address_to pages = guard_pages("memory_offsets_between pages");
+
+        if (!pages)
+                return;
+        p8 address_to bytes = pages + 4096;
+        p64 seed = 0x3f84d5b5b5470917ull;
+#if RISCV64
+        p8 vector = 0;
+        positive tiers = 2;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
+#endif
+                for (positive r = 0; r < array_count(ranges); r++)
+                        for (positive outside = 0; outside < 2; outside++)
+                                for (positive s = 0; s < 201 + array_count(sizes); s += s < 70 ? 1 : 7)
+                                        for (positive residue = 0; residue <= 64; residue += residue < 9 ? 1 : 11)
+                                        {
+                                                positive size = s <= 200 ? s : sizes[s - 201];
+                                                positive back = residue % 9 < 4096 - size ? residue % 9 : 4096 - size;
+                                                positive offset = 4096 - size - back;
+                                                p8 low = ranges[r][0], high = ranges[r][1];
+
+                                                for (positive i = offset > 64 ? offset - 64 : 0; i < 4096; i++)
+                                                {
+                                                        XORSHIFT64(seed);
+                                                        bytes[i] = (seed & 3) ? (p8)(low + (seed >> 8) % 3 - 1)
+                                                                   : (seed & 4) ? (p8)(high + (seed >> 8) % 3 - 1)
+                                                                                : (p8)(seed >> 16);
+                                                }
+                                                positive count = 0;
+                                                for (positive i = 0; i < size; i++)
+                                                {
+                                                        p8 b = bytes[offset + i];
+                                                        if ((b >= low && b <= high) != (outside != 0))
+                                                                want[count++] = (p32)i;
+                                                }
+                                                static const positive limits[] = {1, 2, 7, 8, 9, 64, 65, 5000};
+                                                for (positive l = 0; l < array_count(limits); l++)
+                                                {
+                                                        positive limit = limits[l], have = 0, from = 0;
+                                                        bool ok = true;
+
+                                                        for (;;)
+                                                        {
+                                                                bool fenced = limit + 80 <= array_count(got);
+                                                                if (fenced)
+                                                                        for (positive i = 0; i < 80; i++)
+                                                                                got[limit + i] = 0xdeadbeefu;
+                                                                VECTOR_FIRST_CALL(tier == 0);
+                                                                positive answer = outside
+                                                                    ? (memory_offsets_outside)(got, bytes + offset + from, size - from,
+                                                                                               low, high, limit)
+                                                                    : (memory_offsets_between)(got, bytes + offset + from, size - from,
+                                                                                               low, high, limit);
+                                                                if (answer > limit)
+                                                                {
+                                                                        ok = false;
+                                                                        break;
+                                                                }
+                                                                if (fenced)
+                                                                        for (positive i = 0; i < 80; i++)
+                                                                                if (got[limit + i] != 0xdeadbeefu)
+                                                                                        ok = false;
+                                                                for (positive i = 0; i < answer; i++)
+                                                                        if (have + i >= count || got[i] + from != want[have + i])
+                                                                                ok = false;
+                                                                have += answer;
+                                                                if (answer < limit || !ok)
+                                                                        break;
+                                                                from += got[answer - 1] + 1;
+                                                        }
+                                                        same("memory_offsets_between pages", "offsets", ok, 1);
+                                                        same("memory_offsets_between pages", "count", have, count);
+                                                }
+                                        }
+        }
+#if RISCV64
+        cpu_has_vector = vector;
+#endif
+        memory_free(pages, 3 * 4096);
+}
+
+/*
         memory_offsets_between and memory_offsets_outside against a byte
         loop: the same sizes, residues and limits as memory_offsets_of_either,
         over random bytes, ranges from one value to all of them. On x86_64
@@ -29100,6 +29208,7 @@ b32 main()
         check_span_byte();
         check_dirty_arguments();
         check_offsets_range();
+        check_offsets_range_pages();
         check_offsets_in_set_pages();
         check_record_scans();
         check_record_guards();
