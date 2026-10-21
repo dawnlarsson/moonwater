@@ -183,7 +183,8 @@ DOMAIN_FLOOR = {
     #       disagrees about is a session driven through a pseudo-terminal on
     #       wall-clock pauses, and how many of those land the same way twice
     #       depends on what else the machine is doing.
-    "shell": (45500, 48244, 250,
+    "shell": (46100, 48796, 250,
+              "raised 2026-10-21 from 45500 of 48244: the lane runs 48796 cases now and measured 46222, 46222 and 46227 of them against bash 5.3.20 and dash 0.5.13.4 on three runs of the tree at 313c779c to 655103fa, 722 to 727 above the floor it had, which it asked to have raised. "
               "raised 2026-10-13 from 25650 of 28142, which the budget had outgrown: the lane runs 48244 cases now and measured 45592, 45632 and 45710 of them against bash 5.3.20 and dash 0.5.13.4 on this tree, after it dropped what those references dropped (the for loop closing its process substitutions after each pass, a SIGKILLed job row forgotten under set -m, the table cleared in dash's pipeline stages, a next-line Bad fd number, the escaped copy of $1 in ${@%pat}) and took what they added (cd with an empty operand, a fatal posix shift, any function name in posix mode, set -o with an empty name, dash -E and -V, the dash job errors and No previous job, multiple coprocesses). The slack is 250 because the pseudo-terminal sessions (terminal_session, terminal_jobs, set_options with -i) land a case or two either way with the load. What is left is terminal_session's line editing under vi mode and wording, the options of set that meet each other, and the rows the ledger carries. "
               "retaken 2026-09-24 at 25707 and 25733 of 28142 on two runs against bash 5.3.20, from 24198 of 26969; the gains since were never kept. "
               "what a session says when something goes wrong. The process-surface "
