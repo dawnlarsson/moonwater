@@ -41534,7 +41534,7 @@ __asm__(
         lines of the first 2 MiB of src/lib.c against the walk in C: 31.4 to
         22.3 ns a line, and with every line twenty five times 11.4 to 2.4.
         qemu instructions a line, sorted words and C source: aarch64 101 and
-        122 to 5 and 84; riscv64 135 and 270 to 18 and 202, with V to 3 and
+        122 to 5 and 84; riscv64 135 and 270 to 18 and 154, with V to 3 and
         56.
 */
 #ifndef KERNEL_MODE
@@ -41754,11 +41754,20 @@ __asm__(
         copies are exact, a vsetvli a turn of up to a hundred and twenty
         eight bytes at the smallest VLEN.
 
-        Without V the run is compared a byte at a time, four a turn, the
-        delimiter found a word at a time in the aligned words from where the
-        run differs -- the carry free zero test of the word xor the
-        delimiter in each byte, s10 -- and a line copied eight bytes a turn,
-        the room taking what is past it.
+        Without V the run is compared a byte at a time, four a turn. The
+        output is a stream, as RV64 may trap on an unaligned wide store: s1
+        the aligned word it is in, s2 eight times the bytes of that word
+        written so far and s8 those bytes, the rest of it nought, stored
+        whole when it fills. With none of -c, -d and -u the line that ends a
+        run goes on it eight bytes a chunk from the aligned words it is in,
+        each chunk asked for the delimiter -- the carry free zero test of it
+        xor the delimiter in every byte, s10, with s11 0x7f in every byte --
+        and the bytes through the delimiter last; a line the source ends
+        before its delimiter takes the stream back to where it was, kept in
+        a1, a4 and s3 while it goes on (theirs are in the frame). With any
+        of them the delimiter is found a word at a time from where the run
+        differs, the group's line goes on by chunks of its known length, and
+        its count as one chunk.
 */
 #define UNQ_RV_INDEX(BIT, OUT)                                                 \
     "mul " OUT ", " BIT ", s0\n   srli " OUT ", " OUT ", 58\n   add " OUT ", " OUT ", s1\n   lbu " OUT ", 0(" OUT ")\n"
@@ -41769,13 +41778,6 @@ __asm__(
 #define UNQ_RV_VCOPY(SRC, LEN)                                                 \
     "1:  vsetvli s8, " LEN ", e8, m8, ta, ma\n   vle8.v v16, (" SRC ")\n   vse8.v v16, (a0)\n   add " SRC ", " SRC ", s8\n" \
     "add a0, a0, s8\n   sub " LEN ", " LEN ", s8\n   bnez " LEN ", 1b\n"
-//      Eight bytes a turn, the room taking what is past the length; LEN, s7 and s8 spent.
-#define UNQ_RV_SCOPY(SRC, LEN)                                                 \
-    "add s7, a0, " LEN "\n1:  lbu " LEN ", 0(" SRC ")\n   lbu s8, 1(" SRC ")\n   sb " LEN ", 0(a0)\n   sb s8, 1(a0)\n" \
-    "lbu " LEN ", 2(" SRC ")\n   lbu s8, 3(" SRC ")\n   sb " LEN ", 2(a0)\n   sb s8, 3(a0)\n"            \
-    "lbu " LEN ", 4(" SRC ")\n   lbu s8, 5(" SRC ")\n   sb " LEN ", 4(a0)\n   sb s8, 5(a0)\n"            \
-    "lbu " LEN ", 6(" SRC ")\n   lbu s8, 7(" SRC ")\n   sb " LEN ", 6(a0)\n   sb s8, 7(a0)\n"            \
-    "addi " SRC ", " SRC ", 8\n   addi a0, a0, 8\n   bltu a0, s7, 1b\n   mv a0, s7\n"
 /*
         The count in t3 as on the others, into s6 under ten million: the
         digits from s9's multiply, ORed into spaces as 0x10 more than each;
@@ -41791,15 +41793,65 @@ __asm__(
     "7:  mulhu t6, s8, s9\n   srli t6, t6, 3\n   slli s5, t6, 3\n   sub s5, s8, s5\n   slli a6, t6, 1\n"      \
     "sub s5, s5, a6\n   addi s5, s5, 48\n   addi a7, a7, -1\n   sb s5, 0(a7)\n   mv s8, t6\n   bnez s8, 7b\n" \
     "addi s7, sp, 49\n   sub s7, s7, a7\n" MOVE "   addi sp, sp, 64\n9:\n"
+/*
+        The count in t3 without V, as with it but onto the stream: under ten
+        one digit ORed into spaces, under ten million its digits, either as
+        one chunk; past it the digits and the space a byte at a time from
+        the stack.
+*/
+#define UNQ_RV_SCOUNT                                                          \
+    "li s6, 0x2020202020202020\n   li s5, 10\n   bgeu t3, s5, 2f\n   addi s5, t3, 16\n   slli s5, s5, 48\n"       \
+    "or s6, s6, s5\n   j 3f\n"                                                                                      \
+    "2:  li s5, 10000000\n   bgeu t3, s5, 8f\n   li s7, 48\n   mv a6, t3\n"                                       \
+    "6:  mulhu t6, a6, s9\n   srli t6, t6, 3\n   slli s5, t6, 3\n   sub s5, a6, s5\n   slli a7, t6, 1\n"      \
+    "sub s5, s5, a7\n   addi s5, s5, 16\n   sll s5, s5, s7\n   or s6, s6, s5\n   addi s7, s7, -8\n   mv a6, t6\n" \
+    "bnez a6, 6b\n3:\n" UNQ_RV_WCHUNK("s6", "a0", "a7") "j 9f\n"                                                 \
+    "8:  addi sp, sp, -32\n   addi a7, sp, 24\n   li s6, 32\n   sb s6, 0(a7)\n   mv a6, t3\n"                    \
+    "7:  mulhu t6, a6, s9\n   srli t6, t6, 3\n   slli s5, t6, 3\n   sub s5, a6, s5\n   slli s6, t6, 1\n"      \
+    "sub s5, s5, s6\n   addi s5, s5, 48\n   addi a7, a7, -1\n   sb s5, 0(a7)\n   mv a6, t6\n   bnez a6, 7b\n"      \
+    "1:  lbu s5, 0(a7)\n" UNQ_RV_WBYTE("s5", "a0") "addi a6, sp, 24\n   addi a7, a7, 1\n   bgeu a6, a7, 1b\n"  \
+    "addi sp, sp, 32\n9:\n"
 #define UNQ_RV_VSTORE                                                          \
     "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.s.x v2, s6\n   vsetivli zero, 8, e8, m1, ta, ma\n   vse8.v v2, (a0)\n"
-#define UNQ_RV_SSTORE                                                          \
-    "sb s6, 0(a0)\n   srli s6, s6, 8\n   sb s6, 1(a0)\n   srli s6, s6, 8\n   sb s6, 2(a0)\n   srli s6, s6, 8\n"    \
-    "sb s6, 3(a0)\n   srli s6, s6, 8\n   sb s6, 4(a0)\n   srli s6, s6, 8\n   sb s6, 5(a0)\n   srli s6, s6, 8\n"    \
-    "sb s6, 6(a0)\n   srli s6, s6, 8\n   sb s6, 7(a0)\n"
 //      The digits at a7 and the space, s7 bytes, moved to a0 and the cursor past them.
 #define UNQ_RV_VMOVE "mv s6, a7\n   mv s5, s7\n" UNQ_RV_VCOPY("s6", "s5")
-#define UNQ_RV_SMOVE "mv s6, a7\n   mv s5, s7\n" "1:  lbu s8, 0(s6)\n   sb s8, 0(a0)\n   addi s6, s6, 1\n   addi a0, a0, 1\n   addi s5, s5, -1\n   bnez s5, 1b\n"
+/*
+        The stream without V. Byte B onto it, T spent; eight bytes W, T and
+        U spent, what of W is past the word going on as W >> (64 - s2) in
+        two shifts; the first NB8 / 8 bytes of W, W cut to them, T spent.
+*/
+#define UNQ_RV_WBYTE(B, T)                                                     \
+    "sll " T ", " B ", s2\n   or s8, s8, " T "\n   addi s2, s2, 8\n   andi " T ", s2, 64\n   beqz " T ", 4f\n"       \
+    "sd s8, 0(s1)\n   addi s1, s1, 8\n   li s8, 0\n   li s2, 0\n4:\n"
+#define UNQ_RV_WCHUNK(W, T, U)                                                 \
+    "sll " T ", " W ", s2\n   or s8, s8, " T "\n   sd s8, 0(s1)\n   addi s1, s1, 8\n   srli " T ", " W ", 1\n"      \
+    "xori " U ", s2, 63\n   srl s8, " T ", " U "\n"
+#define UNQ_RV_WCHUNK_T1(W, T)                                                 \
+    "sll " T ", " W ", s2\n   or s8, s8, " T "\n   sd s8, 0(s1)\n   addi s1, s1, 8\n   srli " T ", " W ", 1\n"      \
+    "srl s8, " T ", t1\n"
+#define UNQ_RV_WPART(W, NB8, T)                                                \
+    "li " T ", -1\n   sll " T ", " T ", " NB8 "\n   not " T ", " T "\n   and " W ", " W ", " T "\n   sll " T ", " W ", s2\n" \
+    "or s8, s8, " T "\n   add s2, s2, " NB8 "\n   li " T ", 64\n   bltu s2, " T ", 3f\n   sd s8, 0(s1)\n"           \
+    "addi s1, s1, 8\n   addi s2, s2, -64\n   sub " T ", " NB8 ", s2\n   srl s8, " W ", " T "\n3:\n"
+//      Bit seven of each byte of W that is the delimiter, into Z; T spent.
+#define UNQ_RV_DELIMS(W, Z, T)                                                 \
+    "xor " T ", " W ", s10\n   and " Z ", " T ", s11\n   add " Z ", " Z ", s11\n   or " Z ", " Z ", " T "\n"       \
+    "or " Z ", " Z ", s11\n   not " Z ", " Z "\n"
+/*
+        N bytes from SRC onto the stream: eight a chunk from the aligned
+        words SRC is in, counted down in t0 with 63 - s2 in t1 (both free
+        until the next run), then the rest. SRC and N are spent with t0,
+        t1, a6, a7, s5, s6, s7, t6 and a0.
+*/
+#define UNQ_RV_WCOPY(SRC, N)                                                   \
+    "andi a6, " SRC ", -8\n   andi t6, " SRC ", 7\n   slli t6, t6, 3\n   ld a7, 0(a6)\n   neg s7, t6\n"            \
+    "xori t1, s2, 63\n   srli t0, " N ", 3\n   andi " N ", " N ", 7\n   beqz t0, 2f\n   beqz t6, 3f\n"                \
+    "1:  ld s5, 8(a6)\n   srl s6, a7, t6\n   sll a0, s5, s7\n   or s6, s6, a0\n" UNQ_RV_WCHUNK_T1("s6", "a0")       \
+    "mv a7, s5\n   addi a6, a6, 8\n   addi t0, t0, -1\n   bnez t0, 1b\n   j 2f\n"                                  \
+    "3:  ld s6, 0(a6)\n" UNQ_RV_WCHUNK_T1("s6", "a0") "addi a6, a6, 8\n   addi t0, t0, -1\n   bnez t0, 3b\n"     \
+    "ld a7, 0(a6)\n"                                                                                                \
+    "2:  beqz " N ", 6f\n   ld s5, 8(a6)\n   srl s6, a7, t6\n   beqz t6, 5f\n   sll a0, s5, s7\n   or s6, s6, a0\n" \
+    "5:  slli " N ", " N ", 3\n" UNQ_RV_WPART("s6", N, "a0") "6:\n"
 /*
         From t5 found (where its line is t4, ending a run of t3 lines of t2
         each): a line that starts a group is written now, or the group it
@@ -41814,9 +41866,9 @@ __asm__(
     "4:  andi t6, a5, 1\n   beqz t6, 5f\n" COUNT                                                                    \
     "5:  sub s6, t4, t2\n   mv s5, t2\n" COPY("s6", "s5") "j " P "_new\n"
 //      The lines of the run before the one that ends it at t5 are the group's.
-#define UNQ_RV_ENDED(P)                                                        \
+#define UNQ_RV_ENDED(P, STOP)                                                  \
     P "_ended:\n   sub s5, t5, t1\n   mv t4, t1\n   bltu s5, t2, 3f\n   divu t6, s5, t2\n   add t3, t3, t6\n"           \
-    "mul s6, t6, t2\n   add t4, t1, s6\n3:  bgeu t5, a3, .Lunq_rv_stop\n"
+    "mul s6, t6, t2\n   add t4, t1, s6\n3:  bgeu t5, a3, " STOP "\n"
 __asm__(
     ASM_SECTION
     ".option push\n   .option arch, +v\n"
@@ -41830,7 +41882,7 @@ __asm__(
 #else
     "1:  li t3, 1\n"
 #endif
-    "2:  addi sp, sp, -96\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "2:  addi sp, sp, -128\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
     "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
     "li s5, 2\n   mv s6, t3\n   mv s3, a0\n   add a3, a2, a3\n   ld t3, 0(a4)\n   ld t2, 8(a4)\n   addi t2, t2, 1\n   mv t0, a2\n   mv t1, a2\n"
     "srli s4, a5, 8\n   andi s4, s4, 255\n   li s2, 64\n   li s9, 0xcccccccccccccccd\n   bne s6, s5, .Lunq_rv_scalar\n"
@@ -41843,7 +41895,7 @@ __asm__(
     "vsetvli zero, s2, e8, m4, ta, ma\n   vmseq.vx v1, v8, s4\n   vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s a7, v1\n" UNQ_RV_CLIP
     "srl a7, a7, t5\n   add t5, t5, t0\n   j .Lunq_rv_v_ended\n"
     ".Lunq_rv_v_through:\n   mv t5, a3\n   li a7, 0\n"
-    UNQ_RV_ENDED(".Lunq_rv_v")
+    UNQ_RV_ENDED(".Lunq_rv_v", ".Lunq_rv_stop")
     "beqz a7, .Lunq_rv_v_seeks\n   neg t6, a7\n   and t6, t6, a7\n" UNQ_RV_INDEX("t6", "s6") "add t5, t5, s6\n   j .Lunq_rv_v_found\n"
     ".Lunq_rv_v_seeks:\n   addi t5, t0, 64\n"
     ".Lunq_rv_v_seek:\n   bgeu t5, a3, .Lunq_rv_stop\n   vsetvli zero, s2, e8, m4, ta, ma\n   vle8.v v8, (t5)\n   vmseq.vx v1, v8, s4\n"
@@ -41853,6 +41905,8 @@ __asm__(
     UNQ_RV_FOUND(".Lunq_rv_v", UNQ_RV_VCOPY, UNQ_RV_COUNT(UNQ_RV_VSTORE, UNQ_RV_VMOVE))
     //      Without V: s10 the delimiter in every byte, s11 0x7f in every byte, s0 the byte index's multiplier.
     ".Lunq_rv_scalar:\n   li s5, 0x0101010101010101\n   mul s10, s4, s5\n   li s11, 0x7f7f7f7f7f7f7f7f\n   li s0, 0x0001020304050607\n"
+    "sd a1, 96(sp)\n   sd a4, 104(sp)\n   sd s3, 112(sp)\n   andi s1, a0, -8\n   sub s2, a0, s1\n   slli s2, s2, 3\n   ld s8, 0(s1)\n"
+    "li t6, -1\n   sll t6, t6, s2\n   not t6, t6\n   and s8, s8, t6\n"
     ".Lunq_rv_s_run:\n   sub t6, t0, t2\n   addi s7, a3, -4\n"
     "1:  bgtu t0, s7, 2f\n   lbu s5, 0(t0)\n   lbu s6, 0(t6)\n   bne s5, s6, .Lunq_rv_s_miss\n   lbu s5, 1(t0)\n   lbu s6, 1(t6)\n"
     "bne s5, s6, 3f\n   lbu s5, 2(t0)\n   lbu s6, 2(t6)\n   bne s5, s6, 4f\n   lbu s5, 3(t0)\n   lbu s6, 3(t6)\n   bne s5, s6, 5f\n"
@@ -41862,18 +41916,52 @@ __asm__(
     "addi t0, t0, 1\n   addi t6, t6, 1\n   j 2b\n"
     ".Lunq_rv_s_through:\n   mv t5, a3\n   j .Lunq_rv_s_ended\n"
     ".Lunq_rv_s_miss:\n   mv t5, t0\n"
-    UNQ_RV_ENDED(".Lunq_rv_s")
-    //      The delimiter at or after t5: the aligned word it is in, the bytes before t5 dropped, then the words on.
-    "andi s5, t5, -8\n   sub s6, t5, s5\n   slli s6, s6, 3\n   li s7, -1\n   sll s7, s7, s6\n"
-    "6:  ld s6, 0(s5)\n   xor s6, s6, s10\n   and s8, s6, s11\n   add s8, s8, s11\n   or s8, s8, s6\n   or s8, s8, s11\n"
-    "not s8, s8\n   and s8, s8, s7\n   bnez s8, 7f\n   addi s5, s5, 8\n   li s7, -1\n   bltu s5, a3, 6b\n   j .Lunq_rv_stop\n"
-    "7:  neg s6, s8\n   and s8, s8, s6\n   srli s8, s8, 7\n   mul s8, s8, s0\n   srli s8, s8, 56\n   add t5, s5, s8\n"
-    "bgeu t5, a3, .Lunq_rv_stop\n"
-    UNQ_RV_FOUND(".Lunq_rv_s", UNQ_RV_SCOPY, UNQ_RV_COUNT(UNQ_RV_SSTORE, UNQ_RV_SMOVE))
+    UNQ_RV_ENDED(".Lunq_rv_s", ".Lunq_rv_s_stop")
+    "andi t6, a5, 7\n   bnez t6, .Lunq_rv_s_find\n"
+    /*
+            With none of -c, -d and -u, the line at t4 onto the stream as its
+            delimiter is looked for, the stream kept in a1, a4 and s3 for a
+            line the source ends first; s7 the last aligned word a chunk may
+            start in.
+    */
+    "mv a1, s1\n   mv a4, s2\n   mv s3, s8\n   andi a6, t4, -8\n   andi t6, t4, 7\n   sub s7, a3, t6\n   addi s7, s7, -8\n"
+    "slli t6, t6, 3\n   ld a7, 0(a6)\n   neg t5, t6\n   xori t1, s2, 63\n   bnez t6, .Lunq_rv_s_pu\n"
+    ".Lunq_rv_s_pa:\n   bgtu a6, s7, 7f\n   ld s6, 0(a6)\n" UNQ_RV_DELIMS("s6", "a0", "t0") "bnez a0, 8f\n"
+    UNQ_RV_WCHUNK_T1("s6", "a0") "addi a6, a6, 8\n   j .Lunq_rv_s_pa\n"
+    ".Lunq_rv_s_pu:\n   bgtu a6, s7, 7f\n   ld s5, 8(a6)\n   srl s6, a7, t6\n   sll a0, s5, t5\n   or s6, s6, a0\n"
+    UNQ_RV_DELIMS("s6", "a0", "t0") "bnez a0, 8f\n" UNQ_RV_WCHUNK_T1("s6", "a0") "mv a7, s5\n   addi a6, a6, 8\n   j .Lunq_rv_s_pu\n"
+    //      Under eight bytes before the end: the chunk there, its delimiters from the end on dropped.
+    "7:  andi s5, t4, 7\n   add s5, a6, s5\n   bgeu s5, a3, .Lunq_rv_s_short\n   ld a7, 0(a6)\n   ld s5, 8(a6)\n   srl s6, a7, t6\n"
+    "beqz t6, 1f\n"
+    "sll a0, s5, t5\n   or s6, s6, a0\n"
+    "1:\n" UNQ_RV_DELIMS("s6", "a0", "t5") "andi t5, t4, 7\n   add t5, a6, t5\n   sub t5, a3, t5\n   slli t5, t5, 3\n"
+    "li s5, -1\n   sll s5, s5, t5\n   not s5, s5\n   and a0, a0, s5\n   beqz a0, .Lunq_rv_s_short\n"
+    //      The delimiter in the chunk: the line through it onto the stream, and it is where the line ends.
+    "8:  neg s5, a0\n   and a0, a0, s5\n   srli a0, a0, 7\n   mul a0, a0, s0\n   srli a0, a0, 56\n   andi t5, t4, 7\n"
+    "add t5, a6, t5\n   add t5, t5, a0\n   addi a0, a0, 1\n   slli a0, a0, 3\n   li s5, 64\n   beq a0, s5, 9f\n"
+    UNQ_RV_WPART("s6", "a0", "s5") "j .Lunq_rv_s_new\n"
+    "9:\n" UNQ_RV_WCHUNK("s6", "a0", "s5") "j .Lunq_rv_s_new\n"
+    //      The source ends before the line's delimiter: the stream back to where it was.
+    ".Lunq_rv_s_short:\n   mv s1, a1\n   mv s2, a4\n   mv s8, s3\n   j .Lunq_rv_s_stop\n"
+    //      With -c, -d or -u: the delimiter at or after t5, from the aligned word it is in, the bytes before t5 dropped.
+    ".Lunq_rv_s_find:\n   andi s5, t5, -8\n   sub s6, t5, s5\n   slli s6, s6, 3\n   li s7, -1\n   sll s7, s7, s6\n"
+    "6:  ld s6, 0(s5)\n" UNQ_RV_DELIMS("s6", "a6", "a7") "and a6, a6, s7\n   bnez a6, 7f\n   addi s5, s5, 8\n   li s7, -1\n"
+    "bltu s5, a3, 6b\n   j .Lunq_rv_s_stop\n"
+    "7:  neg s6, a6\n   and a6, a6, s6\n   srli a6, a6, 7\n   mul a6, a6, s0\n   srli a6, a6, 56\n   add t5, s5, a6\n"
+    "bgeu t5, a3, .Lunq_rv_s_stop\n"
+    //      The group the line ends: shown or not, its count as one chunk, its line by chunks.
+    ".Lunq_rv_s_group:\n   andi t6, a5, 2\n   beqz t6, 4f\n   li t6, 2\n   bltu t3, t6, .Lunq_rv_s_new\n"
+    "4:  andi t6, a5, 4\n   beqz t6, 4f\n   li t6, 1\n   bltu t6, t3, .Lunq_rv_s_new\n"
+    "4:  andi t6, a5, 1\n   beqz t6, 5f\n" UNQ_RV_SCOUNT
+    "5:  sub s6, t4, t2\n   mv a1, t2\n" UNQ_RV_WCOPY("s6", "a1")
+    ".Lunq_rv_s_new:\n   sub t2, t5, t4\n   addi t2, t2, 1\n   li t3, 1\n   addi t0, t5, 1\n   mv t1, t0\n   j .Lunq_rv_s_run\n"
+    //      The stream stored, and what the frame kept back in place for the stop both paths share.
+    ".Lunq_rv_s_stop:\n   sd s8, 0(s1)\n   srli a0, s2, 3\n   add a0, s1, a0\n   ld a1, 96(sp)\n   ld a4, 104(sp)\n   ld s3, 112(sp)\n"
+    "j .Lunq_rv_stop\n"
     //      Stopped before the line at t4: the one before it is the last taken.
     ".Lunq_rv_stop:\n   sd t3, 0(a4)\n   addi t6, t2, -1\n   sd t6, 8(a4)\n   sub t6, a0, s3\n   sd t6, 0(a1)\n   sub a0, t4, a2\n"
     "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
-    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 96\n" ASM_RET
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 128\n" ASM_RET
     ".pushsection .rodata\n"
     //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
     ".Lunq_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
