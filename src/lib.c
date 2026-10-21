@@ -37773,6 +37773,11 @@ __asm__(
     //      symbols. base64 -d hands a call all the quanta its buffer holds, and a call stops before the quantum
     //      that holds a line's newline, so each wrapped line of 19 pays the top of the call, two turns, a third
     //      that meets the newline and is thrown away, and its last three quanta in the loops below.
+    //      The turn loop is tested at its foot (a call has at least 32 quanta, more than a turn, so the first
+    //      turn needs no test) and its head starts a 64-byte line, its padding run once a call: the row loop's
+    //      34 bytes then sit inside one line, where they straddled two at offset 35. base64 -d of 2.3 MB not
+    //      wrapped, AVX-512 off, eight layouts a side: 8.20 to 6.99 million cycles; wrapped base64 and
+    //      hexadecimal, which enter it once a line, are unchanged (+0.3 and +0.5 percent, inside the spreads).
     //
     ".Lcodec_decode_x64_avx2:\n   cmp $6, %r8\n   je 2f\n   cmp $4, %r8\n   jne .Lcodec_decode_x64_scalar\n"
     "2:  cmp $32, %rdx\n   jb .Lcodec_decode_x64_scalar\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lcodec_decode_x64_scalar\n   push %rbx\n   push %r12\n"
@@ -37788,13 +37793,13 @@ __asm__(
     "mov $8, %r12d\n   cmp $6, %r8\n   je 3f\n   mov $16, %r12d\n"
     "3:  vpbroadcastd .Lcodec_decode_x64_mul_a(%rip), %ymm10\n   vpbroadcastd .Lcodec_decode_x64_mul_b(%rip), %ymm11\n   vbroadcasti128 .Lcodec_decode_x64_shuffle6(%rip), %ymm12\n"
     "vmovdqu .Lcodec_decode_x64_permute6(%rip), %ymm13\n   cmp $4, %r8\n   jne 4f\n   vpbroadcastd .Lcodec_decode_x64_mul_hex(%rip), %ymm10\n"
-    ".balign 16\n4:  cmp %r12, %rdx\n   jb .Lcodec_decode_x64_avx2_end\n"
-    "vmovdqu (%rsi), %ymm0\n   vpsrlw $4, %ymm0, %ymm1\n   vpand %ymm15, %ymm1, %ymm1\n   vpand %ymm15, %ymm0, %ymm2\n   vmovdqa %ymm14, %ymm3\n   mov %rsp, %rbx\n"
+    ".p2align 6\n"
+    "4:  vmovdqu (%rsi), %ymm0\n   vpsrlw $4, %ymm0, %ymm1\n   vpand %ymm15, %ymm1, %ymm1\n   vpand %ymm15, %ymm0, %ymm2\n   vmovdqa %ymm14, %ymm3\n   mov %rsp, %rbx\n"
     "5:  movzbl (%rbx), %eax\n   vbroadcasti128 (%rcx,%rax), %ymm4\n   vpshufb %ymm2, %ymm4, %ymm4\n   vpcmpeqb (%r10,%rax,2), %ymm1, %ymm5\n   vpblendvb %ymm5, %ymm4, %ymm3, %ymm3\n"
     "inc %rbx\n   cmp %r11, %rbx\n   jb 5b\n   vpmovmskb %ymm3, %eax\n   test %eax, %eax\n   jnz .Lcodec_decode_x64_avx2_end\n   vpmaddubsw %ymm10, %ymm3, %ymm3\n   cmp $4, %r8\n   je 6f\n"
     "vpmaddwd %ymm11, %ymm3, %ymm3\n   vpshufb %ymm12, %ymm3, %ymm3\n   vpermd %ymm3, %ymm13, %ymm3\n   vmovdqu %xmm3, (%rdi)\n   vextracti128 $1, %ymm3, %xmm4\n   vmovq %xmm4, 16(%rdi)\n   add $24, %rdi\n   jmp 7f\n"
     "6:  vpackuswb %ymm3, %ymm3, %ymm3\n   vpermq $0x08, %ymm3, %ymm3\n   vmovdqu %xmm3, (%rdi)\n   add $16, %rdi\n"
-    "7:  add $32, %rsi\n   add %r12, %r9\n   sub %r12, %rdx\n   jmp 4b\n"
+    "7:  add $32, %rsi\n   add %r12, %r9\n   sub %r12, %rdx\n   cmp %r12, %rdx\n   jae 4b\n"
     ".Lcodec_decode_x64_avx2_end:\n   add $24, %rsp\n"
     ".Lcodec_decode_x64_avx2_bail:\n   vzeroupper\n   pop %r12\n   pop %rbx\n   test %rdx, %rdx\n   jz .Lcodec_decode_x64_done\n   jmp .Lcodec_decode_x64_scalar\n"
     ".pushsection .rodata\n   .balign 32\n"
