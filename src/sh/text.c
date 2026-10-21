@@ -12282,15 +12282,17 @@ static positive text_tab_repeat;
 static bool text_tab_repeat_relative;
 
 // Bytes expand copies as they are, and the space alone.
-static const b8 text_tab_expand_span[256] = {[0 ... 7] = 1, [11 ... 255] = 1};
+//      A NUL ends a run: it is no column, which a run's width does not know.
+static const b8 text_tab_expand_span[256] = {[1 ... 7] = 1, [11 ... 255] = 1};
 static const b8 text_tab_space_span[256] = {[' '] = 1};
 // What unexpand has to decide about: a blank, a backspace and a newline,
-// each of which moves a column or ends a line. Everything else passes.
+// each of which moves a column or ends a line, and a NUL, which is no
+// column where a run's width would count it one. Everything else passes.
 //     Under UTF-8 the lead bytes 0xe1 to 0xe3 are asked about too, since the
 //     blanks of width beyond a space (the ideographic space among them) start
 //     there.
-static b8 text_tab_unexpand_special[256] = {['\b'] = 1, ['\t'] = 1, ['\n'] = 1,
-                                            [' '] = 1};
+static b8 text_tab_unexpand_special[256] = {[0] = 1, ['\b'] = 1, ['\t'] = 1,
+                                            ['\n'] = 1, [' '] = 1};
 
 static positive text_tab_extend;
 static positive text_tab_increment;
@@ -12754,7 +12756,13 @@ static positive text_tab_expand_one(p8 character, positive column)
         }
 
         text_put_character(character);
-        return character == '\n' ? 0 : column ? column - 1 : 0;
+        if (character == '\n')
+                return 0;
+        if (character == '\b')
+                return column ? column - 1 : 0;
+        //      A NUL is no column, as GNU's expand gives it in every locale,
+        //      and a control before the backspace is one.
+        return character && column != positive_max ? column + 1 : column;
 }
 
 static fn text_tab_transform(bool unexpand, bool initial_only)
@@ -13057,7 +13065,8 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                                                       : 1;
                                                 }
                                         }
-                                        else
+                                        //      A NUL is no column, as for expand.
+                                        else if (character)
                                         {
                                                 if (column != positive_max)
                                                         column++;
@@ -13117,8 +13126,9 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
 
                                 /*
                                         expand with no -i: only a backspace, a
-                                        tab and a newline ask anything, and
-                                        they are one range, so the library
+                                        tab, a newline and a NUL ask anything,
+                                        and with the controls between they are
+                                        one range, 0 to 10, so the library
                                         hands over where each is in the rest
                                         of the read and the bytes between go
                                         out whole. A span asked for per run
@@ -13128,7 +13138,7 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                 {
                                         positive count = memory_offsets_between(
                                             text_tab_specials, data + at, left - at,
-                                            '\b', '\n', TEXT_TAB_SPECIALS);
+                                            0, '\n', TEXT_TAB_SPECIALS);
                                         positive done = at;
 
                                         for (positive i = 0; i < count; i++)
