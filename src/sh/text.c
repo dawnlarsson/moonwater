@@ -12677,11 +12677,55 @@ static p32 text_tab_specials[TEXT_TAB_SPECIALS];
 // one none, and a byte that is no character is one.
 static bool text_tab_utf8;
 
-// What a decoded character comes to in columns: a C1 control has no width in
-// wcwidth's sense and is a column, as GNU gives it.
+//      A character the end of a read cut short, held until the next read
+//      says how it ends, so that it is counted once and at its width; and
+//      where the read being expanded ends, the one place a character can be
+//      cut short rather than broken.
+static p8 text_tab_carry[4];
+static positive text_tab_carry_used;
+static const p8 address_to text_tab_read_end;
+
+// The carried bytes, when what follows does not finish them: a column each,
+// as bytes that are no character are.
+static positive text_tab_carry_drop()
+{
+        positive width = text_tab_carry_used;
+
+        text_tab_carry_used = 0;
+        return width;
+}
+
+// What a decoded character comes to in columns. What iswprint refuses has no
+// width in wcwidth's sense and is a column, as GNU's expand gives it: a C1
+// control, an unassigned code point, a noncharacter, the line and paragraph
+// separators. wc -L's reading answers nought for those and for the
+// characters of no width alike; the terminal's tells them apart, being one
+// for the first and nought for the second.
+//      Printable to glibc 2.44 and of no width, where the terminal's reading
+//      counts one: the Hangul fillers and the jamo of Extended-B, and the
+//      marks Unicode 17 assigns that Unicode 16 left unassigned. Checked
+//      against GNU expand at every code point.
+static const p32 text_char_no_width[][2] = {
+    {0x1acf, 0x1add}, {0x1ae0, 0x1aeb}, {0x3164, 0x3164}, {0xd7b0, 0xd7c6},
+    {0xd7cb, 0xd7fb}, {0xffa0, 0xffa0}, {0x10efa, 0x10efb}, {0x11b60, 0x11b60},
+    {0x11b62, 0x11b64}, {0x11b66, 0x11b66}, {0x1e6e3, 0x1e6e3}, {0x1e6e6, 0x1e6e6},
+    {0x1e6ee, 0x1e6ef}, {0x1e6f5, 0x1e6f5},
+};
+
 static positive text_char_columns(p32 code)
 {
-        return code >= 0x80 && code < 0xa0 ? 1 : unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+        if (code >= 0x80 && code < 0xa0)
+                return 1;
+
+        positive wide = unicode_width(code, UNICODE_WIDTH_WCWIDTH);
+
+        if (wide || !unicode_width(code, UNICODE_WIDTH_TERMINAL))
+                return wide;
+
+        for (positive at = 0; at < array_count(text_char_no_width); at++)
+                if (code >= text_char_no_width[at][0] && code <= text_char_no_width[at][1])
+                        return 0;
+        return 1;
 }
 
 static positive text_tab_width(const p8 address_to bytes, positive run)
@@ -12692,12 +12736,48 @@ static positive text_tab_width(const p8 address_to bytes, positive run)
         positive width = 0;
         positive at = 0;
 
-        // A run may begin with the rest of a character whose first byte was
-        // taken alone.
-        while (at < run && (bytes[at] & 0xc0) == 0x80)
-                at++;
+        //      The rest of a character the last read cut short; a byte that
+        //      does not continue it leaves its bytes as bytes. A continuation
+        //      byte with nothing before it is a byte that is no character, a
+        //      column, as GNU's expand gives it.
+        if (text_tab_carry_used)
+        {
+                p32 code;
+                positive got;
 
-        if (at == 0 && memory_utf8_span(bytes, run, positive_max).y == run)
+                while (at < run && (bytes[at] & 0xc0) == 0x80 && text_tab_carry_used < 4)
+                {
+                        text_tab_carry[text_tab_carry_used++] = bytes[at++];
+
+                        p8 said = wc_utf8_decode(text_tab_carry, text_tab_carry_used,
+                                                 address_of code, address_of got);
+
+                        if (said == WC_VALID)
+                        {
+                                width += text_char_columns(code);
+                                text_tab_carry_used = 0;
+                        }
+                        else if (said == WC_INVALID)
+                                width += text_tab_carry_drop();
+
+                        if (!text_tab_carry_used)
+                                break;
+                }
+
+                if (text_tab_carry_used && at < run)
+                        width += text_tab_carry_drop();
+                if (text_tab_carry_used)
+                        return width;
+        }
+
+        //      Every byte a character of one column -- ASCII, or bytes that
+        //      are no character -- unless the read ends in a character's
+        //      first bytes, which the span counts as bytes and which are to
+        //      be carried.
+        if (at == 0 && memory_utf8_span(bytes, run, positive_max).y == run &&
+            !(bytes + run == text_tab_read_end &&
+              ((run >= 1 && bytes[run - 1] >= 0xc0) || (run >= 2 && bytes[run - 2] >= 0xe0) ||
+               (run >= 3 && bytes[run - 3] >= 0xf0))))
                 return run;
 
         for (; at < run;)
@@ -12705,18 +12785,28 @@ static positive text_tab_width(const p8 address_to bytes, positive run)
                 p32 code;
                 positive got;
 
-                if (bytes[at] >= 0x80 &&
-                    wc_utf8_decode(bytes + at, run - at, address_of code,
-                                   address_of got) == WC_VALID)
+                if (bytes[at] >= 0x80)
                 {
-                        width += text_char_columns(code);
-                        at += got;
+                        p8 said = wc_utf8_decode(bytes + at, run - at, address_of code,
+                                                 address_of got);
+
+                        if (said == WC_VALID)
+                        {
+                                width += text_char_columns(code);
+                                at += got;
+                                continue;
+                        }
+
+                        if (said == WC_SHORT && bytes + run == text_tab_read_end)
+                        {
+                                text_tab_carry_used = run - at;
+                                memory_copy(text_tab_carry, bytes + at, run - at);
+                                return width;
+                        }
                 }
-                else
-                {
-                        width++;
-                        at++;
-                }
+
+                width++;
+                at++;
         }
         return width;
 }
@@ -12767,6 +12857,7 @@ static positive text_tab_expand_one(p8 character, positive column)
 
 static fn text_tab_transform(bool unexpand, bool initial_only)
 {
+        text_tab_carry_used = 0;
         positive column = 0;
         positive pending = 0;
         bool pending_first_tab = false;
@@ -12792,10 +12883,28 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                         positive at = 0;
                         text_scan scan = {.scanned = data, .set = text_tab_unexpand_special};
 
+                        text_tab_read_end = data + left;
+
                         while (at < left)
                         {
+                                //      What the last read cut short, when this
+                                //      byte does not go on with it.
+                                if (text_tab_carry_used && (data[at] & 0xc0) != 0x80)
+                                {
+                                        positive width = text_tab_carry_drop();
+
+                                        column = column > positive_max - width ? positive_max
+                                                                               : column + width;
+                                }
+
                                 if (!convert)
                                 {
+                                        //      No column counts until the line
+                                        //      ends, so a character carried is
+                                        //      copied with the rest and owed
+                                        //      nothing.
+                                        text_tab_carry_used = 0;
+
                                         string_address newline = memory_first_of(
                                             data + at, '\n', left - at);
                                         positive take = newline
@@ -12949,6 +13058,9 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                         bool blank = character == ' ' ||
                                                      character == '\t';
                                         bool suppress = false;
+                                        //      The bytes after a lead byte that
+                                        //      its character takes with it.
+                                        positive whole = 0;
 
                                         if (blank)
                                         {
@@ -13051,19 +13163,36 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                         else if (text_tab_utf8 && character >= 0x80)
                                         {
                                                 // A lead byte brings the width of its
-                                                // character, the bytes after it none.
+                                                // character and takes the bytes after
+                                                // it along; one the read cut short is
+                                                // carried; a byte that continues
+                                                // nothing is a column, as in a run.
                                                 if (character >= 0xc0)
                                                 {
                                                         p32 code;
                                                         positive got;
+                                                        p8 said = wc_utf8_decode(
+                                                            data + at - 1, left - (at - 1),
+                                                            address_of code, address_of got);
 
-                                                        column += wc_utf8_decode(
-                                                                      data + at - 1, left - (at - 1),
-                                                                      address_of code,
-                                                                      address_of got) == WC_VALID
-                                                                      ? text_char_columns(code)
-                                                                      : 1;
+                                                        if (said == WC_VALID)
+                                                        {
+                                                                column += text_char_columns(code);
+                                                                whole = got - 1;
+                                                        }
+                                                        else if (said == WC_SHORT &&
+                                                                 data + left == text_tab_read_end)
+                                                        {
+                                                                text_tab_carry_used = left - (at - 1);
+                                                                memory_copy(text_tab_carry, data + at - 1,
+                                                                            text_tab_carry_used);
+                                                                whole = left - at;
+                                                        }
+                                                        else
+                                                                column++;
                                                 }
+                                                else
+                                                        column += text_tab_width(data + at - 1, 1);
                                         }
                                         //      A NUL is no column, as for expand.
                                         else if (character)
@@ -13093,6 +13222,12 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                         if (!suppress)
                                                 text_put_character(character);
 
+                                        if (whole)
+                                        {
+                                                text_put(data + at, whole);
+                                                at += whole;
+                                        }
+
                                         if (character == '\n')
                                         {
                                                 column = 0;
@@ -13116,6 +13251,34 @@ static fn text_tab_transform(bool unexpand, bool initial_only)
                                 }
 
                                 p8 character = data[at];
+
+                                //      Under UTF-8 the blanks of more than a
+                                //      byte -- the ogham space mark, the en
+                                //      to hair spaces, the medium mathematical
+                                //      and the ideographic space -- are blanks
+                                //      of the line's start too, as GNU's
+                                //      expand -i takes them.
+                                if (initial_only && text_tab_utf8 && character >= 0xe1 &&
+                                    character <= 0xe3)
+                                {
+                                        p32 code;
+                                        positive got;
+
+                                        if (wc_utf8_decode(data + at, left - at, address_of code,
+                                                           address_of got) == WC_VALID &&
+                                            (code == 0x1680 || (code >= 0x2000 && code <= 0x2006) ||
+                                             (code >= 0x2008 && code <= 0x200a) || code == 0x205f ||
+                                             code == 0x3000))
+                                        {
+                                                text_put(data + at, got);
+                                                positive width = text_char_columns(code);
+
+                                                column = column > positive_max - width ? positive_max
+                                                                                       : column + width;
+                                                at += got;
+                                                continue;
+                                        }
+                                }
 
                                 if (initial_only && character != '\t' &&
                                     character != '\n')
