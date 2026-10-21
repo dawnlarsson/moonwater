@@ -271,6 +271,22 @@ static inline INLINE p8 address_to text_reserve(positive length)
         return at;
 }
 
+// The free end of the buffer, emptied first when less than least is left, and
+// in room how much of it there is: for a caller that learns how much it wrote
+// only after writing it, and then says so to text_out_took before any other output.
+static inline INLINE p8 address_to text_out_room(positive least, positive address_to room)
+{
+        if (unlikely(TEXT_OUT_MAX - text_out_used < least))
+                text_flush_out();
+        address_to room = TEXT_OUT_MAX - text_out_used;
+        return text_out_buffer + text_out_used;
+}
+
+static inline INLINE fn text_out_took(positive length)
+{
+        text_out_used += length;
+}
+
 static inline INLINE fn text_put_character(p8 character)
 {
         if (unlikely(text_out_used >= TEXT_OUT_MAX))
@@ -2119,6 +2135,24 @@ static b32 encoding_decode(const encoding_codec address_to codec,
                           !ignore_garbage;
         positive offset = 0;
 
+        /*
+                Whole quanta are decoded straight into the writer's buffer and
+                whole lines a call each, the newline between two skipped here,
+                where they went into text_line and were copied out of it, and
+                every line came back through the byte loop below to have its
+                newline read and the next call's bounds divided out again. Not
+                for base32, whose padded tail is withheld at the end, nor for
+                base64url's blocks, held until whole: what those make waits in
+                text_line. A quantum's symbols are a power of two, so the
+                groups left are a shift; the room a call may fill is a quarter
+                of the writer's free bytes for three a quantum, all of them for
+                one.
+        */
+        bool direct = !url_blocks && codec->bits != 5;
+        positive width = codec->low_bit_first ? 9 : codec->bits;
+        p32 symbol_shift = (p32)bits_trailing_zeros(codec->output);
+        p32 room_shift = codec->input > 1 ? 2 : 0;
+
         while (valid && (url_blocks ? text_input.position < text_input.filled ||
                                           text_fill_amount(ENCODING_URL_BLOCK -
                                                            offset % ENCODING_URL_BLOCK)
@@ -2141,19 +2175,48 @@ static b32 encoding_decode(const encoding_codec address_to codec,
 
                 while (text_input.position < text_input.filled)
                 {
-                        if (!held && !padded)
+                        if (!held && !padded && direct)
+                        {
+                                for (;;)
+                                {
+                                        positive left = (text_input.filled - text_input.position) >> symbol_shift;
+                                        positive room;
+                                        p8 address_to into = text_out_room((positive)1 << room_shift, address_of room);
+                                        positive groups = min(left, room >> room_shift);
+                                        positive done = memory_decode_power2(
+                                            into, text_input.buffer + text_input.position,
+                                            groups, values, width);
+
+                                        text_out_took(done * codec->input);
+                                        text_input.position += done << symbol_shift;
+                                        seen += done << symbol_shift;
+                                        // All of them: the room ran out first, or under a quantum is left.
+                                        if (done == groups)
+                                        {
+                                                if (groups < left)
+                                                        continue;
+                                                break;
+                                        }
+                                        // Stopped at a line's end: past it, and the next line.
+                                        if (text_input.buffer[text_input.position] != '\n')
+                                                break;
+                                        text_input.position++;
+                                }
+                                if (text_input.position == text_input.filled)
+                                        break;
+                        }
+                        else if (!held && !padded)
                         {
                                 positive groups = min(
-                                    (text_input.filled - text_input.position) / codec->output,
+                                    (text_input.filled - text_input.position) >> symbol_shift,
                                     (TEXT_READ_MAX - made) / codec->input);
                                 positive done = memory_decode_power2(
                                     text_line + made,
                                     text_input.buffer + text_input.position,
-                                    groups, values,
-                                    codec->low_bit_first ? 9 : codec->bits);
+                                    groups, values, width);
 
-                                text_input.position += done * codec->output;
-                                seen += done * codec->output;
+                                text_input.position += done << symbol_shift;
+                                seen += done << symbol_shift;
                                 made += done * codec->input;
                                 // Enter each scalar quantum with room for all
                                 // its bytes, including after a padded member.
@@ -2190,7 +2253,12 @@ static b32 encoding_decode(const encoding_codec address_to codec,
                                 if (held >= 8)
                                 {
                                         held -= 8;
-                                        text_line[made++] = (p8)(accumulator >> held);
+                                        // Straight out where the quanta go
+                                        // straight out, so the two keep order.
+                                        if (direct)
+                                                text_put_character((p8)(accumulator >> held));
+                                        else
+                                                text_line[made++] = (p8)(accumulator >> held);
 
                                         if (made == TEXT_READ_MAX)
                                         {
