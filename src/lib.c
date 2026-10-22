@@ -41768,12 +41768,21 @@ __asm__(
     "3:  mv s1, a7\n   mv s11, a0\n   mv s8, s0\n"                             \
     "5:  vsetvli s2, s8, e8, m8, ta, ma\n   vle8.v v16, (s1)\n   vse8.v v16, (s11)\n   add s1, s1, s2\n   add s11, s11, s2\n   sub s8, s8, s2\n   bnez s8, 5b\n" \
     "4:\n"
-//      Without: eight or sixteen bytes a byte at a time whatever the count, the room taking what is past it, and
-//      a longer field eight bytes a turn the same way, a7 and a0 moved and put back.
+//      Without: eight or sixteen bytes a byte at a time whatever the count, the room taking what is past it. A
+//      longer field is its first eight so, then whole aligned words of the destination from its next word on,
+//      each made of the two aligned source words it straddles, shifted and ored as memory_copy_apart's merge
+//      makes them (ten instructions for eight bytes where the byte loads and stores take nineteen); the last
+//      word may write past the field and read past it, as the room allows. s6, s7 and s9 lend their registers,
+//      kept above the frame's twelve; s0, its count meanwhile, is the field's length again after.
 #define CUTF_RV_BCOPY                                                          \
     "li s1, 16\n   bltu s1, s0, 3f\n" CUTF_RV_BYTES8 "li s1, 8\n   bgeu s1, s0, 4f\n" CUTF_RV_BYTES16 "j 4f\n" \
-    "3:  mv s10, a7\n   mv s11, a0\n"                                           \
-    "5:  " CUTF_RV_BYTES8 "addi a7, a7, 8\n   addi a0, a0, 8\n   bltu a7, t6, 5b\n   mv a7, s10\n   mv a0, s11\n" \
+    "3:  sd s6, 96(sp)\n   sd s7, 104(sp)\n   sd s9, 112(sp)\n" CUTF_RV_BYTES8  \
+    "andi s1, a0, 7\n   li s2, 8\n   sub s2, s2, s1\n   add s1, a7, s2\n   add s2, a0, s2\n   sub s0, t6, s1\n" \
+    "andi s6, s1, 7\n   sub s1, s1, s6\n   slli s6, s6, 3\n   ld s10, 0(s1)\n   beqz s6, 7f\n   neg s7, s6\n" \
+    "5:  ld s11, 8(s1)\n   srl s10, s10, s6\n   sll s9, s11, s7\n   or s10, s10, s9\n   sd s10, 0(s2)\n   mv s10, s11\n" \
+    "addi s1, s1, 8\n   addi s2, s2, 8\n   addi s0, s0, -8\n   bgtz s0, 5b\n   j 6f\n" \
+    "7:  sd s10, 0(s2)\n   ld s10, 8(s1)\n   addi s1, s1, 8\n   addi s2, s2, 8\n   addi s0, s0, -8\n   bgtz s0, 7b\n" \
+    "6:  ld s6, 96(sp)\n   ld s7, 104(sp)\n   ld s9, 112(sp)\n   sub s0, t6, a7\n" \
     "4:\n"
 #define CUTF_RV_BYTES8                                                        \
     "lbu s1, 0(a7)\n   lbu s2, 1(a7)\n   sb s1, 0(a0)\n   sb s2, 1(a0)\n" \
@@ -41798,7 +41807,7 @@ __asm__(
 #else
     "1:  li t3, 1\n"
 #endif
-    "2:  addi sp, sp, -112\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
+    "2:  addi sp, sp, -128\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n   sd s5, 40(sp)\n"
     "sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n   sd s9, 72(sp)\n   sd s10, 80(sp)\n   sd s11, 88(sp)\n"
     "mv s3, a0\n   srli s4, a5, 16\n   andi s4, s4, 1\n   andi s6, a5, 255\n   srli s7, a5, 8\n   andi s7, s7, 255\n"
     "srli s0, a5, 32\n   add a4, a4, s0\n   neg a5, s0\n   mv t2, a5\n"
@@ -41832,7 +41841,7 @@ __asm__(
 #endif
     ".Lcutf_rv_end:\n   sub s0, t1, s3\n   sd s0, 0(a1)\n   sub a0, t0, a2\n"
     "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
-    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 112\n" ASM_RET
+    "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 128\n" ASM_RET
     ".pushsection .rodata\n"
     //      Where the bit is, by the top six bits of it times 0x03f79d71b4cb0a89.
     ".Lcutf_rv_bits:\n   .byte 0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5\n"
