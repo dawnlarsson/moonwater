@@ -27132,38 +27132,109 @@ __asm__(
     //
     //       memory_count -- how many times a byte appears.
     //
-    //       Eight at a time out of an integer register, because the vector
-    //       extension is optional on riscv and this has to run on the ones
-    //       without it. The byte is smeared across a word and exclusive-ored
-    //       in, so a match becomes a zero byte; the carry free zero test then
-    //       leaves bit seven set on exactly those.
+    //       Under eight bytes, a byte a turn. From eight on, words: the head
+    //       is the aligned word the block starts in, its flags shifted down
+    //       past the bytes before the block, and the tail the aligned word it
+    //       ends in, its flags shifted up past the block's end, so no load
+    //       crosses into a page the block does not touch and nothing is
+    //       peeled a byte at a time. RV64I promises no unaligned load, and
+    //       these never need one.
     //
-    //       Counting them without a popcount instruction, which base RV64I
-    //       does not have: shift the flags down to bit zero of each byte and
-    //       multiply by 0x0101..01, which sums all eight into the top byte.
-    //       The same multiply the byte-index arithmetic elsewhere in this
-    //       block uses, asked a different question.
+    //       A word's differing bytes are flagged without carries between
+    //       them: with x the word xor the byte in every lane, bit seven of
+    //       ((x | 0x80..) - 0x01..) | x is set exactly where x is not zero,
+    //       and shifted down and masked it is a 1 in each such lane. The
+    //       flags of a turn's eight words are added lane by lane and summed
+    //       once a turn by the multiply by 0x0101..01, which leaves the total
+    //       in the top byte (at most 72 with the head's, so it cannot carry
+    //       out). The answer is the size less the bytes that differ. Eight
+    //       instructions a word is what this takes without Zbb; a turn adds
+    //       five, the sum and the loop.
     //
-    //       The head is peeled to natural alignment before any ld.  This is
-    //       required even when eight bytes remain: RV64I does not promise an
-    //       unaligned integer load will complete in hardware, or at all.
+    //       Only a block that has a 64-byte turn left after its first one asks
+    //       what the processor has, and pays seven instructions for it without
+    //       V or Zbb; a shorter one runs nothing else. With V the rest is
+    //       strips of eight registers, vmsne and vcpop; with Zbb a word is
+    //       xor, orc.b and cpop, eight bits for each differing byte. In the
+    //       kernel there is neither, and the turns run. 0x0101..01 is loaded
+    //       from beside the body, two instructions where building it took four.
     //
+    //       qemu instructions a call with the driver's, the block on an
+    //       aligned address and three past one, the byte loop and word loop
+    //       before against this: 5 bytes 56 and 48 to 40; 16 bytes 59 and 95
+    //       to 46 and 57; 64 bytes 143 and 179 to 106 and 117; 4096 bytes
+    //       7199 to 4400 without Zbb, 2791 with it and 363 with V at VLEN 128.
+    //       Of every size to 136 at every residue, none runs more than it did;
+    //       one byte off an aligned address and ten bytes seven past one run
+    //       the same. wc -l over C source, a byte: 1.75 to 1.06, 0.66 and 0.06.
+    //
+#define COUNT_RV_FLAGS(D, W, F)                                               \
+    "ld " W ", " D "(a0)\n   xor " W ", " W ", t2\n   or " F ", " W ", t1\n   sub " F ", " F ", t0\n   or " F ", " F ", " W "\n" \
+    "srli " F ", " F ", 7\n   and " F ", " F ", t0\n"
+#define COUNT_RV_REST                                                         \
+    COUNT_RV_FLAGS("8", "t4", "t5") "add a7, a7, t5\n"                         \
+    COUNT_RV_FLAGS("16", "t6", "a3") "add a7, a7, a3\n"                        \
+    COUNT_RV_FLAGS("24", "t3", "t4") "add a7, a7, t4\n"                        \
+    COUNT_RV_FLAGS("32", "t5", "t6") "add a7, a7, t6\n"                        \
+    COUNT_RV_FLAGS("40", "a3", "t3") "add a7, a7, t3\n"                        \
+    COUNT_RV_FLAGS("48", "t4", "t5") "add a7, a7, t5\n"                        \
+    COUNT_RV_FLAGS("56", "t6", "a3") "add a7, a7, a3\n"
+#define COUNT_RV_SUM "mul t3, a7, t0\n   srli t3, t3, 56\n   sub a1, a1, t3\n"
+#define COUNT_RV_ZBB_WORD(D, W) "ld " W ", " D "(a0)\n   xor " W ", " W ", t2\n   orc.b " W ", " W "\n   cpop " W ", " W "\n   add a3, a3, " W "\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_count)
-    "li a3, 0\n   beqz a1, 9f\n   andi a2, a2, 0xff\n   andi t3, a0, 7\n   beqz t3, 4f\n"
-    "2:  lbu t4, 0(a0)\n   bne t4, a2, 3f\n   addi a3, a3, 1\n"
-    "3:  addi a0, a0, 1\n   addi a1, a1, -1\n   beqz a1, 9f\n   andi t3, a0, 7\n   bnez t3, 2b\n"
-    "4:  lui t0, 0x1010\n   addi t0, t0, 257\n   slli t1, t0, 32\n   add t0, t0, t1  # 0x0101010101010101\n"
-    "li t1, 0x7f7f7f7f7f7f7f7f\n   mul t2, a2, t0  # the byte, eight times over\n"
-    "li t3, 8\n   bltu a1, t3, 5f\n"
-    "1:\n   ld t4, 0(a0)\n   xor t4, t4, t2  # a match is now a zero byte\n"
-    "and t5, t4, t1\n   add t5, t5, t1\n   or t5, t5, t4\n   or t5, t5, t1\n   not t5, t5  # bit seven set for each byte that was zero\n"
-    "srli t5, t5, 7\n   mul t5, t5, t0\n   srli t5, t5, 56  # how many of them\n"
-    "add a3, a3, t5\n   addi a0, a0, 8\n   addi a1, a1, -8\n   bgeu a1, t3, 1b\n"
-    "5:  beqz a1, 9f\n"
-    "6:  lbu t4, 0(a0)\n   bne t4, a2, 7f\n   addi a3, a3, 1\n"
-    "7:  addi a0, a0, 1\n   addi a1, a1, -1\n   bnez a1, 6b\n"
+    "andi a2, a2, 0xff\n   li t3, 8\n   bgeu a1, t3, .Lmemory_count_rv_words\n   li a3, 0\n   beqz a1, 9f\n"
+    "1:  lbu t4, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, -1\n   bne t4, a2, 2f\n   addi a3, a3, 1\n"
+    "2:  bnez a1, 1b\n"
     "9:  mv a0, a3\n" ASM_RET
+    ".Lmemory_count_rv_words:\n   ld t0, .Lmemory_count_rv_ones\n"
+    "mul t2, a2, t0  # the byte, eight times over\n   slli t1, t0, 7  # 0x8080808080808080\n"
+    "add a6, a0, a1\n   slli t3, a0, 3  # srl takes the low six bits: the residue's\n   andi a0, a0, -8\n"
+    COUNT_RV_FLAGS("0", "t5", "t4") "srl a7, t4, t3  # the head, from the block's first byte\n   addi a0, a0, 8\n"
+    "addi a4, a6, -64\n   bltu a4, a0, .Lmemory_count_rv_tail\n"
+    COUNT_RV_FLAGS("0", "t3", "t4") "add a7, a7, t4\n" COUNT_RV_REST COUNT_RV_SUM "li a7, 0\n   addi a0, a0, 64\n"
+    "bltu a4, a0, .Lmemory_count_rv_tail\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".Lmemory_count_rv_ask:\n   auipc t3, %pcrel_hi(cpu_has_vector)\n   lbu t3, %pcrel_lo(.Lmemory_count_rv_ask)(t3)\n   addi t4, t3, -1\n"
+    "beqz t4, 8f\n   bnez t3, .Lmemory_count_rv_vector\n"
+    //  The detect keeps a0-a4 and a7 and leaves a6; the three constants are kept here.
+    "addi sp, sp, -32\n   sd ra, 0(sp)\n   sd t0, 8(sp)\n   sd t1, 16(sp)\n   sd t2, 24(sp)\n   call cpu_vector_detect\n"
+    "ld ra, 0(sp)\n   ld t0, 8(sp)\n   ld t1, 16(sp)\n   ld t2, 24(sp)\n   addi sp, sp, 32\n   j .Lmemory_count_rv_ask\n"
+    "8:\n"
+#endif
+    RV_ZBB_ASK("t3", ".Lmemory_count_rv_zbb")
+    ".Lmemory_count_rv_turn:\n" COUNT_RV_FLAGS("0", "t3", "a7") COUNT_RV_REST COUNT_RV_SUM
+    "addi a0, a0, 64\n   bgeu a4, a0, .Lmemory_count_rv_turn\n   li a7, 0\n"
+    ".Lmemory_count_rv_tail:\n   addi a4, a6, -8\n   bltu a4, a0, 4f\n"
+    "3:  " COUNT_RV_FLAGS("0", "t3", "t4") "add a7, a7, t4\n   addi a0, a0, 8\n   bgeu a4, a0, 3b\n"
+    "4:  beq a0, a6, 5f\n"
+    COUNT_RV_FLAGS("0", "t3", "t4") "sub t5, a0, a6\n   slli t5, t5, 3\n   sll t4, t4, t5  # the tail, to its last byte\n   add a7, a7, t4\n"
+    "5:  mul t3, a7, t0\n   srli t3, t3, 56\n   sub a0, a1, t3\n" ASM_RET
+    ".balign 8\n"
+    ".Lmemory_count_rv_ones:\n   .dword 0x0101010101010101\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".Lmemory_count_rv_vector:\n   sub t5, a6, a0\n"
+    "7:  vsetvli t3, t5, e8, m8, ta, ma\n   vle8.v v8, (a0)\n   vmsne.vx v0, v8, a2\n   vcpop.m t4, v0\n   sub a1, a1, t4\n"
+    "add a0, a0, t3\n   sub t5, t5, t3\n   bnez t5, 7b\n   mv a0, a1\n" ASM_RET
+#endif
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lmemory_count_rv_zbb:\n   li a3, 0\n"
+    "6:  " COUNT_RV_ZBB_WORD("0", "t3") COUNT_RV_ZBB_WORD("8", "t4") COUNT_RV_ZBB_WORD("16", "t5") COUNT_RV_ZBB_WORD("24", "t6")
+    COUNT_RV_ZBB_WORD("32", "t3") COUNT_RV_ZBB_WORD("40", "t4") COUNT_RV_ZBB_WORD("48", "t5") COUNT_RV_ZBB_WORD("56", "t6")
+    "addi a0, a0, 64\n   bgeu a4, a0, 6b\n   srli a3, a3, 3\n   sub a1, a1, a3\n   j .Lmemory_count_rv_tail\n"
+    RV_ZBB_END
+#endif
     ASM_END(memory_count)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
+#undef COUNT_RV_ZBB_WORD
+#undef COUNT_RV_SUM
+#undef COUNT_RV_REST
+#undef COUNT_RV_FLAGS
     //
     //       memory_count_words: with V a vector of the bytes a turn -- W the white mask, its lanes made bytes
     //       of 1 and 0 and slid up one with the flag of the byte before at lane 0, and a word starts where W is

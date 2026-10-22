@@ -23742,6 +23742,119 @@ fn check_count()
         }
 }
 
+/*
+        memory_count on each body: on x86_64 with AVX-512, with AVX2 and with
+        neither (the SSE2 one), and on riscv64 with every call the first in a
+        process, which asks for V, then without V, then without V or Zbb.
+        Every size to 160 and those either side of the word turns and of the
+        strips at every VLEN past it, the block at each of eight residues
+        against the page before it and against the page after it, so that a
+        load before its first byte, or past its last where the page does not
+        have it, faults. The byte is everywhere outside the block, so that one
+        counted from outside shows; inside it is nowhere, everywhere, once at
+        each position, and drawn with its neighbours (the byte with bit zero
+        or bit seven turned, or any byte) for 0, 0x80, 0xff and the newline.
+*/
+fn check_count_bodies()
+{
+        static const positive large[] = {191, 192, 193, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025,
+                                         2039, 2040, 2041, 2047, 2048, 2049, 4088, 4095, 4096};
+        static const p8 values[] = {'\n', 0, 0x80, 0xff};
+        p8 address_to pages = guard_pages("memory_count");
+        p64 state = 0x510e527fade682d1ull;
+
+        if (!pages)
+                return;
+        p8 address_to page = pages + 4096;
+#if X64
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+        positive tiers = 3;
+#elif RISCV64
+        p8 vector = 0, zbb = cpu_has_zbb;
+        positive tiers = 3;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx512 = tier < 1 ? avx512 : 0;
+                cpu_has_avx2 = tier < 2 ? avx2 : 0;
+#elif RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
+                if (tier == 2)
+                        cpu_has_zbb = 0;
+#endif
+                for (positive n = 0; n < 161 + array_count(large); n++)
+                        for (positive place = 0; place < 16; place++)
+                        {
+                                positive size = n < 161 ? n : large[n - 161];
+                                positive gap = place & 7;
+
+                                if (size + gap > 4096)
+                                        continue;
+                                p8 address_to block = place < 8 ? page + gap : page + 4096 - size - gap;
+
+                                for (positive v = 0; v < array_count(values); v++)
+                                {
+                                        p8 value = values[v];
+
+                                        memory_fill(page, value, 4096);
+                                        memory_fill(block, (p8)(value ^ 0x80), size);
+                                        VECTOR_FIRST_CALL(tier == 0);
+                                        same("memory_count", "nowhere in the block",
+                                             (memory_count)(block, size, value), 0);
+                                        memory_fill(page, (p8)(value ^ 1), 4096);
+                                        memory_fill(block, value, size);
+                                        VECTOR_FIRST_CALL(tier == 0);
+                                        same("memory_count", "everywhere in the block",
+                                             (memory_count)(block, size, value), size);
+                                        memory_fill(page, value, 4096);
+                                        positive want = 0;
+
+                                        for (positive i = 0; i < size; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                p8 draw = (p8)(state >> 32);
+
+                                                block[i] = (draw & 3) == 0   ? value
+                                                           : (draw & 3) == 1 ? (p8)(value ^ 1)
+                                                           : (draw & 3) == 2 ? (p8)(value ^ 0x80)
+                                                                             : (p8)(state >> 40);
+                                                want += block[i] == value;
+                                        }
+                                        VECTOR_FIRST_CALL(tier == 0);
+                                        same("memory_count", "drawn with its neighbours",
+                                             (memory_count)(block, size, value), want);
+                                }
+                                if (size > 160 || (place != 0 && place != 8 && size > 40))
+                                        continue;
+                                memory_fill(page, '\n', 4096);
+                                memory_fill(block, 'x', size);
+                                for (positive at = 0; at < size; at++)
+                                {
+                                        block[at] = '\n';
+                                        VECTOR_FIRST_CALL(tier == 0 && at % 7 == 0);
+                                        same("memory_count", "once at a position",
+                                             (memory_count)(block, size, '\n'), 1);
+                                        block[at] = 'x';
+                                }
+                        }
+        }
+#if X64
+        cpu_has_avx2 = avx2;
+        cpu_has_avx512 = avx512;
+#elif RISCV64
+        cpu_has_vector = vector;
+        cpu_has_zbb = zbb;
+#endif
+        memory_free(pages, 3 * 4096);
+}
+
 
 /*
         memory_first_of at the sizes that reach the wide path.
@@ -29364,6 +29477,7 @@ b32 main()
         check_fill();
         check_fill_wide();
         check_count();
+        check_count_bodies();
         check_count_words();
         check_memory_compare();
 #if RISCV64
