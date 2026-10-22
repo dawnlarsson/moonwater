@@ -14884,8 +14884,9 @@ fn check_delete_bytes()
         different from it, and absent as a value past 255 whose low byte is
         the first byte. The table against a page that faults, on eight and
         off it, and marks of any nonzero byte, 0x80 among them. On x86_64
-        each body in turn, as for deletion; on riscv64 every call the first
-        in a process, which asks for V, then without V.
+        each body in turn, as for deletion, and the SSE2 blocks with AVX2
+        off; on riscv64 every call the first in a process, which asks for V,
+        then without V.
 */
 fn check_squeeze_bytes()
 {
@@ -14908,8 +14909,8 @@ fn check_squeeze_bytes()
         p8 address_to got = pages + 4096;
         p64 seed = 0x2545f4914f6cdd1dull;
 #if X64
-        p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2;
-        positive tiers = 3;
+        p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2, avx2 = cpu_has_avx2;
+        positive tiers = 4;
 #elif RISCV64
         p8 vector = 0;
         positive tiers = 2;
@@ -14921,6 +14922,7 @@ fn check_squeeze_bytes()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi2 = tier == 1 ? 1 : vbmi2;
+                cpu_has_avx2 = tier < 3 ? avx2 : 0;
 #elif RISCV64
                 if (tier == 1)
                 {
@@ -14933,7 +14935,7 @@ fn check_squeeze_bytes()
                      (memory_squeeze_bytes)(null, 0, null, 256), 0);
                 for (positive s = 0; s < array_count(sizes); s++)
                         for (positive residue = 0; residue <= 64; residue += residue < 8 ? 1 : 7)
-                                for (positive density = 0; density < 4; density++)
+                                for (positive density = 0; density < 7; density++)
                                         for (positive before = 0; before < 4; before++)
                                 {
                                         positive size = sizes[s];
@@ -14945,7 +14947,14 @@ fn check_squeeze_bytes()
                                                 XORSHIFT64(seed);
                                                 // Any nonzero byte, 0x80 (no low bit set) a quarter of the time.
                                                 p8 mark = i % 4 == 0 || !(p8)(seed >> 24) ? 0x80 : (p8)(seed >> 24);
-                                                bool marked = density == 3 ? (seed & 15) != 0
+                                                // Densities 4 to 6 are runs of marks, as SSE2 takes them
+                                                // apart from 256 bytes: three runs, four runs from byte
+                                                // 0 to byte 255 (the last of them sixteen long, past
+                                                // 0xf1), and one run of every byte.
+                                                bool marked = density == 6 ? true
+                                                              : density == 5 ? i == 0 || i == ' ' || i == 'a' || i == 'b' || i >= 0xf0
+                                                              : density == 4 ? i == ' ' || (i >= 'a' && i <= 'b') || (i >= 0xf0 && i <= 0xf2)
+                                                              : density == 3 ? (seed & 15) != 0
                                                               : density == 2 ? (seed & 1) != 0
                                                               : density == 1 ? i == 'a' || i == 0xf1
                                                                              : false;
@@ -14985,6 +14994,7 @@ fn check_squeeze_bytes()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi2 = vbmi2;
+        cpu_has_avx2 = avx2;
 #elif RISCV64
         cpu_has_vector = vector;
 #endif

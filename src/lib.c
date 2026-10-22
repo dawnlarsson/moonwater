@@ -13816,7 +13816,7 @@ __asm__(
     //      the previous block's register still holds: a vperm2i128 puts that register's top lane under this
     //      one's bottom and a vpalignr by fifteen takes the byte from the seam.
     //
-    ".Lmemory_squeeze_x64_avx2:\n   cmp $256, %rsi\n   jb .Lmemory_squeeze_x64_one\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_squeeze_x64_one\n"
+    ".Lmemory_squeeze_x64_avx2:\n   cmp $256, %rsi\n   jb .Lmemory_squeeze_x64_sse2\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_squeeze_x64_sse2\n"
     "cmp $255, %r9\n   jbe 1f\n   movzbl (%rdi), %r9d\n   xor $1, %r9d\n"
     "1:  vmovd %r9d, %xmm0\n   vpbroadcastb %xmm0, %ymm15\n"
     NIBBLE_SETUP("%rdx", "%r10", "%r10d")
@@ -13835,6 +13835,77 @@ __asm__(
     //      The block's last byte, from the register, for the byte loop that finishes: the stores above may have
     //      left something else in memory where it was.
     "vextracti128 $1, %ymm15, %xmm15\n   vpextrb $15, %xmm15, %r9d\n   vzeroupper\n   test %rsi, %rsi\n   jz .Lmemory_squeeze_x64_done\n   jmp .Lmemory_squeeze_x64_one\n"
+    //
+    //      Without AVX2, and under 256 bytes with it: sixteen bytes a turn in the SSE2 registers. The block
+    //      shifted up a byte, the block before's last byte in its lane 0, is compared with the block, and a
+    //      block with no byte that repeats the one before it is stored whole; most blocks of text are. One
+    //      with repeats asks the table about each of them, its answer made a bit with no branch on it (the
+    //      branch was missed often enough to hold the loop near one instruction a cycle), and is stored
+    //      whole too when none is marked;
+    //      otherwise its sixteen bytes are stored one at a time, the cursor moved by the carry of the keep
+    //      mask shifted out a bit at a time, since SSE2 has no byte shuffle to close the gaps with. From
+    //      256 bytes a table whose marks are four runs of bytes or fewer -- a byte alone is a run, and so
+    //      are a-z, the two of [:space:] and the four of [:punct:] -- is asked once for its runs, and a
+    //      block's marks are a pmaxub, a pminub and a compare a run: no walk of its repeats and no branch
+    //      on whether it has any, which in C source almost half the blocks do.
+    //
+    ".Lmemory_squeeze_x64_sse2:\n   cmp $255, %r9\n   jbe 1f\n   movzbl (%rdi), %r9d\n   xor $1, %r9d\n"
+    "1:  movd %r9d, %xmm1\n   pslldq $15, %xmm1\n   cmp $256, %rsi\n   jb .Lmemory_squeeze_x64_sse2_block\n"
+    //      The marks as runs of bytes, the table asked a byte at a time (once a call: a few hundred
+    //      instructions against 256 bytes and more); past four runs the blocks below. r10 gathers each run's
+    //      first and last byte, two bytes a run, the last run found lowest; r11, the start of the block, waits
+    //      in xmm7 while it says whether a run is open.
+    "movq %r11, %xmm7\n   xor %r8d, %r8d\n   xor %r10d, %r10d\n   xor %ecx, %ecx\n   xor %r11d, %r11d\n"
+    ".Lmemory_squeeze_x64_sse2_scan:\n   cmpb $0, (%rdx,%rcx)\n   setne %r9b\n   cmp %r9b, %r11b\n   je 2f\n   mov %r9b, %r11b\n   test %r9b, %r9b\n   jz 1f\n"
+    "inc %r8d\n   cmp $4, %r8d\n   ja 9f\n   shl $16, %r10\n   or %rcx, %r10\n   jmp 2f\n"
+    "1:  lea -1(%rcx), %r9d\n   shl $8, %r9d\n   or %r9, %r10\n"
+    "2:  inc %ecx\n   cmp $256, %ecx\n   jb .Lmemory_squeeze_x64_sse2_scan\n   test %r11b, %r11b\n   jz 3f\n   or $0xff00, %r10\n"
+    "3:  test %r8d, %r8d\n   jz 9f\n   mov %r8d, %r11d\n"
+    //      Fewer than four: the slots above them take the last run again. Then the ends broadcast, run k's
+    //      first byte and last.
+    "movzwl %r10w, %r9d\n   mov %r8d, %ecx\n   shl $4, %ecx\n   shl %cl, %r9\n"
+    "4:  cmp $4, %r8d\n   jae 5f\n   or %r9, %r10\n   shl $16, %r9\n   inc %r8d\n   jmp 4b\n"
+    "5:  movq %r10, %xmm3\n   punpcklbw %xmm3, %xmm3\n"
+    "pshuflw $0x00, %xmm3, %xmm4\n   pshufd $0x00, %xmm4, %xmm4\n   pshuflw $0x55, %xmm3, %xmm5\n   pshufd $0x00, %xmm5, %xmm5\n"
+    "pshuflw $0xaa, %xmm3, %xmm6\n   pshufd $0x00, %xmm6, %xmm6\n   pshuflw $0xff, %xmm3, %xmm8\n   pshufd $0x00, %xmm8, %xmm8\n"
+    "pshufhw $0x00, %xmm3, %xmm9\n   pshufd $0xaa, %xmm9, %xmm9\n   pshufhw $0x55, %xmm3, %xmm10\n   pshufd $0xaa, %xmm10, %xmm10\n"
+    "pshufhw $0xaa, %xmm3, %xmm11\n   pshufd $0xaa, %xmm11, %xmm11\n   pshufhw $0xff, %xmm3, %xmm12\n   pshufd $0xaa, %xmm12, %xmm12\n"
+    "cmp $2, %r11d\n   ja .Lmemory_squeeze_x64_sse2_runs4\n"
+    //      A block's drops are its repeats inside a run, one mask; most blocks have none. Two runs or one.
+    ".balign 16\n.Lmemory_squeeze_x64_sse2_runs2:\n"
+    "movdqu (%rdi), %xmm0\n   movdqa %xmm0, %xmm2\n   pslldq $1, %xmm2\n   psrldq $15, %xmm1\n   por %xmm1, %xmm2\n   movdqa %xmm0, %xmm1\n   pcmpeqb %xmm0, %xmm2\n"
+    "movdqa %xmm0, %xmm13\n   pmaxub %xmm4, %xmm13\n   pminub %xmm5, %xmm13\n   pcmpeqb %xmm0, %xmm13\n"
+    "movdqa %xmm0, %xmm14\n   pmaxub %xmm6, %xmm14\n   pminub %xmm8, %xmm14\n   pcmpeqb %xmm0, %xmm14\n   por %xmm14, %xmm13\n"
+    "pand %xmm13, %xmm2\n   pmovmskb %xmm2, %r8d\n   test %r8d, %r8d\n   jnz 7f\n   movdqu %xmm0, (%rax)\n   add $16, %rax\n"
+    "6:  add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lmemory_squeeze_x64_sse2_runs2\n   movq %xmm7, %r11\n   jmp .Lmemory_squeeze_x64_sse2_end\n"
+    "7:  not %r8d\n"
+    ".irp k,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n   movzbl \\k(%rdi), %ecx\n   mov %cl, (%rax)\n   shr $1, %r8d\n   adc $0, %rax\n   .endr\n"
+    "jmp 6b\n"
+    //      Three or four.
+    ".balign 16\n.Lmemory_squeeze_x64_sse2_runs4:\n"
+    "movdqu (%rdi), %xmm0\n   movdqa %xmm0, %xmm2\n   pslldq $1, %xmm2\n   psrldq $15, %xmm1\n   por %xmm1, %xmm2\n   movdqa %xmm0, %xmm1\n   pcmpeqb %xmm0, %xmm2\n"
+    "movdqa %xmm0, %xmm13\n   pmaxub %xmm4, %xmm13\n   pminub %xmm5, %xmm13\n   pcmpeqb %xmm0, %xmm13\n"
+    "movdqa %xmm0, %xmm14\n   pmaxub %xmm6, %xmm14\n   pminub %xmm8, %xmm14\n   pcmpeqb %xmm0, %xmm14\n   por %xmm14, %xmm13\n"
+    "movdqa %xmm0, %xmm14\n   pmaxub %xmm9, %xmm14\n   pminub %xmm10, %xmm14\n   pcmpeqb %xmm0, %xmm14\n   por %xmm14, %xmm13\n"
+    "movdqa %xmm0, %xmm14\n   pmaxub %xmm11, %xmm14\n   pminub %xmm12, %xmm14\n   pcmpeqb %xmm0, %xmm14\n   por %xmm14, %xmm13\n"
+    "pand %xmm13, %xmm2\n   pmovmskb %xmm2, %r8d\n   test %r8d, %r8d\n   jnz 7f\n   movdqu %xmm0, (%rax)\n   add $16, %rax\n"
+    "6:  add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lmemory_squeeze_x64_sse2_runs4\n   movq %xmm7, %r11\n   jmp .Lmemory_squeeze_x64_sse2_end\n"
+    "7:  not %r8d\n"
+    ".irp k,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n   movzbl \\k(%rdi), %ecx\n   mov %cl, (%rax)\n   shr $1, %r8d\n   adc $0, %rax\n   .endr\n"
+    "jmp 6b\n"
+    "9:  movq %xmm7, %r11\n"
+    ".balign 16\n.Lmemory_squeeze_x64_sse2_block:\n"
+    "movdqu (%rdi), %xmm0\n   movdqa %xmm0, %xmm2\n   pslldq $1, %xmm2\n   psrldq $15, %xmm1\n   por %xmm1, %xmm2\n   movdqa %xmm0, %xmm1\n"
+    "pcmpeqb %xmm0, %xmm2\n   pmovmskb %xmm2, %r10d\n   test %r10d, %r10d\n   jnz .Lmemory_squeeze_x64_sse2_repeats\n"
+    ".Lmemory_squeeze_x64_sse2_whole:\n   movdqu %xmm0, (%rax)\n   add $16, %rax\n"
+    ".Lmemory_squeeze_x64_sse2_next:\n   add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lmemory_squeeze_x64_sse2_block\n"
+    //      The block's last byte for the byte loop that finishes, from the register as above.
+    ".Lmemory_squeeze_x64_sse2_end:\n   psrldq $15, %xmm1\n   movd %xmm1, %r9d\n   test %rsi, %rsi\n   jz .Lmemory_squeeze_x64_done\n   jmp .Lmemory_squeeze_x64_one\n"
+    ".Lmemory_squeeze_x64_sse2_repeats:\n   xor %r8d, %r8d\n"
+    "2:  bsf %r10d, %ecx\n   movzbl (%rdi,%rcx), %r9d\n   cmpb $0, (%rdx,%r9)\n   setne %r9b\n   shl %cl, %r9d\n   or %r9d, %r8d\n"
+    "lea -1(%r10), %r9d\n   and %r9d, %r10d\n   jnz 2b\n   test %r8d, %r8d\n   jz .Lmemory_squeeze_x64_sse2_whole\n   not %r8d\n"
+    ".irp k,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n   movzbl \\k(%rdi), %ecx\n   mov %cl, (%rax)\n   shr $1, %r8d\n   adc $0, %rax\n   .endr\n"
+    "jmp .Lmemory_squeeze_x64_sse2_next\n"
     ".pushsection .rodata\n   .balign 64\n"
     // Lane 0 takes the previous vector's last byte, lane i this one's i - 1.
     ".Lmemory_squeeze_x64_previous:\n   .byte 127,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62\n"
