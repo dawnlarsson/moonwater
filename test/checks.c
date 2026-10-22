@@ -49371,11 +49371,10 @@ static unsigned long long ranged_rev_fill(unsigned char *source, unsigned long l
 }
 
 /*
-        The shapes that move x86_64's walks without AVX2 from one to the
-        other (every 4 KiB, by how many lines went past 32 bytes): long lines
-        then short ones then long again, with sequences of every lead class
-        in some, and lines of 31 to 34 and 63 to 66 bytes in turn, each
-        source against the end of its room and from the start of its own.
+        Long lines then short ones then long again, the same with sequences
+        of every lead class in some, and lines of 31 to 34 and 63 to 66 bytes
+        in turn, about the walks' 32- and 64-byte turns: each source against
+        the end of its room and from the start of its own.
 */
 static unsigned long long ranged_rev_one(unsigned char *d_end, unsigned char *source, unsigned long long length)
 {

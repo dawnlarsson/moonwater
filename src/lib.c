@@ -42056,10 +42056,13 @@ __asm__(
         rev had (every line end from memory_offsets_of_either, a copy and
         memory_reverse a line, and rev_characters' decoding in a UTF-8
         locale): C 150.1M to 50.1M, C.UTF-8 169.8M to 49.8M; 33 MB of mixed
-        UTF-8 281.3M to 155.2M in C.UTF-8 and 59.0M to 24.7M in C; with SSE2
-        alone 177.0M to 71.3M, 207.8M to 71.8M and 68.3M to 33.0M, the mixed
-        UTF-8 the same 301M either way, memory_utf8_valid_span being its
-        scalar walk there. M2 Pro, lifted, src/lib.c: 20.6 to 10.2 ns a line.
+        UTF-8 281.3M to 155.2M in C.UTF-8 and 59.0M to 24.7M in C; without
+        AVX2 (the x86-64-v2 floor: SSE2 then, SSSE3's pshufb now) 177.0M to
+        71.3M, 207.8M to 71.8M and 68.3M to 33.0M, the mixed UTF-8 the same
+        301M either way, memory_utf8_valid_span being its scalar walk there;
+        then with pshufb's 64-byte turns, as AVX2 has, C 67.2M (32-byte turns
+        a word at a time) to 49.2M. M2 Pro, lifted, src/lib.c: 20.6 to 10.2
+        ns a line.
         qemu instructions a line, C source in C and C.UTF-8 and mixed UTF-8:
         aarch64 149, 199 and 1063 to 59, 60 and 495; riscv64 330, 459 and
         1580 to 218, 218 and 1346, with V 238, 367 and 1446 to 49, 50 and 589.
@@ -42089,8 +42092,7 @@ positive memory_reverse_lines__room_64(p8 address_to destination, positive addre
         landed and how long it is -- two bytes a rotate, three an exchange of
         the outer two, four a bswap.
 */
-#define REVL_X64_WALK(P, STEP, SHORT, SHORTTURNS, MASKS, TURN, BITS, CLEAR, LEADS, CLIP, LOWCLEAR, LOAD, END, \
-                      SHORTCOUNT, LONGCOUNT, DECIDE, ENDLONG)                \
+#define REVL_X64_WALK(P, STEP, SHORT, SHORTTURNS, MASKS, TURN, BITS, CLEAR, LEADS, CLIP, LOWCLEAR, LOAD, END) \
     P "_block:\n   cmp %r12, %rdx\n   jae " END "\n" MASKS                      \
     "mov %r12, %r14\n   sub %rdx, %r14\n   cmp $64, %r14\n   jb " P "_clip\n"  \
     P "_clipped:\n   and %r11, %rbx\n   test %rax, %rax\n   jz " P "_carry\n"   \
@@ -42098,20 +42100,20 @@ positive memory_reverse_lines__room_64(p8 address_to destination, positive addre
     P "_line:\n   tzcnt %rax, %r13\n   " BITS "   lea (%rdx,%r13), %r10\n   mov %r10, %r13\n   sub %rsi, %r13\n" \
     "test %r14, %rbx\n   jnz " P "_wide\n   test %rbp, %rbp\n   jnz " P "_wide\n" CLEAR \
     P "_go:\n   mov %r10, %r15\n   mov %rdi, %rcx\n   lea -" SHORT "(%r10), %r14\n   cmp %r9, %r14\n   jb " P "_bytes\n" \
-    SHORTTURNS SHORTCOUNT "   cmp $" SHORT ", %r13\n   ja " P "_long\n"         \
+    SHORTTURNS "   cmp $" SHORT ", %r13\n   ja " P "_long\n"                    \
     P "_ended:\n   test %rbp, %rbp\n   jnz " P "_fix\n"                          \
     P "_fixed:\n   mov %r8b, (%rdi,%r13)\n   lea 1(%rdi,%r13), %rdi\n   lea 1(%rsi,%r13), %rsi\n   xor %ebp, %ebp\n" \
     "test %rax, %rax\n   jnz " P "_line\n"                                      \
-    P "_carry:\n   or %rbx, %rbp\n   add $64, %rdx\n" DECIDE "   jmp " P "_block\n" \
+    P "_carry:\n   or %rbx, %rbp\n   add $64, %rdx\n   jmp " P "_block\n"         \
     /* A line longer than the short turns: a turn at a time on from them, */  \
     /* the last reading from before the line where the source has it.    */  \
-    P "_long:\n   " LONGCOUNT "lea -" SHORT "(%r10), %r15\n   lea " SHORT "(%rdi), %rcx\n" \
+    P "_long:\n   lea -" SHORT "(%r10), %r15\n   lea " SHORT "(%rdi), %rcx\n"   \
     P "_turn:\n   sub $" STEP ", %r15\n   cmp %r9, %r15\n   jb " P "_near\n" TURN "   add $" STEP ", %rcx\n" \
-    "mov %rcx, %r14\n   sub %rdi, %r14\n   cmp %r13, %r14\n   jb " P "_turn\n   jmp " ENDLONG "\n" \
+    "mov %rcx, %r14\n   sub %rdi, %r14\n   cmp %r13, %r14\n   jb " P "_turn\n   jmp " P "_ended\n" \
     P "_near:\n   add $" STEP ", %r15\n"                                         \
     /* Near the source's start: what is left a byte at a time.           */   \
-    P "_bytes:\n   cmp %rsi, %r15\n   jbe " ENDLONG "\n"                       \
-    P "_byte:\n   dec %r15\n   movzbl (%r15), %r14d\n   mov %r14b, (%rcx)\n   inc %rcx\n   cmp %rsi, %r15\n   ja " P "_byte\n   jmp " ENDLONG "\n" \
+    P "_bytes:\n   cmp %rsi, %r15\n   jbe " P "_ended\n"                       \
+    P "_byte:\n   dec %r15\n   movzbl (%r15), %r14d\n   mov %r14b, (%rcx)\n   inc %rcx\n   cmp %rsi, %r15\n   ja " P "_byte\n   jmp " P "_ended\n" \
     P "_clip:\n   xor %r15d, %r15d\n   bts %r14, %r15\n   dec %r15\n   and %r15, %rax\n   and %r15, %rbx\n   jmp " P "_clipped\n" \
     /* A line past ASCII: whole sequences, or the caller's.              */   \
     P "_wide:\n" CLEAR "   push %rax\n   push %rdx\n   push %rsi\n   push %rdi\n   push %r8\n   push %r9\n   push %r10\n   push %r11\n" \
@@ -42155,38 +42157,27 @@ positive memory_reverse_lines__room_64(p8 address_to destination, positive addre
     "shl $48, %r14\n   or %r14, %rax\n   shl $48, %r15\n   or %r15, %rbx\n"
 #define REVL_X64_XFLAGS(OFFSET, LINES, HIGH)                                    \
     "movdqu " OFFSET "(%rdx), %xmm0\n   movdqa %xmm0, %xmm3\n   pcmpeqb %xmm2, %xmm3\n   pmovmskb %xmm3, " LINES "\n   pmovmskb %xmm0, " HIGH "\n"
-//      Thirty two bytes ending at r10 turned over to rdi, and sixty four.
+//      Sixty four bytes ending at r10 turned over to rdi with pshufb: every line to sixty four is these and
+//      nothing else, as with AVX2.
 #define REVL_X64_XSHORT                                                         \
-    "mov -8(%r10), %r14\n   mov -16(%r10), %r15\n   bswap %r14\n   bswap %r15\n   mov %r14, (%rdi)\n   mov %r15, 8(%rdi)\n" \
-    "mov -24(%r10), %r14\n   mov -32(%r10), %r15\n   bswap %r14\n   bswap %r15\n   mov %r14, 16(%rdi)\n   mov %r15, 24(%rdi)\n"
-#define REVL_X64_XSHORT64                                                       \
-    REVL_X64_XSHORT                                                             \
-    "mov -40(%r10), %r14\n   mov -48(%r10), %r15\n   bswap %r14\n   bswap %r15\n   mov %r14, 32(%rdi)\n   mov %r15, 40(%rdi)\n" \
-    "mov -56(%r10), %r14\n   mov -64(%r10), %r15\n   bswap %r14\n   bswap %r15\n   mov %r14, 48(%rdi)\n   mov %r15, 56(%rdi)\n"
-//      The SSE2 walks' arguments past END. The 32-byte walk counts the lines past 32 where it takes them, in 4
-//      KiB windows from the block of the first: 16(%rsp) the window's end, 24(%rsp) the count. The 64-byte walk
-//      counts every line past 32 (cmp leaves the carry under 33) and at a block's end asks whether 1 KiB of
-//      source is behind it since it last asked.
-#define REVL_X64_XCOUNT32                                                       \
-    "cmp 16(%rsp), %rdx\n   jb .Lrevl_x64_x_counted\n   lea 4096(%rdx), %r15\n   mov %r15, 16(%rsp)\n   movq $0, 24(%rsp)\n" \
-    ".Lrevl_x64_x_counted:\n   incq 24(%rsp)\n   "
-#define REVL_X64_XCOUNT64 "   cmp $33, %r13\n   sbbq $-1, 24(%rsp)\n"
-#define REVL_X64_XASK64 "   cmp 16(%rsp), %rdx\n   jae .Lrevl_x64_w_window\n"
-//      Sixteen bytes from r15 turned over to rcx, a word and bswap at a time.
+    "movdqu -16(%r10), %xmm5\n   movdqu -32(%r10), %xmm8\n   movdqu -48(%r10), %xmm9\n   movdqu -64(%r10), %xmm10\n" \
+    "pshufb %xmm6, %xmm5\n   pshufb %xmm6, %xmm8\n   pshufb %xmm6, %xmm9\n   pshufb %xmm6, %xmm10\n"          \
+    "movdqu %xmm5, (%rdi)\n   movdqu %xmm8, 16(%rdi)\n   movdqu %xmm9, 32(%rdi)\n   movdqu %xmm10, 48(%rdi)\n"
+//      Sixteen bytes from r15 turned over to rcx.
 #define REVL_X64_XTURN                                                          \
-    "mov 8(%r15), %r14\n   bswap %r14\n   mov %r14, (%rcx)\n   mov (%r15), %r14\n   bswap %r14\n   mov %r14, 8(%rcx)\n"
+    "movdqu (%r15), %xmm5\n   pshufb %xmm6, %xmm5\n   movdqu %xmm5, (%rcx)\n"
 #define REVL_X64_XLEADS                                                         \
     "movdqu (%rsi,%rcx), %xmm5\n   pand %xmm7, %xmm5\n   pcmpeqb %xmm7, %xmm5\n   pmovmskb %xmm5, %r14d\n"
 #define REVL_X64_XLOAD                                                          \
     "movzbl %r8b, %r15d\n   imul $0x01010101, %r15d, %r15d\n   movd %r15d, %xmm2\n   pshufd $0, %xmm2, %xmm2\n" \
-    "movdqa .Lrevl_x64_leads(%rip), %xmm7\n"
+    "movdqa .Lrevl_x64_leads(%rip), %xmm7\n   movdqa .Lrevl_x64_mask(%rip), %xmm6\n"
 __asm__(
     ASM_SECTION
     //      memory_reverse_lines__room_64: rdi destination, rsi made, rdx
     //      source, rcx length, r8 control; rax the bytes taken.
     ASM_FUNC(memory_reverse_lines__room_64)
     "test %rcx, %rcx\n   jnz 1f\n   movq $0, (%rsi)\n   xor %eax, %eax\n" ASM_RET
-    "1:  push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $40, %rsp\n"
+    "1:  push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $24, %rsp\n"
     "mov %rsi, (%rsp)\n   mov %rdi, 8(%rsp)\n   mov %rdx, %r9\n   lea (%rdx,%rcx), %r12\n   mov %rdx, %rsi\n   xor %ebp, %ebp\n"
     //      r11 keeps the high bytes' mask in a UTF-8 locale.
     "mov %r8, %r11\n   shr $8, %r11\n   and $1, %r11d\n   neg %r11\n"
@@ -42194,35 +42185,19 @@ __asm__(
     REVL_X64_YLOAD
     REVL_X64_WALK(".Lrevl_x64_a", "32", "64", REVL_X64_YSHORT, REVL_X64_YMASKS, REVL_X64_YTURN, "blsmsk %rax, %r14\n   blsr %rax, %rax\n",
                   "andn %rbx, %r14, %rbx\n", REVL_X64_YLEADS, "bzhi %r15, %r14, %r14\n", "blsr %r14, %r14\n", REVL_X64_YLOAD,
-                  ".Lrevl_x64_a_end", "", "", "", ".Lrevl_x64_a_ended")
+                  ".Lrevl_x64_a_end")
     ".Lrevl_x64_a_end:\n   vzeroupper\n   jmp .Lrevl_x64_end\n"
-    //      Without AVX2 a line turned 64 bytes at a time is eight word stores where 32 are four: on short lines
-    //      that is what bounds rev, and on C source, where a line past 32 bytes is a coin, the test at 32 is.
-    //      So two walks, the one at 32 first. It turns to the one at 64 at the end of the sixteenth line past 32
-    //      in 4 KiB, and that one back at a block's end once 1 KiB has held fewer than four; the two walks keep
-    //      the same registers at both places, so a change of walk is a jump. A file of short lines never pays
-    //      for the choice: the 32-byte walk counts only where it takes a long line. On a 9950X without AVX2,
-    //      user cycles over 64 MB of C source 67.2M to 58.8M, 33 MB of mixed UTF-8 31.7M to 29.4M, and files of
-    //      short lines level, among them one whose every 64 KiB begins with a KiB of long lines.
+    //      Without AVX2 the same walk in xmm registers: pshufb is SSSE3, in the x86-64-v2 floor. It was a word and
+    //      bswap at a time, a line 32 bytes in one go, where a line past 32 is a coin on C source, and then two
+    //      walks, 32 and 64, chosen by how many lines went past 32, as 64 bytes were eight word stores. Against
+    //      the two, on a 9950X without AVX2: C source 58.8M cycles to 49.2M, 6-byte lines 62.3M to 56.3M.
     ".Lrevl_x64_sse2:\n" REVL_X64_XLOAD
-    "mov %rdx, 16(%rsp)\n   movq $0, 24(%rsp)\n"
-    REVL_X64_WALK(".Lrevl_x64_x", "16", "32", REVL_X64_XSHORT, REVL_X64_XMASKS, REVL_X64_XTURN,
+    REVL_X64_WALK(".Lrevl_x64_x", "16", "64", REVL_X64_XSHORT, REVL_X64_XMASKS, REVL_X64_XTURN,
                   "lea -1(%rax), %r15\n   mov %rax, %r14\n   xor %r15, %r14\n   and %r15, %rax\n", "not %r14\n   and %r14, %rbx\n",
                   REVL_X64_XLEADS, "xor %r10d, %r10d\n   bts %r15, %r10\n   dec %r10\n   and %r10, %r14\n",
-                  "lea -1(%r14), %r10\n   and %r10, %r14\n", REVL_X64_XLOAD, ".Lrevl_x64_end", "", REVL_X64_XCOUNT32, "",
-                  ".Lrevl_x64_x_longend")
-    REVL_X64_WALK(".Lrevl_x64_w", "16", "64", REVL_X64_XSHORT64, REVL_X64_XMASKS, REVL_X64_XTURN,
-                  "lea -1(%rax), %r15\n   mov %rax, %r14\n   xor %r15, %r14\n   and %r15, %rax\n", "not %r14\n   and %r14, %rbx\n",
-                  REVL_X64_XLEADS, "xor %r10d, %r10d\n   bts %r15, %r10\n   dec %r10\n   and %r10, %r14\n",
-                  "lea -1(%r14), %r10\n   and %r10, %r14\n", REVL_X64_XLOAD, ".Lrevl_x64_end", REVL_X64_XCOUNT64, "", REVL_X64_XASK64,
-                  ".Lrevl_x64_w_ended")
-    ".Lrevl_x64_x_longend:\n   cmpq $16, 24(%rsp)\n   jb .Lrevl_x64_x_ended\n"
-    "lea 1024(%rdx), %r14\n   mov %r14, 16(%rsp)\n   movq $0, 24(%rsp)\n   jmp .Lrevl_x64_w_ended\n"
-    ".Lrevl_x64_w_window:\n   cmpq $4, 24(%rsp)\n   movq $0, 24(%rsp)\n   jb 1f\n   lea 1024(%rdx), %r14\n   mov %r14, 16(%rsp)\n"
-    "jmp .Lrevl_x64_w_block\n"
-    "1:  mov %rdx, 16(%rsp)\n   jmp .Lrevl_x64_x_block\n"
+                  "lea -1(%r14), %r10\n   and %r10, %r14\n", REVL_X64_XLOAD, ".Lrevl_x64_end")
     ".Lrevl_x64_end:\n   mov (%rsp), %rax\n   mov %rdi, %rdx\n   sub 8(%rsp), %rdx\n   mov %rdx, (%rax)\n   mov %rsi, %rax\n   sub %r9, %rax\n"
-    "add $40, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    "add $24, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
     ".pushsection .rodata\n   .balign 32\n"
     ".Lrevl_x64_mask:\n   .byte 15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0\n"
     ".Lrevl_x64_leads:\n   .byte 0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0,0xc0\n"

@@ -32,9 +32,11 @@
 #       by hand needs the same:
 #
 #           qemu-system-x86_64 -cpu Nehalem ...
-#           qemu-system-x86_64 -cpu qemu64,+popcnt,+sse4.1,+sse4.2,+cx16 ...
+#           qemu-system-x86_64 -cpu qemu64,+popcnt,+ssse3,+sse4.1,+sse4.2,+cx16 ...
 #
-#       both of which were checked against this image. Unlike the Zbb floor
+#       both of which were checked against this image. The second needs
+#       +ssse3 for the userspace: lib.c's bodies for a processor without
+#       AVX2 are written for this same floor and use pshufb. Unlike the Zbb floor
 #       profile/arch/riscv declines to set, this one is worth keeping: every
 #       machine in the stated range has it, and the loop this is developed in
 #       already runs on a model that does.
