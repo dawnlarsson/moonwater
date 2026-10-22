@@ -12986,6 +12986,20 @@ __asm__(
     ASM_SIMD_SECTION_END
 #undef CELLS_FROM_ASCII_X64_CELL
 
+//      memory_translate without AVX2: the next row that differs into its two registers, T its sixteen bytes and N
+//      its nibble's row, and when it was the last, the block loop for COUNT rows.
+#define TRX_X64_TAKE(T, N, COUNT)                                              \
+    "bsf %r9d, %ecx\n   shl $4, %ecx\n   movdqu (%rdx,%rcx), %xmm" T "\n   movdqa (%r10,%rcx,2), %xmm" N "\n" \
+    "lea -1(%r9), %r11d\n   and %r11d, %r9d\n   jz .Lmemory_translate_x64_x" COUNT "\n"
+//      A row: its bytes looked up by the low nibbles, put in where the high nibble is its own.
+#define TRX_X64_ROW(T, N)                                                      \
+    "movdqa %xmm" T ", %xmm14\n   pshufb %xmm2, %xmm14\n   movdqa %xmm1, %xmm0\n   pcmpeqb %xmm" N ", %xmm0\n" \
+    "pblendvb %xmm0, %xmm14, %xmm3\n"
+#define TRX_X64_LOOP(COUNT, ROWS)                                              \
+    ".p2align 5\n.Lmemory_translate_x64_x" COUNT ":\n"                          \
+    "movdqu (%rdi), %xmm3\n   movdqa %xmm3, %xmm1\n   psrlw $4, %xmm1\n   pand %xmm15, %xmm1\n   movdqa %xmm3, %xmm2\n   pand %xmm15, %xmm2\n" \
+    ROWS "movdqu %xmm3, (%rdi)\n   add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lmemory_translate_x64_x" COUNT "\n" \
+    "jmp .Lmemory_translate_x64_x_left\n"
     // Eligible disjoint spans index a table held in four vector registers.
     // Other calls retain four scalar lookup chains and their load/store order,
     // including calls whose table overlaps the input.
@@ -13002,7 +13016,6 @@ __asm__(
     ".Lmemory_translate_x64_done:\n" ASM_RET
 #ifndef KERNEL_MODE
     ".Lmemory_translate_x64_dispatch:\n"
-    ASM_NARROW("cpu_has_avx2", ".Lmemory_translate_x64_four")
     // Overlap retains the existing four-byte-group load/store order.
     // Subtractions test the two intervals without overflowing an end pointer.
     "mov %rdi, %r8\n   sub %rdx, %r8\n   jae .Lmemory_translate_x64_block_after\n   mov %rdx, %r8\n   sub %rdi, %r8\n   cmp %rsi, %r8\n"
@@ -13027,7 +13040,7 @@ __asm__(
     //      4.7 million cycles on a 9950X with AVX-512 off and 0.49 million with it. Bytes a tick, data in cache,
     //      AVX-512 off, a-z to A-Z: 1.0 for the four-byte groups and 4.9 to 5.4 for this; 24 with VBMI.
     //
-    ".Lmemory_translate_x64_avx2:\n   cmp $1024, %rsi\n   jb .Lmemory_translate_x64_four\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_translate_x64_four\n"
+    ".Lmemory_translate_x64_avx2:\n   cmp $1024, %rsi\n   jb .Lmemory_translate_x64_four\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_translate_x64_x\n"
     "lea .Lmemory_translate_x64_identity(%rip), %r8\n   xor %r9d, %r9d\n"
     ".irp half,0,1,2,3,4,5,6,7\n"
     "vmovdqu 32*\\half(%rdx), %ymm0\n   vpcmpeqb 32*\\half(%r8), %ymm0, %ymm0\n   vpmovmskb %ymm0, %ecx\n"
@@ -13055,12 +13068,43 @@ __asm__(
     "add $24, %rsp\n   vzeroupper\n   cmp $4, %rsi\n   jb .Lmemory_translate_x64_tail\n   jmp .Lmemory_translate_x64_four\n"
     ".Lmemory_translate_x64_avx2_dense:\n   add $24, %rsp\n   vzeroupper\n   jmp .Lmemory_translate_x64_four\n"
     ".Lmemory_translate_x64_avx2_done:\n   vzeroupper\n" ASM_RET
+    //
+    //      Without AVX2 the same rows sixteen bytes a block in xmm registers: pshufb is SSSE3 and pblendvb,
+    //      which takes its mask in xmm0, SSE4.1, both in the x86-64-v2 floor. The table is sixteen compares
+    //      against the identity where AVX2 makes eight. Up to five rows that differ are kept in registers,
+    //      each its sixteen bytes and its nibble's row, and each count has its block loop with its rows written
+    //      out, five instructions a row: a row loaded from the table in the loop met the block's stores 4 KiB
+    //      apart in some runs (53 to 169 million cycles a run for six rows over 64 MiB), and the row loop was
+    //      four instructions a row more. Past five rows the four-byte groups are what is left. Over 64 MiB of C
+    //      source on a 9950X without AVX2, eight layouts a side, against the groups: tr a-z A-Z 59.9 to 13.1
+    //      million cycles, rot13 (four rows) 59.9 to 21.3, five rows 60.0 to 25.6.
+    //
+    ".Lmemory_translate_x64_x:\n   lea .Lmemory_translate_x64_identity(%rip), %r8\n   xor %r9d, %r9d\n"
+    ".irp row,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"
+    "movdqu 16*\\row(%rdx), %xmm0\n   pcmpeqb 16*\\row(%r8), %xmm0\n   pmovmskb %xmm0, %ecx\n   cmp $0xffff, %ecx\n   setne %cl\n"
+    "movzbl %cl, %ecx\n   shl $\\row, %ecx\n   or %ecx, %r9d\n"
+    ".endr\n"
+    "test %r9d, %r9d\n   jz .Lmemory_translate_x64_done\n   lea .Lmemory_translate_x64_nibbles(%rip), %r10\n"
+    "mov $0x0f0f0f0f, %ecx\n   movd %ecx, %xmm15\n   pshufd $0, %xmm15, %xmm15\n"
+    TRX_X64_TAKE("4", "9", "1") TRX_X64_TAKE("5", "10", "2") TRX_X64_TAKE("6", "11", "3") TRX_X64_TAKE("7", "12", "4")
+    TRX_X64_TAKE("8", "13", "5")
+    "jmp .Lmemory_translate_x64_four\n"
+    TRX_X64_LOOP("1", TRX_X64_ROW("4", "9"))
+    TRX_X64_LOOP("2", TRX_X64_ROW("4", "9") TRX_X64_ROW("5", "10"))
+    TRX_X64_LOOP("3", TRX_X64_ROW("4", "9") TRX_X64_ROW("5", "10") TRX_X64_ROW("6", "11"))
+    TRX_X64_LOOP("4", TRX_X64_ROW("4", "9") TRX_X64_ROW("5", "10") TRX_X64_ROW("6", "11") TRX_X64_ROW("7", "12"))
+    TRX_X64_LOOP("5", TRX_X64_ROW("4", "9") TRX_X64_ROW("5", "10") TRX_X64_ROW("6", "11") TRX_X64_ROW("7", "12")
+                  TRX_X64_ROW("8", "13"))
+    ".Lmemory_translate_x64_x_left:\n   cmp $4, %rsi\n   jb .Lmemory_translate_x64_tail\n   jmp .Lmemory_translate_x64_four\n"
     ".pushsection .rodata\n   .balign 32\n"
     ".Lmemory_translate_x64_identity:\n   .set tr_i, 0\n   .rept 256\n   .byte tr_i\n   .set tr_i, tr_i + 1\n   .endr\n"
     ".Lmemory_translate_x64_nibbles:\n   .irp h,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n   .fill 32, 1, \\h\n   .endr\n"
     ".popsection\n"
 #endif
     ASM_END(memory_translate)
+#undef TRX_X64_LOOP
+#undef TRX_X64_ROW
+#undef TRX_X64_TAKE
 
 #ifndef KERNEL_MODE
     //
