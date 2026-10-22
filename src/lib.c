@@ -7707,7 +7707,7 @@ __asm__(
     //       before the routine returns, and HEAD comes before the block loop's
     //       head. The AVX2 loop is 34 bytes and HEAD jumps over a padding that
     //       starts it on a 64-byte line: wherever growth elsewhere in the file
-    //       left it, grep -c of an absent needle over 7.1 MB with AVX-512 off
+    //       left it, grep -c of an absent needle over 64 MiB with AVX-512 off
     //       took 7.37 to 9.44 million cycles across eight layouts, and 7.37 to
     //       7.69 aligned. The SSE2 loop is longer than a line; its HEAD is empty.
     //
@@ -12971,7 +12971,7 @@ __asm__(
     //      table row's offset, and twice that is its nibbles row's, as memory_decode_power2 keeps them: a row
     //      is then eight instructions, not ten, and the row loop is 35 bytes. The block head starts a 64-byte
     //      line (its padding runs once a call), which keeps the row loop inside that line. tr a-z A-Z over
-    //      7.1 MB, AVX-512 off, eight layouts a side: 9.58 to 7.93 million cycles, the slowest layout now
+    //      64 MiB, AVX-512 off, eight layouts a side: 9.58 to 7.93 million cycles, the slowest layout now
     //      quicker than the quickest before; four rows (rot13) 14.0 to 13.7, the rows' blends being a chain.
     "sub $24, %rsp\n   xor %r10d, %r10d\n"
     ".Lmemory_translate_x64_avx2_list:\n   bsf %r9d, %ecx\n   shl $4, %ecx\n   mov %cl, (%rsp,%r10)\n   inc %r10d\n   lea -1(%r9), %ecx\n   and %ecx, %r9d\n   jnz .Lmemory_translate_x64_avx2_list\n"
@@ -37785,7 +37785,7 @@ __asm__(
     //      that meets the newline and is thrown away, and its last three quanta in the loops below.
     //      The turn loop is tested at its foot (a call has at least 32 quanta, more than a turn, so the first
     //      turn needs no test) and its head starts a 64-byte line, its padding run once a call: the row loop's
-    //      34 bytes then sit inside one line, where they straddled two at offset 35. base64 -d of 2.3 MB not
+    //      34 bytes then sit inside one line, where they straddled two at offset 35. base64 -d of 22.4 MB not
     //      wrapped, AVX-512 off, eight layouts a side: 8.20 to 6.99 million cycles; wrapped base64 and
     //      hexadecimal, which enter it once a line, are unchanged (+0.3 and +0.5 percent, inside the spreads).
     //
