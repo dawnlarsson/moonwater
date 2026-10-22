@@ -32637,6 +32637,16 @@ __asm__(
     //       inside the run-up, and the byte loop takes it, two instructions
     //       later than it did.
     //
+    //       With V: vle8 and vse8 at eight registers a turn, whatever the
+    //       residues, the strip as long as the processor's registers allow.
+    //       Asked only once a copy has made its first 32-byte turn and has a
+    //       turn left, on the path of equal residues and on the merge for
+    //       unequal ones, so a copy under 64 bytes runs exactly what it ran
+    //       before. The detect, on the first path only, keeps a0-a4 and a7.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_copy_apart)
     "mv a3, a0\n   beqz a2, 9f\n   xor t0, a0, a1\n   andi t0, t0, 7\n   bnez t0, 8f\n   andi t0, a0, 7\n   beqz t0, 2f\n"
     "li t4, 8\n   bltu a2, t4, 1f\n"
@@ -32645,6 +32655,13 @@ __asm__(
     "12: andi t1, a0, 4\n   beqz t1, 2f\n   lw t1, 0(a1)\n   sw t1, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -4\n   j 2f\n"
     "1:  lbu t1, 0(a1)\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   beqz a2, 9f\n   andi t0, a0, 7\n   bnez t0, 1b\n"
     "2:  li t4, 32\n   bltu a2, t4, 4f\n"
+    //       The first turn, then the question of V when a turn is left: under 64 bytes the copy is what it was.
+    "ld t0, 0(a1)\n   ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n   sd t2, 16(a0)\n"
+    "sd t3, 24(a0)\n   addi a0, a0, 32\n   addi a1, a1, 32\n   addi a2, a2, -32\n   bltu a2, t4, 4f\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".Lmemory_copy_apart_rv_ask:\n   auipc t3, %pcrel_hi(cpu_has_vector)\n   lbu t3, %pcrel_lo(.Lmemory_copy_apart_rv_ask)(t3)\n   addi t5, t3, -1\n   beqz t5, 3f\n   bnez t3, 14f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   li t4, 32\n   j .Lmemory_copy_apart_rv_ask\n"
+#endif
     "3:\n   ld t0, 0(a1)\n   ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n   sd t2, 16(a0)\n"
     "sd t3, 24(a0)\n   addi a0, a0, 32\n   addi a1, a1, 32\n   addi a2, a2, -32\n   bgeu a2, t4, 3b\n"
     "4:  li t4, 16\n   bltu a2, t4, 5f\n   ld t0, 0(a1)\n   ld t1, 8(a1)\n   sd t0, 0(a0)\n   sd t1, 8(a0)\n   addi a0, a0, 16\n   addi a1, a1, 16\n   addi a2, a2, -16\n"
@@ -32654,6 +32671,10 @@ __asm__(
     "addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   beqz a2, 9f\n"
     "81: lbu t0, 0(a1)\n   sb t0, 0(a0)\n   addi a0, a0, 1\n   addi a1, a1, 1\n   addi a2, a2, -1\n   bnez a2, 81b\n"
     "9:  mv a0, a3\n" ASM_RET
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "14:  vsetvli t0, a2, e8, m8, ta, ma\n   vle8.v v8, (a1)\n   vse8.v v8, (a0)\n   add a1, a1, t0\n   add a0, a0, t0\n   sub a2, a2, t0\n"
+    "bnez a2, 14b\n   mv a0, a3\n   ret\n"
+#endif
     //
     //       Where the byte walk above stops being the answer.
     //
@@ -32716,7 +32737,20 @@ __asm__(
     //       Four output words a turn, each from the two source words it
     //       straddles, the last of the four loads carried to the next turn.
     "andi a1, a1, -8\n   slli a5, a4, 3\n   neg a6, a5\n   ld t0, 0(a1)\n   li t4, 32\n   bltu a2, t4, .Lmemory_copy_apart_rv_one\n"
-    ".Lmemory_copy_apart_rv_four:  ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   ld t6, 32(a1)\n"
+    //       The first turn, then, with a turn left, V when the processor is known to have it: the source
+    //       is a1 and the residue again, and the carried word is not needed. A processor not yet asked
+    //       stays here; the detect does not keep a5 and a6.
+    "ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   ld t6, 32(a1)\n"
+    "srl t5, t0, a5\n   sll a7, t1, a6\n   or t5, t5, a7\n   sd t5, 0(a0)\n   srl t5, t1, a5\n   sll a7, t2, a6\n   or t5, t5, a7\n"
+    "sd t5, 8(a0)\n   srl t5, t2, a5\n   sll a7, t3, a6\n   or t5, t5, a7\n   sd t5, 16(a0)\n   srl t5, t3, a5\n   sll a7, t6, a6\n"
+    "or t5, t5, a7\n   sd t5, 24(a0)\n   mv t0, t6\n   addi a0, a0, 32\n   addi a1, a1, 32\n   addi a2, a2, -32\n"
+    "bltu a2, t4, .Lmemory_copy_apart_rv_one\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".Lmemory_copy_apart_rv_ask_merge:\n   auipc t3, %pcrel_hi(cpu_has_vector)\n   lbu t3, %pcrel_lo(.Lmemory_copy_apart_rv_ask_merge)(t3)\n   li t5, 2\n"
+    "bne t3, t5, .Lmemory_copy_apart_rv_four\n   add a1, a1, a4\n   j 14b\n"
+#endif
+    ".Lmemory_copy_apart_rv_four:\n"
+    "ld t1, 8(a1)\n   ld t2, 16(a1)\n   ld t3, 24(a1)\n   ld t6, 32(a1)\n"
     "srl t5, t0, a5\n   sll a7, t1, a6\n   or t5, t5, a7\n   sd t5, 0(a0)\n   srl t5, t1, a5\n   sll a7, t2, a6\n   or t5, t5, a7\n"
     "sd t5, 8(a0)\n   srl t5, t2, a5\n   sll a7, t3, a6\n   or t5, t5, a7\n   sd t5, 16(a0)\n   srl t5, t3, a5\n   sll a7, t6, a6\n"
     "or t5, t5, a7\n   sd t5, 24(a0)\n   mv t0, t6\n   addi a0, a0, 32\n   addi a1, a1, 32\n   addi a2, a2, -32\n"
@@ -32741,6 +32775,9 @@ __asm__(
     ".Lmemory_copy_apart_rv_tail_end:\n   .option pop\n"
     "j 9b\n"
     ASM_END(memory_copy_apart)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
 
     // memory_copy_apart_end: exact non-overlapping copy, one terminator, and
     // dst+n. The x86_64 block carries the full contract.
