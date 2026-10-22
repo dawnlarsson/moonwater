@@ -13000,6 +13000,18 @@ __asm__(
     "movdqu (%rdi), %xmm3\n   movdqa %xmm3, %xmm1\n   psrlw $4, %xmm1\n   pand %xmm15, %xmm1\n   movdqa %xmm3, %xmm2\n   pand %xmm15, %xmm2\n" \
     ROWS "movdqu %xmm3, (%rdi)\n   add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lmemory_translate_x64_x" COUNT "\n" \
     "jmp .Lmemory_translate_x64_x_left\n"
+//      memory_translate with AVX2: the next row that differs into register T and its nibbles row into slot K of
+//      the frame; when it was the last, the block loop for COUNT rows.
+#define TRY_X64_TAKE(T, K, COUNT)                                              \
+    "bsf %r9d, %ecx\n   shl $4, %ecx\n   vbroadcasti128 (%rdx,%rcx), %ymm" T "\n   vmovdqa (%r10,%rcx,2), %ymm13\n" \
+    "vmovdqa %ymm13, 128+" K "*32(%rsp)\n   lea -1(%r9), %r8d\n   and %r8d, %r9d\n   jz .Lmemory_translate_x64_y" COUNT "\n"
+#define TRY_X64_ROW(T, K)                                                      \
+    "vpshufb %ymm2, %ymm" T ", %ymm13\n   vpcmpeqb 128+" K "*32(%rsp), %ymm1, %ymm14\n   vpblendvb %ymm14, %ymm13, %ymm0, %ymm0\n"
+#define TRY_X64_LOOP(COUNT, ROWS)                                              \
+    ".p2align 6\n.Lmemory_translate_x64_y" COUNT ":\n"                          \
+    "vmovdqu (%rdi), %ymm0\n   vpsrlw $4, %ymm0, %ymm1\n   vpand %ymm15, %ymm1, %ymm1\n   vpand %ymm15, %ymm0, %ymm2\n" \
+    ROWS "vmovdqu %ymm0, (%rdi)\n   add $32, %rdi\n   sub $32, %rsi\n   cmp $32, %rsi\n"                   \
+    "jae .Lmemory_translate_x64_y" COUNT "\n   jmp .Lmemory_translate_x64_y_left\n"
     // Eligible disjoint spans index a table held in four vector registers.
     // Other calls retain four scalar lookup chains and their load/store order,
     // including calls whose table overlaps the input.
@@ -13048,6 +13060,36 @@ __asm__(
     "movzwl %cx, %ecx\n   cmp $0xffff, %ecx\n   setne %cl\n   movzbl %cl, %ecx\n   shl $(2*\\half), %ecx\n   or %ecx, %r9d\n"
     ".endr\n"
     "test %r9d, %r9d\n   jz .Lmemory_translate_x64_avx2_done\n"
+    //      Up to eight rows that differ are held in ymm3 to ymm10, each its sixteen bytes in both lanes, and
+    //      each row's nibbles row is copied to a slot of a 32-byte-aligned frame: a row is vpshufb by the low
+    //      nibbles, vpcmpeqb against its slot and vpblendvb, and each count has its block loop with its rows
+    //      written out. Nothing is loaded from the table in the loop: rows loaded from it met the block's
+    //      stores 4 KiB apart in some runs, three rows over 64 MiB moving 19 to 32 million cycles. A row's
+    //      mask made by a vpshufb of a slot map, where the compare loads nothing, measured slower: a block
+    //      is then a shuffle more, and the shuffles are what bounds it. The slots sit 128 bytes up the frame
+    //      so each compare's displacement is four bytes: with one-byte ones the two-row loop took 3.1 ticks
+    //      a block on a 9950X where it takes 2.1, the loop's instructions falling across its lines otherwise.
+    "popcnt %r9d, %r10d\n   cmp $8, %r10d\n   ja .Lmemory_translate_x64_avx2_many\n"
+    "push %rbp\n   mov %rsp, %rbp\n   and $-32, %rsp\n   sub $384, %rsp\n   lea .Lmemory_translate_x64_nibbles(%rip), %r10\n"
+    "mov $0x0f0f0f0f, %ecx\n   vmovd %ecx, %xmm15\n   vpbroadcastd %xmm15, %ymm15\n"
+    TRY_X64_TAKE("3", "0", "1") TRY_X64_TAKE("4", "1", "2") TRY_X64_TAKE("5", "2", "3") TRY_X64_TAKE("6", "3", "4")
+    TRY_X64_TAKE("7", "4", "5") TRY_X64_TAKE("8", "5", "6") TRY_X64_TAKE("9", "6", "7") TRY_X64_TAKE("10", "7", "8")
+    TRY_X64_LOOP("1", TRY_X64_ROW("3", "0"))
+    TRY_X64_LOOP("2", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1"))
+    TRY_X64_LOOP("3", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1") TRY_X64_ROW("5", "2"))
+    TRY_X64_LOOP("4", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1") TRY_X64_ROW("5", "2") TRY_X64_ROW("6", "3"))
+    TRY_X64_LOOP("5", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1") TRY_X64_ROW("5", "2") TRY_X64_ROW("6", "3")
+                  TRY_X64_ROW("7", "4"))
+    TRY_X64_LOOP("6", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1") TRY_X64_ROW("5", "2") TRY_X64_ROW("6", "3")
+                  TRY_X64_ROW("7", "4") TRY_X64_ROW("8", "5"))
+    TRY_X64_LOOP("7", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1") TRY_X64_ROW("5", "2") TRY_X64_ROW("6", "3")
+                  TRY_X64_ROW("7", "4") TRY_X64_ROW("8", "5") TRY_X64_ROW("9", "6"))
+    TRY_X64_LOOP("8", TRY_X64_ROW("3", "0") TRY_X64_ROW("4", "1") TRY_X64_ROW("5", "2") TRY_X64_ROW("6", "3")
+                  TRY_X64_ROW("7", "4") TRY_X64_ROW("8", "5") TRY_X64_ROW("9", "6") TRY_X64_ROW("10", "7"))
+    ".Lmemory_translate_x64_y_left:\n   mov %rbp, %rsp\n   pop %rbp\n   vzeroupper\n   cmp $4, %rsi\n   jb .Lmemory_translate_x64_tail\n"
+    "jmp .Lmemory_translate_x64_four\n"
+    //      Nine or ten rows, the row loop that loads them.
+    ".Lmemory_translate_x64_avx2_many:\n"
     //      The rows that differ, as sixteen bytes on the stack, and how many. A row is kept as row << 4, its
     //      table row's offset, and twice that is its nibbles row's, as memory_decode_power2 keeps them: a row
     //      is then eight instructions, not ten, and the row loop is 35 bytes. The block head starts a 64-byte
@@ -13103,6 +13145,9 @@ __asm__(
 #endif
     ASM_END(memory_translate)
 #undef TRX_X64_LOOP
+#undef TRY_X64_LOOP
+#undef TRY_X64_ROW
+#undef TRY_X64_TAKE
 #undef TRX_X64_ROW
 #undef TRX_X64_TAKE
 
