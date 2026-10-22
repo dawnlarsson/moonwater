@@ -19627,8 +19627,6 @@ __asm__(
     //
     //       memory_count -- how many times a byte appears.
     //
-    //       memory_count -- how many times a byte appears.
-    //
     //       NEON is not optional on arm64, so there is no second body and
     //       nothing to detect: every machine that runs this has it.
     //
@@ -19639,29 +19637,82 @@ __asm__(
     //       is minus one, so subtracting it into the accumulator adds one --
     //       the same identity the x86_64 body uses.
     //
-    //       That accumulator is a byte per lane and wraps at 256, so the outer
-    //       loop drains it before it can: uaddlv adds the sixteen lanes into
-    //       one halfword, which is why the round count is capped at 255.
+    //       Each accumulator is a byte per lane and wraps at 256, so a round
+    //       is capped at 63 turns: the four then add into one without a carry
+    //       (252 at most) and one uaddlv drains them.
+    //
+    //       Under 64 bytes, and what the rounds leave, nothing is a byte loop
+    //       but one to three bytes, asked for first, and one byte the rounds
+    //       leave (two to fifteen they leave are the last sixteen, masked).
+    //       Four to fifteen are two loads that overlap, the last four
+    //       or eight in the low lanes and the first in the high ones, and the
+    //       low lanes the high ones hold again masked off; sixteen and up go
+    //       sixteen a turn, and the last sixteen bytes of the block are loaded
+    //       again with the lanes already counted masked off. The masks are one
+    //       32-byte row, sixteen 0x00 then sixteen 0xff, loaded from the
+    //       offset that puts the first 0xff on the first lane to count. No
+    //       load reaches outside the block.
+    //
+    //       An M2, nanoseconds a call with the driver's (the mean of eight
+    //       offsets), before and now: 1 byte 1.14 and 1.14; 3 bytes 2.88 to
+    //       2.52; 8 bytes 4.00 to 1.43; 15 bytes 5.99 to 1.43; 32 bytes 10.85
+    //       to 2.00; 63 bytes 19.80 to 2.85; 64 bytes 2.57 to 2.28; 67 bytes
+    //       3.71 to 2.57; 100 bytes 12.84 to 4.00; 4096 bytes 39.7 to 38.9;
+    //       64 KiB 619 to 612. No size from 1 to 136 is slower.
     //
     ASM_FUNC(memory_count)
     //
-    //       The byte is cut to its eight bits first: AAPCS64 leaves w2 above
-    //       them undefined, and the byte loop -- the tail here, the whole of
-    //       it in a kernel -- compares all of w2 against a byte it loaded.
+    //       AAPCS64 leaves w2 above its eight bits undefined: the byte loop
+    //       -- the whole of it in a kernel -- compares only its low byte (cmp's
+    //       uxtb), and dup takes only that.
     //
-    "mov x3, #0\n   and w2, w2, #255\n   cbz x1, 9f\n"
+    "cbz x1, .Lmemory_count_arm64_none\n"
 #ifndef KERNEL_MODE
-    "dup v1.16b, w2\n"
-    "1:  cmp x1, #64\n   b.lo 5f\n   mov x4, x1\n   lsr x4, x4, #6\n   mov x5, #63\n   cmp x4, x5\n   csel x4, x5, x4, hi\n   movi v2.16b, #0\n   movi v3.16b, #0\n   movi v4.16b, #0\n"
-    "movi v5.16b, #0\n   mov x6, x4\n"
-    "2:  ld1 {v16.16b, v17.16b, v18.16b, v19.16b}, [x0], #64\n   cmeq v16.16b, v16.16b, v1.16b\n   cmeq v17.16b, v17.16b, v1.16b\n   cmeq v18.16b, v18.16b, v1.16b\n"
-    "cmeq v19.16b, v19.16b, v1.16b\n   sub v2.16b, v2.16b, v16.16b\n   sub v3.16b, v3.16b, v17.16b\n   sub v4.16b, v4.16b, v18.16b\n   sub v5.16b, v5.16b, v19.16b\n   subs x6, x6, #1\n"
-    "b.ne 2b\n   uaddlv h2, v2.16b\n   uaddlv h3, v3.16b\n   uaddlv h4, v4.16b\n   uaddlv h5, v5.16b\n   umov w7, v2.h[0]\n   add x3, x3, x7\n   umov w7, v3.h[0]\n"
-    "add x3, x3, x7\n   umov w7, v4.h[0]\n   add x3, x3, x7\n   umov w7, v5.h[0]\n   add x3, x3, x7\n   lsl x7, x4, #6\n   sub x1, x1, x7\n   b 1b\n"
+    "cmp x1, #4\n   b.hs .Lmemory_count_arm64_four\n"
 #endif
-    "5:  cbz x1, 9f\n"
-    "6:  ldrb w4, [x0], #1\n   cmp w4, w2\n   cinc x3, x3, eq\n   subs x1, x1, #1\n   b.ne 6b\n"
+    //      The loop starts on a 16-byte boundary outside the kernel: two bytes took a cycle more where it did not.
+    "mov x3, #0\n"
+    "6:  ldrb w4, [x0], #1\n   cmp w4, w2, uxtb\n   cinc x3, x3, eq\n   subs x1, x1, #1\n   b.ne 6b\n"
     "9:  mov x0, x3\n" ASM_RET
+    ".Lmemory_count_arm64_none:\n   mov x0, #0\n" ASM_RET
+#ifndef KERNEL_MODE
+    //      Four to fifteen: the last four or eight bytes in lanes 0-3 or 0-7, the first in the lanes after them.
+    //      The low lanes under 8 - size, or 16 - size, hold bytes the high lanes hold again.
+    ".Lmemory_count_arm64_four:\n   dup v1.16b, w2\n   cmp x1, #16\n   b.hs .Lmemory_count_arm64_wide\n"
+    "add x7, x0, x1\n   adrp x8, .Lmemory_count_arm64_edge\n"
+    "add x8, x8, :lo12:.Lmemory_count_arm64_edge\n   cmp x1, #8\n   b.lo 4f\n"
+    "ldur d16, [x7, #-8]\n   ld1 {v16.d}[1], [x0]\n   ldr q17, [x8, x1]\n   cmeq v16.16b, v16.16b, v1.16b\n   and v16.16b, v16.16b, v17.16b\n"
+    "ushr v16.16b, v16.16b, #7\n   addv b16, v16.16b\n   umov w0, v16.b[0]\n" ASM_RET
+    "4:  ldur s16, [x7, #-4]\n   ld1 {v16.s}[1], [x0]\n   add x6, x1, #8\n   ldr d17, [x8, x6]\n   cmeq v16.8b, v16.8b, v1.8b\n"
+    "and v16.8b, v16.8b, v17.8b\n   ushr v16.8b, v16.8b, #7\n   addv b16, v16.8b\n   umov w0, v16.b[0]\n" ASM_RET
+    ".Lmemory_count_arm64_wide:\n   mov x3, #0\n   add x5, x0, x1\n   cmp x1, #64\n   b.hs 1f\n"
+    "sub x6, x5, #16\n   movi v20.16b, #0\n"
+    "5:  ld1 {v16.16b}, [x0], #16\n   cmeq v16.16b, v16.16b, v1.16b\n   sub v20.16b, v20.16b, v16.16b\n   cmp x0, x6\n   b.ls 5b\n"
+    //      0 to 15 left: the block's last sixteen bytes, the lanes under 16 - left already counted.
+    "3:  subs x7, x5, x0\n   b.eq 7f\n   ldr q16, [x6]\n   adrp x8, .Lmemory_count_arm64_edge\n   add x8, x8, :lo12:.Lmemory_count_arm64_edge\n"
+    "ldr q17, [x8, x7]\n   cmeq v16.16b, v16.16b, v1.16b\n   and v16.16b, v16.16b, v17.16b\n   sub v20.16b, v20.16b, v16.16b\n"
+    "7:  addv b20, v20.16b\n   umov w4, v20.b[0]\n   add x0, x3, x4\n" ASM_RET
+    //      The round's loop starts a 64-byte line: across one an M2 took 9% longer over 64 KiB, and jumped to
+    //      over padding it took 15% longer at 64 and 128 bytes. So the padding is ahead of the round's eight
+    //      setup instructions, never run (a ret is before it), and they fill the 32 bytes up to the line.
+    ".p2align 6\n   .fill 8, 4, 0xd503201f\n"
+    "1:  lsr x4, x1, #6\n   mov x6, #63\n   cmp x4, x6\n   csel x4, x6, x4, hi\n   movi v2.16b, #0\n   movi v3.16b, #0\n   movi v4.16b, #0\n   movi v5.16b, #0\n"
+    "2:  ld1 {v16.16b, v17.16b, v18.16b, v19.16b}, [x0], #64\n   cmeq v16.16b, v16.16b, v1.16b\n   cmeq v17.16b, v17.16b, v1.16b\n   cmeq v18.16b, v18.16b, v1.16b\n"
+    "cmeq v19.16b, v19.16b, v1.16b\n   sub v2.16b, v2.16b, v16.16b\n   sub v3.16b, v3.16b, v17.16b\n   sub v4.16b, v4.16b, v18.16b\n   sub v5.16b, v5.16b, v19.16b\n   subs x4, x4, #1\n"
+    "b.ne 2b\n   add v2.16b, v2.16b, v3.16b\n   add v4.16b, v4.16b, v5.16b\n   add v2.16b, v2.16b, v4.16b\n   uaddlv h2, v2.16b\n   umov w7, v2.h[0]\n   add x3, x3, x7\n"
+    "sub x1, x5, x0\n   cmp x1, #64\n   b.hs 1b\n   cbz x1, 9b\n   cmp x1, #1\n   b.eq 6b\n   cmp x1, #16\n   b.hs 8f\n"
+    //      2 to 15 left: the block's last sixteen bytes, the lanes under 16 - left counted by the rounds.
+    "ldur q16, [x5, #-16]\n   adrp x8, .Lmemory_count_arm64_edge\n   add x8, x8, :lo12:.Lmemory_count_arm64_edge\n   ldr q17, [x8, x1]\n"
+    "cmeq v16.16b, v16.16b, v1.16b\n   and v16.16b, v16.16b, v17.16b\n   ushr v16.16b, v16.16b, #7\n   addv b16, v16.16b\n   umov w4, v16.b[0]\n"
+    "add x0, x3, x4\n" ASM_RET
+    "8:  sub x6, x5, #16\n   movi v20.16b, #0\n   b 5b\n"
+#endif
+#ifndef KERNEL_MODE
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Lmemory_count_arm64_edge:\n   .byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n"
+    ".byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255\n"
+    ".popsection\n"
+#endif
     ASM_END(memory_count)
     ASM_FUNC(memory_count_words)
     "mov x3, #0\n   and w2, w2, #1\n   cbz x1, .Lmemory_words_arm64_done\n"

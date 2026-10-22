@@ -23705,8 +23705,9 @@ positive reference_count(address_any block, positive size, b8 value)
         p8 address_to at = block;
         positive found = 0;
 
+        //      b8 is signed: the cast is what lets a byte past 0x7f be found.
         for (positive i = 0; i < size; i++)
-                if (at[i] == value)
+                if (at[i] == (p8)value)
                         found++;
 
         return found;
@@ -23874,8 +23875,9 @@ address_any reference_memory_first_of(address_any block, b8 value, positive size
 {
         p8 address_to at = block;
 
+        //      b8 is signed: the cast is what lets a byte past 0x7f be found.
         for (positive i = 0; i < size; i++)
-                if (at[i] == value)
+                if (at[i] == (p8)value)
                         return at + i;
 
         return null;
