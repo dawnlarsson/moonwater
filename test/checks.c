@@ -48989,6 +48989,110 @@ static unsigned long long ranged_cut_reference(unsigned char *out, const unsigne
 
 static unsigned char ranged_cut_want[20000 + 64], ranged_cut_keep[4101];
 
+/*
+        The shapes the word walks and their copies turn on, at every residue
+        of the source against every residue of the destination: three fields
+        of widths either side of 8, 16, 24, 32, 48 and 64 bytes, a delimiter
+        at every residue of a line, lines with no delimiter (written whole,
+        or dropped under -s), and a delimiter as the buffer's last byte with
+        no newline after it; -f2, -f1, -f2- and -f1,3.
+*/
+static unsigned long long ranged_cut_shapes(unsigned char *d_end, unsigned char *s_end)
+{
+        static const unsigned char widths[] = {0, 1, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 64, 65};
+        static const unsigned char lists[4][5] = {{3, 0, 1, 0}, {2, 1, 0}, {2, 0, 1}, {4, 1, 0, 1, 0}};
+        static unsigned char text[4096];
+        unsigned long long faults = 0;
+        unsigned count = sizeof(widths) / sizeof(widths[0]);
+
+        for (unsigned shape = 0; shape < 4; shape++)
+        {
+                unsigned long long length = 0;
+
+                if (shape == 0)
+                        for (unsigned a = 0; a < count; a++)
+                        {
+                                unsigned b = (a * 5 + 3) % count, c = (a * 7 + 1) % count;
+
+                                for (unsigned i = 0; i < widths[a]; i++)
+                                        text[length++] = (unsigned char)('a' + i % 26);
+                                text[length++] = ':';
+                                for (unsigned i = 0; i < widths[b]; i++)
+                                        text[length++] = (unsigned char)('A' + i % 26);
+                                text[length++] = ':';
+                                for (unsigned i = 0; i < widths[c]; i++)
+                                        text[length++] = (unsigned char)('0' + i % 10);
+                                text[length++] = '\n';
+                        }
+                else if (shape == 1)
+                        for (unsigned r = 0; r < 24; r++)
+                        {
+                                for (unsigned i = 0; i < r; i++)
+                                        text[length++] = 'x';
+                                text[length++] = ':';
+                                for (unsigned i = 0; i < 17 + r; i++)
+                                        text[length++] = 'y';
+                                text[length++] = ':';
+                                for (unsigned i = 0; i < 9; i++)
+                                        text[length++] = 'z';
+                                text[length++] = '\n';
+                        }
+                else if (shape == 2)
+                        for (unsigned a = 0; a < count; a++)
+                        {
+                                for (unsigned i = 0; i < widths[a]; i++)
+                                        text[length++] = 'q';
+                                text[length++] = '\n';
+                        }
+                else
+                {
+                        for (unsigned a = 0; a < 6; a++)
+                        {
+                                for (unsigned i = 0; i < widths[a + 6]; i++)
+                                        text[length++] = 'p';
+                                text[length++] = ':';
+                                text[length++] = 'r';
+                                text[length++] = '\n';
+                        }
+                        for (unsigned i = 0; i < 20; i++)
+                                text[length++] = 's';
+                        text[length++] = ':';
+                }
+                for (unsigned so = 0; so < 8; so++)
+                        for (unsigned dz = 0; dz < 8; dz++)
+                                for (unsigned list = 0; list < 4; list++)
+                                        for (unsigned long long only = 0; only < 2; only++)
+                                        {
+                                                unsigned long long cap = lists[list][0] - 1u;
+                                                unsigned char *source = s_end - 64 - length - so;
+                                                unsigned char *into = d_end - 64 - length - dz;
+                                                unsigned long long control = ':' | (unsigned long long)'\n' << 8 | only << 16 |
+                                                                             cap << 32;
+                                                unsigned long long want_taken = 0, made = ~0ull;
+
+                                                for (unsigned long long f = 0; f <= cap; f++)
+                                                        ranged_cut_keep[f] = lists[list][1 + f];
+                                                for (unsigned long long i = 0; i < length; i++)
+                                                        source[i] = text[i];
+                                                for (unsigned long long i = length; i < length + 64 + so; i++)
+                                                        source[i] = i & 1 ? '\n' : ':';
+                                                unsigned long long want = ranged_cut_reference(ranged_cut_want, source, length,
+                                                                                               ranged_cut_keep, control, &want_taken);
+
+                                                for (int i = 1; i <= 16; i++)
+                                                        into[-i] = (unsigned char)(0x5c ^ i);
+                                                VECTOR_FIRST_CALL(ranged_first);
+                                                unsigned long long taken = (memory_cut_fields__room_64)(into, &made, source, length,
+                                                                                                        ranged_cut_keep, control);
+                                                faults += taken != want_taken || made != want ||
+                                                          (made == want && !ranged_same(into, ranged_cut_want, want));
+                                                for (int i = 1; i <= 16; i++)
+                                                        faults += into[-i] != (unsigned char)(0x5c ^ i);
+                                        }
+        }
+        return faults;
+}
+
 static unsigned long long ranged_cut_cases(unsigned char *d_end, unsigned char *s_end)
 {
         static const unsigned long long longs[] = {1000, 4096, 5000, 20000};
@@ -49047,7 +49151,7 @@ static unsigned long long ranged_cut_cases(unsigned char *d_end, unsigned char *
                         }
                 }
         }
-        return faults;
+        return faults + ranged_cut_shapes(d_end, s_end);
 }
 
 /*

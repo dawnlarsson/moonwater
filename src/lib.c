@@ -41750,6 +41750,11 @@ __asm__(
     P "_ended:\n   mv t1, a0\n   mv a7, t6\n   mv t0, t6\n   mv t2, a5\n   bnez t3, " P "_bound\n   j " P "_next\n" \
     /* No delimiter in the line: all of it, or none under -s.            */  \
     P "_whole:\n   bnez s4, " P "_ended\n   sub s0, t6, a7\n" COPY "   add a0, a0, s0\n   j " P "_ended\n"
+//      With Zbb the masks are exact from orc.b, s8 the high bit of every byte: a delimiter or a newline is a
+//      byte orc.b leaves nought after the xor with it.
+#define CUTF_RV_ZMASKS \
+    "ld s0, 0(a6)\n   xor s1, s0, s6\n   orc.b s1, s1\n   xor s2, s0, s7\n   orc.b s2, s2\n   and t5, s1, s2\n" \
+    "andn t5, s8, t5\n   andn t4, s8, s2\n"
 #define CUTF_RV_VMASKS                                                         \
     "vsetvli zero, s10, e8, m4, ta, ma\n   vle8.v v8, (a6)\n   vmseq.vx v0, v8, s6\n   vmseq.vx v1, v8, s7\n   vmor.mm v2, v0, v1\n" \
     "vsetivli zero, 1, e64, m1, ta, ma\n   vmv.x.s t5, v2\n   vmv.x.s t4, v1\n"
@@ -41764,11 +41769,11 @@ __asm__(
     "5:  vsetvli s2, s8, e8, m8, ta, ma\n   vle8.v v16, (s1)\n   vse8.v v16, (s11)\n   add s1, s1, s2\n   add s11, s11, s2\n   sub s8, s8, s2\n   bnez s8, 5b\n" \
     "4:\n"
 //      Without: eight or sixteen bytes a byte at a time whatever the count, the room taking what is past it, and
-//      a longer field a byte a turn.
+//      a longer field eight bytes a turn the same way, a7 and a0 moved and put back.
 #define CUTF_RV_BCOPY                                                          \
     "li s1, 16\n   bltu s1, s0, 3f\n" CUTF_RV_BYTES8 "li s1, 8\n   bgeu s1, s0, 4f\n" CUTF_RV_BYTES16 "j 4f\n" \
-    "3:  mv s1, a7\n   mv s2, a0\n"                                            \
-    "5:  lbu s11, 0(s1)\n   sb s11, 0(s2)\n   addi s1, s1, 1\n   addi s2, s2, 1\n   bltu s1, t6, 5b\n" \
+    "3:  mv s10, a7\n   mv s11, a0\n"                                           \
+    "5:  " CUTF_RV_BYTES8 "addi a7, a7, 8\n   addi a0, a0, 8\n   bltu a7, t6, 5b\n   mv a7, s10\n   mv a0, s11\n" \
     "4:\n"
 #define CUTF_RV_BYTES8                                                        \
     "lbu s1, 0(a7)\n   lbu s2, 1(a7)\n   sb s1, 0(a0)\n   sb s2, 1(a0)\n" \
@@ -41806,13 +41811,25 @@ __asm__(
                  "mul s2, s1, s5\n   srli s2, s2, 58\n   add s2, s2, s9\n   lbu t6, 0(s2)\n", CUTF_RV_VCOPY)
     //      Without V: words, from the one the source starts in, the bytes before it dropped from the first and
     //      the bytes past the end from the last; s9 is the last word that is all inside.
-    ".Lcutf_rv_scalar:\n   andi a6, a2, -8\n   addi s9, a3, -8\n   li s5, 0x0001020304050607\n   li s8, 0x7f7f7f7f7f7f7f7f\n   li s0, 0x0101010101010101\n"
-    "mul s6, s6, s0\n   mul s7, s7, s0\n" CUTF_RV_SMASKS
+    ".Lcutf_rv_scalar:\n   andi a6, a2, -8\n   addi s9, a3, -8\n   li s5, 0x0001020304050607\n   li s0, 0x0101010101010101\n"
+    "mul s6, s6, s0\n   mul s7, s7, s0\n"
+    RV_ZBB_ASK("s8", ".Lcutf_rv_zbb")
+    "li s8, 0x7f7f7f7f7f7f7f7f\n" CUTF_RV_SMASKS
     "sub s0, a2, a6\n   slli s0, s0, 3\n   li s1, -1\n   sll s1, s1, s0\n   and t5, t5, s1\n   and t4, t4, s1\n   bgtu a6, s9, .Lcutf_rv_s_edge\n   j .Lcutf_rv_s_clipped\n"
     CUTF_RV_WALK(".Lcutf_rv_s", "8", ".Lcutf_rv_s_block:\n   bgtu a6, s9, .Lcutf_rv_s_last\n" CUTF_RV_SMASKS,
                  "srli t6, s1, 7\n   mul t6, t6, s5\n   srli t6, t6, 56\n", CUTF_RV_BCOPY)
     ".Lcutf_rv_s_last:\n   bgeu a6, a3, .Lcutf_rv_end\n" CUTF_RV_SMASKS
     ".Lcutf_rv_s_edge:\n   sub s0, a3, a6\n   slli s0, s0, 3\n   li s1, 1\n   sll s1, s1, s0\n   addi s1, s1, -1\n   and t5, t5, s1\n   and t4, t4, s1\n   j .Lcutf_rv_s_clipped\n"
+#ifndef KERNEL_MODE
+    RV_ZBB_BEGIN
+    ".Lcutf_rv_zbb:\n   li s8, 0x8080808080808080\n" CUTF_RV_ZMASKS
+    "sub s0, a2, a6\n   slli s0, s0, 3\n   li s1, -1\n   sll s1, s1, s0\n   and t5, t5, s1\n   and t4, t4, s1\n   bgtu a6, s9, .Lcutf_rv_z_edge\n   j .Lcutf_rv_z_clipped\n"
+    CUTF_RV_WALK(".Lcutf_rv_z", "8", ".Lcutf_rv_z_block:\n   bgtu a6, s9, .Lcutf_rv_z_last\n" CUTF_RV_ZMASKS,
+                 "ctz t6, s1\n   srli t6, t6, 3\n", CUTF_RV_BCOPY)
+    ".Lcutf_rv_z_last:\n   bgeu a6, a3, .Lcutf_rv_end\n" CUTF_RV_ZMASKS
+    ".Lcutf_rv_z_edge:\n   sub s0, a3, a6\n   slli s0, s0, 3\n   li s1, 1\n   sll s1, s1, s0\n   addi s1, s1, -1\n   and t5, t5, s1\n   and t4, t4, s1\n   j .Lcutf_rv_z_clipped\n"
+    RV_ZBB_END
+#endif
     ".Lcutf_rv_end:\n   sub s0, t1, s3\n   sd s0, 0(a1)\n   sub a0, t0, a2\n"
     "ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
     "ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   ld s9, 72(sp)\n   ld s10, 80(sp)\n   ld s11, 88(sp)\n   addi sp, sp, 112\n" ASM_RET
