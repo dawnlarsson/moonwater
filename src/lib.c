@@ -14390,7 +14390,7 @@ __asm__(
     //
     "6:\n"
     ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", "2f")
+    ASM_NARROW("cpu_has_avx2", "3f")
     ASM_WIDER("cpu_has_avx512", "5f")
     "cmp $64, %rdx\n   ja 4f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu -32(%rsi,%rdx), %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, -32(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "4:  cmp $128, %rdx\n   ja 1f\n   vmovdqu (%rsi), %ymm0\n   vmovdqu 32(%rsi), %ymm1\n"
@@ -14430,6 +14430,29 @@ __asm__(
     "vmovdqa64 %zmm0, (%rdi)\n   vmovdqa64 %zmm1, 64(%rdi)\n   vmovdqa64 %zmm2, 128(%rdi)\n   vmovdqa64 %zmm3, 192(%rdi)\n"
     "add $256, %rsi\n   add $256, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n"
     "vmovdqu64 %zmm4, -256(%r8)\n   vmovdqu64 %zmm5, -192(%r8)\n   vmovdqu64 %zmm6, -128(%r8)\n   vmovdqu64 %zmm7, -64(%r8)\n   vmovdqu64 %zmm8, (%rax)\n   vzeroupper\n" ASM_RET
+    //
+    //       Without AVX2, from 33 bytes to 255: the same ladder in the sixteen SSE2 registers, the head and
+    //       the tail of the copy in up to eight of them each, where the general registers took eight bytes a
+    //       turn; from 256 the rep movsb below, as before. Userspace only: the kernel's copies stay in the
+    //       general registers, for the reason given above.
+    //
+    "3:  cmp $64, %rdx\n   ja 31f\n"
+    "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu -32(%rsi,%rdx), %xmm2\n   movdqu -16(%rsi,%rdx), %xmm3\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, -32(%rdi,%rdx)\n   movdqu %xmm3, -16(%rdi,%rdx)\n" ASM_RET
+    "31:  cmp $128, %rdx\n   ja 32f\n"
+    "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
+    "movdqu -64(%rsi,%rdx), %xmm4\n   movdqu -48(%rsi,%rdx), %xmm5\n   movdqu -32(%rsi,%rdx), %xmm6\n   movdqu -16(%rsi,%rdx), %xmm7\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
+    "movdqu %xmm4, -64(%rdi,%rdx)\n   movdqu %xmm5, -48(%rdi,%rdx)\n   movdqu %xmm6, -32(%rdi,%rdx)\n   movdqu %xmm7, -16(%rdi,%rdx)\n" ASM_RET
+    "32:  cmp $256, %rdx\n   jae 2f\n"
+    "movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
+    "movdqu 64(%rsi), %xmm4\n   movdqu 80(%rsi), %xmm5\n   movdqu 96(%rsi), %xmm6\n   movdqu 112(%rsi), %xmm7\n"
+    "movdqu -128(%rsi,%rdx), %xmm8\n   movdqu -112(%rsi,%rdx), %xmm9\n   movdqu -96(%rsi,%rdx), %xmm10\n   movdqu -80(%rsi,%rdx), %xmm11\n"
+    "movdqu -64(%rsi,%rdx), %xmm12\n   movdqu -48(%rsi,%rdx), %xmm13\n   movdqu -32(%rsi,%rdx), %xmm14\n   movdqu -16(%rsi,%rdx), %xmm15\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
+    "movdqu %xmm4, 64(%rdi)\n   movdqu %xmm5, 80(%rdi)\n   movdqu %xmm6, 96(%rdi)\n   movdqu %xmm7, 112(%rdi)\n"
+    "movdqu %xmm8, -128(%rdi,%rdx)\n   movdqu %xmm9, -112(%rdi,%rdx)\n   movdqu %xmm10, -96(%rdi,%rdx)\n   movdqu %xmm11, -80(%rdi,%rdx)\n"
+    "movdqu %xmm12, -64(%rdi,%rdx)\n   movdqu %xmm13, -48(%rdi,%rdx)\n   movdqu %xmm14, -32(%rdi,%rdx)\n   movdqu %xmm15, -16(%rdi,%rdx)\n" ASM_RET
     )
     //       Neither extension: eight bytes at a time, and rep movsb where it pays.
     "2:  cmp $256, %rdx\n   jae 0f\n   lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   mov -8(%r11), %r10\n   mov (%rsi), %rdx\n   mov %rdi, %r9\n   add $8, %rdi\n"

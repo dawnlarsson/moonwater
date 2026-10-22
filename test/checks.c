@@ -14075,8 +14075,8 @@ string_address reference_first_of(string_address source, p8 character)
 
 // Every size the routines change strategy at, and the ones either side.
 static positive edges[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33,
-                           63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512,
-                           1000, 4096};
+                           40, 63, 64, 65, 100, 127, 128, 129, 200, 255, 256,
+                           257, 511, 512, 1000, 4096};
 
 #define EDGE_COUNT (sizeof(edges) / sizeof(edges[0]))
 #define ROOM 8192
@@ -29394,6 +29394,7 @@ b32 main()
                 check_frob();
                 check_checksums();
                 check_exchange();
+                check_copy();
                 cpu_has_avx2 = had_avx2;
                 cpu_has_avx512 = 0;
                 check_frob();
