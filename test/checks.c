@@ -14877,6 +14877,82 @@ fn check_delete_bytes()
 }
 
 /*
+        memory_last_of on each x86_64 body, with AVX2 and without it (the
+        SSE2 one), and on riscv64 with every call the first in a process,
+        which asks for V, then without V: every size to 160 and some past it,
+        the span against the page before it and against the page after it,
+        so that a read before its first byte, or past its last where the
+        page does not have it, faults, and the byte everywhere around the
+        span; the byte absent, present once at each position, and present at
+        every position up to one, which is then the answer.
+*/
+fn check_last_of_bodies()
+{
+        static const positive large[] = {255, 256, 257, 1000, 4095, 4096};
+        p8 address_to pages = guard_pages("memory_last_of");
+
+        if (!pages)
+                return;
+        p8 address_to page = pages + 4096;
+#if X64
+        p8 avx2 = cpu_has_avx2;
+        positive tiers = 2;
+#elif RISCV64
+        p8 vector = 0;
+        positive tiers = 2;
+#else
+        positive tiers = 1;
+#endif
+        for (positive tier = 0; tier < tiers; tier++)
+        {
+#if X64
+                cpu_has_avx2 = tier == 0 ? avx2 : 0;
+#elif RISCV64
+                if (tier == 1)
+                {
+                        vector = cpu_has_vector;
+                        cpu_has_vector = 1;
+                }
+#endif
+                for (positive n = 0; n < 161 + array_count(large); n++)
+                        for (positive side = 0; side < 2; side++)
+                        {
+                                positive size = n < 161 ? n : large[n - 161];
+                                positive step = size > 200 ? 37 : 1;
+                                p8 address_to block = side ? page : page + 4096 - size;
+
+                                //      The byte is everywhere outside the span, so a body that
+                                //      takes a byte past either end for it answers wrong.
+                                memory_fill(page, 'y', 4096);
+                                memory_fill(block, 'x', size);
+                                VECTOR_FIRST_CALL(tier == 0);
+                                same("memory_last_of", "absent",
+                                     (positive)(memory_last_of)(block, 'y', size), 0);
+                                for (positive at = 0; at < size; at += step)
+                                {
+                                        block[at] = 'y';
+                                        VECTOR_FIRST_CALL(tier == 0 && at % 7 == 0);
+                                        same("memory_last_of", "present once",
+                                             (positive)(memory_last_of)(block, 'y', size), (positive)(block + at));
+                                        block[at] = 'x';
+                                }
+                                for (positive at = 0; at < size; at += step)
+                                {
+                                        block[at] = 'y';
+                                        same("memory_last_of", "the last of those up to a position",
+                                             (positive)(memory_last_of)(block, 'y', size), (positive)(block + at));
+                                }
+                        }
+        }
+#if X64
+        cpu_has_avx2 = avx2;
+#elif RISCV64
+        cpu_has_vector = vector;
+#endif
+        memory_free(pages, 3 * 4096);
+}
+
+/*
         memory_squeeze_bytes against the byte loop tr used to run: every size
         across the vector edges, every residue, marks from none to nearly all,
         bytes drawn from a four-letter alphabet so that repeats are the rule,
@@ -29340,6 +29416,7 @@ b32 main()
         check_unicode_case();
         check_delete_bytes();
         check_squeeze_bytes();
+        check_last_of_bodies();
         check_offsets_of_either();
         check_span_byte();
         check_dirty_arguments();

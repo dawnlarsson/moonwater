@@ -6815,12 +6815,32 @@ __asm__(
     ASM_USERSPACE_WIDE("cmpb $0, cpu_has_avx2(%rip)\n   jne .Llast_ymm\n.Llast_generic:\n")
     "test %rdx, %rdx\n   jz .Lmemory_last_x64_none\n   lea (%rdi,%rdx), %rax\n"
     ASM_USERSPACE_WIDE(
-    ASM_NARROW("cpu_has_avx2", ".Lmemory_last_x64_words")
+    ASM_NARROW("cpu_has_avx2", ".Lmemory_last_x64_sse2")
     "cmp $32, %rdx\n   jb .Lmemory_last_x64_words\n   movzbl %sil, %ecx\n   vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
     ".Lmemory_last_x64_vector:\n   sub $32, %rax\n   sub $32, %rdx\n   vpcmpeqb (%rax), %ymm1, %ymm0\n   vpmovmskb %ymm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_last_x64_vector_hit\n"
-    "cmp $32, %rdx\n   jae .Lmemory_last_x64_vector\n   vzeroupper\n   jmp .Lmemory_last_x64_words\n"
+    "cmp $32, %rdx\n   jae .Lmemory_last_x64_vector\n   vzeroupper\n   test %rdx, %rdx\n   jz .Lmemory_last_x64_none\n   jmp .Lmemory_last_x64_sse2_rest\n"
     ".Lmemory_last_x64_vector_hit:\n   bsr %ecx, %ecx\n   add %rcx, %rax\n"
     "vzeroupper\n" ASM_RET
+    //
+    //      Without AVX2: thirty two bytes a turn back from the end in two SSE2 compares, their flags in one
+    //      register. Under 32 left, after a vector loop of either width, the first 32 bytes of the span are
+    //      compared once more and cut to the count, the bytes past it already known to hold none; a span
+    //      that is under 32 from the start reads those 32 the same way when the page has them (see
+    //      TINY_PAGE_EDGE), and the words below take it when it does not. tac over C source asks for the
+    //      line before a line each call, a few dozen bytes back.
+    //
+    ".Lmemory_last_x64_sse2:\n   cmp $32, %rdx\n   jae 1f\n"
+    TINY_PAGE_EDGE("edi", ".Lmemory_last_x64_words")
+    "jmp .Lmemory_last_x64_sse2_rest\n"
+    "1:  movzbl %sil, %ecx\n   movd %ecx, %xmm2\n   punpcklbw %xmm2, %xmm2\n   pshuflw $0, %xmm2, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    ".Lmemory_last_x64_sse2_loop:\n   sub $32, %rax\n   sub $32, %rdx\n   movdqu (%rax), %xmm0\n   movdqu 16(%rax), %xmm1\n   pcmpeqb %xmm2, %xmm0\n   pcmpeqb %xmm2, %xmm1\n"
+    "pmovmskb %xmm0, %ecx\n   pmovmskb %xmm1, %r8d\n   shl $16, %r8d\n   or %r8d, %ecx\n   jnz .Lmemory_last_x64_sse2_hit\n"
+    "cmp $32, %rdx\n   jae .Lmemory_last_x64_sse2_loop\n   test %rdx, %rdx\n   jz .Lmemory_last_x64_none\n   jmp .Lmemory_last_x64_sse2_head\n"
+    ".Lmemory_last_x64_sse2_hit:\n   bsr %ecx, %ecx\n   add %rcx, %rax\n" ASM_RET
+    ".Lmemory_last_x64_sse2_rest:\n   movzbl %sil, %ecx\n   movd %ecx, %xmm2\n   punpcklbw %xmm2, %xmm2\n   pshuflw $0, %xmm2, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    ".Lmemory_last_x64_sse2_head:\n   movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm1\n   pcmpeqb %xmm2, %xmm0\n   pcmpeqb %xmm2, %xmm1\n   pmovmskb %xmm0, %eax\n"
+    "pmovmskb %xmm1, %ecx\n   shl $16, %ecx\n   or %ecx, %eax\n   mov %edx, %ecx\n   mov $1, %r8d\n   shl %cl, %r8d\n   dec %r8d\n   and %r8d, %eax\n"
+    "jz .Lmemory_last_x64_none\n   bsr %eax, %eax\n   add %rdi, %rax\n" ASM_RET
     )
     ".Lmemory_last_x64_words:\n   movzbl %sil, %r8d\n   movabs $0x0101010101010101, %r10\n   imul %r10, %r8\n   movabs $0x8080808080808080, %r11\n"
     ".Lmemory_last_x64_word_loop:\n   cmp $8, %rdx\n   jb .Lmemory_last_x64_tail\n   sub $8, %rax\n   sub $8, %rdx\n   mov (%rax), %rcx\n   xor %r8, %rcx\n"
@@ -27022,22 +27042,70 @@ __asm__(
     RV_ZBB_END
 #endif
     ASM_END(memory_first_of)
+    //
+    //       memory_last_of: with V, from 16 bytes, strips of up to four
+    //       registers back from the end, the strip's matches as a mask and
+    //       vfirst only to ask whether there are any; in the strip that has
+    //       one, the highest is the greatest index under the mask, at
+    //       sixteen bits so that no strip is too long to count.
+    //
+    //       Without V, eight bytes a turn back from the end. An end inside a
+    //       word is that aligned word, its bytes past the end and any before
+    //       the start made to differ from the byte, and under a word left
+    //       the word before the aligned end, its bytes before the start made
+    //       to differ: the bytes a byte loop walked at either end are one
+    //       word each. The carry free test is only exact about whether a word
+    //       holds a match and its lowest, so the highest is walked back to
+    //       from the end, or with Zbb taken from the exact mask orc.b makes
+    //       by clz.
+    //
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option push\n   .option arch, +v\n"
+#endif
     ASM_FUNC(memory_last_of)
-    "andi a1, a1, 0xff\n   beqz a2, .Lmemory_last_rv_none\n   add a3, a0, a2\n   andi t0, a3, 7\n   beqz t0, .Lmemory_last_rv_words_setup\n"
-    ".Lmemory_last_rv_peel:\n   addi a3, a3, -1\n   lbu t1, 0(a3)\n   beq t1, a1, .Lmemory_last_rv_found\n   addi a2, a2, -1\n   beqz a2, .Lmemory_last_rv_none\n   andi t0, a3, 7\n"
-    "bnez t0, .Lmemory_last_rv_peel\n"
-    ".Lmemory_last_rv_words_setup:  lui t0, 0x1010\n   addi t0, t0, 257\n   slli t1, t0, 32\n   add t0, t0, t1\n"
+    "andi a1, a1, 0xff\n   beqz a2, .Lmemory_last_rv_none\n   add a3, a0, a2\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  The detect keeps a0-a4 and a7, and its return starts the routine again.
+    "li t3, 16\n   bltu a2, t3, 3f\n"
+    ".Lmemory_last_rv_ask:\n   auipc t3, %pcrel_hi(cpu_has_vector)\n   lbu t3, %pcrel_lo(.Lmemory_last_rv_ask)(t3)\n   addi t4, t3, -1\n   beqz t4, 3f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j memory_last_of\n"
+    "1:  vsetvli t0, a2, e8, m4, ta, ma\n   sub a3, a3, t0\n   sub a2, a2, t0\n   vle8.v v8, (a3)\n   vmseq.vx v0, v8, a1\n   vfirst.m t1, v0\n"
+    "bgez t1, 2f\n   bnez a2, 1b\n   li a0, 0\n   ret\n"
+    "2:  vsetvli zero, t0, e16, m8, ta, ma\n   vmv.s.x v24, zero\n   vid.v v16\n   vredmaxu.vs v24, v16, v24, v0.t\n   vmv.x.s t1, v24\n   add a0, a3, t1\n   ret\n"
+    "3:\n"
+#endif
+    "lui t0, 0x1010\n   addi t0, t0, 257\n   slli t1, t0, 32\n   add t0, t0, t1\n"
     "mul t2, a1, t0\n   slli t1, t0, 7  # the high bit of every byte, from the low one\n"
     "li t6, 8\n"
+    "andi a6, a3, 7\n   beqz a6, .Lmemory_last_rv_word_loop\n   sub a5, a3, a6\n   ld t3, 0(a5)\n   xor t3, t3, t2\n   slli t4, a6, 3\n   li t5, -1\n"
+    "sll t5, t5, t4\n   or t3, t3, t5\n   bgeu a5, a0, 4f\n   sub t4, a0, a5\n   slli t4, t4, 3\n   li t5, 1\n   sll t5, t5, t4\n   addi t5, t5, -1\n   or t3, t3, t5\n"
+    "4:  sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   bnez t4, 5f\n"
+    "bgeu a5, a0, 6f\n   j .Lmemory_last_rv_none\n"
+    "6:  sub a2, a5, a0\n   mv a3, a5\n   j .Lmemory_last_rv_word_loop\n"
+    "5:  mv t4, a3\n   mv a3, a5\n"
+    RV_ZBB_ASK("t5", ".Lmemory_last_rv_zbb")
+    "j .Lmemory_last_rv_refine\n"
     ".Lmemory_last_rv_word_loop:\n   bltu a2, t6, .Lmemory_last_rv_tail\n   addi a3, a3, -8\n   addi a2, a2, -8\n   ld t3, 0(a3)\n   xor t3, t3, t2\n"
-    "sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   beqz t4, .Lmemory_last_rv_word_loop\n   addi t4, a3, 8\n"
+    "sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   beqz t4, .Lmemory_last_rv_word_loop\n"
+    RV_ZBB_ASK("t5", ".Lmemory_last_rv_zbb")
+    "addi t4, a3, 8\n"
     ".Lmemory_last_rv_refine:\n   addi t4, t4, -1\n   lbu t5, 0(t4)\n"
     "bne t5, a1, .Lmemory_last_rv_refine\n   mv a0, t4\n" ASM_RET
-    ".Lmemory_last_rv_tail:\n   beqz a2, .Lmemory_last_rv_none\n"
-    ".Lmemory_last_rv_byte:\n   addi a3, a3, -1\n   lbu t3, 0(a3)\n   beq t3, a1, .Lmemory_last_rv_found\n   addi a2, a2, -1\n   bnez a2, .Lmemory_last_rv_byte\n"
+    ".Lmemory_last_rv_tail:\n   beqz a2, .Lmemory_last_rv_none\n   ld t3, -8(a3)\n   xor t3, t3, t2\n   sub t4, t6, a2\n   slli t4, t4, 3\n   li t5, 1\n   sll t5, t5, t4\n"
+    "addi t5, t5, -1\n   or t3, t3, t5\n   sub t4, t3, t0\n   not t5, t3\n   and t4, t4, t5\n   and t4, t4, t1\n   beqz t4, .Lmemory_last_rv_none\n   mv t4, a3\n   addi a3, a3, -8\n"
+    RV_ZBB_ASK("t5", ".Lmemory_last_rv_zbb")
+    "j .Lmemory_last_rv_refine\n"
     ".Lmemory_last_rv_none:\n   li a0, 0\n" ASM_RET
-    ".Lmemory_last_rv_found:\n   mv a0, a3\n" ASM_RET
+#ifndef KERNEL_MODE
+    //  The word's matches are its zero bytes after the xor: orc.b makes those 0 and the rest 0xff, exactly.
+    RV_ZBB_BEGIN
+    ".Lmemory_last_rv_zbb:\n   orc.b t5, t3\n   not t5, t5\n   clz t5, t5\n   li t4, 56\n   sub t4, t4, t5\n   srli t4, t4, 3\n   add a0, a3, t4\n   ret\n"
+    RV_ZBB_END
+#endif
     ASM_END(memory_last_of)
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    ".option pop\n"
+#endif
     //
     //       memory_count -- how many times a byte appears.
     //
