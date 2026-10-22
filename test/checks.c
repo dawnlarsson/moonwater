@@ -49370,10 +49370,75 @@ static unsigned long long ranged_rev_fill(unsigned char *source, unsigned long l
         return at;
 }
 
+/*
+        The shapes that move x86_64's walks without AVX2 from one to the
+        other (every 4 KiB, by how many lines went past 32 bytes): long lines
+        then short ones then long again, with sequences of every lead class
+        in some, and lines of 31 to 34 and 63 to 66 bytes in turn, each
+        source against the end of its room and from the start of its own.
+*/
+static unsigned long long ranged_rev_one(unsigned char *d_end, unsigned char *source, unsigned long long length)
+{
+        unsigned long long faults = 0;
+
+        for (unsigned long long i = length; i < length + 64; i++)
+                source[i] = '\n';
+        for (unsigned long long utf8 = 0; utf8 < 2; utf8++)
+        {
+                unsigned long long control = '\n' | utf8 << 8, want_taken = 0, made = ~0ull;
+                unsigned long long want = ranged_rev_reference(ranged_rev_want, source, length, control, &want_taken);
+                unsigned char *into = d_end - 64 - length;
+
+                for (int i = 1; i <= 16; i++)
+                        into[-i] = (unsigned char)(0x3a ^ i);
+                unsigned long long taken = (memory_reverse_lines__room_64)(into, &made, source, length, control);
+                faults += taken != want_taken || made != want || (made == want && !ranged_same(into, ranged_rev_want, want));
+                for (int i = 1; i <= 16; i++)
+                        faults += into[-i] != (unsigned char)(0x3a ^ i);
+        }
+        return faults;
+}
+
+static unsigned long long ranged_rev_shapes(unsigned char *d_end, unsigned char *s_end, unsigned char *s_front)
+{
+        static const unsigned char sequence[] = {0xc3, 0xa9, 0xe6, 0x97, 0xa5, 0xf0, 0x9f, 0x98, 0x80};
+        static unsigned char text[16000];
+        unsigned long long faults = 0;
+
+        for (unsigned shape = 0; shape < 3; shape++)
+        {
+                unsigned long long length = 0, line = 0;
+
+                while (length < sizeof(text) - 80)
+                {
+                        unsigned long long width = shape == 2 ? (line & 1 ? 63 : 31) + (line >> 1 & 3)
+                                                   : length < 4600 || length > 12000 ? 40 + ranged_byte() % 21
+                                                                                      : 4 + ranged_byte() % 11;
+                        for (unsigned long long i = 0; i < width; i++)
+                                text[length + i] = (unsigned char)('a' + (length + i) % 26);
+                        if (shape == 1 && line % 3 == 0 && width >= 9)
+                                for (unsigned long long i = 0; i < 9; i++)
+                                        text[length + i] = sequence[i];
+                        length += width;
+                        text[length++] = '\n';
+                        line++;
+                }
+                for (unsigned place = 0; place < 2; place++)
+                {
+                        unsigned char *source = place ? s_front : s_end - 64 - length;
+
+                        for (unsigned long long i = 0; i < length; i++)
+                                source[i] = text[i];
+                        faults += ranged_rev_one(d_end, source, length);
+                }
+        }
+        return faults;
+}
+
 static unsigned long long ranged_rev_cases(unsigned char *d_end, unsigned char *s_end, unsigned char *s_front)
 {
         static const unsigned long long longs[] = {1000, 4096, 5000, 20000};
-        unsigned long long faults = 0;
+        unsigned long long faults = ranged_rev_shapes(d_end, s_end, s_front);
 
         for (unsigned long long at = 0; at < 301 + sizeof(longs) / sizeof(longs[0]); at++)
         {
