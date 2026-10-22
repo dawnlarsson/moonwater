@@ -6944,6 +6944,7 @@ __asm__(
     "xor %eax, %eax\n   test %rsi, %rsi\n   jz 9f\n"
     ASM_USERSPACE_WIDE(
     ASM_WIDER("cpu_has_avx512", "6f")
+    "cmp $64, %rsi\n   jb .Lmemory_count_x64_short\n"
     ASM_NARROW("cpu_has_avx2", ".Lmemory_count_x64_sse2")
     "movzbl %dl, %ecx\n   vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
     //
@@ -6974,7 +6975,10 @@ __asm__(
     "8:  vpcmpeqb (%rdi,%r10), %ymm1, %ymm0\n   vpsubb %ymm0, %ymm2, %ymm2  # 0xff is minus one, so this adds one\n"
     "add $32, %r10\n   mov %rsi, %r8\n   sub %r10, %r8\n   cmp $32, %r8\n   jae 8b\n   vpxor %ymm0, %ymm0, %ymm0\n   vpsadbw %ymm0, %ymm2, %ymm2\n   vextracti128 $1, %ymm2, %xmm3\n"
     "vpaddq %xmm3, %xmm2, %xmm2\n   vpextrq $0, %xmm2, %r11\n   add %r11, %rax\n   vpextrq $1, %xmm2, %r11\n   add %r11, %rax\n   add %r10, %rdi\n   sub %r10, %rsi\n"
-    "4:  vzeroupper\n   jmp 5f\n"
+    //       Under a vector left of 32 or more: the last 32 bytes, the lanes under 32 - left counted already.
+    "4:  test %rsi, %rsi\n   jz 10f\n   vmovdqu -32(%rdi,%rsi), %ymm0\n   vpcmpeqb %ymm1, %ymm0, %ymm0\n   vpmovmskb %ymm0, %r8d\n"
+    "mov $32, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8d\n   popcnt %r8d, %r8d\n   add %r8, %rax\n"
+    "10: vzeroupper\n" ASM_RET
     //
     //       Sixty four bytes at a time, four vectors a turn. The compare
     //       lands in a mask register rather than a vector, which is the only
@@ -7040,7 +7044,7 @@ __asm__(
     //       the eight compares and subtracts at four a cycle (AVX2 1.13,
     //       AVX-512 0.90; the line loads alone 0.50).
     //
-    ".Lmemory_count_x64_sse2:\n   cmp $16, %rsi\n   jb 5f\n"
+    ".Lmemory_count_x64_sse2:\n"
     "movzbl %dl, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n   pxor %xmm7, %xmm7\n"
     "cmp $128, %rsi\n   jb .Lmemory_count_x64_sse2_sixteen\n"
     ".Lmemory_count_x64_sse2_round:\n   mov %rsi, %r8\n   shr $7, %r8\n   mov $255, %r9\n   cmp %r9, %r8\n   cmova %r9, %r8  # never more turns than a lane holds\n"
@@ -7063,7 +7067,48 @@ __asm__(
     ".Lmemory_count_x64_sse2_sixteen:\n   pxor %xmm2, %xmm2\n"
     "1:  movdqu (%rdi), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   psubb %xmm0, %xmm2\n   add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae 1b\n"
     "psadbw %xmm7, %xmm2\n   movq %xmm2, %r11\n   add %r11, %rax\n   punpckhqdq %xmm2, %xmm2\n   movq %xmm2, %r11\n   add %r11, %rax\n"
-    "4:  test %rsi, %rsi\n   jz 9f\n   jmp 5f\n"
+    //       Under sixteen left of thirty two or more: the last sixteen, the lanes under 16 - left counted.
+    "4:  test %rsi, %rsi\n   jz 9f\n   movdqu -16(%rdi,%rsi), %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r8d\n"
+    "mov $16, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8d\n   popcnt %r8d, %r8d\n   add %r8, %rax\n" ASM_RET
+    //
+    //       Under 64 bytes without AVX-512, which has its masked compare: one to
+    //       three bytes a compare each, and four to sixty three as two loads
+    //       that overlap, the first four, eight, sixteen or thirty two bytes and
+    //       the last, in one xmm, two or four. pcmpeqb against the byte and
+    //       pmovmskb give a bit a lane, the last load's bits shifted down past
+    //       the lanes the first holds too (by a 64-bit shift, which can take all
+    //       32), and popcnt counts each; nothing is read outside the block. It
+    //       was the word at a time body and a byte loop under 32, behind the
+    //       AVX2 body's broadcast, its rounds' test and a vzeroupper, and from
+    //       32 a vector loop and its drain.
+    //
+    //       On a 9950X, cycles a call with the driver's (the mean of eight
+    //       offsets and four layouts), AVX2 before and now: 1 byte 7.3 to 5.5,
+    //       7 bytes 17.6 to 9.1, 15 bytes 18.5 to 7.0, 31 bytes 21.3 to 7.0, 63
+    //       bytes 25.0 to 8.3, 64 bytes 10.4 to 9.3, 136 bytes 18.0 to 12.9;
+    //       without AVX2 31 bytes 19.7 to 7.0 and 63 bytes 22.8 to 8.3. Of
+    //       every size to 136 at every offset none takes longer on either.
+    //
+    ".Lmemory_count_x64_short:\n   cmp $4, %rsi\n   jb 3f\n"
+    "movzbl %dl, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n   cmp $16, %rsi\n   jb 1f\n"
+    "cmp $32, %rsi\n   jb 4f\n"
+    "movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm2\n   movdqu -32(%rdi,%rsi), %xmm3\n   movdqu -16(%rdi,%rsi), %xmm4\n"
+    "pcmpeqb %xmm1, %xmm0\n   pcmpeqb %xmm1, %xmm2\n   pcmpeqb %xmm1, %xmm3\n   pcmpeqb %xmm1, %xmm4\n"
+    "pmovmskb %xmm0, %eax\n   pmovmskb %xmm2, %r8d\n   pmovmskb %xmm3, %r9d\n   pmovmskb %xmm4, %r10d\n"
+    "shl $16, %r8d\n   or %r8d, %eax\n   shl $16, %r10d\n   or %r10d, %r9d\n   mov $64, %ecx\n   sub %esi, %ecx\n   shr %cl, %r9\n"
+    "popcnt %eax, %eax\n   popcnt %r9, %r9\n   add %r9, %rax\n" ASM_RET
+    "4:  "
+    "movdqu (%rdi), %xmm0\n   movdqu -16(%rdi,%rsi), %xmm2\n   pcmpeqb %xmm1, %xmm0\n   pcmpeqb %xmm1, %xmm2\n   pmovmskb %xmm0, %eax\n   pmovmskb %xmm2, %r8d\n"
+    "mov $32, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8d\n   popcnt %eax, %eax\n   popcnt %r8d, %r8d\n   add %r8, %rax\n" ASM_RET
+    "1:  cmp $8, %rsi\n   jb 2f\n"
+    "movq (%rdi), %xmm0\n   movq -8(%rdi,%rsi), %xmm2\n   punpcklqdq %xmm2, %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r8d\n"
+    "movzbl %r8b, %eax\n   shr $8, %r8d\n   mov $16, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8d\n   popcnt %eax, %eax\n   popcnt %r8d, %r8d\n   add %r8, %rax\n" ASM_RET
+    //       Four to seven: the lanes past the two words are zero, as a byte of nought would match.
+    "2:  movd (%rdi), %xmm0\n   movd -4(%rdi,%rsi), %xmm2\n   punpckldq %xmm2, %xmm0\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %r8d\n"
+    "mov %r8d, %eax\n   and $15, %eax\n   shr $4, %r8d\n   and $15, %r8d\n   mov $8, %ecx\n   sub %esi, %ecx\n   shr %cl, %r8d\n"
+    "popcnt %eax, %eax\n   popcnt %r8d, %r8d\n   add %r8, %rax\n" ASM_RET
+    "3:  xor %ecx, %ecx\n   cmp %dl, (%rdi)\n   sete %cl\n   mov %ecx, %eax\n   cmp $2, %rsi\n   jb 9f\n"
+    "cmp %dl, 1(%rdi)\n   sete %cl\n   add %ecx, %eax\n   cmp $3, %rsi\n   jb 9f\n   cmp %dl, 2(%rdi)\n   sete %cl\n   add %ecx, %eax\n" ASM_RET
     )
     //
     //       Eight bytes at a time, for a processor with neither, for what the
