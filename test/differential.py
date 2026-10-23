@@ -43607,6 +43607,251 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
     }
     return fuzz_lib_run("bowl json", "bowl-json-fuzz", source, seeds, 8192, lib=False)
 
+
+def security_fuzz_seeds():
+    """Name to bytes for security_fuzz: overlay files in the shapes moonwater
+    security publishes, and the same entries without the header. The first
+    byte says which (odd: the header is made around the rest)."""
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+    def entry(kind, ident, text):
+        padded = text + b"\0" * (-len(text) % 4)
+        return bytes([5, kind]) + struct.pack("<HHH", ident, len(text), 0) + padded
+
+    def anchor(curve, exponent, key):
+        return bytes([curve, 0, 0, 0]) + struct.pack("<I", exponent) + bytes(range(32)) + key
+
+    def point(key):
+        numbers = key.public_key().public_numbers()
+        size = (key.curve.key_size + 7) // 8
+        return numbers.x.to_bytes(size, "big") + numbers.y.to_bytes(size, "big")
+
+    p256 = point(ec.derive_private_key(1025, ec.SECP256R1()))
+    p384 = point(ec.derive_private_key(1025, ec.SECP384R1()))
+    modulus = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key() \
+        .public_numbers().n.to_bytes(256, "big")
+    entries = {
+        "empty": b"",
+        "block": entry(4, 1, bytes(range(32))),
+        "p256": entry(5, 1, anchor(1, 0, p256)),
+        "p384": entry(5, 1, anchor(2, 0, p384)),
+        "rsa": entry(5, 1, anchor(3, 65537, modulus)),
+        "switches": b"".join(entry(6, i, b"") for i in range(1, 6)),
+        "mixed": entry(4, 1, b"\x5a" * 32) + entry(6, 3, b"") + entry(5, 1, anchor(1, 0, p256)) +
+                 entry(4, 1, b"\xa5" * 32),
+        "unknown switch": entry(6, 6, b""),
+        "short block": entry(4, 1, b"\1" * 31),
+        "even exponent": entry(5, 1, anchor(3, 65536, modulus)),
+    }
+    seeds = {}
+    for label, body in entries.items():
+        seeds[label] = b"\1" + body
+        seeds["whole " + label] = b"\0" + b"MWSECURE" + struct.pack("<II", len(body), 0) + body
+    seeds["no magic"] = b"\0MWSECURX" + b"\0" * 8
+    return seeds
+
+
+def harness_security_fuzz(argv):
+    """Coverage-guided libFuzzer over what `moonwater security` keeps and
+    publishes, the two readers of it: tls_overlay_read, which every TLS
+    client runs over /run/moonwater/security, and spark_settings_check,
+    which the kernel runs over the image's settings block at boot and on
+    every SET, in ring 0, and the shell before it believes a slot. The unit
+    is the production net.c and spark.c over lib.util.c, built hosted with
+    clang and ASan/UBSan. The first input byte says whether the rest is a
+    whole file or entries the driver puts a header around; each input is
+    copied into a block exactly its length.
+
+    What is held besides memory: a file the reader takes has at most 64
+    blocks, 8 anchors and the switches this build knows, each anchor a key
+    anchors.inc could hold; written again entry by entry it reads the same,
+    and as a settings slot's security list it checks; a file refused leaves
+    nothing behind. The same bytes as a slot's payload, sealed, are checked
+    too, and a slot that checks has every security entry in the shape the
+    list allows.
+
+        python3 test/differential.py --harness security_fuzz
+    """
+    del argv
+    source = r"""
+#include "src/lib.util.c"
+#include "src/moonwater/spark.c"
+#include "src/net/net.c"
+
+static tls_overlay fuzz_overlay;
+static tls_overlay fuzz_again;
+static struct spark_settings fuzz_slot;
+static p8 fuzz_file[TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM];
+
+static positive fuzz_entry(p8 *at, p8 kind, p16 id, const p8 *text, positive length)
+{
+        positive padded = (length + 3) & ~(positive)3;
+
+        at[0] = TLS_OVERLAY_LIST;
+        at[1] = kind;
+        at[2] = (p8)id;
+        at[3] = (p8)(id >> 8);
+        at[4] = (p8)length;
+        at[5] = (p8)(length >> 8);
+        at[6] = 0;
+        at[7] = 0;
+        if (length)
+                memcpy(at + 8, text, length);
+        memset(at + 8 + length, 0, padded - length);
+        return 8 + padded;
+}
+
+static fn fuzz_header(p8 *file, positive length)
+{
+        memcpy(file, TLS_OVERLAY_MAGIC, 8);
+        for (int k = 0; k < 4; k++)
+        {
+                file[8 + k] = (p8)(length >> (8 * k));
+                file[12 + k] = 0;
+        }
+}
+
+/* What was read, written again as the settings block would carry it. */
+static positive fuzz_encode(const tls_overlay *overlay, p8 *file)
+{
+        positive used = TLS_OVERLAY_HEAD;
+        p8 record[40 + 512];
+
+        for (positive i = 0; i < overlay->blocks; i++)
+                used += fuzz_entry(file + used, TLS_OVERLAY_BLOCK, TLS_OVERLAY_BY_HAND,
+                                   overlay->block[i], 32);
+        for (positive i = 0; i < overlay->anchors; i++)
+        {
+                const tls_added_anchor *added = overlay->anchor + i;
+
+                memset(record, 0, 8);
+                record[0] = added->curve;
+                for (int k = 0; k < 4; k++)
+                        record[4 + k] = (p8)(added->exponent >> (8 * k));
+                memcpy(record + 8, added->name, 32);
+                memcpy(record + 40, added->key, added->key_length);
+                used += fuzz_entry(file + used, TLS_OVERLAY_TRUST, TLS_OVERLAY_BY_HAND, record,
+                                   40 + added->key_length);
+        }
+        for (p16 id = 1; id <= TLS_SWITCHES; id++)
+                if (overlay->switches >> (id - 1) & 1)
+                        used += fuzz_entry(file + used, TLS_OVERLAY_SWITCH, id, null, 0);
+        fuzz_header(file, used - TLS_OVERLAY_HEAD);
+        return used;
+}
+
+static bool fuzz_same(const tls_overlay *one, const tls_overlay *two)
+{
+        if (one->blocks != two->blocks || one->anchors != two->anchors ||
+            one->switches != two->switches || memcmp(one->block, two->block, 32 * one->blocks))
+                return false;
+        for (positive i = 0; i < one->anchors; i++)
+        {
+                const tls_added_anchor *a = one->anchor + i, *b = two->anchor + i;
+
+                if (a->curve != b->curve || a->exponent != b->exponent ||
+                    a->key_length != b->key_length || memcmp(a->name, b->name, 32) ||
+                    memcmp(a->spki, b->spki, 32) || memcmp(a->key, b->key, a->key_length))
+                        return false;
+        }
+        return true;
+}
+
+/* A sealed slot whose payload is these entries: what spark_settings_check says. */
+static int fuzz_check(const p8 *entries, positive length)
+{
+        memset(&fuzz_slot, 0, sizeof fuzz_slot);
+        fuzz_slot.magic = SPARK_SETTINGS_MAGIC;
+        fuzz_slot.version = SPARK_SETTINGS_VERSION;
+        fuzz_slot.header = SPARK_SETTINGS_HEADER;
+        fuzz_slot.slot = SPARK_SETTINGS_SLOT;
+        fuzz_slot.generation = 1;
+        fuzz_slot.length = (unsigned int)length;
+        if (length)
+                memcpy(fuzz_slot.payload, entries, length);
+        fuzz_slot.sum = spark_settings_sum(&fuzz_slot);
+        return spark_settings_check(&fuzz_slot);
+}
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+        if (!size || size - 1 > TLS_OVERLAY_ROOM)
+                return 0;
+        positive length = size - 1;
+        bool wrap = data[0] & 1;
+        positive whole = length + (wrap ? TLS_OVERLAY_HEAD : 0);
+        p8 *file = malloc(whole ? whole : 1);
+
+        if (wrap)
+                fuzz_header(file, length);
+        if (length)
+                memcpy(file + (wrap ? TLS_OVERLAY_HEAD : 0), data + 1, length);
+
+        bool taken = tls_overlay_read(file, whole, &fuzz_overlay);
+        if (taken)
+        {
+                if (fuzz_overlay.state != TLS_OVERLAY_TAKEN || fuzz_overlay.blocks > TLS_OVERLAY_BLOCKS ||
+                    fuzz_overlay.anchors > TLS_OVERLAY_ANCHORS ||
+                    fuzz_overlay.switches >> TLS_SWITCHES)
+                        __builtin_trap();
+                for (positive i = 0; i < fuzz_overlay.anchors; i++)
+                {
+                        const tls_added_anchor *added = fuzz_overlay.anchor + i;
+                        positive n = added->key_length;
+
+                        if (added->curve == 1 ? n != 64 : added->curve == 2 ? n != 96
+                            : added->curve == 3 ? n < 256 || n > 512 || !(added->exponent & 1)
+                                                : true)
+                                __builtin_trap();
+                }
+                tls_overlay_settle(&fuzz_overlay);
+                positive again = fuzz_encode(&fuzz_overlay, fuzz_file);
+                if (!tls_overlay_read(fuzz_file, again, &fuzz_again) ||
+                    !fuzz_same(&fuzz_overlay, &fuzz_again))
+                        __builtin_trap();
+                if (fuzz_check(fuzz_file + TLS_OVERLAY_HEAD, again - TLS_OVERLAY_HEAD) != 1)
+                        __builtin_trap();
+        }
+        else
+        {
+                static const tls_overlay refused = {TLS_OVERLAY_BAD};
+
+                if (memcmp(&fuzz_overlay, &refused, sizeof refused))
+                        __builtin_trap();
+        }
+
+        /* The same bytes as the payload of a slot. */
+        if (length <= SPARK_SETTINGS_PAYLOAD && fuzz_check(data + 1, length) == 1)
+        {
+                positive at = 0;
+
+                while (at < length)
+                {
+                        const p8 *entry = data + 1 + at;
+                        unsigned int text = entry[4] | (unsigned int)entry[5] << 8;
+
+                        if (entry[0] == SPARK_SETTINGS_SECURITY &&
+                            !spark_settings_security_shaped(entry[1], entry[2] | entry[3] << 8, text))
+                                __builtin_trap();
+                        at += SPARK_SETTINGS_ENTRY + spark_settings_padded(text);
+                }
+                if (at != length)
+                        __builtin_trap();
+        }
+        free(file);
+        return 0;
+}
+
+b32 moonwater_program_main(void) { return 0; }
+"""
+    return fuzz_lib_run("security", "security-fuzz", source, security_fuzz_seeds(),
+                        TLS_OVERLAY_FUZZ_MOST)
+
+
+#       The most bytes a security_fuzz input holds: a header's worth more
+#       than the settings block's payload.
+TLS_OVERLAY_FUZZ_MOST = 16384
+
 def harness_terminfo_install(argv):
     """The terminfo blob is written into a directory, never through a name.
 
@@ -53594,6 +53839,379 @@ def harness_dns_tls(argv):
         checks(address(text) == "192.0.2.53" and "tls query" in log and "udp query" not in log,
                "a reply over TLS of exactly 4096 bytes is read: %r %r" % (text[-200:], log))
     return checks.verdict("dns tls:", "dns-tls")
+
+
+def harness_security_overlay(argv):
+    """moonwater security end to end: the command root changes the overlay
+    with and the wget every TLS client is, in user, mount and network
+    namespaces of their own with /run a tmpfs, so the session's settings and
+    /run/moonwater/security carry from one step to the next as on a machine.
+    The shell trusts the harness's bench root (TLS_BENCH_ANCHOR) as a
+    built-in anchor; openssl s_server serves each chain, Python's
+    http.server each plain file.
+
+    - a CA whose key is the P-384 key with private scalar 1025, the first
+      past tls_small_keys, under the bench root: taken; block add of its
+      SPKI SHA-256 refuses it with GNU wget's revoked line and status 5;
+      block remove takes it again; the same by its certificate file and by
+      eight hexadecimal digits; the block is in the session's settings
+    - the bench root itself blocked: a chain under it is not trusted
+    - a root of the harness's own: not trusted; trust add of its PEM: taken
+      and listed as added; block add of the same key: refused (a block
+      wins), and trust add of it refused while it is blocked; block remove:
+      taken; trust remove: not trusted
+    - trust add refuses a leaf, a root with name constraints, a file with no
+      certificate and a key anyone can compute; a built-in block cannot be
+      removed; a word that is no key is refused
+    - a published file that does not read refuses every checked fetch with
+      its own line, --no-check-certificate still fetches, bare security says
+      so, and the next change writes the file again
+    - each switch before, turned and back: tls12 against an openssl TLS 1.2
+      server, aia against a leaf whose CA is only at its caIssuers URL,
+      revocation against a leaf whose CRL point answers nothing, ct against
+      the own root's leaf with no SCTs, http against a plain server with
+      wget and fetch
+    - root only: as the user who runs the harness, a change refuses with
+      status 1 and bare security answers
+
+        python3 test/differential.py --harness security_overlay
+    """
+    import datetime
+    import tempfile
+    del argv
+    if platform.system() != "Linux":
+        print("security overlay: NOT RUN -- needs Linux")
+        return 2
+    for tool in ("unshare", "ip", "openssl"):
+        if not shutil.which(tool):
+            print("security overlay: NOT RUN -- no " + tool)
+            return 2
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+        import ipaddress
+    except ImportError:
+        print("security overlay: NOT RUN -- no cryptography package")
+        return 2
+    if subprocess.run(["unshare", "-Urmn", "true"], capture_output=True).returncode:
+        print("security overlay: NOT RUN -- user, mount and network namespaces are refused")
+        return 2
+    checks = Checks()
+    with tempfile.TemporaryDirectory(prefix="security-overlay-") as temporary:
+        work = Path(temporary)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        root_key = bench_root_key(work)
+        anchor = bench_anchor(work)
+
+        def name(text):
+            return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, text)])
+
+        def pem(path, *certificates):
+            (work / path).write_bytes(b"".join(c.public_bytes(serialization.Encoding.PEM)
+                                               for c in certificates))
+
+        def keep_key(path, key):
+            (work / path).write_bytes(key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+
+        def spki_hash(key):
+            return hashlib.sha256(key.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+
+        def issue(subject, issuer, issuer_key, key, ca, extra=()):
+            built = (x509.CertificateBuilder().subject_name(name(subject))
+                     .issuer_name(name(issuer)).public_key(key.public_key())
+                     .serial_number(x509.random_serial_number())
+                     .not_valid_before(now - datetime.timedelta(days=1))
+                     .not_valid_after(now + datetime.timedelta(days=30)))
+            if ca:
+                built = (built.add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+                         .add_extension(x509.KeyUsage(False, False, False, False, False, True,
+                                                      True, False, False), True))
+            else:
+                built = (built.add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
+                         .add_extension(x509.SubjectAlternativeName(
+                             [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
+                         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+                                        False))
+            for extension in extra:
+                built = built.add_extension(extension, False)
+            return built.sign(issuer_key, hashes.SHA384() if isinstance(
+                issuer_key.curve, ec.SECP384R1) else hashes.SHA256())
+
+        root = issue("security overlay bench root", "security overlay bench root", root_key,
+                     root_key, True)
+        leaf_key = ec.generate_private_key(ec.SECP256R1())
+        keep_key("leaf.key", leaf_key)
+        #   A CA whose private key is 1025: past every scalar tls_small_keys
+        #   screens, so only the overlay can refuse it.
+        small = ec.derive_private_key(1025, ec.SECP384R1())
+        small_ca = issue("security overlay small CA", "security overlay bench root", root_key,
+                         small, True)
+        pem("small.pem", small_ca)
+        pem("small-leaf.pem", issue("small leaf", "security overlay small CA", small, leaf_key,
+                                    False))
+        pem("small-chain.pem", small_ca)
+        pem("plain-leaf.pem", issue("plain leaf", "security overlay bench root", root_key,
+                                    leaf_key, False))
+        pem("root.pem", root)
+        #   A root of the harness's own, which nothing builds in.
+        own_key = ec.generate_private_key(ec.SECP256R1())
+        own = issue("security overlay own root", "security overlay own root", own_key, own_key, True)
+        pem("own.pem", own)
+        pem("own-leaf.pem", issue("own leaf", "security overlay own root", own_key, leaf_key,
+                                  False))
+        constrained_key = ec.generate_private_key(ec.SECP256R1())
+        pem("constrained.pem", issue(
+            "security overlay constrained root", "security overlay constrained root",
+            constrained_key, constrained_key, True,
+            (x509.NameConstraints([x509.DNSName("example.com")], None),)))
+        computable = ec.derive_private_key(2, ec.SECP256R1())
+        pem("computable.pem", issue("security overlay computable root",
+                                    "security overlay computable root", computable,
+                                    computable, True))
+        (work / "junk.txt").write_text("not a certificate\n")
+        #   caIssuers: the leaf names its CA at a URL the plain server holds.
+        aia_key = ec.generate_private_key(ec.SECP256R1())
+        aia_ca = issue("security overlay fetched CA", "security overlay bench root", root_key,
+                       aia_key, True)
+        (work / "files").mkdir()
+        (work / "files" / "aia.der").write_bytes(aia_ca.public_bytes(serialization.Encoding.DER))
+        (work / "files" / "plain.txt").write_text("plain\n")
+        pem("aia-leaf.pem", issue("aia leaf", "security overlay fetched CA", aia_key, leaf_key, False, (
+            x509.AuthorityInformationAccess([x509.AccessDescription(
+                x509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                x509.UniformResourceIdentifier("http://127.0.0.1:8080/aia.der"))]),)))
+        #   A CRL point nothing answers: soft passes it, hard does not.
+        pem("crl-leaf.pem", issue("crl leaf", "security overlay bench root", root_key, leaf_key,
+                                  False, (x509.CRLDistributionPoints([x509.DistributionPoint(
+                                      [x509.UniformResourceIdentifier("http://127.0.0.1:9/x.crl")],
+                                      None, None, None)]),)))
+        (work / "empty.pem").write_text("")
+
+        (work / "bin").mkdir()
+        built = build_together([spark_shell_command(os.environ.get("CC", "gcc"),
+                                                    work / "bin" / "shell", anchor)],
+                               cwd=HARNESS_ROOT, capture_output=True, text=True)[0]
+        if built.returncode:
+            print("  FAIL the shell did not build:\n" + built.stderr[-3000:])
+            return 1
+        for tool in ("moonwater", "wget", "fetch"):
+            (work / "bin" / tool).symlink_to(work / "bin" / "shell")
+
+        h_small = spki_hash(small)
+        h_root = spki_hash(root_key)
+        h_own = spki_hash(own_key)
+        #   Each built-in anchor's key as Python's cryptography spells its
+        #   SubjectPublicKeyInfo, from anchors.inc's numbers.
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        made_hashes = []
+        for _, _, _, _, curve, exponent, key, _ in anchors_parse(
+                (HARNESS_ROOT / "src/net/anchors.inc").read_text())[1]:
+            if curve == 3:
+                public = rsa.RSAPublicNumbers(exponent, int.from_bytes(key, "big")).public_key()
+            else:
+                half = len(key) // 2
+                public = ec.EllipticCurvePublicNumbers(
+                    int.from_bytes(key[:half], "big"), int.from_bytes(key[half:], "big"),
+                    ec.SECP256R1() if curve == 1 else ec.SECP384R1()).public_key()
+            made_hashes.append(hashlib.sha256(public.public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest())
+        emudhra = hashlib.sha256(ec.derive_private_key(156, ec.SECP384R1()).public_key()
+                                 .public_bytes(serialization.Encoding.DER,
+                                               serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+        port = [4430]
+        #   Every marker is told apart by a number: one command said twice is
+        #   two answers.
+        marker = [0]
+
+        def mark(label):
+            marker[0] += 1
+            return "echo '@@ %d %s'; " % (marker[0], label)
+
+        def say(command):
+            return mark(command) + "./bin/moonwater %s 2>&1; echo \"@@status $?\"\n" % command
+
+        def fetch(label, leaf, chain=None, flags="", insecure=False):
+            port[0] += 1
+            chain_flag = " -cert_chain %s" % chain if chain else ""
+            #   The body goes to a file of its own: /dev/null here belongs to
+            #   nobody the namespace maps, and wget writes to no device that
+            #   is not its own.
+            return (mark(label) + "openssl s_server -accept 127.0.0.1:%d -cert %s -key leaf.key%s "
+                    "-www -naccept 1 %s > server.%d 2>&1 & S=$!; i=0; "
+                    "while ! grep -q ACCEPT server.%d 2>/dev/null && [ $i -lt 200 ]; do "
+                    "sleep 0.05; i=$((i+1)); done; ./bin/wget %s-O got.%d https://127.0.0.1:%d/ 2>&1; "
+                    "echo \"@@status $?\"; kill $S 2>/dev/null; wait $S 2>/dev/null\n" % (
+                        port[0], leaf, chain_flag, flags, port[0], port[0],
+                        "--no-check-certificate " if insecure else "", port[0], port[0]))
+
+        def plain(label, tool):
+            return mark(label) + ("./bin/wget -O - " if tool == "wget" else "./bin/fetch ") + \
+                "http://127.0.0.1:8080/plain.txt 2>&1; echo \"@@status $?\"\n"
+
+        def kept(label, digest):
+            return (mark(label) + "python3 -I -c \"import sys; print('kept' if bytes.fromhex('%s') "
+                    "in open('/run/moonwater/settings','rb').read() else 'absent')\"; "
+                    "echo \"@@status $?\"\n" % digest)
+
+        #   (step, script, status wanted, text wanted in what it said or None)
+        steps = [
+            ("the 1025 CA's chain is taken", fetch("1025 taken", "small-leaf.pem", "small-chain.pem"), 0, None),
+            ("block add of its key", say("security block add " + h_small), 0, "security block added " + h_small),
+            ("the block is in the session's settings", kept("1025 kept", h_small), 0, "kept"),
+            ("the chain is refused as revoked", fetch("1025 refused", "small-leaf.pem", "small-chain.pem"),
+             5, "has been revoked"),
+            ("block remove takes it out", say("security block remove " + h_small), 0,
+             "security block removed " + h_small),
+            ("and the chain is taken again", fetch("1025 again", "small-leaf.pem", "small-chain.pem"), 0, None),
+            ("block add by the CA's certificate file", say("security block add small.pem"), 0, h_small),
+            ("refused again", fetch("1025 file", "small-leaf.pem", "small-chain.pem"), 5, "has been revoked"),
+            ("block remove by eight hexadecimal digits", say("security block remove " + h_small[:8]), 0,
+             "removed " + h_small),
+            ("taken again", fetch("1025 prefix", "small-leaf.pem", "small-chain.pem"), 0, None),
+            ("block add of the bench root, a built-in anchor here", say("security block add " + h_root), 0, None),
+            ("a chain under the blocked root is not trusted", fetch("root blocked", "plain-leaf.pem"), 5,
+             "is not trusted"),
+            ("security trust marks it blocked", say("security trust"), 0, None),
+            ("block remove of the root", say("security block remove " + h_root), 0, None),
+            ("a chain under the root is taken", fetch("root back", "plain-leaf.pem"), 0, None),
+            ("a chain under a root of its own is not trusted", fetch("own untrusted", "own-leaf.pem"), 5,
+             "is not trusted"),
+            ("trust add of that root", say("security trust add own.pem"), 0, "security trust added " + h_own),
+            ("the chain under it is taken", fetch("own trusted", "own-leaf.pem"), 0, None),
+            ("bare security lists it as added", say("security"), 0, "trust  added     P-256     " + h_own),
+            ("block add of the same key", say("security block add " + h_own), 0, None),
+            ("a block wins over a trust of the same key", fetch("own blocked", "own-leaf.pem"), 5,
+             "is not trusted"),
+            ("trust add of a blocked key is refused", say("security trust add own.pem"), 1, "a block wins"),
+            ("block remove of it", say("security block remove " + h_own), 0, None),
+            ("taken again", fetch("own again", "own-leaf.pem"), 0, None),
+            ("trust remove", say("security trust remove " + h_own), 0, "security trust removed " + h_own),
+            ("not trusted once removed", fetch("own removed", "own-leaf.pem"), 5, "is not trusted"),
+            ("trust add of a leaf is refused", say("security trust add plain-leaf.pem"), 1, "is not a CA"),
+            ("trust add of a root with name constraints is refused", say("security trust add constrained.pem"),
+             1, "name constraints"),
+            ("trust add of a file with no certificate is refused", say("security trust add junk.txt"), 1,
+             "certificate in it"),
+            ("trust add of an empty file is refused", say("security trust add empty.pem"), 1,
+             "certificate in it"),
+            ("trust add of a key anyone can compute is refused", say("security trust add computable.pem"), 1,
+             "refused"),
+            ("trust remove of a built-in anchor points at block",
+             say("security trust remove " + made_hashes[0]), 1, "block add"),
+            ("block remove of a built-in key is refused", say("security block remove " + emudhra), 1,
+             "built in and stays refused"),
+            ("block add of a built-in key says it is built in", say("security block add " + emudhra), 0,
+             "refused, built in"),
+            ("a word that is no key is refused", say("security block add not-a-key"), 1, "is not a key"),
+            ("a published file that does not read refuses a checked fetch",
+             "printf garbage > /run/moonwater/security\n" + fetch("garbage", "plain-leaf.pem"), 5,
+             "does not read"),
+            ("--no-check-certificate still fetches", fetch("garbage insecure", "plain-leaf.pem",
+                                                          insecure=True), 0, None),
+            ("bare security says the file does not read", say("security"), 1, "does not read"),
+            ("the next change writes it again", say("security tls12 off") + say("security tls12 on") +
+             fetch("garbage gone", "plain-leaf.pem"), 0, None),
+            #   The switches.
+            ("tls12 on: a TLS 1.2 server is taken", fetch("tls12 on", "plain-leaf.pem", flags="-tls1_2"), 0, None),
+            ("security tls12 off", say("security tls12 off"), 0, "security tls12 off"),
+            ("tls12 off: a TLS 1.2 server is refused", fetch("tls12 off", "plain-leaf.pem", flags="-tls1_2"),
+             4, "TLS handshake"),
+            ("tls12 off: TLS 1.3 is taken", fetch("tls13", "plain-leaf.pem"), 0, None),
+            ("security tls12 on", say("security tls12 on"), 0, None),
+            ("tls12 on again: taken", fetch("tls12 back", "plain-leaf.pem", flags="-tls1_2"), 0, None),
+            ("aia on: a CA left out is fetched", fetch("aia on", "aia-leaf.pem"), 0, None),
+            ("security aia off", say("security aia off"), 0, None),
+            ("aia off: not trusted", fetch("aia off", "aia-leaf.pem"), 5, "is not trusted"),
+            ("security aia on", say("security aia on"), 0, None),
+            ("aia on again: taken", fetch("aia back", "aia-leaf.pem"), 0, None),
+            ("revocation soft: an unanswered CRL point passes", fetch("crl soft", "crl-leaf.pem"), 0, None),
+            ("security revocation hard", say("security revocation hard"), 0, None),
+            ("revocation hard: refused as unchecked", fetch("crl hard", "crl-leaf.pem"), 5,
+             "could not be checked"),
+            ("security revocation soft", say("security revocation soft"), 0, None),
+            ("revocation soft again: taken", fetch("crl back", "crl-leaf.pem"), 0, None),
+            ("trust add for the ct rows", say("security trust add own.pem"), 0, None),
+            ("ct off: a chain with no SCTs is taken", fetch("ct off", "own-leaf.pem"), 0, None),
+            ("security ct on", say("security ct on"), 0, None),
+            ("ct on: refused as not logged", fetch("ct on", "own-leaf.pem"), 5, "not logged"),
+            ("security ct off", say("security ct off"), 0, None),
+            ("ct off again: taken", fetch("ct back", "own-leaf.pem"), 0, None),
+            ("bare security says every switch", say("security"), 0, "  ct off"),
+            ("http on: wget fetches plain http",
+             plain("http on", "wget"),
+             0, "plain"),
+            ("http on: so does fetch",
+             plain("fetch on", "fetch"),
+             0, "plain"),
+            ("security http off", say("security http off"), 0, None),
+            ("http off: wget refuses",
+             plain("http off", "wget"),
+             1, "plain http is off"),
+            ("http off: so does fetch",
+             plain("fetch off", "fetch"),
+             1, "plain http is off"),
+            ("http off: https is taken", fetch("https under http off", "plain-leaf.pem"), 0, None),
+            ("security http on", say("security http on"), 0, None),
+            ("http on again: wget fetches",
+             plain("http back", "wget"),
+             0, "plain"),
+        ]
+        script = ("set +e\nip link set lo up && mount -t tmpfs none /run && cd %s || exit 9\n"
+                  "python3 -I -m http.server 8080 --bind 127.0.0.1 --directory files > files.log 2>&1 & H=$!\n"
+                  "i=0; while ! python3 -I -c \"import socket; socket.create_connection(('127.0.0.1', 8080), 1)\" "
+                  "2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done\n" % work)
+        script += "".join(step[1] for step in steps)
+        script += "kill $H 2>/dev/null; wait $H 2>/dev/null\n"
+        ran = subprocess.run(["unshare", "-Urmn", "sh", "-c", script], capture_output=True, text=True,
+                             timeout=900)
+        said = {}
+        current = None
+        for line in ran.stdout.splitlines():
+            if line.startswith("@@ "):
+                current = line[3:]
+                said[current] = {"out": [], "status": None}
+            elif line.startswith("@@status ") and current is not None:
+                said[current]["status"] = int(line.split()[1])
+            elif current is not None:
+                said[current]["out"].append(line)
+        #   A step answers by its last marker: what it set up before says nothing.
+        labels = [re.findall(r"echo '@@ (.*?)'", step[1])[-1] for step in steps]
+        trust_label = [label for label in labels if label.endswith(" security trust")][0]
+        for (what, _, status, text), label in zip(steps, labels):
+            got = said.get(label, {"out": ["(no answer)"], "status": None})
+            joined = "\n".join(got["out"])
+            checks(got["status"] == status and (text is None or text in joined),
+                   "%s: status %s, said %r" % (what, got["status"], joined[-300:]))
+        #   security trust names each built-in anchor by the SHA-256 net.c
+        #   rebuilds of its SubjectPublicKeyInfo, which has to be the one
+        #   Python's cryptography makes of the same numbers; and the bench
+        #   root, blocked.
+        trust_page = "\n".join(said.get(trust_label, {"out": []})["out"])
+        shown_hashes = re.findall(r"^  trust  built-in  \S+\s+([0-9a-f]{64})", trust_page, re.M)
+        checks(shown_hashes[:len(made_hashes)] == made_hashes and
+               h_root + "  (blocked)" in trust_page and len(shown_hashes) == len(made_hashes) + 1,
+               "security trust lists the %d built-in anchors by the hash of their key, and the "
+               "bench root blocked: %d lines, %d agree" % (
+                   len(made_hashes), len(shown_hashes),
+                   sum(a == b for a, b in zip(shown_hashes, made_hashes))))
+
+        #   As the user who runs this, outside the namespace: no change.
+        refused = subprocess.run([str(work / "bin" / "moonwater"), "security", "block", "add", h_small],
+                                 capture_output=True, text=True, timeout=60)
+        shown = subprocess.run([str(work / "bin" / "moonwater"), "security"], capture_output=True,
+                               text=True, timeout=60)
+        checks(refused.returncode == 1 and "needs root" in refused.stdout + refused.stderr,
+               "a change by a user who is not root is refused: %r" % (refused.stdout + refused.stderr))
+        checks(shown.returncode in (0, 1) and "trust  built-in" in shown.stdout,
+               "bare security answers anybody: %r" % shown.stdout[-200:])
+    return checks.verdict("security overlay:", "security-overlay")
 
 
 def harness_wget_mutation(argv):
@@ -90640,6 +91258,7 @@ HARNESS_CHECKS = {
     "tls_chains": harness_tls_chains,
     "nts": harness_nts,
     "nts_fuzz": harness_nts_fuzz,
+    "security_fuzz": harness_security_fuzz,
     "tls_peer": harness_tls_peer,
     "https_downgrade": harness_https_downgrade,
     "http_response_framing": harness_http_response_framing,
@@ -90661,6 +91280,7 @@ HARNESS_CHECKS = {
     "bowl_sig_fuzz": harness_bowl_sig_fuzz,
     "wget_mutation": harness_wget_mutation,
     "dns_tls": harness_dns_tls,
+    "security_overlay": harness_security_overlay,
     "wget_hostile": harness_wget_hostile,
     "dns_fuzz": harness_dns_fuzz,
     "netlink_fuzz": harness_netlink_fuzz,

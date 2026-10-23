@@ -4759,6 +4759,9 @@ net_tls()
         #       through wget; and the log table against its header's list.
         job maybe python3 test/differential.py --harness tls_ct
         job maybe python3 test/differential.py --harness https_downgrade
+        #       moonwater security end to end: the command and wget in a
+        #       namespace, its keys blocked and trusted and its switches.
+        job maybe python3 test/differential.py --harness security_overlay
         #       A DNS reply's reading against an independent one, over replies
         #       from a grammar, a third damaged.
         job hard python3 test/differential.py --harness dns_oracle
@@ -4799,6 +4802,7 @@ net_fuzz()
         job soft python3 test/differential.py --harness wifi_scan_fuzz
         job soft python3 test/differential.py --harness wifi_sae_fuzz
         job soft python3 test/differential.py --harness nts_fuzz
+        job soft python3 test/differential.py --harness security_fuzz
         job soft python3 test/differential.py --harness bowl_sig_fuzz
         job soft python3 test/differential.py --harness dns_fuzz
         job soft python3 test/differential.py --harness netlink_fuzz
@@ -16136,6 +16140,8 @@ printf 'in-memory-%s\n' $(( $(grep -c 'this session only: sda1 is read-only' /tm
 moonwater bind init add "echo boot >> /root/boots" > /dev/null 2>&1
 moonwater bind exit add "echo stop >> /root/stops" > /dev/null 2>&1
 printf 'listed-%s\n' $(( $(moonwater bind init | grep -c -e '^1  echo carried' -e '^2  echo boot') * 7 ))
+moonwater security block add 5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1 > /tmp/security-add 2>&1
+printf 'security-live-%s\n' $(( $(moonwater security block | grep -c 'added     key       5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1') * 7 ))
 moonwater link key > /tmp/linkkey 2>&1
 moonwater link add host LINK_HOST_KEY > /dev/null 2>&1
 moonwater link allow host run log > /dev/null 2>&1
@@ -16225,6 +16231,8 @@ printf 'status-same-%s\n' $(( $(grep -c 'installed on nvme0n1, this build' /tmp/
 sleep 2
 printf 'carried-%s\n' "$(rev < /root/carried)"
 printf 'booted-%s\n' $(( $(grep -c boot /root/boots) * 7 ))
+printf 'security-kept-%s\n' $(( $(moonwater security block | grep -c 'added     key       5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1') * 7 ))
+printf 'security-published-%s\n' $(( $(od -An -tx1 /run/moonwater/security | tr -d ' \n' | grep -c '5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1') * 7 ))
 moonwater bind init add "echo disk >> /root/disk" > /tmp/disk-add 2>&1
 printf 'written-%s\n' $(( $(grep -c 'saved in the image on nvme0n1p1' /tmp/disk-add) * 7 ))
 moonwater bind init add "sleep 8; poweroff" > /dev/null 2>&1
@@ -16336,6 +16344,9 @@ says disk 'and reads back from it'       'disk-listed-14'
 says disk 'a machine script overlays mute' 'script-7'
 says disk 'SET is refused at the script' 'refused-7'
 says disk 'init stays the stored list without moonwater_init' 'init-kept-7'
+says live 'a security block is kept in the session' 'security-live-7'
+says disk 'the install carried the security block' 'security-kept-7'
+says disk 'and boot published it for TLS' 'security-published-7'
 says live 'link on starts the listener'  'link-on-7'
 says live 'and names the machine by its key' 'link-on-key-7'
 says disk 'the link switch came through the install and the reboot' 'link-kept-7'
@@ -16614,8 +16625,12 @@ kinds = {2: 'shell', 3: 'kernel_shell'}
 o = 0
 while o < best[2]:
     l, kind, ident, n = struct.unpack_from('<BBHH', best[1], 64 + o)
-    print('settings-%s-%d-%s' % (names[l], ident,
-                                 kinds.get(kind) or best[1][72 + o:72 + o + n].decode()))
+    text = best[1][72 + o:72 + o + n]
+    if l == 5:
+        # moonwater security's list: a kind, who added it, and bytes.
+        print('settings-security-%d-%d-%s' % (kind, ident, text.hex()))
+    else:
+        print('settings-%s-%d-%s' % (names[l], ident, kinds.get(kind) or text.decode()))
     o += 8 + ((n + 3) & ~3)
 PY
 }
@@ -16625,6 +16640,7 @@ if command -v python3 > /dev/null 2>&1; then
         says update-settings 'the update kept what the stick set' 'settings-init-1-echo carried > /root/carried'
         says update-settings 'and what the disk wrote in place' 'settings-init-3-echo disk >> /root/disk'
         says update-settings 'and its exit list'          'settings-exit-1-echo stop >> /root/stops'
+        says update-settings 'and its security list'      'settings-security-4-1-5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1'
 fi
 
 cat > "$work/use.commands" <<'COMMANDS'
