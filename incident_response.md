@@ -156,6 +156,16 @@ does not cover: a weak key that is not a small scalar (a key from a bad but
 non-trivial generator), RSA keys on served intermediates (no runtime screen),
 and keys outside P-256 and P-384.
 
+Found on the way. The libFuzzer target for path building and anchors
+(`tls_verify_fuzz`) did not compile from 2026-10-11 (`dc56c493`, which made the
+chain call `tls_trust_holds`) to 2026-10-23: its lift stubbed the old function
+name. The fuzz lane's first gate also failed whenever it ran first in a
+process, so the failure was not read. Both are fixed (`20734c17`, `d958266a`).
+For those 12 days the chain verifier was covered by the unit lanes and
+`tls_chains` but not by the fuzzer. Results on the box from a clean export of
+`d958266a`: net lane 230515 of 230515 on x86-64 and at the tight tier, 230453
+of 230453 on arm64 and riscv64, `tls-chains` 1932 of 1932.
+
 **Still open.**
 
 - A machine is fixed only after it boots an image built from `47cc1cc8` or
