@@ -73767,6 +73767,40 @@ static fn tls_trust_anchor_chains(void)
                 check("emSign ECC Root CA - G3 is not a trust anchor", left == 0);
         }
 
+        /* Keys anyone can compute (tls_small_keys): k*G is blocked for every k
+           up to TLS_SMALL_KEYS, on both curves, and the scalars past it are
+           not. */
+        {
+                static const positive scalars[] = {1, 2, 3, 255, 256, 1000, 1023, 1024, 1025, 5000};
+                positive wrong = 0;
+
+                for (positive curve = 1; curve <= 2; curve++)
+                        for (positive s = 0; s < array_count(scalars); s++)
+                        {
+                                p8 scalar[48] = {0};
+                                p8 point[97];
+                                tls_cert cert;
+                                positive coord = curve == 1 ? 32 : 48;
+                                bool made;
+
+                                scalar[coord - 2] = (p8)(scalars[s] >> 8);
+                                scalar[coord - 1] = (p8)scalars[s];
+                                made = curve == 1 ? crypto_ecdh_p256_public(point, scalar)
+                                                  : crypto_ecdh_p384_public(point, scalar);
+                                memory_fill(address_of cert, 0, sizeof cert);
+                                cert.curve = (p8)curve;
+                                cert.spki = point;
+                                cert.spki_length = 1 + 2 * coord;
+                                memory_copy(cert.qx + 48 - coord, point + 1, coord);
+                                memory_copy(cert.qy + 48 - coord, point + 1 + coord, coord);
+                                if (!made ||
+                                    tls_key_blocked(address_of cert) != (scalars[s] <= TLS_SMALL_KEYS))
+                                        wrong++;
+                        }
+                check("an EC key that is k*G for k up to 1024 is blocked and the next scalar is not",
+                      wrong == 0);
+        }
+
         /* Mozilla's distrust-after: a root that has a date anchors a leaf
            issued up to it, to the second, and none after. */
         {

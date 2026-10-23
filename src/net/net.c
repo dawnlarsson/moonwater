@@ -9255,16 +9255,30 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert, p64 leaf_from)
         return false;
 }
 
-/* Whether the certificate's key is one of tls_blocked_keys. */
+/* Whether the certificate's key is one of tls_blocked_keys, or an EC key anyone
+   can compute: k*G for a k up to TLS_SMALL_KEYS (tls_small_keys), which is how
+   eMudhra's eight were made. The next CA to make that mistake is refused
+   before anybody names its keys. */
 static COLD bool tls_key_blocked(const tls_cert address_to cert)
 {
         p8 digest[32];
+        p8 key[96];
+        positive coord = cert->curve == 1 ? 32 : 48;
 
         if (!cert->spki || !cert->spki_length)
                 return false;
         crypto_sha256_of(cert->spki, cert->spki_length, digest);
         for (positive i = 0; i < array_count(tls_blocked_keys); i++)
                 if (!memory_compare(tls_blocked_keys[i], digest, 32))
+                        return true;
+        if (cert->curve != 1 && cert->curve != 2)
+                return false;
+        memory_copy(key, cert->qx + 48 - coord, coord);
+        memory_copy(key + coord, cert->qy + 48 - coord, coord);
+        crypto_sha256_of(key, coord * 2, digest);
+        for (positive k = 0; k < TLS_SMALL_KEYS; k++)
+                if (!memory_compare(tls_small_keys + ((cert->curve - 1) * TLS_SMALL_KEYS + k) * 8,
+                                    digest, 8))
                         return true;
         return false;
 }

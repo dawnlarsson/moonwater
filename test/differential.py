@@ -47557,15 +47557,17 @@ def spark_shell_command(cc, output, anchor=None, defines=()):
             "-o", str(output), "programs/shell.c"]
 
 
-def small_p384_key(work, name, scalar):
-    """work/NAME: the P-384 key whose private scalar is the small number SCALAR, which
-    anyone can make. eMudhra's eight intermediates of 2026-10-17 are such keys (156, 230,
-    115, 56, 155, 4, 66 and 237, found by trying every scalar below 256 against the
-    published public-key hashes), so a chain signed by one is a forger's; SCALAR 156 is
-    the first of net.c's tls_blocked_keys and 157 is the next scalar, which is not."""
+def small_p384_key(work, name, scalar, curve="P-384"):
+    """work/NAME: the key whose private scalar is the small number SCALAR, which anyone can
+    make. eMudhra's eight intermediates of 2026-10-17 are such keys on P-384 (156, 230, 115,
+    56, 155, 4, 66 and 237, found by trying every scalar below 256 against the published
+    public-key hashes), so a chain signed by one is a forger's. 156 is the first of net.c's
+    tls_blocked_keys; any other scalar up to 1024 is refused as a key anyone can compute
+    (tls_small_keys), and one past 1024 is an ordinary key as far as the client can tell."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
-    (work / name).write_bytes(ec.derive_private_key(scalar, ec.SECP384R1()).private_bytes(
+    (work / name).write_bytes(ec.derive_private_key(
+        scalar, ec.SECP256R1() if curve == "P-256" else ec.SECP384R1()).private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 
 
@@ -47701,6 +47703,10 @@ def harness_tls_chains(argv):
     parser = argparse.ArgumentParser(prog="differential.py --harness tls_chains")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     parser.add_argument("--only", help="run only the rows whose name contains this text")
+    parser.add_argument("--random", type=int, default=0,
+                        help="add N seeded random name-constraint chains, held to OpenSSL's "
+                             "verdict: this tree may refuse what OpenSSL accepts, never the reverse")
+    parser.add_argument("--seed", type=int, default=20261023)
     args = parser.parse_args(argv)
     if platform.system() != "Linux" or not shutil.which("openssl"):
         print("tls chains: NOT RUN -- needs Linux and openssl")
@@ -47983,7 +47989,13 @@ def harness_tls_chains(argv):
         ("intermediate holds a compromised CA key", 2, good_leaf,
          {"second_key": "blocked P-384", "keys": ("P-256",)}),
         ("leaf holds a compromised CA key", 2, good_leaf, {"keys": ("blocked P-384",)}),
-        ("one intermediate holds the next small key", 1, good_leaf,
+        # A key that is only small, off the list, on either curve: eMudhra's mistake by another
+        # CA, not yet named by anyone.
+        ("one intermediate holds a key anyone can compute", 1, good_leaf,
+         {"first_key": "small P-384", "keys": ("P-256",)}),
+        ("intermediate holds a P-256 key anyone can compute", 2, good_leaf,
+         {"second_key": "small P-256", "keys": ("P-256",)}),
+        ("one intermediate holds a key past the small ones", 1, good_leaf,
          {"first_key": "unblocked P-384", "keys": ("P-256",)}),
         ("a compromised CA's certificate served and unused", 2, good_leaf,
          {"extra": "spareweak", "keys": ("P-256",)}),
@@ -48124,13 +48136,58 @@ def harness_tls_chains(argv):
         if name.startswith("revocation:") else
         (name, depth, leaf_ext, dict(change, tight=True) if name == "good" else change)
         for name, depth, leaf_ext, change in mutations)
+    if args.random:
+        #   Name constraints are where other validators have failed one after
+        #   another (wildcards against excluded subtrees, letter case, a CA
+        #   with no constraints between two that have them, a name form the
+        #   constraint does not cover). Chains under one or two constrained
+        #   CAs, drawn from a small vocabulary so that the names collide.
+        import random as random_module
+        rng = random_module.Random(args.seed)
+        leaf_names = ["example.com", "EXAMPLE.COM", "a.example.com", "A.Example.COM", "b.a.example.com",
+                      "xample.com", "notexample.com", "evil.test", "Evil.TEST", "a.evil.test",
+                      "example.com.evil.test", "example.org", "localhost",
+                      "*.example.com", "*.EXAMPLE.COM", "*.a.example.com", "*.evil.test", "*.Evil.Test",
+                      "*.org", "*.example.org", "w*.example.com", "xn--bcher-kva.example.com",
+                      "a_b.example.com", "*.xn--bcher-kva.example.com"]
+        dns_limits = ["example.com", ".example.com", "EXAMPLE.COM", "a.example.com", "A.EXAMPLE.COM",
+                      "evil.test", ".evil.test", "Evil.TEST", "org", "localhost", "com"]
+        ip_limits = ["127.0.0.0/255.0.0.0", "127.0.0.1/255.255.255.255", "10.0.0.0/255.0.0.0",
+                     "0.0.0.0/0.0.0.0", "128.0.0.0/128.0.0.0"]
+        mail_limits = ["example.com", ".example.com", "u@example.com", "evil.test"]
+
+        def random_limits():
+            if rng.random() < 0.25:
+                return ""
+            entries = []
+            for _ in range(rng.choice((1, 1, 2, 3))):
+                kind = rng.choices(("DNS", "IP", "email"), (70, 18, 12))[0]
+                value = rng.choice({"DNS": dns_limits, "IP": ip_limits, "email": mail_limits}[kind])
+                entries.append("%s;%s:%s" % (rng.choice(("permitted", "excluded", "excluded")), kind, value))
+            return "nameConstraints=%s%s\n" % (rng.choice(("critical,", "critical,", "critical,", "")),
+                                              ",".join(entries))
+
+        for number in range(args.random):
+            names = rng.sample(leaf_names, rng.choice((1, 1, 2, 3)))
+            sans = ["IP:127.0.0.1"] + ["DNS:" + n for n in names]
+            if rng.random() < 0.15:
+                sans.append("email:u@" + rng.choice(("example.com", "a.example.com", "evil.test")))
+            first, second = random_limits(), random_limits()
+            mutations += (("random %d: %s | first %s | second %s" % (
+                number, ",".join(sans[1:]), first.strip().replace("nameConstraints=critical,", "").replace("nameConstraints=", "") or "-",
+                second.strip().replace("nameConstraints=critical,", "").replace("nameConstraints=", "") or "-"), 2,
+                good_leaf.replace("subjectAltName=IP:127.0.0.1", "subjectAltName=" + ",".join(sans)),
+                {"first_extra": first, "second_extra": second, "keys": ("P-256",)}),)
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
             ("RSA-2048", ["-newkey", "rsa:2048"]),
             ("RSA-8192", ["-newkey", "rsa:8192"]),
             #   Keys anyone can make (small_p384_key): 156 is on net.c's list of
-            #   compromised CA keys and 157 is not.
+            #   compromised CA keys, 157 and P-256's 5 are only small, and 1049089 is past
+            #   the small ones.
             ("blocked P-384", ["-key", "blocked.key"]),
+            ("small P-384", ["-key", "small384.key"]),
+            ("small P-256", ["-key", "small256.key"]),
             ("unblocked P-384", ["-key", "unblocked.key"]))
     #   Every row runs under these unless it names its own; an 8,192-bit key
     #   takes seconds to make, so only the row about it pays for one.
@@ -48144,6 +48201,8 @@ def harness_tls_chains(argv):
         "distrust-after: leaf under the root, issued after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: root served too, leaf issued after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: root served first, leaf issued after": "Mozilla's distrust-after date; openssl has none",
+        "one intermediate holds a key anyone can compute": "tls_small_keys: k*G for a small k; openssl has no list",
+        "intermediate holds a P-256 key anyone can compute": "tls_small_keys: k*G for a small k; openssl has no list",
         "one intermediate holds a compromised CA key": "tls_blocked_keys: a CA key anyone can compute; openssl has no list",
         "intermediate holds a compromised CA key": "tls_blocked_keys: a CA key anyone can compute; openssl has no list",
         "leaf holds a compromised CA key": "tls_blocked_keys: a CA key anyone can compute; openssl has no list",
@@ -48203,10 +48262,12 @@ def harness_tls_chains(argv):
         "one intermediate holds a compromised CA key": REVOKED_LINE,
         "intermediate holds a compromised CA key": REVOKED_LINE,
         "leaf holds a compromised CA key": REVOKED_LINE,
+        "one intermediate holds a key anyone can compute": REVOKED_LINE,
+        "intermediate holds a P-256 key anyone can compute": REVOKED_LINE,
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
-        "one intermediate holds the next small key",
+        "one intermediate holds a key past the small ones",
         "a compromised CA's certificate served and unused",
         "leaf with only a subject alternative name",
         "intermediate constraints are noncritical", "intermediate has no key usage",
@@ -48329,7 +48390,9 @@ def harness_tls_chains(argv):
         p384 = keys[1][1]
         bench_root_key(work)
         small_p384_key(work, "blocked.key", 156)
-        small_p384_key(work, "unblocked.key", 157)
+        small_p384_key(work, "small384.key", 157)
+        small_p384_key(work, "small256.key", 5, "P-256")
+        small_p384_key(work, "unblocked.key", 1049089)
         for root in ("root", "stranger"):
             made = ["-key", "root.key"] if root == "root" else [*p384, "-keyout", root + ".key"]
             openssl("req", "-x509", *made, "-nodes", "-out",
@@ -48389,6 +48452,8 @@ def harness_tls_chains(argv):
                 pass
 
         go_rows = []
+        random_seen = collections.Counter()
+        random_stricter = []
         go_verifier = None
         go = shutil.which("go")
         go_version = (subprocess.run([go, "version"], capture_output=True, text=True)
@@ -48728,6 +48793,18 @@ def harness_tls_chains(argv):
                                (4, b"wget: TLS handshake with 127.0.0.1 failed\n")),
                            "%s: wget over TLS 1.2 says %r with status %d, not what TLS 1.3 said" % (
                                name, fetched12.stderr.decode(errors="replace")[:200], fetched12.returncode))
+                if mutation.startswith("random "):
+                    #   OpenSSL's verdict is the matrix: refusing more is allowed and counted,
+                    #   accepting what it refuses fails the row.
+                    random_seen["rows"] += 1
+                    random_seen["both accept" if ours_ok and openssl_ok else
+                                "both refuse" if not ours_ok and not openssl_ok else
+                                "only openssl accepts" if openssl_ok else "ONLY WGET ACCEPTS"] += 1
+                    if openssl_ok and not ours_ok:
+                        random_stricter.append(name)
+                    checks(openssl_ok or not ours_ok,
+                           "%s: wget accepts a chain OpenSSL refuses (%s)" % (name, mutation))
+                    continue
                 expected = mutation in MUST_ACCEPT
                 checks(openssl_ok == expected or mutation in DELIBERATE or
                        mutation in LOOSER_THAN_OPENSSL or mutation in SOFT_FAIL,
@@ -48786,6 +48863,11 @@ def harness_tls_chains(argv):
                "a server that is not TLS: wget says %r with status %d, not the handshake line with 4" % (
                    fetched.stderr.decode(errors="replace")[:200], fetched.returncode))
         files.shutdown()
+    if args.random:
+        print("tls chains: %d random name-constraint chains (seed %d): %s" % (
+            args.random, args.seed, ", ".join("%s %d" % item for item in sorted(random_seen.items()))))
+        for line in random_stricter[:12]:
+            print("    stricter than OpenSSL: " + line)
     if go_rows:
         differ = [row for row in go_rows if row[1] != row[2]]
         print("tls chains: Go crypto/x509 second oracle: %d rows, %d differ from OpenSSL" % (
@@ -48806,7 +48888,12 @@ def harness_tls_chains(argv):
         }
         for name, openssl_said, go_said, why, ours_said in go_rows:
             mutation = name.rsplit(" with a ", 1)[0]
-            if ours_said and not go_said:
+            if ours_said and not go_said and mutation.startswith("random "):
+                #   OpenSSL and wget agree here and Go does not; the line is printed above
+                #   for a person to read (Go reads an email constraint without a leading
+                #   dot as covering subdomains, which RFC 5280 does not), and is not a failure.
+                checks(openssl_said, "%s: wget accepts what OpenSSL and Go refuse" % name)
+            elif ours_said and not go_said:
                 checks(mutation in go_limits,
                        "%s: wget accepts what Go's crypto/x509 refuses (%s)" % (name, why))
             else:
@@ -58598,6 +58685,23 @@ def anchor_escape(data):
             for byte in data]
 
 
+#   EC keys anyone can compute: k*G for k = 1..ANCHORS_SMALL_SCALARS. eMudhra's eight intermediates
+#   (2026-10-17) were such keys, with k below 256; net.c refuses a certificate whose key is one.
+ANCHORS_SMALL_SCALARS = 1024
+
+
+def anchors_small_keys():
+    """The first eight bytes of SHA-256 over x || y (what tls_anchors calls a key hash) of k*G on
+    P-256 then P-384, k = 1 to ANCHORS_SMALL_SCALARS, back to back."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+    out = bytearray()
+    for curve, size in ((ec.SECP256R1(), 32), (ec.SECP384R1(), 48)):
+        for k in range(1, ANCHORS_SMALL_SCALARS + 1):
+            point = ec.derive_private_key(k, curve).public_key().public_numbers()
+            out += hashlib.sha256(point.x.to_bytes(size, "big") + point.y.to_bytes(size, "big")).digest()[:8]
+    return bytes(out)
+
+
 def anchors_render(head, anchors):
     """anchors.inc from its header comment and (name, cert sha256 prefix, subject hash, key hash,
     curve, exponent, key, distrust) rows: the keys as one string literal, then a row per root.
@@ -58620,8 +58724,20 @@ def anchors_render(head, anchors):
             ", ".join("0x%02x" % b for b in subject), ", ".join("0x%02x" % b for b in digest),
             curve, exponent, len(key), at, distrust))
         at += len(key)
-    return "%s\n\nstatic const p8 tls_anchor_keys[%d] __attribute__((nonstring)) =\n%s;\n\nstatic const tls_anchor tls_anchors[] = {\n%s\n};\n" % (
-        head, at, "\n".join(keys), "\n".join(rows))
+    small = []
+    line = '    "'
+    for token in anchor_escape(anchors_small_keys()):
+        if len(line) + len(token) >= ANCHOR_COLUMNS:
+            small.append(line + '"')
+            line = '    "'
+        line += token
+    small.append(line + '"')
+    return ("%s\n\nstatic const p8 tls_anchor_keys[%d] __attribute__((nonstring)) =\n%s;\n\nstatic const tls_anchor tls_anchors[] = {\n%s\n};\n"
+            "\n/* Keys anyone can compute: for P-256 and then P-384, k = 1 to TLS_SMALL_KEYS, the first eight bytes\n"
+            "   of SHA-256 over the x and y of k*G, the key hash a tls_anchors row carries. test/differential.py\n"
+            "   --harness anchors writes it. */\n#define TLS_SMALL_KEYS %d\n"
+            "static const p8 tls_small_keys[2 * TLS_SMALL_KEYS * 8] __attribute__((nonstring)) =\n%s;\n") % (
+        head, at, "\n".join(keys), "\n".join(rows), ANCHORS_SMALL_SCALARS, "\n".join(small))
 
 
 def anchors_parse(text):
@@ -58697,6 +58813,81 @@ def anchors_from_bundle(pem, distrust=None):
     return sorted(anchors, key=lambda row: row[0].casefold())
 
 
+def anchors_weak_keys(anchors, bits, checks):
+    """Whether any anchor's key is one anybody could have computed, held to the defect that
+    made eMudhra's eight intermediates forgeable (private scalars below 256) and to its
+    cousins in RSA. An EC root is refused when its point is k*G for some k below 2**bits
+    (x(kG) = x(-kG), so the x coordinate is enough); an RSA modulus when it has a prime
+    factor below 2**24, shares a prime with another root, is factored by Fermat's method in
+    100,000 steps (p and q within about 2**(n/2 - 17) of each other), or carries the ROCA
+    fingerprint (Nemec et al., CVE-2017-15361: n mod p lies in the group 65537 generates, for
+    each of the 17 primes below)."""
+    import math
+    from cryptography.hazmat.primitives.asymmetric import ec
+    curves = {1: ec.SECP256R1(), 2: ec.SECP384R1()}
+    for curve, name in ((1, "P-256"), (2, "P-384")):
+        keys = {}
+        for label, _, _, _, kind, _, key, _ in anchors:
+            if kind == curve:
+                half = len(key) // 2
+                keys[int.from_bytes(key[:half], "big")] = label
+        found = 0
+        for k in range(1, 1 << bits):
+            x = ec.derive_private_key(k, curves[curve]).public_key().public_numbers().x
+            if x in keys:
+                checks(False, "%s root %s is %d*G: its private key is a small number" % (name, keys[x], k))
+                found += 1
+        print("anchors weak: %d %s roots, none below k = 2^%d" % (len(keys), name, bits) if not found else
+              "anchors weak: %d %s roots, %d weak" % (len(keys), name, found))
+        checks(True, "%s roots checked for small private scalars" % name)
+    moduli = [(label, int.from_bytes(key, "big")) for label, _, _, _, kind, _, key, _ in anchors if kind == 3]
+    limit = 1 << 24
+    sieve = bytearray([1]) * limit
+    sieve[0:2] = b"\x00\x00"
+    for i in range(2, int(limit ** 0.5) + 1):
+        if sieve[i]:
+            sieve[i * i::i] = bytearray(len(sieve[i * i::i]))
+    primes = [i for i in range(3, limit) if sieve[i]]
+    primorial_chunks = []
+    chunk = 1
+    for p in primes:
+        chunk *= p
+        if chunk.bit_length() > 60000:
+            primorial_chunks.append(chunk)
+            chunk = 1
+    primorial_chunks.append(chunk)
+    for label, n in moduli:
+        small = [c for c in primorial_chunks if math.gcd(n, c) != 1]
+        checks(not small, "RSA root %s has a prime factor below 2^24" % label)
+        a = math.isqrt(n) + 1
+        factored = False
+        for _ in range(100000):
+            square = a * a - n
+            root = math.isqrt(square)
+            if root * root == square:
+                factored = True
+                break
+            a += 1
+        checks(not factored, "RSA root %s is factored by Fermat's method" % label)
+    for i, (first, n) in enumerate(moduli):
+        for second, m in moduli[i + 1:]:
+            checks(math.gcd(n, m) == 1, "RSA roots %s and %s share a prime" % (first, second))
+    roca = (11, 13, 17, 19, 37, 53, 61, 71, 73, 79, 97, 103, 107, 109, 127, 151, 157)
+    groups = {}
+    chance = 1.0
+    for p in roca:
+        seen, value = set(), 1
+        while value not in seen:
+            seen.add(value)
+            value = value * 65537 % p
+        groups[p] = seen
+        chance *= len(seen) / (p - 1)
+    for label, n in moduli:
+        checks(not all(n % p in groups[p] for p in roca), "RSA root %s has the ROCA fingerprint" % label)
+    print("anchors weak: %d RSA roots, no small factor, no shared prime, no Fermat factor, no ROCA "
+          "fingerprint (a random modulus carries it with probability %.1e)" % (len(moduli), chance))
+
+
 def harness_anchors(argv):
     """The trust anchors in src/net/anchors.inc: 120 rows over one string literal of keys.
 
@@ -58721,6 +58912,11 @@ def harness_anchors(argv):
     parser.add_argument("--trust-source",
                         default="/usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit")
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--weak", type=int, metavar="BITS", nargs="?", const=20,
+                        help="also look for the eMudhra defect in every root: an EC key that is k*G "
+                             "for k below 2^BITS (default 20, about a minute), an RSA modulus with a "
+                             "factor under 2^24, two moduli sharing a prime, primes close enough for "
+                             "Fermat's method, or the ROCA fingerprint")
     args = parser.parse_args(argv)
     path = HARNESS_ROOT / "src/net/anchors.inc"
     text = path.read_text()
@@ -58778,6 +58974,8 @@ def harness_anchors(argv):
         if args.write:
             path.write_text(rendered)
             print("anchors: wrote %s (%d roots, %d key bytes)" % (path, len(fresh), sum(len(r[6]) for r in fresh)))
+    if args.weak:
+        anchors_weak_keys(anchors, args.weak, checks)
     print("anchors: %d roots, %d key bytes" % (len(anchors), at))
     return checks.verdict("anchors", "anchors")
 
@@ -89590,7 +89788,10 @@ def harness_network_cases(argv):
                 results = [subprocess.CompletedProcess([], probe_exit, "", "probe")]
                 if probe_exit == 0:
                     results.append(subprocess.CompletedProcess([], 1, "", "broken lift"))
+                #   The build cache's first use of a compiler runs it once to name it, a
+                #   call these two results do not account for, so the cache is off here.
                 with mock.patch.object(differential.shutil, "which", return_value="clang"), \
+                        mock.patch.dict(os.environ, {"MOONWATER_TEST_CACHE": "off"}), \
                         mock.patch.object(differential.subprocess, "run", side_effect=results), \
                         contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(differential.waterlink_script_scan(""), expected)
