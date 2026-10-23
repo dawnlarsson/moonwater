@@ -184,9 +184,16 @@ parser, not an assurance.
 - emSign Root CA - G1, C1 and C3 are still trusted. Chrome is reviewing G1.
   Check the CCADB list and drop them through `ANCHORS_LEFT_OUT` if a root
   program removes one.
-- Removing a root or key still needs a rebuild and a reinstall. The
-  `moonwater security` work (runtime revocation and key add/remove from the
-  CLI) is meant to close that; this entry should gain a line when it lands.
+- Removing a root or key no longer needs a rebuild: `moonwater security block
+  add SHA256|FILE` refuses a key at runtime, `security trust remove` and
+  `block add` take an anchor out, and the list is kept in the settings block
+  and carried by install and update (`6f93271d`, `19558fe7`, `ef52a335`,
+  `d55611a2`). A built-in block (the eMudhra keys, the small-key screen) cannot
+  be lifted from the CLI. A next incident of this kind is first handled with
+  `block add` on the key hashes, then the source change follows. Not yet
+  covered: the mutation lane has not run on the overlay code, and a signed
+  feed that would deliver blocks without a person typing them is designed, not
+  built.
 - Nothing watches for CA incidents. This one was found on 2026-10-23 during a
   review of recent disclosures, 5 days 7 hours 40 minutes after the first
   browser block.
