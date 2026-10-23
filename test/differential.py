@@ -52218,7 +52218,13 @@ def http_fuzz_source(net, util, driver, tight=False):
     finish = net.index("#endif // STANDARD_MODERN_C_NET_HTTP")
     public = src_slice(net, "/* Whether a fetch whose destination the peer chose may go to ip",
                        "#define TLS_AIA_SECONDS", "http_fuzz_source")
-    http = net[begin:lookup] + public + net[leaf:finish]
+    #   What `moonwater security` published, which http_run reads before its
+    #   first hop: here none, the built-in trust and every switch at rest.
+    overlay = src_slice(net, "/*\n        What `moonwater security` adds to the built-in trust",
+                        "static const p8 tls_oid_ec[7] = {", "http_fuzz_source") + (
+        "static COLD fn tls_overlay_refresh(void)\n{\n"
+        "        memset(&tls_overlay_now, 0, sizeof tls_overlay_now);\n}\n")
+    http = overlay + net[begin:lookup] + public + net[leaf:finish]
     known = util[util.index("static inline INLINE b32 known_is_digit(b32 value)"):
                  util.index("static inline INLINE b32 known_is_ascii(b32 value)")]
     digits = util[util.index("static inline INLINE positive digit_known(p8 character, "
@@ -69877,7 +69883,7 @@ def harness_security_hygiene(argv):
         ("nts_ke_reply", ("data",)),
         ("nts_cookies_take", ("plain",)),
         ("nts_reply", ("reply",)),
-        ("tls_overlay_read", ("bytes",)),
+        ("tls_overlay_entries", ("bytes",)),
         ("http_length_values", ("value",)),
         ("http_url_escape", ("url",)),
         ("http_ipv4_spelling", ("host",)),

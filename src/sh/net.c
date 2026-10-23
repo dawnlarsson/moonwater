@@ -666,6 +666,10 @@ static b32 net_fetch(void)
                 string_format(net_out, "fetch: refused %w: the name resolved to this "
                                    "machine or its link-local network\n",
                               writer_terminal_quoted_name, name);
+        else if (status == HTTP_PLAIN)
+                string_format(net_out, "fetch: refused %w: plain http is off "
+                                   "(moonwater security http)\n",
+                              writer_terminal_quoted_name, name);
         else if (status == HTTP_STATUS && http_response_is_redirect(code))
                 string_format(net_out, "fetch: %p, which is a redirect this does not "
                                    "follow\n", (positive)code);
@@ -867,6 +871,11 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      "checked: " TLS_OVERLAY_PATH " does not "
                                      "read. `moonwater security` says why.\n",
                                      writer_terminal_quoted_name, host);
+        case HTTP_PLAIN:
+                return string_report(log_error, WGET_GENERIC,
+                                     "wget: refused %w: plain http is off "
+                                     "(moonwater security http)\n",
+                                     writer_terminal_quoted_name, where);
         case HTTP_PRIVATE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused a redirect to %w, an address "

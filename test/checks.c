@@ -73969,6 +73969,25 @@ static fn tls_trust_anchor_chains(void)
                 memory_zero(address_of tls_overlay_now, sizeof tls_overlay_now);
                 check("an anchor added verifies by its Name, and a block of its key wins", all);
 
+                //      The switches: each one this build knows turns its bit; one it
+                //      does not know, or one with text, refuses the file.
+                used = TLS_OVERLAY_HEAD;
+                for (p16 id = 1; id <= TLS_SWITCHES; id++)
+                        used += overlay_entry(file + used, TLS_OVERLAY_SWITCH, id, digest, 0);
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all = tls_overlay_read(file, used, address_of overlay) &&
+                      overlay.switches == ((p32)1 << TLS_SWITCHES) - 1;
+                used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_SWITCH,
+                                                        TLS_SWITCHES + 1, digest, 0);
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all &= !tls_overlay_read(file, used, address_of overlay);
+                used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_SWITCH, 1,
+                                                        digest, 4);
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all &= !tls_overlay_read(file, used, address_of overlay);
+                check("each switch this build knows reads, and one it does not, or one with text, "
+                      "refuses the file", all);
+
                 //      A served certificate's own hash and the rebuilt one agree.
                 check("a served key's SubjectPublicKeyInfo hash is the one rebuilt from it",
                       tls_spki_digest(address_of certum_cert, true, served) &&

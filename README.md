@@ -80,6 +80,11 @@ moonwater security trust remove SHA256  stop trusting an anchor that was added
 moonwater security block               every key refused, built in and added
 moonwater security block add SHA256|FILE  refuse a key wherever it is: an anchor, a CA, a leaf, a CT log
 moonwater security block remove SHA256  stop refusing a key that was added; a built-in one stays
+moonwater security tls12 [on|off]      TLS 1.2 where a server offers nothing newer; off asks for 1.3 alone [on]
+moonwater security aia [on|off]        fetch a CA a server left out, from where its certificate says [on]
+moonwater security revocation [soft|hard]  hard refuses a certificate whose revocation cannot be told [soft]
+moonwater security ct [on|off]         ask Certificate Transparency of every chain, not only at the tight tier [off]
+moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
 moonwater wifi [on|off]                the radio, saved networks and those in range
 moonwater bluetooth [on|off]           the radio and the remembered devices
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
@@ -116,7 +121,12 @@ refused. An anchor added is held to the rules of the built-in ones (a CA, P-256,
 or RSA of 2048 to 4096 bits, no name constraints). Both lists are kept with the image's
 settings, so they go along with `setup install` and `update`, and every program reads
 them from /run/moonwater/security when it connects; a file there that does not read
-refuses every checked certificate until boot or the next change writes it again.
+refuses every checked certificate until boot or the next change writes it again. The
+five switches only tighten, each from what the default tier does today, and none can
+loosen a tight build; a change reaches every connection opened after it, while one
+already open, and a download's own redirects and revocation fetches, keep what they
+started with. `http off` leaves the CRL and caIssuers fetches inside TLS alone, which
+are plain http by design and checked by their signatures.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
 (machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, power, boot, and all commands) are

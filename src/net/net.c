@@ -5885,6 +5885,20 @@ _Static_assert(TLS_OVERLAY_LIST == SPARK_SETTINGS_SECURITY &&
                    TLS_OVERLAY_ROOM == SPARK_SETTINGS_PAYLOAD,
                "the overlay is the settings block's security list");
 #endif
+/*
+        The switches, by the id a switch entry carries: each is turned from
+        its default when its entry is there, and each only tightens. They
+        apply to every connection opened after the file says so; one already
+        open keeps what it was opened with, and a fetch keeps what its
+        confined child read for its redirects and its revocation fetches.
+*/
+#define TLS_SWITCH_TLS12_OFF 1      // TLS 1.2 refused: a hello offers 1.3 alone
+#define TLS_SWITCH_AIA_OFF 2        // no CA a server left out is fetched
+#define TLS_SWITCH_REVOCATION_HARD 3 // revocation that cannot be told refuses
+#define TLS_SWITCH_CT_ON 4          // Certificate Transparency asked of every chain
+#define TLS_SWITCH_HTTP_OFF 5       // wget and fetch take no plain http
+#define TLS_SWITCHES 5
+#define tls_switched(id) ((tls_overlay_now.switches >> ((id) - 1)) & 1)
 //      What was read: no file, a file taken, or one that is not one.
 #define TLS_OVERLAY_NONE 0
 #define TLS_OVERLAY_TAKEN 1
@@ -9946,7 +9960,8 @@ static COLD bool tls_trust_holds(tls_conn address_to tls, tls_cert address_to ce
                                  tls_cert address_to top, const p8 address_to staple,
                                  positive staple_length, p64 now)
 {
-        if (MOONWATER_STRICT_NET >= STRICT_TIGHT && !tls_ct_holds(certs, path, depth, top))
+        if ((MOONWATER_STRICT_NET >= STRICT_TIGHT || tls_switched(TLS_SWITCH_CT_ON)) &&
+            !tls_ct_holds(certs, path, depth, top))
         {
                 tls->fault = TLS_FAULT_UNLOGGED;
                 return false;
@@ -10132,7 +10147,8 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
                                 return tls_trust_holds(tls, certs, path, depth,
                                                        address_of root, staple,
                                                        staple_length, now);
-                        if (asked || !certs[child].ca_issuers)
+                        if (asked || !certs[child].ca_issuers ||
+                            tls_switched(TLS_SWITCH_AIA_OFF))
                                 return false;
                         asked = true;
                         length = tls_aia_fetch(certs[child].ca_issuers,
@@ -10348,7 +10364,7 @@ static COLD bipolar tls_client_hello(tls_conn address_to tls, p8 address_to out,
         if (!byte_store_append_exact(address_of hello, groups, sizeof groups) ||
             !byte_store_append_exact(address_of hello, share,
                                      10 + share_length) ||
-            (tls->alpn_length
+            (tls->alpn_length || tls_switched(TLS_SWITCH_TLS12_OFF)
                  ? !byte_store_append_exact(address_of hello, only_thirteen,
                                             sizeof only_thirteen) ||
                        !byte_store_append_exact(address_of hello, tail + 9,
@@ -11499,10 +11515,11 @@ static COLD bipolar tls_handshake(
                 tls_transcript_add(tls, hs, length);
         }
 
-        /* TLS 1.2 is never the answer to a retry. In TLS 1.3 the keys
-           change after ServerHello, so nothing may share its records. */
+        /* TLS 1.2 is never the answer to a retry, nor to a hello that
+           offered 1.3 alone. In TLS 1.3 the keys change after ServerHello,
+           so nothing may share its records. */
         if (hello_kind || (retried && tls->tls12) ||
-            (tls->tls12 && tls->alpn_length) ||
+            (tls->tls12 && (tls->alpn_length || tls_switched(TLS_SWITCH_TLS12_OFF))) ||
             (!tls->tls12 && used != length))
                 goto done;
         tls_transcript_add(tls, hs, length);
@@ -11871,6 +11888,9 @@ static bipolar tls_read_until(
 //      What `moonwater security` published could not be read, so no
 //      certificate was believed (TLS_OVERLAY).
 #define HTTP_OVERLAY (-26)
+//      A plain http: URL, or a redirect to one, while `moonwater security
+//      http off` says no.
+#define HTTP_PLAIN (-27)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -14512,7 +14532,8 @@ static COLD bool tls_revocation_holds(tls_conn address_to tls,
         bool timed = network_deadline_begin_within(address_of deadline,
                                                    TLS_REVOCATION_SECONDS, 0,
                                                    tls->deadline);
-        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT;
+        bool tight = MOONWATER_STRICT_NET >= STRICT_TIGHT ||
+                     tls_switched(TLS_SWITCH_REVOCATION_HARD);
 
         for (positive k = 0; k <= depth; k++)
         {
@@ -14687,6 +14708,8 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
           curve's size, or a modulus of 2048 to 4096 bits whose first byte is
           not zero and an odd exponent of at least 3; at most 8 of them
 
+          a switch is its id (TLS_SWITCH_*) and no text
+
         A kind, a list or a number this build has no word for, a byte out of
         place, a count past the most: the whole file is refused, and into
         says so.
@@ -14718,8 +14741,8 @@ static COLD bool tls_overlay_anchor_read(byte_reader address_to text,
                tls_spki_digest(address_of root, false, into->spki);
 }
 
-static COLD bool tls_overlay_read(const p8 address_to bytes, positive length,
-                                  tls_overlay address_to into)
+static COLD bool tls_overlay_entries(const p8 address_to bytes, positive length,
+                                     tls_overlay address_to into)
 {
         byte_reader reader = byte_reader_open(bytes, length);
         const p8 address_to magic = byte_reader_take(address_of reader, 8);
@@ -14727,8 +14750,6 @@ static COLD bool tls_overlay_read(const p8 address_to bytes, positive length,
         bool zero = !byte_reader_u32le(address_of reader);
         byte_reader entries = byte_reader_window(address_of reader, size);
 
-        memory_fill(into, 0, sizeof(*into));
-        into->state = TLS_OVERLAY_BAD;
         if (!magic || memory_compare(magic, TLS_OVERLAY_MAGIC, 8) || !zero ||
             size > TLS_OVERLAY_ROOM || !byte_reader_end(address_of reader))
                 return false;
@@ -14765,11 +14786,31 @@ static COLD bool tls_overlay_read(const p8 address_to bytes, positive length,
                                 return false;
                         into->anchors++;
                 }
+                else if (kind == TLS_OVERLAY_SWITCH)
+                {
+                        if (!id || id > TLS_SWITCHES || byte_reader_left(address_of text))
+                                return false;
+                        into->switches |= (p32)1 << (id - 1);
+                }
                 else
                         return false;
         }
-        into->state = TLS_OVERLAY_TAKEN;
         return true;
+}
+
+/* The file read whole into into, TAKEN; or nothing of it, BAD. */
+static COLD bool tls_overlay_read(const p8 address_to bytes, positive length,
+                                  tls_overlay address_to into)
+{
+        memory_fill(into, 0, sizeof(*into));
+        if (tls_overlay_entries(bytes, length, into))
+        {
+                into->state = TLS_OVERLAY_TAKEN;
+                return true;
+        }
+        memory_fill(into, 0, sizeof(*into));
+        into->state = TLS_OVERLAY_BAD;
+        return false;
 }
 
 _Static_assert(array_count(tls_anchors) <= sizeof(((tls_overlay address_to)0)->refused) * 8,
@@ -15742,6 +15783,7 @@ static bipolar http_run(string_address start, const http_manners address_to how,
         if (string_length(start) >= sizeof url)
                 return HTTP_BAD_URL;
         string_copy(url, start);
+        tls_overlay_refresh();
         if (how->chain_seconds &&
             !network_deadline_begin(address_of chain, how->chain_seconds, 0))
                 return HTTP_NO_REPLY;
@@ -15781,6 +15823,8 @@ static bipolar http_run(string_address start, const http_manners address_to how,
                         status = HTTP_TLS;
                 if (!status && !http_transport_allowed(address_of secure, tls))
                         status = HTTP_DOWNGRADE;
+                if (!status && !tls && tls_switched(TLS_SWITCH_HTTP_OFF))
+                        status = HTTP_PLAIN;
                 if (!status)
                         status = http_request(
                             head, sizeof head, how->head, host, port, path, tls,
@@ -16510,7 +16554,7 @@ static COLD bool http_apart_task(address_any context, bipolar answer)
 static CONST COLD bool http_apart_status(b64 status)
 {
         return (status <= HTTP_OK && status >= HTTP_UNLOGGED && status != -6) ||
-               status == HTTP_OVERLAY;
+               status == HTTP_OVERLAY || status == HTTP_PLAIN;
 }
 
 static COLD bool http_apart_believed(const http_apart_said address_to said,

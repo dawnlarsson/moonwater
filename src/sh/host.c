@@ -19108,6 +19108,27 @@ static b32 host_dns(string_address address_to arguments, positive count)
 #define HOST_SECURITY TLS_OVERLAY_PATH
 #define HOST_SECURITY_DER_MOST 8192
 
+/*
+        The switches, each its word, the word that is its default, the word
+        that turns it (an entry of the security list, TLS_SWITCH_*), and
+        whether the tight tier has it turned whatever is kept. Each only
+        tightens, so none can take back what a build or a tier asks.
+*/
+static const struct
+{
+        string_address word;
+        string_address standard;
+        string_address turned;
+        p16 id;
+        bool tight;
+} security_switches[] = {
+    {"tls12", "on", "off", TLS_SWITCH_TLS12_OFF, false},
+    {"aia", "on", "off", TLS_SWITCH_AIA_OFF, false},
+    {"revocation", "soft", "hard", TLS_SWITCH_REVOCATION_HARD, true},
+    {"ct", "off", "on", TLS_SWITCH_CT_ON, true},
+    {"http", "on", "off", TLS_SWITCH_HTTP_OFF, false},
+};
+
 /* The file of what the settings' security list holds, or none when it holds
    nothing, which is the built-in trust as it has always been. */
 static fn security_publish(host_settings address_to settings)
@@ -19414,6 +19435,20 @@ static fn security_trust_lines(bool every)
                                       security_kind(tls_anchors[i].curve, tls_anchors[i].key_length),
                                       security_hex(digest),
                                       tls_anchor_refused(i) ? "  (blocked)" : "");
+#ifdef TLS_BENCH_ANCHOR
+        //      A harness's own root, which only its builds have.
+        if (every)
+        {
+                p8 key[96];
+
+                memory_copy(key, tls_bench_anchor_x, 48);
+                memory_copy(key + 48, tls_bench_anchor_y, 48);
+                if (tls_kept_key(2, 0, key, sizeof key, address_of root) &&
+                    tls_spki_digest(address_of root, false, digest))
+                        string_format(log, "  trust  built-in  %s  %s%s\n", security_kind(2, 96),
+                                      security_hex(digest), tls_bench_refused() ? "  (blocked)" : "");
+        }
+#endif
         for (positive i = 0; i < security_shown.anchors; i++)
                 string_format(log, "  trust  added     %s  %s%s\n",
                               security_kind(security_shown.anchor[i].curve,
@@ -19432,6 +19467,19 @@ static fn security_block_lines(void)
                               security_hex(security_shown.block[i]));
 }
 
+/* A switch's line: its word and where it stands, as the file and the tier
+   have it. */
+static fn security_switch_line(positive at, bool label)
+{
+        bool forced = security_switches[at].tight && MOONWATER_STRICT_NET >= STRICT_TIGHT;
+        bool turned = forced || ((security_shown.switches >> (security_switches[at].id - 1)) & 1);
+
+        string_format(log, label ? host_label "security %s %s%s\n" : "  %s %s%s\n",
+                      security_switches[at].word,
+                      turned ? security_switches[at].turned : security_switches[at].standard,
+                      forced ? ", as the tight tier has it" : "");
+}
+
 static b32 security_say(string_address which)
 {
         bool readable = security_read();
@@ -19439,12 +19487,74 @@ static b32 security_say(string_address which)
         //      The lines name the anchors this process's overlay refuses.
         memory_copy_apart(address_of tls_overlay_now, address_of security_shown,
                           sizeof tls_overlay_now);
+        for (positive at = 0; which && at < array_count(security_switches); at++)
+                if (string_equals(which, security_switches[at].word))
+                        security_switch_line(at, true);
+        for (positive at = 0; !which && at < array_count(security_switches); at++)
+                security_switch_line(at, false);
         if (!which || string_equals(which, "trust"))
                 security_trust_lines(which != null);
         if (!which || string_equals(which, "block"))
                 security_block_lines();
         log_flush();
         return readable ? 0 : 1;
+}
+
+/* A switch set to a word: its entry added when the word turns it, taken out
+   when the word is its default, then saved and published. */
+static b32 security_switch(positive which, string_address word)
+{
+        host_settings settings;
+        host_setting setting;
+        host_setting found;
+        bool turn = string_equals(word, security_switches[which].turned);
+        bool have = false;
+        positive at = 0;
+        p16 id = security_switches[which].id;
+        string_address failed;
+        b32 answer = 0;
+
+        return_if(!turn && !string_equals(word, security_switches[which].standard), host_usage());
+        host_need_root();
+        if (!host_acquire())
+                return 1;
+        host_state_ready();
+        host_settings_session(address_of settings);
+        while (host_settings_next(address_of settings, address_of at, address_of setting))
+                if (setting.entry.list == SPARK_SETTINGS_SECURITY &&
+                    setting.entry.kind == SPARK_SETTINGS_SWITCH && setting.entry.id == id)
+                {
+                        found = setting;
+                        have = true;
+                }
+        if (have == turn)
+        {
+                host_say(log, host_label "security %s %s\n", security_switches[which].word, word);
+                goto done;
+        }
+        if (turn)
+        {
+                failed = host_settings_add(address_of settings, SPARK_SETTINGS_SECURITY,
+                                           SPARK_SETTINGS_SWITCH, (string_address) "", 0,
+                                           address_of id);
+                if (failed)
+                {
+                        answer = host_settings_refused("security", failed, address_of settings);
+                        goto done;
+                }
+        }
+        else
+                host_settings_drop(address_of settings, address_of found);
+        string_format(log, host_label "security %s %s; ", security_switches[which].word, word);
+        answer = host_settings_save(address_of settings) ? 0 : 1;
+        security_publish(address_of settings);
+        if (!turn && security_switches[which].tight && MOONWATER_STRICT_NET >= STRICT_TIGHT)
+                host_say(log, host_label "security %s stays %s: the tight tier has it so\n",
+                         security_switches[which].word, security_switches[which].turned);
+
+done:
+        host_release();
+        return answer;
 }
 
 /* One entry added to or taken from a list, then saved and published. */
@@ -19588,6 +19698,13 @@ static b32 host_security(string_address address_to arguments, positive count)
 
         if (count == 2)
                 return security_say(null);
+        for (positive at = 0; at < array_count(security_switches); at++)
+                if (string_equals(arguments[2], security_switches[at].word))
+                {
+                        return_if(count > 4, host_usage());
+                        return count == 3 ? security_say(arguments[2])
+                                          : security_switch(at, arguments[3]);
+                }
         return_if(!trust && !string_equals(arguments[2], "block"), host_usage());
         if (count == 3)
                 return security_say(arguments[2]);
@@ -20048,7 +20165,7 @@ static const host_row host_rows[] = {
     {null, "@taskbar", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@dns", null, 'r'},
-    {null, "security [trust|block ...]", "keys TLS trusts and refuses besides the built-in ones", 'm'},
+    {null, "security [trust|block|SWITCH ...]", "keys TLS trusts and refuses besides the built-in ones, and its switches", 'm'},
     {null, "security", "the built-in trust, and what was added to it or taken from it", 'f'},
     {null, "security trust", "every anchor, built in and added, by the SHA-256 of its key", 'f'},
     {null, "security trust add FILE", "trust a CA certificate, PEM or DER, as the built-in anchors are", 'f'},
@@ -20056,6 +20173,11 @@ static const host_row host_rows[] = {
     {null, "security block", "every key refused, built in and added", 'f'},
     {null, "security block add SHA256|FILE", "refuse a key wherever it is: an anchor, a CA, a leaf, a CT log", 'f'},
     {null, "security block remove SHA256", "stop refusing a key that was added; a built-in one stays", 'f'},
+    {null, "security tls12 [on|off]", "TLS 1.2 where a server offers nothing newer; off asks for 1.3 alone [on]", 'f'},
+    {null, "security aia [on|off]", "fetch a CA a server left out, from where its certificate says [on]", 'f'},
+    {null, "security revocation [soft|hard]", "hard refuses a certificate whose revocation cannot be told [soft]", 'f'},
+    {null, "security ct [on|off]", "ask Certificate Transparency of every chain, not only at the tight tier [off]", 'f'},
+    {null, "security http [on|off]", "plain http in wget and fetch, and redirects to it [on]", 'f'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
