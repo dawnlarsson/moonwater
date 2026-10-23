@@ -45,6 +45,7 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 | Moonwater exposure window | 2026-09-14 16:38 to 2026-10-23 03:25, 38 days 10 hours 47 minutes |
 | After public report | 2026-10-17 18:05 to 2026-10-23 03:25, 5 days 9 hours 20 minutes |
 | Fixed by | `47cc1cc8` (fix), `08d96ebb` (anchor count check, audit seal) |
+| Hardening after the fix | `d958266a` (refuses any EC key anyone can compute, with or without a list) |
 | Related | `38ddcbc9` (runs the official Wycheproof vectors in the crypto lane) |
 
 **What happened upstream.** eMudhra generated eight intermediate CA keys in a
@@ -91,8 +92,19 @@ accepted at the default tier, for three reasons:
   the intermediates at all.
 
 An attacker needed a network position to serve the chain. Every client that
-goes through `tls_verify_chain` was affected: wget and fetch (and the
-downloads built on them), NTS key establishment, and DNS over TLS.
+goes through `tls_verify_chain` was affected: wget and fetch, NTS key
+establishment, and DNS over TLS. The worst case is NTS on a machine whose clock
+has never been set: its first answer is believed, so a forged NTS server could
+have set the clock to any time after the build date, and every later
+certificate decision follows the clock. On a clock that is set, a step past 2
+seconds needs a second server's agreement and cannot go back before the last
+authenticated time (`clock.good`).
+
+Checked and not exposed. The bowl root-filesystem downloads: every row is a
+SHA-256 compiled into `src/bowl.c` or an OpenPGP signature against a pinned
+key, and a row that pins nothing is refused, so a forged mirror certificate
+serves a file that fails the digest. `moonwater setup update` writes the build
+that is running onto a disk and downloads nothing.
 
 **Evidence of exploitation.** None known. Moonwater keeps no log of accepted
 chains, so a past acceptance cannot be ruled out from our side. Chrome reports
@@ -131,6 +143,19 @@ CT-visible part.
   230514 of 230514 on x86-64, 230452 of 230452 on arm64 and riscv64,
   `tls-chains` 1916 of 1916, `anchors` 481 of 481.
 
+**Hardening after the fix (`d958266a`).** The blocklist only helps once someone
+names the keys. `tls_small_keys` in `src/net/anchors.inc` holds a key hash for
+k*G, k = 1 to 1024, on P-256 and P-384, and `tls_key_blocked` refuses any
+certificate whose EC key is on it, at every tier. The eMudhra keys (k below 256)
+would have been refused on 2026-10-17 with no list. The same commit audits the
+119 built-in roots for the defect (`--harness anchors --weak`): no EC root is
+k*G for k below 2^20; no RSA root has a prime factor under 2^24, shares a prime
+with another root, falls to 100,000 steps of Fermat's method, or carries the
+ROCA fingerprint. The detector fires on planted keys of each kind. What this
+does not cover: a weak key that is not a small scalar (a key from a bad but
+non-trivial generator), RSA keys on served intermediates (no runtime screen),
+and keys outside P-256 and P-384.
+
 **Still open.**
 
 - A machine is fixed only after it boots an image built from `47cc1cc8` or
@@ -153,3 +178,28 @@ CT-visible part.
 The eight key hashes were taken from Go's fix
 (`golang/go@7f86f957633e`) and from Jackson's `impacted-intermediates.json`;
 they agree, and the scalars above reproduce them.
+
+## Reviews with no exposure found
+
+Disclosures read against the code on 2026-10-23, each with the check that was
+made. Advisory numbers are as secondary sources gave them; none was checked
+against NVD. A row here is evidence the class was looked at on that date, not a
+promise about later code.
+
+| Class (public disclosure) | Result | Check made |
+|---|---|---|
+| Host treated as IP by one component and as a name by another (Node.js, Oct 2026) | Not exposed | `string_to_host` takes strict dotted quads only; the connect path and `tls_general_name_match` classify a host by that one function; `--harness tls_hostnames` holds the name check to OpenSSL over 1531 pairs, NUL bytes and partial wildcards included |
+| X.509 name-constraint bypass via wildcards, case, mixed name types, unconstrained middle CA (wolfSSL, GnuTLS, pyca, Go, AWS-LC, 2026) | Not exposed | `tls_chains --random`: 1,500 random constrained chains over three seeds, none accepted that OpenSSL refuses; wildcard under an excluded subtree refused, including in another letter case |
+| ECDSA edge cases: r or s of 0, point at infinity, invalid curve points, DER laxness (Psychic Signatures 2022, OSEC-2026-13) | Not exposed | Official Wycheproof vectors through the production crypto on x86-64, arm64 and riscv64: 8837 of 8837 each (`MOONWATER_WYCHEPROOF`, lane `net_crypto`) |
+| CurveBall (explicit EC parameters), MD5 or SHA-1 signatures, inner and outer signature algorithm mismatch | Not exposed | `tls_parse_cert` accepts the P-256 and P-384 OIDs only, ECDSA-SHA2 and RSA-PKCS1-SHA2 only, and requires the two algorithm fields to match |
+| DHCP option injection into scripts or lease files (dracut, FreeBSD dhclient, TP-Link, 2026); TunnelVision, option 121 routes (2024) | Not exposed | The client asks for options 1, 3 and 6 and reads 1, 3, 6, 51, 54, 58 and 59 as binary values; no string option is consumed and no route option is read |
+| Credentials carried across a redirect (curl 2026 series; wget CVE-2021-31879) | Not exposed | The HTTP client has no userinfo, `Authorization`, cookies, netrc or proxy; userinfo in a URL or `Location` is refused |
+| Brotli decoder write (Node.js, Oct 2026); response decompression bombs | Not exposed | No Brotli in the tree; the client sends no `Accept-Encoding` and decodes no content encoding |
+| TLS session-ticket forgery (nginx, Oct 2026) | Not exposed | The client offers no PSK and resumes nothing |
+| WPS setup bypass (Broadcom, Oct 2026) | Not exposed | No WPS code |
+| Unbound source-port side channel; DNS cache poisoning in general | Not exposed | The stub draws a CSPRNG source port per query on its own connected socket, randomizes the question's letter case, checks the ID and the echoed question |
+| PwnEscape, CVE-2026-99999 (kernel IPv4 checksum offset, Oct 2026) | Not reachable as configured | The profiles have no TUN or vhost; AF_PACKET with a virtio header needs CAP_NET_RAW. Kernel pinned at 7.3; confirm `ip_check_csum_start` is in the tarball at the next fetch |
+| NTP time shifting (published attacks on ntpd, 2021 and after) | Bounded | A set clock steps at most 2 s on one server's word; a bigger step needs a second server; no step goes back before the last authenticated time. No cumulative cap across polls (about 2 s per poll, polls at 4 to 30 minutes) |
+| Wi-Fi downgrade and Dragonblood (WPA3 to WPA2, SAE timing) | Read, not exercised today | SAE with hash-to-element, hunting fixed at 40 whole passes, PMF required where offered, and a network joined with WPA3 is never joined with WPA2 (`src/sh/host.c`) |
+| Unsigned bootstrap downloads | Not exposed | Every bowl row is a compiled-in SHA-256 or a pinned OpenPGP key; a row that pins nothing is refused (`src/bowl.c`) |
+| SSH (Terrapin, regreSSHion) | Not applicable | No SSH implementation in the tree; OpenSSH inside a bowl is the distribution's package |
