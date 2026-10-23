@@ -177,7 +177,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
-    SETTING_PLAIN_ROW(null, "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
+    SETTING_PLAIN_ROW("Taskbar", "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
                       .need = "how Canvas draws", .refusal = "taskbar position is bottom, top, left or right, not %s\n",
                       .usage = "taskbar position [bottom|top|left|right]", .help = "the edge of the screen the taskbar sits on [bottom]"),
