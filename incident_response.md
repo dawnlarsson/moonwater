@@ -171,6 +171,12 @@ For those 12 days the chain verifier was covered by the unit lanes and
 `d958266a`: net lane 230515 of 230515 on x86-64 and at the tight tier, 230453
 of 230453 on arm64 and riscv64, `tls-chains` 1932 of 1932.
 
+Deep fuzz after the fix, on `20734c17` plus the tests: eight parsers (DER,
+OCSP, CRL, TLS handshake, chain verification, HTTP at the default and tight
+tiers, DNS, DHCP) for 20 minutes each with the 20,000-run cap lifted, one seed
+each, ASan and UBSan: no crash and no sanitizer report. That is 20 minutes a
+parser, not an assurance.
+
 **Still open.**
 
 - A machine is fixed only after it boots an image built from `47cc1cc8` or
