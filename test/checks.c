@@ -73750,7 +73750,22 @@ static fn tls_trust_anchor_chains(void)
                         bad_anchors++;
         }
         check("every anchor decodes to its length and finds itself by key",
-              bad_anchors == 0 && array_count(tls_anchors) == 120);
+              bad_anchors == 0 && array_count(tls_anchors) == 119);
+
+        /* emSign ECC Root CA - G3 signs the eMudhra intermediates whose keys
+           anyone can compute (2026-10-17); Mozilla removed it from NSS on
+           2026-10-20. Neither its key nor its Name is an anchor. */
+        {
+                static const p8 emsign_name[8] = {0x94, 0x6f, 0xd2, 0x10, 0x51, 0xa4, 0x46, 0x99};
+                static const p8 emsign_key[8] = {0x86, 0xd6, 0x38, 0x68, 0xe9, 0xe7, 0x3e, 0x17};
+                positive left = 0;
+
+                for (positive i = 0; i < array_count(tls_anchors); i++)
+                        if (!memory_compare(tls_anchors[i].name, emsign_name, 8) ||
+                            !memory_compare(tls_anchors[i].key_hash, emsign_key, 8))
+                                left++;
+                check("emSign ECC Root CA - G3 is not a trust anchor", left == 0);
+        }
 
         /* Mozilla's distrust-after: a root that has a date anchors a leaf
            issued up to it, to the second, and none after. */
