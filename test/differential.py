@@ -47266,6 +47266,8 @@ def openssl_workbench(work):
         (work / (name + ".ext")).write_text("[extensions]\n" + extensions)
         openssl("req", "-new", *key, "-nodes", "-keyout", name + ".key", "-out",
                 name + ".csr", "-subj", subject)
+        if "-key" in key:
+            (work / (name + ".key")).write_bytes((work / key[key.index("-key") + 1]).read_bytes())
         if x509_can_set_dates:
             openssl("x509", "-req", "-in", name + ".csr", "-CA", issuer + ".pem",
                     "-CAkey", issuer + ".key", "-set_serial",
@@ -47553,6 +47555,18 @@ def spark_shell_command(cc, output, anchor=None, defines=()):
             *(['-DTLS_BENCH_ANCHOR="%s"' % anchor] if anchor else []),
             *("-D" + define for define in defines),
             "-o", str(output), "programs/shell.c"]
+
+
+def small_p384_key(work, name, scalar):
+    """work/NAME: the P-384 key whose private scalar is the small number SCALAR, which
+    anyone can make. eMudhra's eight intermediates of 2026-10-17 are such keys (156, 230,
+    115, 56, 155, 4, 66 and 237, found by trying every scalar below 256 against the
+    published public-key hashes), so a chain signed by one is a forger's; SCALAR 156 is
+    the first of net.c's tls_blocked_keys and 157 is the next scalar, which is not."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    (work / name).write_bytes(ec.derive_private_key(scalar, ec.SECP384R1()).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 
 
 def bench_root_key(work):
@@ -47959,6 +47973,20 @@ def harness_tls_chains(argv):
         ("an unrelated root served too", 2, good_leaf, {"extra": "stranger"}),
         ("a SHA-1 legacy root served too", 2, good_leaf, {"extra": "legacy"}),
         ("an impostor intermediate served first", 2, good_leaf, {"impostor": True}),
+        # eMudhra's intermediates (2026-10-17) have private keys below 256, so
+        # anyone can sign as them under a root that trusts them. The bench
+        # root signs one such key, which openssl, with no list of them, takes;
+        # this tree refuses the key wherever it sits in the chain, and does not
+        # mind a certificate of one that nothing in the chain needs.
+        ("one intermediate holds a compromised CA key", 1, good_leaf,
+         {"first_key": "blocked P-384", "keys": ("P-256",)}),
+        ("intermediate holds a compromised CA key", 2, good_leaf,
+         {"second_key": "blocked P-384", "keys": ("P-256",)}),
+        ("leaf holds a compromised CA key", 2, good_leaf, {"keys": ("blocked P-384",)}),
+        ("one intermediate holds the next small key", 1, good_leaf,
+         {"first_key": "unblocked P-384", "keys": ("P-256",)}),
+        ("a compromised CA's certificate served and unused", 2, good_leaf,
+         {"extra": "spareweak", "keys": ("P-256",)}),
         # Mozilla's server-auth distrust-after (anchors.inc's last field): the
         # bench root carries the date 2024-06-15 23:59:59 in a second build of
         # the shell, and a leaf whose notBefore is later than that is refused
@@ -48099,7 +48127,11 @@ def harness_tls_chains(argv):
     keys = (("P-256", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"]),
             ("P-384", ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:secp384r1"]),
             ("RSA-2048", ["-newkey", "rsa:2048"]),
-            ("RSA-8192", ["-newkey", "rsa:8192"]))
+            ("RSA-8192", ["-newkey", "rsa:8192"]),
+            #   Keys anyone can make (small_p384_key): 156 is on net.c's list of
+            #   compromised CA keys and 157 is not.
+            ("blocked P-384", ["-key", "blocked.key"]),
+            ("unblocked P-384", ["-key", "unblocked.key"]))
     #   Every row runs under these unless it names its own; an 8,192-bit key
     #   takes seconds to make, so only the row about it pays for one.
     every_key = ("P-256", "P-384", "RSA-2048")
@@ -48112,6 +48144,9 @@ def harness_tls_chains(argv):
         "distrust-after: leaf under the root, issued after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: root served too, leaf issued after": "Mozilla's distrust-after date; openssl has none",
         "distrust-after: root served first, leaf issued after": "Mozilla's distrust-after date; openssl has none",
+        "one intermediate holds a compromised CA key": "tls_blocked_keys: a CA key anyone can compute; openssl has no list",
+        "intermediate holds a compromised CA key": "tls_blocked_keys: a CA key anyone can compute; openssl has no list",
+        "leaf holds a compromised CA key": "tls_blocked_keys: a CA key anyone can compute; openssl has no list",
         "no subject alternative name": "a name is taken from subjectAltName only, never the CN",
         "leaf is a CA": "a certificate that says CA:TRUE is not an end entity (tls_leaf_authorized)",
         "leaf wildcard whose star can be an excluded label":
@@ -48164,9 +48199,15 @@ def harness_tls_chains(argv):
         "revocation: the intermediate on its issuer's CRL": REVOKED_LINE,
         "revocation: the first intermediate on the root's CRL": REVOKED_LINE,
         "revocation: a must-staple leaf whose server staples nothing": UNCHECKED_LINE,
+        #   A key on tls_blocked_keys is a revoked one, whoever the CRL is.
+        "one intermediate holds a compromised CA key": REVOKED_LINE,
+        "intermediate holds a compromised CA key": REVOKED_LINE,
+        "leaf holds a compromised CA key": REVOKED_LINE,
     }
     MUST_ACCEPT = {
         "good", "under the root", "one intermediate", "root served too",
+        "one intermediate holds the next small key",
+        "a compromised CA's certificate served and unused",
         "leaf with only a subject alternative name",
         "intermediate constraints are noncritical", "intermediate has no key usage",
         "unknown noncritical intermediate extension", "unknown noncritical leaf extension",
@@ -48287,12 +48328,18 @@ def harness_tls_chains(argv):
 
         p384 = keys[1][1]
         bench_root_key(work)
+        small_p384_key(work, "blocked.key", 156)
+        small_p384_key(work, "unblocked.key", 157)
         for root in ("root", "stranger"):
             made = ["-key", "root.key"] if root == "root" else [*p384, "-keyout", root + ".key"]
             openssl("req", "-x509", *made, "-nodes", "-out",
                     root + ".pem", "-days", "3650", "-sha384", "-subj", "/CN=tls chains root",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        openssl("req", "-x509", "-key", "blocked.key", "-nodes", "-out", "spareweak.pem",
+                "-days", "3650", "-sha384", "-subj", "/CN=tls chains spare weak",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
         # A crypto policy may refuse to sign with SHA-1; that loses one row,
         # not the oracle.
         try:
@@ -48428,7 +48475,8 @@ def harness_tls_chains(argv):
                                     change.get("first_pathlen", 1)),
                          change.get("first_key_usage", "keyCertSign,cRLSign")))
                     first_extensions += change.get("first_extra", "") + crl_point("first")
-                    issue("first", p384, "/CN=tls chains first", top,
+                    issue("first", dict(keys).get(change.get("first_key"), p384),
+                          "/CN=tls chains first", top,
                           first_extensions,
                           change.get("first_dates", (-1, 90)),
                           change.get("first_digest", "sha384"))
@@ -58536,6 +58584,12 @@ int main(void)
 
 ANCHOR_COLUMNS = 200
 
+# Roots the bundle carries that anchors.inc leaves out although this client could verify them,
+# by the first 16 hex digits of the certificate's SHA-256: emSign ECC Root CA - G3 signs the
+# eMudhra intermediates whose private keys anyone can compute (disclosed 2026-10-17); Mozilla
+# removed it from NSS 3.131.1 on 2026-10-20, and Arch's 3.129 bundle still lists it.
+ANCHORS_LEFT_OUT = {"86a1ecba089c4a8d": "emSign ECC Root CA - G3"}
+
 
 def anchor_escape(data):
     """Bytes as the body of a C string literal: printable ASCII as itself, the rest as three-digit
@@ -58634,6 +58688,8 @@ def anchors_from_bundle(pem, distrust=None):
             key = numbers.x.to_bytes(size, "big") + numbers.y.to_bytes(size, "big")
         else:
             continue
+        if certificate.fingerprint(hashes.SHA256()).hex()[:16] in ANCHORS_LEFT_OUT:
+            continue
         anchors.append((label.decode(), certificate.fingerprint(hashes.SHA256()).hex()[:16],
                         hashlib.sha256(certificate.subject.public_bytes()).digest()[:8],
                         hashlib.sha256(key).digest()[:8], curve, exponent, key,
@@ -58681,7 +58737,21 @@ def harness_anchors(argv):
                                  distrust // 100 % 100 < 60 and distrust % 100 < 60),
                "%s: a distrust-after of %d is not a date" % (name, distrust))
         at += len(key)
-    checks(len(anchors) == 120 and at == 39328, "%d anchors, %d key bytes" % (len(anchors), at))
+    checks(len(anchors) == 119 and at == 39232, "%d anchors, %d key bytes" % (len(anchors), at))
+    checks(not any(row[1] in ANCHORS_LEFT_OUT for row in anchors),
+           "anchors.inc carries a root ANCHORS_LEFT_OUT names")
+    #   net.c's tls_blocked_keys are the SHA-256 of the DER SubjectPublicKeyInfo of the eight
+    #   P-384 keys with these private scalars (eMudhra, 2026-10-17; the numbers were found
+    #   against the published hashes, and the hashes are recomputed here from them).
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    table = re.search(r"tls_blocked_keys\[8\]\[32\] = \{(.*?)\}\};", (HARNESS_ROOT / "src/net/net.c").read_text(), re.S)
+    listed = bytes(int(b, 16) for b in re.findall(r"0x([0-9a-f]{2})", table.group(1))) if table else b""
+    made = [hashlib.sha256(ec.derive_private_key(d, ec.SECP384R1()).public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).digest()
+        for d in (156, 230, 115, 56, 155, 4, 66, 237)]
+    checks([listed[at:at + 32] for at in range(0, len(listed), 32)] == made,
+           "net.c's tls_blocked_keys are not the eight small P-384 keys' SPKI hashes, in order")
     checks([row[0].casefold() for row in anchors] == sorted(row[0].casefold() for row in anchors),
            "the rows are not sorted by name")
     checks(anchors_render(head, anchors) == text, "anchors.inc is not what anchors_render writes for it")
