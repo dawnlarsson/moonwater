@@ -19675,8 +19675,11 @@ static b32 security_change(bool trust, bool adding, string_address word)
                                          trust ? SPARK_SETTINGS_TRUST : SPARK_SETTINGS_BLOCK,
                                          word, named ? digest : null, address_of setting))
                 {
-                        answer = host_refuse("security %s has no one entry %s\n", list,
-                                             named ? security_hex(digest) : word);
+                        //      host_refuse names one thing: the list is in the words.
+                        answer = trust ? host_refuse("security trust has no one entry %s\n",
+                                                     named ? security_hex(digest) : word)
+                                       : host_refuse("security block has no one entry %s\n",
+                                                     named ? security_hex(digest) : word);
                         goto done;
                 }
                 security_entry_digest(address_of setting, digest);

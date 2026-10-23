@@ -44389,6 +44389,15 @@ def harness_moonwater_cli(argv):
                 'ntp nts servers ""', "ntp nts servers default",
                 "dns tls", "dns tls on", "dns tls only", "dns tls off", "dns tls maybe",
                 "dns tls on extra",
+                #       moonwater security: its lists, a key added and taken out, its
+                #       switches turned and back, and words that are no key.
+                "security", "security bogus", "security trust", "security block",
+                "security trust extra", "security tls12", "security tls12 maybe",
+                "security tls12 off", "security tls12 on", "security revocation hard",
+                "security revocation soft", "security ct on extra", "security block add",
+                "security block add nothex", "security block add abababababababababababababababababababababababababababababababab", "security block remove abababababababababababababababababababababababababababababababab",
+                "security block remove ab", "security trust add /etc/passwd",
+                "security trust remove nothex", "security block add a b",
                 "keyboard", "keyboard xx", "keyboard a b", "name", "name random", "name x",
                 "name a b", "name random x", 'name ""', "name -x", "name x-", "name UPPER",
                 "name " + "x" * 64, "name ../x", "canvas", "canvas on", "canvas off",
@@ -44464,6 +44473,16 @@ def harness_moonwater_cli(argv):
             'dns tls on',
             'dns tls only',
             'dns tls off',
+            'security',
+            'security trust',
+            'security block',
+            'security tls12',
+            'security tls12 off',
+            'security tls12 on',
+            'security revocation hard',
+            'security revocation soft',
+            'security block add abababababababababababababababababababababababababababababababab',
+            'security block remove abababababababababababababababababababababababababababababababab',
             'keyboard',
             'canvas scale',
             'canvas scale 2',
@@ -44529,6 +44548,10 @@ def harness_moonwater_cli(argv):
         ]:
             walk_classes[vector] = 0
         for vector in [
+            'security block add nothex',
+            'security block remove ab',
+            'security trust add /etc/passwd',
+            'security trust remove nothex',
             'timezone Mars/Olympus',
             'timezone +99',
             'timezone ""',
@@ -44608,6 +44631,12 @@ def harness_moonwater_cli(argv):
             'ntp nts servers a b c d e',
             'dns tls maybe',
             'dns tls on extra',
+            'security bogus',
+            'security trust extra',
+            'security tls12 maybe',
+            'security ct on extra',
+            'security block add',
+            'security block add a b',
             'keyboard a b',
             'name a b',
             'name random x',
@@ -59771,8 +59800,13 @@ b32 main(void)
                     tls_parse_cert(issuer, (positive)issuer_length, certs + 1, null))
                         string_format(log, "%s parse\n", program_argument(at));
                 else
+                {
+                        //      What `moonwater security` blocks (TLS_OVERLAY_PATH), as a
+                        //      connection reads it before it starts.
+                        tls_overlay_refresh();
                         string_format(log, "%s %p\n", program_argument(at),
                                       (positive)tls_ct_holds(certs, chain, 1, certs + 1));
+                }
         }
         log_flush();
         return 0;
@@ -59943,7 +59977,8 @@ def harness_tls_ct(argv):
         (work / "ctd").mkdir()
         (work / "ctd" / "driver.c").write_text(TLS_CT_DRIVER.replace("../src", str(HARNESS_ROOT / "src")))
         built = build_run(spark_shell_command(args.cc, work / "driver", None,
-                                                   ('TLS_BENCH_CT="%s"' % (work / "logs.h"),))
+                                                   ('TLS_BENCH_CT="%s"' % (work / "logs.h"),
+                                                    'TLS_OVERLAY_PATH="%s"' % (work / "security")))
                                [:-1] + [str(work / "ctd" / "driver.c")],
                                cwd=HARNESS_ROOT, capture_output=True, text=True)
         if built.returncode:
@@ -59968,6 +60003,26 @@ def harness_tls_ct(argv):
             got = said.get(names[at])
             checks(got == ("1" if logged else "0"),
                    "%s: tls_ct_holds says %s, the model %s" % (name, got, "logged" if logged else "not"))
+
+        #   A log's id is its key's SPKI hash, so `moonwater security block`
+        #   names a log as it names a CA: a blocked log counts no SCT. Case 0
+        #   is SCTs from logs 0 and 2 (two operators, 90 days), case 4 from
+        #   logs 0, 1 and 2 (400 days, which asks three).
+        def verdicts(*ids):
+            if ids:
+                body = b"".join(bytes([5, 4]) + struct.pack("<HHH", 1, 32, 0) + log_ids[i]
+                                for i in ids)
+                (work / "security").write_bytes(b"MWSECURE" + struct.pack("<II", len(body), 0) + body)
+            elif (work / "security").exists():
+                (work / "security").unlink()
+            again = subprocess.run([str(work / "driver"), names[0], names[4]], capture_output=True,
+                                   text=True, timeout=120)
+            return [line.rsplit(" ", 1)[1] for line in again.stdout.splitlines() if " " in line]
+        checks(verdicts(1) == ["1", "0"],
+               "a blocked log counts no SCT: with log 1 blocked, logs 0 and 2 still log a leaf and "
+               "0, 1 and 2 are one SCT short")
+        checks(verdicts(0, 1) == ["0", "0"], "with logs 0 and 1 blocked neither leaf is logged")
+        checks(verdicts() == ["1", "1"], "and with the file gone both are logged again")
 
         #   End to end, through wget at the tight tier.
         if args.units:
