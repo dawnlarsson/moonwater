@@ -73797,6 +73797,26 @@ static fn tls_trust_anchor_chains(void)
                                     tls_key_blocked(address_of cert) != (scalars[s] <= TLS_SMALL_KEYS))
                                         wrong++;
                         }
+                /* A certificate with no SPKI recorded, or one of no length, is
+                   not looked up, whatever its key is. */
+                {
+                        p8 scalar[32] = {0};
+                        p8 point[97];
+                        tls_cert cert;
+
+                        scalar[31] = 1;
+                        if (!crypto_ecdh_p256_public(point, scalar))
+                                wrong++;
+                        memory_fill(address_of cert, 0, sizeof cert);
+                        cert.curve = 1;
+                        memory_copy(cert.qx + 16, point + 1, 32);
+                        memory_copy(cert.qy + 16, point + 33, 32);
+                        if (tls_key_blocked(address_of cert))
+                                wrong++;
+                        cert.spki = point;
+                        if (tls_key_blocked(address_of cert))
+                                wrong++;
+                }
                 check("an EC key that is k*G for k up to 1024 is blocked and the next scalar is not",
                       wrong == 0);
         }
