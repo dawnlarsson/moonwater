@@ -58045,6 +58045,9 @@ def tls_verify_chain_lift(net, now=None, aia=None):
         "#include TLS_BENCH_ANCHOR\n", "")
     anchor_code += src_slice(net, "/* The last certificate served names its issuer.",
                                 "/*\n        Whether the clock can be believed at all")
+    #   The compromised CA keys tls_key_blocked (in anchor_code) looks a certificate's key up in.
+    blocked_keys = src_slice(net, "/* Intermediate CA keys that are known to be compromised",
+                             "static const p8 tls_oid_ec[7]")
     if now:
         date = ("static bool tls_date_now(p64 address_to value)\n"
                 "{\n        address_to value = %s;\n        return true;\n}\n"
@@ -58066,6 +58069,7 @@ def tls_verify_chain_lift(net, now=None, aia=None):
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
 #define TLS_FAULT_CLOCK 4
+#define TLS_FAULT_REVOKED 5
 typedef struct
 {
         bool check_cert;
@@ -58079,12 +58083,12 @@ typedef struct
         p8 leaf_curve;
         p8 fault;
 } tls_conn;
-""" + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + anchor_code + date +
+""" + anchor_types + (HARNESS_ROOT / "src/net/anchors.inc").read_text() + blocked_keys + anchor_code + date +
             "static COLD positive tls_aia_fetch(const p8 address_to url, positive length,\n"
             "                                   p8 address_to into, positive room)\n{\n" +
             (aia or "        (void)url;\n        (void)length;\n        (void)into;\n"
                     "        (void)room;\n        return 0;\n") + "}\n" +
-            "static COLD bool tls_revocation_holds(tls_conn address_to tls,\n"
+            "static COLD bool tls_trust_holds(tls_conn address_to tls,\n"
             "        tls_cert address_to certs, const positive address_to path,\n"
             "        positive depth, tls_cert address_to top, const p8 address_to staple,\n"
             "        positive staple_length, p64 now)\n{\n"
