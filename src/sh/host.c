@@ -212,6 +212,7 @@ static fn radio_restore(void);
 static fn radio_recover(void);
 static fn locale_restore(void);
 static fn dns_restore(void);
+static fn security_publish(host_settings address_to settings);
 //      Set by the machine process alone, in moonwater.c: only it asks the time.
 static bool host_machine_self;
 static fn name_restore(void);
@@ -2224,6 +2225,7 @@ static fn host_booted(host_settings address_to settings)
         //      What follows starts commands that outlive this one.
         host_release_all();
         name_restore();
+        security_publish(settings);
         host_events_boot(settings);
 }
 
@@ -2376,6 +2378,8 @@ static b32 host_boot(void)
         if (known)
         {
                 host_settings_keep(address_of settings);
+                //      Before the disks are waited for: TLS can start sooner.
+                security_publish(address_of settings);
                 host_bind_apply(address_of settings);
         }
 
@@ -3529,16 +3533,22 @@ static string_address host_settings_add(host_settings address_to settings,
                                         positive length, p16 address_to id)
 {
         positive room = spark_settings_padded(length);
+        bool security = list == SPARK_SETTINGS_SECURITY;
         struct spark_settings_entry entry;
 
         if (length > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_TEXT_MOST
+                      : security                  ? SPARK_SETTINGS_TRUST_MOST
                                                   : SPARK_SETTINGS_TEXT_MOST))
                 return list == SPARK_SETTINGS_BIND ? "a bound command is 255 bytes at most"
+                       : security                  ? "an anchor is 552 bytes at most"
                                                    : "an entry is 4096 bytes at most";
 
         if (host_settings_count(settings, list) >=
-            (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_MOST : SPARK_SETTINGS_LIST_MOST))
+            (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_MOST
+             : security                  ? SPARK_SETTINGS_SECURITY_MOST
+                                         : SPARK_SETTINGS_LIST_MOST))
                 return list == SPARK_SETTINGS_BIND ? "the bind table holds 48 events at most"
+                       : security                  ? "the security list holds 96 entries at most"
                                                    : "a list holds 16 entries at most";
 
         if (SPARK_SETTINGS_PAYLOAD - settings->length < SPARK_SETTINGS_ENTRY + room)
@@ -3549,8 +3559,9 @@ static string_address host_settings_add(host_settings address_to settings,
         entry.kind = kind;
         entry.length = (p16)length;
 
-        //      A bound command's id is its event, which the caller names.
-        if (list == SPARK_SETTINGS_BIND)
+        //      A bound command's id is its event, and a security entry's says
+        //      which switch it is or who added it: the caller names both.
+        if (list == SPARK_SETTINGS_BIND || security)
                 entry.id = id ? address_to id : 0;
         else
         {
@@ -16058,6 +16069,8 @@ static string_address locale_auto_reason(bipolar status)
                 return (string_address) "its certificate is revoked";
         case HTTP_UNLOGGED:
                 return (string_address) "its certificate was not logged (CT)";
+        case HTTP_OVERLAY:
+                return (string_address) "what moonwater security published does not read";
         case HTTP_CLOCK:
                 return (string_address) "the clock is unset";
         case HTTP_STATUS:
@@ -19068,6 +19081,523 @@ static b32 host_dns(string_address address_to arguments, positive count)
 }
 
 /*
+        moonwater security: what TLS trusts and refuses besides what is built
+        in.
+
+        Two lists, each added to and taken from the same way. trust is the
+        anchors: anchors.inc's, and a CA certificate root names (a private or
+        a company's CA), which is then trusted as a built-in one is and held
+        to the same rules -- a CA, a key that may sign certificates, P-256,
+        P-384 or RSA of 2048 to 4096 bits, and no name constraints, since the
+        built-in anchors carry none and one added would be trusted outside
+        them. block is the keys refused, by the SHA-256 of the DER
+        SubjectPublicKeyInfo (what openssl, Chrome's CRLSet and Mozilla's
+        OneCRL name a key by, and what a Certificate Transparency log's id
+        is): a built-in anchor so named stops being one, a CA under it stops
+        being a step to one, a leaf of it is refused, and a CT log of it
+        counts no SCT. Taking a built-in key out of trust is blocking it; a
+        block wins over a trust of the same key; and tls_blocked_keys, which
+        are built in, stay refused, since nothing here can lift them.
+
+        Both are kept in the security list of the image's settings (as init
+        and exit are, so they go along with setup install and update) and
+        published in /run/moonwater/security, which every TLS client reads
+        and only root can write (tls_overlay_read in net.c says how it is
+        read). Bare says what that file holds, to anybody.
+*/
+#define HOST_SECURITY TLS_OVERLAY_PATH
+#define HOST_SECURITY_DER_MOST 8192
+
+/* The file of what the settings' security list holds, or none when it holds
+   nothing, which is the built-in trust as it has always been. */
+static fn security_publish(host_settings address_to settings)
+{
+        static p8 file[TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM];
+        host_setting setting;
+        positive used = TLS_OVERLAY_HEAD;
+        positive at = 0;
+
+        while (settings && host_settings_next(settings, address_of at, address_of setting))
+        {
+                positive size = SPARK_SETTINGS_ENTRY + spark_settings_padded(setting.entry.length);
+
+                if (setting.entry.list != SPARK_SETTINGS_SECURITY ||
+                    used + size > sizeof file)
+                        continue;
+                memory_copy_apart(file + used, settings->payload + setting.at, size);
+                used += size;
+        }
+        if (used == TLS_OVERLAY_HEAD)
+        {
+                (void)system_remove_at(AT_FDCWD, HOST_SECURITY, 0);
+                return;
+        }
+        memory_copy_apart(file, TLS_OVERLAY_MAGIC, 8);
+        for (positive k = 0; k < 4; k++)
+        {
+                file[8 + k] = (p8)((used - TLS_OVERLAY_HEAD) >> (8 * k));
+                file[12 + k] = 0;
+        }
+        host_state_ready();
+        (void)file_publish_bytes(HOST_SECURITY, file, used, 0644, false);
+}
+
+/* A key as it is named on a line: 64 hexadecimal digits. */
+static string_address security_hex(const p8 address_to digest)
+{
+        static p8 text[65];
+
+        memory_into_hex(text, (address_any)digest, 32);
+        text[64] = end;
+        return (string_address)text;
+}
+
+/* A key's type as a column of eight: P-256, P-384, or RSA and its bits. */
+static string_address security_kind(p8 curve, positive length)
+{
+        static p8 text[16];
+        positive used;
+
+        if (curve == 1)
+                return (string_address) "P-256   ";
+        if (curve == 2)
+                return (string_address) "P-384   ";
+        string_copy(text, "RSA-");
+        used = 4 + positive_into_string(text + 4, length * 8);
+        while (used < 8)
+                text[used++] = ' ';
+        text[used] = end;
+        return (string_address)text;
+}
+
+/* A key named on the line: 64 hexadecimal digits, or the 44 characters of
+   base64 a Certificate Transparency log list spells a log id in. */
+static bool security_digest_word(string_address word, p8 address_to digest)
+{
+        positive length = string_length(word);
+        bool loose = false;
+
+        return (length == 64 && memory_from_hex(digest, word, 32)) ||
+               (length == 44 && memory_from_base64(digest, word, 44, 32, address_of loose) &&
+                !loose);
+}
+
+/* A certificate in a file, PEM (the first CERTIFICATE block) or DER, into der:
+   its length, or 0 when the file holds neither. */
+static positive security_certificate_read(string_address path, p8 address_to der,
+                                          positive room)
+{
+        static p8 text[HOST_SECURITY_DER_MOST * 2];
+        static p8 joined[HOST_SECURITY_DER_MOST * 2];
+        static const char begin[] = "-----BEGIN CERTIFICATE-----";
+        static const char finish[] = "-----END CERTIFICATE-----";
+        bipolar got = file_slurp_regular_at(AT_FDCWD, path, text, sizeof text, 0);
+        string_address start;
+        string_address stop;
+        positive used = 0;
+        positive bytes;
+        bool loose = false;
+
+        if (got <= 0 || (positive)got >= sizeof text - 1)
+                return 0;
+        if (text[0] == 0x30)
+        {
+                if ((positive)got > room)
+                        return 0;
+                memory_copy(der, text, (positive)got);
+                return (positive)got;
+        }
+        start = string_find((string_address)text, begin);
+        stop = start ? string_find(start, finish) : null;
+        if (!stop)
+                return 0;
+        for (start += sizeof begin - 1; start < stop; start++)
+                if (*start != '\n' && *start != '\r' && *start != ' ' && *start != '\t')
+                        joined[used++] = (p8)*start;
+        if (used < 4 || used % 4)
+                return 0;
+        bytes = used / 4 * 3 - (joined[used - 1] == '=') - (joined[used - 2] == '=');
+        if (bytes > room ||
+            !memory_from_base64(der, (string_address)joined, used, bytes, address_of loose) ||
+            loose)
+                return 0;
+        return bytes;
+}
+
+/* A key named by a word: its digest, from the word or from the certificate
+   in the file it names. Says why not and answers false. */
+static bool security_digest_of(string_address word, p8 address_to digest)
+{
+        static p8 der[HOST_SECURITY_DER_MOST];
+        tls_cert cert;
+        positive length;
+
+        if (security_digest_word(word, digest))
+                return true;
+        length = security_certificate_read(word, der, sizeof der);
+        if (!length)
+        {
+                host_refuse("%s is not a key's SHA-256 (64 hexadecimal digits, or 44 "
+                            "characters of base64) or a file with a certificate in it\n",
+                            word);
+                return false;
+        }
+        if (tls_parse_cert(der, length, address_of cert, null) ||
+            !tls_spki_digest(address_of cert, true, digest))
+        {
+                host_refuse("%s holds a certificate this cannot read\n", word);
+                return false;
+        }
+        return true;
+}
+
+/* The settings entry an anchor added is kept as: its curve, three zero bytes,
+   its RSA exponent low first, the SHA-256 of its subject Name and its key
+   (tls_overlay_read). Its length, or 0 with the reason said. */
+static positive security_anchor_entry(string_address path, p8 address_to entry,
+                                      p8 address_to digest)
+{
+        static p8 der[HOST_SECURITY_DER_MOST];
+        byte_reader text;
+        tls_added_anchor added;
+        tls_cert cert;
+        positive length = security_certificate_read(path, der, sizeof der);
+        positive key_length;
+
+        if (!length)
+                return host_refuse("%s is not a file with a certificate in it, PEM or "
+                                   "DER\n", path), 0;
+        if (tls_parse_cert(der, length, address_of cert, null))
+                return host_refuse("%s holds a certificate this cannot read\n", path), 0;
+        if (!cert.ca || (cert.key_usage && !cert.key_cert_sign))
+                return host_refuse("%s is not a CA: it does not say CA:TRUE, or its key may "
+                                   "not sign certificates\n", path), 0;
+        if (cert.name_constraints)
+                return host_refuse("%s has name constraints: the built-in anchors carry "
+                                   "none, so it would be trusted for every name\n", path), 0;
+        if (tls_key_blocked(address_of cert))
+                return host_refuse("%s has a key that is refused: built in as compromised, "
+                                   "or one anyone can compute\n", path), 0;
+        memory_zero(entry, SPARK_SETTINGS_TRUST_MOST);
+        entry[0] = cert.curve;
+        if (cert.curve == 3)
+        {
+                positive skip = 0;
+
+                while (skip < cert.modulus_length && !cert.modulus[skip])
+                        skip++;
+                key_length = cert.modulus_length - skip;
+                if (key_length > 512 || cert.exponent > 0xffffffffull)
+                        return host_refuse("%s has a key the built-in anchors could not "
+                                           "have: P-256, P-384, or RSA of 2048 to 4096 bits "
+                                           "with an odd exponent\n", path), 0;
+                for (positive k = 0; k < 4; k++)
+                        entry[4 + k] = (p8)(cert.exponent >> (8 * k));
+                memory_copy(entry + 40, cert.modulus + skip, key_length);
+        }
+        else
+        {
+                key_length = cert.curve == 1 ? 64 : 96;
+                memory_copy(entry + 40, cert.qx + 48 - key_length / 2, key_length / 2);
+                memory_copy(entry + 40 + key_length / 2, cert.qy + 48 - key_length / 2,
+                            key_length / 2);
+        }
+        crypto_sha256_of(cert.subject, cert.subject_length, entry + 8);
+        //      Held to what the reader of the published file takes, by the reader.
+        text = byte_reader_open(entry, 40 + key_length);
+        if (!tls_overlay_anchor_read(address_of text, address_of added))
+                return host_refuse("%s has a key the built-in anchors could not have: "
+                                   "P-256, P-384, or RSA of 2048 to 4096 bits with an odd "
+                                   "exponent\n", path), 0;
+        memory_copy(digest, added.spki, 32);
+        return 40 + key_length;
+}
+
+/* The digest of a security entry's key, a block's or an anchor's. */
+static bool security_entry_digest(host_setting address_to setting, p8 address_to digest)
+{
+        byte_reader text = byte_reader_open(setting->text, setting->entry.length);
+        tls_added_anchor added;
+
+        if (setting->entry.kind == SPARK_SETTINGS_BLOCK && setting->entry.length == 32)
+        {
+                memory_copy(digest, setting->text, 32);
+                return true;
+        }
+        if (setting->entry.kind != SPARK_SETTINGS_TRUST ||
+            !tls_overlay_anchor_read(address_of text, address_of added))
+                return false;
+        memory_copy(digest, added.spki, 32);
+        return true;
+}
+
+/* The entry of a kind whose key is digest, or whose key's hex starts with the
+   word given (eight digits at least, and only one such): false when none or
+   more than one is. */
+static bool security_entry_find(host_settings address_to settings, p8 kind,
+                                string_address word, const p8 address_to digest,
+                                host_setting address_to into)
+{
+        host_setting setting;
+        positive at = 0;
+        positive found = 0;
+        positive length = string_length(word);
+
+        while (host_settings_next(settings, address_of at, address_of setting))
+        {
+                p8 have[32];
+
+                if (setting.entry.list != SPARK_SETTINGS_SECURITY || setting.entry.kind != kind ||
+                    !security_entry_digest(address_of setting, have))
+                        continue;
+                if (digest ? !memory_compare(have, digest, 32)
+                           : length >= 8 && length < 64 &&
+                                 !memory_compare_ascii_case(security_hex(have), word, length))
+                {
+                        address_to into = setting;
+                        found++;
+                }
+        }
+        return found == 1;
+}
+
+//      Which of tls_blocked_keys a digest is, or -1.
+static bipolar security_built_in_block(const p8 address_to digest)
+{
+        for (positive i = 0; i < array_count(tls_blocked_keys); i++)
+                if (!memory_compare(tls_blocked_keys[i], digest, 32))
+                        return (bipolar)i;
+        return -1;
+}
+
+//      Which of tls_anchors has the key of a digest, or -1.
+static bipolar security_built_in_anchor(const p8 address_to digest)
+{
+        p8 have[32];
+        tls_cert root;
+
+        for (positive i = 0; i < array_count(tls_anchors); i++)
+                if (tls_anchor_key(tls_anchors + i, address_of root) &&
+                    tls_spki_digest(address_of root, false, have) &&
+                    !memory_compare(have, digest, 32))
+                        return (bipolar)i;
+        return -1;
+}
+
+/* What the published file holds, as the clients read it, for the lines. */
+static tls_overlay security_shown;
+
+static bool security_read(void)
+{
+        tls_overlay_load(address_of security_shown);
+        if (security_shown.state != TLS_OVERLAY_BAD)
+                return true;
+        host_say(log, host_label "security: " HOST_SECURITY " does not read, so no "
+                                 "certificate is trusted until it does; boot and every "
+                                 "change here write it again\n");
+        return false;
+}
+
+static fn security_trust_lines(bool every)
+{
+        p8 digest[32];
+        tls_cert root;
+
+        if (!every)
+                string_format(log, "  trust  built-in  %p anchors, which moonwater security "
+                                   "trust lists\n",
+                              (positive)array_count(tls_anchors));
+        for (positive i = 0; every && i < array_count(tls_anchors); i++)
+                if (tls_anchor_key(tls_anchors + i, address_of root) &&
+                    tls_spki_digest(address_of root, false, digest))
+                        string_format(log, "  trust  built-in  %s  %s%s\n",
+                                      security_kind(tls_anchors[i].curve, tls_anchors[i].key_length),
+                                      security_hex(digest),
+                                      tls_anchor_refused(i) ? "  (blocked)" : "");
+        for (positive i = 0; i < security_shown.anchors; i++)
+                string_format(log, "  trust  added     %s  %s%s\n",
+                              security_kind(security_shown.anchor[i].curve,
+                                            security_shown.anchor[i].key_length),
+                              security_hex(security_shown.anchor[i].spki),
+                              security_shown.anchor[i].refused ? "  (blocked)" : "");
+}
+
+static fn security_block_lines(void)
+{
+        for (positive i = 0; i < array_count(tls_blocked_keys); i++)
+                string_format(log, "  block  built-in  key       %s\n",
+                              security_hex(tls_blocked_keys[i]));
+        for (positive i = 0; i < security_shown.blocks; i++)
+                string_format(log, "  block  added     key       %s\n",
+                              security_hex(security_shown.block[i]));
+}
+
+static b32 security_say(string_address which)
+{
+        bool readable = security_read();
+
+        //      The lines name the anchors this process's overlay refuses.
+        memory_copy_apart(address_of tls_overlay_now, address_of security_shown,
+                          sizeof tls_overlay_now);
+        if (!which || string_equals(which, "trust"))
+                security_trust_lines(which != null);
+        if (!which || string_equals(which, "block"))
+                security_block_lines();
+        log_flush();
+        return readable ? 0 : 1;
+}
+
+/* One entry added to or taken from a list, then saved and published. */
+static b32 security_change(bool trust, bool adding, string_address word)
+{
+        static p8 entry[SPARK_SETTINGS_TRUST_MOST];
+        host_settings settings;
+        host_setting setting;
+        string_address list = trust ? (string_address) "trust" : (string_address) "block";
+        string_address failed;
+        p8 digest[32];
+        positive length = 32;
+        bool named = true;
+        b32 answer = 0;
+        p16 id = SPARK_SETTINGS_BY_HAND;
+
+        host_need_root();
+        //      What the word names is read before anything waits: a file that
+        //      is no certificate costs a line and not the settings' lock. A
+        //      remove also takes the first hexadecimal digits of a key that
+        //      was added, eight at least, as its line shows them.
+        if (trust && adding)
+        {
+                length = security_anchor_entry(word, entry, digest);
+                return_if(!length, 1);
+        }
+        else if (adding || security_digest_word(word, digest) ||
+                 system_access_at(AT_FDCWD, word, 0) == 0)
+        {
+                return_if(!security_digest_of(word, digest), 1);
+        }
+        else
+        {
+                positive size = string_length(word);
+                bool odd = false;
+
+                named = false;
+                for (positive at = 0; at < size; at++)
+                        odd |= !byte_is_hexadecimal((p8)word[at]);
+                return_if(odd || size < 8,
+                          host_refuse("security %s remove takes a key's SHA-256, eight "
+                                      "hexadecimal digits of it at least, or a file with "
+                                      "a certificate in it\n", list));
+        }
+        if (!trust && !adding && named && security_built_in_block(digest) >= 0)
+                return host_refuse("%s is built in and stays refused; nothing here lifts "
+                                   "it\n", security_hex(digest));
+        if (trust && !adding && named && security_built_in_anchor(digest) >= 0)
+                return host_refuse("%s is a built-in anchor; moonwater security block add "
+                                   "takes it out of trust\n", security_hex(digest));
+        if (adding && security_built_in_block(digest) >= 0)
+        {
+                host_say(log, host_label "security %s: %s is refused, built in%s\n", list,
+                         security_hex(digest), trust ? ", and a block wins" : "");
+                return trust ? 1 : 0;
+        }
+        if (trust && adding && security_built_in_anchor(digest) >= 0)
+        {
+                host_say(log, host_label "security trust: %s is a built-in anchor\n",
+                         security_hex(digest));
+                return 0;
+        }
+        if (!host_acquire())
+                return 1;
+        host_state_ready();
+        host_settings_session(address_of settings);
+
+        if (trust && adding &&
+            security_entry_find(address_of settings, SPARK_SETTINGS_BLOCK, word, digest,
+                                address_of setting))
+        {
+                answer = host_refuse("security trust: %s is blocked, and a block wins; "
+                                     "moonwater security block remove takes it out\n",
+                                     security_hex(digest));
+                goto done;
+        }
+        if (adding &&
+            security_entry_find(address_of settings,
+                                trust ? SPARK_SETTINGS_TRUST : SPARK_SETTINGS_BLOCK, word,
+                                digest, address_of setting))
+        {
+                host_say(log, host_label "security %s: %s is there already\n", list,
+                         security_hex(digest));
+                goto done;
+        }
+        if (adding)
+        {
+                positive have = 0;
+                positive at = 0;
+
+                while (host_settings_next(address_of settings, address_of at, address_of setting))
+                        have += setting.entry.list == SPARK_SETTINGS_SECURITY &&
+                                setting.entry.kind == (trust ? SPARK_SETTINGS_TRUST
+                                                             : SPARK_SETTINGS_BLOCK);
+                if (have >= (trust ? TLS_OVERLAY_ANCHORS : TLS_OVERLAY_BLOCKS))
+                {
+                        answer = host_refuse("security %s holds %p at most; remove one "
+                                             "first\n", list,
+                                             (positive)(trust ? TLS_OVERLAY_ANCHORS
+                                                              : TLS_OVERLAY_BLOCKS));
+                        goto done;
+                }
+                failed = host_settings_add(address_of settings, SPARK_SETTINGS_SECURITY,
+                                           trust ? SPARK_SETTINGS_TRUST : SPARK_SETTINGS_BLOCK,
+                                           trust ? (string_address)entry : (string_address)digest,
+                                           length, address_of id);
+                if (failed)
+                {
+                        answer = host_settings_refused("security", failed, address_of settings);
+                        goto done;
+                }
+                string_format(log, host_label "security %s added %s; ", list,
+                              security_hex(digest));
+        }
+        else
+        {
+                if (!security_entry_find(address_of settings,
+                                         trust ? SPARK_SETTINGS_TRUST : SPARK_SETTINGS_BLOCK,
+                                         word, named ? digest : null, address_of setting))
+                {
+                        answer = host_refuse("security %s has no one entry %s\n", list,
+                                             named ? security_hex(digest) : word);
+                        goto done;
+                }
+                security_entry_digest(address_of setting, digest);
+                host_settings_drop(address_of settings, address_of setting);
+                string_format(log, host_label "security %s removed %s; ", list,
+                              security_hex(digest));
+        }
+        answer = host_settings_save(address_of settings) ? 0 : 1;
+        security_publish(address_of settings);
+
+done:
+        host_release();
+        return answer;
+}
+
+static b32 host_security(string_address address_to arguments, positive count)
+{
+        bool trust = count > 2 && string_equals(arguments[2], "trust");
+
+        if (count == 2)
+                return security_say(null);
+        return_if(!trust && !string_equals(arguments[2], "block"), host_usage());
+        if (count == 3)
+                return security_say(arguments[2]);
+        return_if(count != 5 || (!string_equals(arguments[3], "add") &&
+                                 !string_equals(arguments[3], "remove")),
+                  host_usage());
+        return security_change(trust, string_equals(arguments[3], "add"), arguments[4]);
+}
+
+/*
         Bound events, and the init and exit lists, as one verb.
 
         A kernel event is one line. init and exit stay lists, because more
@@ -19518,6 +20048,14 @@ static const host_row host_rows[] = {
     {null, "@taskbar", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@dns", null, 'r'},
+    {null, "security [trust|block ...]", "keys TLS trusts and refuses besides the built-in ones", 'm'},
+    {null, "security", "the built-in trust, and what was added to it or taken from it", 'f'},
+    {null, "security trust", "every anchor, built in and added, by the SHA-256 of its key", 'f'},
+    {null, "security trust add FILE", "trust a CA certificate, PEM or DER, as the built-in anchors are", 'f'},
+    {null, "security trust remove SHA256", "stop trusting an anchor that was added", 'f'},
+    {null, "security block", "every key refused, built in and added", 'f'},
+    {null, "security block add SHA256|FILE", "refuse a key wherever it is: an anchor, a CA, a leaf, a CT log", 'f'},
+    {null, "security block remove SHA256", "stop refusing a key that was added; a built-in one stays", 'f'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
@@ -20255,6 +20793,7 @@ static b32 host_main()
             {"time", host_time, false},
             {"name", host_name, true},
             {"dns", host_dns, false},
+            {"security", host_security, false},
             {"link", link_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},

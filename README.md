@@ -73,6 +73,13 @@ moonwater airplane [on|off]            every radio at once
 moonwater priority [internet [wired|wifi]]  which link wins when both are up [wired]
 moonwater dns tls [on|off|only]        names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]
 moonwater dns [ADDRESS...|auto]        up to three servers names are asked of, or the network gives them [auto]
+moonwater security                     the built-in trust, and what was added to it or taken from it
+moonwater security trust               every anchor, built in and added, by the SHA-256 of its key
+moonwater security trust add FILE      trust a CA certificate, PEM or DER, as the built-in anchors are
+moonwater security trust remove SHA256  stop trusting an anchor that was added
+moonwater security block               every key refused, built in and added
+moonwater security block add SHA256|FILE  refuse a key wherever it is: an anchor, a CA, a leaf, a CT log
+moonwater security block remove SHA256  stop refusing a key that was added; a built-in one stays
 moonwater wifi [on|off]                the radio, saved networks and those in range
 moonwater bluetooth [on|off]           the radio and the remembered devices
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
@@ -98,6 +105,18 @@ it changes it and needs root, and a word it does not take is a usage page
 (exit 2) and not a refusal (exit 1). `bowl` runs other distributions' programs
 (`bowl profile desktop` installs KDE), and `main.moonwater.sh` is the machine
 script that sets a machine up at boot.
+
+`moonwater security` changes what the TLS client (wget, the clock's NTS, names over
+TLS) trusts without a rebuild. A key is named by the SHA-256 of its DER
+SubjectPublicKeyInfo, as `openssl x509 -pubkey -noout | openssl pkey -pubin -outform
+der | sha256sum` prints it, or by a certificate file. Blocking a key takes a built-in
+anchor out of trust, and refuses any CA, leaf or Certificate Transparency log with it;
+a block wins over a trust of the same key, and the keys built in as compromised stay
+refused. An anchor added is held to the rules of the built-in ones (a CA, P-256, P-384
+or RSA of 2048 to 4096 bits, no name constraints). Both lists are kept with the image's
+settings, so they go along with `setup install` and `update`, and every program reads
+them from /run/moonwater/security when it connects; a file there that does not read
+refuses every checked certificate until boot or the next change writes it again.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
 (machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, power, boot, and all commands) are

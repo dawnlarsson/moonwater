@@ -51268,6 +51268,7 @@ typedef struct { positive began; positive budget; } network_deadline;
 #define TLS_UNCHECKED (-7)
 #define TLS_CLOCK (-8)
 #define TLS_UNLOGGED (-9)
+#define TLS_OVERLAY (-10)
 #define ENOSPC 28
 #define NETWORK_INTERRUPTED (-4)
 #define syscall(name) 0
@@ -52676,6 +52677,7 @@ static bipolar network_stream_read_some_for(bipolar h, p8 *into, positive room,
 #define TLS_UNCHECKED (-7)
 #define TLS_CLOCK (-8)
 #define TLS_UNLOGGED (-9)
+#define TLS_OVERLAY (-10)
 typedef struct
 {
         p8 *receive;
@@ -57312,6 +57314,10 @@ def harness_tls_hs_fuzz(argv):
 
     defines = sec(net, "/* RFC 8446 5.1 and 5.4: a record carries at most 2^14",
                   "/* One trust anchor from anchors.inc")
+    #   What `moonwater security` published, which the handshake reads before
+    #   it starts (tls_overlay_refresh, a stub below that finds none).
+    defines += sec(net, "/*\n        What `moonwater security` adds to the built-in trust",
+                   "static const p8 tls_oid_ec[7] = {")
     connection = sec(net, "typedef struct\n{\n        bipolar handle;\n"
                      "        bool check_cert;", "static fn tls_forget(")
     #   The leaf modulus room is sized in the crypto section.
@@ -57748,6 +57754,12 @@ static bipolar string_to_host(string_address host)
 """
 
     stubs = r"""
+/* What `moonwater security` published is security_fuzz's: here there is none,
+   which is the built-in trust as it has always been. */
+static COLD fn tls_overlay_refresh(void)
+{
+        memset(&tls_overlay_now, 0, sizeof tls_overlay_now);
+}
 /* The certificate verdict is another lift's: here the Certificate body's last
    byte picks the leaf (0 P-256, 1 P-384, 2 RSA) and 0xff refuses it; when
    that byte is 0, the one three before it picks, which is a TLS 1.2 list's
@@ -58070,6 +58082,7 @@ def tls_verify_chain_lift(net, now=None, aia=None):
 #define TLS_FAULT_NAME 3
 #define TLS_FAULT_CLOCK 4
 #define TLS_FAULT_REVOKED 5
+#define TLS_FAULT_OVERLAY 8
 typedef struct
 {
         bool check_cert;
@@ -69864,6 +69877,7 @@ def harness_security_hygiene(argv):
         ("nts_ke_reply", ("data",)),
         ("nts_cookies_take", ("plain",)),
         ("nts_reply", ("reply",)),
+        ("tls_overlay_read", ("bytes",)),
         ("http_length_values", ("value",)),
         ("http_url_escape", ("url",)),
         ("http_ipv4_spelling", ("host",)),

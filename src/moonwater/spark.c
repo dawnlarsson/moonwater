@@ -522,6 +522,19 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
 
         A slot whose generation, length, sum and flags are all zero was never
         written: it is the image as built, and means the defaults.
+
+        The security list is what `moonwater security` keeps for the TLS
+        client: a key refused (the SHA-256 of its DER SubjectPublicKeyInfo,
+        which names a served certificate's key, an anchor's and a
+        Certificate Transparency log's alike), a trust anchor added, and a
+        switch of TLS or HTTP turned from its default. A switch's id says
+        which and it has no text; a block's and an anchor's id says who added
+        it, which is a person with the moonwater command. Only the shape is
+        checked here, in the kernel as anywhere: what a key's bytes are is
+        the TLS client's to judge (src/net/net.c, tls_overlay_read), which
+        reads them from /run/moonwater/security, never from this block. A
+        build from before the list has no list 5 and calls the whole slot
+        damaged, so going back to one boots on the defaults.
 */
 #define SPARK_SETTINGS_MAGIC 0x474e54544553574dull
 #define SPARK_SETTINGS_VERSION 1
@@ -544,11 +557,21 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
 #define SPARK_SETTINGS_STARTUP 2
 #define SPARK_SETTINGS_EXIT 3
 #define SPARK_SETTINGS_BIND 4 // event id -> command; no entry is the event's default
-#define SPARK_SETTINGS_LISTS 4
+#define SPARK_SETTINGS_SECURITY 5 // keys refused and trusted, and TLS's switches
+#define SPARK_SETTINGS_LISTS 5
 
 #define SPARK_SETTINGS_COMMAND 1       // run through /shell -c
 #define SPARK_SETTINGS_SHELL 2         // a terminal window with a shell
 #define SPARK_SETTINGS_KERNEL_SHELL 3  // the kernel log window
+#define SPARK_SETTINGS_BLOCK 4         // security: a key refused, 32 bytes
+#define SPARK_SETTINGS_TRUST 5         // security: a trust anchor added
+#define SPARK_SETTINGS_SWITCH 6        // security: a switch, its id, no text
+
+#define SPARK_SETTINGS_SECURITY_MOST 96 // entries in the security list
+#define SPARK_SETTINGS_TRUST_LEAST 104  // an anchor: 40 bytes and a P-256 key,
+#define SPARK_SETTINGS_TRUST_MOST 552   // up to an RSA modulus of 4096 bits
+#define SPARK_SETTINGS_SWITCHES 16      // switch ids from 1 to this
+#define SPARK_SETTINGS_BY_HAND 1        // a block's or an anchor's id
 
 struct spark_settings {
         unsigned long magic;
@@ -560,7 +583,7 @@ struct spark_settings {
         unsigned int length;
         unsigned int sum;
         unsigned int flags;
-        unsigned short next[SPARK_SETTINGS_LISTS - 1]; // init, startup, exit
+        unsigned short next[3]; // init, startup, exit
         unsigned char reserved[6];
         unsigned char payload[SPARK_SETTINGS_PAYLOAD];
 };
@@ -617,6 +640,23 @@ static inline unsigned int spark_settings_sum(const struct spark_settings *slot)
         twenty-two events, so an out-of-range event is expressible here by
         construction rather than by accident.
 */
+/*
+        A security entry's kind, id and length, which is all of one the
+        checker reads: a block is 32 bytes and an anchor 104 to 552, each
+        added by hand, and a switch is a number with no text.
+*/
+static inline int spark_settings_security_shaped(unsigned int kind, unsigned int id,
+                                                 unsigned int length)
+{
+        if (kind == SPARK_SETTINGS_BLOCK)
+                return id == SPARK_SETTINGS_BY_HAND && length == 32;
+        if (kind == SPARK_SETTINGS_TRUST)
+                return id == SPARK_SETTINGS_BY_HAND &&
+                       length >= SPARK_SETTINGS_TRUST_LEAST;
+        return kind == SPARK_SETTINGS_SWITCH && !length &&
+               id <= SPARK_SETTINGS_SWITCHES;
+}
+
 static inline int spark_settings_check(const struct spark_settings *slot)
 {
         unsigned long counts[SPARK_SETTINGS_LISTS + 1] = {0};
@@ -653,11 +693,13 @@ static inline int spark_settings_check(const struct spark_settings *slot)
                 at += SPARK_SETTINGS_ENTRY;
 
                 if (!list || list > SPARK_SETTINGS_LISTS ||
-                    ++counts[list] > (list == SPARK_SETTINGS_BIND
-                                          ? SPARK_SETTINGS_BIND_MOST
+                    ++counts[list] > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_MOST
+                                      : list == SPARK_SETTINGS_SECURITY
+                                          ? SPARK_SETTINGS_SECURITY_MOST
                                           : SPARK_SETTINGS_LIST_MOST) ||
-                    length > (list == SPARK_SETTINGS_BIND
-                                  ? SPARK_SETTINGS_BIND_TEXT_MOST
+                    length > (list == SPARK_SETTINGS_BIND ? SPARK_SETTINGS_BIND_TEXT_MOST
+                              : list == SPARK_SETTINGS_SECURITY
+                                  ? SPARK_SETTINGS_TRUST_MOST
                                   : SPARK_SETTINGS_TEXT_MOST) ||
                     slot->length - at < spark_settings_padded(length))
                         return -1;
@@ -666,13 +708,18 @@ static inline int spark_settings_check(const struct spark_settings *slot)
                    is judged against it: a kind names how the text runs and
                    there are three of them; in the bind table the id is the
                    event, bounded the way the kernel's own table bounds it,
-                   and in every other list it is the number that list handed
-                   out, which is never zero. The halfword after the length
-                   belongs to a later version, and a later version would have
-                   said so in the header this already checked. */
-                if (!kind || kind > SPARK_SETTINGS_KERNEL_SHELL ||
-                    entry[6] || entry[7] || !id ||
-                    (list == SPARK_SETTINGS_BIND && id > SPARK_BIND_EVENTS))
+                   in the security list the kind is one of its own three
+                   (spark_settings_security_shaped), and in every other list
+                   it is the number that list handed out, which is never zero.
+                   The halfword after the length belongs to a later version,
+                   and a later version would have said so in the header this
+                   already checked. */
+                if (entry[6] || entry[7] || !id)
+                        return -1;
+                if (list == SPARK_SETTINGS_SECURITY
+                        ? !spark_settings_security_shaped(kind, id, length)
+                        : !kind || kind > SPARK_SETTINGS_KERNEL_SHELL ||
+                              (list == SPARK_SETTINGS_BIND && id > SPARK_BIND_EVENTS))
                         return -1;
 
                 at += spark_settings_padded(length);

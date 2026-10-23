@@ -73450,6 +73450,40 @@ static fn tls_ca_issuers_rules(void)
         sha512WithRSAEncryption by the anchor Certum Trusted Network CA. Each
         certificate is the served DER byte for byte.
 */
+/* The header of a moonwater security overlay file over length bytes of
+   entries (copied from entries when it is given): its whole size. */
+static positive overlay_file(p8 address_to file, const p8 address_to entries, positive length)
+{
+        memory_copy(file, TLS_OVERLAY_MAGIC, 8);
+        for (positive k = 0; k < 4; k++)
+        {
+                file[8 + k] = (p8)(length >> (8 * k));
+                file[12 + k] = 0;
+        }
+        if (entries)
+                memory_copy(file + TLS_OVERLAY_HEAD, entries, length);
+        return TLS_OVERLAY_HEAD + length;
+}
+
+/* One security entry as the settings block spells it: its size. */
+static positive overlay_entry(p8 address_to at, p8 kind, p16 id, const p8 address_to text,
+                              positive length)
+{
+        positive padded = (length + 3) & ~(positive)3;
+
+        at[0] = TLS_OVERLAY_LIST;
+        at[1] = kind;
+        at[2] = (p8)id;
+        at[3] = (p8)(id >> 8);
+        at[4] = (p8)length;
+        at[5] = (p8)(length >> 8);
+        at[6] = 0;
+        at[7] = 0;
+        memory_copy(at + 8, text, length);
+        memory_fill(at + 8 + length, 0, padded - length);
+        return 8 + padded;
+}
+
 static fn tls_trust_anchor_chains(void)
 {
         static const char atlas_hex[] =
@@ -73819,6 +73853,191 @@ static fn tls_trust_anchor_chains(void)
                 }
                 check("an EC key that is k*G for k up to 1024 is blocked and the next scalar is not",
                       wrong == 0);
+        }
+
+        /* moonwater security's overlay (tls_overlay_read): the settings'
+           security entries in a file. A blocked key takes a built-in anchor
+           out of trust whichever way it is asked, an added anchor is found
+           by its Name and verifies, a block wins over an anchor added with
+           the same key, the eight built-in keys stay refused whatever the
+           file says, and a file out of shape is refused whole. */
+        {
+                static p8 file[TLS_OVERLAY_HEAD + 80 * 40];
+                static tls_overlay overlay;
+                p8 digest[32];
+                p8 served[32];
+                p8 name[32];
+                p8 anchor_entry[40 + 512];
+                tls_cert root;
+                bipolar network = -1;
+                positive used;
+                positive refused = 0;
+                bool all = true;
+
+                //      The signature bit the check above flipped, back for these.
+                certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
+                crypto_sha256_of(certum_cert.issuer, certum_cert.issuer_length, name);
+                for (positive i = 0; i < array_count(tls_anchors) && network < 0; i++)
+                        if (!memory_compare(tls_anchors[i].name, name, 8))
+                                network = (bipolar)i;
+
+                used = overlay_file(file, null, 0);
+                check("an overlay with no entries reads, and refuses nothing",
+                      tls_overlay_read(file, used, address_of overlay) &&
+                          overlay.state == TLS_OVERLAY_TAKEN && !overlay.blocks && !overlay.anchors);
+                check("and a built-in compromised key stays refused under it",
+                      tls_overlay_refuses(address_of overlay, tls_blocked_keys[0]) &&
+                          tls_overlay_refuses(address_of overlay, tls_blocked_keys[7]));
+
+                //      Every built-in anchor blocked by the hash of its key.
+                used = TLS_OVERLAY_HEAD;
+                for (positive i = 0; i < 64; i++)
+                {
+                        all &= tls_anchor_key(tls_anchors + i, address_of root) &&
+                               tls_spki_digest(address_of root, false, digest);
+                        used += overlay_entry(file + used, TLS_OVERLAY_BLOCK, 1, digest, 32);
+                }
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all &= tls_overlay_read(file, used, address_of overlay);
+                tls_overlay_settle(address_of overlay);
+                for (positive i = 0; i < array_count(tls_anchors); i++)
+                        refused += (overlay.refused[i / 8] >> (i % 8) & 1) != 0;
+                check("sixty-four blocks read and take exactly the anchors they name",
+                      all && overlay.blocks == 64 && refused == 64);
+                used = overlay_entry(file + used, TLS_OVERLAY_BLOCK, 1, digest, 32) + used;
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                check("a sixty-fifth refuses the file",
+                      !tls_overlay_read(file, used, address_of overlay) &&
+                          overlay.state == TLS_OVERLAY_BAD);
+
+                //      The anchor that signs Certum Trusted Root CA, blocked.
+                all = network >= 0 && tls_anchor_key(tls_anchors + network, address_of root) &&
+                      tls_spki_digest(address_of root, false, digest);
+                used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_BLOCK, 1,
+                                                        digest, 32);
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all &= tls_overlay_read(file, used, address_of overlay);
+                tls_overlay_settle(address_of overlay);
+                memory_copy(address_of tls_overlay_now, address_of overlay, sizeof overlay);
+                check("a blocked anchor no longer signs, served or not",
+                      all && !tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null) &&
+                          !tls_spki_is_anchor(address_of root, 0));
+                memory_zero(address_of tls_overlay_now, sizeof tls_overlay_now);
+                check("and signs again once the overlay is gone",
+                      tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null) &&
+                          tls_spki_is_anchor(address_of root, 0));
+
+                //      The same key added as an anchor: found by its whole Name
+                //      when the built-in one is out of the way, and lost again
+                //      to a block of its key.
+                memory_zero(anchor_entry, sizeof anchor_entry);
+                anchor_entry[0] = root.curve;
+                memory_copy(anchor_entry + 8, name, 32);
+                if (root.curve == 3)
+                {
+                        for (positive k = 0; k < 4; k++)
+                                anchor_entry[4 + k] = (p8)(root.exponent >> (8 * k));
+                        memory_copy(anchor_entry + 40, root.modulus, root.modulus_length);
+                        used = 40 + root.modulus_length;
+                }
+                else
+                {
+                        positive coord = root.curve == 1 ? 32 : 48;
+
+                        memory_copy(anchor_entry + 40, root.qx + 48 - coord, coord);
+                        memory_copy(anchor_entry + 40 + coord, root.qy + 48 - coord, coord);
+                        used = 40 + 2 * coord;
+                }
+                used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_TRUST, 1,
+                                                        anchor_entry, used);
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all = tls_overlay_read(file, used, address_of overlay) && overlay.anchors == 1 &&
+                      !memory_compare(overlay.anchor[0].spki, digest, 32);
+                tls_overlay_settle(address_of overlay);
+                memory_copy(address_of tls_overlay_now, address_of overlay, sizeof overlay);
+                tls_overlay_now.refused[network / 8] |= (p8)(1 << (network % 8));
+                all &= tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null) &&
+                       tls_spki_is_anchor(address_of root, 0);
+                used += overlay_entry(file + used, TLS_OVERLAY_BLOCK, 1, digest, 32);
+                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                all &= tls_overlay_read(file, used, address_of overlay);
+                tls_overlay_settle(address_of overlay);
+                memory_copy(address_of tls_overlay_now, address_of overlay, sizeof overlay);
+                all &= overlay.anchor[0].refused &&
+                       !tls_anchor_verifies(address_of certum_cert, 20260101000000ull, null) &&
+                       !tls_spki_is_anchor(address_of root, 0);
+                memory_zero(address_of tls_overlay_now, sizeof tls_overlay_now);
+                check("an anchor added verifies by its Name, and a block of its key wins", all);
+
+                //      A served certificate's own hash and the rebuilt one agree.
+                check("a served key's SubjectPublicKeyInfo hash is the one rebuilt from it",
+                      tls_spki_digest(address_of certum_cert, true, served) &&
+                          tls_spki_digest(address_of certum_cert, false, digest) &&
+                          !memory_compare(served, digest, 32));
+
+                //      Out of shape, each one alone, and the file is refused.
+                {
+                        static const struct
+                        {
+                                positive at;
+                                p8 value;
+                        } breaks[] = {
+                            {0, 'm'},                       // the magic
+                            {12, 1},                        // the zero word
+                            {8, 4},                         // a length past the bytes
+                            {TLS_OVERLAY_HEAD, 4},          // a list that is not 5
+                            {TLS_OVERLAY_HEAD + 1, 7},      // a kind it has no word for
+                            {TLS_OVERLAY_HEAD + 2, 2},      // an id that is not by hand
+                            {TLS_OVERLAY_HEAD + 4, 31},     // a block of 31 bytes
+                            {TLS_OVERLAY_HEAD + 6, 1},      // the zero halfword
+                        };
+                        positive broken = 0;
+
+                        for (positive i = 0; i < array_count(breaks); i++)
+                        {
+                                used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD,
+                                                                        TLS_OVERLAY_BLOCK, 1, digest, 32);
+                                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                                file[breaks[i].at] = breaks[i].value;
+                                broken += !tls_overlay_read(file, used, address_of overlay) &&
+                                          overlay.state == TLS_OVERLAY_BAD && !overlay.blocks;
+                        }
+                        used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD,
+                                                                TLS_OVERLAY_BLOCK, 1, digest, 32);
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        file[used++] = 0;
+                        broken += !tls_overlay_read(file, used, address_of overlay);
+                        //      An anchor whose point is a byte short, and an RSA one
+                        //      whose exponent is even, which with 65537 reads.
+                        memory_zero(anchor_entry, sizeof anchor_entry);
+                        anchor_entry[0] = 2;
+                        used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD,
+                                                                TLS_OVERLAY_TRUST, 1, anchor_entry,
+                                                                40 + 95);
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        broken += !tls_overlay_read(file, used, address_of overlay);
+                        anchor_entry[0] = 3;
+                        anchor_entry[4] = 4;
+                        anchor_entry[40] = 0xc0;
+                        anchor_entry[40 + 255] = 0x01;
+                        used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD,
+                                                                TLS_OVERLAY_TRUST, 1, anchor_entry,
+                                                                40 + 256);
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        broken += !tls_overlay_read(file, used, address_of overlay);
+                        anchor_entry[4] = 0x01;
+                        anchor_entry[6] = 0x01;
+                        used = TLS_OVERLAY_HEAD + overlay_entry(file + TLS_OVERLAY_HEAD,
+                                                                TLS_OVERLAY_TRUST, 1, anchor_entry,
+                                                                40 + 256);
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        check("every shape out of place refuses the whole file",
+                              broken == array_count(breaks) + 3 &&
+                                  tls_overlay_read(file, used, address_of overlay) &&
+                                  overlay.anchors == 1 && overlay.anchor[0].exponent == 65537);
+                }
+                memory_zero(address_of tls_overlay_now, sizeof tls_overlay_now);
+                certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
         }
 
         /* Mozilla's distrust-after: a root that has a date anchors a leaf
@@ -106396,21 +106615,21 @@ static fn format_images(string_address directory)
         neither; where an image's section is believed; and the command line
         against a copy in memory.
 */
-static host_settings settings_slot;
+static host_settings settings_block_slot;
 static host_settings settings_pair[2];
 static host_settings settings_before[2];
-static host_settings settings_next;
-static p8 settings_text[SPARK_SETTINGS_TEXT_MOST + 2];
+static host_settings settings_block_next;
+static p8 settings_block_text[SPARK_SETTINGS_TEXT_MOST + 2];
 
 static fn settings_one(host_settings address_to slot, p64 generation, p8 fill,
                        positive length)
 {
-        memory_fill(settings_text, fill, length);
+        memory_fill(settings_block_text, fill, length);
         host_settings_empty(slot);
         slot->generation = generation;
         memory_fill(slot->medium, 0x5a, sizeof(slot->medium));
         host_settings_add(slot, SPARK_SETTINGS_INIT, SPARK_SETTINGS_COMMAND,
-                          settings_text, length, null);
+                          settings_block_text, length, null);
         host_settings_seal(slot);
 }
 
@@ -106425,6 +106644,114 @@ static fn settings_raw(host_settings address_to slot, p8 list, p16 length)
         slot->length += SPARK_SETTINGS_ENTRY + spark_settings_padded(length);
 }
 
+/* An entry of any shape at the end of the payload, its text zeros. */
+static fn settings_shaped(host_settings address_to slot, p8 list, p8 kind, p16 id, p16 length)
+{
+        struct spark_settings_entry entry = {list, kind, id, length, 0};
+
+        memory_copy_apart(slot->payload + slot->length, address_of entry,
+                          SPARK_SETTINGS_ENTRY);
+        memory_zero(slot->payload + slot->length + SPARK_SETTINGS_ENTRY,
+                    spark_settings_padded(length));
+        slot->length += SPARK_SETTINGS_ENTRY + spark_settings_padded(length);
+}
+
+/*
+        The security list (moonwater security): a block is 32 bytes and an
+        anchor 104 to 552, each added by hand, and a switch is a number from
+        1 to 16 with no text; any other kind, id or length in it is damage,
+        and so are its kinds in any other list and a 97th entry. A slot from
+        a disk nobody vouches for keeps none of it, an anchor least of all.
+*/
+static fn settings_security(void)
+{
+        static const struct
+        {
+                p8 kind;
+                p16 id;
+                p16 length;
+                bool good;
+        } shapes[] = {
+            {SPARK_SETTINGS_BLOCK, SPARK_SETTINGS_BY_HAND, 32, true},
+            {SPARK_SETTINGS_BLOCK, SPARK_SETTINGS_BY_HAND, 31, false},
+            {SPARK_SETTINGS_BLOCK, SPARK_SETTINGS_BY_HAND, 33, false},
+            {SPARK_SETTINGS_BLOCK, 2, 32, false},
+            {SPARK_SETTINGS_TRUST, SPARK_SETTINGS_BY_HAND, SPARK_SETTINGS_TRUST_LEAST, true},
+            {SPARK_SETTINGS_TRUST, SPARK_SETTINGS_BY_HAND, SPARK_SETTINGS_TRUST_MOST, true},
+            {SPARK_SETTINGS_TRUST, SPARK_SETTINGS_BY_HAND, SPARK_SETTINGS_TRUST_LEAST - 1, false},
+            {SPARK_SETTINGS_TRUST, SPARK_SETTINGS_BY_HAND, SPARK_SETTINGS_TRUST_MOST + 1, false},
+            {SPARK_SETTINGS_TRUST, 2, SPARK_SETTINGS_TRUST_LEAST, false},
+            {SPARK_SETTINGS_SWITCH, 1, 0, true},
+            {SPARK_SETTINGS_SWITCH, SPARK_SETTINGS_SWITCHES, 0, true},
+            {SPARK_SETTINGS_SWITCH, SPARK_SETTINGS_SWITCHES + 1, 0, false},
+            {SPARK_SETTINGS_SWITCH, 1, 4, false},
+            {SPARK_SETTINGS_COMMAND, 1, 4, false},
+            {SPARK_SETTINGS_KERNEL_SHELL, 1, 0, false},
+            {SPARK_SETTINGS_SWITCH + 1, 1, 0, false},
+        };
+        host_settings address_to slot = address_of settings_block_slot;
+        p8 key[32];
+        p16 id = SPARK_SETTINGS_BY_HAND;
+        host_setting setting;
+        positive at = 0;
+        bool right = true;
+
+        for (positive i = 0; i < array_count(shapes); i++)
+        {
+                host_settings_empty(slot);
+                slot->generation = 1;
+                settings_shaped(slot, SPARK_SETTINGS_SECURITY, shapes[i].kind, shapes[i].id,
+                                shapes[i].length);
+                host_settings_seal(slot);
+                right &= (spark_settings_check(slot) == 1) == shapes[i].good;
+        }
+        check("each shape of a security entry is taken or called damage as its kind says", right);
+
+        right = true;
+        for (p8 kind = SPARK_SETTINGS_BLOCK; kind <= SPARK_SETTINGS_SWITCH; kind++)
+        {
+                host_settings_empty(slot);
+                slot->generation = 1;
+                settings_shaped(slot, SPARK_SETTINGS_INIT, kind, 1, kind == SPARK_SETTINGS_BLOCK ? 32 : 0);
+                host_settings_seal(slot);
+                right &= spark_settings_check(slot) < 0;
+        }
+        check("the security list's kinds in another list are damage", right);
+
+        host_settings_empty(slot);
+        slot->generation = 1;
+        for (positive i = 0; i < SPARK_SETTINGS_SECURITY_MOST; i++)
+                settings_shaped(slot, SPARK_SETTINGS_SECURITY, SPARK_SETTINGS_BLOCK,
+                                SPARK_SETTINGS_BY_HAND, 32);
+        host_settings_seal(slot);
+        check("ninety-six security entries check", spark_settings_check(slot) == 1);
+        settings_shaped(slot, SPARK_SETTINGS_SECURITY, SPARK_SETTINGS_SWITCH, 1, 0);
+        host_settings_seal(slot);
+        check("a ninety-seventh is damaged", spark_settings_check(slot) < 0);
+
+        host_settings_empty(slot);
+        memory_fill(key, 0x5a, sizeof key);
+        check("a security entry keeps the id it is given, and checks",
+              !host_settings_add(slot, SPARK_SETTINGS_SECURITY, SPARK_SETTINGS_BLOCK,
+                                 (string_address)key, 32, address_of id) &&
+                  id == SPARK_SETTINGS_BY_HAND &&
+                  host_settings_next(slot, address_of at, address_of setting) &&
+                  setting.entry.id == SPARK_SETTINGS_BY_HAND && !memory_compare(setting.text, key, 32) &&
+                  (slot->generation = 1, host_settings_seal(slot), spark_settings_check(slot) == 1));
+        memory_zero(settings_block_text, sizeof settings_block_text);
+        check("an anchor past 552 bytes is refused",
+              host_settings_add(slot, SPARK_SETTINGS_SECURITY, SPARK_SETTINGS_TRUST,
+                                settings_block_text, SPARK_SETTINGS_TRUST_MOST + 1, address_of id) != null);
+        host_settings_add(slot, SPARK_SETTINGS_SECURITY, SPARK_SETTINGS_TRUST, settings_block_text,
+                          SPARK_SETTINGS_TRUST_LEAST, address_of id);
+        host_settings_seal(slot);
+        host_settings_untrusted(slot);
+        at = 0;
+        check("a slot no disk vouches for keeps no key it refuses or trusts",
+              !host_settings_next(slot, address_of at, address_of setting) && !slot->length &&
+                  spark_settings_check(slot) == 1);
+}
+
 static bool settings_same(host_settings address_to left, host_settings address_to right)
 {
         return left->length == right->length &&
@@ -106433,7 +106760,7 @@ static bool settings_same(host_settings address_to left, host_settings address_t
 
 static fn settings_format(void)
 {
-        host_settings address_to slot = address_of settings_slot;
+        host_settings address_to slot = address_of settings_block_slot;
         string_address wanted[] = {"pacman -Syu", "sync", "echo hello > /tmp/marker",
                                    "echo pressed > /tmp/p"};
         p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
@@ -106530,7 +106857,7 @@ static fn settings_format(void)
 
 static fn settings_bounds(void)
 {
-        host_settings address_to slot = address_of settings_slot;
+        host_settings address_to slot = address_of settings_block_slot;
         string_address failed;
         bool refused = true;
         p16 id = 0;
@@ -106612,20 +106939,20 @@ static fn settings_bounds(void)
               !host_settings_add(slot, SPARK_SETTINGS_EXIT, SPARK_SETTINGS_COMMAND,
                                  "true", 4, null));
 
-        memory_fill(settings_text, 'x', SPARK_SETTINGS_TEXT_MOST + 1);
+        memory_fill(settings_block_text, 'x', SPARK_SETTINGS_TEXT_MOST + 1);
         host_settings_empty(slot);
         check("an entry past 4096 bytes is refused",
               host_settings_add(slot, SPARK_SETTINGS_INIT, SPARK_SETTINGS_COMMAND,
-                                settings_text, SPARK_SETTINGS_TEXT_MOST + 1, null) != null);
+                                settings_block_text, SPARK_SETTINGS_TEXT_MOST + 1, null) != null);
         check("a bound command past 255 bytes is refused",
               host_settings_add(slot, SPARK_SETTINGS_BIND, SPARK_SETTINGS_COMMAND,
-                                settings_text, SPARK_SETTINGS_BIND_TEXT_MOST + 1, null) != null);
+                                settings_block_text, SPARK_SETTINGS_BIND_TEXT_MOST + 1, null) != null);
 
         for (positive at = 0; at < 3; at++)
                 host_settings_add(slot, SPARK_SETTINGS_STARTUP, SPARK_SETTINGS_COMMAND,
-                                  settings_text, SPARK_SETTINGS_TEXT_MOST, null);
+                                  settings_block_text, SPARK_SETTINGS_TEXT_MOST, null);
         failed = host_settings_add(slot, SPARK_SETTINGS_EXIT, SPARK_SETTINGS_COMMAND,
-                                   settings_text, SPARK_SETTINGS_TEXT_MOST, null);
+                                   settings_block_text, SPARK_SETTINGS_TEXT_MOST, null);
         check("a block with no room left says it is full",
               failed && string_equals(failed, "the settings block is full"));
         slot->generation = 2;
@@ -106663,7 +106990,7 @@ static fn settings_torn(void)
         check("the newer of two good slots is believed",
               spark_settings_newest(settings_pair) == 0);
         memory_copy_apart(settings_before, settings_pair, sizeof(settings_pair));
-        settings_one(address_of settings_next, 6, 'n', 3500);
+        settings_one(address_of settings_block_next, 6, 'n', 3500);
 
         //      Every sector of the new slot landed or not, then every 37th byte.
         for (positive landed = 0; landed <= SPARK_SETTINGS_SLOT; landed += 1)
@@ -106674,12 +107001,12 @@ static fn settings_torn(void)
                         continue;
 
                 memory_copy_apart(settings_pair, settings_before, sizeof(settings_pair));
-                memory_copy_apart(settings_pair + target, address_of settings_next, landed);
+                memory_copy_apart(settings_pair + target, address_of settings_block_next, landed);
                 newest = spark_settings_newest(settings_pair);
 
                 bool kept = newest == (b32)target
                                 ? settings_same(settings_pair + target,
-                                                address_of settings_next)
+                                                address_of settings_block_next)
                                 : newest == 0 &&
                                       settings_same(settings_pair, settings_before);
 
@@ -106698,18 +107025,18 @@ static fn settings_torn(void)
         check("the first write goes over the first slot",
               host_settings_older(settings_pair) == 0 &&
                   host_settings_generation(settings_pair) == 1);
-        settings_one(address_of settings_next, 1, 'f', 2000);
+        settings_one(address_of settings_block_next, 1, 'f', 2000);
         held = true;
         for (positive landed = 0; landed <= SPARK_SETTINGS_SLOT; landed += 512)
         {
                 b32 newest;
 
                 host_settings_empty(settings_pair);
-                memory_copy_apart(settings_pair, address_of settings_next, landed);
+                memory_copy_apart(settings_pair, address_of settings_block_next, landed);
                 newest = spark_settings_newest(settings_pair);
                 held &= newest >= 0 &&
                         (spark_settings_check(settings_pair + newest) == 0 ||
-                         settings_same(settings_pair + newest, address_of settings_next));
+                         settings_same(settings_pair + newest, address_of settings_block_next));
         }
         check("a first write torn anywhere boots the defaults or the new settings", held);
 
@@ -106725,7 +107052,7 @@ static fn settings_torn(void)
         check("two damaged slots are the defaults", spark_settings_newest(settings_pair) < 0);
 }
 
-static b32 settings_run(string_address first, string_address second,
+static b32 settings_block_run(string_address first, string_address second,
                         string_address third, string_address fourth)
 {
         string_address arguments[] = {"moonwater", first, second, third, fourth, null};
@@ -106743,7 +107070,7 @@ static b32 settings_run(string_address first, string_address second,
 
         //      A change leaves its line for saving to finish, and nothing is
         //      saved here: end it, or the verdict lands on the same line.
-        outcome = host_settings_apply(address_of settings_slot, arguments, count);
+        outcome = host_settings_apply(address_of settings_block_slot, arguments, count);
         if (outcome == HOST_SETTINGS_CHANGED)
         {
                 string_format(log, "\n");
@@ -106759,7 +107086,7 @@ static positive settings_listed(p8 list, p8 kind)
         positive at = 0;
         positive count = 0;
 
-        while (host_settings_next(address_of settings_slot, address_of at, address_of setting))
+        while (host_settings_next(address_of settings_block_slot, address_of at, address_of setting))
                 count += setting.entry.list == list &&
                          (!kind || setting.entry.kind == kind);
 
@@ -106768,74 +107095,74 @@ static positive settings_listed(p8 list, p8 kind)
 
 static fn settings_commands(void)
 {
-        host_settings address_to slot = address_of settings_slot;
+        host_settings address_to slot = address_of settings_block_slot;
         host_setting setting;
 
         host_settings_empty(slot);
 
         check("init add takes the words given apart",
-              settings_run("init", "add", "pacman", "-Syu") == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "add", "pacman", "-Syu") == HOST_SETTINGS_CHANGED &&
                   host_settings_find(slot, SPARK_SETTINGS_INIT, "pacman -Syu",
                                      address_of setting) &&
                   setting.entry.id == 1);
         check("init add takes them quoted",
-              settings_run("init", "add", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "add", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
                   host_settings_find(slot, SPARK_SETTINGS_INIT, "2", address_of setting) &&
                   setting.entry.length == 23);
         check("init add of a line it has is the entry it has, and not another",
-              settings_run("init", "add", "pacman -Syu", null) == HOST_SETTINGS_SHOWN &&
+              settings_block_run("init", "add", "pacman -Syu", null) == HOST_SETTINGS_SHOWN &&
                   settings_listed(SPARK_SETTINGS_INIT, 0) == 2);
         check("init remove takes an id",
-              settings_run("init", "remove", "1", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "remove", "1", null) == HOST_SETTINGS_CHANGED &&
                   !host_settings_find(slot, SPARK_SETTINGS_INIT, "1", address_of setting));
         check("init remove takes the words",
-              settings_run("init", "remove", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "remove", "pacman -Syu --noconfirm", null) == HOST_SETTINGS_CHANGED &&
                   !settings_listed(SPARK_SETTINGS_INIT, 0));
         check("init remove of no such entry is refused",
-              settings_run("init", "remove", "9", null) == HOST_SETTINGS_REFUSED);
-        check("init alone lists", settings_run("init", null, null, null) == HOST_SETTINGS_SHOWN);
+              settings_block_run("init", "remove", "9", null) == HOST_SETTINGS_REFUSED);
+        check("init alone lists", settings_block_run("init", null, null, null) == HOST_SETTINGS_SHOWN);
         check("init add with nothing is usage",
-              settings_run("init", "add", null, null) == HOST_SETTINGS_USAGE &&
-                  settings_run("init", "add", "", null) == HOST_SETTINGS_USAGE);
+              settings_block_run("init", "add", null, null) == HOST_SETTINGS_USAGE &&
+                  settings_block_run("init", "add", "", null) == HOST_SETTINGS_USAGE);
         check("an init word nobody defined is usage",
-              settings_run("init", "pacman -Syu", null, null) == HOST_SETTINGS_USAGE);
+              settings_block_run("init", "pacman -Syu", null, null) == HOST_SETTINGS_USAGE);
 
         check("init mount off turns the mount off",
-              settings_run("init", "mount", "off", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "mount", "off", null) == HOST_SETTINGS_CHANGED &&
                   slot->flags & SPARK_SETTINGS_MOUNT_OFF);
         check("init mount alone shows it",
-              settings_run("init", "mount", null, null) == HOST_SETTINGS_SHOWN);
+              settings_block_run("init", "mount", null, null) == HOST_SETTINGS_SHOWN);
         check("init mount takes on or off only",
-              settings_run("init", "mount", "maybe", null) == HOST_SETTINGS_USAGE &&
-                  settings_run("init", "mount", "on", "now") == HOST_SETTINGS_USAGE);
+              settings_block_run("init", "mount", "maybe", null) == HOST_SETTINGS_USAGE &&
+                  settings_block_run("init", "mount", "on", "now") == HOST_SETTINGS_USAGE);
         check("init mount on turns it back on",
-              settings_run("init", "mount", "on", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "mount", "on", null) == HOST_SETTINGS_CHANGED &&
                   !(slot->flags & SPARK_SETTINGS_MOUNT_OFF));
         check("a switch belongs to its own command",
-              settings_run("exit", "mount", "off", null) == HOST_SETTINGS_USAGE);
+              settings_block_run("exit", "mount", "off", null) == HOST_SETTINGS_USAGE);
 
         //      Canvas at boot is a switch as the mount is. Nothing reads the
         //      startup list yet, so no command takes it: a setting accepted and
         //      then ignored is one nobody can tell is unsupported.
         host_settings_empty(slot);
         check("Canvas at boot is a switch as the mount is",
-              settings_run("init", "canvas", "off", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("init", "canvas", "off", null) == HOST_SETTINGS_CHANGED &&
                   slot->flags & SPARK_SETTINGS_CANVAS_OFF &&
-                  settings_run("init", "canvas", "on", null) == HOST_SETTINGS_CHANGED &&
+                  settings_block_run("init", "canvas", "on", null) == HOST_SETTINGS_CHANGED &&
                   !(slot->flags & SPARK_SETTINGS_CANVAS_OFF));
         check("the startup list is not taken yet",
-              settings_run("startup", null, null, null) == HOST_SETTINGS_USAGE &&
-                  settings_run("startup", "shell", null, null) == HOST_SETTINGS_USAGE &&
-                  settings_run("startup", "add", "btop", null) == HOST_SETTINGS_USAGE &&
+              settings_block_run("startup", null, null, null) == HOST_SETTINGS_USAGE &&
+                  settings_block_run("startup", "shell", null, null) == HOST_SETTINGS_USAGE &&
+                  settings_block_run("startup", "add", "btop", null) == HOST_SETTINGS_USAGE &&
                   !slot->flags && !slot->length);
 
         check("exit add and remove",
-              settings_run("exit", "add", "sync", null) == HOST_SETTINGS_CHANGED &&
+              settings_block_run("exit", "add", "sync", null) == HOST_SETTINGS_CHANGED &&
                   settings_listed(SPARK_SETTINGS_EXIT, 0) == 1 &&
-                  settings_run("exit", "remove", "sync", null) == HOST_SETTINGS_CHANGED &&
+                  settings_block_run("exit", "remove", "sync", null) == HOST_SETTINGS_CHANGED &&
                   !settings_listed(SPARK_SETTINGS_EXIT, 0));
         check("exit with a command and no add is usage",
-              settings_run("exit", "sync", null, null) == HOST_SETTINGS_USAGE);
+              settings_block_run("exit", "sync", null, null) == HOST_SETTINGS_USAGE);
 
         slot->generation = 3;
         host_settings_seal(slot);
@@ -106868,10 +107195,10 @@ static fn settings_build(string_address name, p32 raw, p32 size, bool second)
         storage_put32(table + 96, 0x1000);
         storage_put32(table + 100, 0xa000);
 
-        host_settings_empty(address_of settings_slot);
-        memory_copy_apart(image + 0x2000, address_of settings_slot, 64);
+        host_settings_empty(address_of settings_block_slot);
+        memory_copy_apart(image + 0x2000, address_of settings_block_slot, 64);
         if (second)
-                memory_copy_apart(image + 0x6000, address_of settings_slot, 64);
+                memory_copy_apart(image + 0x6000, address_of settings_block_slot, 64);
 }
 
 static fn settings_sections(void)
@@ -107159,8 +107486,8 @@ static fn image_hostile(void)
 static fn settings_codes(void)
 {
         static p8 back[sizeof(settings_image)];
-        host_settings address_to slot = address_of settings_slot;
-        host_settings address_to into = address_of settings_next;
+        host_settings address_to slot = address_of settings_block_slot;
+        host_settings address_to into = address_of settings_block_next;
         p8 path[64];
         bipolar handle = system_call_2(syscall(memfd_create),
                                        (positive)(string_address)"codes", 0);
@@ -107230,6 +107557,7 @@ b32 main(void)
 {
         settings_format();
         settings_bounds();
+        settings_security();
         settings_torn();
         settings_commands();
         settings_sections();

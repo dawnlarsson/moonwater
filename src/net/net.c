@@ -5759,6 +5759,9 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 /* Or, at the tight tier, that the certificate was not logged as Certificate
    Transparency asks (tls_ct_holds). */
 #define TLS_UNLOGGED (-9)
+/* Or that what `moonwater security` published could not be read, which
+   refuses every checked certificate until it can be (tls_overlay_read). */
+#define TLS_OVERLAY (-10)
 #define TLS_FAULT_EARLY 1
 #define TLS_FAULT_LATE 2
 #define TLS_FAULT_NAME 3
@@ -5766,6 +5769,8 @@ static bool crypto_rsa_pss_sha256(p8 address_to n_bytes, positive n_length,
 #define TLS_FAULT_UNCHECKED 5
 #define TLS_FAULT_CLOCK 6
 #define TLS_FAULT_UNLOGGED 7
+#define TLS_FAULT_OVERLAY 8
+#define TLS_FAULTS 9 // none and each of the above
 
 #define TLS_CT_CCS 20
 #define TLS_CT_ALERT 21
@@ -5835,6 +5840,88 @@ static const p8 tls_blocked_keys[8][32] = {
      0xf9, 0x7c, 0xd5, 0x72, 0x91, 0xbb, 0x5b, 0xa6, 0x86, 0xc5, 0x41, 0x5f, 0x5e, 0xb4, 0xf6, 0xb6},
     {0x92, 0xc0, 0x63, 0xd6, 0x7e, 0x8f, 0x14, 0xdb, 0x71, 0xd2, 0x88, 0xe1, 0x12, 0x66, 0xff, 0xda,
      0xf6, 0x9c, 0xbf, 0x11, 0x5f, 0x7b, 0xab, 0x14, 0xf3, 0xbc, 0x2f, 0x68, 0xd2, 0x5e, 0x0e, 0x30}};
+
+/*
+        What `moonwater security` adds to the built-in trust: keys refused
+        beside tls_blocked_keys, anchors trusted beside anchors.inc's.
+
+        root keeps them in the boot image's settings (src/moonwater/spark.c,
+        the security list) and publishes them in /run/moonwater/security,
+        which every program can read and only root can write: a magic, the
+        length of what follows and four zero bytes, then the list's entries
+        as the settings block spells them (list, kind, id, length, a zero
+        halfword, the text padded to four bytes). A client reads the file
+        when it opens a connection, or once in a confined child before its
+        filter goes on (tls_overlay_hold), and holds it as tls_overlay_now.
+
+        No file is no overlay: the built-in trust, as it has always been. A
+        file that does not read whole, by every rule tls_overlay_read holds
+        it to, refuses every checked certificate until it does, because
+        whatever it would have refused is not known. Nothing in it can lift
+        a block: a key refused here or built in is refused wherever it is,
+        an added anchor among them, and an added anchor is held to every
+        rule a built-in one is. tls_overlay_read says what each entry may be.
+*/
+#ifndef TLS_OVERLAY_PATH
+#define TLS_OVERLAY_PATH "/run/moonwater/security"
+#endif
+#define TLS_OVERLAY_MAGIC "MWSECURE"
+#define TLS_OVERLAY_HEAD 16
+#define TLS_OVERLAY_ROOM (16384 - 64) // the settings block's payload
+#define TLS_OVERLAY_BLOCKS 64
+#define TLS_OVERLAY_ANCHORS 8
+//      The settings block's words for its security list (spark.c).
+#define TLS_OVERLAY_LIST 5
+#define TLS_OVERLAY_BLOCK 4
+#define TLS_OVERLAY_TRUST 5
+#define TLS_OVERLAY_SWITCH 6
+#define TLS_OVERLAY_BY_HAND 1
+#ifdef SPARK_SETTINGS_SECURITY
+_Static_assert(TLS_OVERLAY_LIST == SPARK_SETTINGS_SECURITY &&
+                   TLS_OVERLAY_BLOCK == SPARK_SETTINGS_BLOCK &&
+                   TLS_OVERLAY_TRUST == SPARK_SETTINGS_TRUST &&
+                   TLS_OVERLAY_SWITCH == SPARK_SETTINGS_SWITCH &&
+                   TLS_OVERLAY_BY_HAND == SPARK_SETTINGS_BY_HAND &&
+                   TLS_OVERLAY_ROOM == SPARK_SETTINGS_PAYLOAD,
+               "the overlay is the settings block's security list");
+#endif
+//      What was read: no file, a file taken, or one that is not one.
+#define TLS_OVERLAY_NONE 0
+#define TLS_OVERLAY_TAKEN 1
+#define TLS_OVERLAY_BAD 2
+
+/* An anchor added: its key as anchors.inc keeps one (curve 1 P-256, 2 P-384,
+   3 RSA, then x || y or the modulus), the SHA-256 of its subject Name, and
+   the SHA-256 of its DER SubjectPublicKeyInfo. refused when that key is
+   refused too, which wins. */
+typedef struct
+{
+        p8 curve;
+        p32 exponent;
+        p16 key_length;
+        p8 name[32];
+        p8 spki[32];
+        bool refused;
+        p8 key[512];
+} tls_added_anchor;
+
+typedef struct
+{
+        p8 state;
+        p32 switches;
+        positive blocks;
+        p8 block[TLS_OVERLAY_BLOCKS][32];
+        positive anchors;
+        tls_added_anchor anchor[TLS_OVERLAY_ANCHORS];
+        /* One bit for each of tls_anchors whose key is refused here. */
+        p8 refused[32];
+} tls_overlay;
+
+static tls_overlay tls_overlay_now;
+//      Set in a confined child, which read the file before its filter.
+static bool tls_overlay_held;
+
+static COLD fn tls_overlay_refresh(void);
 
 static const p8 tls_oid_ec[7] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
 static const p8 tls_oid_p256[8] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
@@ -9151,32 +9238,127 @@ static COLD positive tls_key_bits(const tls_cert address_to cert,
 }
 
 /* An anchor's key laid out the way tls_parse_cert lays out a served one. */
-static COLD bool tls_anchor_key(const tls_anchor address_to anchor,
-                           tls_cert address_to root)
+static COLD bool tls_kept_key(p8 curve, p64 exponent, const p8 address_to key,
+                              positive length, tls_cert address_to root)
 {
-        positive length = anchor->key_length;
+        //      Kept as anchors.inc keeps it, built in or added: curve 1
+        //      P-256, 2 P-384, 3 RSA, then x || y or the modulus.
         positive coord = length / 2;
-        const p8 address_to key;
 
         memory_fill(root, 0, sizeof(*root));
-        if (!length || length > sizeof root->modulus ||
-            anchor->key_at + length > sizeof tls_anchor_keys)
+        if (!length || length > sizeof root->modulus)
                 return false;
-        key = tls_anchor_keys + anchor->key_at;
-        root->curve = anchor->curve;
-        if (anchor->curve == 3)
+        root->curve = curve;
+        if (curve == 3)
         {
                 memory_copy(root->modulus, key, length);
                 root->modulus_length = length;
-                root->exponent = anchor->exponent;
+                root->exponent = exponent;
                 return true;
         }
-        if ((anchor->curve != 1 || coord != 32) &&
-            (anchor->curve != 2 || coord != 48))
+        if ((curve != 1 || coord != 32) && (curve != 2 || coord != 48))
                 return false;
         memory_copy(root->qx + 48 - coord, key, coord);
         memory_copy(root->qy + 48 - coord, key + coord, coord);
         return true;
+}
+
+/* tls_kept_key over the bytes anchors.inc keeps for one of tls_anchors. */
+static COLD bool tls_anchor_key(const tls_anchor address_to anchor,
+                           tls_cert address_to root)
+{
+        if (anchor->key_at + anchor->key_length > sizeof tls_anchor_keys)
+        {
+                memory_fill(root, 0, sizeof(*root));
+                return false;
+        }
+        return tls_kept_key(anchor->curve, anchor->exponent,
+                            tls_anchor_keys + anchor->key_at, anchor->key_length, root);
+}
+
+/* The SHA-256 of a key's DER SubjectPublicKeyInfo, which is how a refused key
+   is named. served takes a served certificate's own bytes; otherwise, and
+   always for an anchor, which carries none, the bytes are rebuilt around
+   tls_key_bits -- id-ecPublicKey and the curve's OID, or rsaEncryption and
+   a NULL, then the BIT STRING -- which DER makes the one spelling of the
+   key, and so the hash openssl prints for any certificate of it. False for
+   a key that is none of these. */
+static COLD bool tls_spki_digest(const tls_cert address_to cert, bool served,
+                                 p8 address_to digest)
+{
+        static const p8 p256[] = {0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+                                  0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
+        static const p8 p384[] = {0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+                                  0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22};
+        static const p8 rsa[] = {0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
+                                 0x01, 0x01, 0x01, 0x05, 0x00};
+        const p8 address_to algorithm = cert->curve == 1 ? p256 : cert->curve == 2 ? p384 : rsa;
+        positive algorithm_length = cert->curve == 1   ? sizeof p256
+                                    : cert->curve == 2 ? sizeof p384
+                                                       : sizeof rsa;
+        p8 spki[32 + 16 + CRYPTO_RSA_BYTES];
+        tls_cert bare;
+        positive bits;
+        positive inner;
+        positive at;
+
+        if (served && cert->spki && cert->spki_length)
+        {
+                crypto_sha256_of(cert->spki, cert->spki_length, digest);
+                return true;
+        }
+        //      tls_key_bits hands a served certificate's own bits back, so
+        //      it is asked of a copy that has none.
+        if (cert->curve != 1 && cert->curve != 2 && cert->curve != 3)
+                return false;
+        memory_copy(address_of bare, cert, sizeof bare);
+        bare.key_bits = null;
+        bare.key_bits_length = 0;
+        at = 32;
+        bits = tls_key_bits(address_of bare, spki + at, sizeof spki - at);
+        if (!bits)
+                return false;
+        //      The BIT STRING's unused-bits octet and its header go in front
+        //      of the bits, then the algorithm, then the SEQUENCE's header.
+        spki[--at] = 0;
+        inner = algorithm_length + tls_der_header_size(bits + 1) + bits + 1;
+        if (at < tls_der_header_size(bits + 1) + algorithm_length + tls_der_header_size(inner))
+                return false;
+        at -= tls_der_header_size(bits + 1);
+        tls_der_header(spki + at, 0x03, bits + 1);
+        at -= algorithm_length;
+        memory_copy(spki + at, algorithm, algorithm_length);
+        at -= tls_der_header_size(inner);
+        tls_der_header(spki + at, 0x30, inner);
+        crypto_sha256_of(spki + at, tls_der_header_size(inner) + inner, digest);
+        return true;
+}
+
+/* Whether a key, by the SHA-256 of its DER SubjectPublicKeyInfo, is refused:
+   one of tls_blocked_keys, which nothing lifts, or one an overlay blocks. */
+static COLD bool tls_overlay_refuses(const tls_overlay address_to overlay,
+                                     const p8 address_to digest)
+{
+        for (positive i = 0; i < array_count(tls_blocked_keys); i++)
+                if (!memory_compare(tls_blocked_keys[i], digest, 32))
+                        return true;
+        for (positive i = 0; i < overlay->blocks && i < TLS_OVERLAY_BLOCKS; i++)
+                if (!memory_compare(overlay->block[i], digest, 32))
+                        return true;
+        return false;
+}
+
+static COLD bool tls_digest_refused(const p8 address_to digest)
+{
+        return tls_overlay_refuses(address_of tls_overlay_now, digest);
+}
+
+/* Whether the anchor at this place in tls_anchors has its key refused, which
+   tls_overlay_settle worked out once for the file it read. */
+static COLD bool tls_anchor_refused(positive at)
+{
+        return at < sizeof tls_overlay_now.refused * 8 &&
+               (tls_overlay_now.refused[at / 8] >> (at % 8) & 1);
 }
 
 /* TLS_BENCH_ANCHOR names a file holding tls_bench_anchor_x and _y, the
@@ -9197,6 +9379,21 @@ static COLD bool tls_bench_distrusts(p64 leaf_from)
         return false;
 #endif
 }
+
+/* And it is refused like any anchor when its key is, so a test can block it. */
+static COLD bool tls_bench_refused(void)
+{
+        p8 key[96];
+        p8 digest[32];
+        tls_cert root;
+
+        if (!tls_overlay_now.blocks)
+                return false;
+        memory_copy(key, tls_bench_anchor_x, 48);
+        memory_copy(key + 48, tls_bench_anchor_y, 48);
+        return tls_kept_key(2, 0, key, sizeof key, address_of root) &&
+               tls_spki_digest(address_of root, false, digest) && tls_digest_refused(digest);
+}
 #endif
 
 /* Whether this anchor's distrust-after date is earlier than the leaf's
@@ -9205,6 +9402,18 @@ static COLD bool tls_anchor_distrusts(const tls_anchor address_to anchor,
                                       p64 leaf_from)
 {
         return anchor->distrust && leaf_from > anchor->distrust;
+}
+
+/* Whether two keys laid out as tls_parse_cert lays one out are one key. */
+static COLD bool tls_same_key(const tls_cert address_to one, const tls_cert address_to two)
+{
+        return one->curve == two->curve &&
+               (one->curve == 3 ? one->modulus_length == two->modulus_length &&
+                                      one->exponent == two->exponent &&
+                                      !memory_compare(one->modulus, two->modulus,
+                                                      one->modulus_length)
+                                : !memory_compare(one->qx, two->qx, 48) &&
+                                      !memory_compare(one->qy, two->qy, 48));
 }
 
 /* A served certificate carrying an anchor's key ends the chain, whoever
@@ -9230,7 +9439,7 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert, p64 leaf_from)
         if (cert->curve == 2 &&
             !memory_compare(cert->qx, tls_bench_anchor_x, 48) &&
             !memory_compare(cert->qy, tls_bench_anchor_y, 48))
-                return !tls_bench_distrusts(leaf_from);
+                return !tls_bench_distrusts(leaf_from) && !tls_bench_refused();
 #endif
 
         for (positive i = 0; i < array_count(tls_anchors); i++)
@@ -9240,37 +9449,40 @@ static COLD bool tls_spki_is_anchor(tls_cert address_to cert, p64 leaf_from)
                 if (tls_anchors[i].curve != cert->curve ||
                     memory_compare(tls_anchors[i].key_hash, digest, 8) ||
                     tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
+                    tls_anchor_refused(i) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
                         continue;
-                if (cert->curve == 3
-                        ? root.modulus_length == cert->modulus_length &&
-                              root.exponent == cert->exponent &&
-                              !memory_compare(root.modulus, cert->modulus,
-                                              root.modulus_length)
-                        : !memory_compare(root.qx, cert->qx, 48) &&
-                              !memory_compare(root.qy, cert->qy, 48))
+                if (tls_same_key(address_of root, cert))
+                        return true;
+        }
+
+        //      And the anchors `moonwater security` added, which carry no
+        //      distrust-after date.
+        for (positive i = 0; i < tls_overlay_now.anchors && i < TLS_OVERLAY_ANCHORS; i++)
+        {
+                const tls_added_anchor address_to added = tls_overlay_now.anchor + i;
+                tls_cert root;
+
+                if (!added->refused && added->curve == cert->curve &&
+                    tls_kept_key(added->curve, added->exponent, added->key,
+                                 added->key_length, address_of root) &&
+                    tls_same_key(address_of root, cert))
                         return true;
         }
 
         return false;
 }
 
-/* Whether the certificate's key is one of tls_blocked_keys, or an EC key anyone
-   can compute: k*G for a k up to TLS_SMALL_KEYS (tls_small_keys), which is how
-   eMudhra's eight were made. The next CA to make that mistake is refused
-   before anybody names its keys. */
-static COLD bool tls_key_blocked(const tls_cert address_to cert)
+/* Whether a key is an EC key anyone can compute: k*G for a k up to
+   TLS_SMALL_KEYS (tls_small_keys), which is how eMudhra's eight were made.
+   The next CA to make that mistake is refused before anybody names its keys,
+   and no anchor `moonwater security` adds can be one. */
+static COLD bool tls_key_computable(const tls_cert address_to cert)
 {
         p8 digest[32];
         p8 key[96];
         positive coord = cert->curve == 1 ? 32 : 48;
 
-        if (!cert->spki || !cert->spki_length)
-                return false;
-        crypto_sha256_of(cert->spki, cert->spki_length, digest);
-        for (positive i = 0; i < array_count(tls_blocked_keys); i++)
-                if (!memory_compare(tls_blocked_keys[i], digest, 32))
-                        return true;
         if (cert->curve != 1 && cert->curve != 2)
                 return false;
         memory_copy(key, cert->qx + 48 - coord, coord);
@@ -9281,6 +9493,23 @@ static COLD bool tls_key_blocked(const tls_cert address_to cert)
                                     digest, 8))
                         return true;
         return false;
+}
+
+/* Whether the certificate's key is refused: one of tls_blocked_keys or one
+   `moonwater security` blocked (tls_digest_refused), named by its own
+   SubjectPublicKeyInfo or by the one DER spelling of the same key, so a
+   cross-certificate that spells it otherwise is the same row; or one anyone
+   can compute (tls_key_computable). */
+static COLD bool tls_key_blocked(const tls_cert address_to cert)
+{
+        p8 digest[32];
+
+        if (!cert->spki || !cert->spki_length)
+                return false;
+        crypto_sha256_of(cert->spki, cert->spki_length, digest);
+        return tls_digest_refused(digest) ||
+               (tls_spki_digest(cert, false, digest) && tls_digest_refused(digest)) ||
+               tls_key_computable(cert);
 }
 
 static COLD bool tls_certificate_names_chain(const tls_cert address_to child,
@@ -9362,7 +9591,7 @@ static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from,
         root.curve = 2;
         memory_copy(root.qx, tls_bench_anchor_x, 48);
         memory_copy(root.qy, tls_bench_anchor_y, 48);
-        if (!tls_bench_distrusts(leaf_from) &&
+        if (!tls_bench_distrusts(leaf_from) && !tls_bench_refused() &&
             tls_verify_one(child, address_of root))
                 goto signed_by;
 #endif
@@ -9371,7 +9600,21 @@ static COLD bool tls_anchor_verifies(tls_cert address_to child, p64 leaf_from,
         {
                 if (memory_compare(tls_anchors[i].name, digest, 8) ||
                     tls_anchor_distrusts(tls_anchors + i, leaf_from) ||
+                    tls_anchor_refused(i) ||
                     !tls_anchor_key(tls_anchors + i, address_of root))
+                        continue;
+                if (tls_verify_one(child, address_of root))
+                        goto signed_by;
+        }
+        //      The anchors `moonwater security` added, found by the whole
+        //      hash of their Name.
+        for (positive i = 0; i < tls_overlay_now.anchors && i < TLS_OVERLAY_ANCHORS; i++)
+        {
+                const tls_added_anchor address_to added = tls_overlay_now.anchor + i;
+
+                if (added->refused || memory_compare(added->name, digest, 32) ||
+                    !tls_kept_key(added->curve, added->exponent, added->key,
+                                  added->key_length, address_of root))
                         continue;
                 if (tls_verify_one(child, address_of root))
                         goto signed_by;
@@ -9809,9 +10052,18 @@ static COLD bool tls_verify_chain(p8 address_to body, positive body_length,
         if (!tls->check_cert)
                 return true;
 
-        //      A compromised CA key (tls_blocked_keys) in a served
-        //      certificate: the leaf's refuses the connection, an
-        //      intermediate is never a step of the path.
+        //      What `moonwater security` refuses is not known while what it
+        //      published does not read, so nothing is trusted until it does.
+        if (tls_overlay_now.state == TLS_OVERLAY_BAD)
+        {
+                tls->fault = TLS_FAULT_OVERLAY;
+                return false;
+        }
+
+        //      A compromised CA key (tls_blocked_keys, or one `moonwater
+        //      security` refuses) in a served certificate: the leaf's
+        //      refuses the connection, an intermediate is never a step of
+        //      the path.
         for (positive at = 0; at < count; at++)
                 if (!(unusable >> at & 1) && tls_key_blocked(certs + at))
                 {
@@ -11296,9 +11548,9 @@ done:
 }
 
 /* What each TLS_FAULT_* answers, in its number's order: none, EARLY, ... */
-static const bipolar tls_fault_answer[8] = {
+static const bipolar tls_fault_answer[TLS_FAULTS] = {
     TLS_UNTRUSTED, TLS_NOT_YET, TLS_EXPIRED, TLS_MISMATCH,
-    TLS_REVOKED, TLS_UNCHECKED, TLS_CLOCK, TLS_UNLOGGED};
+    TLS_REVOKED, TLS_UNCHECKED, TLS_CLOCK, TLS_UNLOGGED, TLS_OVERLAY};
 
 /* A connection over the caller's deadline (null when it could not be had),
    and for Network Time Security's key establishment an application
@@ -11320,12 +11572,13 @@ static COLD bipolar tls_connect_until(tls_conn address_to tls, bipolar handle,
         tls->alpn = alpn;
         tls->alpn_length = alpn_length;
         tls->clock_bootstrap = bootstrap;
+        tls_overlay_refresh();
         status = deadline ? tls_handshake(tls, deadline) : TLS_FAIL;
         if (status)
         {
                 status = !tls->untrusted ? TLS_FAIL
-                         : tls->fault < 8 ? tls_fault_answer[tls->fault]
-                                          : TLS_UNTRUSTED;
+                         : tls->fault < TLS_FAULTS ? tls_fault_answer[tls->fault]
+                                                   : TLS_UNTRUSTED;
                 tls_forget(tls);
         }
         return status;
@@ -11615,6 +11868,9 @@ static bipolar tls_read_until(
 //      believe.
 #define HTTP_CONFINE (-24)
 #define HTTP_APART (-25)
+//      What `moonwater security` published could not be read, so no
+//      certificate was believed (TLS_OVERLAY).
+#define HTTP_OVERLAY (-26)
 
 typedef byte_store http_buffer;
 #define http_forget(buffer) byte_store_release(buffer)
@@ -12600,6 +12856,7 @@ static bipolar http_tls_status(bipolar verdict)
                : verdict == TLS_UNCHECKED ? HTTP_UNCHECKED
                : verdict == TLS_CLOCK ? HTTP_CLOCK
                : verdict == TLS_UNLOGGED ? HTTP_UNLOGGED
+               : verdict == TLS_OVERLAY ? HTTP_OVERLAY
                                         : HTTP_TLS;
 }
 
@@ -13910,7 +14167,10 @@ static COLD bool tls_ct_holds(tls_cert address_to certs, const positive address_
                     !tls_ct_sct_read(address_of one, address_of sct))
                         break;
                 log = tls_ct_log_find(sct.id);
-                if (!log || !tls_ct_log_counts(log, sct.timestamp, not_after_ms, now_ms) ||
+                //      A log's id is the SHA-256 of its key's SubjectPublicKeyInfo,
+                //      so `moonwater security block` names one as it names a CA.
+                if (!log || tls_digest_refused(log->id) ||
+                    !tls_ct_log_counts(log, sct.timestamp, not_after_ms, now_ms) ||
                     !tls_ct_sct_verifies(address_of sct, log, issuer_key_hash, precert.bytes,
                                          length, address_of signed_bytes))
                         continue;
@@ -14406,6 +14666,168 @@ static COLD positive tls_aia_fetch(const p8 address_to url, positive length,
         byte_store store = {into, room, 0};
 
         return tls_plain_get(url, length, address_of store, TLS_AIA_SECONDS, null);
+}
+
+/*
+        Reading what `moonwater security` published (TLS_OVERLAY_PATH).
+
+        The file is the magic, the entries' length in four bytes, low first,
+        and four zero bytes; then exactly that many bytes of entries and
+        nothing after. Each is as the settings block spells it: list 5, a
+        kind, an id, a length, a zero halfword, then its text, padded with
+        zeros to four bytes.
+
+          a block is 32 bytes, a key's SubjectPublicKeyInfo hash, added by
+          hand; at most 64 of them
+
+          an anchor is its curve (1 P-256, 2 P-384, 3 RSA), three zero
+          bytes, its RSA exponent in four bytes, low first (zero on a
+          curve), the SHA-256 of its subject Name and its key as anchors.inc
+          keeps one, held to the rules anchors.inc's are: a point of its
+          curve's size, or a modulus of 2048 to 4096 bits whose first byte is
+          not zero and an odd exponent of at least 3; at most 8 of them
+
+        A kind, a list or a number this build has no word for, a byte out of
+        place, a count past the most: the whole file is refused, and into
+        says so.
+*/
+static COLD bool tls_overlay_anchor_read(byte_reader address_to text,
+                                         tls_added_anchor address_to into)
+{
+        p8 curve = byte_reader_u8(text);
+        bool zero = !byte_reader_u8(text) && !byte_reader_u8(text) && !byte_reader_u8(text);
+        p32 exponent = byte_reader_u32le(text);
+        const p8 address_to name = byte_reader_take(text, 32);
+        positive length = byte_reader_left(text);
+        const p8 address_to key = byte_reader_take(text, length);
+        tls_cert root;
+
+        if (!zero || !name || !key || !byte_reader_end(text) ||
+            (curve == 1   ? length != 64 || exponent
+             : curve == 2 ? length != 96 || exponent
+             : curve == 3 ? length < 256 || length > 512 || !key[0] || exponent < 3 ||
+                                !(exponent & 1)
+                          : true))
+                return false;
+        into->curve = curve;
+        into->exponent = exponent;
+        into->key_length = (p16)length;
+        memory_copy(into->name, name, 32);
+        memory_copy(into->key, key, length);
+        return tls_kept_key(curve, exponent, into->key, length, address_of root) &&
+               tls_spki_digest(address_of root, false, into->spki);
+}
+
+static COLD bool tls_overlay_read(const p8 address_to bytes, positive length,
+                                  tls_overlay address_to into)
+{
+        byte_reader reader = byte_reader_open(bytes, length);
+        const p8 address_to magic = byte_reader_take(address_of reader, 8);
+        p32 size = byte_reader_u32le(address_of reader);
+        bool zero = !byte_reader_u32le(address_of reader);
+        byte_reader entries = byte_reader_window(address_of reader, size);
+
+        memory_fill(into, 0, sizeof(*into));
+        into->state = TLS_OVERLAY_BAD;
+        if (!magic || memory_compare(magic, TLS_OVERLAY_MAGIC, 8) || !zero ||
+            size > TLS_OVERLAY_ROOM || !byte_reader_end(address_of reader))
+                return false;
+        while (byte_reader_left(address_of entries))
+        {
+                p8 list = byte_reader_u8(address_of entries);
+                p8 kind = byte_reader_u8(address_of entries);
+                p16 id = byte_reader_u16le(address_of entries);
+                p16 text_length = byte_reader_u16le(address_of entries);
+                bool reserved = byte_reader_u16le(address_of entries) != 0;
+                byte_reader text = byte_reader_window(address_of entries, text_length);
+                byte_reader padding = byte_reader_window(address_of entries,
+                                                         (positive)(4 - text_length % 4) % 4);
+
+                if (!byte_reader_ok(address_of entries) || list != TLS_OVERLAY_LIST || reserved)
+                        return false;
+                while (byte_reader_left(address_of padding))
+                        if (byte_reader_u8(address_of padding))
+                                return false;
+                if (kind == TLS_OVERLAY_BLOCK)
+                {
+                        const p8 address_to key = byte_reader_take(address_of text, 32);
+
+                        if (id != TLS_OVERLAY_BY_HAND || !key || !byte_reader_end(address_of text) ||
+                            into->blocks == TLS_OVERLAY_BLOCKS)
+                                return false;
+                        memory_copy(into->block[into->blocks++], key, 32);
+                }
+                else if (kind == TLS_OVERLAY_TRUST)
+                {
+                        if (id != TLS_OVERLAY_BY_HAND || into->anchors == TLS_OVERLAY_ANCHORS ||
+                            !tls_overlay_anchor_read(address_of text,
+                                                     into->anchor + into->anchors))
+                                return false;
+                        into->anchors++;
+                }
+                else
+                        return false;
+        }
+        into->state = TLS_OVERLAY_TAKEN;
+        return true;
+}
+
+_Static_assert(array_count(tls_anchors) <= sizeof(((tls_overlay address_to)0)->refused) * 8,
+               "a refused bit for every anchor");
+
+/* What a read file refuses, worked out once: which of tls_anchors and which
+   added anchors have a refused key, so a chain asks a bit and not a hash. */
+static COLD fn tls_overlay_settle(tls_overlay address_to overlay)
+{
+        p8 digest[32];
+        tls_cert root;
+
+        for (positive i = 0; overlay->blocks && i < array_count(tls_anchors); i++)
+                if (tls_anchor_key(tls_anchors + i, address_of root) &&
+                    tls_spki_digest(address_of root, false, digest) &&
+                    tls_overlay_refuses(overlay, digest))
+                        overlay->refused[i / 8] |= (p8)(1 << (i % 8));
+        for (positive i = 0; i < overlay->anchors; i++)
+                overlay->anchor[i].refused =
+                    tls_overlay_refuses(overlay, overlay->anchor[i].spki) ||
+                    !tls_kept_key(overlay->anchor[i].curve, overlay->anchor[i].exponent,
+                                  overlay->anchor[i].key, overlay->anchor[i].key_length,
+                                  address_of root) ||
+                    tls_key_computable(address_of root);
+}
+
+/* The published file into an overlay: none when there is no file, and one
+   that refuses everything when there is a file that does not read. */
+static COLD fn tls_overlay_load(tls_overlay address_to into)
+{
+        p8 text[TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM + 2];
+        bipolar got = file_slurp_regular_at(AT_FDCWD, (string_address)TLS_OVERLAY_PATH, text,
+                                            sizeof text, O_NOFOLLOW);
+
+        if (got == -ENOENT)
+                memory_fill(into, 0, sizeof(*into));
+        else if (got < 0 || (positive)got > TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM ||
+                 !tls_overlay_read(text, (positive)got, into))
+        {
+                memory_fill(into, 0, sizeof(*into));
+                into->state = TLS_OVERLAY_BAD;
+        }
+        else
+                tls_overlay_settle(into);
+}
+
+/* Before a connection, the file as it is now; a confined child keeps what it
+   read before its filter, which would kill it for opening anything. */
+static COLD fn tls_overlay_refresh(void)
+{
+        if (!tls_overlay_held)
+                tls_overlay_load(address_of tls_overlay_now);
+}
+
+static COLD fn tls_overlay_hold(void)
+{
+        tls_overlay_load(address_of tls_overlay_now);
+        tls_overlay_held = true;
 }
 
 /*
@@ -15580,10 +16002,11 @@ static bipolar http_fetch_to(string_address start, bipolar dest, bool check_cert
 
           the child holds the answer's pipe, the one descriptor it was handed
           to write into (wget's output, or none) and standard error, and
-          nothing else; reads resolv.conf, the DNS over TLS setting and the
-          clock's floor while it still may (the trust anchors are compiled
-          in, the clock is a vDSO read, and a revocation list is fetched
-          into memory, never a file); becomes
+          nothing else; reads resolv.conf, the DNS over TLS setting, the
+          clock's floor and what `moonwater security` published while it
+          still may (the trust anchors are compiled in, the clock is a vDSO
+          read, and a revocation list is fetched into memory, never a
+          file); becomes
           nobody when it is root; can no longer be dumped, gain a privilege
           through exec or outlive the client; and then installs a filter that
           kills it at any system call fetching does not need.
@@ -15909,6 +16332,7 @@ static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context
         dns_servers_hold((string_address) "/etc/resolv.conf");
         dns_tls_held = dns_tls_mode() + 1;
         clock_floor_held = clock_trust_floor();
+        tls_overlay_hold();
         net_filter_build(address_of filter, clock);
         if (!descriptors_close_outside(0, kept, array_count(kept)) ||
             !net_apart_nobody() || !net_apart_tie(parent) ||
@@ -16085,7 +16509,8 @@ static COLD bool http_apart_task(address_any context, bipolar answer)
 
 static CONST COLD bool http_apart_status(b64 status)
 {
-        return status <= HTTP_OK && status >= HTTP_UNLOGGED && status != -6;
+        return (status <= HTTP_OK && status >= HTTP_UNLOGGED && status != -6) ||
+               status == HTTP_OVERLAY;
 }
 
 static COLD bool http_apart_believed(const http_apart_said address_to said,

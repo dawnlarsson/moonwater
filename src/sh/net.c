@@ -858,6 +858,15 @@ static COLD b32 net_wget_failed(bipolar status, b32 code, p8 address_to where,
                                      "(SCTs from two log operators).\n" NET_WGET_INSECURE,
                                      writer_terminal_quoted_name, host,
                                      writer_terminal_quoted_name, host);
+        //      What `moonwater security` published does not read, so what
+        //      it refuses is not known and no certificate is believed; the
+        //      command writes it again.
+        case HTTP_OVERLAY:
+                return string_report(log_error, WGET_SSL,
+                                     "ERROR: The certificate of '%w' cannot be "
+                                     "checked: " TLS_OVERLAY_PATH " does not "
+                                     "read. `moonwater security` says why.\n",
+                                     writer_terminal_quoted_name, host);
         case HTTP_PRIVATE:
                 return string_report(log_error, WGET_GENERIC,
                                      "wget: refused a redirect to %w, an address "
