@@ -49739,6 +49739,12 @@ def harness_tls_peer(argv):
         ("TLS 1.2 flight with a CertificateVerify", {"tls12": True,
                                                     "extra": [message(15, b"\4\3\0\0")]},
          [app(length_head + body), close]),
+        ("TLS 1.2 change_cipher_spec after the ServerHello", {"tls12": True, "early_ccs": 1},
+         [app(length_head + body), close]),
+        ("TLS 1.2 change_cipher_spec after the Certificate", {"tls12": True, "early_ccs": 2},
+         [app(length_head + body), close]),
+        ("TLS 1.2 change_cipher_spec before the ServerHelloDone", {"tls12": True, "early_ccs": 3},
+         [app(length_head + body), close]),
         ("TLS 1.2 Finished without change_cipher_spec", {"tls12": True, "no_ccs": True},
          [app(length_head + body), close]),
         ("TLS 1.2 wrong server Finished", {"tls12": True, "bad_finished": True},
@@ -49882,7 +49888,13 @@ def harness_tls_peer(argv):
         messages[1:1] = flight.get("extra", [])
         messages.append(message(14, b""))
         transcript += hello + b"".join(messages)
-        if flight.get("split"):
+        if flight.get("early_ccs"):
+            #   A change_cipher_spec before the client has sent its key exchange (CVE-2014-0224;
+            #   wolfSSL CVE-2026-93304): after the first, second or third message of the flight.
+            cut = flight["early_ccs"]
+            sock.sendall(record(22, b"".join(messages[:cut])) + record(20, b"\1") +
+                         record(22, b"".join(messages[cut:])))
+        elif flight.get("split"):
             for part in messages:
                 sock.sendall(record(22, part))
         else:
