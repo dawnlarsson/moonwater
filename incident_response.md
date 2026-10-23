@@ -31,7 +31,12 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
    and confirm the new rows fail. A row that passes both ways tests the shape
    of the chain, not the check.
 5. Commit to main, then run the net lane on the box from a clean export of
-   `HEAD` (the working tree may hold someone else's edits).
+   `HEAD` (the working tree may hold someone else's edits). Fuzz a deep run on
+   the parser the bug touched: `MOONWATER_FUZZ_SECONDS` alone does nothing,
+   because every target is also capped at 20,000 runs; raise
+   `MOONWATER_FUZZ_RUNS` as well. Run the mutation lane on the function you
+   added (`--harness net_mutation --functions '^name$' --oracle full`) and kill
+   every survivor in your own lines.
 6. Write the entry below and list what is still open.
 
 ## Log
@@ -211,5 +216,7 @@ promise about later code.
 | PwnEscape, CVE-2026-99999 (kernel IPv4 checksum offset, Oct 2026) | Not reachable as configured | The profiles have no TUN or vhost; AF_PACKET with a virtio header needs CAP_NET_RAW. Kernel pinned at 7.3; confirm `ip_check_csum_start` is in the tarball at the next fetch |
 | NTP time shifting (published attacks on ntpd, 2021 and after) | Bounded | A set clock steps at most 2 s on one server's word; a bigger step needs a second server; no step goes back before the last authenticated time. No cumulative cap across polls (about 2 s per poll, polls at 4 to 30 minutes) |
 | Wi-Fi downgrade and Dragonblood (WPA3 to WPA2, SAE timing) | Read, not exercised today | SAE with hash-to-element, hunting fixed at 40 whole passes, PMF required where offered, and a network joined with WPA3 is never joined with WPA2 (`src/sh/host.c`) |
+| Output file named by the server (wget CVE-2016-4971 and the Content-Disposition family); a symlink planted where the file will go | Not exposed | A hostile local server against the built shell: `Content-Disposition` names with `../`, with an absolute path and with `filename*`, and redirects to `..%2f`, `/../` and a query holding `../`. Every file landed inside the working directory, named from the requested URL, not from the header or the redirect. A `Location` holding a newline or ESC byte is refused. An existing `index.html` symlink was not followed (wget wrote `index.html.1`, the target was unchanged) |
+| Hostile server: redirect loops, huge or many headers, lengths past 2^64, slow drip | Bounded | 20 redirections, then exit 8. The head is capped at 16 KiB (`HTTP_HEAD_MAX`): a 64 MiB header line and 2 million headers were refused in under a second at 13 to 14 MB resident. `Content-Length: 99999999999999999999` and a chunk size of 2^64-1 are refused. A one-byte-per-half-second drip is held for as long as the read timeout resets, as GNU wget does |
 | Unsigned bootstrap downloads | Not exposed | Every bowl row is a compiled-in SHA-256 or a pinned OpenPGP key; a row that pins nothing is refused (`src/bowl.c`) |
 | SSH (Terrapin, regreSSHion) | Not applicable | No SSH implementation in the tree; OpenSSH inside a bowl is the distribution's package |
