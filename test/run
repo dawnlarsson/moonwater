@@ -4726,9 +4726,12 @@ net_arch()
 #       run, so three makings would be three different sets) and with them
 #       the instruction and address counts of every machine, and the answers
 #       from CHECK_crypto_vectors reading them on its standard input.
+#       MOONWATER_WYCHEPROOF names a directory of C2SP/wycheproof's
+#       testvectors_v1 files (fetched by hand), and adds them to the set.
 net_crypto()
 {
         python3 test/differential.py --harness crypto_vectors \
+                ${MOONWATER_WYCHEPROOF:+--wycheproof "$MOONWATER_WYCHEPROOF"} \
                 > "$work/crypto_vectors.in"
         case $? in
         0)
