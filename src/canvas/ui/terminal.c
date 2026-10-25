@@ -2064,6 +2064,10 @@ static b32 terminal_on_event(const struct window_event address_to event)
 // The keys came or went: the far end is told, where the shell asked to hear of it.
 static b32 terminal_on_focus(b32 focused)
 {
+        // The keys are the only events that say which modifiers are down, and a key let go while another window
+        // had them is never told to this one: left as they were, a Control or Shift that was down when the keys
+        // moved is added to every pointer report after (a wheel notch becomes button 84), until a key is typed here.
+        terminal.modifiers = 0;
         if (terminal.phase == TERMINAL_RUNNING && !terminal.reading)
         {
                 term_focus(focused);
