@@ -17287,7 +17287,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -19792,6 +19792,198 @@ else
                 same "$name" "$want" "$got"
         done < "$work/r1-answers"
         sed -n 's/^r1 /  canvas       /p' "$work/r1-why"
+fi
+fi
+
+#       The wheel on the desktop a plain boot starts. The wheel goes to the window under the pointer when it turns,
+#       not to the one the pointer last moved over: a window that a command opened, a window closed to show
+#       another, and the desktop before the first motion all lie under a pointer that has not moved. The first rows
+#       are routing, read from windows whose places are known (/surface, which writes the wheel it is sent) and
+#       made before any device has moved the pointer; the last are what a person sees, the terminal's scrollback
+#       and the settings list moving. A guest with the lane's tablet does all of them, and a guest with a mouse
+#       in its place does the routing again, because a mouse's wheel is the one a hand has (a notch, and the
+#       hundred and twentieths of it). The other rows move the pointer onto a window just before they turn the
+#       wheel, which is what hid this.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = w1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/w1-answers" 2>"$work/w1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/w1"
+os.makedirs(work, exist_ok=True)
+out = []
+
+def boot(name, hand):
+    """A plain boot with the lane's keyboard and the pointing device named: usb-tablet or usb-mouse."""
+    ser = work + "/ser-" + name
+    arguments = [(hand if word == "usb-tablet" else word) for word in desktop(image)]
+    guest = Guest(arguments + [
+        "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-no-reboot", "-display", "none",
+        "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+        work + "/qmp-" + name, work + "/mon-" + name, work, sockets=(ser,))
+    time.sleep(25)
+    shell = Shell(ser)
+    shell.ready()
+    return guest, shell
+
+def finish(guest):
+    try:
+        guest.quit()
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+def pids(shell, name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+def said(shell, row):
+    if out and out[-1][1] != out[-1][2]:
+        print("w1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -12; dmesg | tail -12", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+def place(x, y):
+    """The tablet puts the pointer at x, y of the output."""
+    send([{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / W)}},
+          {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / H)}}])
+    time.sleep(0.3)
+
+def turn(button, notches):
+    """Notches of the wheel, the pointer where it is."""
+    for _ in range(notches):
+        send([{"type": "btn", "data": {"down": True, "button": button}},
+              {"type": "btn", "data": {"down": False, "button": button}}])
+        time.sleep(0.25)
+    time.sleep(0.8)
+
+def wheels(shell, path):
+    """The wheel a /surface was sent, as 'delta:sideways' words."""
+    text = shell.run("cat %s" % path, 10)[0]
+    return " ".join("%s:%s" % w for w in re.findall(r"surface: wheel (-?\d+) (\d+)", text)) or "none"
+
+def surface(shell, path):
+    """A window the size of the output, on top, that writes the wheel it is sent to path. Its pid."""
+    before = set(pids(shell, "surface"))
+    shell.run("/surface -x 0 -y 0 -w %d -h %d -c 224466 -T wheel -s 300 > %s 2>&1 &" % (W, H - 40, path), 10)
+    until(lambda: set(pids(shell, "surface")) - before, 15)
+    time.sleep(1.5)
+    return set(pids(shell, "surface")) - before or {"0"}
+
+def routing(shell, tag, mouse):
+    """The wheel's routing with no pointer motion: reached, taken by a window opened on top, given back."""
+    until(lambda: len(pids(shell, "terminal")) == 1, 60)
+    time.sleep(3)
+    one, two = "/tmp/%sa.out" % tag, "/tmp/%sb.out" % tag
+    first = surface(shell, one)
+    turn("wheel-up", 1)
+    out.append(("W1.1%s the wheel reaches a window under a pointer that no device has moved since the desktop started" % tag,
+                wheels(shell, one), "120:0"))
+    said(shell, "W1.1" + tag)
+    #   A window a command opened lies on top of it, the pointer still: it is sent the wheel, and the one below is not.
+    second = surface(shell, two)
+    turn("wheel-down", 1)
+    out.append(("W1.2%s a window opened on top of it under the still pointer is sent the wheel" % tag,
+                "%s below %s" % (wheels(shell, two), wheels(shell, one)), "-120:0 below 120:0"))
+    said(shell, "W1.2" + tag)
+    #   And closed, the one below is under the pointer again.
+    shell.run("kill %s" % " ".join(second), 10)
+    time.sleep(1.5)
+    turn("wheel-up", 1)
+    out.append(("W1.3%s that window closed, the one below it is sent the wheel again" % tag,
+                "%s above it %s" % (wheels(shell, one), wheels(shell, two)), "120:0 120:0 above it -120:0"))
+    said(shell, "W1.3" + tag)
+    #   A notch is once: down one and up two are three reports of 120, whatever the device says besides (a mouse
+    #   says the notch and the hundred and twentieths of it).
+    turn("wheel-down", 1)
+    turn("wheel-up", 2)
+    out.append(("W1.4%s a notch is reported once: down one and up two are three reports of 120" % tag,
+                wheels(shell, one), "120:0 120:0 -120:0 120:0 120:0"))
+    said(shell, "W1.4" + tag)
+    shell.run("kill %s" % " ".join(first), 10)
+    time.sleep(1)
+
+#   The tablet: routing first, with no motion, and then what a person sees.
+guest, shell = boot("pad", "usb-tablet")
+routing(shell, "t", False)
+
+def picture(name):
+    shot(name, 1)
+    return load(name)
+
+def changed(one, other, x1, y1, x2, y2):
+    """How many pixels of the rectangle differ between two screens."""
+    width = one[0]
+    count = 0
+    for y in range(y1, y2):
+        row = y * width * 3
+        if one[2][row + x1 * 3:row + x2 * 3] != other[2][row + x1 * 3:row + x2 * 3]:
+            count += sum(1 for x in range(x1, x2)
+                         if one[2][row + x * 3:row + x * 3 + 3] != other[2][row + x * 3:row + x * 3 + 3])
+    return count
+
+#   The terminal has the keys and a count of numbers fills its scrollback; it is where the numbers appeared, and the
+#   tablet puts the pointer on it, which is the motion that comes before a person turns the wheel.
+empty = picture("w1-empty")
+type_text("seq 1 400\n")
+time.sleep(3)
+live = picture("w1-live")
+rows = [y for y in range(0, H * 2 // 3) if changed(empty, live, 0, y, W, y + 1) > 20]
+cols = [x for x in range(0, W) if changed(empty, live, x, 0, x + 1, H * 2 // 3) > 8]
+if rows and cols:
+    tl, tt, tr, tb = cols[0] + 4, rows[0] + 4, cols[-1] - 4, rows[-1] - 4
+else:
+    tl, tt, tr, tb = W * 44 // 100 + 10, H * 14 // 100 + 40, W * 44 // 100 + 330, H * 14 // 100 + 340
+place((tl + tr) // 2, (tt + tb) // 2)
+turn("wheel-up", 3)
+scrolled = picture("w1-scrolled")
+n = changed(live, scrolled, tl, tt, tr, tb)
+out.append(("W1.5 the wheel scrolls the terminal back through what it has said",
+            "yes" if n > 300 else "%d pixels changed in %d-%d,%d-%d" % (n, tl, tr, tt, tb), "yes"))
+said(shell, "W1.5")
+turn("wheel-down", 8)
+back = picture("w1-back")
+n = changed(live, back, tl, tt, tr, tb)
+out.append(("W1.6 and turned back it is the live screen again", "yes" if n < 150 else "%d pixels differ" % n, "yes"))
+said(shell, "W1.6")
+
+#   A menu a command opened under a pointer that has not moved since: the settings window comes up in the middle of
+#   the output, the pointer parked where its rows will be, and the wheel moves its list, not the terminal behind.
+place(W // 2 + 150, H // 2)
+before = picture("w1-before-settings")
+opened = shell.run("moonwater settings; echo status $?", 15)[0]
+until(lambda: len(pids(shell, "settings")) == 1, 20)
+time.sleep(2.5)
+sl, st, sr, sb = W // 2 - 200, H // 2 - 150, W // 2 + 200, H // 2 + 150
+settled = picture("w1-settings")
+n = changed(before, settled, sl, st, sr, sb)
+out.append(("W1.7 the settings window opens under the parked pointer",
+            "yes" if "status 0" in opened and n > 2000 else "%s, %d pixels changed" % (opened[-40:].strip(), n), "yes"))
+said(shell, "W1.7")
+turn("wheel-down", 6)
+listed = picture("w1-settings-wheel")
+n = changed(settled, listed, sl, st, sr, sb)
+out.append(("W1.8 the wheel scrolls its list with the pointer not moved since the window opened",
+            "yes" if n > 300 else "%d pixels changed" % n, "yes"))
+said(shell, "W1.8")
+finish(guest)
+
+#   A mouse in the tablet's place: the same routing, from a device whose wheel is a notch and its hundred and twentieths.
+guest, shell = boot("hand", "usb-mouse")
+routing(shell, "m", True)
+finish(guest)
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/w1-answers" ]; then
+        same "the wheel boot answered" "yes" "no"
+        sed 's/^/    /' "$work/w1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/w1-answers"
+        sed -n 's/^w1 /  canvas       /p' "$work/w1-why"
 fi
 fi
 
