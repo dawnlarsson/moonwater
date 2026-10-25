@@ -665,6 +665,7 @@ static struct
 
         // The list a choice opens: its row (none is -1), the choice the keys are on, the first in view, how many, how wide.
         int menu, menu_at, menu_top, menu_count, menu_width;
+        int wheel[3];            // what the wheel has turned under a whole unit, for the choice list, the groups and the rows
         struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
         positive battery_menu_count;
         char filter[SETTINGS_FILTER];
@@ -717,6 +718,9 @@ static struct
 #define SETTINGS_CUT_WHOLE 1 // the text fits whole
 #define SETTINGS_CUT_DOTS 2  // the first cut bytes, and the dots
 #define SETTINGS_CUT_ONE 3   // the first cut bytes, and no dots: no prefix fits with them
+
+// A bit of the size a text is fitted at, for a text that is drawn bold: its width is measured bold, and it is a cut of its own.
+#define SETTINGS_FIT_BOLD 0x10000
 
 struct settings_cut
 {
@@ -1074,8 +1078,10 @@ static unsigned char settings_cut_find(struct ui address_to ui, string_address t
                                        char address_to fitted, positive capacity, positive address_to cut)
 {
         positive n = length < capacity ? length : capacity - 1, low = 1, high, best = 0;
+        b32 bold = (size & SETTINGS_FIT_BOLD) != 0;
 
-        if (ui_measure(ui, text, size, false) <= room)
+        size &= SETTINGS_FIT_BOLD - 1;
+        if (ui_measure(ui, text, size, bold) <= room)
         {
                 *cut = length;
                 return SETTINGS_CUT_WHOLE;
@@ -1096,7 +1102,7 @@ static unsigned char settings_cut_find(struct ui address_to ui, string_address t
                 memory_copy(fitted, text, at);
                 fitted[at] = 0;
                 string_append_bounded((string_address)fitted, (string_address) "...", capacity);
-                if (ui_measure(ui, (string_address)fitted, size, false) <= room)
+                if (ui_measure(ui, (string_address)fitted, size, bold) <= room)
                 {
                         best = at;
                         low = mid + 1;
@@ -2313,8 +2319,10 @@ static fn settings_finished(b32 killed)
                 for (positive at = 0; at < SETTINGS_ROWS; at++)
                         failed += settings.state[at] == SETTINGS_FAILED || settings.state[at] == SETTINGS_UNREAD;
                 settings.told = true;
+                // None is a number too: compositor_kmsg writes no number for a zero, which is its way to say none, so the
+                // 0 is the tail here.
                 compositor_kmsg((string_address) "settings: rows unread or not understood when first asked: ", failed,
-                                (string_address) "");
+                                failed ? (string_address) "" : (string_address) "0");
         }
 }
 
@@ -2540,6 +2548,21 @@ static int settings_menu_item(int px, int py)
         return settings.menu_top + (py - y - ui_px(&settings.ui, SETTINGS_MENU_PAD)) / item;
 }
 
+/*
+        A turn of the wheel, in 120ths of a notch, as whole units of per_notch to a notch: the list's steps or a
+        column's pixels. What is under a unit stays for the next event, so a wheel that reports in fifteenths of a
+        notch moves a list as far as one that reports whole notches, and an event too small for a unit is not lost.
+        which is 0 for the choice list, 1 for the column of groups, 2 for the rows.
+*/
+static int settings_wheel_take(int which, int delta, int per_notch)
+{
+        long total = (long)settings.wheel[which] + (long)delta * per_notch;
+        int units = (int)(total / 120);
+
+        settings.wheel[which] = (int)(total - (long)units * 120);
+        return units;
+}
+
 // The first choice in view moved to where the keys' choice shows, or by a wheel's steps.
 static fn settings_menu_scroll(int top)
 {
@@ -2587,6 +2610,7 @@ static fn settings_menu_open(int row)
         settings.menu_count = (int)settings_options(which);
         settings.menu_at = 0;
         settings.menu_top = 0;
+        settings.wheel[0] = 0;
         for (int at = 0; settings_choice(which, (positive)at, word, sizeof(word)); at++)
         {
                 int wide = ui_measure(&settings.ui, (string_address)word, UI_TEXT, false);
@@ -3262,19 +3286,20 @@ static b32 settings_event(const struct window_event address_to event)
                 {
                         if (!event->b)
                         {
-                                // A notch is 120; a smaller turn is still a step.
-                                int notches = event->a / 120 ? event->a / 120 : event->a > 0 ? 1 : event->a < 0 ? -1 : 0;
+                                // A notch is a step, counted over the events that make it up.
+                                int notches = settings_wheel_take(0, event->a, 1);
 
-                                settings_menu_scroll(settings.menu_top - notches);
+                                if (notches)
+                                        settings_menu_scroll(settings.menu_top - notches);
                         }
                         break;
                 }
                 // The column of groups or the rows, whichever is under the pointer; a card has all the window.
                 if (!event->b && !settings.view && settings.pointer_x < settings_pane_left() - ui_px(&settings.ui, SETTINGS_GUTTER) / 2)
-                        settings_side_scroll_to(settings.group_scroll - event->a * ui_px(&settings.ui, SETTINGS_GROUP_ROW) / 120);
+                        settings_side_scroll_to(settings.group_scroll - settings_wheel_take(1, event->a, ui_px(&settings.ui, SETTINGS_GROUP_ROW)));
                 else if (!event->b)
                         settings_scroll_to((settings.view ? settings.card_scroll : settings.scroll) -
-                                           event->a * ui_px(&settings.ui, UI_ROW) / 120);
+                                           settings_wheel_take(2, event->a, ui_px(&settings.ui, UI_ROW)));
                 break;
         }
         return true;
@@ -3492,7 +3517,8 @@ static fn settings_draw_side(struct ui address_to ui)
                 if (chosen)
                         ui_focus(ui, left, y + ui_px(&settings.ui, 2), width, height - ui_px(&settings.ui, 4), settings.focused && !settings.pane);
                 ui_text(ui, left + inset, ui_baseline(ui, y, height, UI_TEXT),
-                        settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT, width - 2 * inset, cut, sizeof(cut)),
+                        settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT | (chosen ? SETTINGS_FIT_BOLD : 0), width - 2 * inset,
+                                     cut, sizeof(cut)),
                         UI_TEXT, chosen, ui->ink, chosen ? 255 : 210);
         }
 }
@@ -3763,6 +3789,10 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings_layout();
         settings_scroll_to(settings.view ? settings.card_scroll : settings.scroll);
         settings_side_reveal();
+        // An open list of choices shows as many as the window holds now: its first in view is held to that, or a window
+        // made taller than the list was cut for shows empty slots under the choices and a position mark off its track.
+        if (settings.menu >= 0)
+                settings_menu_scroll(settings.menu_top);
         if (settings.view)
                 settings_wrap();
         settings_dirty();
