@@ -219,7 +219,7 @@ describe()
         install)  echo "Moonwater installed to a disk, started from it, asked about and updated from a stick" ;;
         canvas)   echo "what is actually on the screen, read back a pixel at a time" ;;
         sleep)    echo "moonwater sleep from the serial shell, woken by a key: the compositor's desktop back on a card that lost its pipe" ;;
-        desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it (NOT RUN without a network, an image or mke2fs)" ;;
+        desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it, and weston drawing on the card once desktop off has handed it over (NOT RUN without a network, an image or mke2fs)" ;;
         chrome)   echo "a browser that will not run as root, from Debian's package in a booted guest: who a bowl's programs are, and Chromium's sandbox on (NOT RUN without a network, an image or mke2fs)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
@@ -21173,6 +21173,103 @@ out.append(("the network interface keeps the name the kernel gave it", "yes" if 
 
 alive, status = run("echo answers")
 out.append(("and the machine answers on its serial shell", "yes" if status == 0 and "answers" in alive else "no", "yes"))
+
+#       The disk is the next guest's: what the bowl wrote must be on it, not in this guest's cache.
+run("sync; umount /bowls; umount /mnt/data", 60)
+guest.quit()
+time.sleep(1)
+guest.terminate()
+try:
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+#       Another compositor on a machine that boots to its own: weston, from the
+#       bowl the first guest left on the disk, the way a program of a bowl runs
+#       it (as the user, seat from seatd). The default boot has Canvas's
+#       compositor as the card's master, and nothing else can draw while it is:
+#       weston's commits are refused. moonwater desktop off is what hands the
+#       card over, and has to have done it when it returns; desktop on takes it
+#       back. This is the failure KWin showed as "there are no outputs".
+machine = desktop(image)
+machine[machine.index("-m") + 1] = "3G"
+guest = Guest(machine + [
+    "-drive", "if=none,id=bw,format=raw,file=" + work + "/bowls.img",
+    "-device", "nvme,serial=bowls0,drive=bw",
+    "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
+    "-chardev", "socket,id=s1,path=" + work + "/ser2,server=on,wait=off",
+    "-serial", "chardev:s1",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= moonwater.cursor_plane=0"],
+    work + "/qmp2", work + "/mon2", work, sockets=(work + "/ser2",))
+shell = socket.socket(socket.AF_UNIX)
+shell.connect(work + "/ser2")
+shell.settimeout(1)
+time.sleep(25)
+
+def named(name):
+    """The pids of a process by its name, read from /proc: the bowl's busybox has put its own pidof on /bin."""
+    return "grep -l '^" + name + "$' /proc/[0-9]*/comm | cut -d/ -f3"
+
+def until(command, seconds):
+    stop = time.time() + seconds
+    while time.time() < stop:
+        text, status = run(command, 20)
+        if status == 0 and text.strip():
+            return text
+        time.sleep(1)
+    return ""
+
+run("mkdir -p /mnt/data && mount -o nodev /dev/nvme0n1 /mnt/data && mount --bind /mnt/data /bowls", 30)
+_, added = run("apk add weston weston-backend-drm weston-shell-desktop seatd", 600)
+out.append(("weston and seatd are added to the bowl", "yes" if added == 0 else "no, status %d" % added, "yes"))
+run("ip link set lo up; bowl udev", 120)
+lines = ["export XDG_RUNTIME_DIR=/tmp/xdg LIBSEAT_BACKEND=seatd",
+         "mkdir -p $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR",
+         "[ -S /run/seatd.sock ] || { seatd -u user -g user > /tmp/seatd.log 2>&1 & sleep 1; }",
+         "exec weston --backend=drm --socket=wl-$1 --continue-without-input > /tmp/weston-$1.log 2>&1"]
+run("printf '%s\\n' '" + "' '".join(lines) + "' > /tmp/wl.sh", 20)
+
+up = until(named("compositor"), 90)
+out.append(("a machine that boots to the compositor has it up", "yes" if up else "no", "yes"))
+said, _ = run("moonwater desktop")
+out.append(("and says the desktop is on", "yes" if "desktop on" in said else "no: " + said[-200:], "yes"))
+
+run("(bowl /bowls/alpine /bin/sh /tmp/wl.sh a > /tmp/bowl-a.out 2>&1 &)", 30)
+time.sleep(10)
+refused, _ = run("grep -c 'Permission denied' /tmp/weston-a.log")
+seen, _ = run("ls /tmp; cat /tmp/bowl-a.out")
+out.append(("weston is refused the card while the compositor is its master", "yes" if refused.strip().isdigit() and int(refused) > 0 else "no: " + refused + " " + seen[-300:], "yes"))
+run("kill $(" + named("weston") + ")", 20)
+time.sleep(3)
+
+run("moonwater desktop off", 60)
+left, _ = run(named("compositor"))
+out.append(("moonwater desktop off returns with the compositor gone", "yes" if not left.strip() else "no, pid " + left, "yes"))
+
+run("(bowl /bowls/alpine /bin/sh /tmp/wl.sh b > /tmp/bowl-b.out 2>&1 &)", 30)
+time.sleep(10)
+refused, _ = run("grep -c 'Permission denied' /tmp/weston-b.log")
+seen, _ = run("ls /tmp; cat /tmp/bowl-b.out")
+out.append(("weston started straight after is refused nothing", "yes" if refused.strip() == "0" else "no: " + refused + " " + seen[-300:], "yes"))
+head, _ = run("grep -c \"DRM: head 'Virtual-1' found, connector [0-9]* is connected\" /tmp/weston-b.log")
+out.append(("and finds the screen", "yes" if head.strip() == "1" else "no: " + head, "yes"))
+shot("weston")
+width, height, pixels = load("weston")
+def pixel(x, y):
+    at = (y * (len(pixels) // height)) + x * 3
+    return tuple(pixels[at:at + 3])
+panel, body = pixel(width // 2, 4), pixel(width // 2, height // 2)
+out.append(("and draws its shell: a panel and a body, neither black", "yes" if panel != body and body != (0, 0, 0) else "no: panel %s body %s" % (panel, body), "yes"))
+
+run("kill $(" + named("weston") + ")", 20)
+time.sleep(3)
+run("moonwater desktop on", 60)
+back = until(named("compositor"), 30)
+out.append(("moonwater desktop on brings the compositor back", "yes" if back else "no", "yes"))
+
+alive, status = run("echo answers")
+out.append(("and the machine answers on its serial shell after all of it", "yes" if status == 0 and "answers" in alive else "no", "yes"))
 
 guest.quit()
 time.sleep(1)

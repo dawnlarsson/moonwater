@@ -18903,7 +18903,18 @@ static b32 desktop_put(string_address name, bool boot)
                 return_if(left && desktop_end(), host_refuse("what is left of the last session would not end\n"));
 
                 if (!want)
-                        return desktop_canvas_running() > 0 ? host_canvas_off() : 0;
+                {
+                        //      The machine script ends the compositor from the event Canvas off fires; the card is
+                        //      free when it has gone, and a compositor started straight after (weston, a session)
+                        //      is refused its master until then.
+                        positive compositor = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
+
+                        return_if(desktop_canvas_running() <= 0, 0);
+                        return_if(host_canvas_off(), 1);
+                        for (positive pass = 0; pass < 100 && desktop_alive(compositor); pass++)
+                                host_pause(50000000);
+                        return 0;
+                }
                 if (desktop_canvas_running() <= 0)
                         return host_canvas_on();
                 return_if(desktop_alive(desktop_pid_of((string_address)DESKTOP_COMPOSITOR)), 0);
