@@ -19862,10 +19862,11 @@ def wheels(shell, path):
     text = shell.run("cat %s" % path, 10)[0]
     return " ".join("%s:%s" % w for w in re.findall(r"surface: wheel (-?\d+) (\d+)", text)) or "none"
 
-def surface(shell, path):
-    """A window the size of the output, on top, that writes the wheel it is sent to path. Its pid."""
+def surface(shell, path, box=None):
+    """A window, on top, that writes the wheel it is sent to path: the size of the output, or box (x, y, width, height). Its pid."""
     before = set(pids(shell, "surface"))
-    shell.run("/surface -x 0 -y 0 -w %d -h %d -c 224466 -T wheel -s 300 > %s 2>&1 &" % (W, H - 40, path), 10)
+    x, y, w, h = box or (0, 0, W, H - 40)
+    shell.run("/surface -x %d -y %d -w %d -h %d -c 224466 -T wheel -s 300 > %s 2>&1 &" % (x, y, w, h, path), 10)
     until(lambda: set(pids(shell, "surface")) - before, 15)
     time.sleep(1.5)
     return set(pids(shell, "surface")) - before or {"0"}
@@ -19906,6 +19907,21 @@ def routing(shell, tag, mouse):
 #   The tablet: routing first, with no motion, and then what a person sees.
 guest, shell = boot("pad", "usb-tablet")
 routing(shell, "t", False)
+
+#   The grip a window has just outside its edges is for taking hold of its edge, not for the wheel: a wheel turned over
+#   it goes to what is under it, and not to the window it surrounds. Two pixels outside the left edge of a window and
+#   four inside it.
+grip = surface(shell, "/tmp/wg.out", (400, 300, 600, 300))
+place(398, 450)
+turn("wheel-up", 1)
+outside = wheels(shell, "/tmp/wg.out")
+place(404, 450)
+turn("wheel-up", 1)
+out.append(("W1.9 a wheel turned in the grip just outside a window's edge is not sent to it, and one inside is",
+            "%s then %s" % (outside, wheels(shell, "/tmp/wg.out")), "none then 120:0"))
+said(shell, "W1.9")
+shell.run("kill %s" % " ".join(grip), 10)
+time.sleep(1)
 
 def picture(name):
     shot(name, 1)
@@ -20202,19 +20218,19 @@ out.append(("S1.5e the pointer's size is a choice found by its name, set from th
             "set back 1"))
 said("S1.5e")
 #   A group with a feed is kept up with while it is shown: the clock's row, in Time, is asked again every second,
-#   so the window's picture changes with the time and nobody pressed anything. Time is the fourth group (Machine,
-#   Canvas, Mouse, Time), found from the first; the rows are looked at inside the window, over the terminal's black
+#   so the window's picture changes with the time and nobody pressed anything. Time is the fifth group (Machine,
+#   Canvas, Mouse, Taskbar, Time), found from the first; the rows are looked at inside the window, over the terminal's black
 #   paper, where the kernel log that scrolls behind its left side is not.
 key("tab")
 key("home")
-for _ in range(3):
+for _ in range(4):
     key("down")
 time.sleep(1.5)
 shot("r1-time-one", 1)
 time.sleep(2.5)
 shot("r1-time-two", 1)
 live = differing_in("r1-time-one", "r1-time-two", 1140, 300, 1620, 780)
-for _ in range(3):
+for _ in range(4):
     key("up")
 key("ret")
 time.sleep(0.5)

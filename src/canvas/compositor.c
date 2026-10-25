@@ -1662,7 +1662,7 @@ struct compositor_poll
 #define COMPOSITOR_POLLIN 1
 #define COMPOSITOR_POLLHUP 16
 
-#define COMPOSITOR_INPUTS 16
+#define COMPOSITOR_INPUTS 32 // a lid, the audio jacks and a power button take one each, and a mouse plugged in later needs one
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
 // How long the processor is kept out of its deep idle states after the last thing a person did.
 #define COMPOSITOR_HOLD_NS 500000000ull
@@ -1869,7 +1869,8 @@ static struct
         int accel_x, accel_y; // the fraction of a pixel the gain has not yet paid out
         int tablet_x, tablet_y, tablet_have; // what a tablet has said since its last report
         positive stamp;      // when the last movement was
-        unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths
+        unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
+        int told_row, told_x, told_y; // where the pointer was last told to a window: its row and the place in its picture
         unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
         // `moonwater keyboard repeat` and `moonwater mouse`: what the settings kept, and what each keyboard has been told.
         unsigned char repeats[COMPOSITOR_INPUTS]; // the keyboard's repeat can be set: it answered EVIOCGREP
@@ -4796,7 +4797,8 @@ static void compositor_input_add(unsigned int number)
         compositor.held[at] = 0;
         compositor.wakeonly[at] = (unsigned char)(!keyboard && !mouse && !tablet);
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
-        compositor.hires[at] = (unsigned char)(relative >> COMPOSITOR_REL_WHEEL_HI & 1);
+        compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
+                                               (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
         // The events are stamped by the clock the speed of the hand is measured on.
         {
                 int monotonic = 1;
@@ -5452,6 +5454,7 @@ static void compositor_leave(int row)
                 memory_zero(compositor.keys_down, sizeof(compositor.keys_down));
         }
         compositor.hover = compositor.hover == row ? COMPOSITOR_NONE : compositor.hover;
+        compositor.told_row = compositor.told_row == row ? COMPOSITOR_NONE : compositor.told_row;
         compositor.grab = compositor.grab == row ? COMPOSITOR_NONE : compositor.grab;
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
@@ -5590,7 +5593,9 @@ static void compositor_door(int row, int returned)
         char bytes[64];
         p8 name[48];
 
-        while (system_read_once(compositor.door[row], bytes, sizeof(bytes)) > 0)
+        // Any program may open a door and write to it, so what is read in one turn is bounded: one that never stops
+        // writing is not the whole of the compositor's time.
+        for (int reads = 0; reads < 64 && system_read_once(compositor.door[row], bytes, sizeof(bytes)) > 0; reads++)
                 ;
 
         compositor_take(row);
@@ -5945,8 +5950,10 @@ static void compositor_magnify(positive now)
 // The pointer, to a window: where it is in the window's picture.
 static void compositor_pointer_to(int row)
 {
-        compositor_post(row, WINDOW_EVENT_MOTION, 0, compositor.pointer_x - compositor.x[row],
-                        compositor.pointer_y - compositor.y[row]);
+        compositor.told_row = row;
+        compositor.told_x = compositor.pointer_x - compositor.x[row];
+        compositor.told_y = compositor.pointer_y - compositor.y[row];
+        compositor_post(row, WINDOW_EVENT_MOTION, 0, compositor.told_x, compositor.told_y);
 }
 
 static void compositor_motion(void)
@@ -6211,6 +6218,25 @@ static int compositor_report(positive now)
         return moved;
 }
 
+// What is under a point of its picture: the topmost window whose picture holds it, with the grip a window has just
+// outside its edges (compositor_under's, for a hand that means to resize) not counted, and none over a tab.
+static int compositor_picture_under(int x, int y)
+{
+        struct taskbar_view view = compositor_band_view();
+
+        if (taskbar_hit(&view, x, y) != TASKBAR_HIT_NONE)
+                return COMPOSITOR_NONE;
+        for (unsigned int at = compositor.stacked; at--;)
+        {
+                int row = compositor.stack[at];
+
+                if (compositor_visible(row) && x >= compositor.x[row] && x < compositor.x[row] + (int)compositor.w[row] &&
+                    y >= compositor.y[row] && y < compositor.y[row] + (int)compositor.h[row])
+                        return row;
+        }
+        return COMPOSITOR_NONE;
+}
+
 // The wheel goes to what holds the pointer, or to what is under it when the wheel turns. Not to what was under it when
 // the pointer last moved (compositor.hover): a menu or a terminal that a key opened, a window closed or moved or
 // raised by the keys, and the desktop before the first motion all lie under a pointer that has not moved, and a wheel
@@ -6220,15 +6246,13 @@ static void compositor_wheel(int v120, int horizontal)
         int row = compositor.grab;
 
         if (row < 0)
-        {
-                int tab;
-
-                row = compositor.hover = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
-        }
+                row = compositor.hover = compositor_picture_under(compositor.pointer_x, compositor.pointer_y);
         // Where the pointer is goes first, as it does before a button: a window that turns a wheel by where the pointer
         // is (the settings window's two columns, a terminal's report to a program that asked for the mouse) has only
-        // the last motion it was told of, which is none when it opened under a pointer that has not moved.
-        if (row >= 0)
+        // the last motion it was told of, which is none when it opened under a pointer that has not moved. Told once:
+        // a wheel that reports in 120ths sends several events to a notch, and each would take two of the ring's places.
+        if (row >= 0 && (row != compositor.told_row || compositor.pointer_x - compositor.x[row] != compositor.told_x ||
+                         compositor.pointer_y - compositor.y[row] != compositor.told_y))
                 compositor_pointer_to(row);
         compositor_post(row, WINDOW_EVENT_WHEEL, 0, v120, horizontal);
 }
@@ -6281,8 +6305,9 @@ static void compositor_input_read(unsigned int at)
                         else if (event->type == COMPOSITOR_EV_REL &&
                                  (event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
                                 compositor_wheel(event->value, event->code == COMPOSITOR_REL_HWHEEL_HI);
-                        else if (event->type == COMPOSITOR_EV_REL && !compositor.hires[at] &&
-                                 (event->code == COMPOSITOR_REL_WHEEL || event->code == COMPOSITOR_REL_HWHEEL))
+                        else if (event->type == COMPOSITOR_EV_REL &&
+                                 ((event->code == COMPOSITOR_REL_WHEEL && !(compositor.hires[at] & 1)) ||
+                                  (event->code == COMPOSITOR_REL_HWHEEL && !(compositor.hires[at] & 2))))
                                 compositor_wheel(event->value * 120, event->code == COMPOSITOR_REL_HWHEEL);
                         else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
                         {
@@ -6659,7 +6684,7 @@ static b32 compositor_main()
         memory_zero(&compositor, sizeof(compositor));
         compositor.watch = -1;
         compositor.hold = -1;
-        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
 
         for (positive at = 1; at < program_argument_count(); at++)
