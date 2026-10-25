@@ -6211,11 +6211,21 @@ static int compositor_report(positive now)
         return moved;
 }
 
-// The wheel goes to what is under the pointer, or what holds it.
+// The wheel goes to what holds the pointer, or to what is under it when the wheel turns. Not to what was under it when
+// the pointer last moved (compositor.hover): a menu or a terminal that a key opened, a window closed or moved or
+// raised by the keys, and the desktop before the first motion all lie under a pointer that has not moved, and a wheel
+// sent to the window it last moved over scrolled that one, or nothing.
 static void compositor_wheel(int v120, int horizontal)
 {
-        compositor_post(compositor.grab >= 0 ? compositor.grab : compositor.hover, WINDOW_EVENT_WHEEL, 0, v120,
-                        horizontal);
+        int row = compositor.grab;
+
+        if (row < 0)
+        {
+                int tab;
+
+                row = compositor.hover = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+        }
+        compositor_post(row, WINDOW_EVENT_WHEEL, 0, v120, horizontal);
 }
 
 static void compositor_input_read(unsigned int at)
