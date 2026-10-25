@@ -18796,6 +18796,70 @@ static b32 desktop_end(void)
         return 1;
 }
 
+#define DESKTOP_SUPERVISOR HOST_STATE "/supervisor.pid"
+#define DESKTOP_COMPOSITOR HOST_STATE "/compositor.pid"
+#define DESKTOP_KIDS HOST_STATE "/desktop.kids"
+
+// The pid a file of the machine script holds, or 0.
+static positive desktop_pid_of(string_address path)
+{
+        p8 word[24];
+
+        return_if(host_read_word(path, word, sizeof(word)) <= 0, 0);
+        return string_to_positive(word);
+}
+
+static bool desktop_alive(positive pid)
+{
+        return pid > 1 && system_call_2(syscall(kill), pid, 0) == 0;
+}
+
+/*
+        The compositor of the machine's own desktop, ended for another desktop to have the display. A profile's
+        session (KWin), weston or any other compositor cannot become the card's master while this one is: KWin
+        says it has no outputs and Plasma that it has no screen to put a panel on. The supervisor goes first so that
+        the compositor is not started again, as the machine script's desktop_stop does it, and what the compositor
+        carried (the log, the terminals, the key answerer) goes after it, the programs the script kept the pids of.
+        Nothing is done where no compositor is up.
+*/
+static fn desktop_yield(void)
+{
+        positive supervisor = desktop_pid_of((string_address)DESKTOP_SUPERVISOR),
+                 compositor = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
+        p8 kids[256];
+        bipolar got;
+
+        if (supervisor > 1)
+                system_call_2(syscall(kill), supervisor, SIGTERM);
+        if (compositor > 1)
+                system_call_2(syscall(kill), compositor, SIGTERM);
+        for (positive pass = 0; pass < 60 && desktop_alive(compositor); pass++)
+                host_pause(50000000);
+        if (desktop_alive(compositor))
+        {
+                system_call_2(syscall(kill), compositor, SIGKILL);
+                host_pause(100000000);
+        }
+
+        got = file_read_once_at(AT_FDCWD, (p8 address_to)DESKTOP_KIDS, kids, sizeof(kids));
+        for (positive at = 0, pid = 0, digits = 0; got > 0 && at <= (positive)got; at++)
+        {
+                p8 byte = at < (positive)got ? kids[at] : '\n';
+
+                if (byte >= '0' && byte <= '9' && digits < 9)
+                        pid = pid * 10 + (positive)(byte - '0'), digits++;
+                else
+                {
+                        if (digits && pid > 1)
+                                system_call_2(syscall(kill), pid, SIGTERM);
+                        pid = digits = 0;
+                }
+        }
+        (void)system_remove_at(AT_FDCWD, DESKTOP_SUPERVISOR, 0);
+        (void)system_remove_at(AT_FDCWD, DESKTOP_COMPOSITOR, 0);
+        (void)system_remove_at(AT_FDCWD, DESKTOP_KIDS, 0);
+}
+
 /* The choice, put in force: nothing for Canvas, Canvas off for off, else the session. */
 static b32 desktop_start(bool boot)
 {
@@ -18821,6 +18885,10 @@ static b32 desktop_start(bool boot)
         return_if(left && desktop_end(),
                   host_refuse("what is left of the last session would not end\n"));
 
+        // The compositor of the machine's own desktop has the card's master, and a session cannot have the display
+        // until it lets go: not at boot, where none was started for a profile, but when the choice is made on a
+        // machine that is up.
+        desktop_yield();
         return desktop_launch(name);
 }
 

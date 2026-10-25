@@ -17287,7 +17287,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, k1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -19792,6 +19792,114 @@ else
                 same "$name" "$want" "$got"
         done < "$work/r1-answers"
         sed -n 's/^r1 /  canvas       /p' "$work/r1-why"
+fi
+fi
+
+#       Another desktop on a machine that boots to the compositor. The compositor is the card's master, and a program
+#       that wants the display (a bowl's KDE session, weston, sway) cannot become master while it is: KWin said it had no
+#       outputs and Plasma that it had no screen for a panel, on a desktop that otherwise drew perfectly. The session here
+#       is a stand-in installed where `bowl profile` puts one, a program that does what any compositor does first, takes
+#       the master and holds it, and says whether it got it. Every other lane that starts a session boots with
+#       moonwater.desktop=none, which keeps the compositor away, and so never had the two on one card.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = k1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/k1-answers" 2>"$work/k1-why" <<'PY'
+import os, re, subprocess, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/k1"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+open(work + "/kmsmaster.c", "w").write(r"""
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#define DRM_IOCTL_SET_MASTER 0x641e
+int main(int argc, char **argv)
+{
+    int seconds = argc > 1 ? atoi(argv[1]) : 30;
+    int fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return printf("kms-nocard %d\n", errno), 1;
+    if (ioctl(fd, DRM_IOCTL_SET_MASTER, 0))
+        return printf("kms-busy %d\n", errno), 1;
+    printf("kms-master\n");
+    fflush(stdout);
+    sleep(seconds);
+    return 0;
+}
+""")
+built = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/kmsmaster", work + "/kmsmaster.c"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+names = ("K1.1 with the compositor up the card has a master already: another program cannot take it",
+         "K1.2 moonwater desktop start ends the compositor and its supervisor before the session starts",
+         "K1.3 the session takes the master of the card, once",
+         "K1.4 the session ended, the card has no master left over: a program takes it",
+         "K1.5 the compositor is not started again behind the session")
+if not built:
+    for name, want in zip(names, ("busy", "yes", "1", "master", "yes")):
+        out.append((name, "not run: no static cc for the helper", want))
+else:
+    open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/kmsmaster 120 > /tmp/profile.out 2>&1\n")
+    guest = Guest(desktop(image) + [
+        "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+        "-device", "usb-storage,drive=stick,removable=on",
+        "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-no-reboot", "-display", "none",
+        "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+        work + "/qmp", work + "/mon", work, sockets=(ser,))
+    time.sleep(25)
+    shell = Shell(ser)
+    shell.ready()
+    shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt", 20)
+
+    def compositors():
+        return shell.number("ps | grep -c '[c]ompositor'", 10)
+
+    until(lambda: compositors() == "1", 60)
+    time.sleep(3)
+    first = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
+    out.append((names[0], "busy" if "kms-busy 16" in first else first.strip()[-60:].replace("\n", " "), "busy"))
+
+    shell.run("mkdir -p /bowls/bin; cp /mnt/profile /bowls/bin/desktop; chmod 755 /bowls/bin/desktop", 10)
+    shell.run("moonwater desktop desktop", 10)
+    started = shell.run("moonwater desktop start; echo status $?", 30)[0]
+    until(lambda: "kms-master" in shell.run("cat /tmp/profile.out", 10)[0], 30)
+    time.sleep(2)
+    said = shell.run("cat /tmp/profile.out", 10)[0]
+    gone = "gone" in shell.run("[ -e /run/moonwater/supervisor.pid ] || [ -e /run/moonwater/compositor.pid ] || echo gone", 10)[0]
+    out.append((names[1], "yes" if "status 0" in started and compositors() == "0" and gone else
+                "no: %s compositors %s pid files %s" % (started.strip()[-60:], compositors(), "gone" if gone else "left"), "yes"))
+    out.append((names[2], str(len(re.findall(r"kms-master", said))) if "kms-busy" not in said else said.strip()[-40:].replace("\n", " "), "1"))
+
+    time.sleep(3)
+    out.append((names[4], "yes" if compositors() == "0" else "a compositor is back", "yes"))
+    shell.run("moonwater desktop stop", 30)
+    time.sleep(3)
+    after = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
+    out.append((names[3], "master" if "kms-master" in after else after.strip()[-60:].replace("\n", " "), "master"))
+    try:
+        guest.quit()
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/k1-answers" ]; then
+        same "the handover boot answered" "yes" "no"
+        sed 's/^/    /' "$work/k1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/k1-answers"
 fi
 fi
 
