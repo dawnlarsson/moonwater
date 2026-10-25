@@ -3175,12 +3175,14 @@ static fn font_union(font_engine address_to e, b32 width, b32 from, b32 to, b32 
                 e->gathered = 0;
                 e->overflow = false;
                 font_walk(e);
+                //      What the walk gathered is noted before a band that overflowed is tried again smaller: the
+                //      cleanup below zeroes what was used, and the records of the band given up are in it.
+                e->used[0] = e->gathered > e->used[0] ? e->gathered : e->used[0];
                 if (e->overflow && e->rows > 1)
                 {
                         most = e->rows / 2;
                         continue;
                 }
-                e->used[0] = e->gathered > e->used[0] ? e->gathered : e->used[0];
                 if (!e->overflow && font_list(e))
                         for (b32 r = e->band; r < e->band + e->rows; r++)
                                 if (e->shared[r >> 6] >> (r & 63) & 1)
