@@ -5053,7 +5053,7 @@ static fn host_canvas_write(bool label,
         host_prefix(label);
         if (!control->running)
         {
-                string_format(log, "Canvas is off; moonwater canvas on starts it\n");
+                string_format(log, "Canvas is off; moonwater desktop on starts it\n");
                 return;
         }
 
@@ -5130,7 +5130,7 @@ static fn host_tty1_shell(void)
 {
         string_address argv[] = {HOST_EVENT_SHELL, null};
 
-        //      One is enough: each canvas off over a console that is not a
+        //      One is enough: each desktop off over a console that is not a
         //      screen forked another, and none ended, so after a few round
         //      trips tty1 had as many shells splitting its keys.
         if (!host_tty1_held())
@@ -5140,7 +5140,97 @@ static fn host_tty1_shell(void)
 static b32 locale_canvas_setting(string_address address_to arguments, positive count);
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
 
-/* moonwater canvas [on|off|scale [N|auto]|modes [largest|preferred]|
+/*
+        Canvas off: every window closes and the console is the text one. What `moonwater desktop off` does after it has
+        ended the session of a profile; the machine script's own `desktop_stop` runs from the event this fires.
+*/
+static b32 host_canvas_off(void)
+{
+        struct canvas_control control;
+        bipolar failed;
+
+        //      The banner is for a desktop about to close: said over a
+        //      text console, without the right to close one, or with no
+        //      Canvas in the kernel, it made the refusal after it a lie.
+        if (!bowl_is_root())
+                return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
+        failed = host_canvas_request(SPARK_CANVAS_STATUS, address_of control);
+        return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
+        if (!control.running)
+                return host_refuse("Canvas is already off\n");
+
+        //      A pipe closed on the banner (`desktop off | true`) must not
+        //      end this before the desktop is; the signal is put back at once,
+        //      since the console shell started below would inherit it ignored.
+        positive piped[4];
+        bool quiet = system_signal_install(13, 1, 0, 0, piped);
+
+        host_say(log, host_label "Canvas off: every window closes, this one too. "
+                                 "On the text console, moonwater desktop on "
+                                 "brings the desktop back.\n");
+        if (quiet)
+                system_signal_action(13, piped, null, 8);
+
+        system_signal_install(1, 1, 0, 0, null);
+
+        failed = host_canvas_request(SPARK_CANVAS_OFF, address_of control);
+        if (failed < 0)
+                system_signal_install(1, 0, 0, 0, null);
+        if (failed == -EPERM)
+                return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
+        if (failed == -EALREADY)
+                return host_refuse("Canvas is already off\n");
+        return_if(failed < 0, host_fail("desktop off", failed));
+
+        //      The hangup stays ignored until the console shell has
+        //      forked: the terminal this runs on may be the one that
+        //      closed. The shell resets it itself, before it execs.
+        if (!host_console_is_screen())
+                host_tty1_shell();
+        system_signal_install(1, 0, 0, 0, null);
+
+        return 0;
+}
+
+// Canvas on: the desktop's machine script starts the compositor from the event this fires.
+static b32 host_canvas_on(void)
+{
+        struct canvas_control control;
+        bipolar failed;
+
+        failed = host_canvas_request(SPARK_CANVAS_ON, address_of control);
+        if (failed == -EPERM)
+                return host_refuse("turning Canvas on needs root (CAP_SYS_ADMIN)\n");
+        if (failed == -EALREADY)
+                return host_refuse("Canvas is already on\n");
+        if (failed == -EBUSY)
+        {
+                if (control.master_command[0] && !control.master_pid)
+                        string_format(log_error, host_label "%s, outside this process namespace, "
+                                                            "holds the display; "
+                                                            "Canvas stays off until it lets go\n",
+                                      (string_address)control.master_command);
+                else if (control.master_command[0])
+                        string_format(log_error, host_label "%s (pid %p) holds the display; "
+                                                            "Canvas stays off until it lets go\n",
+                                      (string_address)control.master_command,
+                                      (positive)control.master_pid);
+                else
+                        string_format(log_error, host_label "another program holds the display; "
+                                                            "Canvas stays off until it lets go\n");
+                log_flush();
+                return 1;
+        }
+        if (failed == -ENODEV)
+                return host_refuse("there is no display for Canvas to start on\n");
+        return_if(failed < 0, host_fail("desktop on", failed));
+
+        host_canvas_say(address_of control);
+        return 0;
+
+}
+
+/* moonwater canvas [scale [N|auto]|modes [largest|preferred]|
    background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
@@ -5166,84 +5256,7 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return 0;
         }
 
-        if (string_equals(arguments[2], "off"))
-        {
-                //      The banner is for a desktop about to close: said over a
-                //      text console, without the right to close one, or with no
-                //      Canvas in the kernel, it made the refusal after it a lie.
-                if (!bowl_is_root())
-                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
-                failed = host_canvas_request(SPARK_CANVAS_STATUS, address_of control);
-                return_if(failed < 0, host_fail(SPARK_DEVICE, failed));
-                if (!control.running)
-                        return host_refuse("Canvas is already off\n");
-
-                //      A pipe closed on the banner (`canvas off | true`) must not
-                //      end this before the desktop is; the signal is put back at once,
-                //      since the console shell started below would inherit it ignored.
-                positive piped[4];
-                bool quiet = system_signal_install(13, 1, 0, 0, piped);
-
-                host_say(log, host_label "Canvas off: every window closes, this one too. "
-                                         "On the text console, moonwater canvas on "
-                                         "brings the desktop back.\n");
-                if (quiet)
-                        system_signal_action(13, piped, null, 8);
-
-                system_signal_install(1, 1, 0, 0, null);
-
-                failed = host_canvas_request(SPARK_CANVAS_OFF, address_of control);
-                if (failed < 0)
-                        system_signal_install(1, 0, 0, 0, null);
-                if (failed == -EPERM)
-                        return host_refuse("turning Canvas off needs root (CAP_SYS_ADMIN)\n");
-                if (failed == -EALREADY)
-                        return host_refuse("Canvas is already off\n");
-                return_if(failed < 0, host_fail("canvas off", failed));
-
-                //      The hangup stays ignored until the console shell has
-                //      forked: the terminal this runs on may be the one that
-                //      closed. The shell resets it itself, before it execs.
-                if (!host_console_is_screen())
-                        host_tty1_shell();
-                system_signal_install(1, 0, 0, 0, null);
-
-                return 0;
-        }
-
-        if (string_equals(arguments[2], "on"))
-        {
-                failed = host_canvas_request(SPARK_CANVAS_ON, address_of control);
-                if (failed == -EPERM)
-                        return host_refuse("turning Canvas on needs root (CAP_SYS_ADMIN)\n");
-                if (failed == -EALREADY)
-                        return host_refuse("Canvas is already on\n");
-                if (failed == -EBUSY)
-                {
-                        if (control.master_command[0] && !control.master_pid)
-                                string_format(log_error, host_label "%s, outside this process namespace, "
-                                                                    "holds the display; "
-                                                                    "Canvas stays off until it lets go\n",
-                                              (string_address)control.master_command);
-                        else if (control.master_command[0])
-                                string_format(log_error, host_label "%s (pid %p) holds the display; "
-                                                                    "Canvas stays off until it lets go\n",
-                                              (string_address)control.master_command,
-                                              (positive)control.master_pid);
-                        else
-                                string_format(log_error, host_label "another program holds the display; "
-                                                                    "Canvas stays off until it lets go\n");
-                        log_flush();
-                        return 1;
-                }
-                if (failed == -ENODEV)
-                        return host_refuse("there is no display for Canvas to start on\n");
-                return_if(failed < 0, host_fail("canvas on", failed));
-
-                host_canvas_say(address_of control);
-                return 0;
-        }
-
+        // Turning Canvas on and off is the desktop's: moonwater desktop on|off.
         return host_usage();
 }
 
@@ -18860,22 +18873,42 @@ static fn desktop_yield(void)
         (void)system_remove_at(AT_FDCWD, DESKTOP_KIDS, 0);
 }
 
-/* The choice, put in force: nothing for Canvas, Canvas off for off, else the session. */
-static b32 desktop_start(bool boot)
+// Whether Canvas is running in the kernel: -1 when it cannot be asked.
+static int desktop_canvas_running(void)
 {
-        p8 name[HOST_NAME_ROOM];
+        struct canvas_control control;
+
+        return host_canvas_request(SPARK_CANVAS_STATUS, address_of control) < 0 ? -1 : control.running != 0;
+}
+
+/*
+        The choice, put in force. on is the compositor: a session of a profile ends, and Canvas is turned on if it is
+        off, or off and on if it is on with no compositor (the machine script starts the compositor from the event
+        that turns it on). off is the text console: a session ends and Canvas is turned off. A profile is its
+        session, over Canvas, with the compositor out of its way. At boot the machine script has started the
+        compositor already, or has not for a profile, so on is nothing then.
+*/
+static b32 desktop_put(string_address name, bool boot)
+{
         p32 pid;
         bool leader;
         positive left;
 
-        desktop_choice(name, sizeof(name));
-        return_if(string_equals(name, "canvas"), 0);
-
-        if (string_equals(name, "off"))
+        if (string_equals(name, "canvas") || string_equals(name, "off"))
         {
-                string_address now[] = {"moonwater", "canvas", "off", null};
+                bool want = string_equals(name, "canvas");
 
-                return boot ? host_canvas(now, 3) : 0;
+                return_if(want && boot, 0);
+                left = desktop_scan(desktop_session(), address_of pid, 1, address_of leader);
+                return_if(left && desktop_end(), host_refuse("what is left of the last session would not end\n"));
+
+                if (!want)
+                        return desktop_canvas_running() > 0 ? host_canvas_off() : 0;
+                if (desktop_canvas_running() <= 0)
+                        return host_canvas_on();
+                return_if(desktop_alive(desktop_pid_of((string_address)DESKTOP_COMPOSITOR)), 0);
+                return_if(host_canvas_off(), 1);
+                return host_canvas_on();
         }
 
         return_if(!desktop_installed(name),
@@ -18890,6 +18923,14 @@ static b32 desktop_start(bool boot)
         // machine that is up.
         desktop_yield();
         return desktop_launch(name);
+}
+
+static b32 desktop_start(bool boot)
+{
+        p8 name[HOST_NAME_ROOM];
+
+        desktop_choice(name, sizeof(name));
+        return desktop_put((string_address)name, boot);
 }
 
 /*
@@ -18937,7 +18978,7 @@ static b32 desktop_status(void)
 
         desktop_choice(name, sizeof(name));
         if (string_equals(name, "canvas") || string_equals(name, "off"))
-                host_say(log, host_label "desktop %s\n", (string_address)name);
+                host_say(log, host_label "desktop %s\n", string_equals(name, "canvas") ? (string_address) "on" : (string_address)name);
         else if (!desktop_installed(name))
                 host_say(log, host_label "desktop %s, not installed: bowl profile %s "
                                          "installs it\n", (string_address)name,
@@ -18951,10 +18992,11 @@ static b32 desktop_status(void)
         return 0;
 }
 
-/* moonwater desktop [canvas|off|PROFILE|start|stop] */
+/* moonwater desktop [on|off|PROFILE|start|stop]: the choice kept and put in force now. */
 static b32 host_desktop(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
+        string_address kept;
 
         return_if(count == 2, desktop_status());
         return_if(count != 3, host_usage());
@@ -18968,20 +19010,20 @@ static b32 host_desktop(string_address address_to arguments, positive count)
         return_if(string_equals(word, "stop"), desktop_stop());
 
         host_need_root();
-        if (!string_equals(word, "canvas") && !string_equals(word, "off"))
+        kept = string_equals(word, "on") ? (string_address) "canvas" : word;
+        if (!string_equals(word, "on") && !string_equals(word, "off"))
         {
                 return_if(!bowl_find_profile(word),
-                          host_refuse("unknown desktop %s: canvas, off, or a profile of "
+                          host_refuse("unknown desktop %s: on, off, or a profile of "
                                       "bowl profile\n", word));
                 return_if(!desktop_installed(word),
                           host_refuse("the profile %s is not installed: bowl profile "
                                       "installs it\n", word));
         }
 
-        return_if(host_save("desktop", DESKTOP_PATH, word), 1);
-        host_say(log, host_label "desktop %s, from the next start; moonwater "
-                                 "desktop start begins it now\n", word);
-        return 0;
+        return_if(host_save("desktop", DESKTOP_PATH, kept), 1);
+        host_say(log, host_label "desktop %s\n", word);
+        return desktop_put(kept, false);
 }
 
 /*
@@ -20200,9 +20242,9 @@ static const host_row host_rows[] = {
     {null, "bind exit", "what runs at poweroff or reboot", 'f'},
     {null, "bind exit add \"command\"", "run a command before the disks go read-only", 'f'},
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
-    {null, "canvas [on|off]", "the desktop; off leaves the text console [on]", 'b'},
+    {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
-    {null, "desktop [canvas|off|PROFILE]", "what the machine starts as its desktop [canvas]", 'b'},
+    {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
@@ -20882,7 +20924,7 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
                       system_access_at(AT_FDCWD, (string_address) "/run/moonwater/windows", 0) != 0,
                   host_refuse("the compositor's desktop is not up, and the settings window is one of its "
-                              "windows: moonwater canvas on starts it\n"));
+                              "windows: moonwater desktop on starts it\n"));
 
         // Its -f, from its command line, words a zero apart.
         string_copy(face, (string_address)HOST_SETTINGS_FACE);

@@ -115721,7 +115721,7 @@ static fn check_settings(string_address regular, string_address bold)
 "  /root/main.moonwater.sh overlays the kernel builtin.\n"
                     ;
                 string_address more[SETTINGS_WORDS];
-                int status = -1, wipe = -1, servers = -1, sleep = -1, hibernate = -1, setup = -1, canvas = -1, link = -1, any = SETTINGS_ANY;
+                int status = -1, wipe = -1, servers = -1, sleep = -1, hibernate = -1, setup = -1, desktop = -1, link = -1, any = SETTINGS_ANY;
                 positive rows;
 
                 settings.moonwater = (string_address) "/moonwater";
@@ -115738,17 +115738,17 @@ static fn check_settings(string_address regular, string_address bold)
                         sleep = string_equals((string_address)command, (string_address) "sleep") ? row : sleep;
                         hibernate = string_equals((string_address)command, (string_address) "hibernate") ? row : hibernate;
                         setup = string_equals((string_address)command, (string_address) "setup") ? row : setup;
-                        canvas = string_equals((string_address)command, (string_address) "canvas [on|off]") ? row : canvas;
+                        desktop = string_equals((string_address)command, (string_address) "desktop [on|off|PROFILE]") ? row : desktop;
                         link = string_equals((string_address)command, (string_address) "link [pair|NAME]") ? row : link;
                 }
                 check("settings: help's main page is a row to each command, and its notes are none",
-                      rows > 40 && rows <= SETTINGS_GENERATED && !settings.truncated && status > 0 && wipe > 0 && setup > 0 && canvas > 0 && link > 0);
+                      rows > 40 && rows <= SETTINGS_GENERATED && !settings.truncated && status > 0 && wipe > 0 && setup > 0 && desktop > 0 && link > 0);
                 check("settings: a command with nothing after its verb takes nothing, one with brackets takes words",
-                      !settings_takes(status) && !settings_takes(setup) && settings_takes(wipe) && settings_takes(canvas) && settings_takes(link) &&
+                      !settings_takes(status) && !settings_takes(setup) && settings_takes(wipe) && settings_takes(desktop) && settings_takes(link) &&
                           settings_takes(any));
                 check("settings: the verb is the leading words in small letters",
                       settings.generic[servers - any - 1].verb == sizeof("ntp nts servers") - 1 &&
-                          settings.generic[canvas - any - 1].verb == sizeof("canvas") - 1 &&
+                          settings.generic[desktop - any - 1].verb == sizeof("desktop") - 1 &&
                           settings.generic[status - any - 1].verb == sizeof("status") - 1);
                 check("settings: sleep | hibernate is two rows with one text",
                       sleep > 0 && hibernate == sleep + 1 &&
@@ -115788,8 +115788,8 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: a typed command is words, a pair of quotes holds one, and a semicolon is a word",
                       count == 9 && string_equals(more[0], (string_address) "/moonwater") && string_equals(more[1], (string_address) "bind") &&
                           string_equals(more[4], (string_address) "echo hi there") && string_equals(more[5], (string_address) ";") && !more[9]);
-                count = settings_generic_words(canvas, "off", more, SETTINGS_WORDS);
-                check("settings: a row's verb comes before what is typed", count == 3 && string_equals(more[1], (string_address) "canvas") &&
+                count = settings_generic_words(desktop, "off", more, SETTINGS_WORDS);
+                check("settings: a row's verb comes before what is typed", count == 3 && string_equals(more[1], (string_address) "desktop") &&
                                                                               string_equals(more[2], (string_address) "off"));
                 count = settings_generic_words(any, "a b c d e f g h i j k l m n o p q r s t u v w x y z", more, SETTINGS_WORDS);
                 check("settings: more words than a command takes are none", count == 0);
@@ -115798,10 +115798,10 @@ static fn check_settings(string_address regular, string_address bold)
                                                                               string_equals(more[3], (string_address) "it's"));
 
                 // What asks twice, by the words that would run and not by the row.
-                count = settings_generic_words(canvas, "off", more, SETTINGS_WORDS);
-                check("settings: canvas off asks twice and canvas on does not",
+                count = settings_generic_words(desktop, "off", more, SETTINGS_WORDS);
+                check("settings: desktop off asks twice and desktop on does not",
                       settings_asks_for(more + 1, count - 1) &&
-                          (settings_generic_words(canvas, "on", more, SETTINGS_WORDS), !settings_asks_for(more + 1, 2)));
+                          (settings_generic_words(desktop, "on", more, SETTINGS_WORDS), !settings_asks_for(more + 1, 2)));
                 settings_generic_words(any, "setup install /dev/sda yes", more, SETTINGS_WORDS);
                 check("settings: setup install asks twice, typed in any row", settings_asks_for(more + 1, 4));
                 settings_generic_words(any, "wipe", more, SETTINGS_WORDS);
@@ -115814,7 +115814,7 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: sleep asks, status does not",
                       settings_asks_for(more + 1, 1) && (settings_generic_words(any, "status", more, SETTINGS_WORDS), !settings_asks_for(more + 1, 1)));
                 check("settings: a row whose verb alone ends what a person has says so, one that needs a word typed does not",
-                      settings_row_asks(wipe) && settings_row_asks(sleep) && !settings_row_asks(status) && !settings_row_asks(canvas));
+                      settings_row_asks(wipe) && settings_row_asks(sleep) && !settings_row_asks(status) && !settings_row_asks(desktop));
 
                 // The second Enter: the first says so and runs nothing, a key between asks again, the same Enter after it runs.
                 settings.child = 1;

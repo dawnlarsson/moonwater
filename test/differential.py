@@ -44567,8 +44567,6 @@ def harness_moonwater_cli(argv):
             'name xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
             'name ../x',
             'canvas',
-            'canvas on',
-            'canvas off',
             'canvas scale 9',
             'canvas modes sideways',
             'canvas background red',
@@ -44614,6 +44612,8 @@ def harness_moonwater_cli(argv):
         ]:
             walk_classes[vector] = 1
         for vector in [
+            'canvas on',
+            'canvas off',
             'status extra',
             '-h',
             '--help',
@@ -46348,17 +46348,17 @@ while True:
                               "it": "it"},
               "every layout moonwater keyboard offers has the XKB name a compositor wants", sorted(dict(pairs).items()))
         #       moonwater desktop is a setting like the keyboard's: bare it says
-        #       what is chosen, a word is saved when it is canvas, off or a
+        #       what is chosen, a word is saved when it is on, off or a
         #       profile that is installed, and nothing else is, and a layout is
         #       said in XKB's name for the session of a bowl to read.
         script = ("rm -f /root/desktop /bowls/bin/desktop; mkdir -p /bowls/bin\n" +
                   say("desktop") + say("desktop off") + "echo \"@@kept $(cat /root/desktop)\"\n" +
-                  say("desktop desktop") + say("desktop nosuch") + say("desktop canvas extra") +
+                  say("desktop desktop") + say("desktop nosuch") + say("desktop on extra") +
                   say("desktop stop") + "echo \"@@kept $(cat /root/desktop)\"\n" +
                   "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
                   "chmod 755 /bowls/bin/desktop\n" +
                   say("desktop desktop") + "echo \"@@kept $(cat /root/desktop)\"\n" +
-                  say("desktop") + say("desktop canvas") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  say("desktop") + say("desktop on") + "echo \"@@kept $(cat /root/desktop)\"\n" +
                   "printf '#!/bin/sh\\nexit 0\\n' > /bowls/bin/desktop\n" + say("desktop desktop") +
                   "echo \"@@kept $(cat /root/desktop)\"\n" +
                   "".join(say(f"keyboard {layout}") + say("keyboard xkb") for layout in ("uk", "sv", "nb", "de", "us")) +
@@ -46367,8 +46367,8 @@ while True:
         seen = answers(lines)
         kept = [line.split(None, 1)[1] if " " in line else "" for line in lines if line.startswith("@@kept")]
         check(finished and seen.get("desktop", {}).get("status") == 0 and
-              any(line.endswith("desktop canvas") for line in seen["desktop"]["out"]),
-              "moonwater desktop says canvas when nothing was chosen", repr(seen.get("desktop")))
+              any(line.endswith("desktop on") for line in seen["desktop"]["out"]),
+              "moonwater desktop says on when nothing was chosen", repr(seen.get("desktop")))
         check(seen.get("desktop off", {}).get("status") == 0 and kept[:1] == ["off"],
               "desktop off is saved", repr((seen.get("desktop off"), kept[:1])))
         check(seen.get("desktop desktop", {}).get("status") == 1 and
@@ -46377,13 +46377,13 @@ while True:
         check(seen.get("desktop nosuch", {}).get("status") == 1 and
               any("unknown desktop nosuch" in line for line in seen["desktop nosuch"]["out"]),
               "a word that is no profile is refused", repr(seen.get("desktop nosuch")))
-        check(seen.get("desktop canvas extra", {}).get("status") == 2,
-              "a word too many is a usage page", repr(seen.get("desktop canvas extra")))
+        check(seen.get("desktop on extra", {}).get("status") == 2,
+              "a word too many is a usage page", repr(seen.get("desktop on extra")))
         check(seen.get("desktop stop", {}).get("status") == 1 and
               any("no desktop session is running" in line for line in seen["desktop stop"]["out"]),
               "stop with no session is a refusal", repr(seen.get("desktop stop")))
         check(kept[2:3] == ["desktop"] and kept[3:4] == ["canvas"],
-              "a profile that is installed is chosen, and canvas puts the default back", repr(kept))
+              "a profile that is installed is chosen, and on puts the default back", repr(kept))
         check(kept[4:5] == ["canvas"] and seen.get("desktop desktop", {}).get("status") is not None,
               "a script that is not a profile's is not one", repr(kept))
         names = [lines[at + 1] for at in range(len(lines) - 1) if lines[at] == "@@ keyboard xkb"]
@@ -47085,14 +47085,17 @@ while True:
                   f"moonwater {command.replace(secret, 'SECRET')} keeps the secret out of "
                   "its command line", f"secret in it {seen}, command line read {alive}")
 
-        # Canvas with no kernel desktop to ask: off and on say why and say
-        # nothing about windows closing.
-        lines, finished = session(say("canvas off") + say("canvas on") + say("canvas"))
+        # Canvas with no kernel desktop to ask: the desktop off has nothing to turn off and on cannot start
+        # it, and neither says anything about windows closing; canvas on and off are no verbs, a usage page.
+        lines, finished = session(say("desktop off") + say("desktop on") + say("canvas") + say("canvas on") + say("canvas off"))
         seen = answers(lines)
-        check(finished and all(seen.get(f"canvas {w}".strip(), {}).get("status") == 1 for w in ("off", "on", "")),
-              "canvas, on and off with no Canvas to ask fail with 1", repr(seen))
+        check(finished and seen.get("desktop off", {}).get("status") == 0 and seen.get("desktop on", {}).get("status") == 1 and
+              seen.get("canvas", {}).get("status") == 1,
+              "the desktop off is nothing to do and on fails, with no Canvas to ask, and canvas says 1", repr(seen))
+        check(all(seen.get(f"canvas {w}", {}).get("status") == 2 for w in ("on", "off")),
+              "canvas on and canvas off are a usage page now, 2", repr(seen))
         check(not any("every window closes" in line for line in lines),
-              "canvas off without a Canvas does not announce closing windows", lines[:6])
+              "the desktop off without a Canvas does not announce closing windows", lines[:6])
 
     return checks.verdict("moonwater cli", "moonwater-cli")
 
@@ -47224,7 +47227,7 @@ def harness_moonwater_script(argv):
         ("bios", 0), ("bios reboot", 1), ("time", 0), ("time sync", 1), ("timezone auto", 1),
         ("bind init add echo hi", 0), ("bind init add echo hi", 0), ("bind init mount off", 0),
         ("bind init mount off", 0), ("bind init", 0), ("bind exit add echo bye", 0), ("bind exit add echo bye", 0),
-        ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 1), ("canvas off", 1),
+        ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 2), ("canvas off", 2),
         ("canvas scale 2", 0), ("canvas modes preferred", 0),
         ("desktop off", 0), ("desktop start", 0), ("desktop stop", 1), ("desktop boot", 0), ("desktop", 0),
         ("latency", 1), ("debug", 0), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),

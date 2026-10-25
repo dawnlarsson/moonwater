@@ -44,8 +44,8 @@ moonwater bind EVENT [COMMAND]         one event; empty puts the default back
 moonwater bind init                    what runs at every boot, with ids
 moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
-moonwater canvas [on|off]              the desktop; off leaves the text console [on]
-moonwater desktop [canvas|off|PROFILE]  what the machine starts as its desktop [canvas]
+moonwater canvas                       whether Canvas is on, and the screens it draws on
+moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
 moonwater settings                     the settings window, on the desktop of the compositor
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
@@ -105,6 +105,13 @@ moonwater link on|off                  the listener, kept across boots [off]
 ```
 
 `moonwater` alone prints every command and `moonwater help VERB` the page of one.
+
+`moonwater desktop on|off|PROFILE` is the one switch of what is on the screen, kept for
+every start and put in force at once: `on` is the compositor, `off` the text console, a
+profile (`bowl profile desktop` installs KDE) its session. A session has the display
+only once the compositor has let go of it, since nothing else can be the card's master
+while it is, so the compositor ends first and `desktop on` brings it back.
+
 A verb with no word after it says where its switch stands, to anybody; with one
 it changes it and needs root, and a word it does not take is a usage page
 (exit 2) and not a refusal (exit 1). `bowl` runs other distributions' programs

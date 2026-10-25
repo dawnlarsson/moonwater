@@ -339,8 +339,8 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
 
         poweroff, reset and ctrl_alt_delete default to poweroff, reboot and
         reboot. canvas on and canvas off run when the desktop starts (the
-        first card at boot, or `moonwater canvas on`) and when it stops,
-        not instead of `moonwater canvas on|off`. init and exit are lists
+        first card at boot, or `moonwater desktop on`) and when it stops,
+        not instead of `moonwater desktop on|off`. init and exit are lists
         in the settings block, not rows here.
 
         Reading needs nothing. Setting needs CAP_SYS_ADMIN, because the line

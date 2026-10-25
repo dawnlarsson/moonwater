@@ -16976,7 +16976,7 @@ make_stub()
         rm -rf "$d"
         mkdir -p "$d/bin" "$d/root" "$d/run/moonwater" "$d/fonts"
         echo on > "$d/canvas"
-        echo canvas > "$d/desktop"
+        echo on > "$d/desktop"
         echo "console=ttyS0" > "$d/cmdline"
         : > "$d/starts"
         : > "$d/args"
@@ -17018,11 +17018,14 @@ EOF
         cat > "$d/bin/moonwater" <<'EOF'
 #!/bin/sh
 case $1 in
-desktop) echo "desktop $(cat "$STUB/desktop")" ;;
+desktop)
+        case $2 in
+        "") echo "desktop $(cat "$STUB/desktop")" ;;
+        off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
+        esac ;;
 canvas)
         case $2 in
         "") if [ "$(cat "$STUB/canvas")" = on ]; then echo "Canvas is on"; else echo "Canvas is off"; fi ;;
-        off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
         esac ;;
 esac
 EOF
@@ -17519,7 +17522,10 @@ mkdir -p /bowls/bin
 cp /mnt/profile /bowls/bin/desktop
 chmod 755 /bowls/bin/desktop
 moonwater desktop desktop
+sleep 6
 moonwater desktop
+moonwater desktop stop
+sleep 3
 rm -f /run/moonwater/desktop.booted
 moonwater desktop boot
 sleep 6
@@ -17527,7 +17533,7 @@ moonwater desktop
 moonwater desktop stop
 sleep 3
 moonwater desktop
-moonwater desktop canvas
+moonwater desktop on
 moonwater desktop
 echo desk-done
 ''')
@@ -17806,7 +17812,7 @@ def typed_to_serial(word):
     type_text("0\n")
 
 if holder:
-    shell.run("moonwater canvas off", 30)
+    shell.run("moonwater desktop off", 30)
     time.sleep(8)
     shot("canvas-off", 0.5)
     vga, white = vga_share("canvas-off")
@@ -17827,14 +17833,14 @@ if holder:
     out.append(("and the console has it again once that program exits",
                 "yes" if vga >= 98 and white < 50 else "%d%% console colours, %d%% white" % (vga, white), "yes"))
 
-    shell.run("moonwater canvas on", 30)
+    shell.run("moonwater desktop on", 30)
     time.sleep(8)
     shot("canvas-on", 0.5)
     vga, white = vga_share("canvas-on")
     out.append(("canvas on brings Canvas's own colour back",
                 "yes" if vga < 80 else "%d%% of the screen in console colours" % vga, "yes"))
 
-    shell.run("moonwater canvas off; sleep 6; moonwater canvas on; sleep 6; moonwater canvas off; sleep 6; moonwater canvas on", 90)
+    shell.run("moonwater desktop off; sleep 6; moonwater desktop on; sleep 6; moonwater desktop off; sleep 6; moonwater desktop on", 90)
     time.sleep(4)
     out.append(("off and on twice more, and moonwater canvas says it is on",
                 "yes" if "Canvas is on" in canvas_text() else "no", "yes"))
@@ -17859,10 +17865,10 @@ else:
 way_names = ("Control-Alt-Backspace ends a program that holds the display",
              "and the loop that starts it again with it, not only the one run",
              "moonwater desktop refuses a profile that is not installed, and takes one that is",
-             "moonwater desktop boot starts the chosen profile, over Canvas",
+             "moonwater desktop boot starts the chosen profile, over Canvas, as a boot does",
              "and moonwater desktop says it is running",
              "moonwater desktop stop ends its session, and Canvas has the display back",
-             "and moonwater desktop canvas puts the default back")
+             "and moonwater desktop on puts the default back")
 if holder:
     tag = start_holder("0", "setsid /shell /mnt/respawn")
     started = holder_said(tag, "DRMHOLD master", 15)
@@ -17878,15 +17884,15 @@ if holder:
     time.sleep(1)
     profile_said = shell.run("cat /tmp/profile.out", 10)[0]
     out.append((way_names[2], "yes" if "is not installed" in plain and
-                "desktop desktop, from the next start" in plain else "no: " + repr(plain[:400]), "yes"))
+                "desktop desktop\n" in plain else "no: " + repr(plain[:400]), "yes"))
     out.append((way_names[3], str(len(re.findall(r"DRMHOLD master", profile_said))), "1"))
     out.append((way_names[4], "yes" if "desktop desktop, running" in plain else "no", "yes"))
     shot("profile-after", 0.5)
     vga, white = vga_share("profile-after")
     out.append((way_names[5], "yes" if "desktop stopped" in plain and white < 50 else "no (%d%% white)" % white, "yes"))
     out.append((way_names[6], "yes" if re.search(
-        r"desktop stopped.*desktop desktop, not running.*desktop canvas, from the next start"
-        r".*desktop canvas\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
+        r"desktop stopped.*desktop desktop, not running.*desktop on"
+        r".*desktop on\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
 else:
     for name, want in zip(way_names, ("yes", "1", "yes", "1", "yes", "yes", "yes")):
         out.append((name, "not run: no static cc for the helpers", want))
@@ -17912,7 +17918,7 @@ if guest.poll() is None:
 
 #       The card firmware left, as the only one. A machine whose one display
 #       is the firmware's framebuffer (simpledrm, a VM without a driver for its
-#       GPU) has no native card, so moonwater canvas on opens the node in a
+#       GPU) has no native card, so moonwater desktop on opens the node in a
 #       first pass that skips it and again in a second that takes it. The first
 #       open was closed but not yet gone, it was still the card's master, and
 #       the answer was "shell (pid N) holds the display" naming the caller
@@ -17923,7 +17929,7 @@ if guest.poll() is None:
 ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVMF/OVMF_CODE.fd",
                                "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
 fw_names = ("a firmware card is the only display", "canvas off and on three times with it",
-            "with no refusal naming a holder", "on when it is on says so", "off when it is off says so",
+            "with no refusal naming a holder", "on when it is on is no refusal", "off when it is off is no refusal",
             "and canvas on does not claim another program holds the display",
             "and it says it is on at the end, Canvas's own colour is on the screen",
             "three off and on rounds over a serial console leave one shell on tty1")
@@ -17935,7 +17941,7 @@ if ovmf:
         "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
         "-chardev", "socket,id=s0,path=" + fw_ser + ",server=on,wait=off", "-serial", "chardev:s0",
         "-no-reboot", "-display", "none",
-        #   The console on the serial port: what moonwater canvas off finds is a
+        #   The console on the serial port: what moonwater desktop off finds is a
         #   console that is not a screen, and starts a shell on tty1 for.
         "-append", "console=ttyS0 moonwater.desktop=none"],
         work + "/fw-qmp", work + "/fw-mon", work, sockets=(fw_ser,))
@@ -17945,17 +17951,17 @@ if ovmf:
     said = [fw_shell.run("moonwater canvas", 20)[0]]
     codes = []
     for _ in range(3):
-        fw_shell.run("moonwater canvas off", 30)
+        fw_shell.run("moonwater desktop off", 30)
         time.sleep(6)
-        text, code = fw_shell.run("moonwater canvas on 2>&1", 40)
+        text, code = fw_shell.run("moonwater desktop on 2>&1", 40)
         said.append(text)
         codes.append(code)
         time.sleep(8)
-    again, again_code = fw_shell.run("moonwater canvas on 2>&1", 30)
-    fw_shell.run("moonwater canvas off", 30)
+    again, again_code = fw_shell.run("moonwater desktop on 2>&1", 30)
+    fw_shell.run("moonwater desktop off", 30)
     time.sleep(6)
-    twice, twice_code = fw_shell.run("moonwater canvas off 2>&1", 30)
-    fw_shell.run("moonwater canvas on", 30)
+    twice, twice_code = fw_shell.run("moonwater desktop off 2>&1", 30)
+    fw_shell.run("moonwater desktop on", 30)
     time.sleep(8)
     state = fw_shell.run("moonwater canvas", 20)[0]
     count = fw_shell.number("ls -l /proc/*/fd/0 2>/dev/null | grep -c tty1", 20)
@@ -17965,8 +17971,8 @@ if ovmf:
     out.append((fw_names[0], "yes" if "Canvas is on: simpledrm" in said[0] else "no: " + repr(said[0][-200:]), "yes"))
     out.append((fw_names[1], "yes" if codes == [0, 0, 0] else "rc " + repr(codes), "yes"))
     out.append((fw_names[2], str(everything.count("Canvas stays off")), "0"))
-    out.append((fw_names[3], "yes" if again_code == 1 and "already on" in again else "no", "yes"))
-    out.append((fw_names[4], "yes" if twice_code == 1 and "already off" in twice else "no", "yes"))
+    out.append((fw_names[3], "yes" if again_code == 0 and "already on" not in again else "no", "yes"))
+    out.append((fw_names[4], "yes" if twice_code == 0 and "already off" not in twice else "no", "yes"))
     out.append((fw_names[5], str(everything.count("another program holds")), "0"))
     out.append((fw_names[6], "yes" if "Canvas is on: simpledrm" in state and vga < 80
                 else "status %r, %d%% console colours" % (state[:40], vga), "yes"))
@@ -19188,7 +19194,7 @@ out = []
 ovmf = next((path for path in ("/usr/share/edk2/x64/OVMF.4m.fd", "/usr/share/OVMF/OVMF_CODE.fd",
                                "/usr/share/edk2/ovmf/OVMF_CODE.fd") if os.path.exists(path)), "")
 names = ("R4.1 an image whose settings say Canvas stays off boots on the text console: Canvas is off, and says why",
-         "and moonwater canvas on starts it afterwards, with no warning from the kernel",
+         "and moonwater desktop on starts it afterwards, with no warning from the kernel",
          "R4.2 the same image with its settings as built starts Canvas at boot")
 
 def guest_of(name, kernel):
@@ -19234,7 +19240,7 @@ if ovmf:
     state = shell.run("moonwater canvas | head -1")[0]
     wording = shell.run("moonwater bind init canvas")[0].split("\n")[-1]
     said = shell.number("dmesg | grep -c 'off at boot, as the image'")
-    shell.run("moonwater canvas on")
+    shell.run("moonwater desktop on")
     after = "on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off"
     out.append((names[0], "%s / %s / %s" % ("off" if "Canvas is off" in state else state, wording, said),
                 "off / [Moonwater] init canvas off / 1"))
@@ -19300,7 +19306,7 @@ def alive(pid):
 
 pid = ""
 for round_ in (1, 2):
-    shell.run("moonwater canvas on")
+    shell.run("moonwater desktop on")
     until(lambda: canvas() == "on", 10)
     time.sleep(2)
     if round_ == 1:
@@ -19325,9 +19331,9 @@ for round_ in (1, 2):
                     "%s %s" % (canvas(), shell.number("ps | grep -c '[c]ompositor'")), "off 0"))
         print("r2 Control-Alt-Shift-Backspace with Canvas holding the card to Canvas off: %.2f s" % took, file=sys.stderr)
 
-shell.run("moonwater canvas on")
+shell.run("moonwater desktop on")
 until(lambda: canvas() == "on", 10)
-out.append(("and moonwater canvas on brings the desktop back", canvas(), "on"))
+out.append(("and moonwater desktop on brings the desktop back", canvas(), "on"))
 
 for name, got, want in out:
     print("%s|%s|%s" % (name, got, want))
@@ -19504,12 +19510,12 @@ out.append(("and both inside a second (the first restart is at once, the second 
 #   with it. The image's own bold face is a font that is not the default.
 override = "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf"
 shell.run("echo %s > /root/font" % override, 20)
-shell.run("moonwater canvas off", 15)
+shell.run("moonwater desktop off", 15)
 #   The machine script ends the desktop when it hears of Canvas going off, a
 #   moment after the kernel has; a Canvas turned on before that finds the
 #   compositor still holding the card and stays off, as it does for any program.
 until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
-shell.run("moonwater canvas on", 15)
+shell.run("moonwater desktop on", 15)
 until(lambda: newer(""), 15)
 #   The terminal loads its font while the guest's two processors do everything else.
 until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1", 60)
@@ -19526,9 +19532,9 @@ said("R1.2b")
 #   Back to the image's own fonts: the same restart without /root/font, and then what a plain boot
 #   with fonts has on its screen.
 shell.run("rm -f /root/font", 20)
-shell.run("moonwater canvas off", 15)
+shell.run("moonwater desktop off", 15)
 until(lambda: canvas() == "off" and shell.number("ps | grep -c '[c]ompositor'") == "0", 10)
-shell.run("moonwater canvas on", 15)
+shell.run("moonwater desktop on", 15)
 until(lambda: newer(""), 15)
 until(lambda: shell.number("ps | grep -c '[t]erminal'", 30) == "1", 60)
 
@@ -19721,9 +19727,9 @@ out.append(("R1.4 a stopped compositor with a supervisor does not keep Canvas on
             "off gone stopped"))
 out.append(("and nothing starts the compositor again while Canvas is off",
             "yes" if not compositor() and shell.number("ps | grep -c '[c]ompositor'") == "0" else "no", "yes"))
-shell.run("moonwater canvas on")
+shell.run("moonwater desktop on")
 back, took = until(lambda: newer(stopped), 15)
-out.append(("R1.5 moonwater canvas on starts the desktop again",
+out.append(("R1.5 moonwater desktop on starts the desktop again",
             "yes" if back and canvas() == "on" else "no", "yes"))
 
 #   Four deaths in a row and the supervisor stops: Canvas is turned off, for the text console, and
@@ -19756,7 +19762,7 @@ out.append(("and the shell on the text console answers the keyboard",
 #   nothing on it. Canvas is turned off for the text console, and the log of the machine names the file that
 #   is missing. The image's own fonts are hidden under a file system with none.
 shell.run("mkdir -p /usr/share/fonts; mount -t tmpfs none /usr/share/fonts; echo /nonexistent/font.ttf > /root/font", 20)
-shell.run("moonwater canvas on", 15)
+shell.run("moonwater desktop on", 15)
 until(lambda: "no font" in shell.run("dmesg | grep 'desktop: no font'")[0] and canvas() == "off", 15)
 time.sleep(2)
 said_no_font = shell.run("dmesg | grep 'desktop: no font'")[0]
@@ -19838,12 +19844,15 @@ int main(int argc, char **argv)
 built = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/kmsmaster", work + "/kmsmaster.c"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 names = ("K1.1 with the compositor up the card has a master already: another program cannot take it",
-         "K1.2 moonwater desktop start ends the compositor and its supervisor before the session starts",
+         "K1.2 moonwater desktop PROFILE ends the compositor and its supervisor before the session starts",
          "K1.3 the session takes the master of the card, once",
          "K1.4 the session ended, the card has no master left over: a program takes it",
-         "K1.5 the compositor is not started again behind the session")
+         "K1.5 the compositor is not started again behind the session",
+         "K1.6 moonwater desktop on after a session brings the compositor back, and it is the card's master again",
+         "K1.7 moonwater desktop off ends the compositor and Canvas is off, for the text console",
+         "K1.8 and moonwater desktop on from there starts the compositor again")
 if not built:
-    for name, want in zip(names, ("busy", "yes", "1", "master", "yes")):
+    for name, want in zip(names, ("busy", "yes", "1", "master", "yes", "yes", "yes", "yes")):
         out.append((name, "not run: no static cc for the helper", want))
 else:
     open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/kmsmaster 120 > /tmp/profile.out 2>&1\n")
@@ -19868,8 +19877,7 @@ else:
     out.append((names[0], "busy" if "kms-busy 16" in first else first.strip()[-60:].replace("\n", " "), "busy"))
 
     shell.run("mkdir -p /bowls/bin; cp /mnt/profile /bowls/bin/desktop; chmod 755 /bowls/bin/desktop", 10)
-    shell.run("moonwater desktop desktop", 10)
-    started = shell.run("moonwater desktop start; echo status $?", 30)[0]
+    started = shell.run("moonwater desktop desktop; echo status $?", 60)[0]
     until(lambda: "kms-master" in shell.run("cat /tmp/profile.out", 10)[0], 30)
     time.sleep(2)
     said = shell.run("cat /tmp/profile.out", 10)[0]
@@ -19884,6 +19892,22 @@ else:
     time.sleep(3)
     after = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
     out.append((names[3], "master" if "kms-master" in after else after.strip()[-60:].replace("\n", " "), "master"))
+
+    shell.run("moonwater desktop on", 60)
+    until(lambda: compositors() == "1", 60)
+    time.sleep(3)
+    again = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
+    out.append((names[5], "yes" if compositors() == "1" and "kms-busy 16" in again else
+                "compositors %s, %s" % (compositors(), again.strip()[-40:].replace("\n", " ")), "yes"))
+    shell.run("moonwater desktop off", 60)
+    until(lambda: compositors() == "0", 30)
+    time.sleep(2)
+    state = shell.run("moonwater canvas | head -1", 10)[0]
+    out.append((names[6], "yes" if compositors() == "0" and "Canvas is off" in state else
+                "compositors %s, %s" % (compositors(), state.strip()[-40:]), "yes"))
+    shell.run("moonwater desktop on", 60)
+    until(lambda: compositors() == "1", 60)
+    out.append((names[7], "yes" if compositors() == "1" else "no compositor", "yes"))
     try:
         guest.quit()
         guest.wait(10)
