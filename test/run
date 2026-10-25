@@ -19960,10 +19960,15 @@ n = changed(before, settled, sl, st, sr, sb)
 out.append(("W1.7 the settings window opens under the parked pointer",
             "yes" if "status 0" in opened and n > 2000 else "%s, %d pixels changed" % (opened[-40:].strip(), n), "yes"))
 said(shell, "W1.7")
+#   At its first size no group is longer than the window, so nothing in it scrolls: a word typed with no field open
+#   filters the rows of every group into one list, which does.
+type_text("e")
+time.sleep(1.5)
+filtered = picture("w1-settings-filter")
 turn("wheel-down", 6)
 listed = picture("w1-settings-wheel")
-n = changed(settled, listed, sl, st, sr, sb)
-out.append(("W1.8 the wheel scrolls its list with the pointer not moved since the window opened",
+n = changed(filtered, listed, sl, st, sr, sb)
+out.append(("W1.8 the wheel scrolls its list, the rows and not the groups, with the pointer not moved since the window opened",
             "yes" if n > 300 else "%d pixels changed" % n, "yes"))
 said(shell, "W1.8")
 finish(guest)

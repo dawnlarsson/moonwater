@@ -6225,6 +6225,11 @@ static void compositor_wheel(int v120, int horizontal)
 
                 row = compositor.hover = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         }
+        // Where the pointer is goes first, as it does before a button: a window that turns a wheel by where the pointer
+        // is (the settings window's two columns, a terminal's report to a program that asked for the mouse) has only
+        // the last motion it was told of, which is none when it opened under a pointer that has not moved.
+        if (row >= 0)
+                compositor_pointer_to(row);
         compositor_post(row, WINDOW_EVENT_WHEEL, 0, v120, horizontal);
 }
 
