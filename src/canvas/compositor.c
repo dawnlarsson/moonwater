@@ -1871,6 +1871,8 @@ static struct
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
         int told_row, told_x, told_y; // where the pointer was last told to a window: its row and the place in its picture
+        unsigned char button_down;    // the buttons (BTN_LEFT up, a bit each) a window was sent the press of
+        int button_row[8];            // and the window each press went to, which its release goes to
         unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
         // `moonwater keyboard repeat` and `moonwater mouse`: what the settings kept, and what each keyboard has been told.
         unsigned char repeats[COMPOSITOR_INPUTS]; // the keyboard's repeat can be set: it answered EVIOCGREP
@@ -6036,12 +6038,20 @@ static unsigned int compositor_snap(int x, int y)
 // hand let go, unless the release is not the hand's (the device went away).
 static void compositor_release(unsigned int code, int snap)
 {
-        int grab = compositor.grab, dragged = compositor.drag;
+        int grab = compositor.grab, dragged = compositor.drag, to = grab;
+        unsigned int index = code - COMPOSITOR_BTN_LEFT;
 
         compositor.drag = COMPOSITOR_NONE;
         compositor.grab = COMPOSITOR_NONE;
         compositor.resize = COMPOSITOR_NONE;
-        compositor_post(grab, WINDOW_EVENT_BUTTON, 0, (int)code, 0);
+        // A button is let go in the window it was pressed in: a second button pressed over another window while the
+        // first is held is that window's, and the first's release is the one that window held the grab for.
+        if (index < 8 && (compositor.button_down >> index & 1))
+        {
+                to = compositor.button_row[index];
+                compositor.button_down &= (unsigned char)~(1u << index);
+        }
+        compositor_post(to, WINDOW_EVENT_BUTTON, 0, (int)code, 0);
         // A press and a release with no motion between is a click on the window's top, which only raises it:
         // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
         if (dragged >= 0 && snap && compositor.drag_moved &&
@@ -6177,6 +6187,11 @@ static void compositor_button(unsigned int code, int down)
         compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
         compositor_pointer_to(under);
         compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)code, 0);
+        if (code - COMPOSITOR_BTN_LEFT < 8)
+        {
+                compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
+                compositor.button_row[code - COMPOSITOR_BTN_LEFT] = under;
+        }
 }
 
 /*

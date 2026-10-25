@@ -19923,6 +19923,32 @@ said(shell, "W1.9")
 shell.run("kill %s" % " ".join(grip), 10)
 time.sleep(1)
 
+#   A button is let go in the window it was pressed in. The left button goes down over one window and is held; the
+#   pointer moves onto another, the right button is clicked there, and the left is let go: the second window has the
+#   right button's press and release, and the first has the left button's, both, where the right button's release used
+#   to take the grab and the left button's own release went to nobody.
+def buttons(shell, path):
+    text = shell.run("cat %s" % path, 10)[0]
+    return " ".join("%s:%s" % (code, "down" if flags != "0" else "up") for code, flags in re.findall(r"surface: button (\d+) (\w+)", text)) or "none"
+
+left = surface(shell, "/tmp/wl.out", (100, 100, 400, 300))
+right = surface(shell, "/tmp/wr.out", (700, 100, 400, 300))
+place(250, 250)
+send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+time.sleep(0.4)
+place(850, 250)
+send([{"type": "btn", "data": {"down": True, "button": "right"}}])
+time.sleep(0.3)
+send([{"type": "btn", "data": {"down": False, "button": "right"}}])
+time.sleep(0.3)
+send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+time.sleep(0.8)
+out.append(("W1.10 a button is let go in the window it was pressed in: the left button's release is the first window's and the right button's press and release are the second's",
+            "%s and %s" % (buttons(shell, "/tmp/wl.out"), buttons(shell, "/tmp/wr.out")), "272:down 272:up and 273:down 273:up"))
+said(shell, "W1.10")
+shell.run("kill %s %s" % (" ".join(left), " ".join(right)), 10)
+time.sleep(1)
+
 def picture(name):
     shot(name, 1)
     return load(name)
