@@ -46618,6 +46618,22 @@ while True:
         check(bowl_lines(seen.get("put back", {})) == ["packages off", "sudo on"],
               "and the file put back reads packages off and sudo on again",
               repr(seen.get("put back"))[-300:])
+        #       And one the reader cannot open: at mode 000 nobody, who holds an
+        #       owner's rights over root's files here and no more, cannot read it.
+        session("chmod 000 /run/moonwater/security\n")
+        lines, finished = session(
+            "cat /run/moonwater/security > /dev/null 2>&1 && echo @@readable || echo @@unreadable\n" +
+            ask("unreadable sudo", "security sudo") + ask("unreadable packages", "security packages"),
+            nobody=True)
+        seen = answers(lines)
+        back, _ = session("chmod 644 /run/moonwater/security\n" + ask("readable again", "security sudo"))
+        check(finished and "@@unreadable" in lines and
+              said(seen.get("unreadable sudo", {}), "security sudo off") and
+              said(seen.get("unreadable packages", {}), "security packages on") and
+              said(answers(back).get("readable again", {}), "security sudo on", 0),
+              "with a file the reader cannot open sudo is off and packages on",
+              repr((lines[:1], seen.get("unreadable sudo"), seen.get("unreadable packages"),
+                    answers(back).get("readable again"))))
         #       The bowl's tight tier: over what the default build kept (sudo on,
         #       packages off), then over nothing kept, where its refusals keep
         #       nothing either; then the two words it takes.
