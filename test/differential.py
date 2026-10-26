@@ -45481,6 +45481,16 @@ def harness_moonwater_cli(argv):
               "a cpu that is too long a number, cpu 0 and a cpu that is not there are each said so",
               repr(seen))
 
+        # cpu says whether boost is on from the switch the machine has. A
+        # no_turbo that reads empty is no answer, and was read as off.
+        sys_reset()
+        (fake / "devices/system/cpu/cpufreq/boost").unlink()
+        sys_file("devices/system/cpu/intel_pstate/no_turbo", "")
+        got, done = session("rm -f /root/tune\n" + say("cpu"))
+        seen = answers(got)
+        check(done and seen["cpu"]["status"] == 0 and not any("boost" in line for line in seen["cpu"]["out"]),
+              "cpu says nothing of boost where its switch reads empty", repr(seen.get("cpu")))
+
         # What a sleep reports and puts back is by name. The wakeup sources and
         # the backlights were paired with what they were before by their place
         # in the directory, so a source that went while the machine slept

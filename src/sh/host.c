@@ -13513,8 +13513,9 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                         (void)tune_word(TUNE_SYS_CPU "/cpufreq/boost", boost, sizeof(boost));
                 else if (tune_exists(TUNE_SYS_CPU "/intel_pstate/no_turbo"))
                 {
-                        (void)tune_word(TUNE_SYS_CPU "/intel_pstate/no_turbo", boost, sizeof(boost));
-                        boost[0] = boost[0] == '0' ? '1' : '0';
+                        //      no_turbo is the other way about, and a read that gave nothing says nothing.
+                        if (tune_word(TUNE_SYS_CPU "/intel_pstate/no_turbo", boost, sizeof(boost)))
+                                boost[0] = boost[0] == '0' ? '1' : '0';
                 }
                 (void)tune_word(TUNE_SYS_CPU "/smt/control", smt, sizeof(smt));
                 host_each_entry(TUNE_SYS_CPU, tune_online_visit, address_of online);
