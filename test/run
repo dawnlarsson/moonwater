@@ -3570,6 +3570,15 @@ lane_cli()
         2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
         *) cli_outcome=1 ;;
         esac
+        #       Every file the command keeps or reads, damaged every way a disk or
+        #       a crash can damage one, and every verb that reads it run against
+        #       the damage; MOONWATER_FUZZ_RUNS, _SECONDS and _SEED lengthen it.
+        python3 test/differential.py --harness moonwater_state_fuzz --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
+        *) cli_outcome=1 ;;
+        esac
         #       A waiter for the machine's lock hears the holder let go: the
         #       median wake lag over fifteen releases has to be under 2 ms, where
         #       a 10 ms poll measures about 5 ms (differential.py says why).

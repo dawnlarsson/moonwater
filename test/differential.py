@@ -73800,6 +73800,789 @@ def harness_state_cuts(argv):
     return checks.verdict("state cuts", "state-cuts-inside")
 
 
+def harness_moonwater_state_fuzz(argv):
+    """The files the moonwater command keeps and reads, damaged every way a disk, a
+    person or a crash can damage one, and every verb that reads each of them run
+    against the damage.
+
+    The corpus is real. A sandbox like moonwater_cli's is brought to a state by
+    the verbs that write the state (a saved wifi list, a bluetooth list, a zone,
+    a keyboard, ntp's words, waterlink's peers and groups, a usb policy, the
+    settings rows, the tune file, the verdict and the settings image in /run) and
+    each file of /root, /run/moonwater and the fake /sys that a verb reads is
+    then made, one at a time, into a mutant: absent, empty, a directory, a
+    directory holding a file, a FIFO, a link to a file, to another state file, to
+    /dev/zero, to /proc/self/mem, to itself, to a name that is not there and to a
+    loop of two, mode 000, 64 MiB sparse, 1 MiB of its own content, 1 MiB of one
+    byte; and from a pool, picked by a seeded generator, the file cut at a
+    length, a bit or a byte changed, a slice taken out or put in, doubled,
+    given CRLF line ends, no final line end, blank lines between its lines, a
+    line twice, a key with no value, a value at and across each limit a state
+    reader keeps (63 to 65536 bytes), a NUL or an ESC sequence in a line.
+
+    Each verb that reads the file (the status page, the verb's own reading, and
+    every verb that changes the file) then runs against each mutant, with a
+    limit, and has to answer:
+      - 0, 1 or 2, never a signal, never a hang, never a long wait;
+      - no control byte of the mutant on the screen, and no page that is
+        longer than the verb's page was on good state;
+      - a refusal (1 or 2) leaves every file as it was, and leaves no stage
+        file or lock behind;
+      - a run that succeeds changes only files the same verb changes on good
+        state (a read that repairs a file, or writes through a link, is one
+        more), and in a list that is read and written back (the saved wifi
+        networks, bluetooth devices, usb rules, tune keys, nts servers) keeps
+        every line it was not asked to take out: a file that is there and does
+        not parse is refused and left, as /root/tune, the peers and the groups
+        are, and not read as a shorter list and written over;
+      - a second run of the verb leaves the state it found.
+    It is the fuzzer of what the readers of saved state do with a file that is
+    not what they wrote: the cli lane's rows and the state-cuts cuts are the
+    good file and the interrupted write.
+
+        python3 test/differential.py --harness moonwater_state_fuzz --shell PATH
+        MOONWATER_FUZZ_RUNS=N     mutants to run (a mutant is run against every verb
+                                  of its file; default 1200)
+        MOONWATER_FUZZ_SECONDS=N  stop starting new mutants after N seconds (default 170)
+        MOONWATER_FUZZ_SEED=N     the generator's seed (default 1)
+        MOONWATER_FUZZ_ONLY=TEXT  only the files whose name holds TEXT
+        MOONWATER_FUZZ_SHOW=1     say every failing run, with the mutant and the answer
+        MOONWATER_FUZZ_ALL=1      every mutation of every file (hours)
+
+    Linux only, and NOT RUN without unprivileged user namespaces. Not covered:
+    a file owned by another user (the namespace maps one), and what the kernel's
+    own /sys and /proc say (the fake /sys is plain files).
+    """
+    import platform
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_state_fuzz")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("moonwater state fuzz: NOT RUN -- Linux namespaces")
+        return 2
+
+    if not args.inside:
+        import tempfile
+        probe = subprocess.run(["unshare", "-Urmnpu", "--fork", "true"], capture_output=True)
+        if probe.returncode:
+            print("moonwater state fuzz: NOT RUN -- no unprivileged user namespaces here")
+            return 2
+        seconds = int(os.environ.get("MOONWATER_FUZZ_SECONDS", "170"))
+        with tempfile.TemporaryDirectory(prefix="moonwater-state-fuzz-") as temporary:
+            sandbox, private_dev, _, _, _ = moonwater_sandbox(args.shell, Path(temporary))
+            shutil.copy(Path(__file__).resolve(), sandbox / "tmp/differential.py")
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
+                       f"mount --rbind /proc {sandbox}/proc && "
+                       f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
+                       f"--harness moonwater_state_fuzz --inside --shell /tmp/moonwater")
+            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+            for name in ("MOONWATER_FUZZ_RUNS", "MOONWATER_FUZZ_SECONDS", "MOONWATER_FUZZ_SEED",
+                         "MOONWATER_FUZZ_ONLY", "MOONWATER_FUZZ_SHOW", "MOONWATER_FUZZ_ALL"):
+                if name in os.environ:
+                    environment[name] = os.environ[name]
+            try:
+                ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c", wrapper],
+                                     capture_output=True, text=True, errors="replace",
+                                     timeout=seconds + 900, env=environment)
+            except subprocess.TimeoutExpired:
+                print("moonwater state fuzz: FAIL -- ran %d s past its budget" % 900)
+                write_tally("moonwater-state-fuzz", 0, 1)
+                return 1
+            print(ran.stdout, end="")
+            tally = re.search(r"^moonwater state fuzz (\d+)/(\d+)$", ran.stdout, re.M)
+            if not tally:
+                print("moonwater state fuzz: FAIL -- the sandbox run did not finish\n" + ran.stderr[-1500:])
+                write_tally("moonwater-state-fuzz", 0, 1)
+                return 1
+            write_tally("moonwater-state-fuzz", int(tally.group(1)), int(tally.group(2)))
+            return 0 if tally.group(1) == tally.group(2) else 1
+
+    import collections
+    import random
+    import signal as signals
+    import stat as filemode
+    import time as clock
+    import zlib
+
+    moonwater = args.shell
+    environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+    everything = bool(os.environ.get("MOONWATER_FUZZ_ALL"))
+    runs = int(os.environ.get("MOONWATER_FUZZ_RUNS", "1200"))
+    seconds = int(os.environ.get("MOONWATER_FUZZ_SECONDS", "170"))
+    seed = int(os.environ.get("MOONWATER_FUZZ_SEED", "1"))
+    only = os.environ.get("MOONWATER_FUZZ_ONLY", "")
+    show = bool(os.environ.get("MOONWATER_FUZZ_SHOW"))
+    if everything:
+        runs, seconds = 10 ** 9, 10 ** 9
+    tops = ("/root", "/run/moonwater", "/sys", "/etc")
+    key = "bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="
+    other_key = "kL8Wk4yX3lq2pCq2HfV1m4mJm7m6Zl0Q4Q2c0jV3m2c="
+
+    #   What brings the sandbox to a machine that has used every verb, in order.
+    world_verbs = [
+        "boot", "wifi add oldnet oldpass11", "wifi add second pass2222", "bluetooth add dev1",
+        "bluetooth add dev2", "timezone de", "keyboard us", "ntp on", "ntp server time.example",
+        "ntp sampling off", "ntp nts only", "ntp nts servers a.example b.example:444",
+        "priority internet wired", "name box", "dns 1.1.1.1 9.9.9.9", "dns tls on",
+        "link add peera " + key, "link group lab S3cretOne11xyz allow run", "link port 22400",
+        "usb allow 0627:0001/S1", "usb deny 0627:0001/S2", "usb class storage allow",
+        "canvas scale 2", "canvas modes preferred", "canvas background 112233",
+        "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
+        "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate 20",
+        "mouse sensitivity 150", "mouse acceleration off", "taskbar position top",
+        "taskbar display all", "desktop on", "airplane on", "airplane off", "power powersave",
+        "cpu boost", "charge limit 80", "brightness 50", "wired off", "wifi off", "bluetooth off",
+        "security block add " + "ab" * 32, "security tls12 on", "link on", "link off",
+    ]
+    #   Files no verb writes in a sandbox: what a daemon, a join or the machine's
+    #   own boot leaves, in the shape their writers give.
+    world_files = {
+        "/root/wifi.rules": b"pmf oldnet\nsae oldnet\nwpa2 second\n",
+        "/root/clock.good": b"1790000000\n",
+        "/etc/canary": b"canary\n",
+        "/run/moonwater/clock.auth": b"1790000000 100\n",
+        "/run/moonwater/clock.base": b"1790000000\n",
+        "/run/moonwater/nts.failed": b"50\n",
+        "/run/moonwater/ntp.last": b"plain pool.ntp.org\n",
+        "/run/moonwater/timezone.network": b"Europe/Berlin\n",
+    }
+    sys_files = {
+        "class/backlight/fake0/brightness": b"50\n",
+        "class/backlight/fake0/max_brightness": b"200\n",
+        "class/power_supply/AC/type": b"Mains\n",
+        "class/power_supply/BAT0/type": b"Battery\n",
+        "class/power_supply/BAT0/capacity": b"73\n",
+        "class/power_supply/BAT0/status": b"Discharging\n",
+        "class/power_supply/BAT0/charge_control_end_threshold": b"100\n",
+        "firmware/acpi/platform_profile": b"balanced\n",
+        "firmware/acpi/platform_profile_choices": b"low-power balanced performance\n",
+        "devices/system/cpu/cpufreq/boost": b"1\n",
+        "devices/system/cpu/smt/control": b"on\n",
+        "devices/system/cpu/cpu0/cpufreq/scaling_governor": b"schedutil\n",
+        "devices/system/cpu/cpu0/cpufreq/scaling_available_governors": b"performance schedutil powersave\n",
+        "devices/system/cpu/cpu0/cpufreq/energy_performance_preference": b"balance_performance\n",
+        "devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences":
+            b"default performance balance_performance balance_power power\n",
+        "devices/system/cpu/cpu1/online": b"1\n",
+        "power/state": b"freeze mem disk\n",
+        "module/usbcore/parameters/authorized_default": b"1\n",
+        "bus/usb/drivers_probe": b"",
+        "bus/usb/devices/usb1/idVendor": b"1d6b\n",
+        "bus/usb/devices/usb1/idProduct": b"0002\n",
+        "bus/usb/devices/usb1/product": b"xHCI Host Controller\n",
+        "bus/usb/devices/usb1/authorized": b"1\n",
+        "bus/usb/devices/usb1/authorized_default": b"1\n",
+        "bus/usb/devices/usb1/interface_authorized_default": b"1\n",
+        "bus/usb/devices/usb1/removable": b"unknown\n",
+        "bus/usb/devices/1-1/idVendor": b"0627\n",
+        "bus/usb/devices/1-1/idProduct": b"0001\n",
+        "bus/usb/devices/1-1/serial": b"S1\n",
+        "bus/usb/devices/1-1/product": b"QEMU USB Tablet\n",
+        "bus/usb/devices/1-1/authorized": b"1\n",
+        "bus/usb/devices/1-1/removable": b"unknown\n",
+        "bus/usb/devices/1-1:1.0/bInterfaceClass": b"03\n",
+        "bus/usb/devices/1-1:1.0/bInterfaceSubClass": b"00\n",
+        "bus/usb/devices/1-1:1.0/bInterfaceProtocol": b"00\n",
+        "bus/usb/devices/1-1:1.0/authorized": b"1\n",
+    }
+    volatile = re.compile(r"/(link\.state|wifi\.keeper|usb\.watcher|usb\.log|sleep\.log|link\.stamps)$|\.lock$")
+    sgr = re.compile(rb"\x1b\[[0-9;]*m")
+    control = re.compile(rb"[\x00-\x08\x0b-\x1f\x7f]")
+
+    #   The size of a record of a file of records, for the files that are read whole.
+    records = {"link.key": 32, "link.peers": 96, "link.groups": 128}
+
+    #   What the fuzzer sees and the code does on purpose: (file, verb, problem, why).
+    accepted = [
+        (r"^usb\.policy$", r"^usb unlock$", r"^writes over a ",
+         "unlock is a way out of a lock, so a policy that cannot be read does not stop it (a policy cut short does)"),
+        (r"^(tune|wifi\.power|bluetooth\.power)$", r"^(power |charge |cpu |airplane on)", r"^fails and changes ",
+         "a setting is put in force and then kept: when it cannot be kept the verb answers 1 naming the file"),
+        (r"^usb\.policy$", r"^usb lock$", r"fails and changes /run/moonwater/usb|a second run changes ",
+         "a lock that /root cannot keep is put in force from /run, and says so"),
+        (r"^(wifi\.rules|resolv\.conf|internet run)$", r"^(wifi add|dns |priority internet)", r"^fails and changes ",
+         "the first of two files is kept, and the second is named in the refusal"),
+        (r"^wifi$", r"^wifi on$", r"changes /run/moonwater/wifi\.last",
+         "a join that failed leaves the record of it"),
+        (r"^name$", r"^boot again$", r"a second run changes /etc/host",
+         "a machine whose name cannot be kept is given another at every boot"),
+        (r"^desktop$", r"^desktop (on|off)$", r"fails and changes /root/desktop",
+         "the choice is kept before it is put in force, and stays kept when that is refused"),
+    ]
+
+    #   (name, the file, the verbs that read it, what it holds)
+    #   lines: a list read whole and written back; word: one value; binary
+    verbs_power = ["status", "airplane", "airplane off", "airplane on"]
+    scenes = [
+        ("wifi", "/root/wifi", ["wifi", "wifi add third pass3333xx", "wifi remove oldnet", "wifi on", "status"], "wifi"),
+        ("wifi.rules", "/root/wifi.rules", ["wifi", "wifi add oldnet oldpass11 wpa2", "wifi add oldnet otherpass11", "wifi remove second", "wifi on"], "lines"),
+        ("bluetooth", "/root/bluetooth", ["bluetooth", "bluetooth add dev3", "bluetooth remove dev1", "bluetooth on", "status"], "lines"),
+        ("wifi.power", "/root/wifi.power", ["wifi", "wifi on", "wifi off"] + verbs_power, "word"),
+        ("bluetooth.power", "/root/bluetooth.power", ["bluetooth", "bluetooth on", "bluetooth off"] + verbs_power, "word"),
+        ("wired.power", "/root/wired.power", ["wired", "wired on", "wired off", "status"], "word"),
+        ("internet", "/root/internet", ["priority internet", "priority internet wifi", "priority internet wired", "status"], "word"),
+        ("internet run", "/run/moonwater/internet", ["priority internet", "priority internet wifi", "status"], "word"),
+        ("dns", "/root/dns", ["dns", "dns 9.9.9.9", "dns auto", "status"], "word"),
+        ("dns.tls", "/root/dns.tls", ["dns tls", "dns tls on", "dns tls only", "dns tls off", "dns", "status"], "word"),
+        ("dns.tls run", "/run/moonwater/dns.tls", ["dns tls", "dns tls on", "dns", "status"], "word"),
+        ("ntp", "/root/ntp", ["ntp", "ntp on", "ntp off", "time", "status"], "word"),
+        ("ntp.server", "/root/ntp.server", ["ntp", "ntp server auto", "ntp server other.example", "status"], "word"),
+        ("ntp.sampling", "/root/ntp.sampling", ["ntp", "ntp sampling on", "ntp sampling off", "status"], "word"),
+        ("ntp.nts", "/root/ntp.nts", ["ntp", "ntp nts", "ntp nts on", "ntp nts only", "ntp nts off"], "word"),
+        ("ntp.nts.servers", "/root/ntp.nts.servers", ["ntp", "ntp nts servers", "ntp nts servers c.example", "ntp nts servers default", "ntp nts on"], "lines"),
+        ("timezone", "/root/timezone", ["timezone", "timezone se", "time", "status"], "word"),
+        ("timezone.mode", "/root/timezone.mode", ["timezone", "timezone se", "timezone auto", "time", "status"], "word"),
+        ("keyboard", "/root/keyboard", ["keyboard", "keyboard de", "keyboard list", "status"], "word"),
+        ("name", "/root/name", ["name", "name other", "name random", "status", "boot"], "word"),
+        ("tune", "/root/tune", ["airplane", "airplane on", "airplane off", "power", "power balanced", "cpu", "cpu boost",
+                                 "charge", "charge limit 90", "brightness", "brightness 60", "status"], "lines"),
+        ("usb.policy", "/root/usb.policy", ["usb", "usb lock", "usb unlock", "usb allow 0627:0001/S3", "usb deny 0627:0001/S2",
+                                             "usb forget 0627:0001/S1", "usb class storage deny", "usb apply", "status"], "lines"),
+        ("usb.log", "/root/usb.log", ["usb log", "usb log 5", "usb allow 0627:0001/S3"], "word"),
+        ("resolv.conf", "/etc/resolv.conf", ["dns", "dns 8.8.8.8", "dns auto", "ntp on", "status"], "word"),
+        ("desktop", "/root/desktop", ["desktop", "desktop on", "desktop off", "status"], "word"),
+        ("canvas.scale", "/root/canvas.scale", ["canvas scale", "canvas scale 3", "canvas scale auto"], "word"),
+        ("canvas.modes", "/root/canvas.modes", ["canvas modes", "canvas modes largest"], "word"),
+        ("canvas.background", "/root/canvas.background", ["canvas background", "canvas background 445566", "canvas background default"], "word"),
+        ("canvas.cursor.size", "/root/canvas.cursor.size", ["canvas cursor size", "canvas cursor size 3", "canvas cursor"], "word"),
+        ("canvas.cursor.look", "/root/canvas.cursor.look", ["canvas cursor look", "canvas cursor look light", "canvas cursor"], "word"),
+        ("canvas.cursor.shake", "/root/canvas.cursor.shake", ["canvas cursor shake", "canvas cursor shake on", "canvas cursor"], "word"),
+        ("canvas.cursor.shake.delay", "/root/canvas.cursor.shake.delay", ["canvas cursor shake delay", "canvas cursor shake delay 900", "canvas cursor shake delay default"], "word"),
+        ("keyboard.repeat.delay", "/root/keyboard.repeat.delay", ["keyboard repeat delay", "keyboard repeat delay 400", "keyboard repeat"], "word"),
+        ("keyboard.repeat.rate", "/root/keyboard.repeat.rate", ["keyboard repeat rate", "keyboard repeat rate 25", "keyboard repeat"], "word"),
+        ("mouse.sensitivity", "/root/mouse.sensitivity", ["mouse sensitivity", "mouse sensitivity 120", "mouse"], "word"),
+        ("mouse.acceleration", "/root/mouse.acceleration", ["mouse acceleration", "mouse acceleration on", "mouse"], "word"),
+        ("taskbar.position", "/root/taskbar.position", ["taskbar position", "taskbar position left", "taskbar"], "word"),
+        ("taskbar.display", "/root/taskbar.display", ["taskbar display", "taskbar display primary", "taskbar"], "word"),
+        ("clock.good", "/root/clock.good", ["time", "ntp on", "status"], "word"),
+        ("link", "/root/link", ["link", "link on", "link off"], "word"),
+        ("link.port", "/root/link.port", ["link", "link port", "link port 22500", "link port auto"], "word"),
+        ("link.key", "/root/link.key", ["link", "link key", "link add peerc " + other_key], "binary"),
+        ("link.peers", "/root/link.peers", ["link", "link remove peera", "link allow peera log", "link deny peera run",
+                                             "link add peerb " + other_key, "link group lab2 S3cretTwo22xyz allow run"], "binary"),
+        ("link.groups", "/root/link.groups", ["link", "link group lab3 S3cretTre33xyz allow run", "link group leave lab",
+                                               "link group lab", "link on"], "binary"),
+        ("verdict", "/run/moonwater/verdict", ["status", "boot", "setup", "setup live"], "word"),
+        ("security", "/run/moonwater/security", ["security", "security trust", "security block", "security tls12", "ntp on"], "binary"),
+        ("settings", "/run/moonwater/settings", ["security block add " + "cd" * 32, "security revocation hard", "bind exit",
+                                                  "bind init", "keyboard de", "name other", "status"], "word"),
+        ("clock.auth", "/run/moonwater/clock.auth", ["time", "ntp on", "status"], "word"),
+        ("nts.failed", "/run/moonwater/nts.failed", ["ntp", "ntp nts", "ntp on"], "word"),
+        ("ntp.last", "/run/moonwater/ntp.last", ["ntp", "ntp nts", "status"], "word"),
+        ("timezone.network", "/run/moonwater/timezone.network", ["timezone", "timezone auto", "time"], "word"),
+        ("brightness", "/sys/class/backlight/fake0/brightness", ["brightness", "brightness 75", "brightness +10", "status"], "word"),
+        ("max_brightness", "/sys/class/backlight/fake0/max_brightness", ["brightness", "brightness 75", "status"], "word"),
+        ("charge threshold", "/sys/class/power_supply/BAT0/charge_control_end_threshold", ["charge", "charge limit 80", "status"], "word"),
+        ("platform_profile", "/sys/firmware/acpi/platform_profile", ["power", "power powersave", "status"], "word"),
+        ("scaling_governor", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", ["power", "power performance", "cpu"], "word"),
+        ("usb idVendor", "/sys/bus/usb/devices/1-1/idVendor", ["usb", "usb allow 1-1", "usb apply", "usb lock"], "word"),
+        ("usb serial", "/sys/bus/usb/devices/1-1/serial", ["usb", "usb allow 1-1", "usb apply", "usb lock"], "word"),
+        ("usb authorized", "/sys/bus/usb/devices/1-1/authorized", ["usb", "usb allow 1-1", "usb apply", "usb lock"], "word"),
+        ("usb authorized_default", "/sys/module/usbcore/parameters/authorized_default", ["usb", "usb lock", "usb unlock", "usb apply"], "word"),
+    ]
+    #   The boot reads what the verbs keep: it runs after each file that it applies.
+    scenes = [(name, path, verbs + (["boot again"] if path.startswith(("/root/", "/etc/", "/sys/")) else []) +
+               (["wipe yes"] if path.startswith("/root/") else []), kind)
+              for name, path, verbs, kind in scenes]
+    if only:
+        scenes = [scene for scene in scenes if only in scene[0] or only in scene[1]]
+
+    def forget(path):
+        try:
+            info = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        if filemode.S_ISDIR(info.st_mode):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+
+    def settle():
+        #   The first process of a pid namespace of its own: every other one
+        #   in it is a verb's, a listener, a keeper or a watcher.
+        assert os.getpid() == 1
+        for entry in os.listdir("/proc"):
+            if entry.isdigit() and int(entry) != 1:
+                try:
+                    os.kill(int(entry), signals.SIGKILL)
+                except OSError:
+                    pass
+        while True:
+            try:
+                if os.waitpid(-1, os.WNOHANG) == (0, 0):
+                    break
+            except ChildProcessError:
+                break
+
+    died = []
+
+    spent = collections.Counter()
+
+    def run(verb, limit=5):
+        """(status, output): "hang" when it hung, minus the signal when it died of one."""
+        began = clock.monotonic()
+        try:
+            return run_one(verb, limit)
+        finally:
+            spent[verb.split()[0] if verb != "boot again" else verb] += clock.monotonic() - began
+
+    def run_one(verb, limit):
+        if verb == "boot again":
+            #   The boot of a machine that is not booted: every file it applies is read.
+            forget("/run/moonwater/verdict")
+            verb = "boot"
+        with open("/tmp/state-fuzz.out", "w+b") as sink:
+            child = subprocess.Popen([moonwater] + shlex.split(verb), stdin=subprocess.DEVNULL,
+                                     stdout=sink, stderr=subprocess.STDOUT, env=environment,
+                                     start_new_session=True)
+            try:
+                code = child.wait(limit)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+                code = "hang"
+            sink.seek(0)
+            data = sink.read(1 << 20)
+        #   A verb that starts a listener, a keeper or a watcher leaves it running: it
+        #   is given a moment to read what the verb read, and to die of it.
+        if any(entry.isdigit() and int(entry) != 1 for entry in os.listdir("/proc")):
+            clock.sleep(0.08)
+        died.clear()
+        while True:
+            try:
+                reaped, wait = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if not reaped:
+                break
+            #   Killed and terminated is what a verb does to the listener it ends.
+            if os.WIFSIGNALED(wait) and os.WTERMSIG(wait) not in (signals.SIGKILL, signals.SIGTERM):
+                died.append(os.WTERMSIG(wait))
+        settle()
+        return code, data
+
+    def capture():
+        seen = {}
+
+        def walk(path):
+            try:
+                names = os.listdir(path)
+            except OSError:
+                return
+            for name in names:
+                full = path + "/" + name
+                info = os.lstat(full)
+                mode = info.st_mode
+                if filemode.S_ISLNK(mode):
+                    seen[full] = ("l", os.readlink(full))
+                elif filemode.S_ISDIR(mode):
+                    seen[full] = ("d", mode & 0o7777)
+                    walk(full)
+                elif filemode.S_ISREG(mode):
+                    if info.st_size <= 1 << 20:
+                        with open(full, "rb") as handle:
+                            seen[full] = ("f", mode & 0o7777, handle.read())
+                    else:
+                        seen[full] = ("F", mode & 0o7777, info.st_size, info.st_mtime_ns)
+                elif filemode.S_ISFIFO(mode):
+                    seen[full] = ("p", mode & 0o7777)
+                else:
+                    seen[full] = ("o", mode)
+        for top in tops:
+            walk(top)
+        return seen
+
+    def build(path, entry):
+        kind = entry[0]
+        if kind == "d":
+            os.mkdir(path, 0o700)
+            os.chmod(path, entry[1])
+        elif kind == "l":
+            os.symlink(entry[1], path)
+        elif kind == "p":
+            os.mkfifo(path, 0o600)
+            os.chmod(path, entry[1])
+        elif kind == "f":
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.write(handle, entry[2])
+            os.close(handle)
+            os.chmod(path, entry[1])
+
+    def restore(world, now):
+        """The sandbox put back to the world, from what capture last saw of it."""
+        for path in sorted(now, reverse=True):
+            want, have = world.get(path), now[path]
+            if want is None or (have != want and not (have[0] == "d" and want[0] == "d")):
+                forget(path)
+        for path in sorted(world):
+            want = world[path]
+            if not os.path.lexists(path):
+                build(path, want)
+            elif want[0] == "d" and now.get(path) != want:
+                os.chmod(path, want[1])
+
+    def changes(before, after):
+        return {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
+
+    def keep(world_now, path, spec):
+        """The mutant put at path, whatever was there taken away."""
+        forget(path)
+        kind = spec[0]
+        if kind == "absent":
+            return
+        if kind == "data":
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.write(handle, spec[1])
+            os.close(handle)
+            os.chmod(path, spec[2] if len(spec) > 2 else 0o644)
+        elif kind == "sparse":
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            os.ftruncate(handle, spec[1])
+            os.close(handle)
+        elif kind == "dir":
+            os.mkdir(path, 0o755)
+        elif kind == "dirfile":
+            os.mkdir(path, 0o755)
+            with open(path + "/x", "wb") as handle:
+                handle.write(b"x\n")
+        elif kind == "fifo":
+            os.mkfifo(path, 0o644)
+        elif kind == "link":
+            os.symlink(path if spec[1] == "self" else spec[1], path)
+        elif kind == "loop":
+            os.symlink(path + ".b", path)
+            os.symlink(path, path + ".b")
+
+    interesting = [0, 1, 9, 10, 13, 27, 32, 34, 36, 37, 39, 47, 92, 127, 128, 255]
+    #   Whole contents for a file of words: a path out of the zone directory, a shell
+    #   word, a format, a terminal's escape, the numbers that wrap, a spelling of on.
+    hostile = [b"../../../etc/passwd\n", b"/etc/passwd\n", b"Europe/../../../../etc/shadow\n", b"-\n",
+               b".\n", b"..\n", b"a b c\n", b"$(reboot)\n", b"`id`\n", b";rm -rf /\n", b"%s%s%s%n\n",
+               b"\x1b]0;x\x07\n", b"\x1b[2J\n", b"UTC\n\nUTC\n", b"\n\n", "caf\u00e9\n".encode(),
+               b"\xff\xfe\n", b"0\n", b"-1\n", b"4294967295\n", b"18446744073709551615\n",
+               b"99999999999999999999999\n", b"0x10\n", b"1e9\n", b" 1\n", b"1 \n", b"+1\n", b"on off\n",
+               b"ON\n", b"true\n", b"yes\n", b"<+03>-3\n", b"<>0\n", b"<\n", b"<abc\n", b"EST5EDT,M3.2.0,M11.1.0\n",
+               b"A0B1,M1.1.1,M2.2.2/99999\n", b"UTC+99999999999\n", b"EST5EDT,J366,J1\n", b"+99\n", b"-99:99:99\n",
+               b"Europe/Berlin\nEurope/Paris\n", b"Europe/Berlin/\n", b"europe/berlin\n", b"UTC\x00x\n"]
+    limits = [1, 2, 31, 32, 33, 63, 64, 65, 79, 80, 81, 95, 96, 97, 127, 128, 129, 255, 256, 257, 1023, 1024,
+              1025, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384, 16385, 65535, 65536, 65537]
+
+    def mutants(path, content, other, rng, count, kernel):
+        """(label, spec) for one file: the fixed set, then count from the pool."""
+        texty = all(byte in (9, 10) or 32 <= byte < 127 for byte in content)
+        lines = content.split(b"\n")
+        fixed = [
+            ("absent", ("absent",)), ("empty", ("data", b"")), ("a directory", ("dir",)),
+            ("a directory holding a file", ("dirfile",)), ("a FIFO", ("fifo",)),
+            ("a link to a file", ("link", "/etc/canary")),
+            ("a link to " + other, ("link", other)),
+            ("a link to /dev/zero", ("link", "/dev/zero")),
+            ("a link to /proc/self/mem", ("link", "/proc/self/mem")),
+            ("a link to itself", ("link", "self")),
+            ("a link to a name that is not there", ("link", "/root/nothing-here")),
+            ("a link to a directory", ("link", "/root")),
+            ("a loop of two links", ("loop",)),
+            ("mode 000", ("data", content, 0)), ("mode 777", ("data", content, 0o777)),
+            ("64 MiB sparse", ("sparse", 64 << 20)),
+            ("1 MiB of its own", ("data", (content * ((1 << 20) // max(1, len(content)) + 1))[:1 << 20])),
+            ("1 MiB of one byte", ("data", b"A" * (1 << 20))),
+            ("a newline", ("data", b"\n")), ("a NUL", ("data", b"\0")),
+            ("its content and a newline", ("data", content + b"\n")),
+            ("its content and a NUL", ("data", content + b"\0")),
+            ("its content and junk", ("data", content + b"junk")),
+            ("its content twice", ("data", content * 2)),
+        ]
+        if texty:
+            for word in hostile:
+                fixed.append(("the word %r" % word, ("data", word)))
+        if kernel:
+            #   A file of the kernel's is never a FIFO, a link or a directory (the
+            #   verbs read a FIFO there on purpose, for a test that holds a sleep).
+            fixed = [one for one in fixed if one[1][0] in ("absent", "data", "sparse")]
+        pool = []
+        for at in range(len(content)):
+            pool.append(("cut at %d" % at, ("data", content[:at])))
+            pool.append(("from %d" % at, ("data", content[at:])))
+        for at in range(min(len(content), 256)):
+            for bit in range(8):
+                changed = bytearray(content)
+                changed[at] ^= 1 << bit
+                pool.append(("bit %d.%d" % (at, bit), ("data", bytes(changed))))
+        for at in range(min(len(content), 160)):
+            for value in interesting:
+                changed = bytearray(content)
+                changed[at] = value
+                pool.append(("byte %d is %#x" % (at, value), ("data", bytes(changed))))
+            pool.append(("without byte %d" % at, ("data", content[:at] + content[at + 1:])))
+            for value in (0, 10, 27, 32, 65):
+                pool.append(("%#x put in at %d" % (value, at),
+                             ("data", content[:at] + bytes([value]) + content[at:])))
+        for size in limits:
+            pool.append(("%d bytes of A" % size, ("data", b"A" * size)))
+            pool.append(("its content and %d bytes of A" % size, ("data", content + b"A" * size)))
+            pool.append(("%d bytes of digits" % size, ("data", (b"1234567890" * (size // 10 + 1))[:size] + b"\n")))
+            pool.append(("%d lines" % size, ("data", b"a\n" * min(size, 20000))))
+        pool.append(("CRLF", ("data", content.replace(b"\n", b"\r\n"))))
+        pool.append(("no final newline", ("data", content.rstrip(b"\n"))))
+        pool.append(("blank lines between", ("data", content.replace(b"\n", b"\n\n"))))
+        pool.append(("a blank line first", ("data", b"\n" + content)))
+        pool.append(("blanks and spaces", ("data", b"  " + content.replace(b"\n", b" \n  "))))
+        pool.append(("tabs for spaces", ("data", content.replace(b" ", b"\t"))))
+        pool.append(("lines reversed", ("data", b"\n".join(reversed(lines)))))
+        pool.append(("NUL after each line", ("data", content.replace(b"\n", b"\0\n"))))
+        pool.append(("ESC in each line", ("data", content.replace(b"\n", b"\x1b[31m\x1b]0;x\x07\n"))))
+        pool.append(("a line of ESC", ("data", content + b"\x1b[2J\x1b]0;x\x07\n")))
+        pool.append(("a line of high bytes", ("data", content + b"\xff\xfe\xc0\x80\xed\xa0\x80\n")))
+        pool.append(("a multibyte line", ("data", content + "café ‮⁦x\n".encode())))
+        pool.append(("a percent line", ("data", content + b"%s%n%x\n")))
+        for number, line in enumerate(lines):
+            if not line:
+                continue
+            kept = lines[:number] + lines[number + 1:]
+            pool.append(("without line %d" % number, ("data", b"\n".join(kept))))
+            pool.append(("line %d twice" % number, ("data", b"\n".join(lines[:number + 1] + [line] + lines[number + 1:]))))
+            for cut in (b" ", b"\t", b"="):
+                if cut in line:
+                    pool.append(("line %d with no value" % number,
+                                 ("data", b"\n".join(lines[:number] + [line.split(cut)[0]] + lines[number + 1:]))))
+            for size in (31, 32, 33, 63, 64, 65, 80, 127, 128, 129, 255, 256, 257, 1024, 4096):
+                pool.append(("line %d and %d of A" % (number, size),
+                             ("data", b"\n".join(lines[:number] + [line + b" " + b"A" * size] + lines[number + 1:]))))
+                pool.append(("line %d is %d of A" % (number, size),
+                             ("data", b"\n".join(lines[:number] + [b"A" * size] + lines[number + 1:]))))
+            if number + 1 < len(lines):
+                swapped = list(lines)
+                swapped[number], swapped[number + 1] = swapped[number + 1], swapped[number]
+                pool.append(("lines %d and %d swapped" % (number, number + 1), ("data", b"\n".join(swapped))))
+        if texty and not content.strip(b"\n"):
+            pool.append(("text of nothing", ("data", b"\n\n\n")))
+        #   The pool is a set; the labels are the identity.
+        unique = {}
+        for label, spec in pool:
+            unique.setdefault(label, spec)
+        pool = sorted(unique.items())
+        rng.shuffle(pool)
+        picked = pool if everything else pool[:count]
+        #   The ones that found something first, so that a short run has them; the
+        #   rest of the fixed set and the pool after, in the generator's order.
+        pinned = ("absent", "a FIFO", "a link to a file", "a directory", "64 MiB sparse", "its content twice")
+        first = [one for one in fixed if one[0] in pinned]
+        first.sort(key=lambda one: pinned.index(one[0]))
+        rest = [one for one in fixed + picked if one[0] not in pinned]
+        rng.shuffle(rest)
+        return first + rest
+
+    def lines_of(data):
+        return {line.rstrip(b"\r") for line in data.split(b"\n") if line.strip()}
+
+    def plain(text, most):
+        return len(text) <= most and all(32 <= byte < 127 for byte in text)
+
+    def networks_of(data):
+        """The saved networks of a wifi list the way its reader takes them: an ssid
+        line, then the passphrase line, a pair that is not whole or not plain left out."""
+        found, want_ssid, ssid = set(), True, None
+        for line in data.split(b"\n")[:-1] if data.endswith(b"\n") else data.split(b"\n"):
+            if want_ssid:
+                if not line:
+                    continue
+                ssid = line if plain(line, 32) else None
+                want_ssid = False
+                continue
+            if ssid is not None and (not line or plain(line, 63)):
+                found.add(ssid)
+            want_ssid = True
+        return found
+
+    # ---- the world --------------------------------------------------------------------
+    for top in tops:
+        os.makedirs(top, exist_ok=True)
+    for top in ("/root", "/run/moonwater"):
+        for name in os.listdir(top):
+            forget(top + "/" + name)
+    for name in os.listdir("/etc"):
+        if name not in ("passwd", "group", "hosts"):
+            forget("/etc/" + name)
+    for name, data in sys_files.items():
+        os.makedirs(os.path.dirname("/sys/" + name), exist_ok=True)
+        with open("/sys/" + name, "wb") as handle:
+            handle.write(data)
+    for verb in world_verbs:
+        run(verb)
+    for name, data in world_files.items():
+        with open(name, "wb") as handle:
+            handle.write(data)
+    settle()
+    world = capture()
+    state = world
+    for name in ("/root", "/run/moonwater"):
+        for path in [p for p in world if p.startswith(name + "/") and
+                     re.search(r"\.moonwater-stage-|/tmp\.", p)]:
+            print("  note: the world holds the leftover %s" % path)
+
+    checks = Checks()
+    started = clock.monotonic()
+    findings = collections.OrderedDict()
+    totals = collections.Counter()
+
+    def report(scene, label, verb, problem, status, out, spec):
+        for where, what, why, reason in accepted:
+            if re.search(where, scene) and re.search(what, verb) and re.search(why, problem):
+                totals["accepted"] += 1
+                return False
+        totals["problems"] += 1
+        group = (scene, verb, problem)
+        findings.setdefault(group, []).append((label, status, out[:160], spec))
+        if show:
+            print("  FAIL %s / %s / %s: %s (status %s) %r" % (
+                scene, label, verb, problem, status, sgr.sub(b"", out)[:200]))
+        return True
+
+    def judge(scene, kind, path, label, verb, spec, outcome, pre, after, after_again, base, readers):
+        status, out = outcome
+        problems = []
+        if status == "hang":
+            problems.append("hangs")
+        elif status not in (0, 1, 2):
+            problems.append("ends with status %s" % (status,))
+        if died:
+            problems.append("leaves a process that dies of signal %s" % ",".join(str(one) for one in died))
+        text = sgr.sub(b"", out)
+        if control.search(text) and not control.search(sgr.sub(b"", base["out"])):
+            problems.append("puts a control byte on the screen")
+        if len(out) > 131072 and len(base["out"]) <= 131072:
+            problems.append("prints %d bytes" % len(out))
+        moved = {p for p in changes(pre, after) if not volatile.search(p)}
+        if status in (1, 2) or status == "hang":
+            allowed = base["moved"] if base["status"] != 0 else set()
+            stray = moved - allowed
+            if stray:
+                problems.append("fails and changes " + ", ".join(sorted(stray))[:200])
+        elif status == 0:
+            stray = moved - base["moved"]
+            #   A verb that sets a value writes it over what was there; one that
+            #   only reads has to leave the file as it found it.
+            if verb not in readers or path not in pre:
+                stray.discard(path)
+            #   What the mutant itself put beside the file is the verb's to take away.
+            stray = {one for one in stray if one in world or one not in pre}
+            if stray:
+                problems.append("succeeds and changes what it leaves alone on a good file: " + ", ".join(sorted(stray))[:200])
+            old, new = pre.get(path), after.get(path)
+            #   A list that is read and written back is not written over a file that
+            #   could not be read: a link, a FIFO, a directory, one too large, or
+            #   records cut short are not an empty list.
+            if kind in ("lines", "wifi", "binary") and old and new != old and not base["replaces"]:
+                if old[0] != "f":
+                    problems.append("writes over a %s it cannot have read" % (
+                        "file of %d bytes" % old[2] if old[0] == "F" else
+                        {"l": "link", "p": "FIFO", "d": "directory"}.get(old[0], "file")))
+                elif kind == "binary" and len(old[2]) % records.get(scene, 1):
+                    problems.append("writes over a file of %d bytes, no whole number of records" % len(old[2]))
+            if kind in ("lines", "wifi") and old and new and old[0] == "f" == new[0] and old[2] != new[2] \
+                    and not base["replaces"]:
+                if kind == "wifi":
+                    gone = networks_of(old[2]) - networks_of(new[2]) - base["gone"]
+                else:
+                    #   What the file held before it was damaged and is now not held.
+                    gone = (lines_of(old[2]) & lines_of(world[path][2])) - lines_of(new[2]) - base["gone"]
+                if gone:
+                    problems.append("writes the file back without %s" % sorted(gone)[:3])
+        again = {p for p in changes(after, after_again) if not volatile.search(p)}
+        if again and "random" not in verb and not re.search(r" [+-]\d", verb):
+            problems.append("a second run changes " + ", ".join(sorted(again))[:200])
+        return problems
+
+    # ---- the run ----------------------------------------------------------------------
+    plan = []
+    for name, path, verbs, kind in scenes:
+        entry = world.get(path)
+        checks(entry is not None and entry[0] == "f", "%s: no verb made %s, the corpus has nothing of it" % (name, path))
+        if entry is None or entry[0] != "f":
+            continue
+        rng = random.Random(seed * 1000003 + zlib.crc32(name.encode()))
+        other = "/root/name" if path != "/root/name" else "/root/keyboard"
+        count = max(0, runs // max(1, len(scenes)) - 24) + 40 if not everything else 0
+        listing = mutants(path, entry[2], other, rng, count, path.startswith("/sys/"))
+        base = {}
+        for verb in verbs:
+            restore(world, state)
+            outcome = run(verb)
+            after = capture()
+            moved = {p for p in changes(world, after) if not volatile.search(p)}
+            now = after.get(path)
+            held = networks_of if kind == "wifi" else lines_of
+            #   A file the verb takes away is a file it replaces by nothing.
+            gone = (held(entry[2]) - held(now[2]) if now and now[0] == "f" else held(entry[2])) \
+                if kind in ("lines", "wifi") else set()
+            replaces = bool(gone) and gone == held(entry[2])
+            #   What the verb does where the file is not there is as good as
+            #   what it does where the file is: a setter makes it.
+            restore(world, after)
+            forget(path)
+            lacking = capture()
+            run(verb)
+            made = {p for p in changes(lacking, capture()) if not volatile.search(p)}
+            base[verb] = {"status": outcome[0], "out": outcome[1], "moved": moved | made, "gone": gone,
+                          "replaces": replaces}
+            state = capture()
+            checks(outcome[0] in (0, 1, 2), "%s: %s on good state ends with %s" % (name, verb, outcome[0]))
+        plan.append((name, path, verbs, kind, listing, base))
+    restore(world, state)
+    state = world
+
+    mutant_runs = 0
+    ran = 0
+    deepest = max((len(entry[4]) for entry in plan), default=0)
+    stopped = False
+    for round_ in range(deepest):
+        for name, path, verbs, kind, listing, base in plan:
+            if round_ >= len(listing):
+                continue
+            if mutant_runs >= runs or clock.monotonic() - started > seconds:
+                stopped = True
+                break
+            label, spec = listing[round_]
+            mutant_runs += 1
+            for verb in verbs:
+                restore(world, state)
+                keep(state, path, spec)
+                pre = capture()
+                outcome = run(verb)
+                lost = list(died)
+                after = capture()
+                again = (0, b"") if outcome[0] == "hang" else run(verb)
+                after_again = capture()
+                state = after_again
+                ran += 1
+                died[:] = lost + died
+                problems = judge(name, kind, path, label, verb, spec, outcome, pre, after, after_again,
+                                 base[verb], ("status", "time", verbs[0]))
+                if again[0] not in (0, 1, 2):
+                    problems.append("a second run ends with %s" % (again[0],))
+                reported = [report(name, label, verb, problem, outcome[0], outcome[1], spec) for problem in problems]
+                totals["checked"] += 1
+                if any(reported):
+                    totals["failed"] += 1
+        if stopped:
+            break
+    restore(world, state)
+
+    for (name, verb, problem), found in findings.items():
+        first = found[0]
+        print("  FAIL %s: %s %s -- %d mutants, first %r (status %s): %r" % (
+            name, verb, problem, len(found), first[0], first[1], sgr.sub(b"", first[2])[:120]))
+    checks.checks += totals["checked"]
+    checks.failures += totals["failed"]
+    if show:
+        print("  time by verb: " + ", ".join("%s %.0f s" % item for item in spent.most_common(8)))
+    print("moonwater state fuzz: %d files, %d mutants, %d verb runs, %d s%s" % (
+        len(plan), mutant_runs, ran, clock.monotonic() - started,
+        " (stopped at its budget)" if stopped else ""))
+    return checks.verdict("moonwater state fuzz", "moonwater-state-fuzz-inside")
+
+
 def harness_protected_links(argv):
     """A write through a planted link meets fs.protected_symlinks, as the
     kernel's own open would.
@@ -93875,6 +94658,7 @@ HARNESS_CHECKS = {
     "protected_links": harness_protected_links,
     "hostile_strings": harness_hostile_strings,
     "state_cuts": harness_state_cuts,
+    "moonwater_state_fuzz": harness_moonwater_state_fuzz,
     "machine_scan": harness_machine_scan,
     "ct_logs": harness_ct_logs,
     "tls_ct": harness_tls_ct,
