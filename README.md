@@ -160,8 +160,10 @@ brings back what was on.
 
 `moonwater usb lock` holds what somebody plugs in: a stick, a keyboard that types on its
 own, a hub, a network, audio or camera function. Every device plugged in when it runs
-becomes a rule in /root/usb.policy, with the classes it shows then, and keeps working;
-a new device, one no rule names, or a class a known device never had (a stick that comes
+becomes a rule in /root/usb.policy, with the classes it shows then (one the kernel holds
+unconfigured is configured first to show them), and keeps working; one with no serial is
+pinned to its place, the controller, root hub and port path, which survive a boot that
+numbers the buses otherwise. A new device, one no rule names, or a class a known device never had (a stick that comes
 back as a keyboard too) stays unauthorized until `usb allow` lets it in or `usb class`
 allows what it is. The kernel holds the switches (the `authorized` file of each device
 and interface, the defaults of each root hub), so a held device is never configured and
@@ -172,7 +174,9 @@ doing its own work; a device that copies the VID:PID and serial of one that was 
 is that device to it; DMA over Thunderbolt or PCIe is the IOMMU's (`sec_dma`); and root
 can undo it. The policy is read when /root is, so a device plugged in during boot is up
 until then: only the kernel command line `usbcore.authorized_default=2`, which
-`sec_host_locked` sets, closes that window. The tight tier locks at the first boot.
+`sec_host_locked` sets, closes that window. The tight tier locks at the first boot, once
+USB has settled, and a /root it takes later with no policy of its own; a lock that cannot
+be written to /root is in force from /run until the machine restarts, and `usb` says why.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
 (machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are

@@ -523,17 +523,25 @@ attacker gets its invariants here once there is a lane that proves them.
   root hub's `authorized_default` and `interface_authorized_default`, and
   usbcore's `authorized_default` for a controller that arrives later.
   `usb lock` keeps every device plugged in at the time as an allow rule
-  (`VID:PID/SERIAL`, or `VID:PID/-@PORT` for one with no serial or one too
-  long to keep) with the classes of the interfaces it has then, denies every
+  (`VID:PID/SERIAL`; `VID:PID/-#HASH`, the serial's xxh64, for one too long
+  to keep; `VID:PID/-@PLACE` for one with no serial, the place being the
+  root hub's serial (its controller's bus address), the root hub's product
+  and the port path, which a boot that numbers the buses in another order
+  does not move; a `-@1-4` pin of an older policy is read by its bus port
+  until `usb lock` writes it again) with the classes of the interfaces it
+  has then, denies every
   class, and puts it in force: a new device is then never configured, so no
   driver binds to it. Locked, the interfaces of a device that is configured
   wait at 0 until each is judged, and are authorized and probed only for a
   class its rule keeps or a class allowed (`usb class storage allow`, which
   also has a new device configured so its interfaces can be judged): a stick
-  that comes back as a keyboard as well has the keyboard held. A rule for a
-  device that was not configured when it was made (one the command line held,
-  or one named by its whole id while unplugged) lets it in whole. A deny rule
-  holds its device locked or not. One function judges
+  that comes back as a keyboard as well has the keyboard held. A device the
+  kernel holds unconfigured when the lock is taken (the command line holds
+  every one at boot) is configured first, with every root hub's interfaces
+  waiting, and kept as the classes it then shows; one that cannot be
+  configured or shows no interface is not kept. A rule for a device named by
+  its whole id while unplugged lets it in whole. A deny rule holds its device
+  locked or not. One function judges
   (`usb_judge`) and one applies (`usb_apply`); boot, every verb and the
   watcher (a process of its own while the policy holds anything, woken by
   uevents it never reads and walking sysfs again every ten seconds) call
@@ -561,12 +569,21 @@ attacker gets its invariants here once there is a lane that proves them.
   does not declare internal from the first moment. With the policy off, a
   deny rule is reactive (the watcher deauthorizes the device once it has
   enumerated). The tight host tier (`MOONWATER_STRICT_HOST` 2 and 3) locks a
-  machine with no `/root/usb.policy` at its first boot, once USB has settled
-  (the devices unchanged for two seconds after three of uptime, fifteen at
-  most, in a process of its own so the boot waits for none of it): a lock
-  taken at the first restore held a guest's tablet and keyboard, which had
-  not enumerated yet. Whatever is plugged in by then is trusted. The default
-  tier changes nothing until the owner locks. `sec_locked` reaches `STRICT_HOST` 3
+  `/root` that keeps no `/root/usb.policy` (whether a watcher runs does not
+  decide it: a disk taken after an ask's session had locked was left with no
+  policy), at its first boot once USB has settled (the devices unchanged for
+  two seconds after three of uptime, fifteen at most, in a process of its own
+  so the boot waits for none of it), and at once, carried over the session's
+  lock, when a disk is taken later in the boot: a lock taken at the first
+  restore held a guest's tablet and keyboard, which had not enumerated yet.
+  Whatever is plugged in by then is trusted, but a device first seen in the
+  last two seconds of the settle (one plugging and unplugging to hold it to
+  the cap) gets no rule. A lock that cannot be written to `/root` (or, at
+  boot, finds there something it cannot read, which is not written over) is
+  in force from `/run` until the machine restarts or a verb keeps one, on
+  every tier, and `usb` says why. A verb waits for the usb lock 20 seconds at
+  most and changes nothing if it cannot have it. The default tier changes
+  nothing until the owner locks. `sec_locked` reaches `STRICT_HOST` 3
   through the whole build's level and does not compose `sec_host_locked`, so
   its image has the lock at first boot but not the command line unless
   `sec_host_locked` is named.

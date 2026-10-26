@@ -15628,8 +15628,9 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
         usb_tell_text(false, "mode lock", "");
         usb_apply_all(address_of policy, null, null, say);
         if (error < 0)
-                return host_refuse("%s could not be written (%s): the lock is in force until the machine restarts\n",
-                                   USB_POLICY, file_reason(error));
+                return host_refuse(USB_POLICY " could not be written (%s): the lock is in force until the machine "
+                                   "restarts\n",
+                                   file_reason(error));
         if (say)
                 host_say(log, host_label "usb lock: %p devices plugged in now are kept as rules; "
                                          "a new one waits for usb allow\n",
