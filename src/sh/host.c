@@ -613,6 +613,25 @@ static fn host_verdict_set(string_address kind, string_address disk)
                 host_fail(HOST_VERDICT, failed);
 }
 
+/* An empty file a terminal looks for, made or emptied; one that could not be
+   written is said, since nothing else will tell the terminal why it is not
+   there. */
+static fn host_mark_set(string_address path)
+{
+        bipolar failed = host_write_text(path, "");
+
+        if (failed < 0)
+                host_fail(path, failed);
+}
+
+/* A session that settled live: its verdict, and the hint a terminal prints
+   about a live session when it first opens. */
+static fn host_settle_live(void)
+{
+        host_mark_set(HOST_HINT);
+        host_verdict_set("live", "");
+}
+
 #define RADIO_LOCK_EX 2
 #define RADIO_LOCK_NB 4
 #define RADIO_LOCK_UN 8
@@ -2386,8 +2405,7 @@ static b32 host_boot(void)
 
         if (known && settings.flags & SPARK_SETTINGS_MOUNT_OFF)
         {
-                host_write_text(HOST_HINT, "");
-                host_verdict_set("live", "");
+                host_settle_live();
                 host_say(log, host_label "init mount is off: nothing on this machine's "
                                          "disks is mounted this session\n");
                 host_booted(address_of settings);
@@ -2417,8 +2435,7 @@ static b32 host_boot(void)
 
         if (!census.count)
         {
-                host_write_text(HOST_HINT, "");
-                host_verdict_set("live", "");
+                host_settle_live();
                 host_booted(known ? address_of settings : null);
                 return 0;
         }
@@ -2448,7 +2465,7 @@ static b32 host_boot(void)
                 if (!chosen)
                 {
                         chosen = census.found;
-                        host_write_text(HOST_QUESTION, "");
+                        host_mark_set(HOST_QUESTION);
                         host_verdict_set("ask ", chosen->disk);
                         host_say(log, host_label "more than one disk has Moonwater from "
                                       "this build, and %s is not known to be the one "
@@ -2485,8 +2502,7 @@ static b32 host_boot(void)
 
                 if (known && settings.flags & SPARK_SETTINGS_MOUNT_OFF)
                 {
-                        host_write_text(HOST_HINT, "");
-                        host_verdict_set("live", "");
+                        host_settle_live();
                         host_say(log, host_label "init mount is off: %s is not mounted "
                                                  "this session\n",
                                  chosen->disk);
@@ -2506,7 +2522,7 @@ static b32 host_boot(void)
         }
 
         chosen = refused ? refused : census.found;
-        host_write_text(HOST_QUESTION, "");
+        host_mark_set(HOST_QUESTION);
         host_verdict_set("ask ", chosen->disk);
         host_say(log, refused
                           ? host_label "%s has Moonwater installed from this build, "
@@ -3050,9 +3066,12 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         {
                 system_close(handle);
                 host_unmount(HOST_MEDIUM);
+                //      Too small is one refusal; a size and sector the GPT has no
+                //      layout for is another, and is not said to be too small.
                 return failed < 0 ? host_fail(device, failed)
-                                  : host_refuse("%s is smaller than the 2 GiB an "
-                                                "install needs\n", name);
+                       : bytes < HOST_SMALLEST
+                           ? host_refuse("%s is smaller than the 2 GiB an install needs\n", name)
+                           : host_refuse("%s has no layout an install can be given\n", name);
         }
 
         /*      The partition table is read back from the kernel once it is
@@ -23596,7 +23615,10 @@ static fn host_wipe_table(void)
         while (host_wipe_keep[used])
                 used++;
         for (positive at = 0; at < SETTINGS_ROWS && used + 1 < array_count(host_wipe_keep); at++)
-                if (settings_rows[at].how == SETTING_PLAIN && settings_rows[at].path)
+                //      Only a row under /root names a file wipe keeps: one kept
+                //      anywhere else is not in what wipe empties to begin with.
+                if (settings_rows[at].how == SETTING_PLAIN && settings_rows[at].path &&
+                    string_has_prefix(settings_rows[at].path, "/root/"))
                         host_wipe_keep[used++] = (string_address)settings_rows[at].path + sizeof("/root/") - 1;
         host_wipe_keep[used] = null;
 }
