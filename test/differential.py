@@ -45118,6 +45118,15 @@ def harness_moonwater_cli(argv):
         check(block("kept") == ["unread-a", "passpass1", "unread-b", "passpass2"],
               "and the network it could not forget is still saved", repr(block("kept")))
 
+        # A FIFO at /etc/resolv.conf is no resolv.conf, and the lookups of
+        # the machine do not wait for a writer to it: dns answers.
+        lines, finished = session(
+            "rm -f /etc/resolv.conf; mkfifo /etc/resolv.conf\n" + say("dns") + say("status") + "rm -f /etc/resolv.conf\n")
+        seen = answers(lines)
+        check(finished and seen.get("dns", {}).get("status") == 0 and seen.get("status", {}).get("status") == 0,
+              "a FIFO at /etc/resolv.conf does not hold dns or status",
+              repr((seen.get("dns"), seen.get("status"))))
+
         # What a saved network carries beside its password, in
         # /root/wifi.rules: the wpa2 word an add says, until an add without
         # it; what a join learnt (pmf, sae), while the password stays; and

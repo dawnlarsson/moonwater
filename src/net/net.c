@@ -1981,6 +1981,10 @@ static COLD positive dns_servers(string_address path, p32 address_to servers,
         if (!room)
                 return 0;
 
+        //      Opened without waiting and only if it is a file: a FIFO at
+        //      the name held every lookup of the machine for a writer that
+        //      would not come. A link is followed, since a resolv.conf is
+        //      often one.
         got = file_slurp_regular_at(AT_FDCWD, path, text, sizeof text, 0);
 
         if (got <= 0)

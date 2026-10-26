@@ -3682,7 +3682,8 @@ static b32 bowl_write_resolv(string_address root)
                 return_if(failed < 0, bowl_fail(etc, failed));
         }
 
-        got = file_slurp("/etc/resolv.conf", host, sizeof(host));
+        //      The host's own, read as a file and not waited for: a FIFO at the name is no resolv.conf.
+        got = file_slurp_regular_at(AT_FDCWD, "/etc/resolv.conf", host, sizeof(host), 0);
         if (got > 0 && (positive)got >= sizeof(host))
                 got = (bipolar)(sizeof(host) - 1);
         if (got > 0)
