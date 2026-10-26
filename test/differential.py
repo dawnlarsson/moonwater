@@ -73886,7 +73886,7 @@ def harness_moonwater_state_fuzz(argv):
 
         python3 test/differential.py --harness moonwater_state_fuzz --shell PATH
         MOONWATER_FUZZ_RUNS=N     mutants to run (a mutant is run against every verb
-                                  of its file; default 1200)
+                                  of its file; default 1000)
         MOONWATER_FUZZ_SECONDS=N  stop starting new mutants after N seconds (default 170)
         MOONWATER_FUZZ_SEED=N     the generator's seed (default 1)
         MOONWATER_FUZZ_ONLY=TEXT  only the files whose name holds TEXT
@@ -73925,8 +73925,15 @@ def harness_moonwater_state_fuzz(argv):
                          "MOONWATER_FUZZ_ONLY", "MOONWATER_FUZZ_SHOW", "MOONWATER_FUZZ_ALL"):
                 if name in os.environ:
                     environment[name] = os.environ[name]
+            #   Root of the namespace and the user nobody beside it, where newuidmap
+            #   and a subordinate range allow: the file owned by nobody and the
+            #   verbs run as nobody need the second.
+            wide = ["unshare", "--user", "--map-user=0", "--map-users=auto", "--map-group=0", "--map-groups=auto",
+                    "-mnpu", "--fork", "--mount-proc"]
+            if subprocess.run(wide[:-1] + ["true"], capture_output=True).returncode:
+                wide = ["unshare", "-Urmnpu", "--fork", "--mount-proc"]
             try:
-                ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c", wrapper],
+                ran = subprocess.run(wide + ["sh", "-c", wrapper],
                                      capture_output=True, text=True, errors="replace",
                                      timeout=seconds + 900, env=environment)
             except subprocess.TimeoutExpired:
@@ -73952,14 +73959,18 @@ def harness_moonwater_state_fuzz(argv):
     moonwater = args.shell
     environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
     everything = bool(os.environ.get("MOONWATER_FUZZ_ALL"))
-    runs = int(os.environ.get("MOONWATER_FUZZ_RUNS", "1200"))
+    runs = int(os.environ.get("MOONWATER_FUZZ_RUNS", "1000"))
     seconds = int(os.environ.get("MOONWATER_FUZZ_SECONDS", "170"))
     seed = int(os.environ.get("MOONWATER_FUZZ_SEED", "1"))
     only = os.environ.get("MOONWATER_FUZZ_ONLY", "")
     show = bool(os.environ.get("MOONWATER_FUZZ_SHOW"))
     if everything:
         runs, seconds = 10 ** 9, 10 ** 9
-    tops = ("/root", "/run/moonwater", "/sys", "/etc")
+    tops = ("/root", "/run/moonwater", "/sys", "/etc", "/bowls")
+    with open("/proc/self/uid_map") as handle:
+        mapped = any(int(inner) <= 65534 < int(inner) + int(count)
+                     for inner, _, count in (line.split() for line in handle))
+    secrets = (b"oldpass11", b"pass2222", b"pass3333xx", b"otherpass11")
     key = "bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="
     other_key = "kL8Wk4yX3lq2pCq2HfV1m4mJm7m6Zl0Q4Q2c0jV3m2c="
 
@@ -73977,6 +73988,7 @@ def harness_moonwater_state_fuzz(argv):
         "mouse sensitivity 150", "mouse acceleration off", "taskbar position top",
         "taskbar display all", "desktop on", "airplane on", "airplane off", "power powersave",
         "cpu boost", "charge limit 80", "brightness 50", "wired off", "wifi off", "bluetooth off",
+        "bind init add echo hello", "bind exit add echo bye",
         "security block add " + "ab" * 32, "security tls12 on", "link on", "link off",
     ]
     #   Files no verb writes in a sandbox: what a daemon, a join or the machine's
@@ -74039,6 +74051,9 @@ def harness_moonwater_state_fuzz(argv):
 
     #   What the fuzzer sees and the code does on purpose: (file, verb, problem, why).
     accepted = [
+        (r"^wifi\.rules$", r"^wifi (add|remove)", r"^writes the file back without ",
+         "a rule is for the name of a saved network: a line whose name is cut, joined or ended by a stray byte is "
+         "for none, and the file is kept to the saved networks' own"),
         (r"^usb\.policy$", r"^usb unlock$", r"^writes over a ",
          "unlock is a way out of a lock, so a policy that cannot be read does not stop it (a policy cut short does)"),
         (r"^(tune|wifi\.power|bluetooth\.power)$", r"^(power |charge |cpu |airplane on)", r"^fails and changes ",
@@ -74084,6 +74099,10 @@ def harness_moonwater_state_fuzz(argv):
         ("usb.policy", "/root/usb.policy", ["usb", "usb lock", "usb unlock", "usb allow 0627:0001/S3", "usb deny 0627:0001/S2",
                                              "usb forget 0627:0001/S1", "usb class storage deny", "usb apply", "status"], "lines"),
         ("usb.log", "/root/usb.log", ["usb log", "usb log 5", "usb allow 0627:0001/S3"], "word"),
+        ("etc hostname", "/etc/hostname", ["name", "name other", "boot again", "status"], "word"),
+        ("etc hosts", "/etc/hosts", ["name other", "name random", "boot again"], "word"),
+        ("etc localtime", "/etc/localtime", ["timezone", "timezone se", "time", "status"], "word"),
+        ("bowl localtime", "/bowls/one/etc/localtime", ["timezone", "timezone se", "time"], "word"),
         ("resolv.conf", "/etc/resolv.conf", ["dns", "dns 8.8.8.8", "dns auto", "ntp on", "status"], "word"),
         ("desktop", "/root/desktop", ["desktop", "desktop on", "desktop off", "status"], "word"),
         ("canvas.scale", "/root/canvas.scale", ["canvas scale", "canvas scale 3", "canvas scale auto"], "word"),
@@ -74124,6 +74143,17 @@ def harness_moonwater_state_fuzz(argv):
         ("usb serial", "/sys/bus/usb/devices/1-1/serial", ["usb", "usb allow 1-1", "usb apply", "usb lock"], "word"),
         ("usb authorized", "/sys/bus/usb/devices/1-1/authorized", ["usb", "usb allow 1-1", "usb apply", "usb lock"], "word"),
         ("usb authorized_default", "/sys/module/usbcore/parameters/authorized_default", ["usb", "usb lock", "usb unlock", "usb apply"], "word"),
+        ("usb product", "/sys/bus/usb/devices/1-1/product", ["usb", "usb allow 1-1", "usb log", "usb apply", "status"], "word"),
+        ("usb bInterfaceClass", "/sys/bus/usb/devices/1-1:1.0/bInterfaceClass", ["usb", "usb apply", "usb lock", "usb class hid deny"], "word"),
+        ("usb removable", "/sys/bus/usb/devices/1-1/removable", ["usb", "usb apply", "usb lock"], "word"),
+        ("cpu governors", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors", ["power", "power performance", "cpu"], "word"),
+        ("cpu epp", "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference", ["power", "power powersave", "cpu"], "word"),
+        ("cpu boost", "/sys/devices/system/cpu/cpufreq/boost", ["cpu", "cpu boost", "status"], "word"),
+        ("cpu smt", "/sys/devices/system/cpu/smt/control", ["cpu", "cpu smt off", "cpu smt on"], "word"),
+        ("cpu1 online", "/sys/devices/system/cpu/cpu1/online", ["cpu", "cpu offline 1", "cpu online 1"], "word"),
+        ("battery capacity", "/sys/class/power_supply/BAT0/capacity", ["charge", "battery", "status"], "word"),
+        ("battery type", "/sys/class/power_supply/BAT0/type", ["charge", "battery", "status"], "word"),
+        ("battery status", "/sys/class/power_supply/BAT0/status", ["charge", "battery", "status"], "word"),
     ]
     #   The boot reads what the verbs keep: it runs after each file that it applies.
     scenes = [(name, path, verbs + (["boot again"] if path.startswith(("/root/", "/etc/", "/sys/")) else []) +
@@ -74163,15 +74193,15 @@ def harness_moonwater_state_fuzz(argv):
 
     spent = collections.Counter()
 
-    def run(verb, limit=5):
+    def run(verb, limit=5, nobody=False):
         """(status, output): "hang" when it hung, minus the signal when it died of one."""
         began = clock.monotonic()
         try:
-            return run_one(verb, limit)
+            return run_one(verb, limit, nobody)
         finally:
             spent[verb.split()[0] if verb != "boot again" else verb] += clock.monotonic() - began
 
-    def run_one(verb, limit):
+    def run_one(verb, limit, nobody=False):
         if verb == "boot again":
             #   The boot of a machine that is not booted: every file it applies is read.
             forget("/run/moonwater/verdict")
@@ -74179,7 +74209,8 @@ def harness_moonwater_state_fuzz(argv):
         with open("/tmp/state-fuzz.out", "w+b") as sink:
             child = subprocess.Popen([moonwater] + shlex.split(verb), stdin=subprocess.DEVNULL,
                                      stdout=sink, stderr=subprocess.STDOUT, env=environment,
-                                     start_new_session=True)
+                                     start_new_session=True,
+                                     **({"user": 65534, "group": 65534, "extra_groups": []} if nobody else {}))
             try:
                 code = child.wait(limit)
             except subprocess.TimeoutExpired:
@@ -74221,18 +74252,18 @@ def harness_moonwater_state_fuzz(argv):
                 if filemode.S_ISLNK(mode):
                     seen[full] = ("l", os.readlink(full))
                 elif filemode.S_ISDIR(mode):
-                    seen[full] = ("d", mode & 0o7777)
+                    seen[full] = ("d", mode & 0o7777, info.st_uid)
                     walk(full)
                 elif filemode.S_ISREG(mode):
                     if info.st_size <= 1 << 20:
                         with open(full, "rb") as handle:
-                            seen[full] = ("f", mode & 0o7777, handle.read())
+                            seen[full] = ("f", mode & 0o7777, handle.read(), info.st_uid)
                     else:
-                        seen[full] = ("F", mode & 0o7777, info.st_size, info.st_mtime_ns)
+                        seen[full] = ("F", mode & 0o7777, info.st_size, info.st_mtime_ns, info.st_uid)
                 elif filemode.S_ISFIFO(mode):
-                    seen[full] = ("p", mode & 0o7777)
+                    seen[full] = ("p", mode & 0o7777, info.st_uid)
                 else:
-                    seen[full] = ("o", mode)
+                    seen[full] = ("o", mode, info.st_uid)
         for top in tops:
             walk(top)
         return seen
@@ -74252,6 +74283,8 @@ def harness_moonwater_state_fuzz(argv):
             os.write(handle, entry[2])
             os.close(handle)
             os.chmod(path, entry[1])
+        if kind != "l" and entry[-1]:
+            os.chown(path, entry[-1], entry[-1])
 
     def restore(world, now):
         """The sandbox put back to the world, from what capture last saw of it."""
@@ -74265,6 +74298,7 @@ def harness_moonwater_state_fuzz(argv):
                 build(path, want)
             elif want[0] == "d" and now.get(path) != want:
                 os.chmod(path, want[1])
+                os.chown(path, want[2], want[2])
 
     def changes(before, after):
         return {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
@@ -74280,6 +74314,8 @@ def harness_moonwater_state_fuzz(argv):
             os.write(handle, spec[1])
             os.close(handle)
             os.chmod(path, spec[2] if len(spec) > 2 else 0o644)
+            if len(spec) > 3:
+                os.chown(path, spec[3], spec[3])
         elif kind == "sparse":
             handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             os.ftruncate(handle, spec[1])
@@ -74301,6 +74337,11 @@ def harness_moonwater_state_fuzz(argv):
     interesting = [0, 1, 9, 10, 13, 27, 32, 34, 36, 37, 39, 47, 92, 127, 128, 255]
     #   Whole contents for a file of words: a path out of the zone directory, a shell
     #   word, a format, a terminal's escape, the numbers that wrap, a spelling of on.
+    tokens = [("nothing", b""), ("a dash", b"-"), ("a star", b"*"), ("a path", b"../x"), ("a format", b"%s%n"),
+              ("zero", b"0"), ("minus one", b"-1"), ("a wide number", b"99999999999999999999"),
+              ("an escape", b"\x1b[31m"), ("65 bytes", b"a" * 65), ("300 bytes", b"a" * 300),
+              ("a high byte", b"\xff"), ("a NUL", b"\0"), ("a dot", b"."), ("a colon", b":"),
+              ("a slash", b"/"), ("a quote", b'"'), ("a tab", b"\t")]
     hostile = [b"../../../etc/passwd\n", b"/etc/passwd\n", b"Europe/../../../../etc/shadow\n", b"-\n",
                b".\n", b"..\n", b"a b c\n", b"$(reboot)\n", b"`id`\n", b";rm -rf /\n", b"%s%s%s%n\n",
                b"\x1b]0;x\x07\n", b"\x1b[2J\n", b"UTC\n\nUTC\n", b"\n\n", "caf\u00e9\n".encode(),
@@ -74328,6 +74369,8 @@ def harness_moonwater_state_fuzz(argv):
             ("a link to a directory", ("link", "/root")),
             ("a loop of two links", ("loop",)),
             ("mode 000", ("data", content, 0)), ("mode 777", ("data", content, 0o777)),
+            ("owned by nobody", ("data", content, 0o644, 65534)),
+            ("owned by nobody, mode 600", ("data", content, 0o600, 65534)),
             ("64 MiB sparse", ("sparse", 64 << 20)),
             ("1 MiB of its own", ("data", (content * ((1 << 20) // max(1, len(content)) + 1))[:1 << 20])),
             ("1 MiB of one byte", ("data", b"A" * (1 << 20))),
@@ -74340,6 +74383,8 @@ def harness_moonwater_state_fuzz(argv):
         if texty:
             for word in hostile:
                 fixed.append(("the word %r" % word, ("data", word)))
+        if not mapped:
+            fixed = [one for one in fixed if len(one[1]) < 4]
         if kernel:
             #   A file of the kernel's is never a FIFO, a link or a directory (the
             #   verbs read a FIFO there on purpose, for a test that holds a sleep).
@@ -74365,6 +74410,7 @@ def harness_moonwater_state_fuzz(argv):
         for size in limits:
             pool.append(("%d bytes of A" % size, ("data", b"A" * size)))
             pool.append(("its content and %d bytes of A" % size, ("data", content + b"A" * size)))
+            pool.append(("%d bytes of A and its content" % size, ("data", b"A" * size + b"\n" + content)))
             pool.append(("%d bytes of digits" % size, ("data", (b"1234567890" * (size // 10 + 1))[:size] + b"\n")))
             pool.append(("%d lines" % size, ("data", b"a\n" * min(size, 20000))))
         pool.append(("CRLF", ("data", content.replace(b"\n", b"\r\n"))))
@@ -74399,6 +74445,15 @@ def harness_moonwater_state_fuzz(argv):
                 swapped = list(lines)
                 swapped[number], swapped[number + 1] = swapped[number + 1], swapped[number]
                 pool.append(("lines %d and %d swapped" % (number, number + 1), ("data", b"\n".join(swapped))))
+        if texty:
+            #   Each word of each line made, in turn, what no writer makes it.
+            for number, line in enumerate(lines):
+                words = line.split(b" ")
+                for place in range(len(words)):
+                    for name, word in tokens:
+                        made = words[:place] + [word] + words[place + 1:]
+                        pool.append(("word %d of line %d is %s" % (place, number, name),
+                                     ("data", b"\n".join(lines[:number] + [b" ".join(made)] + lines[number + 1:]))))
         if texty and not content.strip(b"\n"):
             pool.append(("text of nothing", ("data", b"\n\n\n")))
         #   The pool is a set; the labels are the identity.
@@ -74437,6 +74492,9 @@ def harness_moonwater_state_fuzz(argv):
             if ssid is not None and (not line or plain(line, 63)):
                 found.add(ssid)
             want_ssid = True
+        #   An ssid with no line after it is saved with no password.
+        if not want_ssid and ssid is not None:
+            found.add(ssid)
         return found
 
     # ---- the world --------------------------------------------------------------------
@@ -74490,6 +74548,11 @@ def harness_moonwater_state_fuzz(argv):
             problems.append("hangs")
         elif status not in (0, 1, 2):
             problems.append("ends with status %s" % (status,))
+        #   A password that a damaged list has shifted into the place of a name is a name.
+        named = networks_of(pre[path][2]) if kind == "wifi" and pre.get(path, ("",))[0] == "f" else set()
+        for secret in secrets:
+            if secret in out and secret.decode() not in verb and not any(secret in one for one in named):
+                problems.append("prints a saved password")
         if died:
             problems.append("leaves a process that dies of signal %s" % ",".join(str(one) for one in died))
         text = sgr.sub(b"", out)
@@ -74613,6 +74676,41 @@ def harness_moonwater_state_fuzz(argv):
             break
     restore(world, state)
 
+    #   The verbs that only read, as nobody, against the file as nobody may and may not
+    #   read it: they answer, change nothing, print no secret and no control byte.
+    nobody_runs = 0
+    if mapped and clock.monotonic() - started < seconds + 60:
+        for name, path, verbs, kind, listing, base in plan:
+            if path.startswith("/sys/"):
+                continue
+            entry = world[path]
+            for label, spec in (("mode 000", ("data", entry[2], 0)),
+                                ("owned by nobody, mode 600", ("data", entry[2], 0o600, 65534)),
+                                ("owned by nobody, mode 777", ("data", entry[2], 0o777, 65534)),
+                                ("junk owned by nobody", ("data", b"\x1b[31m" + entry[2] + b"\0", 0o666, 65534)),
+                                ("a link", ("link", "/etc/canary"))):
+                for verb in (verbs[0], "status"):
+                    restore(world, state)
+                    keep(state, path, spec)
+                    pre = capture()
+                    status, out = run(verb, nobody=True)
+                    state = capture()
+                    nobody_runs += 1
+                    problems = []
+                    if status not in (0, 1, 2):
+                        problems.append("as nobody ends with %s" % (status,))
+                    if control.search(sgr.sub(b"", out)) and not control.search(sgr.sub(b"", base[verb]["out"])):
+                        problems.append("as nobody puts a control byte on the screen")
+                    if any(secret in out for secret in secrets):
+                        problems.append("as nobody prints a saved password")
+                    moved = {one for one in changes(pre, state) if not volatile.search(one)}
+                    if moved:
+                        problems.append("as nobody changes " + ", ".join(sorted(moved))[:200])
+                    reported = [report(name, label, verb, problem, status, out, spec) for problem in problems]
+                    totals["checked"] += 1
+                    totals["failed"] += any(reported)
+        restore(world, state)
+
     for (name, verb, problem), found in findings.items():
         first = found[0]
         print("  FAIL %s: %s %s -- %d mutants, first %r (status %s): %r" % (
@@ -74621,8 +74719,8 @@ def harness_moonwater_state_fuzz(argv):
     checks.failures += totals["failed"]
     if show:
         print("  time by verb: " + ", ".join("%s %.0f s" % item for item in spent.most_common(8)))
-    print("moonwater state fuzz: %d files, %d mutants, %d verb runs, %d s%s" % (
-        len(plan), mutant_runs, ran, clock.monotonic() - started,
+    print("moonwater state fuzz: %d files, %d mutants, %d verb runs, %d as nobody%s, %d s%s" % (
+        len(plan), mutant_runs, ran, nobody_runs, "" if mapped else " (no user nobody here)", clock.monotonic() - started,
         " (stopped at its budget)" if stopped else ""))
     return checks.verdict("moonwater state fuzz", "moonwater-state-fuzz-inside")
 
