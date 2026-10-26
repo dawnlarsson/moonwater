@@ -23390,7 +23390,12 @@ static fn host_setup_state(void)
                 host_install address_to install = census.found + at;
 
                 host_install_read(install);
-                if (!install->readable)
+                //      Only root can mount an image to read it: for anybody else
+                //      the build is not unreadable, it is not looked at.
+                if (!bowl_is_root())
+                        string_format(log, "  installed on %s, its build is read as root\n",
+                                      install->disk);
+                else if (!install->readable)
                         string_format(log, "  installed on %s, image unreadable\n",
                                       install->disk);
                 else if (string_equals(install->build, running))
@@ -23404,7 +23409,9 @@ static fn host_setup_state(void)
         if (!census.count)
                 string_format(log, "  not installed on any disk here\n");
 
-        if (running[0] && host_medium_find(address_of search, running, null))
+        //      Nor is a stick looked for by anybody who cannot mount it: the
+        //      search keeps at it for up to ten seconds while storage arrives.
+        if (running[0] && bowl_is_root() && host_medium_find(address_of search, running, null))
         {
                 string_format(log, "  this image is on %s\n", search.name);
                 host_unmount(HOST_MEDIUM);
@@ -23647,6 +23654,12 @@ static b32 host_wipe(bool said_yes)
         return failed;
 }
 
+/* The name a DISK argument gives, with a /dev/ in front of it taken off. */
+static string_address host_disk_word(string_address word)
+{
+        return string_has_prefix(word, "/dev/") ? word + 5 : word;
+}
+
 /*
         `moonwater setup`: a live session, or one that keeps its data on a
         disk, and the ways to change which. Arguments are judged before
@@ -23677,7 +23690,8 @@ static b32 host_setup(string_address address_to arguments, positive count)
                 words += removable;
                 said_yes = count > words && string_equals(arguments[words], HOST_YES);
                 words += said_yes;
-                return_if(count < 4 || count != words, host_usage());
+                return_if(count < 4 || count != words || !host_disk_word(arguments[3])[0],
+                          host_usage());
                 host_need_root();
                 if (!said_yes && !host_asks())
                 {
@@ -23705,10 +23719,8 @@ static b32 host_setup(string_address address_to arguments, positive count)
 
         if ((update || string_equals(verb, "use")) && count <= 4)
         {
-                string_address disk = count == 4 ? arguments[3] : null;
+                string_address disk = count == 4 ? host_disk_word(arguments[3]) : null;
 
-                if (disk && string_has_prefix(disk, "/dev/"))
-                        disk += 5;
                 //      A DISK that names nothing is a wrong argument, and is
                 //      judged before root is asked for, as the others are.
                 return_if(disk && !disk[0], host_usage());

@@ -44530,6 +44530,7 @@ def harness_moonwater_cli(argv):
                 "setup install ../x removable yes", "ask", "setup use a b c",
                 "setup update a b c", "setup live extra", "setup bogus", "setup removable",
                 "setup use nobody", "setup update nobody", "setup use /dev/", "setup update /dev/",
+                "setup install /dev/",
                 "boot extra", "ask extra", "machine extra",
                 #       Not "link pair" or "link NAME CODE": those wait five minutes
                 #       for the other machine, and the link harness has them.
@@ -44821,6 +44822,7 @@ def harness_moonwater_cli(argv):
             'setup update a b c',
             'setup use /dev/',
             'setup update /dev/',
+            'setup install /dev/',
             'setup live extra',
             'setup bogus',
             'setup removable',
@@ -47528,7 +47530,7 @@ while True:
             "link a@b abc-def", "name keeper",
             "cpu online 0", "cpu online x", "charge limit", "charge limit 5", "brightness bogus", "brightness 50",
             "power bogus", "power powersave", "brightness", "charge", "power", "ntp sideways", "ntp off",
-            "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "setup use /dev/", "bios reboot",
+            "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "setup use /dev/", "setup install /dev/", "bios reboot",
             "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine", "machine extra",
             "latency", "latency sideways", "latency reset extra", "canvas background 112233",
             "canvas scale 2", "canvas modes preferred",
@@ -47555,7 +47557,7 @@ while True:
             "brightness": (0, "no backlight"), "charge": (0, "no battery"), "power": (0, "no power profile"),
             "ntp sideways": (2, ""), "ntp off": (1, "moonwater ntp needs root"), "keyboard xx": (1, "moonwater keyboard needs root"),
             "timezone Mars/Olympus": (1, "moonwater timezone needs root"), "setup install x": (1, "moonwater setup needs root"),
-            "setup bogus": (2, ""), "setup use /dev/": (2, ""),
+            "setup bogus": (2, ""), "setup use /dev/": (2, ""), "setup install /dev/": (2, ""),
             "bios reboot": (1, "moonwater bios needs root"), "airplane on": (1, "moonwater airplane needs root"),
             "sleep": (1, ""), "time sync": (1, "moonwater time needs root"), "boot": (1, "moonwater boot needs root"),
             "boot extra": (2, ""), "ask": (1, "moonwater ask needs root"), "machine": (1, "moonwater machine needs root"),
