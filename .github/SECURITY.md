@@ -529,8 +529,12 @@ attacker gets its invariants here once there is a lane that proves them.
   does not declare internal from the first moment. With the policy off, a
   deny rule is reactive (the watcher deauthorizes the device once it has
   enumerated). The tight host tier (`MOONWATER_STRICT_HOST` 2 and 3) locks a
-  machine with no `/root/usb.policy` at its first boot; the default tier
-  changes nothing until the owner locks. `sec_locked` reaches `STRICT_HOST` 3
+  machine with no `/root/usb.policy` at its first boot, once USB has settled
+  (the devices unchanged for two seconds after three of uptime, fifteen at
+  most, in a process of its own so the boot waits for none of it): a lock
+  taken at the first restore held a guest's tablet and keyboard, which had
+  not enumerated yet. Whatever is plugged in by then is trusted. The default
+  tier changes nothing until the owner locks. `sec_locked` reaches `STRICT_HOST` 3
   through the whole build's level and does not compose `sec_host_locked`, so
   its image has the lock at first boot but not the command line unless
   `sec_host_locked` is named.

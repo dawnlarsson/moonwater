@@ -14007,6 +14007,10 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define USB_REWALK_NS ((p64)10000000000)
 #define USB_POLL_NS ((p64)250000000)
 #define USB_SETTLE_NS ((p64)50000000)
+// A first boot's lock waits for USB to settle: unchanged this long, up this long at least, and at most.
+#define USB_STILL_NS ((p64)2000000000)
+#define USB_UP_LEAST_NS ((p64)3000000000)
+#define USB_UP_MOST_NS ((p64)15000000000)
 
 /*
         What an interface is, by its class (and, where one class is two
@@ -14592,7 +14596,7 @@ static fn usb_shown(p8 address_to into, positive room, p8 address_to text, posit
 */
 static fn usb_log_line(string_address what)
 {
-        static p8 text[USB_LOG_MOST + USB_LOG_LINE * 2];
+        static p8 text[USB_LOG_MOST / 2];
         p8 line[USB_LOG_LINE + 32];
         p8 when[32];
         time_t stamp = time(null);
@@ -14617,11 +14621,16 @@ static fn usb_log_line(string_address what)
         if (size <= USB_LOG_MOST)
                 return;
 
-        got = host_read_state(USB_LOG, text, sizeof(text));
+        //      The newer half, read from the end, from the first whole line in
+        //      it: a log another hand grew past the room keeps its newest lines.
+        handle = system_open_at(AT_FDCWD, USB_LOG, FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (handle < 0)
+                return;
+        got = file_transfer_exact(syscall(pread64), handle, text, sizeof(text), (p64)size - sizeof(text));
+        system_close(handle);
         if (got <= 0)
                 return;
-        from = (positive)got / 2;
-        from += memory_span_without_byte(text + from, '\n', (positive)got - from);
+        from = memory_span_without_byte(text, '\n', (positive)got);
         from += from < (positive)got;
         (void)host_write_file(USB_LOG, text + from, (positive)got - from, 0600, true);
 }
@@ -15546,10 +15555,13 @@ static b32 usb_apply_verb(void)
         the question is let in only here; the take that follows the answer
         restores again, with the disk's policy. The first restore of a boot
         logs every device as seen. A hardened machine (STRICT_HOST tight or
-        locked) with no policy is locked here, once: what is plugged in at its
-        first boot is what it trusts, so a desktop's own keyboard keeps
-        working. The default tier changes nothing until the owner locks.
+        locked) with no policy is locked once, at its first boot, by
+        usb_first_lock: what is plugged in then is what it trusts, so a
+        desktop's own keyboard keeps working. The default tier changes nothing
+        until the owner locks.
 */
+static fn usb_first_lock(void);
+
 static fn usb_restore(void)
 {
         static usb_census before;
@@ -15558,19 +15570,81 @@ static fn usb_restore(void)
         bipolar lock = host_lock(USB_LOCK_PATH, true);
 
         usb_policy_load(address_of policy);
-        if (!policy.kept)
-        {
-                if (MOONWATER_STRICT_HOST >= STRICT_TIGHT && policy.known && !usb_lock_held(false))
-                        usb_policy_load(address_of policy);
-        }
-        else
+        if (policy.kept)
         {
                 before.count = 0;
                 usb_apply_all(address_of policy, first ? address_of before : null, null, false);
         }
         radio_unlock(lock);
-        if (usb_watched(address_of policy))
+        if (!policy.kept && MOONWATER_STRICT_HOST >= STRICT_TIGHT && policy.known)
+                usb_first_lock();
+        else if (usb_watched(address_of policy))
                 usb_watch_start();
+}
+
+// Every port below a root hub, and whether its device is configured: what a settle compares.
+static fn usb_ports(usb_census address_to census, p8 address_to into, positive room)
+{
+        into[0] = end;
+        for (positive at = 0; at < census->count; at++)
+                if (!census->device[at].root)
+                {
+                        string_append_bounded(into, (string_address)census->device[at].port, room);
+                        string_append_bounded(into, census->device[at].authorized ? (string_address) "+ " : (string_address) "- ",
+                                              room);
+                }
+}
+
+/*
+        A hardened machine's first lock, once USB has settled: the devices of
+        a boot go on enumerating after init starts (a hub and what is behind
+        it the longest), and a snapshot taken before they have would hold the
+        very keyboard it was meant to keep, which the first guest that tried
+        it showed (tablet and keyboard enumerated after the restore, and held
+        by it). The census is taken again every quarter second until it has
+        not changed for two seconds and the machine has been up three, or it
+        has been up fifteen; then the lock, under the usb lock and only if
+        nothing has made a policy meanwhile, and then this is the watcher. A
+        process of its own does it, so the boot waits for none of it; the
+        devices it has not yet judged are as the kernel has them (held from
+        the start by usbcore.authorized_default=2 where the command line says
+        so). A machine first locked long after it booted (setup use of a disk
+        with no policy) is locked at once.
+*/
+static fn usb_first_lock(void)
+{
+        static usb_census census;
+        static p8 seen[USB_MOST * (USB_PORT_ROOM + 2) + 1];
+        static p8 now[sizeof(seen)];
+        p64 still = 0;
+        usb_policy policy;
+        bipolar lock;
+
+        if (host_lock_owner(USB_WATCHER_PATH) || !host_detach(descriptors_none, descriptors_none))
+                return;
+        seen[0] = end;
+        for (;;)
+        {
+                p64 uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
+
+                usb_census_take(address_of census);
+                usb_ports(address_of census, now, sizeof(now));
+                if (!string_equals((string_address)now, (string_address)seen) || !still)
+                {
+                        string_copy(seen, (string_address)now);
+                        still = uptime;
+                }
+                if (uptime >= USB_UP_MOST_NS || (uptime >= USB_UP_LEAST_NS && uptime - still >= USB_STILL_NS))
+                        break;
+                host_pause(USB_POLL_NS);
+        }
+        lock = host_lock(USB_LOCK_PATH, true);
+        usb_policy_load(address_of policy);
+        if (!policy.kept && policy.known)
+                (void)usb_lock_held(false);
+        radio_unlock(lock);
+        (void)usb_watch_run();
+        system_call_1(syscall(exit_group), 0);
 }
 
 // The watcher again, if it ended while the policy still holds something.
