@@ -1916,6 +1916,12 @@ struct compositor_absinfo
 
 #define COMPOSITOR_EVIOCGBIT(type, bytes) (0x80000000u | (bytes) << 16 | 0x4500u | (0x20u + (type)))
 #define COMPOSITOR_EVIOCGABS(axis) (0x80184540u + (axis))
+#define COMPOSITOR_EVIOCGID 0x80084502u // bus, vendor, product, version
+#define COMPOSITOR_EVIOCGNAME(bytes) (0x80000000u | (bytes) << 16 | 0x4506u)
+#define COMPOSITOR_EVIOCGPROP(bytes) (0x80000000u | (bytes) << 16 | 0x4509u)
+#define COMPOSITOR_SYN_DROPPED 3u
+#define COMPOSITOR_BTN_TOOL_FINGER 0x145u
+#define COMPOSITOR_ABS_MT_POSITION_X 0x35u
 
 #define COMPOSITOR_EV_KEY 1u
 #define COMPOSITOR_EV_REL 2u
@@ -2203,6 +2209,10 @@ static struct
         int tablet_x, tablet_y, tablet_have; // what a tablet has said since its last report
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
+        // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
+        unsigned int input_kinds[COMPOSITOR_INPUTS];
+        unsigned short input_id[COMPOSITOR_INPUTS][4];
+        char input_name[COMPOSITOR_INPUTS][WINDOWS_INPUT_NAME];
         int told_row, told_x, told_y; // where the pointer was last told to a window: its row and the place in its picture
         unsigned char button_down;    // the buttons (BTN_LEFT up, a bit each) a window was sent the press of
         int button_row[8];            // and the window each press went to, which its release goes to
@@ -5649,6 +5659,23 @@ static void compositor_input_settings_read(void)
         compositor_taskbar_settings_read();
 }
 
+_Static_assert(COMPOSITOR_INPUTS == WINDOWS_INPUTS, "an input slot is a row of the table's");
+
+// What moonwater debug is shown of slot at: the device in it, or none, its counts started again. Once the table is made.
+static void compositor_input_publish(unsigned int at)
+{
+        struct windows *table = compositor.table;
+
+        if (!table)
+                return;
+        table->input_number[at] = at < compositor.input_count && compositor.inputs[at] >= 0 ? compositor.device_number[at] : -1;
+        table->input_kinds[at] = compositor.input_kinds[at];
+        memory_copy(table->input_id[at], compositor.input_id[at], sizeof(table->input_id[at]));
+        memory_copy(table->input_name[at], compositor.input_name[at], sizeof(table->input_name[at]));
+        table->input_wheel_read[at] = table->input_wheel_used[at] = table->input_dropped[at] = 0;
+        table->input_wheel_last[at] = 0;
+}
+
 /*
         Every keyboard and pointer evdev has, now and as they come. Read
         beside Canvas's own handler, not grabbed from it: a grab would take
@@ -5714,6 +5741,29 @@ static void compositor_input_add(unsigned int number)
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
+        // What it is, for moonwater debug: a device that is not what this took it for says so there.
+        {
+                unsigned int properties = 0, kinds = (keyboard ? WINDOWS_INPUT_KEYBOARD : 0) |
+                                                     (mouse ? WINDOWS_INPUT_MOUSE : 0) |
+                                                     (tablet ? WINDOWS_INPUT_TABLET : 0) |
+                                                     (compositor.wakeonly[at] ? WINDOWS_INPUT_WAKES : 0);
+
+                system_control(handle, COMPOSITOR_EVIOCGPROP(4), address_of properties);
+                kinds |=(relative >> COMPOSITOR_REL_WHEEL & 1 ? WINDOWS_INPUT_WHEEL : 0) |
+                         (relative >> COMPOSITOR_REL_WHEEL_HI & 1 ? WINDOWS_INPUT_WHEEL_HI : 0) |
+                         (relative >> COMPOSITOR_REL_HWHEEL & 1 ? WINDOWS_INPUT_HWHEEL : 0) |
+                         (relative >> COMPOSITOR_REL_HWHEEL_HI & 1 ? WINDOWS_INPUT_HWHEEL_HI : 0) |
+                         (keys[COMPOSITOR_BTN_LEFT / 8] >> (COMPOSITOR_BTN_LEFT % 8) & 1 ? WINDOWS_INPUT_BUTTONS : 0) |
+                         (keys[COMPOSITOR_BTN_TOUCH / 8] >> (COMPOSITOR_BTN_TOUCH % 8) & 1 ? WINDOWS_INPUT_TOUCH : 0) |
+                         (keys[COMPOSITOR_BTN_TOOL_FINGER / 8] >> (COMPOSITOR_BTN_TOOL_FINGER % 8) & 1 ? WINDOWS_INPUT_FINGERS : 0) |
+                         (absolute >> COMPOSITOR_ABS_MT_POSITION_X & 1 ? WINDOWS_INPUT_SLOTS : 0) |
+                         (properties & 1 ? WINDOWS_INPUT_POINTER : 0) | (properties & 2 ? WINDOWS_INPUT_DIRECT : 0);
+                compositor.input_kinds[at] = kinds;
+                memory_zero(compositor.input_id[at], sizeof(compositor.input_id[at]));
+                memory_zero(compositor.input_name[at], sizeof(compositor.input_name[at]));
+                system_control(handle, COMPOSITOR_EVIOCGID, compositor.input_id[at]);
+                system_control(handle, COMPOSITOR_EVIOCGNAME(WINDOWS_INPUT_NAME - 1), compositor.input_name[at]);
+        }
         // The events are stamped by the clock the speed of the hand is measured on.
         {
                 int monotonic = 1;
@@ -5746,6 +5796,7 @@ static void compositor_input_add(unsigned int number)
         }
         compositor.devices |= 1ul << number;
         compositor.input_count = at + 1 > compositor.input_count ? at + 1 : compositor.input_count;
+        compositor_input_publish(at);
 }
 
 static void compositor_inputs_open(void)
@@ -5826,15 +5877,15 @@ static void compositor_inputs_watch(void)
         program tail, and a full ring keeps what came first; a motion behind
         a motion the program has not read yet replaces it. tail is the
         program's, so it is read once and only believed as far as the ring
-        is long.
+        is long. Whether it was put in the ring, or joined to the one before.
 */
-static void compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
+static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
         struct windows *table = compositor.table;
         unsigned int head, used, last, at;
 
         if (row < 0)
-                return;
+                return 0;
 
         head = table->event_head[row];
         used = head - __atomic_load_n(&table->event_tail[row], __ATOMIC_ACQUIRE);
@@ -5846,11 +5897,11 @@ static void compositor_post(int row, unsigned int type, unsigned int flags, int 
         {
                 table->event_a[row][last] = a;
                 table->event_b[row][last] = b;
-                return;
+                return 1;
         }
 
         if (used >= WINDOWS_EVENTS)
-                return;
+                return 0;
 
         at = head % WINDOWS_EVENTS;
         table->event_type[row][at] = (unsigned short)type;
@@ -5858,6 +5909,7 @@ static void compositor_post(int row, unsigned int type, unsigned int flags, int 
         table->event_a[row][at] = a;
         table->event_b[row][at] = b;
         __atomic_store_n(&table->event_head[row], head + 1, __ATOMIC_RELEASE);
+        return 1;
 }
 
 // Every row that was given something in this pass is knocked on, once.
@@ -7726,7 +7778,16 @@ static void compositor_wheel(int v120, int horizontal)
         if (row >= 0 && (row != compositor.told_row || compositor.pointer_x - compositor.x[row] != compositor.told_x ||
                          compositor.pointer_y - compositor.y[row] != compositor.told_y))
                 compositor_pointer_to(row);
-        compositor_post(row, WINDOW_EVENT_WHEEL, 0, v120, horizontal);
+        // What became of it, for moonwater debug.
+        if (row < 0)
+                compositor.table->wheel_nowhere++;
+        else if (compositor_post(row, WINDOW_EVENT_WHEEL, 0, v120, horizontal))
+                compositor.table->wheel_sent++;
+        else
+                compositor.table->wheel_full++;
+        compositor.table->wheel_row = row;
+        compositor.table->wheel_x = row < 0 ? compositor.pointer_x : compositor.pointer_x - compositor.x[row];
+        compositor.table->wheel_y = row < 0 ? compositor.pointer_y : compositor.pointer_y - compositor.y[row];
 }
 
 static void compositor_input_read(unsigned int at)
@@ -7744,6 +7805,7 @@ static void compositor_input_read(unsigned int at)
                 {
                         system_close(compositor.inputs[at]);
                         compositor.inputs[at] = -1;
+                        compositor.table->input_number[at] = -1;
                         compositor.devices &= ~(1ul << compositor.device_number[at]);
 
                         // What it held down will never be let go of: not a key, not a button.
@@ -7775,12 +7837,23 @@ static void compositor_input_read(unsigned int at)
                         else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
                                 compositor.raw_y += event->value;
                         else if (event->type == COMPOSITOR_EV_REL &&
-                                 (event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
-                                compositor_wheel(event->value, event->code == COMPOSITOR_REL_HWHEEL_HI);
-                        else if (event->type == COMPOSITOR_EV_REL &&
-                                 ((event->code == COMPOSITOR_REL_WHEEL && !(compositor.hires[at] & 1)) ||
-                                  (event->code == COMPOSITOR_REL_HWHEEL && !(compositor.hires[at] & 2))))
-                                compositor_wheel(event->value * 120, event->code == COMPOSITOR_REL_HWHEEL);
+                                 (event->code == COMPOSITOR_REL_WHEEL || event->code == COMPOSITOR_REL_HWHEEL ||
+                                  event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
+                        {
+                                int fine = event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI;
+                                int sideways = event->code == COMPOSITOR_REL_HWHEEL || event->code == COMPOSITOR_REL_HWHEEL_HI;
+
+                                compositor.table->input_wheel_read[at]++;
+                                compositor.table->input_wheel_last[at] = now;
+                                // A wheel that reports in 120ths is read from those, and its notches are not counted again.
+                                if (fine || !(compositor.hires[at] >> sideways & 1))
+                                {
+                                        compositor.table->input_wheel_used[at]++;
+                                        compositor_wheel(fine ? event->value : event->value * 120, sideways);
+                                }
+                        }
+                        else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
+                                compositor.table->input_dropped[at]++;
                         else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
                         {
                                 int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
@@ -8448,6 +8521,8 @@ static b32 compositor_main()
                         compositor_hand_back();
                 return 1;
         }
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+                compositor_input_publish(at);
 
         string_format(log, "compositor: %b by %b (scale %b), %p input devices, pointer %s, windows in %s\n",
                       (bipolar)compositor.width, (bipolar)compositor.height,

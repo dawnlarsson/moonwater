@@ -21667,6 +21667,98 @@ static fn name_restore(void)
                                          "moonwater name changes it\n", name);
 }
 
+// Four hexadecimal digits of a number of a device's identity, as lsusb spells a vendor and a product.
+static fn host_debug_hex(p8 address_to into, unsigned short number)
+{
+        p8 bytes[2] = {(p8)(number >> 8), (p8)number};
+
+        memory_into_hex(into, bytes, 2);
+        into[4] = end;
+}
+
+/*
+        The input devices the compositor reads, for moonwater debug: what each
+        is and what it was taken for, its wheel as it was read, and what became
+        of the wheel's turns. A device names itself, so its name is spelled as
+        usb_shown spells what a device says. A wheel used and sent nowhere was
+        turned with no window under the pointer; one never read is a device
+        that said nothing of a wheel, or whose wheel is in a report this kernel
+        does not read.
+*/
+static fn host_debug_inputs(const struct windows address_to table)
+{
+        positive now = clock_monotonic_nanoseconds();
+        positive turns = (positive)table->wheel_sent + table->wheel_nowhere + table->wheel_full;
+
+        host_say(log, "input\n");
+        for (unsigned int at = 0; at < WINDOWS_INPUTS; at++)
+        {
+                unsigned int kinds = table->input_kinds[at], bus = table->input_id[at][0];
+                p8 said[WINDOWS_INPUT_NAME], name[WINDOWS_INPUT_NAME * 4 + 16], vendor[5], product[5], what[160];
+                positive last = table->input_wheel_last[at], ago = now > last ? (now - last) / 100000000 : 0;
+
+                if (table->input_number[at] < 0)
+                        continue;
+                memory_copy(said, table->input_name[at], sizeof(said));
+                said[sizeof(said) - 1] = end;
+                usb_shown(name, sizeof(name), said, string_length((string_address)said));
+                host_debug_hex(vendor, table->input_id[at][1]);
+                host_debug_hex(product, table->input_id[at][2]);
+                host_say(log, "  event%b%s%s (%s %s:%s)\n", (bipolar)table->input_number[at],
+                         table->input_number[at] < 10 ? (string_address) "          " : (string_address) "         ",
+                         name[0] ? (string_address)name : (string_address) "no name",
+                         bus == 3      ? (string_address) "usb"
+                         : bus == 5    ? (string_address) "bluetooth"
+                         : bus == 6    ? (string_address) "virtual"
+                         : bus == 0x11 ? (string_address) "ps/2"
+                         : bus == 0x18 ? (string_address) "i2c"
+                         : bus == 0x19 ? (string_address) "the machine's own"
+                                       : (string_address) "another bus",
+                         vendor, product);
+                what[0] = end;
+                string_append_bounded(what, kinds & WINDOWS_INPUT_KEYBOARD ? ", a keyboard" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_MOUSE ? ", a mouse" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_TABLET ? ", a tablet" : "", sizeof(what));
+                string_append_bounded(what, (kinds & WINDOWS_INPUT_FINGERS) && !(kinds & WINDOWS_INPUT_DIRECT) ? ", a touchpad" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_DIRECT ? ", a touch screen" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_WAKES ? ", read to wake" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_WHEEL_HI ? "; its wheel in 120ths of a notch" : kinds & WINDOWS_INPUT_WHEEL ? "; its wheel in notches" : "", sizeof(what));
+                string_append_bounded(what, kinds & WINDOWS_INPUT_HWHEEL_HI ? ", sideways in 120ths" : kinds & WINDOWS_INPUT_HWHEEL ? ", sideways in notches" : "", sizeof(what));
+                host_say(log, "                  %s\n", what[0] ? (string_address)what + 2 : (string_address) "taken for nothing it says it is");
+                if (table->input_wheel_read[at])
+                        host_say(log, "                  wheel: %p events read, %p used, the last %p.%p s ago\n",
+                                 (positive)table->input_wheel_read[at], (positive)table->input_wheel_used[at], ago / 10, ago % 10);
+                else if (kinds & (WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_WHEEL_HI | WINDOWS_INPUT_HWHEEL | WINDOWS_INPUT_HWHEEL_HI))
+                        host_say(log, "                  wheel: none read\n");
+                if (table->input_dropped[at])
+                        host_say(log, "                  the kernel dropped its events %p times, which were not read in time\n",
+                                 (positive)table->input_dropped[at]);
+        }
+        if (!turns)
+        {
+                host_say(log, "  wheel           not turned since the compositor started\n");
+                return;
+        }
+        host_say(log, "  wheel           %p sent to a window, %p with no window under the pointer, %p refused by a window "
+                      "that had not read its last %p events\n",
+                 (positive)table->wheel_sent, (positive)table->wheel_nowhere, (positive)table->wheel_full, (positive)WINDOWS_EVENTS);
+        if (table->wheel_row < 0 || table->wheel_row >= WINDOWS)
+        {
+                host_say(log, "                  the last with no window under the pointer, at %b,%b of the screen\n",
+                         (bipolar)table->wheel_x, (bipolar)table->wheel_y);
+                return;
+        }
+        {
+                p8 title[WINDOWS_TITLE + 1], shown[WINDOWS_TITLE * 4 + 16];
+
+                memory_copy(title, table->title[table->wheel_row], WINDOWS_TITLE);
+                title[WINDOWS_TITLE] = end;
+                usb_shown(shown, sizeof(shown), title, string_length((string_address)title));
+                host_say(log, "                  the last to window %b (%s), at %b,%b in it\n", (bipolar)table->wheel_row,
+                         shown, (bipolar)table->wheel_x, (bipolar)table->wheel_y);
+        }
+}
+
 /*
         The head of the compositor's window table, mapped to be read, or null
         when no compositor is running or the table cannot be had: taken from
@@ -21732,6 +21824,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
         const struct windows address_to table;
         char driver[17];
         unsigned int screens;
+        p8 shown[17 * 4 + 16];
 
         (void)arguments;
         return_if(count > 2, host_usage());
@@ -21743,8 +21836,10 @@ static b32 host_debug(string_address address_to arguments, positive count)
         }
         memory_copy(driver, table->driver, sizeof(table->driver));
         driver[16] = 0;
+        //      What any mapper of the table wrote, as the names below are: spelled, not sent to the terminal.
+        usb_shown(shown, sizeof(shown), (p8 address_to)driver, string_length((string_address)driver));
         host_say(log, "canvas\n");
-        host_say(log, "  card            %s, %px%p, scale %p\n", driver[0] ? (string_address)driver : (string_address) "none",
+        host_say(log, "  card            %s, %px%p, scale %p\n", shown[0] ? (string_address)shown : (string_address) "none",
                  (positive)table->output_width, (positive)table->output_height, (positive)table->scale);
         //      The screens as the table lists them, the primary first.
         screens = table->outputs <= WINDOWS_OUTPUTS ? table->outputs : 0;
@@ -21785,6 +21880,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",
                  table->unscanned < sizeof(reasons) / sizeof(reasons[0]) ? reasons[table->unscanned] : (string_address) "?");
+        host_debug_inputs(table);
         host_windows_unmap(table);
         return 0;
 }
@@ -23880,7 +23976,7 @@ static const host_row host_rows[] = {
     {null, "", "size WxH, name NAME (what it is remembered by)", 'b'},
     {null, "window move PID|NAME PLACE...", "put the windows of a program, or of a name, where PLACE says", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
-    {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer", 'b'},
+    {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},

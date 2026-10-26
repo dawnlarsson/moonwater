@@ -48872,6 +48872,23 @@ while True:
             check(finished and got["status"] == 1 and any("the compositor's desktop is not up" in line for line in got["out"]),
                   f"moonwater settings with a {word} pid in compositor.pid is no compositor, and exits 1",
                   repr(got)[:240])
+        #       A table of bytes nobody meant, every one an escape: every count
+        #       and number is as large as it can be and every name is escapes.
+        #       What an input device calls itself is whatever it chose, and debug
+        #       prints it beside the card's driver and a window's title, so each
+        #       is spelled and the terminal is sent no escape of its own.
+        script = ("mkdir -p /run/moonwater\nhead -c 1048576 /dev/zero | tr '\\000' '\\033' > /run/moonwater/windows\n"
+                  "echo '@@ debug escapes'; timeout 5 /tmp/moonwater debug > /tmp/debug.out 2>&1; echo \"@@status $?\"\n"
+                  "echo \"@@escapes $(tr -cd '\\033' < /tmp/debug.out | wc -c) $(grep -c 'x1b' /tmp/debug.out)"
+                  " $(grep -c '^input' /tmp/debug.out) $(grep -c 'its wheel in 120ths' /tmp/debug.out)\"\n"
+                  "rm -f /run/moonwater/windows /tmp/debug.out\n")
+        lines, finished = session(script)
+        got = answers(lines).get("debug escapes", {"status": None})
+        counts = next((line.split()[1:] for line in lines if line.startswith("@@escapes ")), [])
+        check(finished and got["status"] == 0 and counts[:1] == ["0"] and len(counts) == 4 and int(counts[1]) > 0 and
+              counts[2] == "1" and int(counts[3]) > 0,
+              "moonwater debug over a table of escape bytes lists its input devices with every name spelled, no escape sent, and exits 0",
+              repr((got, counts))[:240])
         #       The desktop switch ends the compositor and the supervisor the
         #       machine script recorded, by the pids in their files, which are
         #       numbers that fit a pid and nothing around their digits as

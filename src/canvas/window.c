@@ -493,6 +493,23 @@ static inline int window_key(struct window *window, struct window_key *key)
 // The screens one desktop spans, at most, and a screen's connector name with its null.
 #define WINDOWS_OUTPUTS 8
 #define WINDOWS_OUTPUT_NAME 16
+// The input devices the compositor reads, the room of the name it keeps of each, and what it found each to be.
+#define WINDOWS_INPUTS 32
+#define WINDOWS_INPUT_NAME 48
+#define WINDOWS_INPUT_KEYBOARD 1u    // taken as a keyboard: it has the letter A
+#define WINDOWS_INPUT_MOUSE 2u       // as a mouse: relative X and Y
+#define WINDOWS_INPUT_TABLET 4u      // as a tablet: absolute X and Y
+#define WINDOWS_INPUT_WAKES 8u       // a power button or a lid, read only to wake
+#define WINDOWS_INPUT_WHEEL 16u      // it has REL_WHEEL
+#define WINDOWS_INPUT_WHEEL_HI 32u   // REL_WHEEL_HI_RES, the wheel in 120ths of a notch
+#define WINDOWS_INPUT_HWHEEL 64u     // REL_HWHEEL
+#define WINDOWS_INPUT_HWHEEL_HI 128u // REL_HWHEEL_HI_RES
+#define WINDOWS_INPUT_BUTTONS 256u   // BTN_LEFT
+#define WINDOWS_INPUT_TOUCH 512u     // BTN_TOUCH
+#define WINDOWS_INPUT_FINGERS 1024u  // BTN_TOOL_FINGER: a touchpad, or a touch screen that counts fingers
+#define WINDOWS_INPUT_SLOTS 2048u    // ABS_MT_POSITION_X: more than one finger at once
+#define WINDOWS_INPUT_POINTER 4096u  // INPUT_PROP_POINTER: it moves a pointer, a touchpad's mark
+#define WINDOWS_INPUT_DIRECT 8192u   // INPUT_PROP_DIRECT: a touch screen or a pen on one
 
 /*
         The mode of the table, its memfd and the doors: owner only, 0600.
@@ -617,6 +634,28 @@ struct windows
         int output_x[WINDOWS_OUTPUTS], output_y[WINDOWS_OUTPUTS];
         unsigned int output_w[WINDOWS_OUTPUTS], output_h[WINDOWS_OUTPUTS];
         char output_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+
+        /*
+                The compositor's, for moonwater debug: each input device it reads, by its slot, and what became
+                of the wheel. input_number is the device's eventN, or -1 for a slot that holds none; input_name
+                is what the device calls itself, which is whatever bytes it chose, and is shown escaped;
+                input_id its bus, vendor, product and version; input_kinds the WINDOWS_INPUT_* bits. Counted
+                as the events are read: wheel_read the events of its four wheel codes, wheel_used those that
+                turned a wheel (a wheel that reports in 120ths sends its notches twice, and one of the two is
+                not used), dropped the times the kernel said events were lost because they were not read in
+                time; wheel_last when its last wheel event was made, on the monotonic clock. wheel_sent,
+                wheel_nowhere and wheel_full are what became of each turn: sent to a window, turned with no
+                window under the pointer, or refused by a window's ring it had not read; wheel_row, wheel_x
+                and wheel_y are the window the last was sent to and the place in it.
+        */
+        int input_number[WINDOWS_INPUTS];
+        unsigned short input_id[WINDOWS_INPUTS][4];
+        unsigned int input_kinds[WINDOWS_INPUTS];
+        unsigned int input_wheel_read[WINDOWS_INPUTS], input_wheel_used[WINDOWS_INPUTS], input_dropped[WINDOWS_INPUTS];
+        unsigned long input_wheel_last[WINDOWS_INPUTS];
+        char input_name[WINDOWS_INPUTS][WINDOWS_INPUT_NAME];
+        unsigned int wheel_sent, wheel_nowhere, wheel_full;
+        int wheel_row, wheel_x, wheel_y;
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING

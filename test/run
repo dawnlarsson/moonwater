@@ -20630,6 +20630,13 @@ def routing(shell, tag, mouse):
     out.append(("W1.4%s a notch is reported once: down one and up two are three reports of 120" % tag,
                 wheels(shell, one), "120:0 120:0 -120:0 120:0 120:0"))
     said(shell, "W1.4" + tag)
+    #   What moonwater debug says of all that: the device the wheel was read from, and every turn sent to a window.
+    told = shell.run("moonwater debug", 20)[0]
+    sent = re.search(r"wheel +(\d+) sent to a window, (\d+) with no window under the pointer, (\d+) refused", told)
+    out.append(("W1.13%s moonwater debug says which device the wheel was read from and that each turn went to a window" % tag,
+                "yes" if re.search(r"\n *wheel: [1-9]\d* events read", told) and sent and int(sent.group(1)) >= 6 and sent.group(3) == "0"
+                else "no: " + told[-400:].replace("\n", " / "), "yes"))
+    said(shell, "W1.13" + tag)
     shell.run("kill %s" % " ".join(first), 10)
     time.sleep(1)
 

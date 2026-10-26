@@ -54,7 +54,7 @@ moonwater window PLACE... COMMAND...   run COMMAND, its first window put where P
                                        size WxH, name NAME (what it is remembered by)
 moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
-moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows, the pointer
+moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
