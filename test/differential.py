@@ -44445,7 +44445,16 @@ def harness_moonwater_cli(argv):
                 "link group leave", "link group leave nobody", "link group leave nobody forget",
                 "link group leave a b c", "link nobody", "link nobody abc", "link nobody ab-cd",
                 "link nobody not-a-code", "link nobody whoami", "link nobody reboot",
-                "link nobody abcdef", "link log", "link push nobody", "link off"]
+                "link nobody abcdef", "link log", "link push nobody", "link off",
+                #       moonwater usb with no USB under it: a lock with nothing to
+                #       keep, and a watcher that finds no sysfs and ends.
+                "usb", "usb extra", "usb lock", "usb lock extra", "usb class", "usb class storage",
+                "usb class storage allow", "usb class storage maybe", "usb class bogus", "usb class bogus allow",
+                "usb allow", "usb allow 1-1", "usb allow zz", "usb allow 0627:0001", "usb allow 0627:0001/S1",
+                "usb deny 0627:0001/-", "usb allow 0627:0001/-@1-1", "usb allow 0627:0001/a b",
+                "usb forget 0627:0001/S1", "usb forget 0627:0001/S2", "usb forget", "usb log", "usb log 5",
+                "usb log 0", "usb log x", "usb log 5 6", "usb apply", "usb apply extra", "usb watch",
+                "usb watch extra", "usb unlock", "usb unlock extra"]
         #       What each vector of the walk answers, as a class: 0 it did what was
         #       asked or showed it, 1 it refused or failed in words, 2 it was not
         #       a command and printed its usage. A signal, a hang or any other
@@ -44545,6 +44554,19 @@ def harness_moonwater_cli(argv):
             'link',
             'link key',
             'link off',
+            'usb',
+            'usb lock',
+            'usb class',
+            'usb class storage',
+            'usb class storage allow',
+            'usb allow 0627:0001/S1',
+            'usb allow 0627:0001/-@1-1',
+            'usb forget 0627:0001/S1',
+            'usb log',
+            'usb log 5',
+            'usb apply',
+            'usb watch',
+            'usb unlock',
         ]:
             walk_classes[vector] = 0
         for vector in [
@@ -44609,6 +44631,11 @@ def harness_moonwater_cli(argv):
             'link nobody whoami',
             'link nobody reboot',
             'link nobody abcdef',
+            'usb allow 1-1',
+            'usb allow zz',
+            'usb allow 0627:0001',
+            'usb deny 0627:0001/-',
+            'usb forget 0627:0001/S2',
         ]:
             walk_classes[vector] = 1
         for vector in [
@@ -44707,6 +44734,20 @@ def harness_moonwater_cli(argv):
             'link log',
             'link push nobody',
             'settings extra',
+            'usb extra',
+            'usb lock extra',
+            'usb class storage maybe',
+            'usb class bogus',
+            'usb class bogus allow',
+            'usb allow',
+            'usb allow 0627:0001/a b',
+            'usb forget',
+            'usb log 0',
+            'usb log x',
+            'usb log 5 6',
+            'usb apply extra',
+            'usb watch extra',
+            'usb unlock extra',
         ]:
             walk_classes[vector] = 2
         # State the mode rules act on: neither file, then a zone with no mode.
@@ -44731,7 +44772,7 @@ def harness_moonwater_cli(argv):
         #       leave it set on the machine that ran the lane.
         verbs = ["", "status", "timezone", "time", "ntp", "keyboard", "mouse", "name", "canvas", "bind",
                  "wifi", "wired", "bluetooth", "priority", "brightness", "power", "cpu",
-                 "charge", "airplane", "-h", "help", "setup", "link"]
+                 "charge", "airplane", "-h", "help", "setup", "link", "usb"]
         fuzzed = []
         for number in range(300):
             argv = [rng.choice(verbs)] + [rng.choice(words) for _ in range(rng.randint(0, 4))]
@@ -46389,6 +46430,169 @@ while True:
         names = [lines[at + 1] for at in range(len(lines) - 1) if lines[at] == "@@ keyboard xkb"]
         check(names == ["gb", "se", "no", "de", "us"],
               "keyboard xkb says the layout in XKB's name", repr(names))
+        # moonwater usb against a sysfs of the sandbox's own: /sys is a
+        # directory here, so every device, interface and default is a file the
+        # verb reads and writes, and what it wrote is read back. The kernel's
+        # half (a device held at 0 is never configured, an interface binds once
+        # probed) is the usb lane's, in a guest; this is the policy: what lock
+        # keeps, what a rule, a class and a deny let in or hold, a known device
+        # that comes back with a class it never had, a device that says fixed
+        # behind a hub that does not, the grammar of the file and its cap, a
+        # second watcher refused, and what a device says of itself (product,
+        # serial) never reaching the terminal or the log as raw bytes.
+        def usb_show(name, command):
+            return f"echo '@@ {name}'; {command}; echo '@@status 0'\n"
+        #       What the verb writes to a file of sysfs has no newline after it, as
+        #       the kernel takes it: v says each file on a line of its own.
+        usb_values = "v() { for f; do printf '%s\\n' \"$(cat \"$f\")\"; done; }\n"
+        usb_tree = (usb_values +
+            "rm -rf /sys /root/usb.policy /root/usb.log\n"
+            "d=/sys/bus/usb/devices; mkdir -p $d /sys/module/usbcore/parameters\n"
+            "echo 1 > /sys/module/usbcore/parameters/authorized_default; : > /sys/bus/usb/drivers_probe\n"
+            "dev() { mkdir -p $d/$1; echo $2 > $d/$1/idVendor; echo $3 > $d/$1/idProduct; "
+            "[ \"$4\" = - ] || printf '%s\\n' \"$4\" > $d/$1/serial; printf '%s\\n' \"$5\" > $d/$1/product; "
+            "echo $6 > $d/$1/authorized; echo $7 > $d/$1/removable; }\n"
+            "face() { mkdir -p $d/$1; echo $2 > $d/$1/bInterfaceClass; echo 00 > $d/$1/bInterfaceSubClass; "
+            "echo 00 > $d/$1/bInterfaceProtocol; echo $3 > $d/$1/authorized; }\n"
+            "dev usb1 1d6b 0002 0000:00:03.0 'xHCI Host Controller' 1 unknown\n"
+            "echo 1 > $d/usb1/authorized_default; echo 1 > $d/usb1/interface_authorized_default\n"
+            "dev 1-1 0627 0001 28754-tablet 'QEMU USB Tablet' 1 unknown; face 1-1:1.0 03 1\n"
+            "dev 1-2 0627 0001 68284-kbd 'QEMU USB Keyboard' 1 unknown; face 1-2:1.0 03 1\n"
+            "dev 1-3 46f4 0001 \"$(printf 'E\\033[31mVIL\\007')\" "
+            "\"$(printf 'Bad \\042q\\042 \\134 \\033]0;t\\007 hid allow')\" 1 unknown; face 1-3:1.0 08 1\n"
+            "dev 1-4 1234 5678 - \"$(printf 'P%.0s' $(seq 300))\" 1 fixed; face 1-4:1.0 0e 1\n"
+            "dev 1-5 2109 2817 - 'Fixed hub' 1 fixed; face 1-5:1.0 09 1\n"
+            "dev 1-5.1 1234 9999 - 'Behind a fixed hub' 1 fixed; face 1-5.1:1.0 08 1\n"
+            "dev 1-6 2109 2818 - 'Plugged hub' 1 unknown; face 1-6:1.0 09 1\n"
+            "dev 1-6.1 abcd 1111 - 'Says fixed behind it' 1 fixed; face 1-6.1:1.0 03 1\n"
+            "dev 1-7 cccc 0007 \"$(printf '\\377%.0s' $(seq 40))\" 'Long serial' 1 unknown; face 1-7:1.0 ff 1\n")
+        script = (usb_tree + say("usb lock") +
+                  usb_show("kept", "cat /root/usb.policy; v $d/usb1/authorized_default $d/usb1/interface_authorized_default "
+                                   "/sys/module/usbcore/parameters/authorized_default") +
+                  say("usb") + say("usb watch") +
+                  "watcher=$(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p')\n"
+                  #     Plugged in after the lock, while every class is denied: held, never configured.
+                  "dev 2-1 46f4 0001 STICK1 'QEMU USB HARDDRIVE' 0 unknown\n"
+                  "dev 2-2 0627 0001 77777-kbd 'QEMU USB Keyboard' 0 unknown\n" +
+                  say("usb apply") + usb_show("held", "v $d/2-1/authorized $d/2-2/authorized") +
+                  say("usb allow 2-1") + usb_show("allowed", "v $d/2-1/authorized; grep STICK1 /root/usb.policy") +
+                  say("usb deny 0627:0001/68284-kbd") + usb_show("denied", "v $d/1-2/authorized") +
+                  say("usb allow 0627:0001") + say("usb allow 9999:9999") + say("usb allow 1-9") +
+                  "echo '@@ usb allow control'; /tmp/moonwater usb allow \"$(printf '0627:0001/a\\033b')\" 2>&1; "
+                  "echo \"@@status $?\"\n" +
+                  say("usb class storage allow") +
+                  usb_show("class defaults", "v $d/usb1/authorized_default $d/usb1/interface_authorized_default") +
+                  #     A new stick and a new keyboard, configured now and their interfaces waiting.
+                  "dev 2-3 aaaa 0003 NEWSTICK 'New stick' 1 unknown; face 2-3:1.0 08 0; face 2-3:1.1 03 0\n" +
+                  say("usb apply") +
+                  usb_show("class", "v $d/2-3:1.0/authorized $d/2-3:1.1/authorized /sys/bus/usb/drivers_probe") +
+                  #     The stick the lock kept as storage comes back as a keyboard as well.
+                  "face 1-3:1.1 03 0\n" + say("usb apply") +
+                  usb_show("grown", "v $d/1-3:1.0/authorized $d/1-3:1.1/authorized") +
+                  say("usb unlock") + usb_show("unlocked", "v $d/1-2/authorized $d/1-3:1.1/authorized $d/2-2/authorized "
+                                                           "$d/usb1/authorized_default $d/usb1/interface_authorized_default") +
+                  say("usb log 100") + usb_show("log raw", "cat /root/usb.log") + say("usb") +
+                  say("usb forget 0627:0001/68284-kbd") + say("usb") +
+                  "[ -z \"$watcher\" ] || kill \"$watcher\" 2> /dev/null || :\n")
+        lines, finished = session(script, raw=True)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        kept = out.get("kept", "").split("\n")
+        check(finished and seen.get("usb lock", {}).get("status") == 0 and
+              "allow 0627:0001/28754-tablet hid" in kept and "allow 0627:0001/68284-kbd hid" in kept and
+              "allow 46f4:0001/E\\x1b[31mVIL\\x07 storage" in kept and "allow abcd:1111/-@1-6.1 hid" in kept and
+              "allow cccc:0007/-@1-7 other" in kept and "allow 2109:2818/-@1-6 hub" in kept and
+              not any("1234:5678" in line or "1234:9999" in line or "2109:2817" in line for line in kept) and
+              "mode lock" in kept and "class storage deny" in kept and kept[-3:] == ["0", "0", "0"],
+              "usb lock keeps every device plugged in as a rule with its classes, a serial too long to keep pinned to "
+              "its port, none for what is fixed (and a device behind a hub that is not is not), every class denied, "
+              "and the root hub and usbcore holding what is new", repr((seen.get("usb lock"), kept)))
+        check("watcher running, pid" in out.get("usb", "") and seen.get("usb watch", {}).get("status") == 1 and
+              "already running" in out.get("usb watch", ""),
+              "lock starts the watcher, and a second one is refused", repr((out.get("usb"), seen.get("usb watch"))))
+        check(out.get("held") == "0\n0" and out.get("allowed", "").startswith("1") and
+              "allow 46f4:0001/STICK1" in out.get("allowed", "") and out.get("denied") == "0",
+              "a device plugged in after the lock is held, usb allow PORT lets it in and keeps its rule, "
+              "usb deny holds a device at once", repr((out.get("held"), out.get("allowed"), out.get("denied"))))
+        check(seen.get("usb allow 0627:0001", {}).get("status") == 1 and
+              "devices plugged in are 0627:0001" in out.get("usb allow 0627:0001", "") and
+              seen.get("usb allow 9999:9999", {}).get("status") == 1 and
+              seen.get("usb allow 1-9", {}).get("status") == 1 and
+              seen.get("usb allow control", {}).get("status") == 1 and "\\x1b" in out.get("usb allow control", ""),
+              "a VID:PID that is more than one device or none is refused, a port with nothing is refused, "
+              "and a serial typed with a control byte is refused and shown escaped",
+              repr([seen.get(key) for key in ("usb allow 0627:0001", "usb allow 9999:9999", "usb allow control")]))
+        check(out.get("class defaults") == "1\n0" and out.get("class", "").split("\n")[:2] == ["1", "0"] and
+              "2-3:1.0" in out.get("class", ""),
+              "with storage allowed a new device is configured and only its storage interface is authorized and probed",
+              repr((out.get("class defaults"), out.get("class"))))
+        check(out.get("grown") == "1\n0",
+              "a stick the lock kept as storage that comes back with a keyboard has the keyboard held",
+              repr(out.get("grown")))
+        check(out.get("unlocked") == "0\n1\n1\n1\n1",
+              "unlock lets every device in but the one a deny rule holds", repr(out.get("unlocked")))
+        log_lines = out.get("usb log 100", "").split("\n")
+        check(any(line.endswith("mode lock") for line in log_lines) and
+              any("rule added: deny 0627:0001/68284-kbd" in line for line in log_lines) and
+              any("interface 2-3:1.0 storage allowed (class storage)" in line for line in log_lines) and
+              any(re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ ", line) for line in log_lines),
+              "the log has a line for every decision, each with its time", repr(log_lines[-6:]))
+        status_text = out.get("usb", "")
+        check(not re.search(r"[\x00-\x08\x0b-\x1f\x7f]", "\n".join(lines)) and
+              'Bad \\x22q\\x22 \\x5c \\x1b]0;t\\x07 hid allow"' in status_text and "P" * 64 + '..."' in status_text and
+              "\\x1b" in out.get("log raw", ""),
+              "what a device says of itself is escaped and cut short in usb and in the log, and nothing anywhere "
+              "carries a control byte", repr(status_text[-400:]))
+        check("classes: storage allow, hid deny" in status_text and
+              "1-6.1 abcd:1111/- allowed (rule)" in status_text and "1-5.1 1234:9999/- allowed (fixed)" in status_text,
+              "a device that says fixed is fixed only when every hub above it says so too", repr(status_text[-600:]))
+        watching = [line for line in seen.get("usb", {}).get("out", []) if "watcher" in line]
+        check(seen.get("usb forget 0627:0001/68284-kbd", {}).get("status") == 0 and len(watching) == 3 and
+              "running, pid" in watching[1] and "watcher not running" in watching[2],
+              "the watcher keeps running for a deny rule with the policy off, and ends once none is left",
+              repr((seen.get("usb forget 0627:0001/68284-kbd"), watching)))
+
+        # The file: lines that are no rule are left out and counted, a policy
+        # read at boot (apply) lets in the device it names, and the cap.
+        script = (usb_tree +
+                  "printf 'mode lock\\nclass storage allow\\nallow 0627:0001/28754-tablet hid\\nbogus\\n"
+                  "allow zzzz:0001/x\\nallow 0627:0001/q hid,nothing\\ndeny 0627:0001/x hid\\n' > /root/usb.policy\n"
+                  "echo 0 > $d/1-1/authorized\n" + say("usb apply") +
+                  usb_show("from the file", "v $d/1-1/authorized $d/1-2/authorized $d/1-2:1.0/authorized "
+                                            "$d/usb1/authorized_default $d/usb1/interface_authorized_default") +
+                  say("usb") +
+                  "{ echo 'mode off'; i=0; while [ $i -lt 65 ]; do printf 'allow 1111:%04x/S%d\\n' $i $i; i=$((i+1)); done; }"
+                  " > /root/usb.policy\n" + say("usb") + say("usb allow 2222:2222/T") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and seen.get("usb apply", {}).get("status") == 0 and
+              "\n".join(seen.get("from the file", {}).get("out", [])) == "1\n1\n0\n1\n0",
+              "apply puts a policy read from /root in force: the device a rule names is let in, one no rule names "
+              "keeps only the interfaces of an allowed class, and what is new is configured with its interfaces held",
+              repr(seen.get("from the file")))
+        said = "\n".join(seen.get("usb", {}).get("out", []))
+        check("4 lines of /root/usb.policy are no rule" in said and "1 lines of /root/usb.policy are no rule" in said,
+              "a line that is no rule is left out and counted, and so is a rule past the 64 a policy keeps",
+              repr(said)[:400])
+        check(seen.get("usb allow 2222:2222/T", {}).get("status") == 1 and
+              "64 rules at most" in "\n".join(seen.get("usb allow 2222:2222/T", {}).get("out", [])),
+              "an allow past the 64 rules is refused", repr(seen.get("usb allow 2222:2222/T")))
+
+        # Somebody who is not root reads the mode from the kernel and the
+        # devices, and nothing of the rules.
+        session(usb_tree + "printf 'mode lock\\n' > /root/usb.policy; chmod 000 /root/usb.policy; "
+                "echo 0 > $d/usb1/authorized_default\n")
+        lines, finished = session(say("usb") + say("usb lock"), nobody=True)
+        seen = answers(lines)
+        said = "\n".join(seen.get("usb", {}).get("out", []))
+        check(finished and seen.get("usb", {}).get("status") == 0 and "usb lock" in said and
+              "the rules are root's" in said and "storage unknown" in said and "1-1 0627:0001/28754-tablet allowed (unknown)" in said and
+              seen.get("usb lock", {}).get("status") == 1,
+              "usb to somebody who is not root: the mode from the kernel, the devices, the rules unknown",
+              repr(said[-500:]))
+        session("rm -rf /sys /root/usb.policy /root/usb.log\n")
+
         # Wipe against what a machine really has under /home and /root.
         #   A file system mounted there is not userspace to forget: a stick
         #   under /home lost its files and then the wipe failed on the busy
@@ -46634,7 +46838,8 @@ while True:
             "latency", "latency sideways", "latency reset extra", "canvas background 112233",
             "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
             "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
-            "mouse sensitivity 150", "mouse acceleration off")))
+            "mouse sensitivity 150", "mouse acceleration off", "usb lock", "usb allow 1-1", "usb class storage allow",
+            "usb forget 1-1", "usb log", "usb apply", "usb watch", "usb sideways", "usb class")))
         lines, finished = session(script, nobody=True)
         seen = answers(lines)
         wanted = {
@@ -46668,6 +46873,10 @@ while True:
             "keyboard repeat rate off": (1, "moonwater keyboard needs root"),
             "mouse sensitivity 150": (1, "moonwater mouse needs root"),
             "mouse acceleration off": (1, "moonwater mouse needs root"),
+            "usb lock": (1, "moonwater usb needs root"), "usb allow 1-1": (1, "moonwater usb needs root"),
+            "usb class storage allow": (1, "moonwater usb needs root"), "usb forget 1-1": (1, "moonwater usb needs root"),
+            "usb log": (1, "moonwater usb needs root"), "usb apply": (1, "moonwater usb needs root"),
+            "usb watch": (1, "moonwater usb needs root"), "usb sideways": (2, ""), "usb class": (0, "classes: storage"),
         }
         for command, (status, words) in wanted.items():
             got = seen.get(command, {"out": [], "status": None})
@@ -46682,12 +46891,13 @@ while True:
         # disk, a zone, a network, a layout and a name typed with ESC [ 2 J in
         # them cleared the screen of whoever read the refusal.
         quiet = ("status", "help", "help wifi", "wifi", "name", "bind", "keyboard list", "timezone list",
-                 "link", "ntp", "time", "wired", "bluetooth", "airplane", "priority", "setup")
+                 "link", "ntp", "time", "wired", "bluetooth", "airplane", "priority", "setup", "usb")
         hostile = ("timezone x${e}", "keyboard x${e}", "name x${e}", "wifi remove x${e}", "bluetooth remove x${e}",
                    "bind init remove x${e}", "setup install x${e}", "setup use x${e}", "setup update x${e}",
                    "link remove x${e}", "link x${e} abc-def", "link group x${e}", "link allow x${e} shell",
                    "link add x${e} AAAA", "canvas x${e}", "canvas background x${e}", "canvas cursor size x${e}",
-                   "canvas cursor look x${e}", "wifi add x${e} pw", "priority x${e}", "x${e}", "help x${e}")
+                   "canvas cursor look x${e}", "wifi add x${e} pw", "priority x${e}", "x${e}", "help x${e}",
+                   "usb allow x${e}", "usb deny 0627:0001/x${e}", "usb forget x${e}", "usb class x${e}")
         script = ("e=$(printf '\\033[2J')\n" +
                   "".join(f"/tmp/moonwater {command} > /tmp/o 2>&1; echo \"@@escapes {command}: $(tr -cd '\\033' < /tmp/o | wc -c)\"\n"
                           for command in quiet) +

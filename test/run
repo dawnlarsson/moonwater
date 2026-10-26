@@ -125,7 +125,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged"
 
@@ -221,6 +221,7 @@ describe()
         sleep)    echo "moonwater sleep from the serial shell, woken by a key: the compositor's desktop back on a card that lost its pipe" ;;
         desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it, and weston drawing on the card once desktop off has handed it over (NOT RUN without a network, an image or mke2fs)" ;;
         chrome)   echo "a browser that will not run as root, from Debian's package in a booted guest: who a bowl's programs are, and Chromium's sandbox on (NOT RUN without a network, an image or mke2fs)" ;;
+        usb)      echo "moonwater usb in a booted guest with devices hot-plugged over QMP: what lock keeps, a stick and a keyboard held, allow, a class, a deny across unlock, hostile serials, and the policy read at a second boot (NOT RUN without qemu-system-x86_64 or an image)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
@@ -271,7 +272,7 @@ seam_apart()
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
         desktop) echo "desktop chrome" ;;
-        image) echo "ring0 tier" ;;
+        image) echo "ring0 tier usb" ;;
         *) ;;
         esac
 }
@@ -21451,6 +21452,260 @@ PY
 
 if [ ! -s "$work/answers" ]; then
         echo "  chrome       the guest answered nothing"
+        sed 's/^/    /' "$work/why" | tail -5
+        exit 1
+fi
+
+while IFS='|' read -r name got want; do
+        same "$name" "$want" "$got"
+done < "$work/answers"
+
+counted
+)
+
+#       moonwater usb against a real kernel, with devices plugged in while it
+#       runs.
+#
+#       The cli lane holds the policy to a sysfs of files; this is what the
+#       kernel does with it. A guest on an xHCI with eight ports of each
+#       speed (so QEMU never puts a hub of its own in the way) installs to a
+#       disk, keeps its data there and locks: the tablet and the keyboard the
+#       harness types with are kept, and devices are hot-plugged over QMP. A
+#       stick plugged in after the lock stays unauthorized with no SCSI host
+#       and no disk, a keyboard gives no input device, usb allow PORT makes the
+#       disk appear, class storage allow lets a new stick in and still not a
+#       keyboard, a deny holds its keyboard across unlock and again when it
+#       comes back, and a serial of escapes and one too long to keep reach
+#       neither the status nor the log as raw bytes. A second guest boots on
+#       the same disk: the policy is read at boot, the stick it allows is a
+#       disk and the stick it does not know is held.
+lane_usb()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting usb
+
+for need in qemu-system-x86_64 python3 truncate; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  usb          NOT RUN -- no $need"
+                exit 2
+        fi
+done
+
+if [ ! -f "$image" ]; then
+        echo "  usb          NOT RUN -- no image at $image"
+        exit 2
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-usb.XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT INT TERM
+
+#       The install takes the image from a disk the session can see: a stick of
+#       QEMU's FAT with it where firmware looks, as the install lane has.
+mkdir -p "$work/source/EFI/BOOT" && cp "$image" "$work/source/EFI/BOOT/BOOTX64.EFI" &&
+        truncate -s 4G "$work/disk.img" || exit 1
+for stick in 1 2 3 4 5 6 7 8 9; do
+        truncate -s 32M "$work/stick$stick.img" || exit 1
+done
+
+MOONWATER_USB_WORK=$work
+export MOONWATER_USB_WORK
+qmp_guest_module "$work"
+
+PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_USB_WORK"]
+out = []
+
+def machine(name, boot_sticks=(), source=False):
+    """The compositor guest's machine with its xHCI widened, the disk, the sticks as drives, and a serial shell
+       with the kernel's console lines off it, once boot has settled."""
+    args = desktop(image)
+    args[args.index("qemu-xhci")] = "qemu-xhci,id=xhci,p2=8,p3=8"
+    args += ["-drive", "if=none,id=disk,format=raw,file=" + work + "/disk.img",
+             "-device", "nvme,serial=usbdisk,drive=disk"]
+    if source:
+        args += ["-drive", "if=none,id=source,format=raw,file=fat:ro:" + work + "/source,readonly=on",
+                 "-device", "usb-storage,bus=xhci.0,drive=source,removable=on"]
+    for stick in range(1, 10):
+        args += ["-drive", "if=none,id=st%d,format=raw,file=%s/stick%d.img" % (stick, work, stick)]
+    for stick, serial in boot_sticks:
+        args += ["-device", "usb-storage,bus=xhci.0,drive=st%d,serial=%s" % (stick, serial)]
+    args += ["-chardev", "socket,id=s0,path=%s/%s.ser,server=on,wait=off" % (work, name),
+             "-serial", "chardev:s0", "-no-reboot", "-display", "none",
+             "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none"]
+    guest = Guest(args, "%s/%s.qmp" % (work, name), "%s/%s.mon" % (work, name), work,
+                  sockets=("%s/%s.ser" % (work, name),))
+    shell = Shell("%s/%s.ser" % (work, name))
+    shell.ready()
+    shell.run("echo 1 > /proc/sys/kernel/printk; until [ -e /run/moonwater/verdict ]; do sleep 1; done", 120)
+    return guest, shell
+
+def plug(driver, ident, **properties):
+    """A device hot-plugged; QMP's error, or none."""
+    answer = qcmd({"execute": "device_add", "arguments": dict(driver=driver, id=ident, bus="xhci.0", **properties)})
+    time.sleep(3)
+    return answer.get("error", {}).get("desc", "")
+
+def why(shell):
+    """What usb says and the log's tail, for a row that is red."""
+    return shell.run("moonwater usb 2>&1 | tail -12; moonwater usb log 8 2>&1", 20)[0][-900:]
+
+def unplug(ident):
+    qcmd({"execute": "device_del", "arguments": {"id": ident}})
+    time.sleep(2)
+
+def port_of(shell, serial_test):
+    """The sysfs name of the device whose serial passes a shell test of $s."""
+    return shell.run("for f in /sys/bus/usb/devices/*/serial; do s=$(cat $f); if %s; then d=${f%%/serial}; "
+                     "echo ${d##*/}; fi; done" % serial_test, 10)[0].strip()
+
+def stop(guest):
+    guest.quit()
+    time.sleep(1)
+    guest.terminate()
+    try:
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+def keyboards(shell):
+    return shell.number("grep -c 'QEMU USB Keyboard' /proc/bus/input/devices")
+
+def disks(shell):
+    return shell.number("ls /sys/block | grep -c '^sd'")
+
+#       The first guest: an install, its data kept, and the lock.
+guest, shell = machine("one", source=True)
+said, status = shell.run("moonwater setup install nvme0n1 yes > /tmp/install 2>&1; echo $?; tail -3 /tmp/install", 300)
+out.append(("U0 the guest installs to its disk", said.split()[0] if said.split()[:1] == ["0"] else "no: " + said[-300:], "0"))
+said, status = shell.run("moonwater setup use nvme0n1 > /tmp/use 2>&1; echo $?; cat /run/moonwater/verdict", 120)
+out.append(("U0 and keeps its data there", "yes" if "disk nvme0n1" in said else "no: " + said[-200:], "yes"))
+
+said, status = shell.run("moonwater usb lock", 60)
+out.append(("U1 usb lock answers 0", str(status), "0"))
+policy, _ = shell.run("cat /root/usb.policy", 10)
+rules = [line for line in policy.split("\n") if line.startswith("allow 0627:0001/")]
+out.append(("U1 the lock keeps the tablet and the keyboard the harness uses as rules, each a hid",
+            "%d %s" % (len(rules), all(line.endswith(" hid") for line in rules)), "2 True"))
+#       The stick the image came from is a disk, and kept as storage.
+present = int(disks(shell) or 0)
+hosts = shell.number("ls /sys/class/scsi_host | wc -l")
+said, _ = shell.run("moonwater usb", 20)
+out.append(("U1 the watcher runs", "yes" if "watcher running, pid" in said else "no: " + said[-300:], "yes"))
+out.append(("U1 the tablet and the keyboard still give input",
+            shell.number("grep -c -e 'QEMU USB Tablet' -e 'QEMU USB Keyboard' /proc/bus/input/devices"), "2"))
+defaults, _ = shell.run("cat /sys/bus/usb/devices/usb1/authorized_default /sys/bus/usb/devices/usb1/interface_authorized_default "
+                        "/sys/module/usbcore/parameters/authorized_default | tr '\\n' ' '", 10)
+out.append(("U1 the root hub configures nothing new and usbcore holds a later controller", defaults.strip(), "0 0 0"))
+
+#       A stick and a keyboard plugged in after it.
+out.append(("U2 a stick is hot-plugged", plug("usb-storage", "s1", drive="st1", serial="STICK1") or "yes", "yes"))
+stick = port_of(shell, "[ \"$s\" = STICK1 ]")
+state, _ = shell.run("cat /sys/bus/usb/devices/%s/authorized; ls -d /sys/bus/usb/devices/%s:* 2> /dev/null | wc -l; "
+                     "ls /sys/class/scsi_host | wc -l" % (stick, stick), 10)
+out.append(("U2 it stays unauthorized, not configured, with no SCSI host of its own", " ".join(state.split()), "0 0 " + hosts))
+out.append(("U2 and no disk appears", disks(shell), str(present)))
+out.append(("U3 a keyboard is hot-plugged", plug("usb-kbd", "k2", serial="KBD2") or "yes", "yes"))
+out.append(("U3 it gives no input device", keyboards(shell), "1"))
+keyboard = port_of(shell, "[ \"$s\" = KBD2 ]")
+
+#       What a device says of itself, chosen to act on a terminal, as the
+#       serials of two mice (a stick's serial is its SCSI device id too, which
+#       QEMU keeps to 20 characters): one of escapes, and one of 40 control
+#       bytes, which spelled are past what a rule keeps.
+hostile = plug("usb-mouse", "m3", serial="\u001b]0;pwned\u0007\u001b[2J\u001b[31mRED")
+hostile += plug("usb-mouse", "m4", serial="\u0001" * 40)
+raw, _ = shell.run("moonwater usb > /tmp/usb.out 2>&1; tr -cd '\\001\\007\\033' < /tmp/usb.out | wc -c; "
+                   "tr -cd '\\001\\007\\033' < /root/usb.log | wc -c; grep -c 'x1b]0;pwned' /tmp/usb.out", 20)
+out.append(("U4 a serial of escapes reaches neither usb nor the log raw, and is shown spelled",
+            " ".join(raw.split()) if not hostile else "plug: " + hostile, "0 0 1"))
+pinned = port_of(shell, "[ \"$s\" = \"$(printf '\\001%.0s' $(seq 40))\" ]")
+said, status = shell.run("moonwater usb allow %s; grep -c '^allow 0627:0001/-@%s hid' /root/usb.policy" % (pinned, pinned), 30)
+out.append(("U4 one too long to keep is allowed by its port, as the class it shows",
+            said.split()[-1] if pinned and said.split() else "no port: " + why(shell), "1"))
+unplug("m3")
+unplug("m4")
+
+#       The owner lets the stick in by its port.
+said, status = shell.run("moonwater usb allow %s" % stick, 30)
+out.append(("U5 usb allow PORT answers 0", str(status), "0"))
+time.sleep(3)
+out.append(("U5 and the disk appears", disks(shell), str(present + 1)))
+out.append(("U5 its rule keeps it as storage",
+            shell.number("grep -c '^allow 46f4:0001/STICK1 storage$' /root/usb.policy"), "1"))
+
+#       A class allowed: a new stick is let in, a new keyboard still is not.
+said, status = shell.run("moonwater usb class storage allow", 30)
+plug("usb-storage", "s2", drive="st2", serial="STICK2")
+time.sleep(3)
+got = disks(shell)
+out.append(("U6 with storage allowed a new stick is a disk", got if got == str(present + 2) else got + ": " + why(shell),
+            str(present + 2)))
+plug("usb-kbd", "k3", serial="KBD3")
+out.append(("U6 and a new keyboard still gives no input", keyboards(shell), "1"))
+
+#       A deny holds across unlock, and holds the keyboard again when it is back.
+said, status = shell.run("moonwater usb deny %s" % keyboard, 30)
+said, status = shell.run("moonwater usb unlock", 60)
+out.append(("U7 usb unlock answers 0", str(status), "0"))
+time.sleep(2)
+out.append(("U7 the denied keyboard stays held across unlock",
+            shell.run("cat /sys/bus/usb/devices/%s/authorized" % keyboard, 10)[0].strip(), "0"))
+out.append(("U7 and the keyboard the class held gives input once unlocked", keyboards(shell), "2"))
+plug("usb-kbd", "k4", serial="KBD4")
+out.append(("U7 a keyboard plugged in after unlock gives input", keyboards(shell), "3"))
+unplug("k2")
+plug("usb-kbd", "k2b", serial="KBD2")
+time.sleep(2)
+again = port_of(shell, "[ \"$s\" = KBD2 ]")
+out.append(("U7 the denied keyboard plugged in again is held again by the watcher",
+            shell.run("cat /sys/bus/usb/devices/%s/authorized" % again, 10)[0].strip() if again else "not found", "0"))
+log, _ = shell.run("moonwater usb log 200", 20)
+out.append(("U8 the log says what was decided",
+            "%s %s %s" % ("mode lock" in log, "rule added: allow 46f4:0001/STICK1 storage" in log,
+                          bool(re.search(r"seen (allowed|held) \S+ 0627:0001/KBD2", log))), "True True True"))
+
+#       Locked again with only what the second guest is to find, and the disk let go of.
+for ident in ("s1", "s2", "k3", "k4", "k2b"):
+    unplug(ident)
+shell.run("moonwater usb class storage deny; moonwater usb lock; sync", 60)
+stop(guest)
+
+#       The second guest boots on the disk with the stick its policy allows and one it does not know.
+guest, shell = machine("two", boot_sticks=((5, "STICK1"), (6, "STICK5")))
+time.sleep(5)
+verdict, _ = shell.run("cat /run/moonwater/verdict", 10)
+out.append(("U9 the second boot keeps the disk's data", "yes" if verdict.startswith("disk") else "no: " + verdict, "yes"))
+said, _ = shell.run("moonwater usb", 20)
+out.append(("U9 and is locked by the policy read at boot",
+            "yes" if said.split("\n")[0].endswith("usb lock") and "watcher running" in said else "no: " + said[-300:], "yes"))
+known = port_of(shell, "[ \"$s\" = STICK1 ]")
+unknown = port_of(shell, "[ \"$s\" = STICK5 ]")
+state, _ = shell.run("cat /sys/bus/usb/devices/%s/authorized /sys/bus/usb/devices/%s/authorized | tr '\\n' ' '" % (known, unknown), 10)
+out.append(("U9 the stick the policy allows is let in and the one it does not know is held", state.strip(), "1 0"))
+out.append(("U9 so one disk is there", disks(shell), "1"))
+out.append(("U9 the tablet and the keyboard give input after the boot",
+            shell.number("grep -c -e 'QEMU USB Tablet' -e 'QEMU USB Keyboard' /proc/bus/input/devices"), "2"))
+log, _ = shell.run("moonwater usb log 50", 20)
+out.append(("U9 the boot logged every device it found",
+            "yes" if re.search(r"seen \w+ \S+ 46f4:0001/STICK5", log) and re.search(r"held \S+ 46f4:0001/STICK5", log)
+            else "no: " + log[-300:], "yes"))
+plug("usb-storage", "s7", drive="st7", serial="STICK7")
+out.append(("U9 a stick plugged in after that boot is held", disks(shell), "1"))
+alive, status = shell.run("echo answers", 10)
+out.append(("U9 and the machine answers on its serial shell", "yes" if status == 0 and "answers" in alive else "no", "yes"))
+stop(guest)
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, " ".join(got.split()).replace("|", "/"), want))
+PY
+
+if [ ! -s "$work/answers" ]; then
+        echo "  usb          the guest answered nothing"
         sed 's/^/    /' "$work/why" | tail -5
         exit 1
 fi
