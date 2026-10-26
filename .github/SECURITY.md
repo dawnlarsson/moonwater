@@ -339,9 +339,11 @@ attacker gets its invariants here once there is a lane that proves them.
   (host.c) answers them for bowl.c and the command's root check. `packages`
   (the programs of a bowl may run the package manager of their distribution)
   is on at the default tier, as it always was, and off at the bowl's tight
-  tier (`MOONWATER_STRICT_BOWL` 2, `sec_bowl`), which refuses `packages on`:
-  it only tightens, and off takes from a compromised bowl program (attacker 8)
-  the one tool that installs more programs. `sudo` (the `moonwater` command
+  tier (`MOONWATER_STRICT_BOWL` 2 and 3: `sec_bowl_hardened`,
+  `sec_bowl_locked`, and `sec_hardened` and `sec_locked`, which put every
+  region there), which refuses `packages on`: it only tightens, and off is
+  meant to take from a compromised bowl program (attacker 8) the one tool
+  that installs more programs. `sudo` (the `moonwater` command
   through sudo or su in a bowl, by a process that is root only inside the
   bowl's user namespace) is off at every tier and can be turned on at the
   default tier only; a tight build refuses `sudo on` and reads one kept by
@@ -363,10 +365,15 @@ attacker gets its invariants here once there is a lane that proves them.
   when the bowl carries the file in. An older build that boots settings with
   either switch turned publishes the entry and refuses the file whole, since
   its reader knows five ids, so its TLS refuses every checked certificate
-  until a build that knows the switch sets it back. Held by `moonwater_cli`
-  (defaults, a turn and back, the published entries, a second run, nobody,
-  eight files that do not count, the tight build's lines and refusals) and
-  by `CHECK_bowl`'s `switches_asked` at both tiers (`sh test/run cli bowl`).
+  until a build that knows the switch sets it back. What asks the switches
+  is a change of its own: bowl.c before a bowl's program runs a package
+  manager, and the root check before it takes a bowl's root. Until it lands
+  a switch is kept, published and listed and enforces nothing, and that
+  effect is a gap no row holds. The switches and their reader are held by
+  `moonwater_cli` (defaults, a turn and back, the published entries, a
+  second run, nobody, nine files that do not count, the tight build's lines
+  and refusals) and by `CHECK_bowl`'s `switches_asked` at both tiers (`sh
+  test/run cli bowl`).
 - **The clients' network half runs apart (`net_apart`, `src/net/net.c`).**
   wget (`--spider` too), fetch, `host`, the NTS key establishment and every
   SNTP or NTS time query the machine's NTP child makes as root

@@ -160,14 +160,17 @@ started with. `http off` leaves the CRL and caIssuers fetches inside TLS alone, 
 are plain http by design and checked by their signatures.
 
 `packages` and `sudo` are the bowls' two switches, kept and published the same way.
-`packages off` keeps the programs of a bowl from running their distribution's package
+`packages` says whether the programs of a bowl may run their distribution's package
 manager (apk, apt and dpkg, pacman, dnf and rpm, zypper, nix); it is on by default and
-off at the bowl's tight tier (`sec_bowl`), which refuses `packages on`. `sudo on` lets
-the `moonwater` command be used through a bowl's sudo or su, by a process that is root
-only inside the bowl: it trusts root in a bowl as root of the machine, which is for a
+off at the bowl's tight tier (`sec_bowl_hardened`, and `sec_hardened` and `sec_locked`,
+which put every region there), which refuses `packages on`. `sudo` says whether the
+`moonwater` command may be used through a bowl's sudo or su, by a process that is root
+only inside the bowl: on trusts root in a bowl as root of the machine, which is for a
 machine with one user, so it is off at every tier and only the default tier can turn
 it on. A published file that is not root's, that a group or others may write, or that
-does not read counts as no file: packages on, sudo off.
+does not read counts as no file: packages on, sudo off. Bowl and the command's root
+check are what ask them; until that asking lands, a switch is kept, published and
+listed and changes nothing else.
 
 At the tight and locked net tiers (`sec_net_hardened`, `sec_net_locked`) a closed
 port gives a scanner nothing: the kernel sysctl `net.ipv4.moonwater_silent` is set
