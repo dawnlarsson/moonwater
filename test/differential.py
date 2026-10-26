@@ -47318,6 +47318,27 @@ while True:
               "in force until the machine restarts, not kept: /root/usb.policy cannot be read" in out.get("usb", ""),
               "usb lock refuses to write over a policy it cannot read, as the verbs do, and is in force from /run",
               repr((seen.get("usb lock"), out.get("linked lock"), out.get("usb", "")[-300:])))
+        #       A lock that /run cannot keep either says so: the answer said the lock was in force until the
+        #       machine restarts whether or not /run held it, and the log and usb said so with no note written.
+        script = (usb_tree +
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy; mkdir -p /run/moonwater/usb.policy /root/usb.policy\n" +
+                  say("usb lock") +
+                  usb_show("nowhere", "grep -c 'and /run could not keep it either: Is a directory' /root/usb.log; "
+                                      "grep -c 'the lock is in force until the machine restarts' /root/usb.log; "
+                                      "ls /run/moonwater/usb.unkept 2>&1 | grep -c 'No such'") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n"
+                  "rmdir /run/moonwater/usb.policy /root/usb.policy\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb lock", {}).get("status") == 1 and
+              "/root/usb.policy cannot be read (" in out.get("usb lock", "") and
+              "), and nor could /run/moonwater/usb.policy be (Is a directory): what is held now stays held, and "
+              "nothing keeps the lock" in out.get("usb lock", "") and
+              "in force until the machine restarts" not in out.get("usb lock", "") and
+              out.get("nowhere") == "1\n0\n1",
+              "a lock that /run cannot keep either is said so, in the answer and in the log, and no note is written",
+              repr((seen.get("usb lock"), out.get("nowhere"))))
 
         # The usb log is shown from its newest line, however much of it there is: a log
         # grown past what usb log reads (another hand's, or a cut that did not happen)

@@ -15557,21 +15557,26 @@ static b32 usb_policy_whole(usb_policy address_to policy)
 /*
         A lock put in force that /root/usb.policy does not keep -- it could
         not be written (a disk full or read only), or what is there cannot be
-        read and is not written over at boot: the policy in /run, which the
+        read and is not written over: the policy in /run, which the
         watcher and every verb read in its place until the machine restarts
-        or a verb keeps one, and why, beside which /root it is for.
+        or a verb keeps one, and why, beside which /root it is for. Negative
+        when /run could not keep it either: nothing then holds the lock but
+        what the kernel and the devices are set to now.
 */
-static fn usb_policy_unkept(usb_policy address_to policy, string_address what, bipolar error)
+static bipolar usb_policy_unkept(usb_policy address_to policy, string_address what, bipolar error)
 {
         static p8 text[USB_POLICY_ROOM];
         p8 note[256];
         p8 mark[64];
+        bipolar failed;
 
         usb_root_mark(mark, sizeof(mark));
-        (void)host_write_file(USB_RUN_POLICY, text, usb_policy_text(policy, text, sizeof(text)), 0600, false);
+        failed = host_write_file(USB_RUN_POLICY, text, usb_policy_text(policy, text, sizeof(text)), 0600, false);
         (void)string_join(note, sizeof(note), (string_address)mark, "\n" USB_POLICY " ", what, ": ",
                           file_reason(error), "\n");
-        (void)host_write_file(USB_UNKEPT_PATH, note, string_length((string_address)note), 0600, false);
+        //      Both are needed for the lock to be read (usb_policy_load): a lock /run holds no note of is none.
+        return failed < 0 ? failed
+                          : host_write_file(USB_UNKEPT_PATH, note, string_length((string_address)note), 0600, false);
 }
 
 // Whether the policy holds anything, which is what the watcher is for.
@@ -15879,6 +15884,7 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
         bool write;
         positive kept = 0;
         bipolar error;
+        bipolar run = 0;
 
         usb_policy_load(address_of policy);
         if (policy.cut)
@@ -15945,8 +15951,12 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
         error = write ? usb_policy_write(address_of policy) : policy.error;
         if (error < 0)
         {
-                usb_policy_unkept(address_of policy, write ? "could not be written" : "cannot be read", error);
-                usb_tell_text(false, "the lock is in force until the machine restarts, and not kept: ", file_reason(error));
+                run = usb_policy_unkept(address_of policy, write ? "could not be written" : "cannot be read", error);
+                usb_tell_text(false, run < 0 ? "the lock is applied now, and not kept: "
+                                             : "the lock is in force until the machine restarts, and not kept: ",
+                              file_reason(error));
+                if (run < 0)
+                        usb_tell_text(false, "and /run could not keep it either: ", file_reason(run));
         }
         for (positive at = policy.count - kept; at < policy.count; at++)
         {
@@ -15957,6 +15967,16 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
         }
         usb_tell_text(false, "mode lock", "");
         usb_apply_all(address_of policy, null, null, say);
+        if (error < 0 && run < 0)
+        {
+                p8 line[256];
+
+                //      Applied now, and the kernel holds what is new at its defaults, but nothing reads this lock again.
+                (void)string_join(line, sizeof(line), USB_POLICY, write ? " could not be written (" : " cannot be read (",
+                                  file_reason(error), "), and nor could " USB_RUN_POLICY " be (", file_reason(run),
+                                  "): what is held now stays held, and nothing keeps the lock");
+                return host_refuse("%s\n", (string_address)line);
+        }
         if (error < 0)
                 return write ? host_refuse(USB_POLICY " could not be written (%s): the lock is in force until the "
                                                       "machine restarts\n",
