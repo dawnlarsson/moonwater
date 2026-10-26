@@ -531,6 +531,8 @@ static fn link_serve_start(bool detached, bipolar ready)
                 (void)system_call(syscall(setsid));
                 (void)descriptors_close_except(3, descriptors_none, descriptors_none);
         }
+        //      The listener carries what the one that started it ignored no further.
+        (void)system_signal_install(13, 0, 0, 0, null);
         (void)shell_exec_file((string_address) "/proc/self/exe",
                               ready >= 0 ? words : plain, ready >= 0 ? 4 : 3,
                               file_environment_all());
@@ -1444,7 +1446,7 @@ static bool link_code_shaped(string_address word)
                link_code_clean(word, code);
 }
 
-static b32 link_main(string_address address_to arguments, positive count)
+static b32 link_dispatch(string_address address_to arguments, positive count)
 {
         string_address verb = count > 2 ? arguments[2] : null;
         positive kind;
@@ -1578,6 +1580,38 @@ static b32 link_main(string_address address_to arguments, positive count)
         return host_refuse("no machine is called %s: moonwater link pair "
                            "on it, then moonwater link NAME CODE here\n",
                            verb);
+}
+
+/*
+        The verbs that change what the machine keeps end what they began when
+        the reader of their output has gone, as host_main's quiet verbs do:
+        `link group lab SECRET | true` died of SIGPIPE at its first line, with
+        the group not joined and the listener not started. The ones that carry
+        a stream (a terminal, a command, push, pull, log, serve) keep the
+        signal as they found it, since ending with the reader is what they
+        are for.
+*/
+static b32 link_main(string_address address_to arguments, positive count)
+{
+        static const string_address changes[] = {"on",  "off",    "port", "pair", "add",
+                                                 "remove", "allow", "deny", "group"};
+        string_address verb = count > 2 ? arguments[2] : null;
+        positive previous[4];
+        bool ignored = false;
+        b32 answer;
+
+        for (positive at = 0; verb && at < array_count(changes); at++)
+                ignored |= string_equals(verb, changes[at]);
+        if (ignored)
+                ignored = system_signal_install(13, 1, 0, 0, previous);
+        answer = link_dispatch(arguments, count);
+        if (ignored)
+        {
+                log_flush();
+                log_failure_reset();
+                system_signal_action(13, previous, null, 8);
+        }
+        return answer;
 }
 
 /*

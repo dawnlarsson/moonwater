@@ -48457,6 +48457,62 @@ while True:
         check(finished and not any(line.strip().startswith("AUTOINJECT") for line in auto.get("out", [])),
               "moonwater timezone auto spells the kept zone in its error, not a forged line",
               repr(auto.get("out"))[:240])
+        #       A verb that changes what the machine keeps ends what it began
+        #       when the one reading its output has gone. Each runs with a
+        #       pipe for its standard output and error whose read end is
+        #       closed, so its first line is a SIGPIPE if the signal is let
+        #       land: `security block add KEY | true` was kept in the image's
+        #       copy and never published to the file TLS reads, `bind init
+        #       add` never reached the session's copy, `usb lock` never
+        #       started its watcher, `link group` never joined. What each
+        #       leaves is read after, from the places the verb writes last.
+        script = """python3 - <<'PYEOF'
+import os, subprocess, shutil
+key = "a" * 64
+def reset():
+    for top in ("/root", "/run/moonwater"):
+        shutil.rmtree(top, ignore_errors=True)
+        os.makedirs(top, exist_ok=True)
+def closed(words):
+    reader, writer = os.pipe()
+    os.close(reader)
+    subprocess.run(["/tmp/moonwater"] + words.split(), stdin=subprocess.DEVNULL, stdout=writer, stderr=writer)
+    os.close(writer)
+def said(words):
+    return subprocess.run(["/tmp/moonwater"] + words.split(), stdin=subprocess.DEVNULL,
+                          capture_output=True).stdout.decode()
+def has(path):
+    return os.path.exists(path)
+rows = [
+    ("bind init add", "bind init add zzz", lambda: "zzz" in said("bind init")),
+    ("bind init remove", "bind init remove zzz", lambda: "zzz" not in said("bind init"), "bind init add zzz"),
+    ("bind init canvas", "bind init canvas off", lambda: "off" in said("bind init canvas")),
+    ("bind exit add", "bind exit add yyy", lambda: "yyy" in said("bind exit")),
+    ("security block add", "security block add " + key, lambda: has("/run/moonwater/security") and key in said("security block")),
+    ("security switch", "security tls12 off", lambda: has("/run/moonwater/security")),
+    ("usb lock", "usb lock", lambda: has("/run/moonwater/usb.watcher")),
+    ("link group", "link group lab S3cretOne11 allow run", lambda: open("/root/link").read().strip() == "on" and "lab" in said("link")),
+    ("link port", "link port 4000", lambda: "4000" in said("link")),
+]
+for row in rows:
+    reset()
+    if len(row) > 3:
+        said(row[3])
+    closed(row[1])
+    ok = False
+    try:
+        ok = row[2]()
+    except OSError:
+        pass
+    print("@@pipe %s %s" % ("ok" if ok else "lost", row[0]))
+    said("link off")
+PYEOF
+"""
+        lines, finished = session(script)
+        lost = [line for line in lines if line.startswith("@@pipe lost")]
+        check(finished and len([line for line in lines if line.startswith("@@pipe ")]) == 9 and not lost,
+              "a verb whose reader has gone still ends what it changed: settings, security, usb lock, link",
+              repr(lines[-14:]))
 
     return checks.verdict("moonwater cli", "moonwater-cli")
 

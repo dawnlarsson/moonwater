@@ -24100,10 +24100,15 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         what it does and nothing else (quiet) has its output set aside from
         its answer: standard output closed or full or a pipe whose reader has
         gone is no reason for `moonwater name` to say it failed after the name
-        was kept, or for `status | head` to die of SIGPIPE; one that starts
-        processes of its own keeps the signal as it found it. The table is
-        host_main's own, where the lane that works out which applets can start
-        a program reads the handlers it names.
+        was kept, or for `status | head` to die of SIGPIPE. That holds most
+        for a verb that changes something: it says a line while it works and
+        keeps what it changed after, the settings' list and the file TLS reads
+        after the line that names them, the usb watcher after the lock, so a
+        pipe closed at the line left the half it had done (`security block add
+        KEY | true` was kept in the image and never published). Only a verb
+        that starts processes of its own, or streams, keeps the signal as it
+        found it. The table is host_main's own, where the lane that works out
+        which applets can start a program reads the handlers it names.
 */
 
 static b32 host_main()
@@ -24116,38 +24121,38 @@ static b32 host_main()
         } host_verbs[] = {
             {"status", host_status_verb, true},
             {"help", host_help, true},
-            {"setup", host_setup, false},
+            {"setup", host_setup, true},
             // Reading needs nothing, and the kernel decides who may set a bound
             // event. init and exit still need root.
-            {"bind", host_bind, false},
+            {"bind", host_bind, true},
             {"canvas", host_canvas, false},
             {"desktop", host_desktop, false},
             {"settings", host_settings_window, false},
             {"latency", host_latency, false},
             {"debug", host_debug, true},
             {"bios", host_bios, false},
-            {"airplane", tune_airplane, false},
-            {"brightness", tune_brightness, false},
-            {"charge", tune_charge, false},
-            {"battery", tune_battery_verb, false},
-            {"power", tune_power, false},
-            {"cpu", tune_cpu, false},
-            {"sleep", tune_sleep_verb, false},
-            {"hibernate", tune_hibernate_verb, false},
-            {"wifi", host_wifi, false},
-            {"bluetooth", host_bluetooth, false},
-            {"priority", host_priority, false},
-            {"wired", host_wired, false},
-            {"usb", host_usb, false},
-            {"timezone", host_timezone, false},
-            {"ntp", host_ntp, false},
-            {"keyboard", host_keyboard, false},
-            {"mouse", host_setting_verb, false},
-            {"taskbar", host_setting_verb, false},
-            {"time", host_time, false},
+            {"airplane", tune_airplane, true},
+            {"brightness", tune_brightness, true},
+            {"charge", tune_charge, true},
+            {"battery", tune_battery_verb, true},
+            {"power", tune_power, true},
+            {"cpu", tune_cpu, true},
+            {"sleep", tune_sleep_verb, true},
+            {"hibernate", tune_hibernate_verb, true},
+            {"wifi", host_wifi, true},
+            {"bluetooth", host_bluetooth, true},
+            {"priority", host_priority, true},
+            {"wired", host_wired, true},
+            {"usb", host_usb, true},
+            {"timezone", host_timezone, true},
+            {"ntp", host_ntp, true},
+            {"keyboard", host_keyboard, true},
+            {"mouse", host_setting_verb, true},
+            {"taskbar", host_setting_verb, true},
+            {"time", host_time, true},
             {"name", host_name, true},
-            {"dns", host_dns, false},
-            {"security", host_security, false},
+            {"dns", host_dns, true},
+            {"security", host_security, true},
             {"link", link_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
