@@ -8735,6 +8735,7 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      bool force, p8 rules, bool key_only,
                                      wifi_rsn_caps address_to caps, wifi_seen address_to seen);
 static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length);
+#define RADIO_RULES_PATH "/root/wifi.rules"
 static COLD bipolar radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what);
 
 /*
@@ -8993,8 +8994,17 @@ static COLD bipolar nl80211_join_once(p8 address_to ssid, positive ssid_length,
                                   ? WIFI_RULE_SAE
                                   : 0);
 
+                //      The join stands whatever becomes of this, but a rule that
+                //      is not kept is the next join's downgrade: said, with the
+                //      file it was for. (From a station the put is a question to
+                //      the broker, which keeps the file and answers 0.)
                 if (learned & ~rules)
-                        radio_rules_put(ssid, ssid_length, learned, learned);
+                {
+                        bipolar put = radio_rules_put(ssid, ssid_length, learned, learned);
+
+                        if (put < 0)
+                                host_fail(RADIO_RULES_PATH, put);
+                }
         }
         kept = !failed;
         return failed;
@@ -9350,7 +9360,6 @@ static bipolar radio_wifi_save(radio_network address_to networks, positive count
         third is what the last add of it said. A name has no line feed, and
         the first space ends the word.
 */
-#define RADIO_RULES_PATH "/root/wifi.rules"
 #define RADIO_RULES_ROOM 4096
 
 static const string_address radio_rule_words[] = {
