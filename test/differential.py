@@ -44920,12 +44920,11 @@ def harness_moonwater_cli(argv):
         ]:
             walk_classes[vector] = 1
         for vector in [
-            'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus', 'taskbar text edge extra',
             'window', 'window center env',
         ]:
             walk_classes[vector] = 1
         for vector in [
-            'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus',
+            'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus', 'taskbar text edge extra',
             'window bogus', 'window center', 'window at 1,x env',
         ]:
             walk_classes[vector] = 2
@@ -46756,8 +46755,8 @@ while True:
               bowl_lines(seen.get("tight bare list", {})) == forced,
               "the tight tier lists packages off and sudo off, with sudo kept on and with nothing kept",
               repr((seen.get("tight list"), seen.get("tight bare list")))[-400:])
-        check(said(seen.get("tight sudo on", {}), "security sudo stays off: the tight tier has it so", 1) and
-              said(seen.get("tight packages on", {}), "security packages stays off: the tight tier has it so",
+        check(said(seen.get("tight sudo on", {}), "security sudo stays as the tight tier has it", 1) and
+              said(seen.get("tight packages on", {}), "security packages stays as the tight tier has it",
                    1) and ids is not None and not ids & {6, 7},
               "the tight tier refuses security sudo on and security packages on, and keeps neither",
               repr((seen.get("tight sudo on"), seen.get("tight packages on"), ids)))
