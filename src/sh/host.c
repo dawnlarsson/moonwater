@@ -9015,16 +9015,6 @@ static b32 host_save(string_address label, string_address path, string_address w
         return failed < 0 ? host_fail(label, failed) : 0;
 }
 
-/* What a switch's word says: 1 on, 0 off, -1 when it says neither or is not
-   there, which is the same as on to everything that asks. */
-static bipolar radio_power(string_address path)
-{
-        p8 text[16];
-
-        return host_read_word(path, text, sizeof(text)) < 0 ? -1
-                                                              : host_onoff((string_address)text);
-}
-
 static bipolar radio_lock(bool wait)
 {
         return host_lock(RADIO_LOCK_PATH, wait);
@@ -9733,6 +9723,32 @@ static bool radio_has_interface(void)
 }
 
 /*
+        A radio's word as the machine reads it: 1 on, 0 off. With no word kept, wifi and bluetooth are off, as a
+        machine that has not asked for them has them, and moonwater wifi on or bluetooth on is what raises one. A
+        machine that was using one before this default keeps it: a saved network or a remembered device leaves the
+        word unsaid, -1, which every caller reads as on, as it always did.
+*/
+static bipolar radio_kept(string_address path)
+{
+        radio_network networks[1];
+        p8 text[16];
+        bool used;
+
+        if (host_read_word(path, text, sizeof(text)) >= 0)
+                return host_onoff((string_address)text);
+
+        if (string_equals(path, NET_WIFI_POWER))
+        {
+                used = radio_wifi_load(networks, 1, null) != 0;
+                crypto_forget(networks, sizeof(networks));
+        }
+        else
+                used = host_read_state(NET_BLUETOOTH_LIST, text, 1) > 0;
+
+        return used ? -1 : 0;
+}
+
+/*
         Why wifi cannot be used, into why, or false when the machine shows
         nothing wrong: a radio is there and nothing blocks it.
 */
@@ -9743,7 +9759,7 @@ static bool radio_wifi_why(p8 address_to why, positive room)
         p8 rfkill = 0;
 
         why[0] = end;
-        if (radio_power(NET_WIFI_POWER) == 0)
+        if (radio_kept(NET_WIFI_POWER) == 0)
         {
                 radio_line(why, room, (string_address) "switched off (moonwater wifi on)",
                            null, null, null, null);
@@ -11885,6 +11901,8 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
         radio_heard address_to heard = null;
         positive pass_length = pass ? string_length(pass) : 0;
         bool same;
+        //      Asked before the network is saved: a saved network is what makes a radio with no word on.
+        bool off = radio_kept(NET_WIFI_POWER) == 0;
         bipolar stored = radio_wifi_store(ssid, pass, address_of same);
         bipolar failed;
         p8 why[RADIO_WHY_ROOM];
@@ -11903,6 +11921,15 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
                         (p8)((same ? 0 : WIFI_RULE_PMF | WIFI_RULE_SAE) | WIFI_RULE_WPA2),
                         wpa2 ? WIFI_RULE_WPA2 : 0);
 
+        //      A radio that is off stays off: the network is saved, and moonwater wifi on is what joins it.
+        if (off)
+        {
+                //      The word is pinned, so the saved network does not make the next reading of a radio with no
+                //      word on.
+                (void)radio_write_word(NET_WIFI_POWER, "off");
+                host_say(log, host_label "wifi saved %s; wifi is off, moonwater wifi on joins it\n", ssid);
+                return 0;
+        }
         switched = radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
 
         /*      What the air already says about it, from the last scan and
@@ -12163,7 +12190,7 @@ static b32 radio_wifi_status(void)
         radio_network networks[RADIO_WIFI_MOST];
         positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         positive at;
-        bool off = radio_power(NET_WIFI_POWER) == 0;
+        bool off = radio_kept(NET_WIFI_POWER) == 0;
         bool joined = false;
         p8 why[RADIO_WHY_ROOM];
         radio_last last;
@@ -12313,6 +12340,8 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
         bipolar lock;
         bipolar failed = 0;
         bool found = false;
+        //      Asked before the list is written: a remembered device is what makes a radio with no word on.
+        bool off = radio_kept(NET_BLUETOOTH_POWER) == 0;
 
         if (!length || length > 128)
                 return host_refuse("that bluetooth name is empty or too long\n");
@@ -12368,8 +12397,11 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                 return host_refuse("%s is too long to change here\n", NET_BLUETOOTH_LIST);
         return_if(failed, host_fail(NET_BLUETOOTH_LIST, failed));
         //      A name remembered is for a radio that is on to find it.
-        failed = add ? radio_bluetooth_power(true, true) : 0;
-        host_say(log, host_label "bluetooth %s %s\n", add ? "remembered" : "forgot", identity);
+        if (add && off)
+                (void)radio_write_word(NET_BLUETOOTH_POWER, "off");
+        failed = add && !off ? radio_bluetooth_power(true, true) : 0;
+        host_say(log, host_label "bluetooth %s %s%s\n", add ? "remembered" : "forgot", identity,
+                 add && off ? "; bluetooth is off, moonwater bluetooth on raises it" : "");
         return failed;
 }
 
@@ -12377,7 +12409,7 @@ static b32 radio_bluetooth_status(void)
 {
         p8 text[4096];
         bipolar got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
-        bool off = radio_power(NET_BLUETOOTH_POWER) == 0;
+        bool off = radio_kept(NET_BLUETOOTH_POWER) == 0;
         positive at = 0;
         positive start;
         positive length;
@@ -12559,8 +12591,8 @@ static bool radio_wifi_restored(bipolar wifi)
 
 static fn radio_restore(void)
 {
-        bipolar wifi = radio_power(NET_WIFI_POWER);
-        bipolar bluetooth = radio_power(NET_BLUETOOTH_POWER);
+        bipolar wifi = radio_kept(NET_WIFI_POWER);
+        bipolar bluetooth = radio_kept(NET_BLUETOOTH_POWER);
 
         radio_internet_copy();
 
@@ -12595,7 +12627,7 @@ static fn radio_recover(void)
 
         radio_internet_copy();
 
-        if (radio_wifi_wanted(radio_power(NET_WIFI_POWER)))
+        if (radio_wifi_wanted(radio_kept(NET_WIFI_POWER)))
                 radio_wifi_keep();
 }
 
@@ -13012,8 +13044,8 @@ static bool tune_percent(string_address text, bool address_to relative, bool add
    included, outlasts a boot. With nothing kept both come back. */
 static b32 tune_airplane(string_address address_to arguments, positive count)
 {
-        bool wifi_off = radio_power(NET_WIFI_POWER) == 0;
-        bool bluetooth_off = radio_power(NET_BLUETOOTH_POWER) == 0;
+        bool wifi_off = radio_kept(NET_WIFI_POWER) == 0;
+        bool bluetooth_off = radio_kept(NET_BLUETOOTH_POWER) == 0;
         p8 was[24];
         bool kept;
         bool on;
@@ -13885,7 +13917,7 @@ static fn tune_restore(void)
                 (void)tune_charge_apply((string_address)value);
         //      Airplane mode is every radio off, and the modem has no word of its own.
         if (tune_find(text, (positive)got, "airplane", value, sizeof(value)) &&
-            radio_power(NET_WIFI_POWER) == 0 && radio_power(NET_BLUETOOTH_POWER) == 0)
+            radio_kept(NET_WIFI_POWER) == 0 && radio_kept(NET_BLUETOOTH_POWER) == 0)
                 (void)radio_rfkill(0, true);
 }
 
@@ -22047,12 +22079,12 @@ static const host_row host_rows[] = {
     {null, "bios [reboot]", "whether firmware setup is on offer; reboot goes", 'b'},
     {null, "@wired", null, 'r'},
     {null, "@wifi", null, 'r'},
-    {null, "wifi add SSID [PASSWORD|-] [wpa2]", "remember a network and join it; asks for", 'b'},
+    {null, "wifi add SSID [PASSWORD|-] [wpa2]", "remember a network, joined once wifi is on; asks for", 'b'},
     {null, "", "the password, - reads it from stdin; wpa2 lets", 'b'},
     {null, "", "a tight tier join it without WPA3", 'b'},
     {null, "wifi remove SSID", "forget a saved network, and leave it", 'b'},
     {null, "@bluetooth", null, 'r'},
-    {null, "bluetooth add NAME", "keep the name of a device; the radio goes on for what pairs", 'b'},
+    {null, "bluetooth add NAME", "keep the name of a device, found once the radio is on", 'b'},
     {null, "bluetooth remove NAME", "forget a bluetooth device", 'b'},
     {null, "@usb", null, 'r'},
     {null, "usb allow|deny ID|PORT", "let one device in, or hold it, now and at every plug;", 'b'},

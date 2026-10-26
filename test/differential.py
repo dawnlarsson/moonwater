@@ -45480,13 +45480,15 @@ def harness_moonwater_cli(argv):
             check(f"@@ fifo {name} {verb} 124" not in joined and f"@@ fifo {name} {verb} " in joined,
                   f"a FIFO at /root/{name} does not hold `{verb}`", joined[-300:])
         got = tuned("rm -f /run/moonwater/internet /root/wifi.power /root/bluetooth.power /root/internet\n"
-                    "printf 'off\\n' > /root/off-target; printf 'wifi\\n' > /root/wifi-word\n"
-                    "ln -s off-target /root/wifi.power; ln -s off-target /root/bluetooth.power\n"
+                    "printf 'on\\n' > /root/on-target; printf 'wifi\\n' > /root/wifi-word\n"
+                    "ln -s on-target /root/wifi.power; ln -s on-target /root/bluetooth.power\n"
                     "ln -s wifi-word /root/internet\n" +
                     say("wifi") + say("bluetooth") + say("priority internet"))
         seen = answers(got)
-        check("wifi off" not in " ".join(seen["wifi"]["out"]) and
-              "bluetooth off" not in " ".join(seen["bluetooth"]["out"]) and
+        # A link to a word that says on is no word: the radios are off, as with nothing kept.
+        check("wifi on" not in " ".join(seen["wifi"]["out"]) and "wifi off" in " ".join(seen["wifi"]["out"]) and
+              "bluetooth on" not in " ".join(seen["bluetooth"]["out"]) and
+              "bluetooth off" in " ".join(seen["bluetooth"]["out"]) and
               "prefers wired" in " ".join(seen["priority internet"]["out"]),
               "a word that is a link is not followed", repr(seen))
 
@@ -47054,7 +47056,11 @@ while True:
                 name = rng.choice(names)
                 if name not in bluetooth:
                     bluetooth.append(name)
-                model["bluetooth.power"] = "on"
+                # A radio with no word, or off, only keeps the name, and pins its word off.
+                if model["bluetooth.power"] in (None, "off"):
+                    model["bluetooth.power"] = "off"
+                else:
+                    model["bluetooth.power"] = "on"
                 return f"bluetooth add {shlex.quote(name)}", 0
             if kind == 8:
                 name = rng.choice(names)
@@ -47070,8 +47076,12 @@ while True:
                     entry[0][1] = password
                 else:
                     wifi_list.append([ssid, password])
+                # An off radio only saves the network and pins its word off; one that is on has no radio
+                # in the sandbox to join with: saved, and said not joined.
+                if model["wifi.power"] in (None, "off"):
+                    model["wifi.power"] = "off"
+                    return f"wifi add {ssid} {password}", 0
                 model["wifi.power"] = "on"
-                # No radio in the sandbox: saved, and said not joined.
                 return f"wifi add {ssid} {password}", 1
             if kind == 10:
                 ssid = rng.choice(ssids)

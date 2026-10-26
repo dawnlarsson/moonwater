@@ -85,8 +85,8 @@ moonwater security aia [on|off]        fetch a CA a server left out, from where 
 moonwater security revocation [soft|hard]  hard refuses a certificate whose revocation cannot be told [soft]
 moonwater security ct [on|off]         ask Certificate Transparency of every chain, not only at the tight tier [off]
 moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
-moonwater wifi [on|off]                the radio, saved networks and those in range
-moonwater bluetooth [on|off]           the radio and the remembered devices
+moonwater wifi [on|off]                the radio, saved networks and those in range [off]
+moonwater bluetooth [on|off]           the radio and the remembered devices [off]
 moonwater usb [lock|unlock]            lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]
 moonwater usb class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
 moonwater usb allow|deny ID|PORT       let one device in, or hold it, now and at every plug;
@@ -140,6 +140,12 @@ loosen a tight build; a change reaches every connection opened after it, while o
 already open, and a download's own redirects and revocation fetches, keep what they
 started with. `http off` leaves the CRL and caIssuers fetches inside TLS alone, which
 are plain http by design and checked by their signatures.
+
+Wi-Fi and Bluetooth are off until `moonwater wifi on` and `moonwater bluetooth on` raise
+them: a machine that has not asked for a radio has it soft-blocked from boot, and `wifi add` and
+`bluetooth add` keep a name for when it is on and do not switch it. A machine that already
+used one (a saved network, a remembered device) keeps it on as it was, and `airplane off`
+brings back what was on.
 
 `moonwater usb lock` holds what somebody plugs in: a stick, a keyboard that types on its
 own, a hub, a network, audio or camera function. Every device plugged in when it runs

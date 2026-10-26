@@ -210,9 +210,9 @@ static const struct settings_row settings_rows[] = {
     {null, "Name servers (auto for the network)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"dns"}, "dns ", null, {"dns"}, null, '(', null,
      .usage = "dns [ADDRESS...|auto]", .help = "up to three servers names are asked of, or the network gives them [auto]"},
     {"Wi-Fi", "Wi-Fi", SETTINGS_SWITCH, 0, 0, {"wifi"}, "wifi ", null, {"wifi"}, null, 0, null,
-     .usage = "wifi [on|off]", .help = "the radio, saved networks and those in range"},
+     .usage = "wifi [on|off]", .help = "the radio, saved networks and those in range [off]"},
     {"Bluetooth", "Bluetooth", SETTINGS_SWITCH, 0, 0, {"bluetooth"}, "bluetooth ", null, {"bluetooth"}, null, 0, null,
-     .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices"},
+     .usage = "bluetooth [on|off]", .help = "the radio and the remembered devices [off]"},
     // A class row reads its word off the classes line usb says before any device, so what a device calls itself is never read.
     {"USB", "New USB devices", SETTINGS_CHOICE, 0, 0, {"usb"}, "usb ", null, {"usb"}, "unlock lock", 0, null,
      .usage = "usb [lock|unlock]", .help = "lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]"},
