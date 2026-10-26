@@ -22088,6 +22088,34 @@ out.append(("a key reaches it", "yes" if "KEYBOARD_KEY" in events else "no: " + 
 out.append(("a pointer movement reaches it", "yes" if "POINTER_MOTION_ABSOLUTE" in events or "POINTER_MOTION" in events else "no: " + events[-300:], "yes"))
 out.append(("a button reaches it", "yes" if "POINTER_BUTTON" in events else "no: " + events[-300:], "yes"))
 
+#       The wheel, which the rows above never turned: a libinput deaf to it
+#       passed them all. A notch each way and then a swipe as QEMU's cocoa
+#       window sends one, faster (150 notches 6 ms apart, each a press and a
+#       release with a report after each), read back as libinput says them to
+#       a compositor, in 120ths of a notch, from the device that turned them.
+def swipe(notches, button="wheel-down", gap=0.006):
+    for _ in range(notches):
+        send([{"type": "btn", "data": {"down": True, "button": button}}])
+        send([{"type": "btn", "data": {"down": False, "button": button}}])
+        time.sleep(gap)
+
+def turned(name):
+    """The wheel libinput reported from the device of that name, as a list of 120ths."""
+    events, _ = run("cat /tmp/events", 60)
+    nodes = re.findall(r"(event\d+)\s+DEVICE_ADDED\s+" + re.escape(name), events)
+    return [int(float(v120)) for node, v120 in re.findall(r"(event\d+)\s+POINTER_SCROLL_WHEEL.*?vert -?[\d.]+/(-?[\d.]+)", events)
+            if node in nodes]
+
+swipe(1, "wheel-up", 0.3)
+swipe(1, "wheel-down", 0.3)
+time.sleep(1)
+notches = turned("QEMU QEMU USB Tablet")
+out.append(("a notch of the tablet's wheel reaches it, each way", " ".join(str(v) for v in notches) or "none", "-120 120"))
+swipe(150)
+time.sleep(2)
+swiped = sum(turned("QEMU QEMU USB Tablet")[len(notches):])
+out.append(("and a swipe of 150 notches 6 ms apart, whole", "%d notches" % (swiped // 120) if swiped % 120 == 0 else "%d/120" % swiped, "150 notches"))
+
 links, _ = run("ls /sys/class/net")
 out.append(("the network interface keeps the name the kernel gave it", "yes" if "eth0" in links.split() else "no: " + links[-100:], "yes"))
 
