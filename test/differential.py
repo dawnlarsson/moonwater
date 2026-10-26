@@ -46950,7 +46950,7 @@ while True:
         locale_say = say
         script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
                   "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes "
-                  "/root/canvas.background /root/canvas.cursor.size /root/canvas.cursor.look\n"
+                  "/root/canvas.background /root/canvas.cursor.size /root/canvas.cursor.look /root/canvas.arrange\n"
                   "echo '@@ tz'; TZ=QQQ-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
                   "echo '@@ tz time'; TZ=QQQ-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
                   "printf 'off\\r\\n' > /root/wired.power\n" + locale_say("wired") +
@@ -46958,13 +46958,13 @@ while True:
         #       What a machine nobody has told anything says, then what it says to a
         #       caller with no right to look: /root at mode 000 is closed to nobody.
         readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard", "canvas scale",
-                   "canvas modes", "canvas background", "canvas cursor", "status")
+                   "canvas modes", "canvas background", "canvas cursor", "canvas arrange", "status")
         script += "".join(f"echo '@@ open {verb}'; timeout 20 /tmp/moonwater {verb} 2>&1; "
                           "echo \"@@status $?\"\n" for verb in readers)
         script += ("echo off > /root/ntp; echo off > /root/ntp.sampling; echo de > /root/keyboard\n"
                    "echo 3 > /root/canvas.scale; echo preferred > /root/canvas.modes\n"
                    "echo ff0000 > /root/canvas.background; echo 3 > /root/canvas.cursor.size; "
-                   "echo dark > /root/canvas.cursor.look\n"
+                   "echo dark > /root/canvas.cursor.look; echo Virtual-2 HDMI-A-1@off > /root/canvas.arrange\n"
                    "echo Europe/Paris > /root/timezone; echo manual > /root/timezone.mode\n"
                    "chmod 000 /root\n")
         lines, finished = session(script)
@@ -47104,7 +47104,7 @@ while True:
                  "ntp server": (), "timezone": ("Europe/Paris", "manual"), "time": ("Europe/Paris",),
                  "keyboard": ("keyboard de",), "canvas scale": ("scale 3",),
                  "canvas modes": ("modes preferred",), "canvas background": ("background #ff0000",),
-                 "canvas cursor": ("size 3", "look dark"),
+                 "canvas cursor": ("size 3", "look dark"), "canvas arrange": ("arrange Virtual-2 HDMI-A-1@off",),
                  "status": ("Europe/Paris", "ntp off", "keyboard de")}
         for verb in readers:
             shut, kept = text(f"shut {verb}"), text(f"kept {verb}")

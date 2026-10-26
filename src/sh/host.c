@@ -5189,7 +5189,9 @@ static fn host_windows_unmap(const struct windows address_to table);
         or -1 for a screen that is dark): the compositor's own list when one
         is running and its table can be read, and else where the kept
         arrangement lays the screens Canvas has (windows_arrange_lay), which
-        is where a desktop that starts puts them.
+        is where a desktop that starts puts them. A caller who can read
+        neither (both are root's) is told so: -2, and no default as the
+        answer.
 */
 static fn host_canvas_places(struct canvas_control address_to control, int (*places)[3])
 {
@@ -5227,6 +5229,12 @@ static fn host_canvas_places(struct canvas_control address_to control, int (*pla
         }
         host_windows_unmap(table);
         got = host_read_state(SETTING_CANVAS_ARRANGE_PATH, text, sizeof(text) - 1);
+        if (got < 0 && got != -ENOENT)
+        {
+                for (positive at = 0; at < count; at++)
+                        places[at][2] = -2;
+                return;
+        }
         text[got > 0 ? got : 0] = end;
         lit = windows_arrange_lay((const char address_to)text, (const char (*)[WINDOWS_OUTPUT_NAME])names,
                                   (const int (*)[2])sizes, (unsigned int)count, rects, order);
@@ -5260,7 +5268,10 @@ static fn host_canvas_screen_line(struct canvas_control address_to control, posi
         string_format(log, "  %s: %p by %p, %p Hz", (string_address)control->output[at].connector,
                       (positive)control->output[at].width, (positive)control->output[at].height,
                       (positive)control->output[at].refresh);
-        if (places[at][2] < 0)
+        // LOCALE_NEEDS_ROOT's words, which the readers of /root say, defined further on.
+        if (places[at][2] == -2)
+                string_format(log, ", its place (needs root)\n");
+        else if (places[at][2] < 0)
                 string_format(log, ", dark\n");
         else
                 string_format(log, ", at %b,%b%s\n", (bipolar)places[at][0], (bipolar)places[at][1],
@@ -21090,7 +21101,9 @@ static b32 host_setting_group(string_address address_to words, positive count)
 static fn locale_canvas_arrange_line(struct canvas_control address_to control, positive at, int (*places)[3], bool label)
 {
         (void)label;
-        if (places[at][2] < 0)
+        if (places[at][2] == -2)
+                host_say(log, host_label "  %s, its place " LOCALE_NEEDS_ROOT "\n", (string_address)control->output[at].connector);
+        else if (places[at][2] < 0)
                 host_say(log, host_label "  %s dark\n", (string_address)control->output[at].connector);
         else
                 host_say(log, host_label "  %s at %b,%b%s\n", (string_address)control->output[at].connector,
