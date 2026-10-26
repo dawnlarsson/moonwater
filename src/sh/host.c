@@ -23469,8 +23469,6 @@ static b32 host_answer(bool update, string_address disk)
         host_install address_to install = null;
 
         host_read_word(HOST_VERDICT, verdict, sizeof(verdict));
-        if (disk && string_has_prefix(disk, "/dev/"))
-                disk += 5;
 
         /*      The data this session already keeps. An update touches only the
                 system partition, so it can go ahead underneath what is mounted;
@@ -23705,9 +23703,16 @@ static b32 host_setup(string_address address_to arguments, positive count)
 
         if ((update || string_equals(verb, "use")) && count <= 4)
         {
+                string_address disk = count == 4 ? arguments[3] : null;
+
+                if (disk && string_has_prefix(disk, "/dev/"))
+                        disk += 5;
+                //      A DISK that names nothing is a wrong argument, and is
+                //      judged before root is asked for, as the others are.
+                return_if(disk && !disk[0], host_usage());
                 host_need_root();
                 host_state_ready();
-                return host_answer(update, count == 4 ? arguments[3] : null);
+                return host_answer(update, disk);
         }
 
         return host_usage();
