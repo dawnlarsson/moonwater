@@ -392,6 +392,17 @@ static b32 settings_absent(const char address_to line, positive length)
                settings_find(line, length, "no wireless hardware") < length;
 }
 
+// The part of a line that a machine said of itself: what follows `; "` is a name some device chose (usb says each device's product
+// there, escaped so that no quote but the opening one is bare), and a device that calls itself "this machine has no" must not take
+// every row of its verb away.
+static positive settings_unquoted(const char address_to line, positive length)
+{
+        for (positive at = 0; at + 2 < length; at++)
+                if (line[at] == ';' && line[at + 1] == ' ' && line[at + 2] == '"')
+                        return at;
+        return length;
+}
+
 // Whether a line says a row has none, for this row. "this battery has no charge limit" is the charge limit's none only: a line that
 // also says this row's own key (the battery's percent) is a value of this row and does not take it away.
 static b32 settings_lacks(const char address_to line, positive length, const struct settings_row address_to row)
@@ -431,7 +442,7 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
 
                 if (!size)
                         continue;
-                absent |= settings_lacks(line, size, row);
+                absent |= settings_lacks(line, settings_unquoted(line, size), row);
 
                 for (positive which = 0; which < 2 && !found; which++)
                 {

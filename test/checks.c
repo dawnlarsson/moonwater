@@ -115413,6 +115413,18 @@ static fn check_settings(string_address regular, string_address bold)
         check("settings: a verb's word after its label and its escapes",
               settings_parsed(keyboard, "\x1b[1m[Moonwater]\x1b[0m keyboard us\n", value) == SETTINGS_READ &&
                   string_equals((string_address)value, (string_address) "us"));
+        // A device chooses what it is called, and usb prints that after `; "` on the device's line: a name that says "this
+        // machine has no" is a name and takes no row of the USB group away.
+        {
+                int usb = settings_row_named("New USB devices");
+
+                check("settings: a device's own name does not take the USB rows away",
+                      usb >= 0 &&
+                          settings_parsed(usb, "[Moonwater] usb lock\n[Moonwater]   1-1 1234:5678/-@1-1 allowed (rule); \"x this machine has no y\"\n",
+                                          value) == SETTINGS_READ &&
+                          string_equals((string_address)value, (string_address) "lock") &&
+                          settings_parsed(usb, "[Moonwater] usb lock\n[Moonwater]   this machine has no usb\n", value) != SETTINGS_READ);
+        }
         check("settings: a name is the whole of its line", settings_parsed(name, "patient-cricket\n", value) == SETTINGS_READ &&
                                                                string_equals((string_address)value, (string_address) "patient-cricket"));
         check("settings: a zone is the word before its comma",

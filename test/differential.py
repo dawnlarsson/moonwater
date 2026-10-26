@@ -45158,7 +45158,27 @@ def harness_moonwater_cli(argv):
                     say("airplane off") + "echo '@@ words2'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n")
         joined = "\n".join(got)
         check("@@ words\noff\noff" in joined, "airplane on turns the wifi and bluetooth words off", joined[-200:])
-        check("@@ words2\non\non" in joined, "airplane off turns them back on", joined[-200:])
+        check("@@ words2\noff\noff" in joined,
+              "airplane off gives back what airplane on turned off, and with both off before it gives back none", joined[-200:])
+        # The radios are off until raised, so airplane mode is not the radios being off but being asked for, and a
+        # round trip leaves a machine as it was: off stays off, and what was on is on again.
+        got = tuned("rm -f /root/wifi.power /root/bluetooth.power /root/tune\n" + say("airplane") + say("airplane off") +
+                    "echo '@@ words0'; cat /root/wifi.power /root/bluetooth.power 2>&1; echo '@@end'\n" +
+                    say("airplane on") + say("airplane") +
+                    "echo '@@ kept0'; cat /root/tune; echo '@@end'\n" + say("airplane off") + say("airplane") +
+                    "echo '@@ words1'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n" +
+                    say("wifi on") + say("bluetooth on") + say("airplane on") + say("airplane") +
+                    "echo '@@ words2'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n" +
+                    say("airplane off") +
+                    "echo '@@ words3'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n")
+        seen = answers(got)
+        joined = "\n".join(got)
+        check("@@ words0\n" in joined and "on" not in joined.split("@@ words0\n", 1)[1].split("@@end", 1)[0].split(),
+              "airplane off on a machine that never asked for airplane mode raises nothing", joined[-300:])
+        check("@@ kept0\nairplane none" in joined, "airplane on with both radios off keeps none", joined[-300:])
+        check("@@ words1\noff\noff" in joined, "and airplane off then leaves both off", joined[-300:])
+        check("@@ words2\noff\noff" in joined and "@@ words3\non\non" in joined,
+              "with both on, airplane on turns them off and airplane off turns them on again", joined[-400:])
 
         # Off until it is switched on. A radio with no word is off and its status says how to raise it; a name
         # added to an off radio is only kept, and pins the word off; on, it is as before. A machine that used a
@@ -45511,7 +45531,7 @@ def harness_moonwater_cli(argv):
               (fake / "power/pm_print_times").stat().st_mtime > 1e9 + 1000,
               "a sleep leaves alone a switch that was on and puts back one that was off", repr(got[-6:]))
 
-        got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("bluetooth off") + say("airplane on") +
+        got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n" + say("wifi on") + say("bluetooth off") + say("airplane on") +
                     "echo '@@ kept'; cat /root/tune; echo '@@end'\n" + say("airplane") + say("airplane on") +
                     "echo '@@ again'; cat /root/tune; echo '@@end'\n" +
                     ": > /dev/rfkill\n" + say("sleep") +
