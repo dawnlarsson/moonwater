@@ -15126,25 +15126,64 @@ static fn usb_watch_stop(void)
         with none, a keyboard swapped since) would let in the first keyboard
         plugged in after, which is the device this is for. A device a deny
         rule holds keeps its rule, and a fixed one needs none. Each rule keeps
-        the classes of the interfaces that work now; a device not configured
-        (one usbcore.authorized_default=2 held at boot) shows none, and is
-        kept whole. Locked already, the lock keeps only what the policy lets
+        the classes of the interfaces that work now. A device the kernel
+        holds unconfigured (usbcore.authorized_default=2 holds every one at
+        boot) shows none, and a rule written then let in whatever it came
+        back as -- a keyboard's rule let the same identity bring up storage
+        and a network: usb_configure_held configures it first, its
+        interfaces waiting, and its rule keeps the classes they say, as
+        usb_rule_verb's allow does (a device none of whose interfaces work
+        keeps the classes it has). One that cannot be configured, or shows
+        no interface once it is, is not kept: held, it is let in by usb
+        allow PORT. Locked already, the lock keeps only what the policy lets
         work: a device it holds stays held. carried is the same for a lock
         that another /root's policy put in force this boot (the session's,
         before the disk was taken): what that lock holds was judged, and the
         first lock of this /root does not let it in.
 */
+static positive usb_configure_held(usb_policy address_to policy, usb_census address_to census)
+{
+        positive count = 0;
+
+        for (positive at = 0; at < census->count; at++)
+        {
+                usb_device address_to device = census->device + at;
+
+                if (device->root || device->fixed || device->authorized || usb_rule_for(policy, device))
+                        continue;
+                //      Every root hub's new interfaces wait before the first is
+                //      configured, so nothing binds before the policy says.
+                for (positive hub = 0; !count && hub < census->count; hub++)
+                        if (census->device[hub].root)
+                                (void)usb_set((string_address)census->device[hub].port,
+                                              "interface_authorized_default", "0");
+                count += usb_set((string_address)device->port, "authorized", "1") >= 0;
+        }
+        return count;
+}
+
 static b32 usb_lock_held(bool say, bool carried)
 {
         static usb_census census;
         usb_policy policy;
+        bool stay;
         positive kept = 0;
         b32 failed;
 
         usb_policy_load(address_of policy);
         if (policy.cut)
                 return host_refuse("%s is too long to change here\n", USB_POLICY);
+        stay = policy.lock || carried;
         usb_census_take(address_of census);
+        //      Refused before anything is configured: at most each device no rule names is a rule more.
+        for (positive at = 0, more = 0; at < census.count; at++)
+                if (!census.device[at].root && !census.device[at].fixed &&
+                    !usb_rule_for(address_of policy, census.device + at) && policy.count + ++more > USB_RULES_MOST)
+                        return host_refuse("more devices are plugged in than the %p rules a policy keeps; "
+                                           "nothing was locked\n",
+                                           (positive)USB_RULES_MOST);
+        if (!stay && usb_configure_held(address_of policy, address_of census))
+                usb_census_take(address_of census);
         for (positive at = 0; at < census.count; at++)
         {
                 usb_device address_to device = census.device + at;
@@ -15153,13 +15192,18 @@ static b32 usb_lock_held(bool say, bool carried)
                 if (device->root || device->fixed || usb_rule_for(address_of policy, device))
                         continue;
                 usb_rule_from(address_of rule, USB_ALLOW, device, address_of census, false);
-                if ((policy.lock || carried) &&
-                    (!device->authorized || (usb_shows(address_of census, device) && !rule.kinds)))
+                if (!rule.kinds && !stay)
+                        usb_rule_from(address_of rule, USB_ALLOW, device, address_of census, true);
+                if (stay && (!device->authorized || (usb_shows(address_of census, device) && !rule.kinds)))
                         continue;
+                if (!device->authorized || !rule.kinds)
+                {
+                        usb_tell(false, "not kept", device, USB_WHY_NONE);
+                        continue;
+                }
+                //      Counted above, unless the census took a device more since.
                 if (policy.count == USB_RULES_MOST)
-                        return host_refuse("more devices are plugged in than the %p rules a policy keeps; "
-                                           "nothing was locked\n",
-                                           (positive)USB_RULES_MOST);
+                        break;
                 policy.rule[policy.count++] = rule;
                 kept++;
         }
@@ -20571,6 +20615,32 @@ static bool desktop_installed(string_address name)
                !string_compare_max(held, want, string_length(want));
 }
 
+static positive desktop_scan(positive session, p32 address_to pids, positive room,
+                             bool address_to leader);
+
+// The session of a KWin that is running, 0 when none is: how a session nobody recorded is found.
+static positive desktop_compositor_session(void)
+{
+        static system_snapshot sample;
+
+        return_if(!system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false), 0);
+        for (positive at = 0; at < sample.header.process_count; at++)
+        {
+                const struct snapshot_process address_to process = sample.processes + at;
+
+                if (process->state != 'Z' && process->session > 1 &&
+                    !string_compare_max((string_address)process->command, "kwin_wayland", sizeof("kwin_wayland") - 1))
+                        return process->session;
+        }
+        return 0;
+}
+
+/*
+        The session desktop off and stop end: the one the verb recorded, and where nothing of it is left (or none was
+        recorded, as when a session was started some other way) the session of the KWin that is running. A session
+        that was in no record was left running by desktop off, with Canvas gone: its compositor and the session bus
+        held the keyboard, and the console came back black and deaf until a reboot.
+*/
 static positive desktop_session(void)
 {
         p8 word[24];
@@ -20612,32 +20682,6 @@ static positive desktop_scan(positive session, p32 address_to pids, positive roo
                 address_to leader |= process->pid == session;
                 if (found < room)
                         pids[found] = process->pid;
-static positive desktop_scan(positive session, p32 address_to pids, positive room,
-                             bool address_to leader);
-
-// The session of a KWin that is running, 0 when none is: how a session nobody recorded is found.
-static positive desktop_compositor_session(void)
-{
-        static system_snapshot sample;
-
-        return_if(!system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false), 0);
-        for (positive at = 0; at < sample.header.process_count; at++)
-        {
-                const struct snapshot_process address_to process = sample.processes + at;
-
-                if (process->state != 'Z' && process->session > 1 &&
-                    !string_compare_max((string_address)process->command, "kwin_wayland", sizeof("kwin_wayland") - 1))
-                        return process->session;
-        }
-        return 0;
-}
-
-/*
-        The session desktop off and stop end: the one the verb recorded, and where nothing of it is left (or none was
-        recorded, as when a session was started some other way) the session of the KWin that is running. A session
-        that was in no record was left running by desktop off, with Canvas gone: its compositor and the session bus
-        held the keyboard, and the console came back black and deaf until a reboot.
-*/
                 found++;
         }
 

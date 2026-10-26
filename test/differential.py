@@ -46693,6 +46693,32 @@ while True:
               "the watcher keeps running for a deny rule with the policy off, and ends once none is left",
               repr((seen.get("usb forget 0627:0001/68284-kbd"), watching)))
 
+        # A device the kernel holds when the lock is taken (usbcore.authorized_default=2
+        # holds every one at boot) is configured first and kept as the classes it then
+        # shows: its keyboard interface, here already standing for what configuring it
+        # makes, since a sysfs of files cannot. When the same identity later brings up
+        # storage and a network, those stay held. One that shows no interface once
+        # configured is not kept at all. A rule written while it showed nothing let in
+        # whatever it came back as.
+        script = (usb_tree +
+                  "dev 1-8 5555 0008 HELD8 'Held at lock' 0 unknown; face 1-8:1.0 03 0\n"
+                  "dev 1-9 5555 0009 HELD9 'Shows nothing' 0 unknown\n" + say("usb lock") +
+                  usb_show("held kept", "grep '^allow 5555:' /root/usb.policy") +
+                  "face 1-8:1.1 08 0; face 1-8:1.2 02 0\n" + say("usb apply") +
+                  usb_show("held grown", "v $d/1-8/authorized $d/1-8:1.0/authorized $d/1-8:1.1/authorized "
+                                         "$d/1-8:1.2/authorized $d/1-9/authorized") +
+                  usb_show("held log", "grep -c 'not kept 1-9 5555:0009/HELD9' /root/usb.log") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb lock", {}).get("status") == 0 and
+              out.get("held kept") == "allow 5555:0008/HELD8 hid" and
+              out.get("held grown") == "1\n1\n0\n0\n0" and out.get("held log") == "1",
+              "a device held when the lock is taken is configured and kept as the classes it shows; the storage and "
+              "network it brings up later stay held, and one that shows no interface is not kept",
+              repr((out.get("held kept"), out.get("held grown"), out.get("held log"))))
+
         # The file: lines that are no rule are left out and counted, a policy
         # read at boot (apply) lets in the device it names, and the cap.
         script = (usb_tree +
