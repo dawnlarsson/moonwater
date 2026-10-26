@@ -44910,6 +44910,26 @@ def harness_moonwater_cli(argv):
                      "neither zone file is auto", joined[:400])
         check("(manual)" in joined.split("@@ timezone", 3)[2].split("@@status")[0],
                      "a zone with no mode beside it is manual", joined[:400])
+        #       A POSIX zone whose bracket is no offset is shown as typed, and
+        #       one with daylight saving is not called a fixed offset; a
+        #       bracket that is an offset is shown as one. The zone it was set
+        #       to is put back as the lane found it.
+        dst = "<CET>-1<CEST>,M3.5.0,M10.5.0/3"
+        lines, finished = session(
+            f"echo '@@ dst'; timeout 20 /tmp/moonwater timezone '{dst}' 2>&1; echo \"@@status $?\"\n"
+            "echo '@@ dst-shown'; timeout 20 /tmp/moonwater timezone 2>&1; echo '@@status 0'\n"
+            "echo '@@ offset'; timeout 20 /tmp/moonwater timezone '<+0530>-5:30' 2>&1; echo \"@@status $?\"\n"
+            "printf 'Europe/London\\n' > /root/timezone; rm -f /root/timezone.mode\n")
+        check(finished, "the zone with daylight saving session finished", "")
+        dst_lines = [line for line in lines if line.startswith("[Moonwater] timezone ")]
+        check(any(line.startswith(f"[Moonwater] timezone {dst} (manual)") for line in dst_lines),
+              "a POSIX zone with daylight saving is shown as typed", dst_lines[:3])
+        before_offset = lines[:lines.index("@@ offset")] if "@@ offset" in lines else lines
+        check(not any("fixed offset" in line or "UTCCET" in line for line in before_offset),
+              "a POSIX zone with daylight saving is not a fixed offset", dst_lines[:3])
+        check(any(line.startswith("[Moonwater] timezone UTC+05:30, a fixed offset with no daylight saving")
+                  for line in lines),
+              "a fixed offset stored as a bracket is shown as UTC+05:30", dst_lines[:3])
 
         # The words of the settings the verbs above do not reach are read as
         # state too: a FIFO planted at the name of one does not hold the verb

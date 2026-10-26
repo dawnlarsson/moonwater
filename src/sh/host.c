@@ -17820,10 +17820,46 @@ static bool locale_clock_synced(void)
 }
 
 /*
+        Whether a stored zone is a fixed offset, the way clock_zone_offset
+        writes one. Its bracket has to name the offset its POSIX part gives:
+        "<+0530>-5:30" does, and "<CET>-1<CEST>,M3.5.0,M10.5.0/3" starts with
+        a bracket too but is a zone with daylight saving. The bracket is put
+        back in the clock's spelling and written again, and what comes out
+        has to be the zone whole.
+*/
+static bool locale_zone_fixed(string_address zone)
+{
+        p8 clock[8];
+        p8 written[24];
+        positive digits = 0;
+        positive at = 0;
+
+        if (zone[0] != '<' || (zone[1] != '+' && zone[1] != '-'))
+                return false;
+        while (digits < 5 && byte_is_digit((p8)zone[2 + digits]))
+                digits++;
+        if ((digits != 2 && digits != 4) || zone[2 + digits] != '>')
+                return false;
+        clock[at++] = (p8)zone[1];
+        memory_copy(clock + at, zone + 2, digits == 4 ? 2 : digits);
+        at += digits == 4 ? 2 : digits;
+        if (digits == 4)
+        {
+                clock[at++] = ':';
+                memory_copy(clock + at, zone + 4, 2);
+                at += 2;
+        }
+        clock[at] = end;
+        return clock_zone_offset((string_address)clock, written, sizeof(written)) &&
+               string_equals((string_address)written, zone);
+}
+
+/*
         What a stored zone is called when it is shown. A country code or a
         zone name comes back as the table spells it; a fixed offset stored as
         "<+0530>-5:30" is shown as UTC+05:30, which is how it was asked for,
-        rather than the POSIX spelling that exists to get the sign right.
+        rather than the POSIX spelling that exists to get the sign right. Any
+        other zone is shown as it is typed, bracket and all.
 */
 static fn locale_zone_describe(string_address zone, p8 address_to into,
                                positive room)
@@ -17836,7 +17872,7 @@ static fn locale_zone_describe(string_address zone, p8 address_to into,
                 string_copy_bounded(into, named, room);
                 return;
         }
-        if (zone[0] != '<' || room < 16)
+        if (!locale_zone_fixed(zone) || room < 16)
         {
                 string_copy_bounded(into, zone[0] ? zone : (string_address) "UTC",
                                     room);
@@ -17957,7 +17993,7 @@ static fn locale_zone_title(string_address zone, p8 address_to into,
                 string_append_bounded(into, ", ", room);
                 string_append_bounded(into, spoken, room);
         }
-        else if (zone[0] == '<')
+        else if (locale_zone_fixed(zone))
                 string_append_bounded(into,
                                       ", a fixed offset with no daylight saving",
                                       room);
