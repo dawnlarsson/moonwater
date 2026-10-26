@@ -46963,6 +46963,27 @@ while True:
         names = [lines[at + 1] for at in range(len(lines) - 1) if lines[at] == "@@ keyboard xkb"]
         check(names == ["gb", "se", "no", "de", "us"],
               "keyboard xkb says the layout in XKB's name", repr(names))
+        #       A desktop chosen while the machine's compositor is up ends what the
+        #       machine script kept the pids of, read from a list of 256 bytes. A
+        #       number at the end of a longer list may be the front of one, and was
+        #       ended as the pid it looks like: here a process of the sandbox's own
+        #       (its number written to end at byte 256, a digit after it) is left
+        #       alone by the verb, and one the list names whole is ended.
+        script = ("rm -f /run/moonwater/desktop /run/moonwater/desktop.kids /root/desktop; "
+                  "mkdir -p /run/moonwater /bowls/bin\n"
+                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
+                  "chmod 755 /bowls/bin/desktop\n"
+                  "sleep 60 & cut=$!; sleep 60 & whole=$!\n"
+                  "printf \"%$((256 - ${#cut}))s%s7\\n\" '' \"$cut\" > /run/moonwater/desktop.kids\n" +
+                  say("desktop desktop") +
+                  "sleep 0.3; echo \"@@ cut $(sed 's/.*) //;s/ .*//' /proc/$cut/stat 2>&1)\"\n"
+                  "printf '%s\\n' \"$whole\" > /run/moonwater/desktop.kids\n" + say("desktop desktop") +
+                  "sleep 0.3; echo \"@@ whole $(sed 's/.*) //;s/ .*//' /proc/$whole/stat 2>&1)\"\n"
+                  "kill -9 $cut $whole; rm -f /bowls/bin/desktop /root/desktop /run/moonwater/desktop.kids\n")
+        lines, finished = session(script)
+        check(finished and "@@ cut S" in lines and not any(line == "@@ whole S" for line in lines),
+              "a number cut at the end of the list of a compositor's company is not a pid to end, a whole one is",
+              repr(lines[-8:]))
         # moonwater usb against a sysfs of the sandbox's own: /sys is a
         # directory here, so every device, interface and default is a file the
         # verb reads and writes, and what it wrote is read back. The kernel's

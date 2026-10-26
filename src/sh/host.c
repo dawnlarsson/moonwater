@@ -21730,6 +21730,10 @@ static b32 desktop_end(void)
 #define DESKTOP_SUPERVISOR HOST_STATE "/supervisor.pid"
 #define DESKTOP_COMPOSITOR HOST_STATE "/compositor.pid"
 #define DESKTOP_KIDS HOST_STATE "/desktop.kids"
+//      The room the list of pids the machine script keeps is read into, and the
+//      most digits a number of it may have to be a pid (the kernel's most is 7).
+#define DESKTOP_KIDS_ROOM 256
+#define DESKTOP_PID_DIGITS 9
 
 // The pid a file of the machine script holds, or 0: a whole number that fits what kill takes it as, and
 // nothing after its digits (4294967295 is -1, which every process answers to, and "123abc" is no pid).
@@ -21763,8 +21767,9 @@ static fn desktop_yield(void)
 {
         positive supervisor = desktop_pid_of((string_address)DESKTOP_SUPERVISOR),
                  compositor = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
-        p8 kids[256];
+        p8 kids[DESKTOP_KIDS_ROOM];
         bipolar got;
+        bool cut;
 
         if (supervisor > 1)
                 system_call_2(syscall(kill), supervisor, SIGTERM);
@@ -21779,18 +21784,26 @@ static fn desktop_yield(void)
         }
 
         got = file_read_once_at(AT_FDCWD, (p8 address_to)DESKTOP_KIDS, kids, sizeof(kids));
+        //      A read that filled the room may have more behind it, and a number
+        //      at its end may be the front of a longer one: not a pid, and not
+        //      to be killed as the one it looks like. A number of more digits
+        //      than a pid has is none either, and is not split into two.
+        cut = got == (bipolar)sizeof(kids);
         for (positive at = 0, pid = 0, digits = 0; got > 0 && at <= (positive)got; at++)
         {
                 p8 byte = at < (positive)got ? kids[at] : '\n';
 
-                if (byte >= '0' && byte <= '9' && digits < 9)
-                        pid = pid * 10 + (positive)(byte - '0'), digits++;
-                else
+                if (byte >= '0' && byte <= '9')
                 {
-                        if (digits && pid > 1)
-                                system_call_2(syscall(kill), pid, SIGTERM);
-                        pid = digits = 0;
+                        if (digits < DESKTOP_PID_DIGITS)
+                                pid = pid * 10 + (positive)(byte - '0');
+                        if (digits <= DESKTOP_PID_DIGITS)
+                                digits++;
+                        continue;
                 }
+                if (digits && digits <= DESKTOP_PID_DIGITS && pid > 1 && !(cut && at == (positive)got))
+                        system_call_2(syscall(kill), pid, SIGTERM);
+                pid = digits = 0;
         }
         (void)system_remove_at(AT_FDCWD, DESKTOP_SUPERVISOR, 0);
         (void)system_remove_at(AT_FDCWD, DESKTOP_COMPOSITOR, 0);
