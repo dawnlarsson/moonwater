@@ -48631,6 +48631,26 @@ PYEOF
               "a verb whose reader has gone still ends what it changed: settings, security, usb lock, link",
               repr(lines[-14:]))
 
+        #       The files a command writes for everybody to read are 0644 whatever the
+        #       umask of the root shell that wrote them, and the state directory is
+        #       0755: with umask 077 the resolvers, the host name and its hosts, the
+        #       zone's TZif came out 0600 (no lookup of a user's had a server, a
+        #       user's programs read UTC), and /run/moonwater 0700, with the file
+        #       TLS reads for the blocks in it (every client but root's was told of
+        #       none).
+        script = ("rm -rf /run/moonwater /root/* /etc/resolv.conf /etc/hostname /etc/hosts /etc/localtime\n"
+                  "(umask 077; /tmp/moonwater dns 1.1.1.1; /tmp/moonwater name aa-bb; /tmp/moonwater timezone de; "
+                  "/tmp/moonwater security block add " + "a" * 64 + ") > /dev/null 2>&1\n"
+                  "for f in /etc/resolv.conf /etc/hostname /etc/hosts /etc/localtime /run/moonwater /run/moonwater/security "
+                  "/root/dns /root/name; do echo \"@@mode $(stat -c %a $f) $f\"; done\n")
+        lines, finished = session(script)
+        modes = {line.split()[2]: line.split()[1] for line in lines if line.startswith("@@mode ")}
+        want = {"/etc/resolv.conf": "644", "/etc/hostname": "644", "/etc/hosts": "644", "/etc/localtime": "644",
+                "/run/moonwater": "755", "/run/moonwater/security": "644", "/root/dns": "644", "/root/name": "644"}
+        check(finished and modes == want,
+              "a command run under umask 077 writes what everybody reads at 0644 and keeps /run/moonwater at 0755",
+              repr({path: (modes.get(path), mode) for path, mode in want.items() if modes.get(path) != mode}))
+
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 

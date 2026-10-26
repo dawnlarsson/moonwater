@@ -571,12 +571,15 @@ static bipolar host_make_directory(string_address path, positive mode, bool exac
 /*      A directory this keeps state in, made if it is not there -- and made
         again if what is there is a link, which every write under it would
         otherwise have followed, since a mkdir that fails because the name
-        exists says nothing about what the name is. */
+        exists says nothing about what the name is. Its mode is the one asked
+        for and not the caller's umask taken from it: /run/moonwater made by a
+        root shell with umask 077 was 0700, and the security file in it, which
+        every TLS client reads, could not be opened by anyone else. */
 static fn host_state_directory(string_address path, positive mode)
 {
         bipolar opened;
 
-        system_make_directory_at(AT_FDCWD, path, mode);
+        system_make_directory_exact_at(AT_FDCWD, path, mode);
         opened = system_open_at(AT_FDCWD, path,
                                 FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (opened >= 0)
@@ -586,7 +589,7 @@ static fn host_state_directory(string_address path, positive mode)
         }
 
         if (system_remove_at(AT_FDCWD, path, 0) >= 0)
-                system_make_directory_at(AT_FDCWD, path, mode);
+                system_make_directory_exact_at(AT_FDCWD, path, mode);
 }
 
 /* The state directory is made, and looked at, once for a command: it asked four

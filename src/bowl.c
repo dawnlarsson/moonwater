@@ -3394,7 +3394,11 @@ static b32 bowl_write_bytes(string_address path, string_address text,
                 return bowl_fail(path, handle);
         }
 
-        if (system_write_all((positive)handle, text, length) != length)
+        //      0644 whatever the umask: the temporary file is made by an open, which
+        //      takes it away (hosts, hostname and localtime came out 0600 from a root
+        //      shell with umask 077, and a user's programs read none of them).
+        failed = system_call_2(syscall(fchmod), (positive)handle, 0644);
+        if (!failed && system_write_all((positive)handle, text, length) != length)
                 failed = -ERROR_INPUT_OUTPUT;
         if (!failed)
                 failed = system_call_1(syscall(fsync), (positive)handle);

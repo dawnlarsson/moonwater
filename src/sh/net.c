@@ -1183,8 +1183,11 @@ static COLD bipolar net_write_resolv_servers(string_address path,
                 line[used++] = '\n';
         }
 
-        //      The file a lease writes survives the power going with it.
-        return file_publish_bytes(path, line, used, 0644 & ~file_umask(), true);
+        //      The file a lease writes survives the power going with it. It is
+        //      the machine's, read by every user: 0644 whatever the umask of the
+        //      shell that set the servers (0600 under 077, and no lookup of any
+        //      user's had a server to ask).
+        return file_publish_with(path, line, used, 0644, true, FILE_STAGED_EXACT_MODE);
 }
 
 static COLD bipolar net_write_resolv_to(string_address path, p32 nameserver)
