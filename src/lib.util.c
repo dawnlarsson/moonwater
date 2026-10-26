@@ -23355,6 +23355,8 @@ static fn clock_tz_load_localtime(void)
         positive used = 0;
         positive line;
 
+        //      Nonblocking: a FIFO at the name held every program that asks
+        //      what time it is here, until somebody wrote to it.
         handle = system_call_4(syscall(openat), AT_FDCWD,
                                (positive)(string_address)CLOCK_LOCALTIME_PATH,
                                O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);

@@ -3945,9 +3945,12 @@ static b32 bowl_write_localtime_at(string_address path)
         //      a symlink into the guest's zoneinfo is exactly what differs.
         {
                 p8 held[sizeof(file)];
+                //      Nonblocking: a FIFO at the name is not what the file
+                //      says, and it is replaced; opened to be waited for, it
+                //      held every verb that applies the zone.
                 bipolar handle = system_open_at(AT_FDCWD, path,
                                                 O_RDONLY | O_NOFOLLOW |
-                                                        O_CLOEXEC);
+                                                        O_NONBLOCK | O_CLOEXEC);
 
                 if (handle >= 0)
                 {
