@@ -338,10 +338,16 @@ static b32 link_key_verb(void)
 
         link_key_text(me.public, key);
         crypto_forget(address_of me, sizeof me);
-        string_format(log, "%s\n", (string_address)key);
-        log_flush();
+        host_say(log, "%s\n", (string_address)key);
         return 0;
 }
+
+//      The refusal of a word no machine or group may be called, which says
+//      what it was asked to be: a name, or a group name.
+#define link_refuse_name(name, what)                                           \
+        host_refuse("%s is not a %s: letters, digits, . - _, up to 31, and "   \
+                    "not one of the words link uses\n",                        \
+                    (name), (what))
 
 /*      Under the peers lock. where is the address it is reached at, looked
         up before the lock was taken -- a name is a wait of seconds on a
@@ -357,10 +363,7 @@ static b32 link_add_locked(string_address name, string_address text,
         struct waterlink_identity me;
 
         if (!link_name_good(name))
-                return host_refuse("%s is not a name: letters, digits, "
-                                   ". - _, up to 31, and not one of the words "
-                                   "link uses\n",
-                                   name);
+                return link_refuse_name(name, "name");
 
         memory_zero(address_of peer, sizeof peer);
         if (!link_key_parse(text, peer.key))
@@ -444,10 +447,9 @@ static b32 link_add_locked(string_address name, string_address text,
         if (link_peers_save(address_of peers) < 0)
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
 
-        string_format(log, host_label "added %s; it may do nothing yet: "
-                                      "moonwater link allow %s run\n",
-                      name, name);
-        log_flush();
+        host_say(log, host_label "added %s; it may do nothing yet: "
+                                 "moonwater link allow %s run\n",
+                 name, name);
         return 0;
 }
 
@@ -466,8 +468,7 @@ static b32 link_remove_locked(string_address name)
         if (link_peers_save(address_of peers) < 0)
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
 
-        string_format(log, host_label "removed %s\n", name);
-        log_flush();
+        host_say(log, host_label "removed %s\n", name);
         return 0;
 }
 
@@ -502,9 +503,8 @@ static b32 link_grant_locked(string_address name, bool allow,
                 return host_refuse("%s could not be written\n", LINK_PEERS_PATH);
 
         link_grants_text(found->may, grants, sizeof grants);
-        string_format(log, host_label "%s may %s\n", name,
-                      (string_address)grants);
-        log_flush();
+        host_say(log, host_label "%s may %s\n", name,
+                 (string_address)grants);
         return 0;
 }
 
@@ -605,8 +605,7 @@ static b32 link_switch(bool on, bool say)
                         return host_refuse("the listener did not stop\n");
                 if (say)
                 {
-                        string_format(log, host_label "link off; sessions closed\n");
-                        log_flush();
+                        host_say(log, host_label "link off; sessions closed\n");
                 }
                 return 0;
         }
@@ -620,10 +619,12 @@ static b32 link_switch(bool on, bool say)
         {
                 b32 ends[2];
                 bool started;
+                bipolar piped = system_pipe(ends, 0);
 
-                if (system_pipe(ends, 0) < 0)
-                        return host_refuse("the listener did not start: is udp %p "
-                                           "taken?\n", (positive)link_port());
+                //      A pipe that cannot be made is the command's failure,
+                //      not a listener that could not take the port: the
+                //      refusal below is for the second.
+                return_if(piped < 0, host_fail("link on", piped));
                 link_serve_start(true, (bipolar)ends[1]);
                 system_close((bipolar)ends[1]);
                 started = link_wait_started((bipolar)ends[0]);
@@ -637,9 +638,8 @@ static b32 link_switch(bool on, bool say)
         // forgotten one, 32 zeros, and link on said this machine is AAAA...A=.
         if (say)
         {
-                string_format(log, host_label "link on, udp %p; this machine is %s\n",
-                              (positive)link_port(), (string_address)key);
-                log_flush();
+                host_say(log, host_label "link on, udp %p; this machine is %s\n",
+                         (positive)link_port(), (string_address)key);
         }
         return 0;
 }
@@ -701,10 +701,7 @@ static b32 link_group_join(string_address address_to words, positive count)
 
         if (!link_name_good(namespace) ||
             string_length(namespace) >= WATERLINK_NAMESPACE_MAX)
-                return host_refuse("%s is not a group name: letters, digits, "
-                                   ". - _, up to 31, and not one of the words "
-                                   "link uses\n",
-                                   namespace);
+                return link_refuse_name(namespace, "group name");
         if (at < count && !string_equals(words[at], "allow"))
                 secret = words[at++];
         if (secret && string_equals(secret, "-"))
@@ -841,11 +838,10 @@ static b32 link_group_join(string_address address_to words, positive count)
                                                  "%s -\n",
                                       (string_address)made, namespace);
                 else if (secret && string_length(secret) < 20)
-                        string_format(log, host_label "a secret this short can be "
-                                                      "guessed offline by anyone on "
-                                                      "the network; leave it out and "
-                                                      "one is made\n");
-                log_flush();
+                        host_say(log, host_label "a secret this short can be "
+                                                 "guessed offline by anyone on "
+                                                 "the network; leave it out and "
+                                                 "one is made\n");
         }
         return link_switch(true, true);
 }
@@ -905,21 +901,20 @@ static b32 link_group_leave(string_address namespace, bool forget)
                         (void)link_peers_save(address_of peers);
                 link_peers_unlock(held);
                 if (read)
-                        string_format(log, host_label "left group %s and removed the "
-                                                      "%p machines it linked\n",
-                                      namespace, dropped);
+                        host_say(log, host_label "left group %s and removed the "
+                                                 "%p machines it linked\n",
+                                 namespace, dropped);
                 else
-                        string_format(log, host_label "left group %s; %s could not "
-                                                      "be locked or read, so the "
-                                                      "machines it linked are "
-                                                      "kept\n",
-                                      namespace, LINK_PEERS_PATH);
+                        host_say(log, host_label "left group %s; %s could not "
+                                                 "be locked or read, so the "
+                                                 "machines it linked are "
+                                                 "kept\n",
+                                 namespace, LINK_PEERS_PATH);
         }
         else
-                string_format(log, host_label "left group %s; the machines it "
-                                              "linked are still known\n",
-                              namespace);
-        log_flush();
+                host_say(log, host_label "left group %s; the machines it "
+                                         "linked are still known\n",
+                         namespace);
         crypto_forget(address_of keys, sizeof keys);
         return 0;
 }
@@ -1156,6 +1151,8 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
         b32 stopped = 0;
         bool closed = false;
 
+        scope_exit(if (signals >= 0) system_close(signals));
+
         for (;;)
         {
                 link_peers peers;
@@ -1166,13 +1163,12 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
                 for (positive at = 0; at < peers.count; at++)
                         if (peers.peer[at].group == mark)
                         {
-                                string_format(log, host_label "linked with %s: it and "
-                                                              "this machine may each "
-                                                              "use a terminal, "
-                                                              "commands, files and "
-                                                              "the log of the other\n",
-                                              (string_address)peers.peer[at].name);
-                                log_flush();
+                                host_say(log, host_label "linked with %s: it and "
+                                                         "this machine may each "
+                                                         "use a terminal, "
+                                                         "commands, files and "
+                                                         "the log of the other\n",
+                                         (string_address)peers.peer[at].name);
                                 return 0;
                         }
                 if (closed || link_boot_seconds() >= until)
@@ -1258,15 +1254,17 @@ static b32 link_pair_here(string_address expect)
         refused = link_pair_start((string_address)name, code, expect,
                                   address_of mark, address_of before);
         if (refused)
+        {
+                crypto_forget(code, sizeof code);
                 return refused;
+        }
 
         link_code_text(code, said);
-        string_format(log, host_label "%s %s: on the other machine, moonwater "
-                                      "link %s %s\n"
+        host_say(log, host_label "%s %s: on the other machine, moonwater "
+                                 "link %s %s\n"
                            host_label "waiting five minutes for it\n",
-                      (string_address)name, (string_address)said,
-                      (string_address)name, (string_address)said);
-        log_flush();
+                 (string_address)name, (string_address)said,
+                 (string_address)name, (string_address)said);
         crypto_forget(code, sizeof code);
         return link_pair_wait(mark, (string_address)name, address_of before);
 }
@@ -1296,10 +1294,9 @@ static b32 link_pair_there(string_address typed_name, string_address typed)
         if (refused)
                 return refused;
 
-        string_format(log, host_label "looking for %s on this network, for five "
-                                      "minutes at most\n",
-                      (string_address)name);
-        log_flush();
+        host_say(log, host_label "looking for %s on this network, for five "
+                                 "minutes at most\n",
+                 (string_address)name);
         return link_pair_wait(mark, (string_address)name, address_of before);
 }
 
