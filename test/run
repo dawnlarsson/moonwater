@@ -21249,6 +21249,21 @@ run("moonwater desktop off", 60)
 left, _ = run(named("compositor"))
 out.append(("moonwater desktop off returns with the compositor gone", "yes" if not left.strip() else "no, pid " + left, "yes"))
 
+#       The console that comes back is drawn: Canvas off hands the card to the kernel's console while the compositor
+#       still has the master, and nothing repainted it once the compositor was gone, so the shell was there and typed
+#       to and the screen black until a switch of virtual console. The prompt and what is typed are in the corner.
+type_text("echo console-is-drawn\n")
+time.sleep(2)
+shot("console")
+width, height, pixels = load("console")
+lit = 0
+for y in range(0, 120):
+    row = y * (len(pixels) // height)
+    for x in range(0, 900):
+        if pixels[row + x * 3:row + x * 3 + 3] != b"\0\0\0":
+            lit += 1
+out.append(("and the text console is on the screen, drawn, not black", "yes" if lit > 200 else "%d lit pixels" % lit, "yes"))
+
 run("(bowl /bowls/alpine /bin/sh /tmp/wl.sh b > /tmp/bowl-b.out 2>&1 &)", 30)
 time.sleep(10)
 refused, _ = run("grep -c 'Permission denied' /tmp/weston-b.log")

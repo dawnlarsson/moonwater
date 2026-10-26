@@ -7940,6 +7940,32 @@ static b32 bowl_profile_script(const struct bowl_profile address_to profile)
         return 0;
 }
 
+/*
+        A launcher written before the session lived in this binary holds the session's lines itself, which is what
+        a machine installed that early still has: it runs on the spot, wherever it is typed, and is in no record the
+        desktop verbs read. This binary's launcher names the session, so it is written again over one that is the
+        install's own (its header) and does not. Quiet, and nothing when it is current.
+*/
+static b32 bowl_profile_refresh(const struct bowl_profile address_to profile)
+{
+        p8 path[BOWL_PATH_LIMIT];
+        p8 want[BOWL_SHEBANG_LIMIT * 8];
+        p8 have[BOWL_SHEBANG_LIMIT * 8];
+        bipolar got;
+
+        return_if(!profile->session ||
+                      !path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY, profile->name) ||
+                      !bowl_profile_header(want, sizeof(want), profile->name),
+                  0);
+        got = file_read_once_at(AT_FDCWD, path, have, sizeof(have) - 1);
+        return_if(got < (bipolar)string_length(want), 0);
+        have[got] = end;
+        return_if(string_compare_max(have, want, string_length(want)) ||
+                      string_find(have + string_length(want), "exec bowl profile "),
+                  0);
+        return bowl_profile_script(profile);
+}
+
 /* `bowl profile NAME session [argument...]`: the profile's session, lines of
    a shell script, run by /bin/sh with the arguments as its own. What the
    launcher the profile exposes under its name does. */

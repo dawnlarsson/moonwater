@@ -2006,6 +2006,10 @@ static b32 host_attach(host_install address_to install)
         }
 
         bowl_mkdir(BOWL_EXPOSE_DIRECTORY);
+        //      A profile's launcher from before the session moved into this binary is written again, so that a desktop
+        //      typed by hand is the one the verb starts.
+        for (positive profile = 0; profile < array_count(bowl_profiles); profile++)
+                (void)bowl_profile_refresh(bowl_profiles + profile);
         host_each_entry(BOWL_EXPOSE_DIRECTORY, host_publish_visit, null);
         return 0;
 }
@@ -5127,6 +5131,40 @@ static bool host_tty1_held(void)
                         sample.processes[at].state != 'Z';
 
         return held;
+}
+
+#define HOST_VT_GETSTATE 0x5603
+#define HOST_VT_ACTIVATE 0x5606
+#define HOST_VT_WAITACTIVE 0x5607
+
+/*
+        The text console's picture, drawn again. Canvas off gives the card back to the kernel's console while the
+        compositor, which is ended after it, still has the master, so the console's own modeset is refused and
+        nothing repaints it once the compositor is gone: the shell is there, and what is typed, and the screen is
+        black until something draws it. A switch to another virtual console and back does, and costs a frame. It is
+        done whether the console is the screen or a serial line, since the shell on tty1 is what the screen shows
+        then.
+*/
+static fn host_console_redraw(void)
+{
+        unsigned short state[3] = {0, 0, 0};
+        bipolar tty;
+        unsigned int active;
+        unsigned int other;
+
+        tty = system_open_at(AT_FDCWD, "/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (tty < 0)
+                return;
+        if (system_call_3(syscall(ioctl), (positive)tty, HOST_VT_GETSTATE, (positive)state) >= 0 && state[0])
+        {
+                active = state[0];
+                other = active == 1 ? 2 : 1;
+                (void)system_call_3(syscall(ioctl), (positive)tty, HOST_VT_ACTIVATE, other);
+                (void)system_call_3(syscall(ioctl), (positive)tty, HOST_VT_WAITACTIVE, other);
+                (void)system_call_3(syscall(ioctl), (positive)tty, HOST_VT_ACTIVATE, active);
+                (void)system_call_3(syscall(ioctl), (positive)tty, HOST_VT_WAITACTIVE, active);
+        }
+        system_close((positive)tty);
 }
 
 /* A shell on tty1, in a session of its own, for a console that has none. */
@@ -21115,6 +21153,53 @@ static bool desktop_installed(string_address name)
 static positive desktop_scan(positive session, p32 address_to pids, positive room,
                              bool address_to leader);
 
+static bool desktop_named(const struct snapshot_process address_to process, string_address name)
+{
+        return !string_compare_max((string_address)process->command, name, string_length(name));
+}
+
+static const struct snapshot_process address_to desktop_parent(const system_snapshot address_to sample,
+                                                                const struct snapshot_process address_to child)
+{
+        for (positive at = 0; at < sample->header.process_count; at++)
+                if (sample->processes[at].pid == child->ppid && child->ppid)
+                        return sample->processes + at;
+        return null;
+}
+
+// The top of the chain that runs a KWin (the session bus runner, startplasma, the compositor): 0 when none is.
+static positive desktop_root(const system_snapshot address_to sample)
+{
+        const struct snapshot_process address_to top = null;
+
+        for (positive at = 0; at < sample->header.process_count && !top; at++)
+                if (sample->processes[at].state != 'Z' && desktop_named(sample->processes + at, "kwin_wayland"))
+                        top = sample->processes + at;
+        for (positive hops = 0; top && hops < 16; hops++)
+        {
+                const struct snapshot_process address_to above = desktop_parent(sample, top);
+
+                if (!above || !(desktop_named(above, "dbus-run-sess") || desktop_named(above, "startplasma") ||
+                                desktop_named(above, "plasma_session") || desktop_named(above, "kwin_wayland")))
+                        break;
+                top = above;
+        }
+        return top ? top->pid : 0;
+}
+
+// Whether a process is the root or one of its descendants.
+static bool desktop_below(const system_snapshot address_to sample, const struct snapshot_process address_to process,
+                          positive root)
+{
+        for (positive hops = 0; process && hops < 64; hops++)
+        {
+                if (process->pid == root)
+                        return true;
+                process = desktop_parent(sample, process);
+        }
+        return false;
+}
+
 // The session of a KWin that is running, 0 when none is: how a session nobody recorded is found.
 static positive desktop_compositor_session(void)
 {
@@ -21125,8 +21210,7 @@ static positive desktop_compositor_session(void)
         {
                 const struct snapshot_process address_to process = sample.processes + at;
 
-                if (process->state != 'Z' && process->session > 1 &&
-                    !string_compare_max((string_address)process->command, "kwin_wayland", sizeof("kwin_wayland") - 1))
+                if (process->state != 'Z' && desktop_named(process, "kwin_wayland"))
                         return process->session;
         }
         return 0;
@@ -21169,14 +21253,21 @@ static positive desktop_scan(positive session, p32 address_to pids, positive roo
                       !system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false),
                   0);
 
+        //      Session 1 is init's, which every program of the machine is in and no session of a desktop's own: a
+        //      desktop found there (started from a shell that is init's, as a serial console is) is the chain that
+        //      runs its KWin and what is below it.
+        positive root = session == 1 ? desktop_root(address_of sample) : 0;
+
+        return_if(session == 1 && !root, 0);
         for (positive at = 0; at < sample.header.process_count; at++)
         {
                 const struct snapshot_process address_to process = sample.processes + at;
 
-                if (process->session != session || process->state == 'Z')
+                if (process->state == 'Z' ||
+                    (session == 1 ? !desktop_below(address_of sample, process, root) : process->session != session))
                         continue;
 
-                address_to leader |= process->pid == session;
+                address_to leader |= process->pid == (session == 1 ? root : session);
                 if (found < room)
                         pids[found] = process->pid;
                 found++;
@@ -21352,6 +21443,7 @@ static b32 desktop_put(string_address name, bool boot)
                         return_if(host_canvas_off(), 1);
                         for (positive pass = 0; pass < 100 && desktop_alive(compositor); pass++)
                                 host_pause(50000000);
+                        host_console_redraw();
                         return 0;
                 }
                 if (desktop_canvas_running() <= 0)
@@ -21363,6 +21455,7 @@ static b32 desktop_put(string_address name, bool boot)
 
         return_if(!desktop_installed(name),
                   host_refuse("the profile %s is not installed: bowl profile installs it\n", name));
+        (void)bowl_profile_refresh(bowl_find_profile(name));
         left = desktop_scan(desktop_session(), address_of pid, 1, address_of leader);
         return_if(leader, host_refuse("the desktop %s is already running\n", name));
         return_if(left && desktop_end(),
