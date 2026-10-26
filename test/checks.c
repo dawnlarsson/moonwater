@@ -113470,6 +113470,96 @@ static fn check_sweep()
 }
 
 /*
+        Lines of the faces this tree ships, as the taskbar and the windows
+        write them: Inter alone, and Inter with IBM Plex Mono behind it for
+        what Inter has not. Kerned pairs, Latin-1, drawn cells, a code point
+        neither face has and a byte that is no UTF-8; at the tabs' 11 px and
+        at 13, 16.5 and 24 px; from pens a quarter of a pixel apart; dark on
+        light (darkened), light on dark, a colour on a colour, and white on a
+        ground not known (a ramp, blended pixel by pixel).
+*/
+#define LINE_W 560
+#define LINE_H 40
+#define LINE_BASELINE 29
+
+static p8 line_inter[1 << 19], line_plex[1 << 18];
+static font_face line_faces[2];
+static p32 line_pixels[LINE_W * LINE_H];
+static const string_address line_texts[] = {
+    "Moonwater: the quick brown fox jumps over the lazy dog, 0123456789",
+    "AVATAR To Ty Wa ffi T.V. \xc3\xa5\xc3\xa4\xc3\xb6 \xc3\x85\xc3\x84\xc3\x96 \xc3\xa9",
+    "\xe2\x94\x80\xe2\x94\xbc\xe2\x95\xad\xe2\xa3\xbf\xe2\x96\x92 shell \xe4\xb8\xad \xff end",
+};
+static const p32 line_sizes[] = {11 * 64, 13 * 64, 1056, 24 * 64};
+static const p32 line_inks[][2] = {{0x101010, 0xf0f0f0}, {0xe4e4e4, 0x2f2f33}, {0x3366ff, 0xffee88}, {0xffffff, FONT_UNKNOWN}};
+
+static bool line_load(void)
+{
+        bipolar inter = file_slurp_regular_at(AT_FDCWD, "fonts/inter/Inter-Regular.ttf", line_inter, sizeof(line_inter), 0);
+        bipolar plex = file_slurp_regular_at(AT_FDCWD, "fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf", line_plex,
+                                             sizeof(line_plex), 0);
+
+        return inter > 0 && plex > 0 && font_load(&line_faces[0], line_inter, (positive)inter, 0) == 0 &&
+               font_load(&line_faces[1], line_plex, (positive)plex, 0) == 0;
+}
+
+//      The ground a line is drawn on, width by height: its colour, or for a ground not known a ramp.
+static fn line_ground(p32 address_to pixels, b32 width, b32 height, p32 ground)
+{
+        for (b32 y = 0; y < height; y++)
+                for (b32 x = 0; x < width; x++)
+                        pixels[y * width + x] = ground & FONT_UNKNOWN ? (p32)(x * 0x010203 + y * 0x030100) & 0xffffff : ground;
+}
+
+static p64 line_hash(p64 hash, const p32 address_to pixels, positive count)
+{
+        for (positive at = 0; at < count; at++)
+                for (p32 shift = 0; shift < 32; shift += 8)
+                        hash = (hash ^ (pixels[at] >> shift & 255)) * 0x100000001b3ull;
+        return hash;
+}
+
+/*
+        Upright text is the bytes it was before text could be turned: every
+        line above, hashed, against the hash the engine made then, the same
+        on all three machines.
+*/
+#define LINE_UPRIGHT 13976847403197385133ull
+
+static fn check_upright(void)
+{
+        static font_engine e;
+        static p8 store[256 * 256];
+        p64 hash = 0xcbf29ce484222325ull;
+
+        if (!line_load())
+        {
+                check("upright: the faces this tree ships load", false);
+                return;
+        }
+        font_start(&e, store, 256, 256);
+        for (p32 chain = 1; chain <= 2; chain++)
+                for (p32 text = 0; text < sizeof(line_texts) / sizeof(line_texts[0]); text++)
+                        for (p32 size = 0; size < sizeof(line_sizes) / sizeof(line_sizes[0]); size++)
+                                for (p32 ink = 0; ink < sizeof(line_inks) / sizeof(line_inks[0]); ink++)
+                                        for (p32 pen = 0; pen < 4; pen++)
+                                        {
+                                                const font_face address_to faces[2] = {&line_faces[0], &line_faces[1]};
+                                                font_target target = {line_pixels, LINE_W, LINE_W, LINE_H};
+
+                                                line_ground(line_pixels, LINE_W, LINE_H, line_inks[ink][1]);
+                                                font_draw(&e, faces, chain, (const p8 address_to)line_texts[text],
+                                                          string_length(line_texts[text]), line_sizes[size], 0, &target,
+                                                          (b32)(3 << 16) + (b32)pen * 0x4000, LINE_BASELINE,
+                                                          line_inks[ink][0], line_inks[ink][1]);
+                                                hash = line_hash(hash, line_pixels, LINE_W * LINE_H);
+                                        }
+        if (hash != LINE_UPRIGHT)
+                string_format(log, "  upright text hashes to %p\n", (positive)hash);
+        check("upright: text is the bytes it was before text could be turned", hash == LINE_UPRIGHT);
+}
+
+/*
         Hostile fonts. The bytes are copied so that the last one sits against
         a page that faults, and each cut and each mutation is loaded, every
         glyph drawn hinted and not at two sizes, every pair of the first
@@ -113694,6 +113784,7 @@ b32 main()
         check_synthetic(&one, &two);
         check_polarity(&two);
         check_invariants();
+        check_upright();
         check_cells(&small_engine, &two);
         check_translate();
         check_translate_planes();
@@ -114514,6 +114605,91 @@ static void check_taskbar_geometry(void)
 
         check("taskbar: the battery set to none is not drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
     }
+}
+
+/* The band's titles written with a face: three tabs (the one with the keys, one, one put away, the last a title too
+   long for its tab) on a 1920 by 1080 output, over a glass that is a ramp of the output whatever rectangle is asked
+   for, the tabs' slots alone redone, so the clock and the minute are not in the picture. */
+#define BAND_W 1920
+#define BAND_H 1080
+static unsigned int band_pixels[BAND_W * COMPOSITOR_PANEL], band_glass_pixels[(BAND_W + 64) * (COMPOSITOR_PANEL + 64)];
+static font_engine band_engine;
+static p8 band_atlas[128 * 128];
+static font_face band_face;
+static const char *const band_titles[3] = {"shell", "Settings \xe2\x80\x94 T\xc3\xa4st", "AVATAR To Wa: a title too long"};
+static const unsigned char band_marks[3] = {COMPOSITOR_TAB_LIT, 0, COMPOSITOR_TAB_AWAY};
+
+static int band_glass(void *context, int x, int y, int width, int height)
+{
+    (void)context;
+    for (int row = 0; row < height; row++)
+        for (int column = 0; column < width; column++)
+            band_glass_pixels[row * width + column] = (unsigned int)((x + column) * 0x000103 + (y + row) * 0x050201) & 0xffffffu;
+    return width;
+}
+
+/* The view of a band at a position with the three tabs, its pixels cleared. */
+static struct taskbar_view band_view(unsigned int position)
+{
+    struct taskbar_view view;
+    static unsigned char lengths[3];
+
+    memory_zero(&view, sizeof(view));
+    memory_zero(band_pixels, sizeof(band_pixels));
+    view.width = BAND_W;
+    view.height = BAND_H;
+    view.scale = 1;
+    view.position = position;
+    view.pixels = band_pixels;
+    view.band_bytes = sizeof(band_pixels);
+    view.glass = band_glass_pixels;
+    view.face = &band_face;
+    view.engine = &band_engine;
+    view.count = 3;
+    view.marks = band_marks;
+    view.lengths = lengths;
+    for (unsigned int at = 0; at < 3; at++)
+        view.titles[at] = band_titles[at], lengths[at] = compositor_title_length(band_titles[at], WINDOWS_TITLE);
+    return view;
+}
+
+static p64 band_hash(p64 hash)
+{
+    for (unsigned int at = 0; at < sizeof(band_pixels) / sizeof(band_pixels[0]); at++)
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+            hash = (hash ^ (band_pixels[at] >> shift & 255)) * 0x100000001b3ull;
+    return hash;
+}
+
+/* A bottom and a top band are the bytes they were before a band on a side could turn its text. */
+#define BAND_UPRIGHT 15291459019951173845ull
+
+static void check_taskbar_text(string_address face_path)
+{
+    static p8 bytes[1 << 19];
+    bipolar got = face_path ? file_slurp_regular_at(AT_FDCWD, face_path, bytes, sizeof(bytes), 0) : -1;
+    p64 hash = 0xcbf29ce484222325ull;
+    int rect[4];
+
+    if (got <= 0 || font_load(&band_face, bytes, (positive)got, 0) != 0)
+    {
+        check("taskbar text: the face the tabs are written in loads", false);
+        return;
+    }
+    font_start(&band_engine, band_atlas, 128, 128);
+    for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_TOP; position++)
+    {
+        struct taskbar_view view = band_view(position);
+
+        taskbar_settings_set(position == TASKBAR_TOP ? "top" : "bottom", "primary", "battery none\n");
+        check("taskbar text: a bottom and a top band draw their tabs", taskbar_draw(&view, 7, band_glass, null, rect) == 1);
+        hash = band_hash(hash);
+    }
+    if (hash != BAND_UPRIGHT)
+        string_format(log, "  the bottom and top bands hash to %p\n", (positive)hash);
+    check("taskbar text: a bottom and a top band are the bytes they were before a side band could turn its text",
+          hash == BAND_UPRIGHT);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
 }
 
 static void check_compositor_look(void)
@@ -117518,6 +117694,9 @@ b32 main()
 #endif
         check_compositor_look();
         check_taskbar_geometry();
+#if MOONWATER_UI_TASKBAR
+        check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
+#endif
 #if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
