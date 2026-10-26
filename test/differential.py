@@ -30198,6 +30198,24 @@ int main(void) {
             "linux/fs/overlayfs/super.c":
                 "static const struct dentry_operations ovl_dentry_operations = {\n"
                 "\t.d_real = ovl_d_real,\n};\n",
+            # mw_net_silent_gate's guards and declarations: a #include for the
+            # declaration to go after, a first line of code, and the exact
+            # reply line each guard is placed above, once.
+            "linux/net/ipv4/tcp_ipv4.c":
+                "#include <net/tcp.h>\n\nint tcp_v4_rcv(struct sk_buff *skb)\n{\n"
+                "\t\ttcp_v4_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason));\n}\n",
+            "linux/net/ipv6/tcp_ipv6.c":
+                "#include <net/tcp.h>\n\nint tcp_v6_rcv(struct sk_buff *skb)\n{\n"
+                "\t\ttcp_v6_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason));\n}\n",
+            "linux/net/ipv4/udp.c":
+                "#include <net/udp.h>\n\nint udp_rcv(struct sk_buff *skb)\n{\n"
+                "\ticmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);\n}\n",
+            "linux/net/ipv6/udp.c":
+                "#include <net/udp.h>\n\nint udpv6_rcv(struct sk_buff *skb)\n{\n"
+                "\ticmpv6_send(skb, ICMPV6_DEST_UNREACH, ICMPV6_PORT_UNREACH, 0);\n}\n",
+            "linux/net/ipv4/sysctl_net_ipv4.c":
+                "#include <net/tcp.h>\n\nstatic struct ctl_table ipv4_table[] = {\n"
+                "#ifdef CONFIG_NETLABEL\n};\n",
         }
 
         def settings_placed(tree):
@@ -30247,7 +30265,32 @@ int main(void) {
                     "_Static_assert(offsetof(struct getdents_callback64, current_dir) == 24," in readdir and
                     "void moonwater_offsets(void)" in offsets and
                     "OFFSET(MW_INODE_SB, inode, i_sb);" in offsets and
-                    "DEFINE(MW_AVX2_BIT, (X86_FEATURE_AVX2 & 31));" in offsets)
+                    "DEFINE(MW_AVX2_BIT, (X86_FEATURE_AVX2 & 31));" in offsets and
+                    net_gate_placed(tree, offsets))
+
+        # mw_net_silent_gate replaces nothing, so its //> guard and //> declare
+        # put it into Linux's own C: a declaration above the first line of each
+        # guarded file, the check above each reply line, the sysctl row, the
+        # assert, and the offsets asked of the compiler.
+        def net_gate_placed(tree, offsets):
+            read = lambda name: (tree / name).read_text()
+            tcp4 = read("linux/net/ipv4/tcp_ipv4.c")
+            udp4 = read("linux/net/ipv4/udp.c")
+            udp6 = read("linux/net/ipv6/udp.c")
+            sysctl = read("linux/net/ipv4/sysctl_net_ipv4.c")
+            return ("int mw_net_silent_gate(const struct sk_buff *skb);" in tcp4 and
+                    tcp4.index("if (mw_net_silent_gate(skb)) goto discard_it;") <
+                    tcp4.index("tcp_v4_send_reset(NULL,") and
+                    "_Static_assert(sizeof_field(struct net_device, flags) == 4," in tcp4 and
+                    "int mw_net_silent_gate(const struct sk_buff *skb);" in read("linux/net/ipv6/tcp_ipv6.c") and
+                    udp4.index("if (mw_net_silent_gate(skb)) { sk_skb_reason_drop(sk, skb, drop_reason); return 0; }") <
+                    udp4.index("icmp_send(") and
+                    udp6.index("if (mw_net_silent_gate(skb)) { sk_skb_reason_drop(sk, skb, reason); return 0; }") <
+                    udp6.index("icmpv6_send(") and
+                    "extern int mw_net_silent;" in sysctl and
+                    sysctl.index('.procname = "moonwater_silent"') < sysctl.index("#ifdef CONFIG_NETLABEL") and
+                    "OFFSET(MW_SKB_DEV, sk_buff, dev);" in offsets and
+                    "DEFINE(MW_IFF_LOOPBACK, IFF_LOOPBACK);" in offsets)
 
         # Where a new process starts: each scheduler edit inside the function
         # it belongs to, ahead of the line it is placed by.
