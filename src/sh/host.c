@@ -14675,15 +14675,21 @@ static fn usb_probe_flush(void)
         usb_probe_count = 0;
 }
 
-/* A device's authorized set, unless the device at its port is no longer the
-   one the census read: one plugged in since at the same port (or the same
-   one enumerated again) has another devnum, and the next pass judges it. */
-static bipolar usb_set_device(usb_device address_to device, string_address word)
+/* Whether the device at its port is still the one the census read: one
+   plugged in since at the same port (or the same one enumerated again) has
+   another devnum, and the next pass judges it. */
+static bool usb_still(usb_device address_to device)
 {
         p8 now[sizeof(device->devnum)];
 
         usb_read((string_address)device->port, "devnum", now, sizeof(now));
-        if (!string_equals((string_address)now, (string_address)device->devnum))
+        return string_equals((string_address)now, (string_address)device->devnum);
+}
+
+/* A device's authorized set, unless it is no longer the one the census read. */
+static bipolar usb_set_device(usb_device address_to device, string_address word)
+{
+        if (!usb_still(device))
                 return -ESTALE;
         return usb_set((string_address)device->port, "authorized", word);
 }
@@ -15184,11 +15190,8 @@ static usb_device address_to usb_before(usb_census address_to before, usb_device
 static fn usb_interfaces(usb_policy address_to policy, usb_census address_to census,
                          usb_device address_to device, p8 why, usb_census address_to before, bool say)
 {
-        p8 now[sizeof(device->devnum)];
-
         //      Not the device the census read: the next pass judges what is there.
-        usb_read((string_address)device->port, "devnum", now, sizeof(now));
-        if (!string_equals((string_address)now, (string_address)device->devnum))
+        if (!usb_still(device))
                 return;
         for (positive at = 0; at < census->interfaces; at++)
         {
@@ -15800,7 +15803,7 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
 
         usb_policy_load(address_of policy);
         if (policy.cut)
-                return host_refuse("%s is too long to change here\n", USB_POLICY);
+                return usb_policy_too_long();
         stay = policy.lock || how == USB_LOCK_CARRIED;
         usb_census_take(address_of census);
         //      Refused before anything is configured: at most each device no rule names is a rule more.
@@ -15907,10 +15910,11 @@ static b32 usb_unlock_now(void)
         if (lock < 0)
                 return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
+        //      Unlock is a way out of a lock, so an unreadable policy does not stop it: only one that is cut short.
         if (policy.cut)
         {
                 radio_unlock(lock);
-                return host_refuse("%s is too long to change here\n", USB_POLICY);
+                return usb_policy_too_long();
         }
         policy.lock = false;
         failed = usb_policy_save(address_of policy);
@@ -16104,14 +16108,19 @@ static b32 usb_forget(string_address word)
         return 0;
 }
 
+// A class as the policy says it: allow or deny, or unknown where the policy is not read.
+static string_address usb_class_word(usb_policy address_to policy, positive kind)
+{
+        return !policy->known                    ? (string_address) "unknown"
+               : (policy->allowed >> kind) & 1 ? (string_address) "allow"
+                                               : (string_address) "deny";
+}
+
 static fn usb_classes_say(usb_policy address_to policy)
 {
         string_format(log, host_label "  classes:");
         for (positive kind = 0; kind < USB_KINDS; kind++)
-                string_format(log, "%s %s %s", kind ? "," : "", usb_kinds[kind],
-                              !policy->known                    ? "unknown"
-                              : (policy->allowed >> kind) & 1 ? "allow"
-                                                                : "deny");
+                string_format(log, "%s %s %s", kind ? "," : "", usb_kinds[kind], usb_class_word(policy, kind));
         string_format(log, "\n");
 }
 
@@ -16130,9 +16139,7 @@ static b32 usb_class(string_address address_to arguments, positive count)
                         usb_classes_say(address_of policy);
                 else
                         string_format(log, host_label "usb class %s %s\n", usb_kinds[kind],
-                                      !policy.known                     ? "unknown"
-                                      : (policy.allowed >> kind) & 1 ? "allow"
-                                                                       : "deny");
+                                      usb_class_word(address_of policy, kind));
                 log_flush();
                 return 0;
         }
@@ -16271,8 +16278,8 @@ static b32 usb_status(void)
         static usb_census census;
         usb_policy policy;
         p8 line[USB_LOG_LINE];
-        bool told;
-        b32 watcher = usb_watcher_owner(address_of told);
+        bool known;
+        b32 watcher = usb_watcher_owner(address_of known);
         bool locked;
 
         usb_policy_load(address_of policy);
@@ -16283,7 +16290,7 @@ static b32 usb_status(void)
         string_format(log, host_label "%s\n", line);
         if (watcher)
                 string_format(log, host_label "  watcher running, pid %p\n", (positive)watcher);
-        else if (!told)
+        else if (!known)
                 string_format(log, host_label "  whether the watcher runs is root's to see\n");
         else
                 string_format(log, host_label "  watcher not running\n");
@@ -16598,9 +16605,10 @@ static b32 host_usb(string_address address_to arguments, positive count)
         }
         if (count == 3 && string_equals(word, "watch"))
         {
-                b32 owner = host_lock_owner(USB_WATCHER_PATH);
+                b32 owner;
 
                 host_need_root();
+                owner = host_lock_owner(USB_WATCHER_PATH);
                 return_if(owner, host_refuse("the usb watcher is already running, pid %p\n", (positive)owner));
                 return usb_watch_run();
         }
