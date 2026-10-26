@@ -45512,6 +45512,22 @@ def harness_moonwater_cli(argv):
               not any("battery 0%" in line or ", ;" in line for line in seen["charge"]["out"]),
               "charge says the charge is unknown where the battery gives no capacity", repr(seen.get("charge")))
 
+        # A suspend refused before any device was reached (here the state is a
+        # link, which the write does not follow) is not reported as the device
+        # the last suspend failed on: the kernel's record of that is old.
+        sys_reset()
+        (fake / "power/state").rename(fake / "power/state.list")
+        os.symlink("state.list", fake / "power/state")
+        sys_file("power/suspend_stats/last_failed_dev", "stale-dev\n")
+        sys_file("power/suspend_stats/last_failed_step", "suspend\n")
+        sys_file("power/suspend_stats/last_failed_errno", "16\n")
+        sys_file("power/suspend_stats/fail", "1\n")
+        got, done = session("rm -f /root/tune\n" + say("sleep"))
+        joined = "\n".join(got)
+        check(done and "stale-dev" not in joined and "the kernel stopped at" not in joined and
+              any(line.startswith("[Moonwater] sleep:") for line in got),
+              "a suspend refused before a device is not blamed on the last one that failed", joined[-300:])
+
         # What a sleep reports and puts back is by name. The wakeup sources and
         # the backlights were paired with what they were before by their place
         # in the directory, so a source that went while the machine slept

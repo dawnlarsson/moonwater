@@ -13725,13 +13725,22 @@ static fn tune_wake_report(tune_sources address_to before, p8 address_to text)
         string_append_bounded(text, "\n", TUNE_LOG_ROOM);
 }
 
-/* What the kernel says went wrong, when it says anything: the device, the step and the error. */
-static fn tune_suspend_failure(void)
+/*
+        What the kernel says went wrong, when it says anything: the device, the
+        step and the error. Those are the last failure's, and a write the kernel
+        refuses before any device is reached (a state it does not take) leaves
+        them as they were, so they are said only when this write counted a
+        failure: the fail count is the one asked before the write.
+*/
+static fn tune_suspend_failure(positive failures)
 {
         p8 device[64];
         p8 step[32];
         positive errno_value = 0;
+        positive counted = 0;
 
+        if (!tune_number(TUNE_SYS_POWER "/suspend_stats/fail", address_of counted) || counted == failures)
+                return;
         if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_dev", device, sizeof(device)) || !device[0])
                 return;
         if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_step", step, sizeof(step)))
@@ -13944,11 +13953,14 @@ static b32 tune_suspend(string_address verb, string_address state)
         tune_backlight_save(address_of lights);
         system_call(syscall(sync));
         {
-                bipolar failed = tune_write(TUNE_SYS_POWER "/state", state);
+                positive failures = 0;
+                bipolar failed;
 
+                (void)tune_number(TUNE_SYS_POWER "/suspend_stats/fail", address_of failures);
+                failed = tune_write(TUNE_SYS_POWER "/state", state);
                 if (failed < 0)
                 {
-                        tune_suspend_failure();
+                        tune_suspend_failure(failures);
                         text[0] = end;
                         tune_sleep_stats(text);
                         tune_kernel_lines(text);
