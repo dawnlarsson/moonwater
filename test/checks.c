@@ -88413,6 +88413,28 @@ static fn request_answers(void)
         (void)system_remove_at(AT_FDCWD, "/root/private", 0);
 }
 
+/*
+        The kernel says how many events it binds, and moonwater bind asks that
+        many: a count past the names the shell knows is cut to them, and one
+        under them is kept, so that a kernel that offers more can never have
+        the walk go past its own table. (Here, with the rest of the shell
+        compiled in; the storage_format section, which holds the other host
+        checks, calls host_settings_apply with three arguments and does not
+        build on this tree.)
+*/
+static fn bind_events(void)
+{
+        check("the bind count the kernel offers is kept where it is under the "
+              "events this knows",
+              host_bind_known(1) == 1 &&
+                      host_bind_known(SPARK_BIND_EVENTS) == SPARK_BIND_EVENTS &&
+                      host_bind_known(SPARK_BIND_EVENTS - 1) ==
+                              SPARK_BIND_EVENTS - 1);
+        check("and is cut to them where it is over",
+              host_bind_known(SPARK_BIND_EVENTS + 1) == SPARK_BIND_EVENTS &&
+                      host_bind_known(0xffffffffu) == SPARK_BIND_EVENTS);
+}
+
 //      The words that name a machine, and the terminal a client names.
 static fn names_and_words(void)
 {
@@ -94145,6 +94167,7 @@ b32 main(void)
         stream_failures();
         request_answers();
         names_and_words();
+        bind_events();
         control_messages();
         private_records_never_wait();
         reaped_commands();

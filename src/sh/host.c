@@ -22956,6 +22956,14 @@ static fn host_bind_apply(host_settings address_to settings)
         system_close(device);
 }
 
+//      How many events are asked of the kernel: the number it says it has, and
+//      no more than the names this knows (SPARK_BIND_EVENTS), past which there
+//      is nothing to say.
+static unsigned int host_bind_known(unsigned int offered)
+{
+        return offered < SPARK_BIND_EVENTS ? offered : SPARK_BIND_EVENTS;
+}
+
 static bipolar host_bind_each(bool label, bool required)
 {
         struct bind_control control;
@@ -22978,7 +22986,7 @@ static bipolar host_bind_each(bool label, bool required)
                         return (required && event == 1) ? failed : 0;
                 }
                 if (event == 1 && control.count)
-                        count = control.count;
+                        count = host_bind_known(control.count);
                 host_bind_say(label, address_of control);
         }
 
