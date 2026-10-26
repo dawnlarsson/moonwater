@@ -21762,6 +21762,11 @@ if os.path.isfile(tier):
     #       An install of the tier to a disk of its own, from a stick of the tier image.
     said, status = shell.run("moonwater setup install nvme0n1 yes > /tmp/install 2>&1; echo $?; tail -3 /tmp/install", 300)
     out.append(("U11 the tier installs to a disk", said.split()[0] if said.split()[:1] == ["0"] else "no: " + said[-300:], "0"))
+    #       The install keeps the disk's data and starts it with this session's /root, its lock included; the
+    #       disk this is about has none (one installed by a build or a tier that never locked), so it goes.
+    said, _ = shell.run("grep -q '^disk nvme0n1' /run/moonwater/verdict && rm -f /root/usb.policy /root/usb.log && sync && "
+                        "[ ! -e /root/usb.policy ] && echo gone", 20)
+    out.append(("U11 and its disk is left with no policy", said.strip().split("\n")[-1] if said.strip() else "no answer", "gone"))
     stop(guest)
 
     #       Booted again not from that disk, the tight tier asks about it. The session locks its own /root once USB
