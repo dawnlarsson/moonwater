@@ -46199,6 +46199,20 @@ while True:
                              "power and charge ones too), the link's key and switch, and the bowls",
                              line)
         check(dns_lines > 0, "a bare dns says its state, one or more lines", dns_lines)
+        #       A file TLS or the resolver reads that cannot be written is said, and the
+        #       verb answers 1: the word is kept, but nothing follows it until the file
+        #       is written. A directory in the way makes the write fail, and it is taken
+        #       away after, so the next word is written as it always was.
+        lines, finished = session(
+            "rm -rf /run/moonwater/dns.tls\nmkdir -p /run/moonwater/dns.tls/x\n" + say("dns tls only") +
+            "rm -rf /run/moonwater/dns.tls\n" + say("dns tls off"))
+        seen = answers(lines)
+        only = seen.get("dns tls only", {"out": [], "status": None})
+        check(finished and only["status"] == 1 and
+              any("/run/moonwater/dns.tls" in line for line in only["out"]) and
+              seen.get("dns tls off", {}).get("status") == 0,
+              "a dns tls word whose published file cannot be written says so and answers 1",
+              repr((only, seen.get("dns tls off"))))
         #       The same for moonwater security: a switch and an entry kept while the
         #       file TLS reads cannot be written are said and answer 1, and the next
         #       change, once the file can be written, publishes what the settings hold.

@@ -21773,18 +21773,20 @@ static b32 host_desktop(string_address address_to arguments, positive count)
 */
 #define DNS_TLS_KEPT "/root/dns.tls"
 
-static fn dns_tls_publish(void)
+//      What the resolver reads is answered, so that a verb can say it was not written: the mode it names is not in force.
+static bipolar dns_tls_publish(void)
 {
         p8 word[16];
+        bipolar failed;
 
         host_read_word(DNS_TLS_KEPT, word, sizeof(word));
         if (!word[0])
         {
-                (void)system_remove_at(AT_FDCWD, DNS_TLS_PATH, 0);
-                return;
+                failed = system_remove_at(AT_FDCWD, DNS_TLS_PATH, 0);
+                return failed < 0 && failed != -ENOENT ? failed : 0;
         }
         host_state_ready();
-        (void)radio_write_word(DNS_TLS_PATH, (string_address)word);
+        return radio_write_word(DNS_TLS_PATH, (string_address)word);
 }
 
 static string_address dns_tls_word(positive mode)
@@ -21825,6 +21827,7 @@ static fn dns_say(bool label)
 static b32 dns_tls_verb(string_address address_to arguments, positive count)
 {
         string_address word = count > 3 ? arguments[3] : null;
+        bipolar failed;
 
         if (count == 4)
         {
@@ -21832,7 +21835,8 @@ static b32 dns_tls_verb(string_address address_to arguments, positive count)
                           !string_equals(word, "only"), host_usage());
                 host_need_root();
                 return_if(host_save("dns tls", DNS_TLS_KEPT, word), 1);
-                dns_tls_publish();
+                failed = dns_tls_publish();
+                return_if(failed < 0, host_fail("dns tls not published to " DNS_TLS_PATH, failed));
         }
         else
                 return_if(count != 3, host_usage());
@@ -21895,7 +21899,7 @@ static fn dns_restore(void)
         p32 servers[DNS_SERVERS_MAX];
         positive count = net_dns_kept(servers);
 
-        dns_tls_publish();
+        (void)dns_tls_publish();
         if (count)
                 (void)net_write_resolv_servers((string_address) "/etc/resolv.conf",
                                                servers, count);
