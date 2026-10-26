@@ -115956,6 +115956,11 @@ static fn check_compositor_remember(void)
         compositor.card = -1;
         compositor.scanout = screen;
         compositor.scanout_pitch = GLASS_SIDE * 4;
+        // One screen of the output model, named as a connector is: a headless compositor's has no name, and a place
+        // is kept under its screen's name.
+        compositor.outputs = 1;
+        compositor.screen[0][2] = compositor.screen[0][3] = GLASS_SIDE;
+        memory_copy(compositor.output[0].name, "screen", 7);
         if (!glass_table_map())
         {
                 check("remember: the table is mapped", false);

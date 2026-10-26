@@ -5936,18 +5936,6 @@ static unsigned int place_screen_at(int x, int y, const int (*screens)[4], unsig
         return found;
 }
 
-// A connector's name as placement keeps it: letters, digits and hyphens, one to fifteen.
-static int place_screen_name_valid(const char *name)
-{
-        unsigned int at = 0;
-
-        for (; name[at] && at < WINDOWS_NAME; at++)
-                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
-                      (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
-                        return 0;
-        return at && at < WINDOWS_NAME;
-}
-
 // The screens' rectangles, and how many there are.
 static unsigned int place_screens(int (*screens)[4])
 {
@@ -6151,7 +6139,7 @@ static void compositor_remember(int row)
         if (row < 0 || !compositor.showing[row] || !compositor.name[row][0] ||
             compositor.arranged[row] != COMPOSITOR_FLOATING || !compositor_remembering())
                 return;
-        count = compositor_screens(screens);
+        count = place_screens(screens);
         on = place_screen_at(compositor.x[row] + (int)compositor.w[row] / 2, compositor.y[row] + (int)compositor.h[row] / 2,
                              screens, count);
         compositor_screen_names(names, count);
@@ -6271,7 +6259,7 @@ static void compositor_move(int row)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
         int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
-        unsigned int count = compositor_screens(screens), from, on, fills;
+        unsigned int count = place_screens(screens), from, on, fills;
         char name[WINDOWS_NAME];
         struct window_place place;
 
