@@ -46230,6 +46230,15 @@ while True:
               seen.get("security block remove " + key, {}).get("status") == 0,
               "a security change whose published file cannot be written says so and answers 1",
               repr((switch, seen.get("security block add " + key), seen.get("security tls12 on"))))
+        #       A boot whose desktop cannot be started (no process can be made) says so,
+        #       and takes its marker away so that the next boot asks again. The shell
+        #       cannot fork under the limit, so the verb is the last thing it runs.
+        lines, finished = session("rm -f /run/moonwater/desktop.booted\n"
+                                  "ulimit -u 1\nexec /tmp/moonwater desktop boot 2>&1\n")
+        left, _ = session("test -e /run/moonwater/desktop.booted && echo @@left || echo @@gone\n")
+        check(not finished and any(line.startswith("[Moonwater] desktop: ") for line in lines) and
+              "@@gone" in left,
+              "a desktop boot that cannot fork says so, answers 1 and leaves no marker", repr((lines, left)))
 
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line

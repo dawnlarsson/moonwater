@@ -21666,6 +21666,7 @@ static b32 desktop_start(bool boot)
 static b32 desktop_boot(void)
 {
         bipolar made;
+        bipolar child;
 
         host_need_root();
         host_state_ready();
@@ -21674,7 +21675,14 @@ static b32 desktop_boot(void)
                                    0600);
         return_if(made < 0, 0);
         system_close(made);
-        return_if(system_fork(), 0);
+        child = system_fork();
+        if (child < 0)
+        {
+                //      The marker goes with the failed start, so that a boot that asks again is not told it was done.
+                (void)system_remove_at(AT_FDCWD, DESKTOP_BOOTED, 0);
+                return host_fail("desktop", child);
+        }
+        return_if(child, 0);
 
         system_call(syscall(setsid));
         host_verdict_settled();
