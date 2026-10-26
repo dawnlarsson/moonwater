@@ -565,7 +565,8 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_LEFT 2
 #define COMPOSITOR_RIGHT 3
 #define COMPOSITOR_ROOM 4
-#define COMPOSITOR_FRAMES (2 * WINDOWS + 2) // the windows, and a tab for each window and the tray
+// The windows, and a tab for each window and a tray for each band (`taskbar display all` is one on every screen).
+#define COMPOSITOR_FRAMES (2 * WINDOWS + 1 + WINDOWS_OUTPUTS)
 
 /*
         The scene: inside the target's damage, each window where nothing
@@ -1772,175 +1773,13 @@ static void compositor_screen_carry(const int *was, const int *now, int *x, int 
         *y = compositor_carry_axis(*y, was[1], was[3], now[1], now[3], height);
 }
 
-// A word of the arrangement, as long as length: whether it is one, NAME, NAME@X,Y or NAME@off, with the name's length
-// and what it says. A name is letters, digits and dashes, as a connector's is.
-#define COMPOSITOR_PLACE_FLOW 0
-#define COMPOSITOR_PLACE_AT 1
-#define COMPOSITOR_PLACE_OFF 2
-#define COMPOSITOR_PLACE_MOST 32768
-
-static int compositor_arrange_word(const char *word, unsigned int length, unsigned int *name, int *how, int *x, int *y)
+// The pointer's cell, size pixels square at left, top in the space, and a screen: where the cell is on that screen,
+// and whether it meets it at all, which is whether that screen's cursor plane is to show it.
+static int compositor_screen_cell(const int *screen, int left, int top, int size, int *x, int *y)
 {
-        unsigned int at = 0;
-
-        while (at < length && ((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
-                               word[at] == '-'))
-                at++;
-        *name = at;
-        *how = COMPOSITOR_PLACE_FLOW;
-        *x = *y = 0;
-        if (!at || at >= WINDOWS_OUTPUT_NAME)
-                return 0;
-        if (at == length)
-                return 1;
-        if (word[at++] != '@')
-                return 0;
-        if (length - at == 3 && word[at] == 'o' && word[at + 1] == 'f' && word[at + 2] == 'f')
-        {
-                *how = COMPOSITOR_PLACE_OFF;
-                return 1;
-        }
-        for (int axis = 0; axis < 2; axis++)
-        {
-                int sign = 1, value = 0, digits = 0, *into = axis ? y : x;
-
-                if (at < length && word[at] == '-')
-                        sign = -1, at++;
-                while (at < length && word[at] >= '0' && word[at] <= '9' && digits < 6)
-                        value = value * 10 + (word[at++] - '0'), digits++;
-                if (!digits || value > COMPOSITOR_PLACE_MOST)
-                        return 0;
-                *into = sign * value;
-                if (!axis && (at >= length || word[at++] != ','))
-                        return 0;
-        }
-        *how = COMPOSITOR_PLACE_AT;
-        return at == length;
-}
-
-// Whether count bytes at a and at b are the same.
-static int compositor_same(const char *a, const char *b, unsigned int count)
-{
-        while (count && *a == *b)
-                a++, b++, count--;
-        return !count;
-}
-
-// Whether a whole arrangement is one: default or nothing, or words each of which is one, a name once.
-static int compositor_arrange_valid(const char *text)
-{
-        unsigned int at = 0, words = 0, starts[WINDOWS_OUTPUTS * 2], names[WINDOWS_OUTPUTS * 2];
-
-        while (text[at])
-        {
-                unsigned int start, name;
-                int how, x, y;
-
-                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                        at++;
-                if (!text[at])
-                        break;
-                start = at;
-                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
-                        at++;
-                // default is a word alone, never a screen's name among others.
-                if (at - start == 7 && compositor_same(text + start, "default", 7))
-                {
-                        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                                at++;
-                        return !words && !text[at];
-                }
-                if (words == WINDOWS_OUTPUTS * 2 || !compositor_arrange_word(text + start, at - start, &name, &how, &x, &y))
-                        return 0;
-                for (unsigned int other = 0; other < words; other++)
-                        if (names[other] == name && compositor_same(text + starts[other], text + start, name))
-                                return 0;
-                starts[words] = start;
-                names[words++] = name;
-        }
-        return 1;
-}
-
-/*
-        The arrangement: count screens in the card's order, each its name and
-        its width and height, laid by the words of the setting (default or
-        none for the card's own order). Each screen's rectangle comes back in
-        rects, x, y, width, height, in the card's order, with a width of 0 for
-        one that is dark; order is the screens lit, the primary first and the
-        rest as they were laid. Answers how many are lit, at least one when
-        any is connected: a setting that would leave every screen dark lights
-        the first.
-*/
-static unsigned int compositor_screens_lay(const char *text, const char (*names)[WINDOWS_OUTPUT_NAME], const int (*sizes)[2],
-                                           unsigned int count, int (*rects)[4], unsigned char *order)
-{
-        unsigned char laid[WINDOWS_OUTPUTS] = {0}, placed[WINDOWS_OUTPUTS] = {0}, dark[WINDOWS_OUTPUTS] = {0};
-        int place[WINDOWS_OUTPUTS][2] = {{0}}, valid = compositor_arrange_valid(text);
-        unsigned int lit = 0, at = 0, used = 0;
-        int right = 0, low_x = 0, low_y = 0;
-
-        count = count < WINDOWS_OUTPUTS ? count : WINDOWS_OUTPUTS;
-
-        // The named screens first, in the setting's order; a name no screen has is a screen not plugged in now.
-        while (valid && text[at])
-        {
-                unsigned int start, name;
-                int how, x, y;
-
-                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                        at++;
-                start = at;
-                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
-                        at++;
-                if (at == start || !compositor_arrange_word(text + start, at - start, &name, &how, &x, &y))
-                        continue;
-                for (unsigned int screen = 0; screen < count; screen++)
-                {
-                        unsigned int same = 0;
-
-                        while (same < name && names[screen][same] == text[start + same])
-                                same++;
-                        if (same != name || names[screen][name] || laid[screen])
-                                continue;
-                        laid[screen] = 1;
-                        dark[screen] = how == COMPOSITOR_PLACE_OFF;
-                        placed[screen] = how == COMPOSITOR_PLACE_AT;
-                        place[screen][0] = x, place[screen][1] = y;
-                        order[used++] = (unsigned char)screen;
-                }
-        }
-        for (unsigned int screen = 0; screen < count; screen++)
-                if (!laid[screen])
-                        order[used++] = (unsigned char)screen;
-
-        for (unsigned int screen = 0; screen < count; screen++)
-                lit += !dark[screen];
-        if (!lit && count)
-                dark[0] = 0;
-
-        // Those given a place have it; the rest go to the right of everything laid before them, tops level.
-        lit = 0;
-        for (unsigned int each = 0; each < used; each++)
-        {
-                unsigned int screen = order[each];
-
-                if (dark[screen])
-                        continue;
-                rects[screen][0] = placed[screen] ? place[screen][0] : right;
-                rects[screen][1] = placed[screen] ? place[screen][1] : 0;
-                rects[screen][2] = sizes[screen][0];
-                rects[screen][3] = sizes[screen][1];
-                right = rects[screen][0] + rects[screen][2] > right || !lit ? rects[screen][0] + rects[screen][2] : right;
-                low_x = !lit || rects[screen][0] < low_x ? rects[screen][0] : low_x;
-                low_y = !lit || rects[screen][1] < low_y ? rects[screen][1] : low_y;
-                order[lit++] = (unsigned char)screen;
-        }
-        for (unsigned int screen = 0; screen < count; screen++)
-                if (dark[screen])
-                        rects[screen][0] = rects[screen][1] = rects[screen][2] = rects[screen][3] = 0;
-                else
-                        rects[screen][0] -= low_x, rects[screen][1] -= low_y;
-        return lit;
+        *x = left - screen[0];
+        *y = top - screen[1];
+        return *x < screen[2] && *y < screen[3] && *x + size > 0 && *y + size > 0;
 }
 
 /* ---- end of the outputs ---- */
@@ -2187,6 +2026,17 @@ static struct
         struct compositor_output output[WINDOWS_OUTPUTS];
         int screen[WINDOWS_OUTPUTS][4];
         unsigned int outputs, layout;
+        /*
+                What every window's buffer is made for, for the session: stride the pixels a row of it (the
+                widest screen connected when the compositor started) and most_w by most_h the largest a window
+                may be, which is the largest screen. 0 is the space's own width and height: one screen.
+        */
+        int stride, most_w, most_h, room_h; // room_h: the rows a window's buffer holds
+        unsigned int scanout_handle;        // the scanout's dumb buffer, given back when another takes its place
+        unsigned long composing_bytes, mirror_bytes; // what compositor_changed_ready mapped, given back with it
+        int space_wanted;   // the screens are to be taken again once the card has finished a flip
+        int kept_x, kept_y; // where the pointer was last kept on a screen, which a movement starts from
+        int absolute;       // the pointer was put by a tablet, whose point comes from no screen
         int damage[COMPOSITOR_DAMAGE][4]; // x1, y1, x2, y2: what changed, apart
         unsigned int damages;
 
@@ -2196,6 +2046,7 @@ static struct
         unsigned int input_count;
 
         int watch;           // inotify on /dev/input, -1 when there is none
+        int uevents;         // the kernel's uevents (compositor_uevents_read), -1 when there is no socket for them
         unsigned long devices; // the evdev numbers that are open
         int device_number[COMPOSITOR_INPUTS];
 
@@ -2267,6 +2118,15 @@ static struct
         unsigned char listed[WINDOWS], marks[WINDOWS], lengths[WINDOWS];
         unsigned int listing;
         unsigned int *band;  // the band's pixels, or none: no font, and the tabs are shapes
+        /*
+                `taskbar display all`, a band on every screen listing that screen's windows: band_at is the band
+                being drawn or asked of (screen band_at's; 0, the primary's, is band above), each other band's
+                pixels are its own, and each band's marks are kept as they were listed for its frames.
+        */
+        int band_at;
+        unsigned int *band_more[WINDOWS_OUTPUTS];
+        unsigned long band_more_bytes[WINDOWS_OUTPUTS];
+        unsigned char band_marks[WINDOWS_OUTPUTS][WINDOWS];
         unsigned long band_bytes; // how much memory the band has
         unsigned int *glass; // what is under the tabs, blurred: as wide as the band and its margins, as high
         unsigned long glass_bytes;
@@ -2387,6 +2247,22 @@ static const int (*compositor_screens(unsigned int *count))[4]
         whole[0][3] = compositor.height;
         *count = 1;
         return (const int (*)[4])whole;
+}
+
+// The pixels a row of every window's buffer is, and the largest a window may be (compositor.stride, most_w and most_h).
+static int compositor_stride(void)
+{
+        return compositor.stride ? compositor.stride : compositor.width;
+}
+
+static int compositor_most_width(void)
+{
+        return compositor.most_w ? compositor.most_w : compositor.width;
+}
+
+static int compositor_most_height(void)
+{
+        return compositor.most_h ? compositor.most_h : compositor.height;
 }
 
 // How many screens the desktop spans: at least one.
@@ -2671,7 +2547,7 @@ static void compositor_stretch(int row)
         unsigned int *pixels = compositor_pixels(row);
         unsigned int drawn_w = compositor.picture_w[row], drawn_h = compositor.picture_h[row];
         unsigned int width = compositor.w[row], height = compositor.h[row];
-        unsigned long stride = (unsigned long)compositor.width;
+        unsigned long stride = (unsigned long)compositor_stride();
 
         if (!drawn_w || !drawn_h)
                 return;
@@ -2689,7 +2565,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
 
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
                                            (int)compositor.h[row], compositor.scale, compositor_pixels(row),
-                                           (unsigned long)compositor.width, 0, null, 0,
+                                           (unsigned long)compositor_stride(), 0, null, 0,
                                            line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
                                            row == compositor.focus ? COMPOSITOR_INK_LINE_LIT : COMPOSITOR_INK_LINE};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
@@ -2715,16 +2591,26 @@ static void compositor_damage_row(int row)
         compositor_damage(x, y, width, height);
 }
 
-// The windows that have a tab, in the order they first showed, and what each tab shows.
+static int compositor_screen_of(int row);
+
+// How many bands there are: one on every screen with `taskbar display all`, and the primary's alone otherwise.
+static int compositor_bands(void)
+{
+        return taskbar_display_all() ? compositor_output_count() : 1;
+}
+
+// The windows that have a tab, in the order they first showed, and what each tab shows: every window on the one band,
+// and on each of several, the windows whose screen it is on (compositor_screen_of).
 static unsigned int compositor_windows(void)
 {
         unsigned int count = 0;
+        int bands = compositor_bands();
 
         for (int row = 0; row < WINDOWS; row++)
         {
                 unsigned int place = count;
 
-                if (!compositor.showing[row])
+                if (!compositor.showing[row] || (bands > 1 && compositor_screen_of(row) != compositor.band_at))
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
                         place--;
@@ -2753,12 +2639,12 @@ static struct taskbar_view compositor_taskbar_view(void)
         struct taskbar_view view;
 
         memory_zero(&view, sizeof(view));
-        view.width = compositor.width;
-        view.height = compositor.height;
+        // The primary screen's (`taskbar display primary`), or with a band on every screen the one asked of.
+        compositor_output_rect(compositor.band_at, &view.x, &view.y, &view.width, &view.height);
         view.scale = compositor.scale;
         view.position = taskbar_position();
-        view.pixels = compositor.band;
-        view.band_bytes = compositor.band_bytes;
+        view.pixels = compositor.band_at > 0 ? compositor.band_more[compositor.band_at] : compositor.band;
+        view.band_bytes = compositor.band_at > 0 ? compositor.band_more_bytes[compositor.band_at] : compositor.band_bytes;
         view.glass = compositor.glass;
         view.face = &compositor.face;
         view.engine = compositor.engine;
@@ -2778,14 +2664,18 @@ static struct taskbar_view compositor_band_view(void)
 
 // The panel's band as a frame: the band's own pixels when there is a font to write the titles with, and shapes the
 // scene draws when there is not.
+// The band compositor.band_at is (0, the primary's, when there is one), as a frame; its marks are kept apart, so
+// each band's frames keep their own however many bands are listed after it.
 static void compositor_band_frame(struct compositor_frame *frame)
 {
         struct taskbar_view view = compositor_band_view();
+        unsigned char *marks = compositor.band_marks[compositor.band_at];
         int x, y, width, height;
 
+        memory_copy(marks, compositor.marks, compositor.listing);
         taskbar_band(&view, &x, &y, &width, &height);
-        *frame = (struct compositor_frame){x, y, width, height, compositor.scale, compositor.band,
-                                           (unsigned long)width, !compositor.band, compositor.marks,
+        *frame = (struct compositor_frame){x, y, width, height, compositor.scale, view.pixels,
+                                           (unsigned long)width, !view.pixels, marks,
                                            compositor.listing};
         frame->position = view.position;
         frame->lengths = compositor.lengths;
@@ -2794,14 +2684,18 @@ static void compositor_band_frame(struct compositor_frame *frame)
 // What the tabs show changed: the windows, which has the keys, which are put away, a title, the minute, the battery.
 static void compositor_tabs_changed(void)
 {
-        struct taskbar_view view = compositor_taskbar_view();
-        int x, y, width, height;
-
         taskbar_changed();
-        taskbar_band(&view, &x, &y, &width, &height);
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(x, y, width, height);
-        compositor.damage_by = 0;
+        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_taskbar_view();
+                int x, y, width, height;
+
+                taskbar_band(&view, &x, &y, &width, &height);
+                compositor.damage_by = COMPOSITOR_OVER;
+                compositor_damage(x, y, width, height);
+                compositor.damage_by = 0;
+        }
+        compositor.band_at = 0;
 }
 
 // How far the blur reaches, at the scale: a power of two, which the passes' steps add up to less one.
@@ -3254,7 +3148,7 @@ static int compositor_glass_compose(int row, const int *c)
                 for (int y = y0; y < y1; y++)
                         memory_glass_over_u32(compositor.composed[row] + (unsigned long)(y - compositor.y[row]) * compositor.w[row] +
                                                   (unsigned long)(c[0] - compositor.x[row]),
-                                              picture + (unsigned long)(y - compositor.y[row]) * (unsigned long)compositor.width +
+                                              picture + (unsigned long)(y - compositor.y[row]) * (unsigned long)compositor_stride() +
                                                   (unsigned long)(c[0] - compositor.x[row]),
                                               ground + (unsigned long)(y - y0) * pitch, (positive)width,
                                               compositor_grain_row(compositor.glass_side[row], c[0], y));
@@ -3613,7 +3507,7 @@ static unsigned int compositor_window_fb(int row, unsigned int which)
         fb.height = (unsigned int)compositor.height;
         fb.format = COMPOSITOR_XRGB8888;
         fb.handles[0] = prime.handle;
-        fb.pitches[0] = (unsigned int)compositor.width * 4;
+        fb.pitches[0] = (unsigned int)compositor_stride() * 4;
         if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0)
         {
                 unsigned int close[2] = {prime.handle, 0};
@@ -3733,7 +3627,7 @@ static void compositor_direct_unpatch(void)
                 return;
         pixels = compositor_buffer(row, which);
         for (int y = rect[1]; y < rect[3]; y++)
-                memory_copy(pixels + (unsigned long)y * (unsigned long)compositor.width + (unsigned long)rect[0],
+                memory_copy(pixels + (unsigned long)y * (unsigned long)compositor_stride() + (unsigned long)rect[0],
                             compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
                             (unsigned long)(rect[2] - rect[0]) * 4);
         compositor.patched[row][which] = 0;
@@ -3774,11 +3668,11 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         }
         for (int y = rect[1]; y < rect[3]; y++)
                 memory_copy(compositor.under[which] + (unsigned long)(y - rect[1]) * (unsigned long)(rect[2] - rect[0]),
-                            pixels + (unsigned long)y * (unsigned long)compositor.width + (unsigned long)rect[0],
+                            pixels + (unsigned long)y * (unsigned long)compositor_stride() + (unsigned long)rect[0],
                             (unsigned long)(rect[2] - rect[0]) * 4);
         memory_copy(compositor.under_rect[which], rect, sizeof(rect));
 
-        struct compositor_target target = {pixels, (unsigned long)compositor.width, compositor.width, compositor.height,
+        struct compositor_target target = {pixels, (unsigned long)compositor_stride(), compositor.width, compositor.height,
                                            rect[0], rect[1], rect[2], rect[3]};
 
         for (unsigned int at = 0; at < count; at++)
@@ -3796,8 +3690,10 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
 {
         int row;
 
+        // On more than one screen every frame is composed: a flip, the overlay and the window's framebuffer are one
+        // crtc's, and the scanout is the whole space.
         if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd || compositor_cursor_in_scene() || !windows ||
-            compositor.drag >= 0 || compositor.resize >= 0)
+            compositor.drag >= 0 || compositor.resize >= 0 || compositor_output_count() > 1)
                 return -1;
         row = rows[windows - 1];
         if (compositor.table->glass[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
@@ -3934,7 +3830,9 @@ static int compositor_changed_ready(void)
         if (composing < 0 && composing > -4096)
                 return 0;
         compositor.composing = (unsigned int *)composing;
+        compositor.composing_bytes = slices;
         compositor.mirror = compositor.scanout;
+        compositor.mirror_bytes = 0;
         compositor.mirror_pitch = compositor.scanout_pitch / 4;
         if (own)
         {
@@ -3947,6 +3845,7 @@ static int compositor_changed_ready(void)
                         return 0;
                 }
                 compositor.mirror = (unsigned int *)mirror;
+                compositor.mirror_bytes = bytes;
                 compositor.mirror_pitch = (unsigned long)compositor.width;
                 compositor.mirror_stale = 1;
                 compositor_damage(0, 0, compositor.width, compositor.height);
@@ -4335,6 +4234,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (compositor.card < 0 || compositor.direct_refused || !compositor.table_memfd)
                 return *why = compositor.card < 0 ? 1 : compositor.direct_refused ? 11 : 2, -1;
+        if (compositor_output_count() > 1)
+                return *why = 13, -1;
         if (compositor.cursor.soft)
                 return *why = 3, -1;
         if (!windows || compositor.drag >= 0 || compositor.resize >= 0)
@@ -4453,20 +4354,30 @@ static void compositor_present(void)
 
         // What is under the tabs changed, or what they say: the glass is made again over it, and shown. The glass
         // is made from the scene over the tabs' span and the blur's reach round it, so only a change there is one.
-        compositor_band_frame(&band);
+        // Each band in turn, with whether all are stale read once: the first one drawn says they are not.
         {
-                struct taskbar_view view = compositor_taskbar_view();
-                int span[4];
-                unsigned long redo = taskbar_stale() ? COMPOSITOR_TABS_ALL : 0;
+                int stale = taskbar_stale(), bands = compositor_bands();
 
-                if (!redo && compositor.band && taskbar_span(&view, &span[0], &span[1], &span[2], &span[3]))
-                        redo = taskbar_meets(&view, compositor.damage, compositor.damages);
-                if (redo)
-                        compositor_band_draw(frames, windows, redo);
+                for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
+                {
+                        struct taskbar_view view;
+                        int span[4];
+                        unsigned long redo = stale ? COMPOSITOR_TABS_ALL : 0;
+
+                        compositor_band_frame(&band);
+                        view = compositor_taskbar_view();
+                        if (!redo && view.pixels && taskbar_span(&view, &span[0], &span[1], &span[2], &span[3]))
+                                redo = taskbar_meets(&view, compositor.damage, compositor.damages);
+                        if (redo)
+                                compositor_band_draw(frames, windows, redo);
+                }
+                for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
+                {
+                        compositor_band_frame(&band);
+                        count += compositor_panel_tabs(&band, &frames[count]);
+                }
+                compositor.band_at = 0;
         }
-
-        compositor_band_frame(&band);
-        count += compositor_panel_tabs(&band, &frames[count]);
 
         // The close buttons' means, now the glass and the band are made: where a change reaches a box.
         for (unsigned int at = 0; at < windows; at++)
@@ -4604,29 +4515,552 @@ static void compositor_present(void)
 }
 
 /*
-        The card, at the mode Canvas left on it.
+        The card, and every screen it has connected, at the mode Canvas left
+        on each.
 
-        Taking Canvas's own mode is what keeps the switch a plane change and
+        Taking Canvas's own modes is what keeps the switch a plane change and
         not a modeset, and what keeps every coordinate the same on both sides
-        of it. A connector with no crtc driving it takes its first mode.
+        of it. A connector with no crtc driving it takes a free crtc it can
+        have and its first mode (the kernel lists the preferred one first).
+
+        One scanout is the whole space the screens make (compositor.width by
+        compositor.height), and each screen's crtc shows its own rectangle of
+        it: the scene is composed once across them, a window that straddles
+        two is in both, and one DIRTYFB a frame is one commit that takes in
+        every screen showing what changed, so no screen waits on another's
+        vertical blank in turn. The rows of the space no screen shows (under a
+        shorter screen) are composed with the rest and seen by none.
 */
 static void compositor_kmsg(string_address text, positive value, string_address tail);
+static void compositor_text(const char *path, char *text, unsigned int room);
+static void compositor_cursor_move(void);
+static void compositor_arrange_on(int row, unsigned int how, int on);
+static void compositor_place(int row, int x, int y);
+static void compositor_room(const int *screen, int *room);
+static void compositor_arrange_rect(int row, unsigned int how, const int *rect);
+static void compositor_room_follow(void);
+
+/*
+        What the card has connected: each connector that says it is connected
+        and lists a mode, in the card's order, with its name, the crtc that
+        drives it now and the mode that crtc is at (Canvas's: current), or the
+        crtcs it could have and its first mode. GETCONNECTOR, asked by the
+        card's master, probes the connector again, which is what a hotplug
+        is to be answered by.
+*/
+#define COMPOSITOR_CONNECTORS 16
+#define COMPOSITOR_MODE_USERDEF 32u // DRM_MODE_TYPE_USERDEF
+
+struct compositor_connected
+{
+        unsigned int count, crtc_count, max_width, max_height;
+        unsigned int crtcs[COMPOSITOR_CONNECTORS];
+        unsigned int connector[WINDOWS_OUTPUTS], crtc[WINDOWS_OUTPUTS], possible[WINDOWS_OUTPUTS];
+        int current[WINDOWS_OUTPUTS];
+        struct compositor_mode mode[WINDOWS_OUTPUTS];
+        char name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        int size[WINDOWS_OUTPUTS][2];
+};
+
+static b32 compositor_connected_read(struct compositor_connected *found)
+{
+        struct compositor_card_res resources = {0};
+        unsigned int connectors[COMPOSITOR_CONNECTORS], taken = 0, kept = 0;
+
+        memory_zero(found, sizeof(*found));
+        if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0 ||
+            resources.connector_count > COMPOSITOR_CONNECTORS || resources.crtc_count > COMPOSITOR_CONNECTORS ||
+            !resources.crtc_count)
+                return -COMPOSITOR_EINVAL;
+        resources.connectors = (unsigned long)connectors;
+        resources.crtcs = (unsigned long)found->crtcs;
+        resources.fb_count = resources.encoder_count = 0;
+        if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
+                return -COMPOSITOR_EINVAL;
+        found->crtc_count = resources.crtc_count;
+        found->max_width = resources.max_width;
+        found->max_height = resources.max_height;
+
+        for (unsigned int at = 0; at < resources.connector_count && found->count < WINDOWS_OUTPUTS; at++)
+        {
+                struct compositor_connector probe = {.connector_id = connectors[at]};
+                struct compositor_mode modes[128];
+                unsigned int encoders[8], n = found->count, asked_modes, asked_encoders;
+                int listed;
+
+                if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0 ||
+                    probe.connection != 1 || !probe.mode_count)
+                        continue;
+                // The kernel copies a list only when it fits what was asked for, and says how long it is either way.
+                asked_modes = probe.mode_count = probe.mode_count > 128 ? 128 : probe.mode_count;
+                asked_encoders = probe.encoder_count = probe.encoder_count > 8 ? 8 : probe.encoder_count;
+                probe.modes = (unsigned long)modes;
+                probe.encoders = (unsigned long)encoders;
+                probe.prop_count = 0;
+                if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0)
+                        continue;
+                listed = probe.mode_count && probe.mode_count <= asked_modes;
+                probe.encoder_count = probe.encoder_count <= asked_encoders ? probe.encoder_count : 0;
+
+                found->connector[n] = connectors[at];
+                compositor_connector_name(probe.connector_type, probe.connector_type_id, found->name[n]);
+                // The mode the kernel's command line names (video=, which the kernel marks the person's) before the
+                // first listed, which is the one the screen prefers; Canvas takes them in that order too.
+                for (unsigned int each = 0; listed && each < probe.mode_count && !found->mode[n].clock; each++)
+                        if (modes[each].type & COMPOSITOR_MODE_USERDEF)
+                                found->mode[n] = modes[each];
+                if (listed && !found->mode[n].clock)
+                        found->mode[n] = modes[0];
+                if (probe.encoder_id)
+                {
+                        struct compositor_encoder encoder = {.encoder_id = probe.encoder_id};
+
+                        if (system_control(compositor.card, COMPOSITOR_GETENCODER, address_of encoder) == 0 && encoder.crtc_id)
+                        {
+                                struct compositor_crtc current = {.crtc_id = encoder.crtc_id};
+
+                                found->crtc[n] = encoder.crtc_id;
+                                if (system_control(compositor.card, COMPOSITOR_GETCRTC, address_of current) == 0 &&
+                                    current.mode_valid)
+                                        found->mode[n] = current.mode, found->current[n] = 1;
+                        }
+                }
+                for (unsigned int each = 0; each < probe.encoder_count; each++)
+                {
+                        struct compositor_encoder encoder = {.encoder_id = encoders[each]};
+
+                        if (system_control(compositor.card, COMPOSITOR_GETENCODER, address_of encoder) == 0)
+                                found->possible[n] |= encoder.possible_crtcs;
+                }
+                if (!found->current[n] && !listed)
+                        continue;
+                found->size[n][0] = found->mode[n].hdisplay;
+                found->size[n][1] = found->mode[n].vdisplay;
+                if (found->size[n][0] && found->size[n][1])
+                        found->count++;
+        }
+
+        // A crtc is one screen's: those a crtc drives now keep it, and the rest take the first free one they can have.
+        for (unsigned int n = 0; n < found->count; n++)
+                for (unsigned int at = 0; found->crtc[n] && at < found->crtc_count; at++)
+                        if (found->crtcs[at] == found->crtc[n])
+                        {
+                                if (taken >> at & 1)
+                                        found->crtc[n] = 0, found->current[n] = 0;
+                                else
+                                        taken |= 1u << at;
+                                break;
+                        }
+        for (unsigned int n = 0; n < found->count; n++)
+                for (unsigned int at = 0; !found->crtc[n] && at < found->crtc_count; at++)
+                        if (!(taken >> at & 1) && (!found->possible[n] || found->possible[n] >> at & 1))
+                        {
+                                found->crtc[n] = found->crtcs[at];
+                                taken |= 1u << at;
+                        }
+        // One no crtc is left for is no screen of this desktop.
+        for (unsigned int n = 0; n < found->count; n++)
+        {
+                if (!found->crtc[n])
+                        continue;
+                if (kept != n)
+                {
+                        found->connector[kept] = found->connector[n], found->crtc[kept] = found->crtc[n];
+                        found->possible[kept] = found->possible[n], found->current[kept] = found->current[n];
+                        found->mode[kept] = found->mode[n];
+                        memory_copy(found->name[kept], found->name[n], WINDOWS_OUTPUT_NAME);
+                        found->size[kept][0] = found->size[n][0], found->size[kept][1] = found->size[n][1];
+                }
+                kept++;
+        }
+        found->count = kept;
+        return 0;
+}
+
+// The connected screens laid by the arrangement, but for those in dropped (a bit each), which are dark: what
+// windows_arrange_lay answers, in the found list's order.
+static unsigned int compositor_space_lay(const struct compositor_connected *found, unsigned int dropped,
+                                         int (*rects)[4], unsigned char *order)
+{
+        char names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME], text[512];
+        int sizes[WINDOWS_OUTPUTS][2], some[WINDOWS_OUTPUTS][4];
+        unsigned char map[WINDOWS_OUTPUTS], laid[WINDOWS_OUTPUTS];
+        unsigned int count = 0, lit;
+
+        for (unsigned int n = 0; n < found->count; n++)
+        {
+                rects[n][0] = rects[n][1] = rects[n][2] = rects[n][3] = 0;
+                if (dropped >> n & 1)
+                        continue;
+                memory_copy(names[count], found->name[n], WINDOWS_OUTPUT_NAME);
+                sizes[count][0] = found->size[n][0];
+                sizes[count][1] = found->size[n][1];
+                map[count++] = (unsigned char)n;
+        }
+        compositor_text(SETTING_CANVAS_ARRANGE_PATH, text, sizeof(text));
+        lit = windows_arrange_lay(text, (const char (*)[WINDOWS_OUTPUT_NAME])names, (const int (*)[2])sizes, count, some,
+                                     laid);
+        for (unsigned int at = 0; at < count; at++)
+                memory_copy(rects[map[at]], some[at], sizeof(some[at]));
+        for (unsigned int at = 0; at < lit; at++)
+                order[at] = map[laid[at]];
+        return lit;
+}
+
+// A scanout of width by height: a dumb buffer, its framebuffer and its mapping. Answers 0, or a negative errno.
+static b32 compositor_scanout_make(int width, int height, unsigned int *fb_id, unsigned int *handle,
+                                   unsigned int **pixels, unsigned long *bytes, unsigned long *pitch)
+{
+        struct compositor_dumb dumb = {(unsigned int)height, (unsigned int)width, 32, 0, 0, 0, 0};
+        struct compositor_map_dumb map = {0};
+        struct compositor_fb fb = {0};
+        long mapped;
+
+        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
+                return -COMPOSITOR_ENOSPC;
+        fb.width = dumb.width;
+        fb.height = dumb.height;
+        fb.pitch = dumb.pitch;
+        fb.bpp = 32;
+        fb.depth = 24;
+        fb.handle = dumb.handle;
+        map.handle = dumb.handle;
+        mapped = system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) != 0 ||
+                         system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0
+                     ? -COMPOSITOR_EINVAL
+                     : compositor_call(syscall(mmap), 0, dumb.size, 3, 1, (positive)compositor.card, map.offset);
+        if (mapped < 0 && mapped > -4096)
+        {
+                unsigned int close[2] = {dumb.handle, 0};
+
+                if (fb.fb_id)
+                        system_control(compositor.card, COMPOSITOR_RMFB, address_of fb.fb_id);
+                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                return -COMPOSITOR_EINVAL;
+        }
+        *fb_id = fb.fb_id;
+        *handle = dumb.handle;
+        *pixels = (unsigned int *)mapped;
+        *bytes = dumb.size;
+        *pitch = dumb.pitch;
+        return 0;
+}
+
+// A scanout no crtc shows any more, given back.
+static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsigned int *pixels, unsigned long bytes)
+{
+        unsigned int close[2] = {handle, 0};
+
+        compositor_call(syscall(munmap), (positive)pixels, bytes, 0, 0, 0, 0);
+        system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
+        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+}
+
+// A crtc that shows nothing: off, its screen dark.
+static void compositor_crtc_off(unsigned int crtc)
+{
+        struct compositor_crtc off = {0, 0, crtc, 0, 0, 0, 0, 0, {0}};
+
+        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of off);
+}
+
+// Whether two modes are the same timing: what a crtc scans at, whatever the name says.
+static int compositor_mode_same(const struct compositor_mode *a, const struct compositor_mode *b)
+{
+        return a->clock == b->clock && a->hdisplay == b->hdisplay && a->vdisplay == b->vdisplay &&
+               a->htotal == b->htotal && a->vtotal == b->vtotal && a->vrefresh == b->vrefresh && a->flags == b->flags;
+}
+
+/*
+        The windows and the pointer, from the screens they were on (was, with
+        their names, before the screens were taken again) to the screens now.
+        A window on a screen that is still there, by its name, goes with it
+        where it moved; one on a screen that went goes to the primary, at the
+        same share of the room it had (compositor_screen_carry); one that
+        filled a screen or half of one fills the same of the screen it is on
+        now; and every one is then kept reachable. A drag or a resize under way
+        ends. The pointer goes the same way and is kept on a screen.
+*/
+static void compositor_space_carry(const int (*was)[4], const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count)
+{
+        unsigned int now_count;
+        const int (*now)[4] = compositor_screens(&now_count);
+        int nowhere = -2147483647 - 1;
+
+        compositor.drag = compositor.resize = COMPOSITOR_NONE;
+        for (int row = -1; row < WINDOWS; row++)
+        {
+                int x = row < 0 ? compositor.pointer_x : compositor.x[row], y = row < 0 ? compositor.pointer_y : compositor.y[row];
+                int w = row < 0 ? 1 : (int)compositor.w[row], h = row < 0 ? 1 : (int)compositor.h[row], from, to = 0;
+
+                if (row >= 0 && !compositor.showing[row])
+                        continue;
+                from = count ? compositor_screen_owner(was, count, x, y, w, h) : -1;
+                for (unsigned int at = 0; from >= 0 && at < now_count && at < compositor.outputs; at++)
+                        if (!string_compare((string_address)compositor.output[at].name, (string_address)names[from]))
+                                to = (int)at;
+                if (from < 0 || !memory_compare(was[from], now[to], sizeof(was[from])))
+                        ;
+                else if (row < 0)
+                        compositor_screen_carry(was[from], now[to], &compositor.pointer_x, &compositor.pointer_y, 1, 1);
+                else
+                {
+                        int sx = compositor.saved_x[row], sy = compositor.saved_y[row];
+
+                        compositor_screen_carry(was[from], now[to], &x, &y, w, h);
+                        compositor_screen_carry(was[from], now[to], &sx, &sy, (int)compositor.saved_w[row],
+                                                (int)compositor.saved_h[row]);
+                        compositor.saved_x[row] = sx, compositor.saved_y[row] = sy;
+                        compositor.x[row] = compositor.table->x[row] = x;
+                        compositor.y[row] = compositor.table->y[row] = y;
+                }
+                // One that filled a screen's room fills the room of the screen it is on now, the band left out.
+                if (row >= 0 && compositor.arranged[row] == COMPOSITOR_ROOM)
+                {
+                        int room[4];
+
+                        compositor_room(now[to], room);
+                        compositor_arrange_rect(row, COMPOSITOR_ROOM, room);
+                }
+                else if (row >= 0 && compositor.arranged[row] != COMPOSITOR_FLOATING)
+                        compositor_arrange_on(row, compositor.arranged[row], to);
+                else if (row >= 0)
+                        compositor_place(row, compositor.x[row], compositor.y[row]);
+        }
+        compositor_screen_keep_point(now, now_count, nowhere, nowhere, &compositor.pointer_x, &compositor.pointer_y);
+        compositor.kept_x = compositor.pointer_x;
+        compositor.kept_y = compositor.pointer_y;
+        // A window on a screen that stayed whose band moved (the primary is another now) follows its room.
+        compositor_room_follow();
+}
+
+static void compositor_table_outputs(void);
+static void compositor_band_room(void);
+
+/*
+        The screens taken: what the card has connected, laid by the
+        arrangement, one scanout as large as the space they make, and each
+        crtc showing its screen's rectangle of it. A screen the card will not
+        drive -- one that puts the space past the largest framebuffer the card
+        makes, or whose mode a commit refuses -- is left dark and the rest laid
+        again without it, so one screen that cannot be shown takes none of the
+        others down with it. The first take starts from Canvas's state; a
+        later one (a screen plugged in or out, the arrangement changed) is
+        nothing when nothing changed, and otherwise carries the windows and
+        the pointer to the space it makes. Answers 0, or a negative errno
+        when not one screen could be shown.
+*/
+static b32 compositor_space_take(int first)
+{
+        struct compositor_connected found;
+        int rects[WINDOWS_OUTPUTS][4], was[WINDOWS_OUTPUTS][4];
+        char was_names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0;
+        unsigned char order[WINDOWS_OUTPUTS];
+        b32 status = compositor_connected_read(&found);
+
+        if (status < 0 || !found.count)
+                return status < 0 ? status : -COMPOSITOR_EINVAL;
+        // A flip in flight is the card showing a window's buffer on one crtc: the screens are taken once it has landed.
+        if (!first && compositor.flip_pending)
+        {
+                compositor.space_wanted = 1;
+                return 0;
+        }
+        compositor.space_wanted = 0;
+        for (unsigned int at = 0; at < was_count; at++)
+        {
+                memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
+                memory_copy(was_names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
+                was_crtc[at] = compositor.output[at].crtc;
+        }
+
+        for (unsigned int attempt = 0; attempt <= found.count; attempt++)
+        {
+                unsigned int lit = compositor_space_lay(&found, dropped, rects, order), refused = 0, same;
+                unsigned int old_fb = compositor.fb, old_handle = compositor.scanout_handle, *old_pixels = compositor.scanout;
+                unsigned long old_bytes = compositor.scanout_bytes;
+                unsigned int fb = compositor.fb, handle = compositor.scanout_handle, *pixels = compositor.scanout;
+                unsigned long bytes = compositor.scanout_bytes, pitch = compositor.scanout_pitch;
+                int box[4], screens[WINDOWS_OUTPUTS][4], most_w = 0, most_h = 0;
+                positive period = 0;
+
+                if (!lit)
+                        return -COMPOSITOR_EINVAL;
+                for (unsigned int at = 0; at < lit; at++)
+                        memory_copy(screens[at], rects[order[at]], sizeof(screens[at]));
+                compositor_screens_box((const int (*)[4])screens, lit, box);
+
+                // Past the largest framebuffer the card makes: the last screen laid is left dark, and the rest laid again.
+                if (lit > 1 && found.max_width && found.max_height &&
+                    ((unsigned int)box[2] > found.max_width || (unsigned int)box[3] > found.max_height))
+                {
+                        compositor_kmsg((string_address) "compositor: the screens make a space larger than the card's largest framebuffer, dark: ",
+                                        0, (string_address)found.name[order[lit - 1]]);
+                        dropped |= 1u << order[lit - 1];
+                        continue;
+                }
+
+                same = !first && lit == compositor.outputs && box[2] == compositor.width && box[3] == compositor.height;
+                for (unsigned int at = 0; same && at < lit; at++)
+                        same = compositor.output[at].crtc == found.crtc[order[at]] &&
+                               compositor.output[at].connector == found.connector[order[at]] &&
+                               !memory_compare(compositor.screen[at], screens[at], sizeof(screens[at])) &&
+                               compositor_mode_same(&compositor.output[at].mode, &found.mode[order[at]]);
+                if (same)
+                        return 0;
+
+                // A space of another size is another scanout; the one before is given back once no crtc shows it.
+                if (first || box[2] != compositor.width || box[3] != compositor.height)
+                {
+                        status = compositor_scanout_make(box[2], box[3], &fb, &handle, &pixels, &bytes, &pitch);
+                        if (status < 0 && lit > 1)
+                        {
+                                compositor_kmsg((string_address) "compositor: no scanout as large as the screens' space, dark: ",
+                                                0, (string_address)found.name[order[lit - 1]]);
+                                dropped |= 1u << order[lit - 1];
+                                continue;
+                        }
+                        if (status < 0)
+                                return status;
+                }
+
+                // The screens, the primary first, each at its own mode.
+                memory_zero(compositor.output, sizeof(compositor.output));
+                for (unsigned int at = 0; at < lit; at++)
+                {
+                        unsigned int n = order[at];
+                        positive refresh = found.mode[n].vrefresh >= 24 && found.mode[n].vrefresh <= 1000 ? found.mode[n].vrefresh : 60;
+
+                        compositor.output[at].crtc = found.crtc[n];
+                        compositor.output[at].connector = found.connector[n];
+                        compositor.output[at].mode = found.mode[n];
+                        memory_copy(compositor.output[at].name, found.name[n], WINDOWS_OUTPUT_NAME);
+                        for (unsigned int index = 0; index < found.crtc_count; index++)
+                                if (found.crtcs[index] == found.crtc[n])
+                                        compositor.output[at].crtc_index = index;
+                        memory_copy(compositor.screen[at], screens[at], sizeof(screens[at]));
+                        most_w = screens[at][2] > most_w ? screens[at][2] : most_w;
+                        most_h = screens[at][3] > most_h ? screens[at][3] : most_h;
+                        // Frames go out at the fastest screen's rate.
+                        period = !period || 1000000000ull / refresh < period ? 1000000000ull / refresh : period;
+                }
+                compositor.outputs = lit;
+                compositor.period = period;
+                compositor.crtc = compositor.output[0].crtc;
+                compositor.crtc_index = compositor.output[0].crtc_index;
+                compositor.connector = compositor.output[0].connector;
+                compositor.mode = compositor.output[0].mode;
+                // The room every window's buffer has: the widest and the tallest screen connected at the start, dark or
+                // lit, for the session; what a window may be is the largest screen now, in that room.
+                if (first)
+                {
+                        compositor.stride = compositor.room_h = 0;
+                        for (unsigned int n = 0; n < found.count; n++)
+                        {
+                                compositor.stride = found.size[n][0] > compositor.stride ? found.size[n][0] : compositor.stride;
+                                compositor.room_h = found.size[n][1] > compositor.room_h ? found.size[n][1] : compositor.room_h;
+                        }
+                }
+                compositor.most_w = most_w < compositor.stride ? most_w : compositor.stride;
+                compositor.most_h = most_h < compositor.room_h ? most_h : compositor.room_h;
+
+                // The scanout the space is composed into; what was composed apart for the one before is let go.
+                if (fb != compositor.fb)
+                {
+                        if (compositor.composing)
+                                compositor_call(syscall(munmap), (positive)compositor.composing, compositor.composing_bytes, 0, 0, 0, 0);
+                        if (compositor.mirror && compositor.mirror_bytes)
+                                compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
+                        compositor.composing = compositor.mirror = 0;
+                        compositor.composing_bytes = compositor.mirror_bytes = 0;
+                        compositor.changed = 0;
+                        compositor.scanout = pixels;
+                        compositor.scanout_bytes = bytes;
+                        compositor.scanout_pitch = pitch;
+                        compositor.scanout_handle = handle;
+                        compositor.fb = fb;
+                        compositor.width = box[2];
+                        compositor.height = box[3];
+                }
+                if (!first)
+                {
+                        // The card shows the compositor's own scanout from here on, on every crtc.
+                        compositor_overlay_off();
+                        compositor.direct_row = compositor.plane_row = -1;
+                        compositor.plane_fb = 0;
+                        compositor.on_screen = compositor.fb;
+                        compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])was_names, was_count);
+                        compositor_band_room();
+                        compositor_tabs_changed();
+                }
+                compositor.mirror_stale = 1;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+                compositor_present();
+
+                for (unsigned int at = 0; at < lit; at++)
+                {
+                        struct compositor_crtc set = {(unsigned long)address_of compositor.output[at].connector, 1,
+                                                      compositor.output[at].crtc, compositor.fb, (unsigned int)screens[at][0],
+                                                      (unsigned int)screens[at][1], 0, 1, compositor.output[at].mode};
+
+                        if (system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) != 0)
+                                refused |= 1u << order[at];
+                }
+                // The crtcs no screen of the space has: a screen that went, one arranged dark, one left dark above.
+                for (unsigned int at = 0; at < was_count; at++)
+                {
+                        int used = 0;
+
+                        for (unsigned int now = 0; now < lit; now++)
+                                used |= compositor.output[now].crtc == was_crtc[at];
+                        if (!used)
+                                compositor_crtc_off(was_crtc[at]);
+                }
+                for (unsigned int n = 0; n < found.count; n++)
+                        if (found.current[n] && !rects[n][2])
+                                compositor_crtc_off(found.crtc[n]);
+                if (old_fb && old_fb != compositor.fb)
+                        compositor_scanout_free(old_fb, old_handle, old_pixels, old_bytes);
+
+                if (!refused)
+                        break;
+                // A commit refused a screen: it is left dark, and the rest are taken again without it, from what was taken.
+                for (unsigned int n = 0; n < found.count; n++)
+                        if (refused >> n & 1)
+                                compositor_kmsg((string_address) "compositor: the card refused a screen, which is left dark: ", 0,
+                                                (string_address)found.name[n]);
+                if (lit == 1)
+                        return -COMPOSITOR_EINVAL;
+                dropped |= refused;
+                was_count = compositor.outputs;
+                for (unsigned int at = 0; at < was_count; at++)
+                {
+                        memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
+                        memory_copy(was_names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
+                        was_crtc[at] = compositor.output[at].crtc;
+                }
+                first = 0;
+        }
+
+        compositor.layout++;
+        compositor_table_outputs();
+        for (unsigned int at = 0; at < compositor.outputs; at++)
+                compositor.output[at].shows = 0;
+        compositor.cursor.plane_scale = 0;
+        if (!first)
+                compositor_cursor_move();
+        return 0;
+}
 
 static b32 compositor_card_open(void)
 {
-        struct compositor_card_res resources = {0};
-        unsigned int connectors[16], crtcs[16];
-        struct compositor_mode mode;
-        unsigned int connector = 0, crtc = 0, screens = 0;
-        int have_mode = 0;
-
         compositor.card = (int)system_open_at(AT_FDCWD, (string_address) "/dev/dri/card0",
                                               FILE_READ_WRITE | O_CLOEXEC);
         if (compositor.card < 0)
                 return compositor.card;
 
-        if (system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0 ||
-            system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
+        if (system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
                 return -COMPOSITOR_EBUSY;
 
         {
@@ -4638,122 +5072,7 @@ static b32 compositor_card_open(void)
                         compositor.driver[0] = 0;
         }
 
-        if (resources.connector_count > 16 || resources.crtc_count > 16 || !resources.crtc_count)
-                return -COMPOSITOR_EINVAL;
-
-        resources.connectors = (unsigned long)connectors;
-        resources.crtcs = (unsigned long)crtcs;
-        resources.fb_count = resources.encoder_count = 0;
-        if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0)
-                return -COMPOSITOR_EINVAL;
-
-        for (unsigned int at = 0; at < resources.connector_count; at++)
-        {
-                struct compositor_connector probe = {.connector_id = connectors[at]};
-                struct compositor_mode modes[64];
-                struct compositor_encoder encoder = {0};
-                struct compositor_crtc current = {0};
-
-                if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0 ||
-                    probe.connection != 1 || !probe.mode_count)
-                        continue;
-
-                screens++;
-                if (have_mode)
-                        continue;
-
-                probe.mode_count = probe.mode_count > 64 ? 64 : probe.mode_count;
-                probe.modes = (unsigned long)modes;
-                probe.prop_count = probe.encoder_count = 0;
-                if (system_control(compositor.card, COMPOSITOR_GETCONNECTOR, address_of probe) != 0)
-                        continue;
-
-                connector = connectors[at];
-                crtc = crtcs[0];
-                mode = modes[0];
-                have_mode = 1;
-                compositor_connector_name(probe.connector_type, probe.connector_type_id, compositor.output[0].name);
-
-                encoder.encoder_id = probe.encoder_id;
-                if (probe.encoder_id &&
-                    system_control(compositor.card, COMPOSITOR_GETENCODER, address_of encoder) == 0 &&
-                    encoder.crtc_id)
-                {
-                        current.crtc_id = encoder.crtc_id;
-                        crtc = encoder.crtc_id;
-                        if (system_control(compositor.card, COMPOSITOR_GETCRTC, address_of current) == 0 &&
-                            current.mode_valid)
-                                mode = current.mode;
-                }
-        }
-
-        if (!have_mode)
-                return -COMPOSITOR_EINVAL;
-
-        // One screen is drawn on. The kernel desktop was one desktop across every screen of every
-        // card; this is not yet, and says so where the machine's log has it.
-        if (screens > 1)
-                compositor_kmsg((string_address) "compositor: more than one screen is connected and this draws on one of them, screens: ",
-                                screens, (string_address) "");
-
-        compositor.width = mode.hdisplay;
-        compositor.height = mode.vdisplay;
-        compositor.crtc = crtc;
-        for (unsigned int at = 0; at < resources.crtc_count; at++)
-                if (crtcs[at] == crtc)
-                        compositor.crtc_index = at;
-        compositor.mode = mode;
-        compositor.connector = connector;
-        compositor.output[0].crtc = crtc;
-        compositor.output[0].crtc_index = compositor.crtc_index;
-        compositor.output[0].connector = connector;
-        compositor.output[0].mode = mode;
-        compositor.screen[0][0] = compositor.screen[0][1] = 0;
-        compositor.screen[0][2] = compositor.width;
-        compositor.screen[0][3] = compositor.height;
-        compositor.outputs = 1;
-        compositor.period = 1000000000ull / (mode.vrefresh >= 24 && mode.vrefresh <= 1000 ? mode.vrefresh : 60);
-
-        struct compositor_dumb dumb = {(unsigned int)compositor.height,
-                                       (unsigned int)compositor.width, 32, 0, 0, 0, 0};
-        struct compositor_map_dumb map = {0};
-        struct compositor_fb fb = {0};
-
-        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
-                return -COMPOSITOR_ENOSPC;
-
-        fb.width = dumb.width;
-        fb.height = dumb.height;
-        fb.pitch = dumb.pitch;
-        fb.bpp = 32;
-        fb.depth = 24;
-        fb.handle = dumb.handle;
-        map.handle = dumb.handle;
-        if (system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) != 0 ||
-            system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
-                return -COMPOSITOR_EINVAL;
-
-        long mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1,
-                                      (positive)compositor.card, map.offset);
-
-        if (mapped < 0 && mapped > -4096)
-                return -COMPOSITOR_ENOSPC;
-
-        compositor.scanout = (unsigned int *)mapped;
-        compositor.scanout_bytes = dumb.size;
-        compositor.scanout_pitch = dumb.pitch;
-        compositor.fb = fb.fb_id;
-
-        compositor_damage(0, 0, compositor.width, compositor.height);
-        compositor_present();
-
-        struct compositor_crtc set = {(unsigned long)address_of connector, 1, crtc, fb.fb_id,
-                                      0, 0, 0, 1, mode};
-
-        if (system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) != 0)
-                return -COMPOSITOR_EINVAL;
-
-        return 0;
+        return compositor_space_take(1);
 }
 
 /*
@@ -4816,11 +5135,11 @@ static int compositor_cursor_plane_wanted(void)
         return 1;
 }
 
-// A shape painted into the buffer of the plane that is not showing, and the plane given it.
-static int compositor_cursor_paint(unsigned int shape, int fitted, int left, int top)
+// A shape painted into the buffer of the plane that is not showing, which is the one shown from here on: paints counts
+// them, and a screen's plane given the newest wears paints.
+static int compositor_cursor_paint(unsigned int shape, int fitted)
 {
         struct compositor_map_dumb map = {.handle = compositor.cursor.handle[compositor.cursor.back]};
-        struct compositor_cursor cursor = {3, compositor.crtc, left, top, CP_PLANE, CP_PLANE, map.handle};
         long mapped;
 
         if (system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
@@ -4840,14 +5159,76 @@ static int compositor_cursor_paint(unsigned int shape, int fitted, int left, int
         }
         compositor_call(syscall(munmap), (positive)mapped, CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
 
-        if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of cursor) != 0)
-                return -1;
-
         compositor.cursor.back ^= 1;
         compositor.cursor.paints++;
         compositor.cursor.plane_shape = (int)shape;
         compositor.cursor.plane_scale = fitted;
         return 0;
+}
+
+/*
+        The plane is a crtc's, and the pointer is on one screen or, at an
+        edge two screens share, on both: each screen's plane shows the cell
+        at left, top where the cell meets its screen, at the cell's place on
+        that screen, and nothing where it does not, so no screen keeps a
+        pointer the hand has taken to another. A plane that wears an older
+        shape is given the one painted last; the rest are moved. Answers -1
+        when a plane refuses the shape.
+*/
+static int compositor_cursor_planes(int left, int top)
+{
+        unsigned int count, front = compositor.cursor.handle[compositor.cursor.back ^ 1];
+        const int (*screens)[4] = compositor_screens(&count);
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                struct compositor_output *output = &compositor.output[at];
+                unsigned int crtc = compositor.outputs ? output->crtc : compositor.crtc;
+                int x, y;
+
+                if (compositor_screen_cell(screens[at], left, top, CP_PLANE, &x, &y))
+                {
+                        if (output->shows != (unsigned int)compositor.cursor.paints)
+                        {
+                                struct compositor_cursor give = {3, crtc, x, y, CP_PLANE, CP_PLANE, front};
+
+                                if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of give) != 0)
+                                        return -1;
+                                output->shows = (unsigned int)compositor.cursor.paints;
+                        }
+                        else
+                        {
+                                struct compositor_cursor move = {2, crtc, x, y, 0, 0, 0};
+
+                                compositor.cursor.moves += system_control(compositor.card, COMPOSITOR_CURSOR, address_of move) == 0;
+                        }
+                }
+                else if (output->shows)
+                {
+                        struct compositor_cursor gone = {1, crtc, 0, 0, CP_PLANE, CP_PLANE, 0};
+
+                        system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
+                        output->shows = 0;
+                }
+        }
+        return 0;
+}
+
+// Every screen's plane showing nothing; the next shape wanted is painted again.
+static void compositor_cursor_planes_off(void)
+{
+        unsigned int count;
+
+        compositor_screens(&count);
+        for (unsigned int at = 0; at < count; at++)
+        {
+                struct compositor_cursor gone = {1, compositor.outputs ? compositor.output[at].crtc : compositor.crtc, 0, 0,
+                                                 CP_PLANE, CP_PLANE, 0};
+
+                system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
+                compositor.output[at].shows = 0;
+        }
+        compositor.cursor.plane_shape = -1;
 }
 
 static void compositor_cursor_start(void)
@@ -4876,12 +5257,7 @@ static void compositor_cursor_move(void)
         {
                 // A plane that was showing the pointer shows nothing now, and says so again when it is wanted.
                 if (!compositor.cursor.soft && compositor.cursor.plane_shape >= 0)
-                {
-                        struct compositor_cursor gone = {1, compositor.crtc, 0, 0, CP_PLANE, CP_PLANE, 0};
-
-                        system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
-                        compositor.cursor.plane_shape = -1;
-                }
+                        compositor_cursor_planes_off();
                 if (compositor.cursor.drawn)
                         compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
                                                       compositor.cursor.drawn_scale);
@@ -4910,29 +5286,17 @@ static void compositor_cursor_move(void)
 
                 compositor_cursor_cell(&left, &top, compositor.pointer_x, compositor.pointer_y, shape, fitted);
 
-                if ((int)shape != compositor.cursor.plane_shape || fitted != compositor.cursor.plane_scale)
-                {
-                        if (compositor_cursor_paint(shape, fitted, left, top) == 0)
+                if (((int)shape == compositor.cursor.plane_shape && fitted == compositor.cursor.plane_scale) ||
+                    compositor_cursor_paint(shape, fitted) == 0)
+                        if (compositor_cursor_planes(left, top) == 0)
                                 return;
 
-                        // The card will not take it: the pointer is drawn from here on.
-                        {
-                                struct compositor_cursor gone = {1, compositor.crtc, 0, 0, CP_PLANE, CP_PLANE, 0};
-
-                                system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
-                        }
-                        compositor.cursor.handle[0] = compositor.cursor.handle[1] = 0;
-                        compositor.cursor.refused++;
-                        compositor.cursor.soft = 1;
-                        compositor_cursor_move();
-                        return;
-                }
-
-                {
-                        struct compositor_cursor move = {2, compositor.crtc, left, top, 0, 0, 0};
-
-                        compositor.cursor.moves += system_control(compositor.card, COMPOSITOR_CURSOR, address_of move) == 0;
-                }
+                // The card will not take it: the pointer is drawn from here on.
+                compositor_cursor_planes_off();
+                compositor.cursor.handle[0] = compositor.cursor.handle[1] = 0;
+                compositor.cursor.refused++;
+                compositor.cursor.soft = 1;
+                compositor_cursor_move();
         }
 }
 
@@ -4975,11 +5339,14 @@ static void compositor_resume(int cycle)
         if (compositor.card < 0)
                 return;
 
-        if (cycle && !compositor_virtual())
+        // Every screen's pipe, each showing its rectangle of the space.
+        for (unsigned int at = 0; cycle && !compositor_virtual() && at < compositor.outputs; at++)
         {
-                struct compositor_crtc off = {0, 0, compositor.crtc, 0, 0, 0, 0, 0, {0}};
-                struct compositor_crtc on = {(unsigned long)address_of compositor.connector, 1, compositor.crtc,
-                                             compositor.fb, 0, 0, 0, 1, compositor.mode};
+                struct compositor_output *output = &compositor.output[at];
+                struct compositor_crtc off = {0, 0, output->crtc, 0, 0, 0, 0, 0, {0}};
+                struct compositor_crtc on = {(unsigned long)address_of output->connector, 1, output->crtc, compositor.fb,
+                                             (unsigned int)compositor.screen[at][0], (unsigned int)compositor.screen[at][1],
+                                             0, 1, output->mode};
 
                 system_control(compositor.card, COMPOSITOR_SETCRTC, address_of off);
                 system_control(compositor.card, COMPOSITOR_SETCRTC, address_of on);
@@ -5223,18 +5590,34 @@ static void compositor_input_settings_set(const char *shake, const char *shake_d
 }
 
 /*
-        The taskbar's settings: its position, the display it is on, its battery and which way a side band's text faces
-        (the place of the word kept among center and edge, the row's standard when none is), as the files in /root hold them.
-        Read when the compositor starts and again when a file of them is written. A band that moves is damaged where it
-        was as well as where it is now, and a window that fills a screen's room fills the room the band leaves now.
+        The taskbar's settings: its position, the screens it is on (primary, or all: a band on every screen), its
+        battery and which way a side band's text faces (the place of the word kept among center and edge, the row's
+        standard when none is), as the files in /root hold them. Read when the compositor starts and again when a file
+        of them is written. Every band is damaged where it was as well as where it is now, a band on a screen that had
+        none is given its memory, and when a band moved, came or went a window that fills a screen's room fills the
+        room the bands leave now.
 */
 static void compositor_room_follow(void);
+static void compositor_band_room(void);
+
+// Where each band is, a rectangle each and the rest none: what a change of the settings is held against.
+static void compositor_bands_where(int (*rects)[4])
+{
+        memory_zero(rects, sizeof(int) * 4 * WINDOWS_OUTPUTS);
+        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_taskbar_view();
+
+                taskbar_band(&view, &rects[compositor.band_at][0], &rects[compositor.band_at][1], &rects[compositor.band_at][2],
+                             &rects[compositor.band_at][3]);
+        }
+        compositor.band_at = 0;
+}
 
 static void compositor_taskbar_settings_read(void)
 {
         char position[16], display[16], tune[512], text[16];
-        struct taskbar_view view = compositor_taskbar_view();
-        int was[4], now[4];
+        int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4];
         long edge;
 
         compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
@@ -5242,22 +5625,15 @@ static void compositor_taskbar_settings_read(void)
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
-        taskbar_band(&view, &was[0], &was[1], &was[2], &was[3]);
+        compositor_bands_where(was);
+        compositor_tabs_changed();
         taskbar_settings_set(position, display, tune);
         taskbar_text_set(edge == 1);
-        view = compositor_taskbar_view();
-        taskbar_band(&view, &now[0], &now[1], &now[2], &now[3]);
-        if (was[0] != now[0] || was[1] != now[1] || was[2] != now[2] || was[3] != now[3])
-        {
-                compositor_band_damage(was[0], was[1], was[2], was[3]);
+        compositor_band_room();
+        compositor_tabs_changed();
+        compositor_bands_where(now);
+        if (memory_compare(was, now, sizeof(was)))
                 compositor_room_follow();
-        }
-        compositor_band_damage(now[0], now[1], now[2], now[3]);
-        if (taskbar_display_all())
-        {
-                string_format(log, "compositor: taskbar display all is not supported yet, the taskbar is drawn on its one display\n");
-                log_flush();
-        }
 }
 
 // Read when the compositor starts and again when a file of them is written.
@@ -5285,6 +5661,8 @@ static void compositor_input_settings_read(void)
         away is let go of where it is read (compositor_input_read) and its
         number is free again for the one that is plugged in next.
 */
+static void compositor_space_retake(void);
+
 static void compositor_input_add(unsigned int number)
 {
         p8 path[32] = "/dev/input/event";
@@ -5417,6 +5795,10 @@ static void compositor_inputs_watch(void)
                         {
                                 compositor_look_read();
                                 compositor_input_settings_read();
+                                // The arrangement: the screens laid again, which probes them, so only when it is the file written.
+                                if (string_equals((string_address)name,
+                                                  (string_address)SETTING_CANVAS_ARRANGE_PATH + sizeof("/root/") - 1))
+                                        compositor_space_retake();
                         }
                         else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
                                  !compositor.layout_given)
@@ -5575,6 +5957,17 @@ static void compositor_refocus(void)
         compositor_focus(next);
 }
 
+// A window's screen, by the rule of compositor_screen_owner: the one that holds the most of it.
+static int compositor_screen_of(int row)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        return count < 2 ? 0
+                         : compositor_screen_owner(screens, count, compositor.x[row], compositor.y[row], (int)compositor.w[row],
+                                                   (int)compositor.h[row]);
+}
+
 // Whether a point is in the band at a window's edges that resizes it -- just inside its contents, its line,
 // and past it -- and which edges.
 static unsigned int compositor_edge_zone(int row, int x, int y)
@@ -5590,15 +5983,36 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
         edges |= x < compositor.x[row] + in ? COMPOSITOR_EDGE_LEFT : x >= x2 - in ? COMPOSITOR_EDGE_RIGHT : 0;
         edges |= y < compositor.y[row] + in ? COMPOSITOR_EDGE_TOP : y >= y2 - in ? COMPOSITOR_EDGE_BOTTOM : 0;
 
-        // A window that fills the output or half of it has no edge on the output's own: the pointer is held
+        // A window that fills its screen or half of it has no edge on the screen's own: the pointer is held
         // there, and flung to the top to take the window it would start a resize instead.
         if (compositor.arranged[row] != COMPOSITOR_FLOATING)
         {
+                unsigned int count;
+                const int (*screens)[4] = compositor_screens(&count);
+                const int *screen = screens[compositor_screen_of(row)];
+
                 edges &= ~(unsigned int)(COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_BOTTOM);
-                edges &= compositor.x[row] <= 0 ? ~(unsigned int)COMPOSITOR_EDGE_LEFT : ~0u;
-                edges &= x2 >= compositor.width ? ~(unsigned int)COMPOSITOR_EDGE_RIGHT : ~0u;
+                edges &= compositor.x[row] <= screen[0] ? ~(unsigned int)COMPOSITOR_EDGE_LEFT : ~0u;
+                edges &= x2 >= screen[0] + screen[2] ? ~(unsigned int)COMPOSITOR_EDGE_RIGHT : ~0u;
         }
         return edges;
+}
+
+// What of the bands is at a point (taskbar_hit's answer), with the listing of the band it is on in compositor.listed,
+// which is what a tab's number names.
+static int compositor_band_hit(int x, int y)
+{
+        int hit = TASKBAR_HIT_NONE, bands = compositor_bands();
+
+        for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_band_view();
+
+                hit = taskbar_hit(&view, x, y);
+        }
+        // The listing of the band hit stays: the last listed.
+        compositor.band_at = 0;
+        return hit;
 }
 
 /*
@@ -5607,11 +6021,11 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
         grip, just outside its edges, hold it. Between the tabs is whatever is
         below them.
 */
+static int compositor_band_hit(int x, int y);
+
 static int compositor_under(int x, int y, int *tab)
 {
-        struct taskbar_view view = compositor_band_view();
-
-        *tab = taskbar_hit(&view, x, y);
+        *tab = compositor_band_hit(x, y);
         if (*tab != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
 
@@ -5637,17 +6051,15 @@ static void compositor_put(int row, int x, int y)
         compositor.y[row] = compositor.table->y[row] = y;
 }
 
-// Kept on the output: all of it when it fits, its top left when it does not, so a person can always reach it.
+// Kept where a person can reach it (compositor_screen_keep_window): on one screen, all of it when it fits and its
+// top left when it does not; across screens, its top on one of them.
 static void compositor_place(int row, int x, int y)
 {
-        int line = compositor_line(row);
-        int high_x = compositor.width - (int)compositor.w[row] - line;
-        int high_y = compositor.height - (int)compositor.h[row] - line;
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
 
-        x = x > high_x ? high_x : x;
-        y = y > high_y ? high_y : y;
-        x = x < line ? line : x;
-        y = y < line ? line : y;
+        compositor_screen_keep_window(screens, count, &x, &y, (int)compositor.w[row], (int)compositor.h[row],
+                                      compositor_line(row), COMPOSITOR_GRAB * compositor.scale);
         compositor_put(row, x, y);
 }
 
@@ -5661,10 +6073,10 @@ static void compositor_want(int row, int width, int height)
         int x = compositor.x[row], y = compositor.y[row];
 
         width = width < WINDOW_MIN_WIDTH * compositor.scale ? WINDOW_MIN_WIDTH * compositor.scale
-                : width > compositor.width                  ? compositor.width
+                : width > compositor_most_width()           ? compositor_most_width()
                                                             : width;
         height = height < WINDOW_MIN_HEIGHT * compositor.scale ? WINDOW_MIN_HEIGHT * compositor.scale
-                 : height > compositor.height                  ? compositor.height
+                 : height > compositor_most_height()           ? compositor_most_height()
                                                                : height;
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
@@ -5705,8 +6117,8 @@ static void compositor_resize_move(void)
         int dx = compositor.pointer_x - compositor.press_x;
         int dy = compositor.pointer_y - compositor.press_y;
         int w = compositor.resize_w, h = compositor.resize_h;
-        int max_w = compositor.width - 2 * compositor_line(row);
-        int max_h = compositor.height - 2 * compositor_line(row);
+        int max_w = compositor_most_width() - 2 * compositor_line(row);
+        int max_h = compositor_most_height() - 2 * compositor_line(row);
 
         if (compositor.edges[row] & COMPOSITOR_EDGE_LEFT)
                 w -= dx;
@@ -5722,22 +6134,27 @@ static void compositor_resize_move(void)
 }
 
 /*
-        Filling the output, or half of it: a window is asked for the size
-        the rectangle gives it and put where the rectangle begins, and the
+        Filling a screen, or half of it: a window is asked for the size the
+        rectangle gives it and put where the rectangle begins, and the
         rectangle it had is kept, from the time it left floating and not at
         every arrangement, so snapping left, then right, then dragging off
         puts it back where it was and not on the left half. The edge that is
-        the output's stays where it is whatever size comes back: the right
-        half is held by its right.
+        the screen's stays where it is whatever size comes back: the right
+        half is held by its right. The screen is the one named, or with none
+        (-1) the window's own (compositor_screen_of).
 */
-static void compositor_arrange(int row, unsigned int how)
+static void compositor_arrange_on(int row, unsigned int how, int on)
 {
-        int half = compositor.width / 2;
-        int left = how == COMPOSITOR_RIGHT ? half : 0;
-        int right = how == COMPOSITOR_LEFT ? half : compositor.width;
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int part[4], left, right;
 
         if (!compositor.showing[row])
                 return;
+
+        compositor_screen_part(screens[on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row)], how, part);
+        left = part[0];
+        right = part[0] + part[2];
 
         if (compositor.arranged[row] == COMPOSITOR_FLOATING)
         {
@@ -5751,9 +6168,14 @@ static void compositor_arrange(int row, unsigned int how)
         compositor.arranged[row] = how;
         compositor.edges[row] = how == COMPOSITOR_RIGHT ? COMPOSITOR_EDGE_LEFT : 0;
         compositor.far_x[row] = right;
-        compositor_put(row, left, 0);
+        compositor_put(row, left, part[1]);
         compositor_damage_row(row);
-        compositor_want(row, right - left, compositor.height);
+        compositor_want(row, right - left, part[3]);
+}
+
+static void compositor_arrange(int row, unsigned int how)
+{
+        compositor_arrange_on(row, how, -1);
 }
 
 // Back to the rectangle it had, wherever it was put since.
@@ -5806,12 +6228,18 @@ static void compositor_float_for_drag(int row)
 static void compositor_first_place(int row, int *x, int *y)
 {
         int step = COMPOSITOR_STEP * compositor.scale;
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int on = compositor_screen_at(screens, count, *x, *y);
+        // The screen it asked to be on, or the primary: the search stops at that screen's bottom and right.
+        int right = screens[on < 0 ? 0 : on][0] + screens[on < 0 ? 0 : on][2];
+        int bottom = screens[on < 0 ? 0 : on][1] + screens[on < 0 ? 0 : on][3];
 
         for (int at = 0; at < 8; at++)
         {
                 int taken = 0, tx = *x + at * step, ty = *y + at * step;
 
-                if (tx + (int)compositor.w[row] > compositor.width || ty + (int)compositor.h[row] > compositor.height)
+                if (tx + (int)compositor.w[row] > right || ty + (int)compositor.h[row] > bottom)
                         break;
 
                 for (int other = 0; other < WINDOWS; other++)
@@ -5947,14 +6375,25 @@ static unsigned int place_screens(int (*screens)[4])
         return count;
 }
 
-// The room of a screen, the taskbar's band where it is now taken out.
+// The room of a screen, the band on it where it is now taken out: the primary's, or with a band on every screen
+// (`taskbar display all`) the screen's own.
 static void compositor_room(const int *screen, int *room)
 {
-        struct taskbar_view view = compositor_taskbar_view();
-        int band[4];
+        memory_copy(room, screen, 4 * sizeof(int));
+        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_taskbar_view();
+                int band[4], cut[4];
 
-        taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
-        place_room(screen, band, view.position, room);
+                taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
+                place_room(screen, band, view.position, cut);
+                if (memory_compare(cut, screen, sizeof(cut)))
+                {
+                        memory_copy(room, cut, sizeof(cut));
+                        break;
+                }
+        }
+        compositor.band_at = 0;
 }
 
 /*
@@ -6336,8 +6775,8 @@ static void compositor_take(int row)
                 return;
 
         compositor.seen[row] = frame;
-        width = width > (unsigned int)compositor.width ? (unsigned int)compositor.width : width;
-        height = height > (unsigned int)compositor.height ? (unsigned int)compositor.height : height;
+        width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
+        height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
         // A window the card shows straight is told the picture was taken once the card has let go of the buffer
         // it showed before, at the flip's event; any other at once.
         if (row == compositor.direct_row)
@@ -6930,15 +7369,24 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 compositor_latency(2, reported, clock_monotonic_nanoseconds());
 }
 
-// The pointer stays on the output, wherever the motions of a burst took it.
+/*
+        The pointer stays on a screen, wherever the motions of a burst took it
+        (compositor_screen_keep_point): where they end off every screen it is
+        kept on the screen it was on, and a tablet's point, which comes from
+        nowhere, goes to the nearest screen.
+*/
 static void compositor_pointer_clamp(void)
 {
-        compositor.pointer_x = compositor.pointer_x < 0 ? 0
-                               : compositor.pointer_x >= compositor.width ? compositor.width - 1
-                                                                        : compositor.pointer_x;
-        compositor.pointer_y = compositor.pointer_y < 0 ? 0
-                               : compositor.pointer_y >= compositor.height ? compositor.height - 1
-                                                                         : compositor.pointer_y;
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int nowhere = -2147483647 - 1;
+
+        compositor_screen_keep_point(screens, count, compositor.absolute ? nowhere : compositor.kept_x,
+                                     compositor.absolute ? nowhere : compositor.kept_y, &compositor.pointer_x,
+                                     &compositor.pointer_y);
+        compositor.kept_x = compositor.pointer_x;
+        compositor.kept_y = compositor.pointer_y;
+        compositor.absolute = 0;
 }
 
 // Whether a movement of the hand is a shake that finds the pointer: `moonwater canvas cursor shake off` says none is.
@@ -7024,20 +7472,14 @@ static void compositor_motion(void)
                 compositor_pointer_to(under);
 }
 
-// Where a drag ended, read as an arrangement: the pointer and not the window,
-// because the pointer is what the hand aimed. The top before the sides, so a
-// corner fills the screen.
-static unsigned int compositor_snap(int x, int y)
+// Where a drag ended, read as an arrangement: the pointer and not the window, because the pointer is what the
+// hand aimed, on the screen under it and at its free edges (compositor_screen_snap), and which screen that is.
+static unsigned int compositor_snap(int x, int y, int *screen)
 {
-        int margin = COMPOSITOR_SNAP * compositor.scale;
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
 
-        if (y < margin)
-                return COMPOSITOR_MAXIMIZED;
-        if (x < margin)
-                return COMPOSITOR_LEFT;
-        if (compositor.width - 1 - x < margin)
-                return COMPOSITOR_RIGHT;
-        return COMPOSITOR_FLOATING;
+        return compositor_screen_snap(screens, count, x, y, COMPOSITOR_SNAP * compositor.scale, screen);
 }
 
 // The button is let go. A window that was being moved is arranged by where the
@@ -7060,9 +7502,14 @@ static void compositor_release(unsigned int code, int snap)
         compositor_post(to, WINDOW_EVENT_BUTTON, 0, (int)code, 0);
         // A press and a release with no motion between is a click on the window's top, which only raises it:
         // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
-        if (dragged >= 0 && snap && compositor.drag_moved &&
-            compositor_snap(compositor.pointer_x, compositor.pointer_y) != COMPOSITOR_FLOATING)
-                compositor_arrange(dragged, compositor_snap(compositor.pointer_x, compositor.pointer_y));
+        if (dragged >= 0 && snap && compositor.drag_moved)
+        {
+                int screen;
+                unsigned int how = compositor_snap(compositor.pointer_x, compositor.pointer_y, &screen);
+
+                if (how != COMPOSITOR_FLOATING)
+                        compositor_arrange_on(dragged, how, screen);
+        }
         // Where the hand put a window is where a window of its name opens next (compositor_remember).
         if (snap && (resized >= 0 || (dragged >= 0 && compositor.drag_moved)))
                 compositor_remember(resized >= 0 ? resized : dragged);
@@ -7225,6 +7672,7 @@ static int compositor_report(positive now)
                 if (compositor.tablet_have & 2)
                         compositor.pointer_y = compositor.tablet_y;
                 compositor.tablet_have = 0;
+                compositor.absolute = 1;
                 moved = 1;
         }
 
@@ -7248,9 +7696,7 @@ static int compositor_report(positive now)
 // outside its edges (compositor_under's, for a hand that means to resize) not counted, and none over a tab.
 static int compositor_picture_under(int x, int y)
 {
-        struct taskbar_view view = compositor_band_view();
-
-        if (taskbar_hit(&view, x, y) != TASKBAR_HIT_NONE)
+        if (compositor_band_hit(x, y) != TASKBAR_HIT_NONE)
                 return COMPOSITOR_NONE;
         for (unsigned int at = compositor.stacked; at--;)
         {
@@ -7444,6 +7890,9 @@ static void compositor_table_outputs(void)
                         table->output_name[at][length] = name[length], length++;
                 memory_zero(table->output_name[at] + length, WINDOWS_OUTPUT_NAME - length);
         }
+        // The largest a window may be follows the screens, inside the room its buffer has for the session.
+        table->output_width = (unsigned int)compositor_most_width();
+        table->output_height = (unsigned int)compositor_most_height();
         table->layout = compositor.layout;
         __atomic_store_n(&table->outputs, (unsigned int)count, __ATOMIC_RELEASE);
 }
@@ -7460,7 +7909,10 @@ static void compositor_table_outputs(void)
 static int compositor_table(void)
 {
         unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
-        unsigned long buffer = ((unsigned long)compositor.width * (unsigned long)compositor.height * 4 + 4095) & ~4095ul;
+        // Every window's buffer as large as the largest window may be, a row of it stride pixels: for the session,
+        // as the table is sealed at its size and mapped by every window.
+        unsigned long buffer = ((unsigned long)compositor_stride() * (unsigned long)compositor_most_height() * 4 + 4095) &
+                               ~4095ul;
         unsigned long bytes = header + buffer * 2 * WINDOWS;
         long handle, mapped;
         p8 name[48];
@@ -7503,9 +7955,9 @@ static int compositor_table(void)
         compositor.table = (struct windows *)mapped;
         compositor.pixels = header;
         compositor.buffer = buffer;
-        compositor.table->output_width = (unsigned int)compositor.width;
-        compositor.table->output_height = (unsigned int)compositor.height;
-        compositor.table->stride = (unsigned int)compositor.width;
+        compositor.table->output_width = (unsigned int)compositor_most_width();
+        compositor.table->output_height = (unsigned int)compositor_most_height();
+        compositor.table->stride = (unsigned int)compositor_stride();
         compositor.table->scale = (unsigned int)compositor.scale;
         compositor.table->period = (unsigned int)compositor.period;
         compositor.table->focus = WINDOWS;
@@ -7569,6 +8021,83 @@ static void compositor_say(string_address what, bipolar value)
 {
         string_format(log, "compositor: %s %b\n", what, value);
         log_flush();
+}
+
+static void compositor_screens_say(void);
+
+// The screens taken again (a screen came or went, the arrangement changed), and said in the log when they changed.
+static void compositor_space_retake(void)
+{
+        unsigned int layout = compositor.layout;
+        b32 status = compositor.card >= 0 ? compositor_space_take(0) : 0;
+
+        if (status < 0)
+                compositor_say("the screens could not be taken again, error", status);
+        else if (compositor.layout != layout)
+                compositor_screens_say();
+}
+
+/*
+        A screen plugged in or out. The kernel says so in a uevent of the drm
+        subsystem -- HOTPLUG=1 on the card, a connector's change -- heard on a
+        socket of NETLINK_KOBJECT_UEVENT, and the screens are taken again. A
+        uevent is only a wake-up and is never believed further: any of the
+        drm subsystem's is a reason to look, GETCONNECTOR asks every connector
+        the card has, and taking the screens again when none changed is
+        nothing (compositor_space_take). With no socket to be had the screens
+        are the ones the desktop started with.
+*/
+#define COMPOSITOR_UEVENT 15 // NETLINK_KOBJECT_UEVENT
+
+static int compositor_uevents_open(void)
+{
+        bipolar handle = socket_new(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, COMPOSITOR_UEVENT);
+        socket_address_netlink self = {.family = AF_NETLINK, .groups = 1};
+
+        if (handle < 0)
+                return -1;
+        if (socket_bind((b32)handle, address_of self, sizeof(self)) < 0)
+        {
+                system_close(handle);
+                return -1;
+        }
+        return (int)handle;
+}
+
+// Whether a uevent, its lines KEY=VALUE each ended by a null, is the drm subsystem's.
+static int compositor_uevent_drm(const char *message, long length)
+{
+        static const char want[] = "SUBSYSTEM=drm";
+
+        for (long at = 0; at < length;)
+        {
+                long line = at;
+
+                while (at < length && message[at])
+                        at++;
+                if (at - line == (long)sizeof(want) - 1 && !memory_compare(message + line, want, sizeof(want) - 1))
+                        return 1;
+                at++;
+        }
+        return 0;
+}
+
+// What the socket has, read to its end (a bounded number of messages a pass); the screens looked at once for a burst.
+static void compositor_uevents_read(void)
+{
+        char message[2048];
+        int drm = 0;
+
+        for (int reads = 0; reads < 64; reads++)
+        {
+                bipolar got = socket_receive((b32)compositor.uevents, message, sizeof(message), MSG_DONTWAIT, 0, 0);
+
+                if (got <= 0)
+                        break;
+                drm |= compositor_uevent_drm(message, got);
+        }
+        if (drm)
+                compositor_space_retake();
 }
 
 /*
@@ -7699,7 +8228,8 @@ static void compositor_font(string_address path)
         if (!bytes)
                 return;
 
-        taskbar_bytes(compositor.width, compositor.height, compositor.scale, &band_bytes, &glass_bytes);
+        // For the largest screen, which any screen the band is on fits in.
+        taskbar_bytes(compositor_most_width(), compositor_most_height(), compositor.scale, &band_bytes, &glass_bytes);
         engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
         band = compositor_call(syscall(mmap), 0, (positive)band_bytes, 3, 0x22, (positive)-1, 0);
         // The glass: the band and the blur's reach on every side, for a band on any edge.
@@ -7718,6 +8248,101 @@ static void compositor_font(string_address path)
         compositor.band_bytes = band_bytes;
         compositor.glass = (unsigned int *)glass;
         taskbar_changed();
+        // The other screens' bands, where `taskbar display all` asks for them.
+        compositor_band_room();
+}
+
+// The screens, a line each, the primary first: what the log says of the space whenever it is taken.
+static void compositor_screens_say(void)
+{
+        for (int at = 0; at < compositor_output_count(); at++)
+        {
+                int x, y, width, height;
+
+                compositor_output_rect(at, &x, &y, &width, &height);
+                string_format(log, "compositor: screen %b %s %b by %b at %b,%b\n", (bipolar)at,
+                              compositor_output_name(at)[0] ? (string_address)compositor_output_name(at) : (string_address) "-",
+                              (bipolar)width, (bipolar)height, (bipolar)x, (bipolar)y);
+        }
+        log_flush();
+}
+
+/*
+        The bands' memory for the screens they are on now: each band's pixels
+        made again when its screen wants more than they have (a larger screen
+        became the primary), a band on each other screen made with `taskbar
+        display all` and given back without it, and the glass, which every
+        band is drawn through in turn, as large as the largest wants. With no
+        memory for the primary's band or the glass every tab is a shape, as
+        with no font; with none for another band that band's are: a band
+        larger than its memory would be read past its end.
+*/
+static unsigned int *compositor_remap(unsigned int *was, unsigned long had, unsigned long bytes)
+{
+        long mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
+
+        if (was)
+                compositor_call(syscall(munmap), (positive)was, had, 0, 0, 0, 0);
+        return mapped < 0 && mapped > -4096 ? 0 : (unsigned int *)mapped;
+}
+
+static void compositor_band_room(void)
+{
+        unsigned long glass_most = 0;
+        int bands = compositor_bands();
+
+        if (!compositor.band)
+                return;
+        for (int at = 0; at < WINDOWS_OUTPUTS; at++)
+        {
+                unsigned int **pixels = at ? &compositor.band_more[at] : &compositor.band;
+                unsigned long *had = at ? &compositor.band_more_bytes[at] : &compositor.band_bytes;
+                unsigned long band_bytes = 0, glass_bytes = 0;
+                int x, y, width, height;
+
+                if (at >= bands)
+                {
+                        if (*pixels)
+                                compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
+                        *pixels = 0;
+                        *had = 0;
+                        continue;
+                }
+                compositor_output_rect(at, &x, &y, &width, &height);
+                taskbar_bytes(width, height, compositor.scale, &band_bytes, &glass_bytes);
+                glass_most = glass_bytes > glass_most ? glass_bytes : glass_most;
+                if (band_bytes <= *had)
+                        continue;
+                *pixels = compositor_remap(*pixels, *had, band_bytes);
+                *had = *pixels ? band_bytes : 0;
+                taskbar_changed();
+                if (!at && !compositor.band)
+                        break;
+        }
+        if (compositor.band && glass_most > compositor.glass_bytes)
+        {
+                compositor.glass = compositor_remap(compositor.glass, compositor.glass_bytes, glass_most);
+                compositor.glass_bytes = compositor.glass ? glass_most : 0;
+        }
+        // No primary band, or no glass to draw any band through: every band's tabs are shapes.
+        if (!compositor.band || !compositor.glass)
+        {
+                for (int at = 0; at < WINDOWS_OUTPUTS; at++)
+                {
+                        unsigned int **pixels = at ? &compositor.band_more[at] : &compositor.band;
+                        unsigned long *had = at ? &compositor.band_more_bytes[at] : &compositor.band_bytes;
+
+                        if (*pixels)
+                                compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
+                        *pixels = 0;
+                        *had = 0;
+                }
+                if (compositor.glass)
+                        compositor_call(syscall(munmap), (positive)compositor.glass, compositor.glass_bytes, 0, 0, 0, 0);
+                compositor.glass = 0;
+                compositor.glass_bytes = 0;
+                taskbar_changed();
+        }
 }
 
 /*
@@ -7742,7 +8367,7 @@ static b32 compositor_main()
         claim_standard_descriptors();
 
         memory_zero(&compositor, sizeof(compositor));
-        compositor.watch = -1;
+        compositor.watch = compositor.uevents = -1;
         compositor.hold = -1;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
@@ -7789,15 +8414,24 @@ static b32 compositor_main()
         }
 
         if (!headless)
+        {
                 compositor_cursor_start();
+                compositor.uevents = compositor_uevents_open();
+        }
         compositor_inputs_open();
         if (extra >= 0 && compositor.input_count < COMPOSITOR_INPUTS)
         {
                 compositor.inputs[compositor.input_count] = extra;
                 compositor.device_number[compositor.input_count++] = COMPOSITOR_DEVICES - 1;
         }
-        compositor.pointer_x = compositor.width / 2;
-        compositor.pointer_y = compositor.height / 2;
+        // The middle of the primary screen.
+        {
+                int x, y, width, height;
+
+                compositor_output_rect(0, &x, &y, &width, &height);
+                compositor.pointer_x = compositor.kept_x = x + width / 2;
+                compositor.pointer_y = compositor.kept_y = y + height / 2;
+        }
         compositor_look_read();
         compositor_input_settings_read();
         compositor_cursor_move();
@@ -7820,14 +8454,14 @@ static b32 compositor_main()
                       (bipolar)compositor.scale, (positive)compositor.input_count,
                       compositor.cursor.soft ? "drawn" : compositor.cursor.handle[0] ? "on the plane" : "none",
                       WINDOWS_TABLE);
-        log_flush();
+        compositor_screens_say();
 
         compositor.asleep = compositor_slept_clock();
 
         while (running)
         {
-                struct compositor_poll wanted[3 + COMPOSITOR_INPUTS + WINDOWS];
-                unsigned int count = 0, inputs, doors, card_at = 0;
+                struct compositor_poll wanted[4 + COMPOSITOR_INPUTS + WINDOWS];
+                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
 
@@ -7844,6 +8478,11 @@ static b32 compositor_main()
                 {
                         card_at = count;
                         wanted[count++] = (struct compositor_poll){compositor.card, COMPOSITOR_POLLIN, 0};
+                }
+                if (compositor.uevents >= 0)
+                {
+                        uevents_at = count;
+                        wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
                 }
 
                 // With nothing to show or time the wait is for ever. With
@@ -7923,6 +8562,12 @@ static b32 compositor_main()
 
                 if (card_at && wanted[card_at].returned)
                         compositor_card_read();
+
+                // A screen came or went, or the screens are taken now that a flip that held them back has landed.
+                if (uevents_at && wanted[uevents_at].returned)
+                        compositor_uevents_read();
+                if (compositor.space_wanted && !compositor.flip_pending)
+                        compositor_space_retake();
 
                 // A pointer that was shaken is its own size again when its time is up.
                 if (compositor.cursor.magnified && clock_monotonic_nanoseconds() >= compositor.cursor.magnified_until)

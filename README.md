@@ -72,7 +72,7 @@ moonwater canvas windows [forget]      where windows open again, from where the 
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
-moonwater taskbar display [primary|all]  the display the taskbar is drawn on: the one Canvas draws on [primary]
+moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater time [sync]                  the clock; sync sets it and the zone now

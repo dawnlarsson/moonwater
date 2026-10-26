@@ -834,7 +834,12 @@ static int launcher_open(void)
         launcher_changed();
         // The bar is centred across, and sits a third of the way down: its y is not the middle, so it is set after.
         ui_centre(table, row, launcher.width, 0, 0);
-        table->y[row] = (int)table->output_height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, LAUNCHER_FIELD) / 2;
+        {
+                int x, y, width, height;
+
+                windows_output(table, 0, &x, &y, &width, &height);
+                table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, LAUNCHER_FIELD) / 2;
+        }
         launcher_frame();
 
         // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not

@@ -933,13 +933,17 @@ static string_address ui_argument(positive at, string_address name)
 }
 
 /*
-        A window's place in the table, centred on the output: x by its width, and y by its height, raised offset
-        pixels above the middle (offset 0 for the middle itself).
+        A window's place in the table, centred on the primary screen (windows_output's index 0, the output itself
+        where the table lists no screens): x by its width, and y by its height, raised offset pixels above the
+        middle (offset 0 for the middle itself).
 */
 static void ui_centre(struct windows address_to table, unsigned int row, int width, int height, int offset)
 {
-        table->x[row] = ((int)table->output_width - width) / 2;
-        table->y[row] = ((int)table->output_height - height) / 2 - offset;
+        int x, y, screen_width, screen_height;
+
+        windows_output(table, 0, &x, &y, &screen_width, &screen_height);
+        table->x[row] = x + (screen_width - width) / 2;
+        table->y[row] = y + (screen_height - height) / 2 - offset;
 }
 
 // Whether a process is the program name: its command name is name and a newline, as /proc/PID/comm has it.

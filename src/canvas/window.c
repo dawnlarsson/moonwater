@@ -590,7 +590,7 @@ struct windows
         // 3 the pointer is drawn in software; 4 no window, or one dragged or resized; 5 it is glass; 6 it is not at the
         // size it drew; 7 not wholly on the output; 8 too short past its corners and close button; 9 it meets the
         // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
-        // refused the overlay's commit.
+        // refused the overlay's commit; 13 the desktop spans more than one screen, where every frame is composed.
         unsigned int unscanned;
         // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own,
         // and the overlay: 1 found, -1 none or refused, 0 not yet asked.
@@ -659,6 +659,186 @@ struct windows
 // Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
 // constant here and not the header's pixels field, which any mapper of the table may write.
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
+
+/*
+        The arrangement of the screens, which the compositor lays them by and
+        `moonwater canvas arrange` keeps (/root/canvas.arrange): words, each
+        a screen's connector name alone (laid to the right of the ones
+        before it, tops level), NAME@X,Y (at that place) or NAME@off (dark),
+        in the order they are laid, the first the primary; screens no word
+        names follow in the card's order; default alone is the card's order.
+        Here because the command and the compositor both judge the words.
+*/
+// A word of the arrangement, as long as length: whether it is one, NAME, NAME@X,Y or NAME@off, with the name's length
+// and what it says. A name is letters, digits and dashes, as a connector's is.
+#define WINDOWS_PLACE_FLOW 0
+#define WINDOWS_PLACE_AT 1
+#define WINDOWS_PLACE_OFF 2
+#define WINDOWS_PLACE_MOST 32768
+
+static int windows_arrange_word(const char *word, unsigned int length, unsigned int *name, int *how, int *x, int *y)
+{
+        unsigned int at = 0;
+
+        while (at < length && ((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
+                               word[at] == '-'))
+                at++;
+        *name = at;
+        *how = WINDOWS_PLACE_FLOW;
+        *x = *y = 0;
+        if (!at || at >= WINDOWS_OUTPUT_NAME)
+                return 0;
+        if (at == length)
+                return 1;
+        if (word[at++] != '@')
+                return 0;
+        if (length - at == 3 && word[at] == 'o' && word[at + 1] == 'f' && word[at + 2] == 'f')
+        {
+                *how = WINDOWS_PLACE_OFF;
+                return 1;
+        }
+        for (int axis = 0; axis < 2; axis++)
+        {
+                int sign = 1, value = 0, digits = 0, *into = axis ? y : x;
+
+                if (at < length && word[at] == '-')
+                        sign = -1, at++;
+                while (at < length && word[at] >= '0' && word[at] <= '9' && digits < 6)
+                        value = value * 10 + (word[at++] - '0'), digits++;
+                if (!digits || value > WINDOWS_PLACE_MOST)
+                        return 0;
+                *into = sign * value;
+                if (!axis && (at >= length || word[at++] != ','))
+                        return 0;
+        }
+        *how = WINDOWS_PLACE_AT;
+        return at == length;
+}
+
+// Whether count bytes at a and at b are the same.
+static int windows_same(const char *a, const char *b, unsigned int count)
+{
+        while (count && *a == *b)
+                a++, b++, count--;
+        return !count;
+}
+
+// Whether a whole arrangement is one: default or nothing, or words each of which is one, a name once.
+static int windows_arrange_valid(const char *text)
+{
+        unsigned int at = 0, words = 0, starts[WINDOWS_OUTPUTS * 2], names[WINDOWS_OUTPUTS * 2];
+
+        while (text[at])
+        {
+                unsigned int start, name;
+                int how, x, y;
+
+                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                        at++;
+                if (!text[at])
+                        break;
+                start = at;
+                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
+                        at++;
+                // default is a word alone, never a screen's name among others.
+                if (at - start == 7 && windows_same(text + start, "default", 7))
+                {
+                        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                                at++;
+                        return !words && !text[at];
+                }
+                if (words == WINDOWS_OUTPUTS * 2 || !windows_arrange_word(text + start, at - start, &name, &how, &x, &y))
+                        return 0;
+                for (unsigned int other = 0; other < words; other++)
+                        if (names[other] == name && windows_same(text + starts[other], text + start, name))
+                                return 0;
+                starts[words] = start;
+                names[words++] = name;
+        }
+        return 1;
+}
+
+/*
+        The arrangement: count screens in the card's order, each its name and
+        its width and height, laid by the words of the setting (default or
+        none for the card's own order). Each screen's rectangle comes back in
+        rects, x, y, width, height, in the card's order, with a width of 0 for
+        one that is dark; order is the screens lit, the primary first and the
+        rest as they were laid. Answers how many are lit, at least one when
+        any is connected: a setting that would leave every screen dark lights
+        the first.
+*/
+static unsigned int windows_arrange_lay(const char *text, const char (*names)[WINDOWS_OUTPUT_NAME], const int (*sizes)[2],
+                                           unsigned int count, int (*rects)[4], unsigned char *order)
+{
+        unsigned char laid[WINDOWS_OUTPUTS] = {0}, placed[WINDOWS_OUTPUTS] = {0}, dark[WINDOWS_OUTPUTS] = {0};
+        int place[WINDOWS_OUTPUTS][2] = {{0}}, valid = windows_arrange_valid(text);
+        unsigned int lit = 0, at = 0, used = 0;
+        int right = 0, low_x = 0, low_y = 0;
+
+        count = count < WINDOWS_OUTPUTS ? count : WINDOWS_OUTPUTS;
+
+        // The named screens first, in the setting's order; a name no screen has is a screen not plugged in now.
+        while (valid && text[at])
+        {
+                unsigned int start, name;
+                int how, x, y;
+
+                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                        at++;
+                start = at;
+                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
+                        at++;
+                if (at == start || !windows_arrange_word(text + start, at - start, &name, &how, &x, &y))
+                        continue;
+                for (unsigned int screen = 0; screen < count; screen++)
+                {
+                        unsigned int same = 0;
+
+                        while (same < name && names[screen][same] == text[start + same])
+                                same++;
+                        if (same != name || names[screen][name] || laid[screen])
+                                continue;
+                        laid[screen] = 1;
+                        dark[screen] = how == WINDOWS_PLACE_OFF;
+                        placed[screen] = how == WINDOWS_PLACE_AT;
+                        place[screen][0] = x, place[screen][1] = y;
+                        order[used++] = (unsigned char)screen;
+                }
+        }
+        for (unsigned int screen = 0; screen < count; screen++)
+                if (!laid[screen])
+                        order[used++] = (unsigned char)screen;
+
+        for (unsigned int screen = 0; screen < count; screen++)
+                lit += !dark[screen];
+        if (!lit && count)
+                dark[0] = 0;
+
+        // Those given a place have it; the rest go to the right of everything laid before them, tops level.
+        lit = 0;
+        for (unsigned int each = 0; each < used; each++)
+        {
+                unsigned int screen = order[each];
+
+                if (dark[screen])
+                        continue;
+                rects[screen][0] = placed[screen] ? place[screen][0] : right;
+                rects[screen][1] = placed[screen] ? place[screen][1] : 0;
+                rects[screen][2] = sizes[screen][0];
+                rects[screen][3] = sizes[screen][1];
+                right = rects[screen][0] + rects[screen][2] > right || !lit ? rects[screen][0] + rects[screen][2] : right;
+                low_x = !lit || rects[screen][0] < low_x ? rects[screen][0] : low_x;
+                low_y = !lit || rects[screen][1] < low_y ? rects[screen][1] : low_y;
+                order[lit++] = (unsigned char)screen;
+        }
+        for (unsigned int screen = 0; screen < count; screen++)
+                if (dark[screen])
+                        rects[screen][0] = rects[screen][1] = rects[screen][2] = rects[screen][3] = 0;
+                else
+                        rects[screen][0] -= low_x, rects[screen][1] -= low_y;
+        return lit;
+}
 
 // Row row's buffer which, for a caller holding the table: the buffer's size is the header's, which the compositor
 // wrote and any mapper may write too, so the program's own copy (windows_pixels) is the one to draw through.

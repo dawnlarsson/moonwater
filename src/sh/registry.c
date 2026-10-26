@@ -87,6 +87,7 @@
 // Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
+#define SETTING_CANVAS_ARRANGE_PATH "/root/canvas.arrange"
 
 struct settings_row
 {
@@ -196,7 +197,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Taskbar display", SETTINGS_CHOICE, 0, ("taskbar", "display"), "display ", "primary all",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
                       .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
-                      .usage = "taskbar display [primary|all]", .help = "the display the taskbar is drawn on: the one Canvas draws on [primary]"),
+                      .usage = "taskbar display [primary|all]", .help = "the screens the taskbar is on: the primary, or all, each listing its windows [primary]"),
     //  The letters' tops toward the middle by default: a side band is then the bottom band stood on its end, its titles
     //  facing the round corners of its tabs as the bottom band's do. Flipping the default is this row's standard, its
     //  help and the README's line; the compositor takes the standard from here, and a file that says default follows it.

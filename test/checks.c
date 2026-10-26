@@ -114953,6 +114953,192 @@ static void check_compositor_partial(void)
 }
 
 /*
+        Two screens, one space. A is 320 by 192 at the left and B, taller at 256
+        by 240, to its right; the scanout is the space, 576 by 240, and B's
+        bottom rows under A's are no screen's. The pointer crosses where the
+        two meet and stops beside A's bottom; a window dragged by its top
+        across the edge is composed on both while it straddles and is B's when
+        it is let go; a drop just past the shared edge arranges nothing, and
+        one at B's free right edge fills B's right half; maximized it fills its
+        own screen; the band is the primary's; the table lists both by name;
+        and when B goes its windows and the pointer are carried onto A.
+*/
+#define SCREENS_W 576
+#define SCREENS_H 240
+#define SCREENS_A_W 320
+#define SCREENS_A_H 192
+#define SCREENS_B_W 256
+
+static fn screens_paint(int row, int width, int height, unsigned int colour)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int address_to pixels = windows_buffer(table, row, 0);
+
+        for (int line = 0; line < height; line++)
+                for (int column = 0; column < width; column++)
+                        pixels[line * SCREENS_A_W + column] = colour;
+        table->width[row] = (unsigned int)width;
+        table->height[row] = (unsigned int)height;
+        table->buffer_index[row] = 0;
+        table->damage_width[row] = 0;
+        table->damage_height[row] = height;
+        table->frame[row]++;
+        compositor_take(row);
+}
+
+// The pointer taken to x, y as a hand would take it, with a button down or up after when one is named.
+static fn screens_hand(int x, int y, int button)
+{
+        compositor.pointer_x = x;
+        compositor.pointer_y = y;
+        compositor_motion();
+        if (button)
+                compositor_button(COMPOSITOR_BTN_LEFT, button > 0);
+}
+
+static void check_compositor_screens(void)
+{
+    static unsigned int scanout[SCREENS_W * SCREENS_H];
+    struct windows address_to table;
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    struct compositor_frame band;
+    int was[2][4], x, y, w, h;
+    char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = SCREENS_W;
+    compositor.height = SCREENS_H;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = scanout;
+    compositor.scanout_pitch = SCREENS_W * 4;
+    compositor.outputs = 2;
+    compositor.screen[0][2] = SCREENS_A_W, compositor.screen[0][3] = SCREENS_A_H;
+    compositor.screen[1][0] = SCREENS_A_W, compositor.screen[1][2] = SCREENS_B_W, compositor.screen[1][3] = SCREENS_H;
+    memory_copy(compositor.output[0].name, names[0], sizeof(names[0]));
+    memory_copy(compositor.output[1].name, names[1], sizeof(names[1]));
+    compositor.stride = compositor.most_w = SCREENS_A_W;
+    compositor.room_h = compositor.most_h = SCREENS_H;
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("screens: the table is mapped", false);
+        return;
+    }
+    table = compositor.table = (struct windows address_to)mapped;
+    compositor.pixels = table->pixels = header;
+    compositor.buffer = table->buffer = buffer;
+    table->stride = SCREENS_A_W;
+    compositor_table_outputs();
+    check("screens: the table lists both, the primary first, by name and place",
+          table->outputs == 2 && !string_compare((string_address)table->output_name[1], (string_address) "B-1") &&
+              table->output_x[1] == SCREENS_A_W && table->output_w[1] == SCREENS_B_W && table->output_h[1] == SCREENS_H &&
+              table->output_width == SCREENS_A_W && table->output_height == SCREENS_H);
+    windows_output(table, 1, &x, &y, &w, &h);
+    check("screens: windows_output reads a screen of the list, and the primary for one past it",
+          x == SCREENS_A_W && y == 0 && w == SCREENS_B_W && h == SCREENS_H &&
+              windows_output(table, 7, &x, &y, &w, &h) == 0 && x == 0 && w == SCREENS_A_W);
+
+    table->x[1] = 30, table->y[1] = 30;
+    screens_paint(1, 60, 40, 0x2060c0u);
+    table->x[2] = 10, table->y[2] = 4;
+    screens_paint(2, 40, 20, 0xc06020u);
+    compositor_damage(0, 0, SCREENS_W, SCREENS_H);
+    compositor_present();
+
+    // The pointer.
+    screens_hand(310, 50, 0);
+    screens_hand(330, 50, 0);
+    check("screens: the pointer crosses where the screens meet", compositor.pointer_x == 330 && compositor.pointer_y == 50);
+    screens_hand(330, 230, 0);
+    screens_hand(310, 230, 0);
+    check("screens: and stops beside the shorter screen's bottom, on the screen it was on",
+          compositor.pointer_x == SCREENS_A_W && compositor.pointer_y == 230);
+    screens_hand(900, 900, 0);
+    check("screens: and at the space's edge", compositor.pointer_x == SCREENS_W - 1 && compositor.pointer_y == SCREENS_H - 1);
+    compositor.tablet_x = 300, compositor.tablet_y = 232, compositor.tablet_have = 3;
+    compositor_report(0);
+    compositor_motion();
+    check("screens: a tablet's point under the shorter screen goes to the nearest screen",
+          compositor.pointer_x == SCREENS_A_W && compositor.pointer_y == 232);
+
+    // A drag across the edge, by the window's top.
+    screens_hand(40, 35, 1);
+    screens_hand(280, 35, 0);
+    compositor_present();
+    check("screens: a window dragged across the edge is on both while it straddles",
+          compositor.x[1] == 270 && (scanout[50 * SCREENS_W + 310] & 0xffffffu) == 0x2060c0u &&
+              (scanout[50 * SCREENS_W + 325] & 0xffffffu) == 0x2060c0u);
+    screens_hand(420, 35, 0);
+    screens_hand(420, 35, -1);
+    compositor_present();
+    check("screens: and let go wholly on the second, it is the second screen's",
+          compositor.x[1] == 410 && table->x[1] == 410 && compositor.arranged[1] == COMPOSITOR_FLOATING &&
+              compositor_screen_of(1) == 1 && (scanout[50 * SCREENS_W + 430] & 0xffffffu) == 0x2060c0u &&
+              (scanout[50 * SCREENS_W + 310] & 0xffffffu) != 0x2060c0u);
+
+    // Where a drag ends.
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(20, 8, 1);
+    screens_hand(200, 50, 0);
+    screens_hand(318, 50, 0);
+    screens_hand(318, 50, -1);
+    check("screens: a drop just short of the shared edge arranges nothing", compositor.arranged[2] == COMPOSITOR_FLOATING);
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
+    screens_hand(450, 50, 0);
+    screens_hand(SCREENS_W - 2, 50, 0);
+    screens_hand(SCREENS_W - 2, 50, -1);
+    check("screens: one at the second screen's free right edge fills its right half",
+          compositor.arranged[2] == COMPOSITOR_RIGHT && compositor.x[2] == SCREENS_A_W + SCREENS_B_W / 2 && compositor.y[2] == 0 &&
+              table->want_width[2] == SCREENS_B_W / 2 && table->want_height[2] == SCREENS_H);
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    check("screens: maximized, a window fills its own screen",
+          compositor.x[1] == SCREENS_A_W && compositor.y[1] == 0 && table->want_width[1] == SCREENS_B_W &&
+              table->want_height[1] == SCREENS_H);
+
+#if MOONWATER_UI_TASKBAR
+    // The band is the primary's.
+    compositor_band_frame(&band);
+    check("screens: the band is along the primary screen's bottom",
+          band.x == 0 && band.width == SCREENS_A_W && band.y + band.height == SCREENS_A_H && compositor.listing == 2);
+    taskbar_settings_set("bottom", "all", "");
+    compositor.band_at = 1;
+    compositor_band_frame(&band);
+    compositor.band_at = 0;
+    check("screens: with taskbar display all the second screen has a band of its own, listing the windows on it",
+          band.x == SCREENS_A_W && band.width == SCREENS_B_W && band.y + band.height == SCREENS_H && compositor.listing == 2);
+    compositor_band_frame(&band);
+    check("screens: and the primary's lists none of them", band.x == 0 && compositor.listing == 0);
+    taskbar_settings_set("bottom", "primary", "");
+#else
+    (void)band;
+#endif
+
+    // B goes: its windows and the pointer are carried onto A.
+    memory_copy(was, compositor.screen, sizeof(was));
+    screens_hand(500, 200, 0);
+    compositor.outputs = 1;
+    compositor.width = SCREENS_A_W, compositor.height = SCREENS_A_H;
+    compositor.most_h = SCREENS_A_H;
+    compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, 2);
+    check("screens: a window that filled the screen that went fills the one left",
+          compositor.x[1] == 0 && compositor.y[1] == 0 && table->want_width[1] == SCREENS_A_W && table->want_height[1] == SCREENS_A_H);
+    check("screens: one that filled half of it fills the same half of the one left, and the pointer is on it",
+          compositor.arranged[2] == COMPOSITOR_RIGHT && compositor.x[2] == SCREENS_A_W / 2 &&
+              table->want_width[2] == SCREENS_A_W / 2 && compositor.pointer_x < SCREENS_A_W && compositor.pointer_y < SCREENS_A_H);
+    compositor_float(1);
+    check("screens: and the place it floated at before is carried too", compositor.x[1] + 60 <= SCREENS_A_W &&
+                                                                            compositor.y[1] + 40 <= SCREENS_A_H);
+    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+    memory_zero(&compositor, sizeof(compositor));
+}
+
+/*
         Alt-Tab, ended by a window leaving. A window that goes while an Alt-Tab
         is under way ends it, since the stack is one shorter; the window it
         stopped on has the keys, and what letting go of Alt does to it (bring it
@@ -118780,6 +118966,7 @@ b32 main()
         check_take();
         check_glass();
         check_compositor_partial();
+        check_compositor_screens();
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_dismiss();
@@ -122312,7 +122499,7 @@ static int co_rect(const int *r,int x,int y,int w,int h){return r[0]==x&&r[1]==y
 static unsigned int co_lay(const char *text,int (*rects)[4],unsigned char *order) {
     static const char names[3][WINDOWS_OUTPUT_NAME]={"Virtual-1","Virtual-2","HDMI-A-1"};
     static const int sizes[3][2]={{2560,1080},{1920,1080},{1280,1024}};
-    return compositor_screens_lay(text,names,sizes,2,rects,order);
+    return windows_arrange_lay(text,names,sizes,2,rects,order);
 }
 static void check_compositor_outputs(void) {
     char name[WINDOWS_OUTPUT_NAME];
@@ -122330,12 +122517,12 @@ static void check_compositor_outputs(void) {
         "DP-1@off eDP-1","a@32768,-32768","\tx\ny\r"};
     static const char *const invalid[]={"Virtual-2@","Virtual-2@1","Virtual-2@1,","Virtual-2@1,2x","@1,2","a b a","default x",
         "x default","abcdefghijklmnop","a@32769,0","a@1,,2","a@of","a_b","a@--1,2","a@1,2,3"};
-    for(unsigned i=0;i<sizeof(valid)/sizeof(valid[0]);i++)co_check(compositor_arrange_valid(valid[i]));
-    for(unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)co_check(!compositor_arrange_valid(invalid[i]));
+    for(unsigned i=0;i<sizeof(valid)/sizeof(valid[0]);i++)co_check(windows_arrange_valid(valid[i]));
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)co_check(!windows_arrange_valid(invalid[i]));
     { unsigned int length;int how,x,y;
-      co_check(compositor_arrange_word("DP-1@-1920,40",13,&length,&how,&x,&y)&&length==4&&how==COMPOSITOR_PLACE_AT&&x==-1920&&y==40);
-      co_check(compositor_arrange_word("eDP-1@off",9,&length,&how,&x,&y)&&length==5&&how==COMPOSITOR_PLACE_OFF);
-      co_check(compositor_arrange_word("eDP-1",5,&length,&how,&x,&y)&&length==5&&how==COMPOSITOR_PLACE_FLOW); }
+      co_check(windows_arrange_word("DP-1@-1920,40",13,&length,&how,&x,&y)&&length==4&&how==WINDOWS_PLACE_AT&&x==-1920&&y==40);
+      co_check(windows_arrange_word("eDP-1@off",9,&length,&how,&x,&y)&&length==5&&how==WINDOWS_PLACE_OFF);
+      co_check(windows_arrange_word("eDP-1",5,&length,&how,&x,&y)&&length==5&&how==WINDOWS_PLACE_FLOW); }
     /* Left to right in the card's order, tops level, the first the primary. */
     co_check(co_lay("",rects,order)==2&&co_rect(rects[0],0,0,2560,1080)&&co_rect(rects[1],2560,0,1920,1080)&&order[0]==0&&order[1]==1);
     co_check(co_lay("default",rects,order)==2&&co_rect(rects[1],2560,0,1920,1080)&&order[0]==0);
@@ -122421,6 +122608,13 @@ static void check_compositor_outputs(void) {
       static const int odd[4]={10,20,101,50};
       compositor_screen_part(odd,COMPOSITOR_LEFT,part);co_check(co_rect(part,10,20,50,50));
       compositor_screen_part(odd,COMPOSITOR_RIGHT,part);co_check(co_rect(part,60,20,51,50)); }
+    /* The cursor plane is a crtc's: the cell shows on each screen it meets, at its place on that screen, and on no other. */
+    { int cx,cy;
+      co_check(compositor_screen_cell(two[0],2500,100,64,&cx,&cy)&&cx==2500&&cy==100&&compositor_screen_cell(two[1],2500,100,64,&cx,&cy)&&cx==-60&&cy==100);
+      co_check(compositor_screen_cell(two[0],2400,100,64,&cx,&cy)&&!compositor_screen_cell(two[1],2400,100,64,&cx,&cy));
+      co_check(!compositor_screen_cell(two[0],2560,100,64,&cx,&cy)&&compositor_screen_cell(two[1],2560,100,64,&cx,&cy)&&cx==0);
+      co_check(compositor_screen_cell(two[0],2496,1016,64,&cx,&cy)&&!compositor_screen_cell(two[0],2496,1080,64,&cx,&cy)&&
+               !compositor_screen_cell(two[0],-64,0,64,&cx,&cy)&&compositor_screen_cell(two[0],-63,0,64,&cx,&cy)); }
     /* Carried: a screen that only moved takes its windows along; another size keeps the share of the room. */
     { static const int was[4]={2560,0,1920,1080},moved[4]={0,0,1920,1080},bigger[4]={0,0,2560,1080};
       x=2560+700,y=390;compositor_screen_carry(was,moved,&x,&y,400,300);co_check(x==700&&y==390);

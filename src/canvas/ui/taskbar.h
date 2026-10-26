@@ -61,6 +61,7 @@
 struct taskbar_view
 {
         int width, height, scale;        // the output, and the device pixels a logical one is
+        int x, y;                        // where that output is in the desktop's space: its screen's top left
         unsigned int position;           // TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT or TASKBAR_RIGHT
         unsigned int *pixels;            // the band's pixels, or none
         unsigned long band_bytes;        // how much memory pixels has

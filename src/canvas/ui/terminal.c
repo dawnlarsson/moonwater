@@ -1422,15 +1422,18 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
 {
         struct windows address_to table;
         unsigned int display_w, display_h, pixels_w, pixels_h;
+        int display_x, display_y, screen_w, screen_h;
 
         // A shell at its prompt has no use for the pointer's motion, and each report of it is a wakeup: asked for
         // only while a program has a mouse mode (the loop says when that changes).
         windows_hover(&terminal.own, false);
         terminal.hovering = false;
 
+        // The primary screen is where it opens, its shares of that screen, and no larger than a window may be.
         table = terminal.own.table;
-        display_w = table->output_width;
-        display_h = table->output_height;
+        windows_output(table, 0, &display_x, &display_y, &screen_w, &screen_h);
+        display_w = (unsigned int)screen_w < table->output_width ? (unsigned int)screen_w : table->output_width;
+        display_h = (unsigned int)screen_h < table->output_height ? (unsigned int)screen_h : table->output_height;
         terminal.pitch = table->stride;
         address_to columns = terminal_columns(display_w * wide / 100);
         address_to rows = terminal_rows(display_h * high / 100);
@@ -1454,10 +1457,10 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
         pixels_w = terminal_pixels(address_to columns, address_to rows, &pixels_h);
         terminal.width = pixels_w < display_w ? pixels_w : display_w;
         terminal.height = pixels_h < display_h ? pixels_h : display_h;
-        table->x[terminal.own.row] = cells[0] && cells[1] ? ((int)display_w - (int)terminal.width) / 2
-                                                          : (int)(display_w * left / 100);
-        table->y[terminal.own.row] = cells[0] && cells[1] ? ((int)display_h - (int)terminal.height) / 2
-                                                          : (int)(display_h * top / 100);
+        table->x[terminal.own.row] = display_x + (cells[0] && cells[1] ? ((int)display_w - (int)terminal.width) / 2
+                                                                       : (int)(display_w * left / 100));
+        table->y[terminal.own.row] = display_y + (cells[0] && cells[1] ? ((int)display_h - (int)terminal.height) / 2
+                                                                       : (int)(display_h * top / 100));
 }
 
 /*

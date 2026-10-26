@@ -27,7 +27,7 @@ static struct taskbar_state
         unsigned int minute;                    // the minute the tray shows
         unsigned int position_default;          // where the band sits when no setting keeps one (-t: top)
         unsigned int position;                  // where it sits now
-        int all;                                // `taskbar display all`: not supported, drawn on the one display
+        int all;                                // `taskbar display all`: a band on every screen, each its own windows
         char battery[BATTERY_NAME];      // the settings' word: "" or "auto" for the first battery found, "none", or a name
         int battery_item;                       // the battery is shown: its row is not none and a battery was read
         int battery_percent, battery_charging;  // what it read
@@ -93,6 +93,9 @@ static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *w
                 *x = 0, *y = view->height - thick, *width = view->width, *height = thick;
                 break;
         }
+        // On its screen, wherever that screen is in the space: every rectangle below is made from this one.
+        *x += view->x;
+        *y += view->y;
 }
 
 /*
