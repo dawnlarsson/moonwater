@@ -50120,7 +50120,7 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
             continue
         for _ in range(3):
             values = fuzz_expand(tree[1][-1], rng, good_for(prefix[0].decode()))
-            if values and not {b"default", b"auto", b"random", b"list", b"xkb", b"-", b"yes"} & set(values):
+            if values and not {b"default", b"auto", b"random", b"list", b"xkb", b"-", b"yes", b"forget"} & set(values):
                 chains.append([(prefix + values, "roundtrip-a", False), (prefix, "roundtrip-b", False)])
     #   A list filled, asked for and emptied.
     for fill, take in FUZZ_FILL:
