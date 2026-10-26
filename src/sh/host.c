@@ -2533,7 +2533,15 @@ static fn host_question(string_address disk)
         host_census_take(address_of census);
         install = host_census_find(address_of census, disk);
         if (!install)
+        {
+                //      The disk went between boot's question and this terminal's
+                //      look: the question goes back for the next one to see, and
+                //      says why this one did not ask.
+                host_say(log, host_label "%s is no longer here, so there is nothing to ask "
+                                         "about\n", disk);
+                system_rename_at(AT_FDCWD, HOST_QUESTION_TAKEN, AT_FDCWD, HOST_QUESTION, 0);
                 return;
+        }
 
         host_install_read(install);
         if (!host_running_build(running, sizeof(running)))
@@ -3153,9 +3161,16 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
         if (!failed)
                 failed = system_call_1(syscall(fsync), (positive)handle);
 
-        //      Written part way, the disk is not left holding half of an install.
+        //      Written part way, the disk is not left holding half of an install,
+        //      and when the table cannot be taken off, that is said as well as
+        //      the write's own failure.
         if (failed)
-                host_install_clear(handle);
+        {
+                if (!host_install_clear(handle))
+                        host_say(log_error, host_label "%s could not be cleared: the install "
+                                                       "did not finish, and its partitions are "
+                                                       "not to be trusted\n", name);
+        }
         else
                 failed = host_rescan(handle);
 
