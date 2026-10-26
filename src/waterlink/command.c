@@ -443,7 +443,8 @@ static b32 link_remove_locked(string_address name)
         link_peers peers;
         struct waterlink_peer address_to found;
 
-        link_peers_load(address_of peers);
+        if (!link_peers_for_change(address_of peers))
+                return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
         found = link_peer_named(address_of peers, name);
         if (!found)
                 return host_refuse("no machine is called %s\n", name);
@@ -464,7 +465,8 @@ static b32 link_grant_locked(string_address name, bool allow,
         struct waterlink_peer address_to found;
         p8 grants[96];
 
-        link_peers_load(address_of peers);
+        if (!link_peers_for_change(address_of peers))
+                return host_refuse("%s could not be read\n", LINK_PEERS_PATH);
         found = link_peer_named(address_of peers, name);
         if (!found)
                 return host_refuse("no machine is called %s\n", name);

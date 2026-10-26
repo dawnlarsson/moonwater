@@ -46240,6 +46240,24 @@ while True:
               "@@gone" in left,
               "a desktop boot that cannot fork says so, answers 1 and leaves no marker", repr((lines, left)))
 
+        # A peers file that is there and cannot be read is no list to change:
+        # remove, allow and deny say so as add does, and do not say the machine
+        # is not there, which would send a person to pair it again over a file
+        # they have.
+        peer = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        lines, finished = session(
+            "rm -f /root/link.peers\n" + say("link add peer1 " + peer) +
+            "chmod 644 /root/link.peers\n" +
+            say("link remove peer1") + say("link allow peer1 run") + say("link deny peer1 run") +
+            say("link add peer1 " + peer) + "rm -f /root/link.peers\n")
+        seen = answers(lines)
+        refused = ("link remove peer1", "link allow peer1 run", "link deny peer1 run", "link add peer1 " + peer)
+        check(finished and all(seen.get(command, {}).get("status") == 1 and
+                               any("/root/link.peers could not be read" in line
+                                   for line in seen[command]["out"]) for command in refused),
+              "link remove, allow and deny refuse a peers file that cannot be read, as add does",
+              repr({command: seen.get(command) for command in refused}))
+
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line
         # is told to a person at a terminal and not to a script, whose
