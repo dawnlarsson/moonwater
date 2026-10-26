@@ -5930,68 +5930,14 @@ static unsigned int place_screen_at(int x, int y, const int (*screens)[4], unsig
         return found;
 }
 
-/*
-        The screens, as placement asks for them: how many, each one's rectangle on the desktop and its connector's
-        name. One screen until there are more: the output the compositor draws on, at the desktop's top left,
-        named as Canvas names it (`moonwater canvas`), or "screen" where Canvas does not say.
-*/
-static unsigned int compositor_output_count(void)
-{
-        return 1;
-}
-
-static void compositor_output_rect(unsigned int at, int *rect)
-{
-        (void)at;
-        rect[0] = rect[1] = 0;
-        rect[2] = compositor.width;
-        rect[3] = compositor.height;
-}
-
-// A connector's name as placement keeps it: letters, digits and hyphens, one to fifteen.
-static int place_screen_name_valid(const char *name)
-{
-        unsigned int at = 0;
-
-        for (; name[at] && at < WINDOWS_NAME; at++)
-                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
-                      (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
-                        return 0;
-        return at && at < WINDOWS_NAME;
-}
-
-static const char *compositor_output_name(unsigned int at)
-{
-        static char name[WINDOWS_NAME];
-        struct canvas_control control;
-        b32 spark;
-
-        (void)at;
-        if (name[0])
-                return name;
-        memory_copy(name, "screen", sizeof("screen"));
-        memory_zero(&control, sizeof(control));
-        spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
-        if (spark < 0)
-                return name;
-        if (system_control(spark, SPARK_IOCTL_CANVAS, address_of control) == 0 && control.output_count)
-        {
-                control.output[0].connector[sizeof(control.output[0].connector) - 1] = 0;
-                if (place_screen_name_valid(control.output[0].connector))
-                        memory_copy(name, control.output[0].connector, sizeof(name));
-        }
-        system_close(spark);
-        return name;
-}
-
 // The screens' rectangles, and how many there are.
-static unsigned int compositor_screens(int (*screens)[4])
+static unsigned int place_screens(int (*screens)[4])
 {
         unsigned int count = compositor_output_count();
 
         count = count < WINDOW_PLACE_SCREENS ? count : WINDOW_PLACE_SCREENS;
         for (unsigned int at = 0; at < count; at++)
-                compositor_output_rect(at, screens[at]);
+                compositor_output_rect((int)at, &screens[at][0], &screens[at][1], &screens[at][2], &screens[at][3]);
         return count;
 }
 
@@ -6034,7 +5980,7 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
 static void compositor_room_follow(void)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4];
-        unsigned int count = compositor_screens(screens);
+        unsigned int count = place_screens(screens);
 
         for (int row = 0; row < WINDOWS; row++)
         {
@@ -6104,7 +6050,7 @@ static void compositor_first_put(int row, int x, int y)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
         int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
-        unsigned int count = compositor_screens(screens), on, how, fills;
+        unsigned int count = place_screens(screens), on, how, fills;
         struct window_place place;
 
         compositor_place_read(row, &place);
