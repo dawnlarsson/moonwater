@@ -19,6 +19,9 @@
         and are linked into the same kernel image, which as a whole is a
         GPL-2.0 work as any kernel with a built-in module is. A change to a routine
         here is a change to a GPL-2.0 file and is contributed as one.
+        mw_net_silent_gate is the exception to "a port": it is new, a check the
+        kernel's own TCP and UDP code calls, written for this file and under
+        the same license as the rest of it.
 
         WHAT IT IS. lib.c's style, for the kernel's own functions: top-level
         asm, one ASM_FUNC to a routine, no C body anywhere in it. Where a C
@@ -33,7 +36,9 @@
         reads them (see that file for the grammar): which kernel function
         stops being C, which functions and structure offsets the asm needs
         from the kernel, and which values it takes as literals and the build
-        checks. The kernel's structure offsets are the compiler's own for the
+        checks. A routine that replaces nothing says where Linux's C calls
+        it instead: a //> guard puts the call above a line of the kernel's.
+        The kernel's structure offsets are the compiler's own for the
         configuration being built -- generated into asm-offsets.h through the
         architecture's asm-offsets.c -- and this file names them through
         MWSET, never as numbers. MOONWATER_STOCK builds none of it.
@@ -51,8 +56,9 @@
 //    ext4_htree_store_dirent  fs/ext4/dir.c ext4_htree_store_dirent   yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
 //    free_rb_tree_fname       fs/ext4/dir.c free_rb_tree_fname        yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
 //    ext4_dir_open            fs/ext4/dir.c ext4_dir_open             yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
+//    mw_net_silent_gate       nothing; 5 guard lines                  yes     yes     yes     -
 //
-//    7 routines.
+//    8 routines.
 //  (index end)
 */
 
@@ -2762,5 +2768,140 @@ __asm__(
 );
 #endif // CONFIG_RISCV
 
+//
+//       mw_net_silent_gate -- new; called from net/ipv4/tcp_ipv4.c tcp_v4_rcv,
+//       net/ipv6/tcp_ipv6.c tcp_v6_rcv, net/ipv4/udp.c udp_rcv and
+//       net/ipv6/udp.c udpv6_rcv
+//
+//       int mw_net_silent_gate(const struct sk_buff *skb)
+//       int mw_net_silent                  /proc/sys/net/ipv4/moonwater_silent
+//
+//       A segment to a TCP port nothing listens on is answered with a reset,
+//       and a datagram to a closed UDP port with an ICMP port unreachable.
+//       Those answers are how a scan learns which ports are closed, and each
+//       one is work the machine does for whoever sent the packet. With
+//       net.ipv4.moonwater_silent at 1 the kernel sends neither for a packet
+//       that came in on anything but a loopback device, and drops it as it
+//       would have dropped it after answering: the same drop reason
+//       (NO_SOCKET), the same counters before the answer (TcpInSegs,
+//       UdpNoPorts and Udp6NoPorts still count it), and no TcpOutRsts,
+//       IcmpOutDestUnreachs or Icmp6OutDestUnreachs. Loopback keeps
+//       answering, so a connect to a closed port of 127.0.0.1, ::1 or the
+//       machine's own address (which is routed over lo) is still refused at
+//       once. The switch covers IPv4 and IPv6 alike; it is one int, in the
+//       first network namespace's table only (ipv4_table is registered for
+//       init_net), so a namespace of its own cannot see it or turn it.
+//
+//       What it does not touch: a reset that answers a segment for a socket
+//       that exists (a listener's, an established one's, a TIME-WAIT's), every
+//       other ICMP error, echo, neighbour discovery and Packet Too Big, and
+//       anything forwarded. The four call sites are the "no socket" ends of
+//       the receive paths, after the checksum is verified (a bad checksum was
+//       never answered), and only the reset with no socket is guarded: the
+//       tcp_v4_send_reset(NULL, ...) line is the one call with a NULL socket
+//       in each file. Nothing is added to a path a packet for an open port
+//       takes.
+//
+//       It returns 1 when the switch is on and skb->dev is a device without
+//       IFF_LOOPBACK, and 0 otherwise, a NULL device included (the receive
+//       paths have read the device's namespace before they get here, so it
+//       is never NULL there; 0 is the answer that changes nothing). The
+//       switch off is the first path through it and the shortest: one load,
+//       one test, a branch not taken and the return.
+//
+//> arch x86_64 arm64 riscv64
+//> declare net/ipv4/tcp_ipv4.c int mw_net_silent_gate(const struct sk_buff *skb);
+//> guard net/ipv4/tcp_ipv4.c tcp_v4_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason)); => if (mw_net_silent_gate(skb)) goto discard_it;
+//> declare net/ipv6/tcp_ipv6.c int mw_net_silent_gate(const struct sk_buff *skb);
+//> guard net/ipv6/tcp_ipv6.c tcp_v6_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason)); => if (mw_net_silent_gate(skb)) goto discard_it;
+//> declare net/ipv4/udp.c int mw_net_silent_gate(const struct sk_buff *skb);
+//> guard net/ipv4/udp.c icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0); => if (mw_net_silent_gate(skb)) { sk_skb_reason_drop(sk, skb, drop_reason); return 0; }
+//> declare net/ipv6/udp.c int mw_net_silent_gate(const struct sk_buff *skb);
+//> guard net/ipv6/udp.c icmpv6_send(skb, ICMPV6_DEST_UNREACH, ICMPV6_PORT_UNREACH, 0); => if (mw_net_silent_gate(skb)) { sk_skb_reason_drop(sk, skb, reason); return 0; }
+//> declare net/ipv4/sysctl_net_ipv4.c extern int mw_net_silent;
+//> guard net/ipv4/sysctl_net_ipv4.c #ifdef CONFIG_NETLABEL => { .procname = "moonwater_silent", .data = &mw_net_silent, .maxlen = sizeof(int), .mode = 0644, .proc_handler = proc_dointvec_minmax, .extra1 = SYSCTL_ZERO, .extra2 = SYSCTL_ONE },
+//> assert net/ipv4/tcp_ipv4.c sizeof_field(struct net_device, flags) == 4
+//> include <linux/skbuff.h>
+//> include <linux/netdevice.h>
+//> offset MW_SKB_DEV sk_buff dev
+//> offset MW_DEV_FLAGS net_device flags
+//> const MW_IFF_LOOPBACK IFF_LOOPBACK
+#if defined(CONFIG_X86_64) || defined(CONFIG_ARM64) || defined(CONFIG_RISCV)
+__asm__(
+    "        .pushsection .data..read_mostly, \"aw\"\n"
+    "        .balign 4\n"
+    "        .globl  mw_net_silent\n"
+    "        .type   mw_net_silent, %object\n"
+    "        .size   mw_net_silent, 4\n"
+    "mw_net_silent:  .long 0\n"
+    "        .popsection\n"
+);
+#endif
+
+#ifdef CONFIG_X86_64
+__asm__(
+    MWSET(MW_SKB_DEV)
+    MWSET(MW_DEV_FLAGS)
+    MWSET(MW_IFF_LOOPBACK)
+);
+
+__asm__(
+    ASM_FUNC(mw_net_silent_gate)
+    "        mov     mw_net_silent(%rip), %eax\n   test    %eax, %eax\n   jnz     1f\n"
+    "        " ASM_RET
+    "1:      mov     MW_SKB_DEV(%rdi), %rdx\n   xor     %eax, %eax\n   test    %rdx, %rdx\n   jz      2f\n"
+    "        testl   $MW_IFF_LOOPBACK, MW_DEV_FLAGS(%rdx)\n   sete    %al\n"
+    "2:      " ASM_RET
+    ASM_END(mw_net_silent_gate)
+);
+#endif // CONFIG_X86_64
+
+#ifdef CONFIG_ARM64
+__asm__(
+    MWSET(MW_SKB_DEV)
+    MWSET(MW_DEV_FLAGS)
+    MWSET(MW_IFF_LOOPBACK)
+);
+
+__asm__(
+    ASM_FUNC(mw_net_silent_gate)
+    "        adrp    x1, mw_net_silent\n   ldr     w1, [x1, :lo12:mw_net_silent]\n   cbnz    w1, 1f\n"
+    "        mov     w0, #0\n"
+    "        " ASM_RET
+    "1:      ldr     x1, [x0, #MW_SKB_DEV]\n   cbz     x1, 2f\n"
+    "        ldr     w1, [x1, #MW_DEV_FLAGS]\n   tst     w1, #MW_IFF_LOOPBACK\n   cset    w0, eq\n"
+    "        " ASM_RET
+    "2:      mov     w0, #0\n"
+    "        " ASM_RET
+    ASM_END(mw_net_silent_gate)
+);
+#endif // CONFIG_ARM64
+
+#ifdef CONFIG_RISCV
+//       A load's offset is twelve signed bits here; a configuration that put
+//       either field past them stops the build rather than reading elsewhere.
+__asm__(
+    MWSET(MW_SKB_DEV)
+    MWSET(MW_DEV_FLAGS)
+    MWSET(MW_IFF_LOOPBACK)
+    ".if MW_SKB_DEV > 2047\n"
+    ".error \"mw_net_silent_gate: sk_buff.dev is past a load offset\"\n"
+    ".endif\n"
+    ".if MW_DEV_FLAGS > 2047\n"
+    ".error \"mw_net_silent_gate: net_device.flags is past a load offset\"\n"
+    ".endif\n"
+);
+
+__asm__(
+    ASM_FUNC(mw_net_silent_gate)
+    "        lw      t0, mw_net_silent\n   bnez    t0, 1f\n"
+    "        li      a0, 0\n"
+    "        " ASM_RET
+    "1:      ld      t0, MW_SKB_DEV(a0)\n   li      a0, 0\n   beqz    t0, 2f\n"
+    "        lw      t1, MW_DEV_FLAGS(t0)\n   andi    t1, t1, MW_IFF_LOOPBACK\n   seqz    a0, t1\n"
+    "2:      " ASM_RET
+    ASM_END(mw_net_silent_gate)
+);
+#endif // CONFIG_RISCV
 
 #endif // KERNEL_KERNEL_C
