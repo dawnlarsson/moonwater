@@ -22454,11 +22454,12 @@ static b32 security_change(bool trust, bool adding, string_address word)
         if (trust && !adding && named && security_built_in_anchor(digest) >= 0)
                 return host_refuse("%s is a built-in anchor; moonwater security block add "
                                    "takes it out of trust\n", security_hex(digest));
-        if (adding && security_built_in_block(digest) >= 0)
+        //      A trust add of a built-in refused key never gets here: security_anchor_entry refuses that key first.
+        if (!trust && adding && security_built_in_block(digest) >= 0)
         {
-                host_say(log, host_label "security %s: %s is refused, built in%s\n", list,
-                         security_hex(digest), trust ? ", and a block wins" : "");
-                return trust ? 1 : 0;
+                host_say(log, host_label "security %s: %s is refused, built in\n", list,
+                         security_hex(digest));
+                return 0;
         }
         if (trust && adding && security_built_in_anchor(digest) >= 0)
         {
