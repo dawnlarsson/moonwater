@@ -21988,6 +21988,12 @@ static b32 host_desktop(string_address address_to arguments, positive count)
                                       "installs it\n", word));
         }
 
+        //      The choice is kept before it is put in force, and stays kept when
+        //      putting it is refused (a session that would not end, a desktop
+        //      already running): it is what every start does, and the verb is
+        //      the person's word for that first and for this moment second. Kept
+        //      after, the word of whoever asked for off while a session hung
+        //      would be lost, and the next start would not honour it.
         return_if(host_save("desktop", DESKTOP_PATH, kept), 1);
         host_say(log, host_label "desktop %s\n", word);
         return desktop_put(kept, false);
