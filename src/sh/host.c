@@ -665,8 +665,18 @@ static bipolar host_lock(string_address path, bool wait)
                 return handle;
 
         locked = system_call_2(syscall(flock), (positive)handle,
-                               wait ? RADIO_LOCK_EX
-                                    : (RADIO_LOCK_EX | RADIO_LOCK_NB));
+                               RADIO_LOCK_EX | RADIO_LOCK_NB);
+        //      A holder that has it for a join (the radio lock is held through
+        //      every network tried, which is a minute for a few) was waited for
+        //      with nothing said: a command that takes the lock says what it is
+        //      waiting for once, and then waits as it did.
+        if (locked == -EAGAIN && wait)
+        {
+                host_say(log, host_label "waiting for another moonwater command to let go of %s\n",
+                         path);
+                log_flush();
+                locked = system_call_2(syscall(flock), (positive)handle, RADIO_LOCK_EX);
+        }
         if (locked < 0)
         {
                 system_close(handle);
@@ -12856,6 +12866,7 @@ static b32 radio_done(b32 failed, string_address what)
 static b32 host_priority(string_address address_to arguments, positive count)
 {
         string_address word = count > 2 ? arguments[2] : null;
+        b32 answer;
 
         if (count == 2)
                 return radio_internet_status();
@@ -12866,7 +12877,13 @@ static b32 host_priority(string_address address_to arguments, positive count)
                            !string_equals(arguments[3], "wifi")))
                 return host_usage();
         host_need_root();
-        return radio_internet_set(arguments[3]);
+        //      The word is kept in /root and copied to /run: two commands at once
+        //      could leave the two files naming different links.
+        if (!host_acquire())
+                return 1;
+        answer = radio_internet_set(arguments[3]);
+        host_release();
+        return answer;
 }
 
 static b32 host_wired(string_address address_to arguments, positive count)
@@ -21490,10 +21507,18 @@ static b32 host_name(string_address address_to arguments, positive count)
         }
 
         //      Kept first, so a machine whose kernel will not take the name still
-        //      has it at the next boot, and says so when it does not.
-        if (host_save(NAME_PATH, NAME_PATH, name))
+        //      has it at the next boot, and says so when it does not. Kept and
+        //      applied together: two names at once could end with one kept and
+        //      the other the machine's.
+        if (!host_acquire())
                 return 1;
+        if (host_save(NAME_PATH, NAME_PATH, name))
+        {
+                host_release();
+                return 1;
+        }
         applied = name_apply(name);
+        host_release();
         if (applied < 0)
         {
                 host_say(log_error, host_label "%s is saved, but the "
@@ -22193,8 +22218,17 @@ static b32 dns_tls_verb(string_address address_to arguments, positive count)
                 return_if(!string_equals(word, "on") && !string_equals(word, "off") &&
                           !string_equals(word, "only"), host_usage());
                 host_need_root();
-                return_if(host_save("dns tls", DNS_TLS_KEPT, word), 1);
+                //      Kept, and the kept word read again and published: two commands
+                //      at once could publish the word the other had already replaced.
+                if (!host_acquire())
+                        return 1;
+                if (host_save("dns tls", DNS_TLS_KEPT, word))
+                {
+                        host_release();
+                        return 1;
+                }
                 failed = dns_tls_publish();
+                host_release();
                 return_if(failed < 0, host_fail("dns tls not published to " DNS_TLS_PATH, failed));
         }
         else
@@ -22266,6 +22300,8 @@ static fn dns_restore(void)
 
 static b32 host_dns(string_address address_to arguments, positive count)
 {
+        b32 answer;
+
         if (count == 2)
         {
                 dns_say(true);
@@ -22274,8 +22310,15 @@ static b32 host_dns(string_address address_to arguments, positive count)
         if (string_equals(arguments[2], "tls"))
                 return dns_tls_verb(arguments, count);
         host_need_root();
-        return count == 3 && string_equals(arguments[2], "auto") ? dns_auto()
-                                                                 : dns_set(arguments + 2, count - 2);
+        //      The servers are kept in /root and written to /etc/resolv.conf: two
+        //      commands at once each did both, and the files could end naming
+        //      different servers (A kept, B kept, B written, A written).
+        if (!host_acquire())
+                return 1;
+        answer = count == 3 && string_equals(arguments[2], "auto") ? dns_auto()
+                                                                   : dns_set(arguments + 2, count - 2);
+        host_release();
+        return answer;
 }
 
 /*

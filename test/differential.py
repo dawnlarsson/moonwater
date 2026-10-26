@@ -48834,6 +48834,47 @@ for round_ in range(40):
     if [p.returncode for p in running] != [0, 0, 0, 0] or not tune_has("power performance", "cpu.boost off", "cpu.smt off", "charge.limit 80")():
         odd.append((round_, [p.returncode for p in running], cat("/root/tune")))
 print("@@race tune_four %d" % len(odd), odd[:1])
+#   A command that has to wait for a lock says what for, once, and then waits
+#   as it did: the radio lock (held through a join) and the clock's.
+import fcntl
+for name, lock, words, token in [
+        ("radio", "/run/moonwater/radio.lock", "bluetooth add dev1", "dev1"),
+        ("locale", "/run/moonwater/locale.lock", "timezone de", "Berlin")]:
+    clear()
+    held = open(lock, "a+")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    waiter = start(words)
+    time.sleep(0.4)
+    fcntl.flock(held, fcntl.LOCK_UN)
+    held.close()
+    said = waiter.communicate(timeout=60)[0].decode(errors="replace")
+    kept = token in cat("/root/bluetooth") + cat("/root/timezone")
+    quiet = "waiting for another moonwater command" not in said
+    print("@@wait %s %d" % (name, 1 if waiter.returncode != 0 or quiet or not kept else 0), repr(said[:160]))
+#   A verb that keeps a word in /root and puts it somewhere else too does both
+#   under the machine's lock, so two of them at once cannot cross (A kept, B kept,
+#   B put, A put, and the two files name different servers, links or names):
+#   with the lock held here, the verb has changed nothing a quarter second on,
+#   and has done all of it once the lock is let go.
+for name, before, words, gone in [
+        ("dns", [], "dns 1.1.1.1", "/root/dns"),
+        ("dns auto", ["dns 9.9.9.9"], "dns auto", "-/root/dns"),
+        ("dns tls", [], "dns tls on", "/root/dns.tls"),
+        ("priority", [], "priority internet wifi", "/root/internet"),
+        ("name", [], "name aa-bb", "/root/name")]:
+    clear()
+    for word in before:
+        sh(word)
+    held = open("/run/moonwater/lock", "a+")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    waiter = start(words)
+    time.sleep(0.3)
+    early = waiter.poll() is None and (os.path.exists(gone[1:]) if gone[0] == "-" else not os.path.exists(gone))
+    fcntl.flock(held, fcntl.LOCK_UN)
+    held.close()
+    waiter.communicate(timeout=60)
+    late = waiter.returncode == 0 and (not os.path.exists(gone[1:]) if gone[0] == "-" else os.path.exists(gone))
+    print("@@lock %s %d" % (name.replace(" ", "_"), 0 if early and late else 1), early, late)
 READERS = [
     ("wifi", "wifi add stable passpass1", ["wifi add churn passpass2", "wifi remove churn"], "wifi", "stable"),
     ("bluetooth", "bluetooth add stable", ["bluetooth add churn", "bluetooth remove churn"], "bluetooth", "stable"),
@@ -48877,6 +48918,18 @@ PYEOF
         for found in races:
             check(len(found) > 2 and found[2] == "0",
                   "%s: both commands end 0 and both effects stand, forty rounds" % found[1],
+                  " ".join(found))
+        waits = [line.split(None, 3) for line in lines if line.startswith("@@wait ")]
+        check(len(waits) == 2, "the lock waits ran", lines[-4:])
+        for found in waits:
+            check(len(found) > 2 and found[2] == "0",
+                  "%s lock: a command held back by it says what it waits for, and then does its work" % found[1],
+                  " ".join(found))
+        locks = [line.split(None, 3) for line in lines if line.startswith("@@lock ")]
+        check(len(locks) == 5, "the machine lock rows ran", lines[-4:])
+        for found in locks:
+            check(len(found) > 2 and found[2] == "0",
+                  "%s: waits for the machine's lock before it keeps or puts anything, and finishes after" % found[1],
                   " ".join(found))
         for found in reads:
             check(len(found) > 2 and found[2] == "0",

@@ -8355,8 +8355,12 @@ static COLD bipolar file_publish_with(string_address path, address_any bytes,
 {
         bipolar result = file_publish_once(path, bytes, length, mode, sync, behavior);
 
+        //      A name taken away between the look and the rename (dns auto beside
+        //      dns ADDRESS) is the same race, once or twice; a directory that is not
+        //      there answers the same and is not asked sixteen times.
         for (positive attempt = 0; attempt < 16 && !(behavior & FILE_STAGED_NO_REPLACE) &&
-                                   (result == -ERROR_EXISTS || result == -ERROR_AGAIN);
+                                   (result == -ERROR_EXISTS || result == -ERROR_AGAIN ||
+                                    (result == -ERROR_NO_ENTRY && attempt < 2));
              attempt++)
                 result = file_publish_once(path, bytes, length, mode, sync, behavior);
         return result;
