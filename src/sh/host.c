@@ -21349,14 +21349,20 @@ static const struct snapshot_process address_to desktop_parent(const system_snap
         return null;
 }
 
+// The first KWin that is not a zombie, or null.
+static const struct snapshot_process address_to desktop_kwin(const system_snapshot address_to sample)
+{
+        for (positive at = 0; at < sample->header.process_count; at++)
+                if (sample->processes[at].state != 'Z' && desktop_named(sample->processes + at, "kwin_wayland"))
+                        return sample->processes + at;
+        return null;
+}
+
 // The top of the chain that runs a KWin (the session bus runner, startplasma, the compositor): 0 when none is.
 static positive desktop_root(const system_snapshot address_to sample)
 {
-        const struct snapshot_process address_to top = null;
+        const struct snapshot_process address_to top = desktop_kwin(sample);
 
-        for (positive at = 0; at < sample->header.process_count && !top; at++)
-                if (sample->processes[at].state != 'Z' && desktop_named(sample->processes + at, "kwin_wayland"))
-                        top = sample->processes + at;
         for (positive hops = 0; top && hops < 16; hops++)
         {
                 const struct snapshot_process address_to above = desktop_parent(sample, top);
@@ -21386,16 +21392,11 @@ static bool desktop_below(const system_snapshot address_to sample, const struct 
 static positive desktop_compositor_session(void)
 {
         static system_snapshot sample;
+        const struct snapshot_process address_to kwin;
 
         return_if(!system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false), 0);
-        for (positive at = 0; at < sample.header.process_count; at++)
-        {
-                const struct snapshot_process address_to process = sample.processes + at;
-
-                if (process->state != 'Z' && desktop_named(process, "kwin_wayland"))
-                        return process->session;
-        }
-        return 0;
+        kwin = desktop_kwin(address_of sample);
+        return kwin ? kwin->session : 0;
 }
 
 /*
