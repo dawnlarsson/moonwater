@@ -18894,6 +18894,14 @@ static b32 locale_time_sync(void)
                                    "clock was left alone; remove "
                                    "/root/clock.good if that is wrong\n",
                               locale_ntp_answered);
+        else if (failed == SNTP_CONTRADICTS)
+                //      Before the generic answer below, which it would be
+                //      given too: the take names the server before it refuses.
+                string_format(log, host_label "time: %s answered, but it is "
+                                   "further from the time NTS gave this boot "
+                                   "than the clock can have drifted, so the "
+                                   "clock was left alone\n",
+                              locale_ntp_answered);
         else if (failed < 0 && locale_ntp_answered[0])
                 string_format(log, host_label "time: %s answered, but the "
                                    "clock could not be set: %s\n",
@@ -18903,12 +18911,6 @@ static b32 locale_time_sync(void)
                                                      "outside the years this "
                                                      "machine accepts"
                                   : file_reason(failed));
-        else if (failed == SNTP_CONTRADICTS)
-                string_format(log, host_label "time: %s answered, but it is "
-                                   "further from the time NTS gave this boot "
-                                   "than the clock can have drifted, so the "
-                                   "clock was left alone\n",
-                              locale_ntp_answered);
         else if (failed == SNTP_UNCONFIRMED)
                 string_format(log, host_label "time: no second server agreed "
                                    "with a step past 2 s, so the clock was "
