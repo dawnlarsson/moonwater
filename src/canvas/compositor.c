@@ -1955,6 +1955,7 @@ struct compositor_poll
 #define COMPOSITOR_POLLHUP 16
 
 #define COMPOSITOR_INPUTS 32 // a lid, the audio jacks and a power button take one each, and a mouse plugged in later needs one
+#define COMPOSITOR_WHEEL_JOIN 960 // eight notches, in 120ths: the most one wheel event joined from several holds
 #define COMPOSITOR_DEVICES 64 // evdev numbers the hotplug watch can name
 // How long the processor is kept out of its deep idle states after the last thing a person did.
 #define COMPOSITOR_HOLD_NS 500000000ull
@@ -5878,6 +5879,16 @@ static void compositor_inputs_watch(void)
         a motion the program has not read yet replaces it. tail is the
         program's, so it is read once and only believed as far as the ring
         is long. Whether it was put in the ring, or joined to the one before.
+
+        A wheel behind a wheel the program has not read, turned the same way
+        round its axis, is added to it once the program is half a ring
+        behind: a swipe is sixty to a hundred and fifty events a second, a
+        wheel that reports in 120ths sends eight to a notch, and a program
+        that is busy for a moment had the rest of the swipe cut off where the
+        ring filled. Half a ring behind, the event joined to is one the
+        program is not reading as it is changed; and an event holds at most
+        COMPOSITOR_WHEEL_JOIN, since a program bounds what one event may do
+        (a terminal scrolls a screen at most).
 */
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
@@ -5897,6 +5908,16 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         {
                 table->event_a[row][last] = a;
                 table->event_b[row][last] = b;
+                return 1;
+        }
+
+        if (type == WINDOW_EVENT_WHEEL && used >= WINDOWS_EVENTS / 2 && used <= WINDOWS_EVENTS &&
+            table->event_type[row][last] == WINDOW_EVENT_WHEEL && table->event_b[row][last] == b &&
+            table->event_flags[row][last] == flags && (table->event_a[row][last] < 0) == (a < 0) &&
+            (long)table->event_a[row][last] + a <= COMPOSITOR_WHEEL_JOIN &&
+            (long)table->event_a[row][last] + a >= -COMPOSITOR_WHEEL_JOIN)
+        {
+                table->event_a[row][last] += a;
                 return 1;
         }
 

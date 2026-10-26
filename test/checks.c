@@ -115813,6 +115813,143 @@ static void check_compositor_hover(void)
 }
 
 /*
+        The wheel through the compositor's reader, from a pipe that stands for a device in slot 0: what a notch
+        becomes in the ring of the window under the pointer, what moonwater debug is told of it, and a swipe at a
+        window that is not reading while it comes, which its ring of WINDOWS_EVENTS events used to cut off.
+*/
+static int wheel_pipe[2] = {-1, -1};
+
+static fn wheel_feed(unsigned short type, unsigned short code, int value)
+{
+        struct compositor_input_event event = {0, 0, type, code, value};
+
+        system_write_once(wheel_pipe[1], &event, sizeof(event));
+}
+
+// A notch as the kernel says one of a wheel that reports in 120ths: the notch, the 120ths, the end of the report.
+static fn wheel_notch(int sign)
+{
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, sign);
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL_HI, sign * 120);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+}
+
+// The wheel the program of row has not read yet: the sum of its turns, how many events they are, and the last.
+static int wheel_unread(int row, unsigned int address_to events, int address_to last)
+{
+        struct windows address_to table = compositor.table;
+        int sum = 0;
+
+        address_to events = 0;
+        address_to last = 0;
+        for (unsigned int at = table->event_tail[row]; at != table->event_head[row]; at++)
+                if (table->event_type[row][at % WINDOWS_EVENTS] == WINDOW_EVENT_WHEEL)
+                {
+                        sum += table->event_a[row][at % WINDOWS_EVENTS];
+                        address_to last = table->event_a[row][at % WINDOWS_EVENTS];
+                        (address_to events)++;
+                }
+        return sum;
+}
+
+static void check_compositor_wheel(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int events;
+    int last, sum;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.hold = -1;
+    compositor.holds = ~0ul;
+    compositor.told_row = COMPOSITOR_NONE;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map() || system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("wheel: the table and the device are made", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_present();
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    compositor.pointer_x = 60;
+    compositor.pointer_y = 40;
+
+    /* A wheel that reports in 120ths: a notch is read twice, sent once. */
+    compositor.hires[0] = 1;
+    wheel_notch(1);
+    compositor_input_read(0);
+    sum = wheel_unread(1, &events, &last);
+    check("wheel: a notch of a wheel in 120ths is one turn of 120 for the window under the pointer", sum == 120 && events == 1);
+    check("wheel: and moonwater debug is told it was read twice, used once and sent to that window",
+          table->input_wheel_read[0] == 2 && table->input_wheel_used[0] == 1 && table->wheel_sent == 1 && table->wheel_row == 1 &&
+              table->wheel_x == 10 && table->wheel_y == 10 && table->input_wheel_last[0] == 0);
+    table->event_tail[1] = table->event_head[1];
+
+    /* One whose notches are all it says, and one that says eighths of a notch. */
+    compositor.hires[0] = 0;
+    wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, -1);
+    wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+    compositor_input_read(0);
+    sum = wheel_unread(1, &events, &last);
+    check("wheel: a notch of a wheel in notches is a turn of -120", sum == -120 && events == 1);
+    table->event_tail[1] = table->event_head[1];
+    compositor.hires[0] = 1;
+    for (int step = 0; step < 8; step++)
+    {
+        if (step == 7)
+            wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, 1);
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL_HI, 15);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+    }
+    compositor_input_read(0);
+    sum = wheel_unread(1, &events, &last);
+    check("wheel: eight eighths are eight turns that are a notch", sum == 120 && events == 8);
+    table->event_tail[1] = table->event_head[1];
+
+    /* A swipe at a window that is not reading: 150 notches, faster than it reads any of them. */
+    for (int notch = 0; notch < 150; notch++)
+        wheel_notch(-1);
+    compositor_input_read(0);
+    sum = wheel_unread(1, &events, &last);
+    check("wheel: a swipe of 150 notches at a window that is not reading is all there when it reads",
+          sum == -150 * 120 && table->wheel_full == 0 && events < WINDOWS_EVENTS);
+    table->event_tail[1] = table->event_head[1];
+
+    /* Turned back in the middle of one, the way back is not added to the way there. */
+    for (int notch = 0; notch < 80; notch++)
+        wheel_notch(notch < 40 ? 1 : -1);
+    compositor_input_read(0);
+    sum = wheel_unread(1, &events, &last);
+    check("wheel: and a swipe turned back half way comes to nothing, ending the way it was turned last", sum == 0 && last < 0);
+    table->event_tail[1] = table->event_head[1];
+
+    /* With no window under the pointer, and when the kernel had to drop what was not read in time. */
+    compositor.pointer_x = 5;
+    compositor.pointer_y = 5;
+    wheel_notch(1);
+    wheel_feed(COMPOSITOR_EV_SYN, COMPOSITOR_SYN_DROPPED, 0);
+    compositor_input_read(0);
+    check("wheel: a notch with no window under the pointer is said to have gone nowhere, and a drop is counted",
+          table->wheel_nowhere == 1 && table->wheel_row < 0 && table->input_dropped[0] == 1);
+    system_close(wheel_pipe[0]);
+    system_close(wheel_pipe[1]);
+    compositor.input_count = 0;
+}
+
+/*
         Where a placed window goes (compositor_first_put and the rectangles under it). The room of a screen is the
         screen less the taskbar on each of its four edges, and the whole screen with no band or a band elsewhere;
         a window is kept on its screen whatever it asked, its top left on it when it is larger; centre is the
@@ -118979,6 +119116,7 @@ b32 main()
         check_compositor_screens();
         check_compositor_cycle();
         check_compositor_hover();
+        check_compositor_wheel();
         check_compositor_dismiss();
         check_compositor_place();
         check_compositor_remember();

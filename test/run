@@ -20591,6 +20591,18 @@ def wheels(shell, path):
     text = shell.run("cat %s" % path, 10)[0]
     return " ".join("%s:%s" % w for w in re.findall(r"surface: wheel (-?\d+) (\d+)", text)) or "none"
 
+def turned(shell, path):
+    """The wheel a /surface was sent, as (delta, sideways) numbers."""
+    text = shell.run("cat %s" % path, 30)[0]
+    return [(int(a), int(b)) for a, b in re.findall(r"surface: wheel (-?\d+) (\d+)", text)]
+
+def swipe(button, notches, gap):
+    """Notches as QEMU's cocoa window sends a scroll: a press and a report, a release and a report, each."""
+    for _ in range(notches):
+        send([{"type": "btn", "data": {"down": True, "button": button}}])
+        send([{"type": "btn", "data": {"down": False, "button": button}}])
+        time.sleep(gap)
+
 def surface(shell, path, box=None):
     """A window, on top, that writes the wheel it is sent to path: the size of the output, or box (x, y, width, height). Its pid."""
     before = set(pids(shell, "surface"))
@@ -20630,6 +20642,25 @@ def routing(shell, tag, mouse):
     out.append(("W1.4%s a notch is reported once: down one and up two are three reports of 120" % tag,
                 wheels(shell, one), "120:0 120:0 -120:0 120:0 120:0"))
     said(shell, "W1.4" + tag)
+    #   A swipe as QEMU's window makes one of a trackpad, faster: 150 notches 6 ms apart, each a press and a release
+    #   with a report after each. It all reaches a window that is reading, and a window that is not reading while it
+    #   comes (stopped, as a program busy drawing is) has all of it when it reads again, where its ring of 64 events
+    #   used to keep the first 64 and lose the rest.
+    for stopped in (False, True):
+        before = len(turned(shell, one))
+        if stopped:
+            shell.run("kill -STOP %s" % " ".join(first), 10)
+        swipe("wheel-down", 150, 0.006)
+        if stopped:
+            time.sleep(0.5)
+            shell.run("kill -CONT %s" % " ".join(first), 10)
+        time.sleep(2)
+        got = turned(shell, one)[before:]
+        notches = sum(a for a, b in got if b == 0)
+        out.append(("W1.%s%s a swipe of 150 notches 6 ms apart reaches %s whole" % ("12" if stopped else "11", tag,
+                    "a window that was not reading while it came" if stopped else "a window"),
+                    "%d notches" % (notches // 120) if notches % 120 == 0 else "%d/120 notches" % notches, "-150 notches"))
+        said(shell, "W1.12" + tag if stopped else "W1.11" + tag)
     #   What moonwater debug says of all that: the device the wheel was read from, and every turn sent to a window.
     told = shell.run("moonwater debug", 20)[0]
     sent = re.search(r"wheel +(\d+) sent to a window, (\d+) with no window under the pointer, (\d+) refused", told)
