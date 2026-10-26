@@ -2681,7 +2681,7 @@ static b32 host_machine_run(void)
                 locale_recover();
                 link_keep();
                 failed = host_machine_wait(device, address_of control);
-                if (failed == -4 || failed == -ETIMEDOUT)
+                if (failed == -EINTR || failed == -ETIMEDOUT)
                         continue;
                 if (failed < 0) {
                         //      Not an ending: the wait itself was refused.
