@@ -48206,6 +48206,17 @@ while True:
               "a boot whose security file cannot be published says so and still settles",
               repr((seen.get("boot"), lines[-2:])))
 
+        # The compositor's table of windows is a file the debug page maps, and
+        # a FIFO at its name held the page for good: it was opened read-only
+        # and a read-only open of a FIFO waits for a writer.
+        script = ("mkdir -p /run/moonwater; rm -rf /run/moonwater/windows; mkfifo /run/moonwater/windows\n"
+                  "timeout 5 /tmp/moonwater debug >/dev/null 2>&1; echo \"@@fifo windows debug: $?\"\n"
+                  "rm -f /run/moonwater/windows\n")
+        lines, finished = session(script)
+        got = [line for line in lines if line.startswith("@@fifo windows debug: ")]
+        check(finished and got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
+              "debug is not held by a FIFO at /run/moonwater/windows", got)
+
         # A verdict that cannot be written is not a live session: `setup live`
         # said so on standard error and then that the disks were left alone,
         # and ended 0, so a script that asked for live went on as if it had it.

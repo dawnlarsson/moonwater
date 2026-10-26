@@ -21794,8 +21794,10 @@ static const struct windows address_to host_windows_header(void)
                 file = window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0);
                 window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
         }
+        //      Without blocking: a FIFO at the table's name is no table, and a read-only
+        //      open of one waits for a writer that is not coming.
         if (file < 0)
-                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOWS_O_READ, 0, 0, 0);
         //      A table shorter than the struct is no table this build can map:
         //      the page past its end is a bus error on the first field read,
         //      which is what an empty file (a compositor still starting) was.
