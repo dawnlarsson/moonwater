@@ -775,7 +775,11 @@ command -v "$emulator" >/dev/null 2>&1 ||
 #       the screen, or the compositor is drawing underneath something else.
 cmdline="console=$console_device drm_client_lib.active="
 
-say "Booting $image ($target)"
+#       When the image was written here, since --boot takes whatever was
+#       fetched last for this architecture, and an image older than the
+#       tree is not the tree. uname -v in the guest says when its kernel was
+#       built.
+say "Booting $image ($target), written $(date -r "$image" '+%Y-%m-%d %H:%M' 2>/dev/null || echo 'at a time this date cannot say')"
 size "$image"
 
 #       virtio-gpu rather than the default VGA: it is the only device here that
