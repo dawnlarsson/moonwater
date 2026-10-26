@@ -6938,7 +6938,7 @@ static b32 compositor_main()
 // surface ----------------------------------------------------------
 /*
         A test client: surface [-x X] [-y Y] [-w WIDTH] [-h HEIGHT] [-c RRGGBB]
-        [-T TITLE] [-p] [-m] [-R] [-n] [-G] [-a ALPHA] [-F PICTURES]
+        [-T TITLE] [-N NAME] [-p] [-m] [-R] [-n] [-G] [-a ALPHA] [-F PICTURES]
         [-f FONT.ttf] [-t TEXT] [-s SECONDS].
 
         A window of one colour at X, Y, a line of TEXT drawn with font.c on it
@@ -6948,8 +6948,10 @@ static b32 compositor_main()
         motions. -m puts it away as it opens, -R draws the size it is asked
         for, -n never shows a picture, and -F shows PICTURES more, as fast as
         it can. -G makes it glass, its colour laid over the glass at ALPHA
-        (0, the default, is the glass alone, 255 the colour alone). It lives
-        until it is asked to close, the compositor goes, or SECONDS.
+        (0, the default, is the glass alone, 255 the colour alone). -N is the
+        name the compositor remembers where it was put by; without one it is
+        not remembered. It lives until it is asked to close, the compositor
+        goes, or SECONDS.
 */
 static void surface_draw(const struct window_row *own, unsigned int which, unsigned int width, unsigned int height,
                          unsigned int colour, string_address font, string_address text)
@@ -6998,7 +7000,7 @@ static b32 surface_main()
 {
         bipolar x = 0, y = 0, width = 320, height = 200, colour = 0x3366aa, seconds = -1, flood = 0, alpha = 0;
         b32 pointer = 0, never = 0, away = 0, sized = 0, focused = 0, glass = 0;
-        string_address title = null, font = null, text = (string_address) "Moonwater";
+        string_address title = null, font = null, text = (string_address) "Moonwater", name = null;
         struct window_row own;
         struct windows *table;
         unsigned int which = 0;
@@ -7037,6 +7039,7 @@ static b32 surface_main()
                 case 'F': flood = compositor_number(value, 0); break;
                 case 'a': alpha = compositor_number(value, 0); break;
                 case 'T': title = value; break;
+                case 'N': name = value; break;
                 case 'f': font = value; break;
                 case 't': text = value; break;
                 }
@@ -7072,6 +7075,7 @@ static b32 surface_main()
                         table->title[own.row][at] = (char)title[at];
                 table->title[own.row][at] = 0; // a row is reused: what it held past this title is not the title's
         }
+        windows_name(&own, (const char *)name);
         surface_draw(&own, which, (unsigned int)width, (unsigned int)height, (unsigned int)colour, font, text);
 
         if (!never)

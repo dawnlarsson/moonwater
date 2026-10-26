@@ -3889,6 +3889,7 @@ static struct ui_app settings_app = {
         .ui = &settings.ui,
         .missing = (string_address) "settings: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Settings",
+        .name = (string_address) "settings",
         .glass = WINDOW_GLASS,
         .font = null,
         .nofont = (string_address) "settings: no font to draw with (-f FONT.ttf), pid ",

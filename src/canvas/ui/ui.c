@@ -758,7 +758,7 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 
 /*
         One app's window and loop. The runner claims the standard descriptors,
-        takes the window, sets its title, glass, scale and ground, and calls
+        takes the window, sets its title, name, glass, scale and ground, and calls
         open. Then it runs the loop: events, closing, focus, ground, the size
         asked for by the hand, a due picture,
         the app's tick and its one descriptor, and the wait. An app keeps its
@@ -770,6 +770,7 @@ struct ui_app
         struct ui address_to ui;
         string_address missing;         // logged when the desktop has no window for it
         string_address title;
+        string_address name;            // what the compositor remembers where it was put by, or none (windows_name)
         unsigned int glass;
         b32 address_to dirty;           // a picture is due: frame paints it
         b32 address_to focused;         // the app's own: the keys are its
@@ -831,6 +832,7 @@ static int ui_app_run(struct ui_app address_to app)
                                     ? &app->ui->faces[1] : null;
         }
         string_copy_bounded((string_address)table->title[row], app->title, WINDOWS_TITLE);
+        windows_name(app->own, (const char *)app->name);
         table->glass[row] = app->glass;
         *app->ground = table->ground[row];
         ui_inks(app->ui, *app->ground ? *app->ground : 0x101012u);

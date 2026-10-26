@@ -434,7 +434,8 @@ static inline int window_key(struct window *window, struct window_key *key)
         compositor makes one none again, when its door has closed.
 
         The program writes x and y (where it wants to be, read once, when
-        the window first shows), width and height (its picture's), buffer,
+        the window first shows), place to name (where it asks to be put and
+        what it is remembered by, read then too), width and height (its picture's), buffer,
         frame, the damage, the title, state's WINDOW_MINIMIZED before the
         first picture, and event_tail. The compositor writes the rest: the
         output's numbers, focus, x and y from then on, state, want_width
@@ -515,6 +516,54 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_EVENT_BUTTON 3u
 #define WINDOW_EVENT_WHEEL 4u
 
+/*
+        Where a program asks its window to be put, and the name the window is known by.
+
+        The program writes these into its row before its first picture, and the compositor reads them once with
+        that picture, into its own copy, and clamps them there as it does x and y. place is one of the
+        WINDOW_PLACE_ modes, with WINDOW_PLACE_SCREEN when a screen was named and WINDOW_PLACE_SIZE when a size
+        was; place_x and place_y are where WINDOW_PLACE_AT puts the top left, counted from the top left of the
+        screen; place_screen counts the screens from 0, in the order `moonwater canvas` lists them. A screen
+        that is not there is the first. The room of a screen is the screen less the taskbar along its edge.
+
+        name is what the compositor remembers where the window was put by: lower-case letters, digits and
+        hyphens, a letter or a digit first, and none for a window that is not remembered. Not the title, which
+        a program changes as it runs (a terminal's is its shell's).
+
+        `moonwater window` hands a program its placement in its environment, as MOONWATER_PLACE: the words of
+        the verb, which window_place_parse reads. windows_take reads it into the row it takes and empties it in
+        the program's environment, so the first window a program opens is the one put there and the programs
+        it starts after that are not. A program that is no window of this compositor's (a bowl's, one of
+        Wayland or X) never reads it.
+*/
+#define WINDOW_PLACE_AUTO 0u       // where the program asked, x and y, as it always was
+#define WINDOW_PLACE_CENTER 1u     // in the middle of the screen's room
+#define WINDOW_PLACE_AT 2u         // its top left at place_x, place_y of the screen
+#define WINDOW_PLACE_MAXIMIZED 3u  // filling the screen's room, the taskbar not covered
+#define WINDOW_PLACE_FULLSCREEN 4u // filling the screen, under the taskbar too
+#define WINDOW_PLACE_HOW 7u        // the mode's bits
+#define WINDOW_PLACE_SCREEN 8u
+#define WINDOW_PLACE_SIZE 16u
+// The most a number of a placement can be either way: wider than any desktop, and far inside WINDOW_COORD_MAX.
+#define WINDOW_PLACE_MOST 16384
+// The screens a placement can name, from 1 as it is typed.
+#define WINDOW_PLACE_SCREENS 8u
+// A name, its null included.
+#define WINDOWS_NAME 16
+// The variable, the words a placement has at most, and the room of its text.
+#define WINDOW_PLACE_VARIABLE "MOONWATER_PLACE"
+#define WINDOW_PLACE_WORDS 14u
+#define WINDOW_PLACE_TEXT 112u
+
+// A placement as it is parsed, and as a row's columns hold it.
+struct window_place
+{
+        unsigned int how; // WINDOW_PLACE_*
+        int x, y;
+        unsigned int width, height, screen;
+        char name[WINDOWS_NAME];
+};
+
 // glass: the window is frosted glass, its buffer premultiplied ARGB over it.
 #define WINDOW_GLASS 1u
 // The glass column's other bits: the window has no close button (none is drawn over it, none is hit), and a press
@@ -570,6 +619,12 @@ struct windows
         */
         unsigned int pinned[WINDOWS];
         int spoiled_x[WINDOWS][2], spoiled_y[WINDOWS][2], spoiled_width[WINDOWS][2], spoiled_height[WINDOWS][2];
+
+        // The program's, read with its first picture: where it asks to be put, and its name (WINDOW_PLACE_*).
+        unsigned int place[WINDOWS];
+        int place_x[WINDOWS], place_y[WINDOWS];
+        unsigned int place_width[WINDOWS], place_height[WINDOWS], place_screen[WINDOWS];
+        char name[WINDOWS][WINDOWS_NAME];
 
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
@@ -973,13 +1028,296 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
         table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
+        // A placement and a name are the program that asked's, and not the next one's to open in the row.
+        table->place[row] = table->place_screen[row] = 0;
+        table->place_x[row] = table->place_y[row] = 0;
+        table->place_width[row] = table->place_height[row] = 0;
+        for (unsigned int at = 0; at < WINDOWS_NAME; at++)
+                table->name[row][at] = 0;
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
 }
 
 /*
+        A name a window may be remembered by: one to WINDOWS_NAME - 1 lower-case letters, digits and hyphens, a
+        letter or a digit first. It is written into a file of /root and read back, so nothing else is one.
+*/
+static int window_name_valid(const char *name)
+{
+        unsigned int at = 0;
+
+        if (!((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= '0' && name[0] <= '9')))
+                return 0;
+        for (; name[at] && at < WINDOWS_NAME; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                        return 0;
+        return at < WINDOWS_NAME;
+}
+
+/*
+        A number of a placement, read from text up to stop (0: the end of the word): digits, a minus before them
+        only where low is below zero, no zero in front of another digit and no minus zero, from low to high.
+        Where the number ends, or null for anything else.
+*/
+static const char *window_place_number(const char *text, char stop, int low, int high, int *value)
+{
+        int negative = text[0] == '-' && low < 0, digits = 0;
+        long number = 0;
+
+        text += negative;
+        if (text[0] == '0' && text[1] >= '0' && text[1] <= '9')
+                return 0;
+        // Six digits is past WINDOW_PLACE_MOST, and is refused at the stop.
+        for (; text[0] >= '0' && text[0] <= '9' && digits < 6; text++, digits++)
+                number = number * 10 + (text[0] - '0');
+        if (!digits || text[0] != stop || (negative && !number))
+                return 0;
+        number = negative ? -number : number;
+        if (number < low || number > high)
+                return 0;
+        *value = (int)number;
+        return text;
+}
+
+static int window_place_word(const char *word, const char *name)
+{
+        while (*name && *word == *name)
+                word++, name++;
+        return !*name && !*word;
+}
+
+/*
+        The words of a placement, as `moonwater window` takes them and MOONWATER_PLACE holds them: center, at X,Y,
+        maximized, fullscreen, screen N, size WxH and name NAME, each at most once and one of the first four. X
+        and Y are -16384 to 16384, N 1 to 8, W and H 1 to 16384. Answers how many of words were the placement's
+        (the first that is none of them ends it), or -1 when one of them is wrong: a number out of its range or
+        with anything after its digits, a name that is none, a word with nothing after it, a word given twice,
+        two of the first four, or a size with maximized or fullscreen, which are the screen's size.
+*/
+static int window_place_parse(struct window_place *place, const char *const *words, unsigned int count)
+{
+        unsigned int at = 0, seen = 0;
+
+        for (unsigned int byte = 0; byte < sizeof(*place); byte++)
+                ((char *)place)[byte] = 0;
+        while (at < count)
+        {
+                const char *word = words[at], *value = at + 1 < count ? words[at + 1] : 0, *after;
+                unsigned int bit, how = 0;
+                int number;
+
+                if (window_place_word(word, "center"))
+                        how = WINDOW_PLACE_CENTER;
+                else if (window_place_word(word, "maximized"))
+                        how = WINDOW_PLACE_MAXIMIZED;
+                else if (window_place_word(word, "fullscreen"))
+                        how = WINDOW_PLACE_FULLSCREEN;
+                else if (window_place_word(word, "at"))
+                        how = WINDOW_PLACE_AT;
+                bit = how                                 ? WINDOW_PLACE_HOW
+                      : window_place_word(word, "screen") ? WINDOW_PLACE_SCREEN
+                      : window_place_word(word, "size")   ? WINDOW_PLACE_SIZE
+                      : window_place_word(word, "name")   ? 32u
+                                                          : 0;
+                if (!bit)
+                        break;
+                if (seen & bit)
+                        return -1;
+                seen |= bit;
+                at++;
+                if (how == WINDOW_PLACE_CENTER || how == WINDOW_PLACE_MAXIMIZED || how == WINDOW_PLACE_FULLSCREEN)
+                {
+                        place->how |= how;
+                        continue;
+                }
+                if (!value)
+                        return -1;
+                at++;
+                if (how == WINDOW_PLACE_AT)
+                {
+                        after = window_place_number(value, ',', -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST, &place->x);
+                        if (!after || !window_place_number(after + 1, 0, -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST, &place->y))
+                                return -1;
+                        place->how |= how;
+                }
+                else if (bit == WINDOW_PLACE_SCREEN)
+                {
+                        if (!window_place_number(value, 0, 1, (int)WINDOW_PLACE_SCREENS, &number))
+                                return -1;
+                        place->screen = (unsigned int)number - 1;
+                        place->how |= WINDOW_PLACE_SCREEN;
+                }
+                else if (bit == WINDOW_PLACE_SIZE)
+                {
+                        after = window_place_number(value, 'x', 1, WINDOW_PLACE_MOST, &number);
+                        place->width = (unsigned int)number;
+                        if (!after || !window_place_number(after + 1, 0, 1, WINDOW_PLACE_MOST, &number))
+                                return -1;
+                        place->height = (unsigned int)number;
+                        place->how |= WINDOW_PLACE_SIZE;
+                }
+                else
+                {
+                        if (!window_name_valid(value))
+                                return -1;
+                        for (unsigned int letter = 0; value[letter]; letter++)
+                                place->name[letter] = value[letter];
+                }
+        }
+        if ((place->how & WINDOW_PLACE_SIZE) && ((place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_MAXIMIZED ||
+                                                 (place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_FULLSCREEN))
+                return -1;
+        return (int)at;
+}
+
+// A whole number in decimal, a minus before it when it is below zero: where it ends.
+static char *window_place_digits(char *into, int value)
+{
+        char digits[12];
+        unsigned int count = 0, magnitude = value < 0 ? 0u - (unsigned int)value : (unsigned int)value;
+
+        if (value < 0)
+                *into++ = '-';
+        do
+                digits[count++] = (char)('0' + magnitude % 10);
+        while ((magnitude /= 10));
+        while (count)
+                *into++ = digits[--count];
+        return into;
+}
+
+static char *window_place_text(char *into, const char *text)
+{
+        while (*text)
+                *into++ = *text++;
+        return into;
+}
+
+/*
+        A placement as its words, the way window_place_parse reads them back, into room bytes (WINDOW_PLACE_TEXT
+        holds the longest): one blank between two words and none at either end. Its length.
+*/
+static unsigned int window_place_say(const struct window_place *place, char *into, unsigned int room)
+{
+        static const char *const modes[] = {"", "center", "at", "maximized", "fullscreen"};
+        char text[WINDOW_PLACE_TEXT], *at = text;
+        unsigned int how = place->how & WINDOW_PLACE_HOW, length;
+
+        if (how && how < sizeof(modes) / sizeof(modes[0]))
+                at = window_place_text(at, modes[how]);
+        if (how == WINDOW_PLACE_AT)
+        {
+                at = window_place_digits(window_place_text(at, " "), place->x);
+                at = window_place_digits(window_place_text(at, ","), place->y);
+        }
+        if (place->how & WINDOW_PLACE_SCREEN)
+                at = window_place_digits(window_place_text(at, at > text ? " screen " : "screen "), (int)place->screen + 1);
+        if (place->how & WINDOW_PLACE_SIZE)
+        {
+                at = window_place_digits(window_place_text(at, at > text ? " size " : "size "), (int)place->width);
+                at = window_place_digits(window_place_text(at, "x"), (int)place->height);
+        }
+        if (place->name[0])
+                at = window_place_text(window_place_text(at, at > text ? " name " : "name "), place->name);
+        length = (unsigned int)(at - text);
+        length = length < room ? length : room ? room - 1 : 0;
+        for (unsigned int byte = 0; byte < length; byte++)
+                into[byte] = text[byte];
+        if (room)
+                into[length] = 0;
+        return length;
+}
+
+// A placement into a row's columns, the name too when it has one: what the compositor reads with the first picture.
+static void windows_place_set(struct windows *table, unsigned int row, const struct window_place *place)
+{
+        table->place_x[row] = place->x;
+        table->place_y[row] = place->y;
+        table->place_width[row] = place->width;
+        table->place_height[row] = place->height;
+        table->place_screen[row] = place->screen;
+        if (place->name[0])
+                for (unsigned int at = 0; at < WINDOWS_NAME; at++)
+                        table->name[row][at] = place->name[at];
+        __atomic_store_n(&table->place[row], place->how, __ATOMIC_RELEASE);
+}
+
+/*
+        The text of MOONWATER_PLACE as a placement: words a single blank apart, every one of them the
+        placement's. False for anything else, which is no placement at all.
+*/
+static int window_place_from_text(struct window_place *place, const char *text)
+{
+        char words[WINDOW_PLACE_TEXT];
+        const char *word[WINDOW_PLACE_WORDS];
+        unsigned int length = 0, count = 0;
+
+        while (text[length] && length < WINDOW_PLACE_TEXT)
+                length++;
+        if (!length || length == WINDOW_PLACE_TEXT)
+                return 0;
+        for (unsigned int at = 0; at <= length; at++)
+        {
+                words[at] = text[at] == ' ' ? 0 : text[at];
+                if (at < length && text[at] != ' ' && (!at || text[at - 1] == ' '))
+                {
+                        if (count == WINDOW_PLACE_WORDS)
+                                return 0;
+                        word[count++] = words + at;
+                }
+                // A blank at either end, or two together, is a word that is empty.
+                if (text[at] == ' ' && (!at || at + 1 == length || text[at + 1] == ' '))
+                        return 0;
+        }
+        return window_place_parse(place, word, count) == (int)count;
+}
+
+/*
+        MOONWATER_PLACE, into the row just taken, and emptied in the environment the program was started with, so
+        a program that starts another with that environment hands on no placement. Emptied where it is, the
+        string cut after its '=', and not taken out of the vector: the vector ends in the null the auxiliary
+        vector is found after (the vDSO's clock is looked for there the first time the clock is read), and a
+        vector made shorter in place would put that null where the walk stops too soon. A placement whose words
+        are wrong is not used, and is emptied all the same.
+*/
+static void windows_place_take(struct windows *table, unsigned int row)
+{
+        string_address address_to environment = program_environment_list();
+        const unsigned int prefix = sizeof(WINDOW_PLACE_VARIABLE);
+        int placed = 0;
+        struct window_place place;
+
+        for (unsigned int at = 0; environment && environment[at]; at++)
+        {
+                char *entry = (char *)environment[at];
+                unsigned int same = 0;
+
+                while (same + 1 < prefix && entry[same] == WINDOW_PLACE_VARIABLE[same])
+                        same++;
+                if (same + 1 != prefix || entry[same] != '=')
+                        continue;
+                if (!placed && entry[prefix] && window_place_from_text(&place, entry + prefix))
+                {
+                        windows_place_set(table, row, &place);
+                        placed = 1;
+                }
+                entry[prefix] = 0;
+        }
+}
+
+// The name a program's windows are remembered by, unless its placement named one.
+static void windows_name(const struct window_row *own, const char *name)
+{
+        if (!name || own->table->name[own->row][0] || !window_name_valid(name))
+                return;
+        for (unsigned int at = 0; name[at] && at < WINDOWS_NAME - 1; at++)
+                own->table->name[own->row][at] = name[at];
+}
+
+/*
         A row taken: the table mapped and its header copied and checked (-22 when it does not fit), the first row
-        with no pid given this one, the row's program fields reset, and its door and its wake opened. The row is
+        with no pid given this one, the row's program fields reset and its placement taken from MOONWATER_PLACE
+        (windows_place_take), and its door and its wake opened. The row is
         claimed with WINDOWS_TAKING, a pid no peer takes for a program, and the program's pid is stored last, so a
         peer never finds a row half reset. The door is opened for writing first, which fails when no compositor
         holds its other end, and then for reading and writing, which is the end kept: a knock on a door whose
@@ -1048,6 +1386,7 @@ static long windows_take(struct window_row *own)
                 return -28; // ENOSPC
         }
         windows_reset_row(table, own->row);
+        windows_place_take(table, own->row);
 
         windows_door_name(name, own->row, 0);
         probe = window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_WRITE, 0, 0, 0);

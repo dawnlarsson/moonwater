@@ -2546,6 +2546,7 @@ static b32 terminal_run(b32 reading)
 
         terminal.reading = reading;
         terminal_app.title = reading ? (string_address) "kernel log" : (string_address)terminal_label;
+        terminal_app.name = reading ? (string_address) "klog" : (string_address) "terminal";
         terminal_app.missing = reading ? (string_address) "klog: no window: no compositor, or no row free in its table\n"
                                        : (string_address) "terminal: no window: no compositor, or no row free in its table\n";
         return ui_app_run(&terminal_app);

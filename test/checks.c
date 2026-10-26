@@ -57899,6 +57899,144 @@ static fn windows_header(void)
         */
         check("the window table and its doors are private to the owner", WINDOWS_MODE == 0600);
         check("no group or other bits reach the table or its doors", (WINDOWS_MODE & 0077) == 0);
+
+        table.place[3] = WINDOW_PLACE_AT | WINDOW_PLACE_SIZE;
+        table.place_x[3] = 5;
+        table.place_screen[3] = 2;
+        table.name[3][0] = 't';
+        table.name[3][14] = 'x';
+        windows_reset_row(&table, 3);
+        check("a reset row has no placement and no name left, to its last byte",
+              !table.place[3] && !table.place_x[3] && !table.place_screen[3] && !table.name[3][0] && !table.name[3][14]);
+}
+
+/*
+        A placement: the words `moonwater window` takes and MOONWATER_PLACE holds, read strictly, said back the way
+        they are read, and taken into a row once, the environment's copy emptied so what the program starts next
+        is not placed too. Every word, every bound of every number and every word the reader must refuse.
+*/
+static b32 place_words(const char *text, struct window_place address_to place)
+{
+        return window_place_from_text(place, text);
+}
+
+static fn windows_placement(void)
+{
+        static const char *const good[] = {
+            "center", "maximized", "fullscreen", "at 0,0", "at -16384,16384", "at 16384,-16384", "screen 1", "screen 8",
+            "size 1x1", "size 16384x16384", "name terminal", "name a", "name 0-a", "name abcdefghijklmno",
+            "center screen 2 size 800x600 name notes", "at -10,20 screen 3", "size 640x480", "maximized screen 2 name klog",
+            "name x center", "screen 4 at 7,9"};
+        static const char *const bad[] = {
+            "", " ", "center ", " center", "center  screen 1", "centre", "Center", "center center", "center maximized",
+            "at 1,2 center", "maximized fullscreen", "at", "at 1", "at 1,", "at ,1", "at 1;2", "at 1,2,3", "at +1,2",
+            "at 01,2", "at -0,2", "at 16385,0", "at 0,-16385", "at 999999,0", "at 1x2", "screen", "screen 0", "screen 9",
+            "screen -1", "screen 1x", "screen 01", "size", "size 0x5", "size 5x0", "size 16385x1", "size 5", "size 5x",
+            "size x5", "size -5x5", "size 5X5", "name", "name -a", "name A", "name a_b", "name abcdefghijklmnop",
+            "name a.b", "name ../x", "maximized size 800x600", "fullscreen size 1x1", "screen 1 screen 2", "size 1x1 size 2x2",
+            "name a name b", "at 1,2 at 3,4", "center\tscreen 1", "a b c d e f g h i j k l m n o"};
+        struct window_place place;
+        char said[WINDOW_PLACE_TEXT];
+        unsigned int wrong = 0, round = 0;
+
+        for (positive at = 0; at < array_count(good); at++)
+        {
+                struct window_place again;
+
+                if (!place_words(good[at], &place))
+                {
+                        wrong++;
+                        continue;
+                }
+                window_place_say(&place, said, sizeof(said));
+                round += !place_words(said, &again) || memory_compare(&place, &again, sizeof(place)) != 0;
+        }
+        check("every placement word and every bound of its numbers is read", !wrong);
+        check("and said back as words that read as the same placement", !round);
+        wrong = 0;
+        for (positive at = 0; at < array_count(bad); at++)
+                wrong += place_words(bad[at], &place);
+        check("a placement with a word that is wrong, twice, empty, out of its range or in a second mode is none", !wrong);
+
+        check("center screen 2 size 800x600 name notes is the middle of the second screen, at that size, remembered as notes",
+              place_words("center screen 2 size 800x600 name notes", &place) &&
+                  place.how == (WINDOW_PLACE_CENTER | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && place.screen == 1 &&
+                  place.width == 800 && place.height == 600 && string_equals((string_address)place.name, "notes"));
+        check("at -10,20 is a top left past the screen's left, which the compositor clamps and the reader does not",
+              place_words("at -10,20", &place) && place.how == WINDOW_PLACE_AT && place.x == -10 && place.y == 20);
+        window_place_say(&place, said, sizeof(said));
+        check("a placement is said in the words it is read from", string_equals((string_address)said, "at -10,20"));
+        place_words("maximized screen 2 name klog", &place);
+        window_place_say(&place, said, 10);
+        check("and cut to the room it is given, ended all the same", string_length((string_address)said) == 9);
+
+        {
+                const char *argv[] = {"at", "5,6", "/surface", "-x", "1"};
+                const char *refused[] = {"at", "5,x", "/surface"};
+                const char *only[] = {"/surface", "center"};
+
+                check("the words of the verb end at the first that is no placement word: the command",
+                      window_place_parse(&place, argv, 5) == 2 && place.x == 5 && place.y == 6);
+                check("a wrong value is a refusal, not the command", window_place_parse(&place, refused, 3) == -1);
+                check("and a command first is no placement at all", window_place_parse(&place, only, 2) == 0 && !place.how);
+        }
+
+        check("a name is lower-case letters, digits and hyphens, a letter or a digit first, under sixteen",
+              window_name_valid("terminal") && window_name_valid("9-x") && !window_name_valid("") &&
+                  !window_name_valid("-x") && !window_name_valid("Settings") && !window_name_valid("a b") &&
+                  !window_name_valid("abcdefghijklmnop") && window_name_valid("abcdefghijklmno"));
+
+        /*
+                The environment the program was started with: the entry is read into the row the program takes, and
+                emptied where it is, the vector's length and its null left as they were (the auxiliary vector is
+                found past that null). A second window of the program, and whatever it starts, finds nothing.
+        */
+        {
+                static struct windows table;
+                string_address address_to environment = program_environment_list();
+                static char first[] = "MOONWATER_PLACE=at 40,50 size 300x200 name probe";
+                static char second[] = "MOONWATER_PLACE=center";
+                string_address kept[3];
+                positive count = 0;
+
+                while (environment && environment[count])
+                        count++;
+                check("the environment has room for the two entries the next checks put in it", environment && count >= 2);
+                if (environment && count >= 2)
+                {
+                        kept[0] = environment[0];
+                        kept[1] = environment[1];
+                        environment[0] = (string_address)first;
+                        environment[1] = (string_address)second;
+                        windows_place_take(&table, 6);
+                        check("MOONWATER_PLACE is the row's placement and name",
+                              table.place[6] == (WINDOW_PLACE_AT | WINDOW_PLACE_SIZE) && table.place_x[6] == 40 &&
+                                  table.place_y[6] == 50 && table.place_width[6] == 300 && table.place_height[6] == 200 &&
+                                  string_equals((string_address)table.name[6], "probe"));
+                        check("and every copy of it is emptied in place, the vector as long as it was",
+                              string_equals(environment[0], "MOONWATER_PLACE=") &&
+                                  string_equals(environment[1], "MOONWATER_PLACE=") && environment[count] == null &&
+                                  environment[count - 1] != null);
+                        windows_reset_row(&table, 7);
+                        windows_place_take(&table, 7);
+                        check("so a second window of the program is where it asks, unplaced", !table.place[7] && !table.name[7][0]);
+                        environment[0] = kept[0];
+                        environment[1] = kept[1];
+                }
+
+                {
+                        struct window_row own = {&table, 6, -1, -1, 0, 0, 0, 0, 0};
+
+                        windows_name(&own, "terminal");
+                        check("a placement's name stands over the name the program gives", string_equals((string_address)table.name[6], "probe"));
+                        windows_reset_row(&table, 6);
+                        windows_name(&own, "terminal");
+                        check("which is the name with none from the placement", string_equals((string_address)table.name[6], "terminal"));
+                        windows_reset_row(&table, 6);
+                        windows_name(&own, "Not A Name");
+                        check("and a name that is none is no name", !table.name[6][0]);
+                }
+        }
 }
 
 b32 main(void)
@@ -57910,6 +58048,7 @@ b32 main(void)
         windows_client();
 #endif
         windows_header();
+        windows_placement();
         return test_report(null);
 }
 #endif /* CHECK_socket */
