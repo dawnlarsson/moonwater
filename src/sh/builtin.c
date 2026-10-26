@@ -7604,11 +7604,6 @@ COLD fn shell_logout(writer write)
 }
 
 
-#define REBOOT_MAGIC 0xfee1dead
-#define REBOOT_MAGIC_SECOND 672274793
-#define REBOOT_RESTART 0x01234567
-#define REBOOT_POWER_OFF 0x4321fedc
-
 // The rootfs lives in RAM. Whatever is still in flight is all there is, so it
 // goes out to whatever backing store there is before the machine stops.
 /*

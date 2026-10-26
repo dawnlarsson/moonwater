@@ -201,11 +201,8 @@ static bool host_machine_stop(void);
 static bool host_init_list_runs(void);
 
 //      builtin.c's, which stops the machine the way reboot does; it is
-//      included after this file. The number is the one it defines.
+//      included after this file. The commands are shell.c's REBOOT_*.
 fn shell_stop(writer write, positive command);
-#ifndef REBOOT_RESTART
-#define REBOOT_RESTART 0x01234567
-#endif
 static b32 host_machine_run(void);
 static fn tune_restore(void);
 static fn radio_restore(void);

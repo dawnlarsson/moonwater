@@ -1970,8 +1970,6 @@ static long report_bind(struct bind_control __user *out)
 #define HOST_MACHINE_OK 0
 #define HOST_MACHINE_ABSENT 1
 #define HOST_MACHINE_REFUSED 2
-#define HOST_REBOOT_RESTART 0x01234567u
-#define HOST_REBOOT_POWER_OFF 0x4321fedcu
 
 extern string_address address_to shell_argv;
 extern positive shell_argc;
@@ -2733,8 +2731,8 @@ static b32 host_machine_run(void)
                         host_machine_dirty(false);
                         host_machine_close(device);
                         shell_stop(log, stopping == SPARK_BIND_POWEROFF
-                                            ? HOST_REBOOT_POWER_OFF
-                                            : HOST_REBOOT_RESTART);
+                                            ? REBOOT_POWER_OFF
+                                            : REBOOT_RESTART);
                         return HOST_MACHINE_STOPPED;
                 }
         }

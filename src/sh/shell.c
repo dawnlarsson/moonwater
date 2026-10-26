@@ -873,6 +873,15 @@ static bipolar file_exec_path_try(string_address address_to words);
 #define shell_child_fd_move system_descriptor_move
 #define SHELL_PIPE_CLOSE_ON_EXEC 02000000
 
+/* reboot(2)'s two magic words and the commands that stop the machine. The one
+   call is builtin.c's shell_stop; host.c's firmware restart and moonwater.c's
+   machine process, which stops the machine for its script's poweroff and
+   reboot, hand it these. */
+#define REBOOT_MAGIC 0xfee1dead
+#define REBOOT_MAGIC_SECOND 672274793
+#define REBOOT_RESTART 0x01234567
+#define REBOOT_POWER_OFF 0x4321fedc
+
 #include "lex.c"
 #include "file.c"
 #include "gzip.c"
