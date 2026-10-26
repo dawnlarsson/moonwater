@@ -12851,7 +12851,7 @@ static bool tune_exists(string_address path)
 /* Whether a name in the cpu directory is a processor's: cpu and its number. */
 static bool tune_is_cpu(string_address name)
 {
-        return name[0] == 'c' && name[1] == 'p' && name[2] == 'u' && byte_is_digit(name[3]);
+        return string_has_prefix(name, "cpu") && byte_is_digit(name[3]);
 }
 
 /* The best of a directory's entries, by the rank a visitor gives each, and the
@@ -13946,6 +13946,18 @@ static fn tune_flag_back(tune_flag address_to flag)
                 (void)tune_write(flag->path, (string_address)flag->was);
 }
 
+/* What a sleep leaves in /root/sleep.log, awake or not, and the switches it
+   turned on are put back as they were. */
+static fn tune_suspend_record(p8 address_to text, tune_flag address_to messages,
+                              tune_flag address_to times)
+{
+        tune_sleep_stats(text);
+        tune_kernel_lines(text);
+        (void)host_write_text("/root/sleep.log", (string_address)text);
+        tune_flag_back(messages);
+        tune_flag_back(times);
+}
+
 /* moonwater sleep and moonwater hibernate: the kernel's own suspend and hibernate. */
 static b32 tune_suspend(string_address verb, string_address state)
 {
@@ -13987,11 +13999,7 @@ static b32 tune_suspend(string_address verb, string_address state)
                 {
                         tune_suspend_failure(failures);
                         text[0] = end;
-                        tune_sleep_stats(text);
-                        tune_kernel_lines(text);
-                        (void)host_write_text("/root/sleep.log", (string_address)text);
-                        tune_flag_back(address_of messages);
-                        tune_flag_back(address_of times);
+                        tune_suspend_record(text, address_of messages, address_of times);
                         return host_fail(verb, failed);
                 }
         }
@@ -14005,11 +14013,7 @@ static b32 tune_suspend(string_address verb, string_address state)
         tune_backlight_restore(address_of lights);
         radio_net_wake();
         tune_restore();
-        tune_sleep_stats(text);
-        tune_kernel_lines(text);
-        (void)host_write_text("/root/sleep.log", (string_address)text);
-        tune_flag_back(address_of messages);
-        tune_flag_back(address_of times);
+        tune_suspend_record(text, address_of messages, address_of times);
         return 0;
 }
 
