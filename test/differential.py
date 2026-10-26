@@ -72486,7 +72486,8 @@ class SyscallTracer:
     k-th of them one thing done to it: the program killed, the call made to
     fail with an errno, or a write cut short."""
 
-    PATHS = (b"/root", b"/run/moonwater")
+    PATHS = (b"/root", b"/run/moonwater", b"/etc/hostname", b"/etc/hosts", b"/etc/resolv.conf",
+             b"/etc/localtime")
     WRITES = {1, 18, 20, 77}            # write, pwrite64, writev, ftruncate
     SYNCS = {74, 75}                    # fsync, fdatasync
     RENAMES = {82: (0, 1), 264: (1, 3), 316: (1, 3), 265: (1, 3)}  # rename(at)(2), linkat
@@ -72692,17 +72693,25 @@ def harness_state_cuts(argv):
             for name, target in (("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib"),
                                  ("sbin", "usr/bin")):
                 (sandbox / name).symlink_to(target)
-            for name in ("passwd", "group"):
+            for name in ("passwd", "group", "hosts"):
                 if Path("/etc", name).exists():
                     shutil.copy(Path("/etc", name), sandbox / "etc" / name)
             shutil.copy(args.shell, sandbox / "tmp/moonwater")
             shutil.copy(Path(__file__).resolve(), sandbox / "tmp/differential.py")
-            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount --rbind /dev {sandbox}/dev && "
+            #       A /dev of its own, as the cli harness has: airplane and wifi
+            #       write /dev/rfkill, which here is a plain file.
+            nodes = [name for name in ("null", "zero", "full", "random", "urandom", "tty")
+                     if Path("/dev", name).exists()]
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && mount -t tmpfs -o mode=755 tmpfs {sandbox}/dev && " +
+                       "".join(f": > {sandbox}/dev/{name} && mount --bind /dev/{name} {sandbox}/dev/{name} && "
+                               for name in nodes) +
+                       f": > {sandbox}/dev/rfkill && "
                        f"mount --rbind /proc {sandbox}/proc && "
                        f"exec chroot {sandbox} /usr/bin/python3 /tmp/differential.py "
                        f"--harness state_cuts --inside --shell /tmp/moonwater")
             environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C",
-                           "MOONWATER_CUTS_ALL": os.environ.get("MOONWATER_CUTS_ALL", "")}
+                           "MOONWATER_CUTS_ALL": os.environ.get("MOONWATER_CUTS_ALL", ""),
+                           "MOONWATER_CUTS_ONLY": os.environ.get("MOONWATER_CUTS_ONLY", "")}
             try:
                 ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c",
                                       wrapper], capture_output=True, text=True, timeout=1500,
@@ -72742,7 +72751,59 @@ def harness_state_cuts(argv):
                         "link group lab2 S3cretTwo22 allow run"], "link group leave lab", None),
         ("link pair", ["link add peera " + key], "link add peerb " + other_key, None),
         ("link forget", ["link add peera " + key], "link remove peera", None),
+        #   The rest of what the verbs keep, as the first scenes were the lists:
+        #   the resolvers (the file the libraries read, and the word that says
+        #   whether they were asked for), the name in three files, the zone with
+        #   the TZif it copies, the settings and the security file TLS reads,
+        #   the usb policy, the switches and the two radios' words.
+        ("dns servers", ["dns 9.9.9.9"], "dns 1.1.1.1 8.8.8.8", None),
+        ("dns auto", ["dns 1.1.1.1"], "dns auto", None),
+        ("dns tls", ["dns tls off"], "dns tls on", None),
+        ("name", ["name aa-bb"], "name cc-dd", None),
+        ("timezone zone", ["timezone de"], "timezone Europe/Paris", None),
+        ("desktop", ["desktop off"], "desktop on", None),
+        ("canvas scale", ["canvas scale 1"], "canvas scale 2", None),
+        ("mouse", ["mouse sensitivity 90"], "mouse sensitivity 120", None),
+        ("taskbar", ["taskbar position top"], "taskbar position left", None),
+        ("keyboard repeat", ["keyboard repeat rate 20"], "keyboard repeat rate 40", None),
+        ("ntp server", ["ntp server a.example"], "ntp server b.example", None),
+        ("ntp nts servers", ["ntp nts servers a.example"], "ntp nts servers b.example", None),
+        ("bind add", ["bind init add xx"], "bind init add yy", None),
+        ("bind remove", ["bind init add xx", "bind init add yy"], "bind init remove xx", None),
+        ("bind switch", ["bind init canvas on"], "bind init canvas off", None),
+        ("security block add", ["security block add " + "a" * 64], "security block add " + "b" * 64, None),
+        ("security block remove", ["security block add " + "a" * 64], "security block remove " + "a" * 64, None),
+        ("security switch", ["security tls12 on"], "security tls12 off", None),
+        ("usb class", ["usb class hid allow"], "usb class storage allow", None),
+        ("usb lock", ["usb class hid allow"], "usb lock", None),
+        ("usb unlock", ["usb lock"], "usb unlock", None),
+        ("airplane on", ["airplane off"], "airplane on", None),
+        ("airplane off", ["airplane on"], "airplane off", None),
+        ("wifi add wpa2", ["wifi add oldnet oldpass11"], "wifi add plantnet passpass1 wpa2", b"passpass1"),
+        ("wifi on", ["wifi add oldnet oldpass11"], "wifi on", b"oldpass11"),
+        ("bluetooth remove", ["bluetooth add dev1", "bluetooth add dev2"], "bluetooth remove dev1", None),
+        ("wired", ["wired on"], "wired off", None),
+        ("link on", ["link on", "link off"], "link on", None),
+        ("link off", ["link on"], "link off", None),
+        ("link port", ["link port 4000"], "link port 4001", None),
+        ("link allow", ["link add peera " + key], "link allow peera run", None),
+        ("setup live", [], "setup live", None),
     ]
+
+    etc_kept = ("hostname", "hosts", "resolv.conf", "localtime")
+
+    def watched(path):
+        #   What a verb keeps, as a power cut or a kill finds it: all of /root,
+        #   the files of /run/moonwater that say something (not the locks, the
+        #   watcher's and keeper's marks or the listener's own state), and the
+        #   few /etc files the name, the resolvers and the zone are written to.
+        name = Path(path).name
+        #   The usb log is a line a decision, stamped, and best-effort by design.
+        if name == "usb.log":
+            return False
+        if str(path).startswith("/run/moonwater/"):
+            return not re.search(r"(^lock|\.lock|\.watcher|\.keeper|^link\.state)$", name)
+        return True
 
     def clear():
         for top in (Path("/root"), Path("/run/moonwater")):
@@ -72751,13 +72812,20 @@ def harness_state_cuts(argv):
                     shutil.rmtree(entry, ignore_errors=True)
                 else:
                     entry.unlink(missing_ok=True)
+        for name in etc_kept:
+            Path("/etc", name).unlink(missing_ok=True)
 
     def snapshot():
         seen = {}
-        for entry in sorted(Path("/root").rglob("*")):
+        for top in (Path("/root"), Path("/run/moonwater")):
+            for entry in sorted(top.rglob("*")):
+                if entry.is_file() and not entry.is_symlink() and watched(str(entry)):
+                    info = entry.stat()
+                    seen[str(entry)] = (entry.read_bytes(), info.st_mode & 0o7777)
+        for name in etc_kept:
+            entry = Path("/etc", name)
             if entry.is_file() and not entry.is_symlink():
-                info = entry.stat()
-                seen[str(entry)] = (entry.read_bytes(), info.st_mode & 0o7777)
+                seen[str(entry)] = (entry.read_bytes(), entry.stat().st_mode & 0o7777)
         return seen
 
     def restore(state):
@@ -72793,7 +72861,10 @@ def harness_state_cuts(argv):
                 break
 
     cut_total = 0
+    only = os.environ.get("MOONWATER_CUTS_ONLY", "")
     for name, before, verb, secret in scenes:
+        if only and only not in name:
+            continue
         settle()
         clear()
         for step in before:
@@ -72816,7 +72887,8 @@ def harness_state_cuts(argv):
         #   Durability: a rename onto a kept /root name, then /root synced.
         finals = [at for at, call in enumerate(calls)
                   if call[1] == "rename" and call[3] == 0 and
-                  call[2][1].decode() in new and not temporary(call[2][1].decode()) and
+                  call[2][1].decode() in new and call[2][1].startswith(b"/root/") and
+                  not temporary(call[2][1].decode()) and
                   new.get(call[2][1].decode()) != old.get(call[2][1].decode()) and
                   not call[2][1].endswith(b"/link.stamps")]
         if finals:
@@ -72841,8 +72913,12 @@ def harness_state_cuts(argv):
             where = "%s: %s at call %d of %d (%s %s)" % (
                 name, action[0], cut, count, calls[cut - 1][1],
                 b" ".join(calls[cut - 1][2]).decode(errors="replace"))
+            #   A policy that /root would not take is kept in /run and marked, which is
+            #   the designed way a lock is held when it cannot be kept (usb lock).
             half = [path for path in set(old) | set(new) | set(after)
-                    if not temporary(path) and after.get(path) not in (old.get(path), new.get(path))]
+                    if not temporary(path) and
+                    path not in ("/run/moonwater/usb.policy", "/run/moonwater/usb.unkept") and
+                    after.get(path) not in (old.get(path), new.get(path))]
             checks(not half, "%s leaves %s neither as it was nor as it is to be" % (
                 where, ", ".join(sorted(half))))
             wide = [path for path in after if temporary(path) and secret and
@@ -72850,7 +72926,10 @@ def harness_state_cuts(argv):
             checks(not wide, "%s leaves %s holding the secret readable by others" % (
                 where, ", ".join(wide)))
             if action[0] in ("fail", "short"):
+                #   The hosts and the host name are written again from /root/name at
+                #   every boot, and a name that was set is in the kernel: best effort.
                 lost = [path for path in new if not temporary(path) and
+                        path not in ("/etc/hosts", "/etc/hostname") and
                         after.get(path) != new.get(path)]
                 checks(not (cut_status == 0 and lost),
                        "%s ends 0 with %s not written" % (where, ", ".join(sorted(lost))))
@@ -72861,7 +72940,8 @@ def harness_state_cuts(argv):
                    {path: value for path, value in new.items() if not temporary(path)} and
                    not [path for path in again if temporary(path)],
                    "%s: a second run does not arrive at the uncut state (%s)" % (
-                       where, ", ".join(sorted(set(again) ^ set(new)))[:200]))
+                       where, ", ".join(sorted(path for path in set(again) | set(new)
+                                               if again.get(path) != new.get(path)))[:200]))
     print("state cuts: %d scenes, %d cut runs" % (len(scenes), cut_total))
     return checks.verdict("state cuts", "state-cuts-inside")
 

@@ -482,6 +482,19 @@ static bipolar host_write_file(string_address path, p8 address_to bytes,
         return failed;
 }
 
+/* Bytes over a /run file that others read, whole or not at all and not synced:
+   written beside the name and renamed over it, as the synced ones are, so that
+   a reader never finds it empty. The stages a killed writer left in its
+   directory are taken away first, as a synced write does, since a settings
+   write killed between its two steps left a stage in /run/moonwater for each
+   kill, with the commands of the list in it, until the machine stopped. */
+static bipolar host_publish(string_address path, address_any bytes, positive length,
+                            positive mode)
+{
+        file_stage_sweep(path);
+        return file_publish_bytes(path, bytes, length, mode, false);
+}
+
 static bipolar host_write_text(string_address path, string_address text)
 {
         return host_write_file(path, (p8 address_to)text, string_length(text),
@@ -595,7 +608,7 @@ static fn host_state_ready(void)
 
 /* The verdict a terminal waits on; one that could not be written is said, since
    nothing else will tell the terminal why it never came. */
-static fn host_verdict_set(string_address kind, string_address disk)
+static b32 host_verdict_set(string_address kind, string_address disk)
 {
         p8 line[HOST_NAME_ROOM + 16];
         p8 text[HOST_NAME_ROOM + 16];
@@ -603,12 +616,10 @@ static fn host_verdict_set(string_address kind, string_address disk)
 
         if (!host_join(line, sizeof(line), kind, disk) ||
             !host_join(text, sizeof(text), line, "\n"))
-                return;
+                return 0;
 
-        failed = file_publish_bytes(HOST_VERDICT, text, string_length(text), 0644,
-                                    false);
-        if (failed < 0)
-                host_fail(HOST_VERDICT, failed);
+        failed = host_publish(HOST_VERDICT, text, string_length(text), 0644);
+        return failed < 0 ? host_fail(HOST_VERDICT, failed) : 0;
 }
 
 /* An empty file a terminal looks for, made or emptied; one that could not be
@@ -3959,8 +3970,7 @@ static bool host_settings_keep(host_settings address_to settings)
         set = host_spark_once(SPARK_IOCTL_SETTINGS_SET, address_of request,
                               FILE_READ_WRITE);
 
-        written = file_publish_bytes(HOST_SETTINGS, settings, SPARK_SETTINGS_SLOT, 0600,
-                                     false) >= 0;
+        written = host_publish(HOST_SETTINGS, settings, SPARK_SETTINGS_SLOT, 0600) >= 0;
 
         return written && (set >= 0 || set == -ENOENT || set == -ENODEV);
 }
@@ -12639,7 +12649,7 @@ static bipolar radio_internet_run(string_address which)
         string_copy_bounded(line, which, sizeof(line));
         string_append_bounded(line, "\n", sizeof(line));
         host_state_ready();
-        return host_write_text(NET_INTERNET_RUN, line);
+        return host_publish(NET_INTERNET_RUN, line, string_length(line), 0644);
 }
 
 /* What is kept comes first: a /run that said wifi over a /root that kept
@@ -22470,7 +22480,7 @@ static bipolar security_publish(host_settings address_to settings)
                 file[12 + k] = 0;
         }
         host_state_ready();
-        return file_publish_bytes(HOST_SECURITY, file, used, 0644, false);
+        return host_publish(HOST_SECURITY, file, used, 0644);
 }
 
 /* The settings are kept and the file is published, or the verb says the file was not. */
@@ -22862,6 +22872,10 @@ static b32 security_switch(positive which, string_address word)
         if (have == turn)
         {
                 host_say(log, host_label "security %s %s\n", security_switches[which].word, word);
+                //      The file is put right as well: the same word again is how a change
+                //      that was kept and not published (the command killed or the disk
+                //      full between the two) is finished.
+                answer = security_publish_answer(address_of settings);
                 goto done;
         }
         if (turn)
@@ -22972,6 +22986,7 @@ static b32 security_change(bool trust, bool adding, string_address word)
         {
                 host_say(log, host_label "security %s: %s is there already\n", list,
                          security_hex(digest));
+                answer = security_publish_answer(address_of settings);
                 goto done;
         }
         if (adding)
@@ -23014,6 +23029,9 @@ static b32 security_change(bool trust, bool adding, string_address word)
                                                      named ? security_hex(digest) : word)
                                        : host_refuse("security block has no one entry %s\n",
                                                      named ? security_hex(digest) : word);
+                        //      An entry taken out and not yet out of the file is finished by
+                        //      saying so again, as an add that was kept is.
+                        (void)security_publish_answer(address_of settings);
                         goto done;
                 }
                 security_entry_digest(address_of setting, digest);
@@ -24069,7 +24087,10 @@ static b32 host_setup(string_address address_to arguments, positive count)
                         return host_refuse("this session already keeps %s, and is not "
                                            "live until it powers off\n", kept);
                 system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
-                host_verdict_set("live", "");
+                //      Said as it fails, and then not said to have been done: the
+                //      terminal that waits on the verdict gets nothing from this line.
+                if (host_verdict_set("live", ""))
+                        return 1;
                 host_say(log, host_label "the disks are left alone this session\n");
                 return 0;
         }
