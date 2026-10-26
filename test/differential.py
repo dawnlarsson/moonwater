@@ -44992,6 +44992,48 @@ def harness_moonwater_cli(argv):
         check(seen["wired on"]["status"] == 0 and block("on-word") == ["on"],
               "wired on writes its word", repr(seen["wired on"]))
 
+        # A list that is there and cannot be read is said so, and not taken
+        # for an empty one: a remove over a /root/wifi that is a directory
+        # said there was no such network, and one over a /root/bluetooth said
+        # no device was remembered; both are refused and the lists left as
+        # they were. A /root/wifi.rules that cannot be written is said too,
+        # and a remove that cannot rewrite it forgets nothing.
+        lines, finished = session(
+            "rm -rf /root/wifi /root/bluetooth /root/wifi.rules\n" +
+            say("wifi add unread-a passpass1") +
+            "mv /root/wifi /tmp/wifi.unread; mkdir /root/wifi\n" +
+            say("wifi remove unread-a") +
+            "rmdir /root/wifi; mv /tmp/wifi.unread /root/wifi\n" +
+            "echo '@@ unread'; cat /root/wifi; echo '@@end'\n" +
+            "mkdir /root/bluetooth\n" + say("bluetooth remove unread-k") +
+            "rmdir /root/bluetooth\n" +
+            say("wifi add unread-b passpass2 wpa2") +
+            "rm -f /root/wifi.rules; mkdir /root/wifi.rules\n" +
+            say("wifi add unread-a passpass1 wpa2") + say("wifi remove unread-b") +
+            "rmdir /root/wifi.rules\n" +
+            "echo '@@ kept'; cat /root/wifi; echo '@@end'\n")
+        seen = answers(lines)
+        check(finished, "the unreadable lists session finished", "")
+        check(seen["wifi remove unread-a"]["status"] == 1 and
+              any("/root/wifi" in line for line in seen["wifi remove unread-a"]["out"]) and
+              not any("no saved network" in line for line in seen["wifi remove unread-a"]["out"]),
+              "a saved list that cannot be read is said, not taken for an empty one", repr(seen["wifi remove unread-a"]))
+        check(block("unread") == ["unread-a", "passpass1"],
+              "and the list that could not be read is left as it was", repr(block("unread")))
+        check(seen["bluetooth remove unread-k"]["status"] == 1 and
+              any("/root/bluetooth" in line for line in seen["bluetooth remove unread-k"]["out"]) and
+              not any("no remembered" in line for line in seen["bluetooth remove unread-k"]["out"]),
+              "a bluetooth list that cannot be read is said, not taken for an empty one",
+              repr(seen["bluetooth remove unread-k"]))
+        check(seen["wifi add unread-a passpass1 wpa2"]["status"] == 1 and
+              any("wifi.rules" in line for line in seen["wifi add unread-a passpass1 wpa2"]["out"]),
+              "a rules file that cannot be written is said by wifi add", repr(seen["wifi add unread-a passpass1 wpa2"]))
+        check(seen["wifi remove unread-b"]["status"] == 1 and
+              any("wifi.rules" in line for line in seen["wifi remove unread-b"]["out"]),
+              "a rules file that cannot be rewritten is said by wifi remove", repr(seen["wifi remove unread-b"]))
+        check(block("kept") == ["unread-a", "passpass1", "unread-b", "passpass2"],
+              "and the network it could not forget is still saved", repr(block("kept")))
+
         # What a saved network carries beside its password, in
         # /root/wifi.rules: the wpa2 word an add says, until an add without
         # it; what a join learnt (pmf, sae), while the password stays; and

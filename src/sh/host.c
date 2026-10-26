@@ -8674,7 +8674,7 @@ static COLD bipolar radio_bss_choose(nl80211 address_to session, p32 index,
                                      bool force, p8 rules, bool key_only,
                                      wifi_rsn_caps address_to caps, wifi_seen address_to seen);
 static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length);
-static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what);
+static COLD bipolar radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what);
 
 /*
         WPA3 with the access point chosen: the exchange counted against its
@@ -9149,10 +9149,13 @@ static bool host_line_next(p8 address_to text, positive size, positive address_t
         return true;
 }
 
-/* The saved networks, up to room of them. cut, when asked for, says that
-   there was more than this read: a full buffer, or rows left over. */
-static positive radio_wifi_load(radio_network address_to into, positive room,
-                                bool address_to cut)
+/* The saved networks, up to room of them, or the error of a list that is there
+   and cannot be read: a list that is not there has none. cut, when asked for,
+   says that there was more than this read: a full buffer, or rows left over.
+   The writers answer an error and do not write a list back over what they
+   could not read. */
+static bipolar radio_wifi_read(radio_network address_to into, positive room,
+                               bool address_to cut)
 {
         p8 text[8192];
         bipolar got = host_read_state(NET_WIFI_LIST, text, sizeof(text));
@@ -9165,6 +9168,8 @@ static positive radio_wifi_load(radio_network address_to into, positive room,
         memory_fill(into, 0, sizeof(radio_network) * room);
         if (cut)
                 *cut = false;
+        if (got < 0 && got != -ENOENT)
+                return got;
         if (got <= 0)
                 return 0;
         /* text holds the saved passphrases in the clear, exactly as the
@@ -9221,6 +9226,27 @@ static positive radio_wifi_load(radio_network address_to into, positive room,
                 count++;
 
         crypto_forget(text, sizeof(text));
+        return (bipolar)count;
+}
+
+/* radio_wifi_read where an unreadable list is no list: the readers that only
+   ask what is saved, and so have nothing to write back over it. */
+static positive radio_wifi_load(radio_network address_to into, positive room,
+                                bool address_to cut)
+{
+        bipolar count = radio_wifi_read(into, room, cut);
+
+        return count > 0 ? (positive)count : 0;
+}
+
+/* The index of the saved network called ssid, or count when it is not saved. */
+static positive radio_saved_index(const radio_network address_to networks, positive count,
+                                  string_address ssid, positive ssid_length)
+{
+        for (positive at = 0; at < count; at++)
+                if (networks[at].ssid_length == ssid_length &&
+                    !memory_compare(networks[at].ssid, ssid, ssid_length))
+                        return at;
         return count;
 }
 
@@ -9306,8 +9332,10 @@ static COLD p8 radio_rules_get(p8 address_to ssid, positive ssid_length)
 
 /* The rules of ssid made what in the bits of mask, the others kept as they
    are; and the lines of a name no longer saved are dropped, which keeps the
-   file to the saved networks' three each. */
-static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what)
+   file to the saved networks' three each. The error of the file's write, or 0:
+   a join's station asks the broker, which keeps the file, and has no answer
+   to give it. */
+static COLD bipolar radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask, p8 what)
 {
         p8 text[RADIO_RULES_ROOM];
         p8 kept[RADIO_RULES_ROOM];
@@ -9325,7 +9353,7 @@ static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask
         {
                 (void)radio_station_number(RADIO_ASK_RULES_PUT, ssid, ssid_length, null, mask,
                                            what);
-                return;
+                return 0;
         }
         count = radio_wifi_load(networks, RADIO_WIFI_MOST, null);
         //      A saved list that is there but does not read is not known to
@@ -9368,7 +9396,13 @@ static COLD fn radio_rules_put(p8 address_to ssid, positive ssid_length, p8 mask
                 used += ssid_length;
                 kept[used++] = '\n';
         }
-        host_write_file(RADIO_RULES_PATH, kept, used, 0600, true);
+        //      A file that holds these bytes already is not written again, as
+        //      radio_write_word does: an add of the same network and password
+        //      must not need /root to take a write, so a read-only /root keeps
+        //      its rules as they are.
+        if (got >= 0 && got == (bipolar)used && !memory_compare(text, kept, used))
+                return 0;
+        return host_write_file(RADIO_RULES_PATH, kept, used, 0600, true);
 }
 
 /* ---- wifi: why there is nothing to join with ---- */
@@ -10724,6 +10758,9 @@ _Static_assert(RADIO_AVOID_MOST * sizeof(radio_avoid) == RADIO_ASK_AVOID_ROOM,
 
 static positive radio_avoid_load(radio_avoid address_to into)
 {
+        //      One byte more than the list can be, since a state read keeps
+        //      one for its end: a full list is read whole.
+        p8 raw[RADIO_AVOID_MOST * sizeof(radio_avoid) + 1];
         bipolar got;
         positive count;
         positive kept = 0;
@@ -10742,9 +10779,11 @@ static positive radio_avoid_load(radio_avoid address_to into)
                 memory_copy(into, answer.avoid, (positive)answer.count * sizeof(radio_avoid));
                 return (positive)answer.count;
         }
-        got = file_read_once_at(AT_FDCWD, RADIO_AVOID_PATH, into,
-                                RADIO_AVOID_MOST * sizeof(radio_avoid));
+        //      A state file read like the others: a regular file, no link, and
+        //      a FIFO at the name answers at once instead of holding the join.
+        got = host_read_state(RADIO_AVOID_PATH, raw, sizeof(raw));
         count = got > 0 ? (positive)got / sizeof(radio_avoid) : 0;
+        memory_copy(into, raw, count * sizeof(radio_avoid));
 
         for (positive at = 0; at < count; at++)
                 if (into[at].until > now && into[at].until - now <= RADIO_AVOID_MS)
@@ -11166,7 +11205,7 @@ static COLD fn radio_broker_answer(radio_ask address_to ask, radio_answer addres
                 break;
         case RADIO_ASK_RULES_PUT:
                 if (ssid)
-                        radio_rules_put(ssid, ssid_length, ask->mask, ask->rules);
+                        (void)radio_rules_put(ssid, ssid_length, ask->mask, ask->rules);
                 break;
         case RADIO_ASK_AVOID_LOAD:
                 answer->count = radio_avoid_load((radio_avoid address_to)answer->avoid);
@@ -11399,22 +11438,17 @@ static COLD bipolar radio_heard_refused(const radio_heard address_to heard,
                                         const radio_network address_to networks,
                                         positive count)
 {
-        for (positive at = 0; at < count; at++)
-        {
-                wifi_plan plan;
-                wifi_rsn_caps caps = heard->caps;
+        positive at = radio_saved_index(networks, count, (string_address)heard->ssid,
+                                        heard->ssid_length);
+        wifi_plan plan;
+        wifi_rsn_caps caps = heard->caps;
 
-                if (networks[at].ssid_length != heard->ssid_length ||
-                    memory_compare(networks[at].ssid, heard->ssid, heard->ssid_length))
-                        continue;
-                if (!networks[at].pass_length)
-                        return 0;
-                return wifi_join_plan(MOONWATER_STRICT_NET, address_of caps,
-                                      radio_rules_get((p8 address_to)networks[at].ssid,
-                                                      networks[at].ssid_length),
-                                      networks[at].pass_length == 64, address_of plan);
-        }
-        return 0;
+        if (at == count || !networks[at].pass_length)
+                return 0;
+        return wifi_join_plan(MOONWATER_STRICT_NET, address_of caps,
+                              radio_rules_get((p8 address_to)networks[at].ssid,
+                                              networks[at].ssid_length),
+                              networks[at].pass_length == 64, address_of plan);
 }
 
 static string_address radio_join_words(bipolar failed)
@@ -11477,13 +11511,15 @@ static string_address radio_join_words(bipolar failed)
                    : (string_address) "could not be joined";
 }
 
-/* A join's failure that is the network's doing, which radio_join_words
-   says, rather than the machine's. */
-static bool radio_join_said(bipolar failed)
+/* A join's failure that radio_join_words says in words after the network's
+   name: the network's doing, or the station that could not be confined or
+   ended without a word. The machine's own failures are not told so. */
+static bool radio_join_told(bipolar failed)
 {
         return failed == -110 || failed == -111 || failed == -13 || failed == -62 ||
                failed == -121 || failed == -113 ||
                (failed >= WIFI_REFUSE_FIRST && failed <= WIFI_REFUSE_LAST) ||
+               failed == WIFI_REFUSE_CONFINE || failed == WIFI_REFUSE_APART ||
                (failed <= -1000 && failed > -1000 - 65536);
 }
 
@@ -11837,8 +11873,7 @@ static b32 radio_wifi_bring(bool say)
                            : host_refuse("no wireless interface\n");
         }
         if (say)
-                return radio_join_said(failed) || failed == WIFI_REFUSE_CONFINE ||
-                               failed == WIFI_REFUSE_APART
+                return radio_join_told(failed)
                            ? host_refuse("the network %s\n", radio_join_words(failed))
                            : host_fail("wifi", failed ? failed : -1);
         return 1;
@@ -11883,15 +11918,19 @@ static bipolar radio_wifi_store(string_address ssid, string_address pass,
 {
         radio_network networks[RADIO_WIFI_MOST];
         bool cut;
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, address_of cut);
+        bipolar loaded = radio_wifi_read(networks, RADIO_WIFI_MOST, address_of cut);
+        positive count = loaded > 0 ? (positive)loaded : 0;
         positive at;
         positive ssid_length = string_length(ssid);
         positive pass_length = pass ? string_length(pass) : 0;
         bipolar failed = 0;
 
-        for (at = 0; at < count; at++)
-                if (string_equals((string_address)networks[at].ssid, ssid))
-                        break;
+        if (loaded < 0)
+        {
+                crypto_forget(networks, sizeof(networks));
+                return loaded;
+        }
+        at = radio_saved_index(networks, count, ssid, string_length(ssid));
 
         //      The same network with the same password is already what the
         //      list says: nothing is written for it, and the caller is told.
@@ -11966,9 +12005,12 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
         //      What the network taught the join stands while its password
         //      does; whether WPA2 is let through the tight tier is what
         //      this add says.
-        radio_rules_put((p8 address_to)ssid, string_length(ssid),
-                        (p8)((same ? 0 : WIFI_RULE_PMF | WIFI_RULE_SAE) | WIFI_RULE_WPA2),
-                        wpa2 ? WIFI_RULE_WPA2 : 0);
+        failed = radio_rules_put((p8 address_to)ssid, string_length(ssid),
+                                 (p8)((same ? 0 : WIFI_RULE_PMF | WIFI_RULE_SAE) | WIFI_RULE_WPA2),
+                                 wpa2 ? WIFI_RULE_WPA2 : 0);
+        //      Said, and the join not made: the network is saved, but without
+        //      the rules that say how it may be joined.
+        return_if(failed < 0, host_fail(RADIO_RULES_PATH, failed));
 
         //      A radio that is off stays off: the network is saved, and moonwater wifi on is what joins it.
         if (off)
@@ -12019,7 +12061,7 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
                                          "wireless interface\n");
         if (failed == -113)
                 return host_refuse("saved, but it is not in range\n");
-        if (radio_join_said(failed))
+        if (radio_join_told(failed))
         {
                 if (failed == -110 &&
                     radio_air_take(address_of air, RADIO_AIR_CACHED) &&
@@ -12028,8 +12070,6 @@ static b32 radio_wifi_enter(string_address ssid, string_address pass, bool wpa2)
                 return host_refuse("saved, but the network %s\n",
                                    radio_join_words(failed));
         }
-        if (failed == WIFI_REFUSE_CONFINE || failed == WIFI_REFUSE_APART)
-                return host_refuse("saved, but the network %s\n", radio_join_words(failed));
         return_if(failed < 0, host_fail("wifi", failed));
         if (pass && pass[0])
                 crypto_forget((address_any)pass, string_length(pass));
@@ -12081,14 +12121,18 @@ static b32 radio_wifi_forget(string_address ssid)
 {
         radio_network networks[RADIO_WIFI_MOST];
         bool cut;
-        positive count = radio_wifi_load(networks, RADIO_WIFI_MOST, address_of cut);
+        bipolar loaded = radio_wifi_read(networks, RADIO_WIFI_MOST, address_of cut);
+        positive count = loaded > 0 ? (positive)loaded : 0;
         positive at;
         bool was_joined = false;
         bipolar failed;
 
-        for (at = 0; at < count; at++)
-                if (string_equals((string_address)networks[at].ssid, ssid))
-                        break;
+        if (loaded < 0)
+        {
+                crypto_forget(networks, sizeof(networks));
+                return host_fail(NET_WIFI_LIST, loaded);
+        }
+        at = radio_saved_index(networks, count, ssid, string_length(ssid));
 
         //      A list longer than the rows read would be written back without
         //      what was not read: twenty networks, one forgotten, and fifteen left.
@@ -12122,8 +12166,15 @@ static b32 radio_wifi_forget(string_address ssid)
 
         //      Its rules first: a remove cut between the two leaves the
         //      network saved, and the next remove does both.
-        radio_rules_put((p8 address_to)ssid, string_length(ssid),
-                        WIFI_RULE_PMF | WIFI_RULE_SAE | WIFI_RULE_WPA2, 0);
+        failed = radio_rules_put((p8 address_to)ssid, string_length(ssid),
+                                 WIFI_RULE_PMF | WIFI_RULE_SAE | WIFI_RULE_WPA2, 0);
+        //      Nothing forgotten when its rules could not go: the network stays
+        //      saved, with the rules it had, for the next remove to do both.
+        if (failed < 0)
+        {
+                crypto_forget(networks, sizeof(networks));
+                return host_fail(RADIO_RULES_PATH, failed);
+        }
         failed = radio_wifi_save(networks, count);
         crypto_forget(networks, sizeof(networks));
         return_if(failed < 0, host_fail(NET_WIFI_LIST, failed));
@@ -12184,6 +12235,7 @@ static b32 radio_wired_set(bool on)
         netlink_wired wired;
         bipolar handle;
         bipolar failed;
+        bipolar flagged = 0;
 
         if (host_save(NET_WIRED_POWER, NET_WIRED_POWER, on ? "on" : "off"))
                 return 1;
@@ -12195,11 +12247,20 @@ static b32 radio_wired_set(bool on)
         if (failed >= 0)
                 for (positive at = 0; at < wired.count; at++)
                         if (((wired.link[at].flags & IFF_UP) != 0) != on)
-                                (void)netlink_link_flag_up((b32)handle, wired.link[at].index, on);
+                        {
+                                //      The first link the kernel would not move is said:
+                                //      a link left up after "wired off" was said to be down.
+                                bipolar moved = netlink_link_flag_up((b32)handle,
+                                                                     wired.link[at].index, on);
+
+                                if (moved < 0 && !flagged)
+                                        flagged = moved;
+                        }
         socket_close((b32)handle);
         radio_net_wake();
 
         return_if(failed < 0, host_fail("wired", failed));
+        return_if(flagged < 0, host_fail("wired", flagged));
         host_say(log, host_label "wired %s%s\n", on ? "on" : "off",
                  wired.count ? "" : " (this machine has no wired link)");
         return 0;
@@ -12284,14 +12345,9 @@ static b32 radio_wifi_status(void)
                 }
                 for (at = 0; at < shown; at++)
                 {
-                        bool saved = false;
+                        bool saved = radio_saved_index(networks, count, air.heard[at].ssid,
+                                                       air.heard[at].ssid_length) < count;
 
-                        for (positive have = 0; have < count; have++)
-                                saved |= networks[have].ssid_length ==
-                                             air.heard[at].ssid_length &&
-                                         !memory_compare(networks[have].ssid,
-                                                         air.heard[at].ssid,
-                                                         air.heard[at].ssid_length);
                         radio_air_row(air.heard + at, width, saved);
                 }
                 if (air.count > shown)
@@ -12395,6 +12451,16 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
 
         lock = radio_lock(true);
         return_if(lock < 0, host_fail("bluetooth", lock));
+        //      A list that is there and does not read is said, and not taken for
+        //      an empty one: a remove would say no device was remembered, and an
+        //      add would write the list back with the one name in it. Read before
+        //      the word is pinned, so a refusal changes nothing.
+        got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
+        if (got < 0 && got != -ENOENT)
+        {
+                radio_unlock(lock);
+                return host_fail(NET_BLUETOOTH_LIST, got);
+        }
         //      Asked, and pinned, under the lock and before the list is written: a remembered device is what makes a
         //      radio with no word on, and a bluetooth on that comes between would be written over.
         off = radio_kept(NET_BLUETOOTH_POWER) == 0;
@@ -12407,7 +12473,6 @@ static b32 radio_bluetooth_edit(string_address identity, bool add)
                         return host_fail(NET_BLUETOOTH_POWER, failed);
                 }
         }
-        got = host_read_state(NET_BLUETOOTH_LIST, text, sizeof(text));
         if (got < 0)
                 got = 0;
 
@@ -13146,12 +13211,14 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                         failed |= radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
                         (void)radio_wifi_on(false);
                 }
+                //      A block that the kernel refuses is the first error said,
+                //      as the unblock above is, and not dropped.
                 else if (wifi_off)
-                        (void)radio_rfkill(RADIO_RFKILL_WLAN, true);
+                        sent = sent < 0 ? sent : radio_rfkill(RADIO_RFKILL_WLAN, true);
                 if (bluetooth_back)
                         failed |= radio_bluetooth_power(true, true);
                 else if (bluetooth_off)
-                        (void)radio_rfkill(RADIO_RFKILL_BLUETOOTH, true);
+                        sent = sent < 0 ? sent : radio_rfkill(RADIO_RFKILL_BLUETOOTH, true);
                 if (kept)
                         failed |= tune_remember("airplane", "");
         }
