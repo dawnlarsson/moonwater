@@ -5935,6 +5935,18 @@ static unsigned int place_screen_at(int x, int y, const int (*screens)[4], unsig
         return found;
 }
 
+// A connector's name as placement keeps it: letters, digits and hyphens, one to fifteen.
+static int place_screen_name_valid(const char *name)
+{
+        unsigned int at = 0;
+
+        for (; name[at] && at < WINDOWS_NAME; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
+                      (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                        return 0;
+        return at && at < WINDOWS_NAME;
+}
+
 // The screens' rectangles, and how many there are.
 static unsigned int place_screens(int (*screens)[4])
 {
@@ -6044,9 +6056,162 @@ static void compositor_place_read(int row, struct window_place *place)
 }
 
 /*
+        Where windows were last put, kept (window.c's places): the files are /root's, and a checks run names others.
+        The file is read when a window of a name opens and read, noted in and written whole when the hand lets one
+        go, so nothing is held between the two and `canvas windows forget`, which takes the file away, needs to tell
+        the compositor nothing.
+*/
+static const char *compositor_places_path = SETTING_WINDOWS_PLACES_PATH;
+static const char *compositor_remember_path = SETTING_WINDOWS_REMEMBER_PATH;
+
+// Whether windows are remembered: `canvas windows remember`, on unless it keeps off.
+static int compositor_remembering(void)
+{
+        const struct settings_row *row = setting_by_path((string_address)SETTING_WINDOWS_REMEMBER_PATH);
+        char word[16];
+        long value = 0;
+
+        compositor_word(compositor_remember_path, word, sizeof(word));
+        return !(row && setting_kept(row, (string_address)word, &value) && value == 1);
+}
+
+static void compositor_places_read(struct places *places)
+{
+        static char text[PLACES_BYTES + 1];
+
+        compositor_text(compositor_places_path, text, sizeof(text));
+        places_parse(places, text, string_length((string_address)text));
+}
+
+/*
+        The places written whole beside the file and renamed over it, so a reader finds the old one or the new and
+        never half of either. Not synced: a drag's end is not to wait on a disk, and what a power cut takes is the
+        last place a window was put, which the next drag puts back.
+*/
+static void compositor_places_write(const struct places *places)
+{
+        static char text[PLACES_BYTES];
+        char stage[80];
+        unsigned long length = places_say(places, text, sizeof(text)), path = string_length((string_address)compositor_places_path);
+        bipolar handle, written;
+
+        if (path + sizeof(".new") > sizeof(stage))
+                return;
+        memory_copy(stage, compositor_places_path, path);
+        memory_copy(stage + path, ".new", sizeof(".new"));
+        handle = system_open_at_mode(AT_FDCWD, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (handle < 0)
+                return;
+        written = length ? system_write_once(handle, text, length) : 0;
+        system_close(handle);
+        if (written != (bipolar)length ||
+            system_rename_at(AT_FDCWD, (string_address)stage, AT_FDCWD, (string_address)compositor_places_path, 0) < 0)
+                system_remove_at(AT_FDCWD, (string_address)stage, 0);
+}
+
+// The screen a kept place goes on: the one of its connector's name, else the one nearest where it was, else the first.
+static unsigned int place_kept_screen(const struct place_kept *kept, const char (*names)[WINDOWS_NAME],
+                                      const int (*screens)[4], unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (!memory_compare(names[at], kept->screen, WINDOWS_NAME))
+                        return at;
+        return place_screen_at(kept->origin_x + kept->x + kept->width / 2, kept->origin_y + kept->y + kept->height / 2,
+                               screens, count);
+}
+
+// The screens' names, each the full WINDOWS_NAME bytes, nulls after.
+static void compositor_screen_names(char (*names)[WINDOWS_NAME], unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const char *name = compositor_output_name(at);
+                unsigned int letter = 0;
+
+                memory_zero(names[at], WINDOWS_NAME);
+                for (; name[letter] && letter < WINDOWS_NAME - 1; letter++)
+                        names[at][letter] = name[letter];
+        }
+}
+
+/*
+        Where the hand left a window, noted under its name: a window that has one and floats, let go of by the hand
+        after a drag or a resize. Its place is kept from the top left of the screen its middle is on; a place off
+        that screen is not kept, and nothing is written when the newest line already says it.
+*/
+static void compositor_remember(int row)
+{
+        int screens[WINDOW_PLACE_SCREENS][4];
+        char names[WINDOW_PLACE_SCREENS][WINDOWS_NAME];
+        unsigned int count, on;
+        struct places places;
+        struct place_kept kept;
+
+        if (row < 0 || !compositor.showing[row] || !compositor.name[row][0] ||
+            compositor.arranged[row] != COMPOSITOR_FLOATING || !compositor_remembering())
+                return;
+        count = compositor_screens(screens);
+        on = place_screen_at(compositor.x[row] + (int)compositor.w[row] / 2, compositor.y[row] + (int)compositor.h[row] / 2,
+                             screens, count);
+        compositor_screen_names(names, count);
+        memory_zero(&kept, sizeof(kept));
+        memory_copy(kept.name, compositor.name[row], WINDOWS_NAME);
+        memory_copy(kept.screen, names[on], WINDOWS_NAME);
+        kept.origin_x = screens[on][0];
+        kept.origin_y = screens[on][1];
+        kept.x = compositor.x[row] - screens[on][0];
+        kept.y = compositor.y[row] - screens[on][1];
+        kept.width = (int)compositor.w[row];
+        kept.height = (int)compositor.h[row];
+        if (kept.x < 0 || kept.y < 0 || kept.x >= screens[on][2] || kept.y >= screens[on][3] || kept.width < 1 ||
+            kept.height < 1 || kept.width > WINDOW_PLACE_MOST || kept.height > WINDOW_PLACE_MOST ||
+            !place_screen_name_valid(kept.screen))
+                return;
+        compositor_places_read(&places);
+        if (places.count && !memory_compare(&places.kept[0], &kept, sizeof(kept)))
+                return;
+        places_note(&places, &kept);
+        compositor_places_write(&places);
+}
+
+/*
+        A window of a name put where the hand last left one: on the screen it was on, or the nearest to where that
+        was, at the size it had up to the screen's, a step down and across from a window already there, and kept
+        on the screen. False when no place is kept for it, and it goes where it would have.
+*/
+static int compositor_recall(int row, const int (*screens)[4], unsigned int count)
+{
+        char names[WINDOW_PLACE_SCREENS][WINDOWS_NAME];
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale, found, x, y;
+        unsigned int on, width, height;
+        struct places places;
+
+        if (!compositor.name[row][0] || !compositor_remembering())
+                return 0;
+        compositor_places_read(&places);
+        found = places_find(&places, compositor.name[row]);
+        if (found < 0)
+                return 0;
+        compositor_screen_names(names, count);
+        on = place_kept_screen(&places.kept[found], names, screens, count);
+        x = screens[on][0] + places.kept[found].x;
+        y = screens[on][1] + places.kept[found].y;
+        width = (unsigned int)place_size((unsigned int)places.kept[found].width, screens[on][2], least_w);
+        height = (unsigned int)place_size((unsigned int)places.kept[found].height, screens[on][3], least_h);
+        compositor_put(row, x, y);
+        if (width != compositor.w[row] || height != compositor.h[row])
+                compositor_want(row, (int)width, (int)height);
+        compositor_first_place(row, &x, &y);
+        place_clamp(screens[on], (int)compositor.w[row], (int)compositor.h[row], compositor_line(row), &x, &y);
+        compositor_put(row, x, y);
+        return 1;
+}
+
+/*
         Where a window goes the first time it shows, from where its program asked (x, y) and the placement it was
-        given: none is where it asked, a step down and across from any window in that place (compositor_first_place),
-        as it always was; center and at are the rectangle place_rect works out, on the screen named or the first;
+        given: none is where the hand last put a window of its name (compositor_recall), and with nothing kept for it
+        where it asked, a step down and across from any window in that place (compositor_first_place), as it always
+        was; center and at are the rectangle place_rect works out, on the screen named or the first;
         maximized and fullscreen are where it would have gone with none, filling the room or the screen from there,
         so taking it out of that gives it back the place and size it would have had. A size is asked of the
         program as the hand asks one, and the window is shown at it until a picture of it comes.
@@ -6059,6 +6224,9 @@ static void compositor_first_put(int row, int x, int y)
         struct window_place place;
 
         compositor_place_read(row, &place);
+        // A placement stands over where the hand last put a window of the name; a name alone is no placement.
+        if (!(place.how & (WINDOW_PLACE_HOW | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE)) && compositor_recall(row, screens, count))
+                return;
         how = place.how & WINDOW_PLACE_HOW;
         on = (place.how & WINDOW_PLACE_SCREEN) && place.screen < count ? place.screen : 0;
         compositor_room(screens[on], room);
@@ -6838,7 +7006,7 @@ static unsigned int compositor_snap(int x, int y)
 // hand let go, unless the release is not the hand's (the device went away).
 static void compositor_release(unsigned int code, int snap)
 {
-        int grab = compositor.grab, dragged = compositor.drag, to = grab;
+        int grab = compositor.grab, dragged = compositor.drag, to = grab, resized = compositor.resize;
         unsigned int index = code - COMPOSITOR_BTN_LEFT;
 
         compositor.drag = COMPOSITOR_NONE;
@@ -6857,6 +7025,9 @@ static void compositor_release(unsigned int code, int snap)
         if (dragged >= 0 && snap && compositor.drag_moved &&
             compositor_snap(compositor.pointer_x, compositor.pointer_y) != COMPOSITOR_FLOATING)
                 compositor_arrange(dragged, compositor_snap(compositor.pointer_x, compositor.pointer_y));
+        // Where the hand put a window is where a window of its name opens next (compositor_remember).
+        if (snap && (resized >= 0 || (dragged >= 0 && compositor.drag_moved)))
+                compositor_remember(resized >= 0 ? resized : dragged);
 }
 
 static void compositor_button(unsigned int code, int down)

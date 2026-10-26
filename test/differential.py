@@ -44591,7 +44591,10 @@ def harness_moonwater_cli(argv):
                 "taskbar position bottom", "taskbar position sideways", "taskbar display all",
                 "taskbar display primary", "taskbar display", "taskbar display sideways", "taskbar bogus",
                 "taskbar text", "taskbar text edge", "taskbar text center", "taskbar text sideways",
-                "taskbar text edge extra"]
+                "taskbar text edge extra",
+                #       moonwater window with no desktop up: the words are judged first, and a
+                #       placement and a command are then refused for the desktop that is not there.
+                "window", "window center env", "window bogus", "window center", "window at 1,x env"]
         #       What each vector of the walk answers, as a class: 0 it did what was
         #       asked or showed it, 1 it refused or failed in words, 2 it was not
         #       a command and printed its usage. A signal, a hang or any other
@@ -44910,6 +44913,12 @@ def harness_moonwater_cli(argv):
             walk_classes[vector] = 1
         for vector in [
             'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus', 'taskbar text edge extra',
+            'window', 'window center env',
+        ]:
+            walk_classes[vector] = 1
+        for vector in [
+            'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus',
+            'window bogus', 'window center', 'window at 1,x env',
         ]:
             walk_classes[vector] = 2
         for vector in [
@@ -48860,6 +48869,131 @@ PYEOF
         check(finished and modes == want,
               "a command run under umask 077 writes what everybody reads at 0644 and keeps /run/moonwater at 0755",
               repr({path: (modes.get(path), mode) for path, mode in want.items() if modes.get(path) != mode}))
+
+        #       moonwater window, with a desktop that is up as far as the verb can tell: a compositor pid that is
+        #       alive (the script's own shell) and a table at its path, both made up here. The command runs in the
+        #       verb's place with MOONWATER_PLACE in its environment, the words said back the one way the reader
+        #       takes them, one entry whatever the caller had, and its own status the verb's. A word that is wrong,
+        #       a number past its bound, two modes or no command is the verb's page and exit 2, and runs nothing;
+        #       a compositor that has gone, or none, is a refusal.
+        up = "mkdir -p /run/moonwater; echo $$ > /run/moonwater/compositor.pid; : > /run/moonwater/windows\n"
+        down = "rm -f /run/moonwater/compositor.pid /run/moonwater/windows\n"
+        handed = {"window center screen 2 size 800x600 name notes env": "center screen 2 size 800x600 name notes",
+                  "window name notes size 800x600 screen 2 center env": "center screen 2 size 800x600 name notes",
+                  "window at -16384,16384 -- env": "at -16384,16384", "window at 16384,-16384 env": "at 16384,-16384",
+                  "window maximized env": "maximized", "window fullscreen screen 8 env": "fullscreen screen 8",
+                  "window size 1x16384 env": "size 1x16384", "window name 0-a env": "name 0-a"}
+        refused = ("window bogus", "window center", "window at 16385,0 env", "window at 1 env", "window at 1,2,3 env",
+                   "window at +1,2 env", "window at 01,2 env", "window at -0,2 env", "window screen 0 env",
+                   "window screen 9 env", "window size 0x1 env", "window size 16385x1 env", "window size 8 env",
+                   "window name Bad env", "window name -a env", "window name abcdefghijklmnop env",
+                   "window center center env", "window center at 1,1 env", "window maximized size 8x8 env",
+                   "window --", "window -- env", "window center --")
+        script = (up + "".join(say(command) for command in handed) + "".join(say(command) for command in refused) +
+                  say('window screen 1 sh -c "exit 7"') + say("window center /nonexistent/program") +
+                  say('window center sh -c "env | grep -c ^MOONWATER_PLACE="') +
+                  "echo '@@ inherited'; MOONWATER_PLACE=junk timeout 20 /tmp/moonwater window at 1,2 env 2>&1; "
+                  "echo \"@@status $?\"\n" + say("window") +
+                  "echo 2147483000 > /run/moonwater/compositor.pid\n" +
+                  "echo '@@ dead'; timeout 20 /tmp/moonwater window maximized env 2>&1; echo \"@@status $?\"\n" + down +
+                  "echo '@@ gone'; timeout 20 /tmp/moonwater window maximized env 2>&1; echo \"@@status $?\"\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+
+        def placed(command):
+            return [line[len("MOONWATER_PLACE="):] for line in seen.get(command, {"out": []})["out"]
+                    if line.startswith("MOONWATER_PLACE=")]
+
+        check(finished, "the moonwater window session finished", "")
+        for command, words in handed.items():
+            check(seen.get(command, {}).get("status") == 0 and placed(command) == [words],
+                  f"moonwater {command} runs env with MOONWATER_PLACE={words}", repr(seen.get(command))[:300])
+        for command in refused:
+            got = seen.get(command, {"out": [], "status": None})
+            check(got["status"] == 2 and any("window PLACE... COMMAND..." in line for line in got["out"]) and
+                  not placed(command), f"moonwater {command} is the window page, exit 2, and runs nothing", repr(got)[:300])
+        check(seen.get('window screen 1 sh -c "exit 7"', {}).get("status") == 7,
+              "the command's status is the verb's: it runs in its place", repr(seen.get('window screen 1 sh -c "exit 7"')))
+        got = seen.get("window center /nonexistent/program", {"out": [], "status": None})
+        check(got["status"] == 127 and any("failed to run command" in line for line in got["out"]),
+              "a command that is not there is 127, as env says it", repr(got)[:300])
+        check(seen.get('window center sh -c "env | grep -c ^MOONWATER_PLACE="', {"out": []})["out"][-1:] == ["1"],
+              "the command has one MOONWATER_PLACE", repr(seen.get('window center sh -c "env | grep -c ^MOONWATER_PLACE="')))
+        check(placed("inherited") == ["at 1,2"], "a placement the caller had is replaced by the one asked, not added to",
+              repr(seen.get("inherited"))[:300])
+        got = seen.get("window", {"out": [], "status": None})
+        check(got["status"] == 1 and any("desktop is not up" in line for line in got["out"]),
+              "moonwater window with no table it can map says the desktop is not up", repr(got)[:300])
+        for command in ("dead", "gone"):
+            got = seen.get(command, {"out": [], "status": None})
+            check(got["status"] == 1 and any("desktop is not up" in line for line in got["out"]) and not placed(command),
+                  "a compositor that has gone, or none, is a refusal and runs nothing" + (" (no pid file)" if command == "gone" else ""),
+                  repr(got)[:300])
+        lines, finished = session(up + say("window center env") + say("window bogus") + say("window") +
+                                  say("window at 1,x env") + down, nobody=True)
+        seen = answers(lines)
+        for command, (status, words) in {"window center env": (1, "moonwater window needs root"), "window bogus": (2, ""),
+                                         "window": (1, "moonwater window needs root"), "window at 1,x env": (2, "")}.items():
+            got = seen.get(command, {"out": [], "status": None})
+            check(got["status"] == status and words in "\n".join(got["out"]) and not placed(command),
+                  f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""), repr(got)[:240])
+
+        #       moonwater canvas windows: the switch kept in /root and said back, the places the compositor keeps read
+        #       with its own reader (a line that is none left out), forget taking the file away (twice is no error),
+        #       a word that is wrong the page or a refusal, and wipe forgetting the places and keeping the switch.
+        places = ("terminal Virtual-1 0 0 100 80 800 600\\nnot a line\\n"
+                  "settings HDMI-A-1 1920 0 -30 40 640 480\\nterminal Virtual-1 0 0 1 1 1 1\\n")
+        script = ("rm -f /root/canvas.windows /root/canvas.windows.remember\n" + say("canvas windows") +
+                  say("canvas windows remember off") +
+                  "echo '@@ kept'; cat /root/canvas.windows.remember; echo '@@status 0'\n" +
+                  say("canvas windows remember") + say("canvas windows remember maybe") +
+                  say("canvas windows remember on off") + say("canvas windows remember default") +
+                  f"printf '{places}' > /root/canvas.windows\n" +
+                  say("canvas windows") + say("canvas windows bogus") + say("canvas windows forget extra") +
+                  say("canvas windows forget") + "echo '@@ gone'; ls /root/canvas.windows 2>&1; echo '@@status 0'\n" +
+                  "echo '@@ again'; timeout 20 /tmp/moonwater canvas windows forget 2>&1; echo \"@@status $?\"\n" +
+                  "echo '@@ empty'; timeout 20 /tmp/moonwater canvas windows 2>&1; echo \"@@status $?\"\n" +
+                  "printf 'off\\n' > /root/canvas.windows.remember\n" + f"printf '{places}' > /root/canvas.windows\n" +
+                  "echo '@@ wiped'; timeout 60 /tmp/moonwater wipe yes > /dev/null 2>&1; "
+                  "ls /root/canvas.windows /root/canvas.windows.remember 2>&1; echo '@@status 0'\n"
+                  "rm -f /root/canvas.windows /root/canvas.windows.remember\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+
+        def said(command):
+            return "\n".join(seen.get(command, {"out": []})["out"])
+
+        check(finished and seen.get("canvas windows", {}).get("status") == 0, "the canvas windows session finished", said("canvas windows"))
+        check("windows remember off" in said("canvas windows remember off") and said("kept").strip() == "off" and
+              "windows remember off" in said("canvas windows remember"),
+              "canvas windows remember off is kept in /root and said back", said("canvas windows remember off") + said("kept"))
+        check(seen.get("canvas windows remember maybe", {}).get("status") == 1 and
+              "is on or off, not maybe" in said("canvas windows remember maybe") and
+              seen.get("canvas windows remember on off", {}).get("status") == 2 and
+              "windows remember on" in said("canvas windows remember default"),
+              "a word the switch does not take is refused, two are the page, default puts it back",
+              said("canvas windows remember maybe") + said("canvas windows remember on off"))
+        check("terminal on Virtual-1 at 100,80, 800 by 600" in said("canvas windows") and
+              "settings on HDMI-A-1 at -30,40, 640 by 480" in said("canvas windows") and
+              "not a line" not in said("canvas windows") and "1 by 1" not in said("canvas windows"),
+              "canvas windows says each window kept as the compositor reads it, a line that is none and a second of a name left out",
+              said("canvas windows"))
+        check(seen.get("canvas windows bogus", {}).get("status") == 2 and seen.get("canvas windows forget extra", {}).get("status") == 2,
+              "a word canvas windows does not take is the page, exit 2", said("canvas windows bogus"))
+        check("windows forgotten" in said("canvas windows forget") and "No such file" in said("gone") and
+              seen.get("again", {}).get("status") == 0 and "no window is kept" in said("empty"),
+              "forget takes the places away, and forget again is no error", said("canvas windows forget") + said("gone") + said("again"))
+        check(sorted(said("wiped").splitlines()) == ["/root/canvas.windows", "/root/canvas.windows.remember"],
+              "wipe keeps where windows were and whether they are remembered, as it keeps the settings", said("wiped"))
+        lines, finished = session("chmod 700 /root\n" + say("canvas windows forget") + say("canvas windows remember off") +
+                                  say("canvas windows") + say("canvas windows bogus"), nobody=True)
+        seen = answers(lines)
+        for command, (status, words) in {"canvas windows forget": (1, "moonwater canvas needs root"),
+                                         "canvas windows remember off": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                                         "canvas windows": (0, "windows remember"), "canvas windows bogus": (2, "")}.items():
+            got = seen.get(command, {"out": [], "status": None})
+            check(got["status"] == status and words in "\n".join(got["out"]),
+                  f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""), repr(got)[:240])
 
     return checks.verdict("moonwater cli", "moonwater-cli")
 

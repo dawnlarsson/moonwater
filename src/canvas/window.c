@@ -1377,6 +1377,174 @@ static unsigned int windows_output(const struct windows *table, unsigned int ind
 }
 
 /*
+        Where windows were last put by the hand, by their names: what the compositor keeps across boots in a file
+        of /root (registry.c's SETTING_WINDOWS_PLACES_PATH), written when a drag or a resize ends and read when a
+        window of a name opens, and what `moonwater canvas windows` reads and its forget empties. One line a
+        window, the newest first, PLACES_MOST of them at most:
+
+                NAME SCREEN ORIGIN_X ORIGIN_Y X Y WIDTH HEIGHT
+
+        SCREEN is the name of the connector the window was on (Virtual-1, HDMI-A-1), ORIGIN that screen's top
+        left on the desktop when it was, and X and Y the window's top left from there. Every number is inside
+        WINDOW_PLACE_MOST and a size is at least 1. A line that is not one -- a word too many or too few, a blank
+        at an end or two together, a number past its bound or with anything after its digits, a name that is
+        none, no line end -- is left out, and so is a second line of a name: the file is the compositor's, but
+        it is a file, and a file can be anything.
+*/
+#define PLACES_MOST 32
+#define PLACES_LINE 96
+#define PLACES_BYTES (PLACES_MOST * PLACES_LINE)
+
+struct place_kept
+{
+        char name[WINDOWS_NAME], screen[WINDOWS_NAME];
+        int origin_x, origin_y, x, y, width, height;
+};
+
+struct places
+{
+        unsigned int count;
+        struct place_kept kept[PLACES_MOST];
+};
+
+// A connector's name as a place is kept with it: letters, digits and hyphens, one to fifteen of them.
+static int place_screen_name_valid(const char *name)
+{
+        unsigned int at = 0;
+
+        for (; name[at] && at < WINDOWS_NAME; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
+                      (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                        return 0;
+        return at && at < WINDOWS_NAME;
+}
+
+// The line of a name, or -1.
+static int places_find(const struct places *places, const char *name)
+{
+        for (unsigned int at = 0; at < places->count; at++)
+        {
+                unsigned int letter = 0;
+
+                while (letter < WINDOWS_NAME && places->kept[at].name[letter] == name[letter] && name[letter])
+                        letter++;
+                if (letter < WINDOWS_NAME && places->kept[at].name[letter] == name[letter])
+                        return (int)at;
+        }
+        return -1;
+}
+
+// One line, ended at its line end, as a place: false when it is none.
+static int places_line(char *line, struct place_kept *kept)
+{
+        char *field[8];
+        unsigned int fields = 0;
+        int value[6];
+
+        for (unsigned int at = 0;; at++)
+        {
+                if (line[at] && line[at] != ' ')
+                {
+                        if (!at || !line[at - 1])
+                        {
+                                if (fields == 8)
+                                        return 0;
+                                field[fields++] = line + at;
+                        }
+                        continue;
+                }
+                // A blank first, last or after another is a field that is empty.
+                if (line[at] == ' ' && (!at || !line[at - 1] || !line[at + 1]))
+                        return 0;
+                if (!line[at])
+                        break;
+                line[at] = 0;
+        }
+        if (fields != 8 || !window_name_valid(field[0]) || !place_screen_name_valid(field[1]))
+                return 0;
+        for (unsigned int at = 0; at < 6; at++)
+                if (!window_place_number(field[2 + at], 0, at < 4 ? -WINDOW_PLACE_MOST : 1, WINDOW_PLACE_MOST, &value[at]))
+                        return 0;
+        for (unsigned int at = 0; at < WINDOWS_NAME; at++)
+                kept->name[at] = kept->screen[at] = 0;
+        for (unsigned int at = 0; field[0][at]; at++)
+                kept->name[at] = field[0][at];
+        for (unsigned int at = 0; field[1][at]; at++)
+                kept->screen[at] = field[1][at];
+        kept->origin_x = value[0];
+        kept->origin_y = value[1];
+        kept->x = value[2];
+        kept->y = value[3];
+        kept->width = value[4];
+        kept->height = value[5];
+        return 1;
+}
+
+// The places a file's text holds, of length bytes.
+static void places_parse(struct places *places, const char *text, unsigned long length)
+{
+        unsigned long at = 0;
+
+        places->count = 0;
+        while (at < length && places->count < PLACES_MOST)
+        {
+                char line[PLACES_LINE];
+                unsigned long size = 0;
+                struct place_kept kept;
+
+                for (; at + size < length && text[at + size] != '\n'; size++)
+                        if (size < PLACES_LINE)
+                                line[size] = text[at + size];
+                // A line with no end is a line cut short, and one longer than any the compositor writes is none.
+                if (at + size >= length || size >= PLACES_LINE)
+                {
+                        at += size + 1;
+                        continue;
+                }
+                line[size] = 0;
+                at += size + 1;
+                if (places_line(line, &kept) && places_find(places, kept.name) < 0)
+                        places->kept[places->count++] = kept;
+        }
+}
+
+// The places as the file keeps them, into room bytes (PLACES_BYTES holds all of them): its length.
+static unsigned long places_say(const struct places *places, char *into, unsigned long room)
+{
+        unsigned long length = 0;
+
+        for (unsigned int at = 0; at < places->count; at++)
+        {
+                const struct place_kept *kept = &places->kept[at];
+                const int numbers[6] = {kept->origin_x, kept->origin_y, kept->x, kept->y, kept->width, kept->height};
+                char line[PLACES_LINE * 2], *tail = window_place_text(line, kept->name);
+
+                tail = window_place_text(window_place_text(tail, " "), kept->screen);
+                for (unsigned int number = 0; number < 6; number++)
+                        tail = window_place_digits(window_place_text(tail, " "), numbers[number]);
+                *tail++ = '\n';
+                if (length + (unsigned long)(tail - line) > room)
+                        break;
+                for (char *byte = line; byte < tail; byte++)
+                        into[length++] = *byte;
+        }
+        return length;
+}
+
+// A place noted: the newest line, the line of its name it had taken out, and the oldest left off when they are all used.
+static void places_note(struct places *places, const struct place_kept *kept)
+{
+        int found = places_find(places, kept->name);
+        unsigned int last = found >= 0 ? (unsigned int)found : places->count < PLACES_MOST ? places->count : PLACES_MOST - 1;
+
+        for (unsigned int at = last; at > 0; at--)
+                places->kept[at] = places->kept[at - 1];
+        places->kept[0] = *kept;
+        if (found < 0 && places->count < PLACES_MOST)
+                places->count++;
+}
+
+/*
         A row taken: the table mapped and its header copied and checked (-22 when it does not fit), the first row
         with no pid given this one, the row's program fields reset and its placement taken from MOONWATER_PLACE
         (windows_place_take), and its door and its wake opened. The row is

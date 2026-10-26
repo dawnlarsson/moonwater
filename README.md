@@ -48,6 +48,10 @@ moonwater canvas                       whether Canvas is on, and the screens it 
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
 moonwater desktop start|stop           begin the chosen desktop now, or end its session
 moonwater settings                     the settings window, on the desktop of the compositor
+moonwater window                       the windows on the desktop: name, pid, place, size, title
+moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says:
+                                       center, at X,Y, maximized, fullscreen, screen N,
+                                       size WxH, name NAME (what it is remembered by)
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater debug                        what the desktop is doing and why (root): the card, the pointer, windows shown straight
 moonwater name [NEW|random]            what this machine is called, like space-wizard
@@ -62,6 +66,8 @@ moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e
 moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
+moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
+moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
@@ -224,6 +230,29 @@ window. Typing filters the rows of every group; a command that ends the session 
 throws away what is kept is run by a second Enter.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away.
+
+`moonwater window PLACE... COMMAND...` starts COMMAND with where its first window goes.
+`center` is the middle of the screen's room, the screen less the taskbar; `at X,Y` puts
+the window's top left at X,Y from the screen's; `maximized` fills the room and keeps to
+it when the taskbar moves, and a double click gives the window back the place it would
+have had; `fullscreen` fills the whole screen as a double click does, the taskbar still
+drawn over it. `screen N` counts the screens from 1 in the order `moonwater canvas` lists
+them (one that is not there is the first), and `size WxH` asks the program for that
+size, up to the screen's. A window is always kept on its screen. The placement reaches
+the command as MOONWATER_PLACE in its environment: the first window of the compositor's
+own that it opens (the terminal, the log, the settings, the launcher, `/surface`) takes
+it and empties it, so what that program starts after is not placed too, while programs
+the command starts before any window is open each take their own copy. A program that is
+no window of the compositor's, from a bowl, Wayland or X, never reads it.
+
+A window the hand moves or resizes is remembered by its name (terminal, klog, settings,
+or the one `name NAME` gave it), and the next window of that name opens there: on the
+same screen, found by its connector's name, or the nearest one left when that screen is
+gone, at the size it had up to the screen's, and a step down and across from one already
+there. A placement stands over it. The places are kept in /root/canvas.windows, written
+whole and renamed over the last; `canvas windows` says them, `canvas windows forget`
+empties them, `canvas windows remember off` stops it, and wipe keeps them with the
+settings.
 
 ## Layout
 

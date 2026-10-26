@@ -83,6 +83,10 @@
 #define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
 #define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
 #define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
+#define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
+// Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
+// windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
+#define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
 
 struct settings_row
 {
@@ -173,6 +177,11 @@ static const struct settings_row settings_rows[] = {
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000, .need = "how Canvas draws",
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
+    //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
+    SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
+                      .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas windows remember [on|off]",
+                      .help = "a window opens where the hand last put it, kept across boots [on]"),
     SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,

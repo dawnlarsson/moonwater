@@ -5274,6 +5274,7 @@ static fn host_tty1_shell(void)
 
 static b32 locale_canvas_setting(string_address address_to arguments, positive count);
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
+static b32 locale_canvas_windows(string_address address_to arguments, positive count);
 
 /*
         Canvas off: every window closes and the console is the text one. What `moonwater desktop off` does after it has
@@ -5379,6 +5380,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return locale_canvas_setting(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "cursor"))
                 return locale_canvas_cursor(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "windows"))
+                return locale_canvas_windows(arguments, count);
 
         return_if(count > 3, host_usage());
 
@@ -20960,6 +20963,54 @@ static b32 locale_canvas_cursor(string_address address_to arguments, positive co
         return host_setting_group(shake, 3);
 }
 
+/*
+        moonwater canvas windows [forget]: whether windows open where the hand last put them, and where each one
+        that is kept will, from the compositor's own file read with its own reader (window.c's places), so what is
+        said is what it will do. forget takes the file away: the compositor reads it when a window opens and holds
+        nothing of it, so the next window opens where its program puts it. The rows of remember are found before
+        this, as a plain row's words are.
+*/
+static b32 locale_canvas_windows(string_address address_to arguments, positive count)
+{
+        static p8 text[PLACES_BYTES + 1];
+        struct places places;
+        bool forget = count == 4 && string_equals(arguments[3], "forget");
+        bipolar handle, got = 0;
+
+        return_if(count > 4 || (count == 4 && !forget), host_usage());
+        if (forget)
+        {
+                bipolar failed;
+
+                host_need_root();
+                failed = system_remove_at(AT_FDCWD, (string_address)SETTING_WINDOWS_PLACES_PATH, 0);
+                return_if(failed < 0 && failed != -ENOENT, host_fail("canvas windows forget", failed));
+                host_say(log, host_label "windows forgotten: each opens where its program puts it\n");
+                return 0;
+        }
+
+        host_setting_status(setting_by_path((string_address)SETTING_WINDOWS_REMEMBER_PATH));
+        handle = system_open_at(AT_FDCWD, (string_address)SETTING_WINDOWS_PLACES_PATH, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle == -EACCES || handle == -EPERM)
+        {
+                host_say(log, "  places " LOCALE_NEEDS_ROOT "\n");
+                return 0;
+        }
+        if (handle >= 0)
+        {
+                got = system_read_once((b32)handle, text, PLACES_BYTES);
+                system_close(handle);
+        }
+        places_parse(&places, (const char *)text, got > 0 ? (unsigned long)got : 0);
+        for (unsigned int at = 0; at < places.count; at++)
+                host_say(log, "  %s on %s at %b,%b, %b by %b\n", (string_address)places.kept[at].name,
+                         (string_address)places.kept[at].screen, (bipolar)places.kept[at].x, (bipolar)places.kept[at].y,
+                         (bipolar)places.kept[at].width, (bipolar)places.kept[at].height);
+        if (!places.count)
+                host_say(log, "  no window is kept\n");
+        return 0;
+}
+
 //      A verb with no words of its own but its rows': bare it says them all.
 static b32 host_setting_verb(string_address address_to arguments, positive count)
 {
@@ -23561,9 +23612,14 @@ static const host_row host_rows[] = {
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
     {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
+    {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
+    {null, "window", "the windows on the desktop: name, pid, place, size, title", 'b'},
+    {null, "window PLACE... COMMAND...", "run COMMAND, its first window put where PLACE says:", 'b'},
+    {null, "", "center, at X,Y, maximized, fullscreen, screen N,", 'b'},
+    {null, "", "size WxH, name NAME (what it is remembered by)", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why (root): the card, the pointer, windows shown straight", 'b'},
     {null, "@airplane", null, 'r'},
@@ -24023,6 +24079,8 @@ static string_address host_wipe_keep[96] = {
     HOST_WIPE_KEEP(LINK_PORT_PATH),
     HOST_WIPE_KEEP(LINK_GROUPS_PATH),
     HOST_WIPE_KEEP(LINK_STAMPS_PATH),
+    //  Where the windows were last put, which the compositor writes and no plain row names.
+    HOST_WIPE_KEEP(SETTING_WINDOWS_PLACES_PATH),
     //  The text size every terminal follows, which is the module's own
     //  (TERMINAL_SIZE_DIR in src/canvas/ui/terminal.c) and so named here.
     "terminal",
@@ -24332,6 +24390,119 @@ static b32 host_settings_window(string_address address_to arguments, positive co
 }
 
 /*
+        moonwater window: the windows of the compositor's desktop, and a command started with where its first
+        window goes.
+
+        Bare, each window that has shown a picture: its name, its program's pid, where it is, the size it drew and
+        its title, which is a program's to write and so is spelled and not obeyed. With words, the words of a
+        placement (window.c's window_place_parse: center, at X,Y, maximized, fullscreen, screen N, size WxH, name
+        NAME), then the command, which runs in this process's place as env runs one, with MOONWATER_PLACE in its
+        environment: the first window it opens is put there, and the programs it starts after that are not. --
+        ends the words, for a command named like one of them.
+
+        The words are judged first, then root is asked for, as the other verbs do: the window table and its doors
+        are root's (WINDOWS_MODE), so no program that is not root opens a window to be placed. The placement goes
+        only to the command, in its own environment, which the compositor never reads: it reads the placement
+        out of the window's row, as it reads the rest of what a program writes there, and clamps it. A program
+        that is no window of this compositor's (a bowl's, Wayland's, X's) is started all the same and never reads it.
+*/
+#define HOST_WINDOW_ENVIRONMENT 512
+
+static b32 host_window_list(void)
+{
+        const struct windows address_to table;
+        long spark, file = -1, mapped;
+        positive shown = 0;
+
+        spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
+        if (spark >= 0)
+        {
+                file = window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0);
+                window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
+        }
+        if (file < 0)
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
+        //      As debug does: a table shorter than the struct is no table this build can map.
+        if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
+        {
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                file = -1;
+        }
+        if (file < 0)
+                return host_refuse("the compositor's desktop is not up: moonwater desktop on starts it\n");
+        // PROT_READ, MAP_SHARED
+        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 1, 1, file, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        if (mapped < 0 && mapped > -4096)
+                return host_fail("window", (b32)mapped);
+        table = (const struct windows address_to)mapped;
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
+                char name[WINDOWS_NAME], title[WINDOWS_TITLE];
+
+                if (!pid || pid == WINDOWS_TAKING || !__atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE))
+                        continue;
+                memory_copy(name, table->name[row], sizeof(name));
+                memory_copy(title, table->title[row], sizeof(title));
+                name[sizeof(name) - 1] = title[sizeof(title) - 1] = 0;
+                host_say(log, "  %s, pid %p, at %b,%b, %p by %p%s: %w\n",
+                         window_name_valid(name) ? (string_address)name : (string_address) "-", (positive)pid,
+                         (bipolar)table->x[row], (bipolar)table->y[row], (positive)table->width[row],
+                         (positive)table->height[row],
+                         table->state[row] & WINDOW_MINIMIZED ? (string_address) ", put away" : (string_address) "",
+                         writer_terminal_name, (string_address)title);
+                shown++;
+        }
+        if (!shown)
+                host_say(log, "  no windows\n");
+        window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
+        return 0;
+}
+
+static b32 host_window(string_address address_to arguments, positive count)
+{
+        static string_address environment[HOST_WINDOW_ENVIRONMENT + 2];
+        static p8 entry[sizeof(WINDOW_PLACE_VARIABLE) + WINDOW_PLACE_TEXT];
+        string_address address_to inherited;
+        struct window_place place;
+        positive pid, at, used = 0, length = sizeof(WINDOW_PLACE_VARIABLE);
+        int words = count > 2 ? window_place_parse(&place, (const char *const *)(arguments + 2), (unsigned int)(count - 2)) : 0;
+
+        at = 2 + (positive)(words > 0 ? words : 0);
+        if (words > 0 && at < count && string_equals(arguments[at], "--"))
+                at++;
+        //      A word that is wrong, words and no command, or a command with no words: the verb's page.
+        return_if(count > 2 && (words <= 0 || at >= count), host_usage());
+        host_need_root();
+        pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
+        return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
+                      system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) != 0,
+                  host_refuse("the compositor's desktop is not up, so there is no window to put: moonwater desktop "
+                              "on starts it\n"));
+        if (count == 2)
+                return host_window_list();
+
+        memory_copy(entry, WINDOW_PLACE_VARIABLE "=", length);
+        window_place_say(&place, (char *)entry + length, WINDOW_PLACE_TEXT);
+        environment[used++] = entry;
+        //      One placement: one the caller already had is this one's now.
+        inherited = file_environment_all();
+        for (positive variable = 0; inherited && inherited[variable]; variable++)
+        {
+                if (string_has_prefix(inherited[variable], WINDOW_PLACE_VARIABLE "="))
+                        continue;
+                return_if(used == HOST_WINDOW_ENVIRONMENT,
+                          host_refuse("the environment has more than %p variables, which is more than this hands on\n",
+                                      (positive)(HOST_WINDOW_ENVIRONMENT - 1)));
+                environment[used++] = inherited[variable];
+        }
+        environment[used] = null;
+        return process_tool_exec_environment("moonwater window", arguments + at, environment,
+                                             file_environment((string_address) "PATH"));
+}
+
+/*
         Every word the command answers to, and who answers. A verb that says
         what it does and nothing else (quiet) has its output set aside from
         its answer: standard output closed or full or a pipe whose reader has
@@ -24364,6 +24535,7 @@ static b32 host_main()
             {"canvas", host_canvas, false},
             {"desktop", host_desktop, false},
             {"settings", host_settings_window, false},
+            {"window", host_window, false},
             {"latency", host_latency, false},
             {"debug", host_debug, true},
             {"bios", host_bios, false},

@@ -17364,7 +17364,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, k1, g1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -20370,6 +20370,215 @@ else
                 same "$name" "$want" "$got"
         done < "$work/w1-answers"
         sed -n 's/^w1 /  canvas       /p' "$work/w1-why"
+fi
+fi
+
+#       Where a window goes (`moonwater window`), and where it goes again, on a plain boot's desktop. /surface
+#       windows started through the verb with each placement are read back from where each says it was put (its
+#       first line), from `moonwater window` and from the screen: the middle of the room above the taskbar, a
+#       place, a size, the room filled and following the band to the left edge and back, a place far off kept on
+#       the screen, a screen that is not there. Then one with a name, dragged by the hand with Alt held, closed
+#       and opened again where the hand left it; the file it is kept in, and `canvas windows` saying it; a
+#       placement standing over it; forget and remember off. The guest's /root is a tmpfs, so a second boot keeps
+#       nothing: the file is what is asserted, and the checks hold its reader and writer.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = p1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/p1-answers" 2>"$work/p1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/p1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def picture(name):
+    shot(name, 1)
+    return load(name)
+
+def pixel(screen, x, y):
+    width, height, data = screen
+    at = (y * width + x) * 3
+    return "%02x%02x%02x" % (data[at], data[at + 1], data[at + 2])
+
+def near(got, want, slack=0):
+    return got is not None and all(abs(a - b) <= slack for a, b in zip(got, want))
+
+def surface(words, name, colour, size=(200, 100), program=(7, 7)):
+    """A /surface started through `moonwater window WORDS` (none: started bare), drawing the size it is asked for:
+    its pid, and where it says it was put."""
+    command = ("moonwater window %s " % words if words else "") + \
+        "/surface -R -x %d -y %d -w %d -h %d -c %s -s 900 %s> /tmp/%s.out 2>&1 & echo pid $!" % (
+            program[0], program[1], size[0], size[1], colour, "-N %s " % name if name.startswith("n-") else "", name)
+    pid = re.search(r"pid (\d+)", shell.run(command, 10)[0])
+    found, _ = until(lambda: re.search(r"surface: \d+ at (-?\d+),(-?\d+)", shell.run("cat /tmp/%s.out" % name, 10)[0]), 20)
+    time.sleep(1.5)
+    return (pid.group(1) if pid else "0"), ((int(found.group(1)), int(found.group(2))) if found else None)
+
+def sized(name):
+    sizes = re.findall(r"surface: size (\d+) (\d+)", shell.run("cat /tmp/%s.out" % name, 10)[0])
+    return (int(sizes[-1][0]), int(sizes[-1][1])) if sizes else None
+
+def close(pid):
+    shell.run("kill %s; sleep 1" % pid, 10)
+
+def said(row):
+    if out and out[-1][1] != out[-1][2]:
+        print("p1 %s: %s" % (row, shell.run("moonwater window; cat /root/canvas.windows; dmesg | tail -6", 15)[0].replace("\n", " / ")),
+              file=sys.stderr)
+
+def drag_with_alt(x0, y0, x1, y1):
+    send([press("alt", True)])
+    time.sleep(0.2)
+    moveto(x0, y0)
+    time.sleep(0.2)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.2)
+    moveto((x0 + x1) // 2, (y0 + y1) // 2)
+    moveto(x1, y1)
+    time.sleep(0.3)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.5)
+    send([press("alt", False)])
+    time.sleep(0.8)
+
+until(lambda: "terminal" in shell.run("moonwater window", 10)[0], 60)
+time.sleep(2)
+scale = re.search(r"scale (\d+)", shell.run("moonwater debug", 10)[0])
+scale = int(scale.group(1)) if scale else 1
+band = 24 * scale
+room = H - band
+#   The pointer is drawn into the screen here (no cursor plane): out of the way, in a corner nothing is put in.
+moveto(W - 3, 3)
+
+#   The placements.
+pid, at = surface("center", "c1", "336699")
+screen = picture("p1-center")
+x, y = (W - 200) // 2, (room - 100) // 2
+out.append(("P1.1 center is the middle of the room above the taskbar, and the window is drawn there",
+            "%s %s %s" % (at, pixel(screen, x + 60, y + 30), pixel(screen, x - 12, y + 30) != "336699"),
+            "%s 336699 True" % ((x, y),)))
+said("P1.1")
+listed = shell.run("moonwater window", 10)[0]
+out.append(("P1.2 moonwater window lists it, its pid and where it is, and the terminal and the log by their names",
+            "yes" if re.search(r"-, pid %s, at %d,%d, 200 by 100" % (pid, x, y), listed) and "terminal, pid" in listed and
+            "klog, pid" in listed else listed.replace("\n", " / ")[-300:], "yes"))
+close(pid)
+
+pid, at = surface("at 300,200", "c2", "996633")
+screen = picture("p1-at")
+out.append(("P1.3 at 300,200 puts the top left there", "%s %s" % (at, pixel(screen, 350, 250)), "(300, 200) 996633"))
+said("P1.3")
+close(pid)
+
+pid, at = surface("center size 400x300", "c3", "55aa55")
+time.sleep(1)
+screen = picture("p1-size")
+x, y = (W - 400) // 2, (room - 300) // 2
+out.append(("P1.4 a size asked with the centre is drawn, centred at that size",
+            "%s %s %s" % (at, sized("c3"), pixel(screen, x + 390, y + 290)), "%s (400, 300) 55aa55" % ((x, y),)))
+said("P1.4")
+close(pid)
+
+pid, at = surface("maximized", "c4", "aa3355")
+time.sleep(1)
+screen = picture("p1-maximized")
+out.append(("P1.5 maximized fills the room, the taskbar left showing under it",
+            "%s %s %s %s" % (at, sized("c4"), pixel(screen, W - 8, room - 8), pixel(screen, W // 2, H - band // 2) != "aa3355"),
+            "(0, 0) (%d, %d) aa3355 True" % (W, room)))
+said("P1.5")
+shell.run("moonwater taskbar position left", 10)
+time.sleep(2.5)
+screen = picture("p1-left")
+listed = shell.run("moonwater window", 10)[0]
+out.append(("P1.6 the taskbar moved to the left edge, the maximized window fills the room it leaves",
+            "%s %s %s" % (sized("c4"), bool(re.search(r"pid %s, at %d,0," % (pid, band), listed)), pixel(screen, band + 8, H - 8)),
+            "(%d, %d) True aa3355" % (W - band, H)))
+said("P1.6")
+shell.run("moonwater taskbar position bottom", 10)
+time.sleep(2.5)
+out.append(("P1.7 and back at the bottom, the room above it again", "%s" % (sized("c4"),), "(%d, %d)" % (W, room)))
+said("P1.7")
+close(pid)
+
+pid, at = surface("at -500,-16384", "c5", "3355aa")
+out.append(("P1.8 a place far off the screen is kept on it, the top left the window is taken by",
+            "%s" % (at,), "%s" % ((scale, scale),)))
+said("P1.8")
+close(pid)
+
+pid, at = surface("screen 2 at 300,200", "c6", "3355aa")
+out.append(("P1.9 a screen that is not there is the first", "%s" % (at,), "(300, 200)"))
+said("P1.9")
+close(pid)
+
+refused = shell.run("moonwater window center at 1,1 /surface; echo status $?", 10)[0]
+out.append(("P1.10 two modes are the verb's page, exit 2, and no window",
+            "yes" if "status 2" in refused and "window PLACE" in refused else refused[-200:], "yes"))
+
+#   Remembered: a named window dragged with Alt held, closed, and opened again.
+shell.run("moonwater canvas windows forget", 10)
+pid, at = surface("", "n-probe", "336699", program=(100, 100))
+out.append(("P2.1 a named window with nothing kept is where its program put it", "%s" % (at,), "(100, 100)"))
+drag_with_alt(150, 150, 650, 450)
+kept = shell.run("cat /root/canvas.windows", 10)[0]
+line = re.search(r"^n-probe \S+ 0 0 (\d+) (\d+) 200 100$", kept, re.M)
+out.append(("P2.2 let go of by the hand, its place is written under its name, from the screen's top left",
+            "yes" if line and near((int(line.group(1)), int(line.group(2))), (600, 400), 2) else kept[-200:], "yes"))
+said("P2.2")
+close(pid)
+pid, again = surface("", "n-probe", "996633", program=(100, 100))
+screen = picture("p1-recalled")
+out.append(("P2.3 closed and opened again, the window of the name is where the hand left the last",
+            "yes" if line and again == (int(line.group(1)), int(line.group(2))) and pixel(screen, again[0] + 100, again[1] + 50) == "996633"
+            else "%s %s" % (again, kept[-120:]), "yes"))
+said("P2.3")
+listed = shell.run("moonwater canvas windows", 10)[0]
+out.append(("P2.4 canvas windows says it is remembered and where",
+            "yes" if "windows remember on" in listed and re.search(r"n-probe on \S+ at %d,%d, 200 by 100" % again, listed)
+            else listed[-200:], "yes"))
+close(pid)
+pid, at = surface("at 50,60", "n-probe", "55aa55", program=(100, 100))
+out.append(("P2.5 a placement stands over where it was kept", "%s" % (at,), "(50, 60)"))
+said("P2.5")
+close(pid)
+shell.run("moonwater canvas windows forget", 10)
+pid, at = surface("", "n-probe", "55aa55", program=(100, 100))
+out.append(("P2.6 forgotten, it is where its program puts it", "%s" % (at,), "(100, 100)"))
+said("P2.6")
+shell.run("moonwater canvas windows remember off", 10)
+drag_with_alt(150, 150, 650, 450)
+gone = shell.run("ls /root/canvas.windows 2>&1; moonwater canvas windows", 10)[0]
+out.append(("P2.7 with remember off, a drag keeps nothing",
+            "yes" if "No such file" in gone and "no window is kept" in gone else gone[-200:], "yes"))
+said("P2.7")
+close(pid)
+shell.run("moonwater canvas windows remember default; moonwater canvas windows forget", 10)
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/p1-answers" ]; then
+        same "the placement boot answered" "yes" "no"
+        sed 's/^/    /' "$work/p1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/p1-answers"
+        sed -n 's/^p1 /  canvas       /p' "$work/p1-why"
 fi
 fi
 

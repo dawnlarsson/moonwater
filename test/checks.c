@@ -58039,6 +58039,91 @@ static fn windows_placement(void)
         }
 }
 
+/*
+        Where windows were last put, as the compositor keeps it and `canvas windows` reads it: a line a window,
+        every field checked, the newest first and a name once, said back as it is read, and the oldest left off
+        when all PLACES_MOST lines are used.
+*/
+static fn windows_places(void)
+{
+        static const char text[] =
+            "terminal Virtual-1 0 0 100 80 800 600\n"
+            "settings HDMI-A-1 1920 0 -30 40 640 480\n"
+            "terminal Virtual-1 0 0 5 5 50 50\n"
+            "Bad Virtual-1 0 0 1 1 1 1\n"
+            "klog Virtual-1 0 0 1 1 0 1\n"
+            "klog Virtual-1 0 0 16385 1 1 1\n"
+            "klog Virtual-1 0 0 1 1 1\n"
+            "klog Virtual-1 0 0 1 1 1 1 1\n"
+            "klog  Virtual-1 0 0 1 1 1 1\n"
+            " klog Virtual-1 0 0 1 1 1 1\n"
+            "klog Virtual-1 0 0 1 1 1 1 \n"
+            "klog Virt_1 0 0 1 1 1 1\n"
+            "klog Virtual-1 0 0 01 1 1 1\n"
+            "klog Virtual-1 0 0 1x 1 1 1\n"
+            "\n"
+            "klog Virtual-1 0 0 1 1 1 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+            "notes eDP-1 -1280 100 0 0 300 200\n"
+            "cut Virtual-1 0 0 1 1 1 1";
+        static const char said_wanted[] = "terminal Virtual-1 0 0 100 80 800 600\n"
+                                          "settings HDMI-A-1 1920 0 -30 40 640 480\n"
+                                          "notes eDP-1 -1280 100 0 0 300 200\n";
+        static struct places places, again;
+        static char said[PLACES_BYTES];
+        struct place_kept kept;
+        unsigned long length;
+        unsigned int full = 1;
+
+        places_parse(&places, text, sizeof(text) - 1);
+        check("places: a line is a name, a screen and six numbers in their bounds, and nothing else is one",
+              places.count == 3 && string_equals((string_address)places.kept[0].name, "terminal") &&
+                  places.kept[0].x == 100 && places.kept[0].height == 600 &&
+                  string_equals((string_address)places.kept[1].screen, "HDMI-A-1") && places.kept[1].origin_x == 1920 &&
+                  places.kept[1].x == -30 && string_equals((string_address)places.kept[2].name, "notes") &&
+                  places.kept[2].origin_x == -1280);
+        check("places: a second line of a name is left out, the first kept",
+              places_find(&places, "terminal") == 0 && places.kept[0].width == 800 && places_find(&places, "klog") < 0);
+        check("places: and so is a last line with no line end, which was cut short", places_find(&places, "cut") < 0);
+        length = places_say(&places, said, sizeof(said));
+        said[length] = 0;
+        check("places: they are said back in the words they are read from, the newest first",
+              string_equals((string_address)said, said_wanted));
+        places_parse(&again, said, length);
+        check("places: and read again they are the same", again.count == 3 && !memory_compare(&again, &places, sizeof(places)));
+
+        memory_zero(&kept, sizeof(kept));
+        memory_copy(kept.name, "klog", 5);
+        memory_copy(kept.screen, "Virtual-1", 10);
+        kept.x = 7, kept.y = 9, kept.width = 300, kept.height = 200;
+        places_note(&places, &kept);
+        check("places: a place noted is the newest line", places.count == 4 && places_find(&places, "klog") == 0 &&
+                                                              places_find(&places, "terminal") == 1);
+        kept.x = 70;
+        memory_copy(kept.name, "settings", 9);
+        places_note(&places, &kept);
+        check("places: one noted again for a name is moved to the front, its old line gone",
+              places.count == 4 && places_find(&places, "settings") == 0 && places.kept[0].x == 70 &&
+                  places_find(&places, "klog") == 1 && places_find(&places, "notes") == 3);
+        for (unsigned int at = 0; at < PLACES_MOST; at++)
+        {
+                char name[8] = {'w', (char)('a' + at / 10), (char)('0' + at % 10), 0};
+
+                memory_zero(kept.name, sizeof(kept.name));
+                memory_copy(kept.name, name, 4);
+                places_note(&places, &kept);
+                full &= places.count <= PLACES_MOST;
+        }
+        check("places: all of them used, the oldest is left off and the newest kept",
+              full && places.count == PLACES_MOST && places_find(&places, "notes") < 0 && places_find(&places, "settings") < 0 &&
+                  places_find(&places, "wa0") == PLACES_MOST - 1 && places_find(&places, "wd1") == 0);
+        length = places_say(&places, said, sizeof(said));
+        check("places: and the whole of them fit the room the compositor reads", length < PLACES_BYTES);
+        check("places: a screen is named by letters, digits and hyphens, one to fifteen",
+              place_screen_name_valid("HDMI-A-1") && place_screen_name_valid("eDP-1") && !place_screen_name_valid("") &&
+                  !place_screen_name_valid("a b") && !place_screen_name_valid("Virt_1") &&
+                  !place_screen_name_valid("ABCDEFGHIJKLMNOP"));
+}
+
 b32 main(void)
 {
         byte_order();
@@ -58049,6 +58134,7 @@ b32 main(void)
 #endif
         windows_header();
         windows_placement();
+        windows_places();
         return test_report(null);
 }
 #endif /* CHECK_socket */
@@ -115751,6 +115837,162 @@ static fn check_compositor_place(void)
         memory_zero(&compositor, sizeof(compositor));
 }
 
+/*
+        Where the hand put a window, kept and given back (compositor_remember, compositor_recall): a named window
+        let go of after a drag or a resize is written to the file, and the next window of that name opens there,
+        at that size, a step down and across from one still there; a placement stands over it; a window with no
+        name, one that fills a place, or any while remembering is off is not kept; and a kept place on a screen
+        that is gone goes to the nearest one left, kept on it however far off it was.
+*/
+static fn place_file(const char address_to path, const char address_to text)
+{
+        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
+        if (handle >= 0)
+        {
+                system_write_once(handle, text, string_length((string_address)text));
+                system_close(handle);
+        }
+}
+
+static fn place_named(int row, const char address_to name, unsigned int how, int x, int y, int program_x, int program_y)
+{
+        struct windows address_to table = compositor.table;
+
+        memory_zero(table->name[row], WINDOWS_NAME);
+        if (name)
+                memory_copy(table->name[row], name, string_length((string_address)name));
+        // A size, when one is asked, of 50 by 30: under the least, which is what it is made.
+        place_paint(row, how, x, y, 50, 30, program_x, program_y, 100, 60);
+}
+
+// The hand lets go of a window it dragged to x, y, the pointer on the window and far from the output's edges, which
+// would arrange it.
+static fn place_dragged(int row, int x, int y)
+{
+        compositor.drag = row;
+        compositor.drag_moved = 1;
+        compositor_place(row, x, y);
+        compositor.pointer_x = compositor.x[row] + 10;
+        compositor.pointer_y = compositor.y[row] + 10;
+        compositor_release(COMPOSITOR_BTN_LEFT, 1);
+}
+
+static fn check_compositor_remember(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        static char places_path[64], remember_path[64], before[PLACES_BYTES + 1], after[PLACES_BYTES + 1];
+        const int screens[3][4] = {{0, 0, 1000, 800}, {1000, 0, 800, 600}, {-1280, 100, 1280, 1024}};
+        const char names[3][WINDOWS_NAME] = {"eDP-1", "HDMI-A-1", "DP-2"};
+        struct place_kept kept;
+        struct windows address_to table;
+        positive length;
+
+        memory_zero(&kept, sizeof(kept));
+        memory_copy(kept.screen, "HDMI-A-1", 9);
+        kept.origin_x = 2560, kept.x = 10, kept.y = 10, kept.width = 100, kept.height = 100;
+        check("remember: a kept place goes on the screen of its connector's name, wherever that screen is now",
+              place_kept_screen(&kept, names, screens, 3) == 1);
+        memory_copy(kept.screen, "DP-9", 5);
+        kept.origin_x = -1000, kept.origin_y = 300;
+        check("remember: its screen gone, it goes on the one nearest where it was",
+              place_kept_screen(&kept, names, screens, 3) == 2);
+        kept.origin_x = 5000, kept.origin_y = 0;
+        check("remember: from far right of them all, the nearest is the one on the right", place_kept_screen(&kept, names, screens, 3) == 1);
+        check("remember: and with no screens it is the first", place_kept_screen(&kept, names, screens, 0) == 0);
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("remember: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+        length = positive_into_string((p8 address_to)places_path + 24, (positive)system_call(syscall(getpid)));
+        memory_copy(places_path, "/tmp/moonwater-places-p.", 24);
+        places_path[24 + length] = 0;
+        memory_copy(remember_path, places_path, 25 + length);
+        remember_path[22] = 'r';
+        system_remove_at(AT_FDCWD, (string_address)places_path, 0);
+        system_remove_at(AT_FDCWD, (string_address)remember_path, 0);
+        compositor_places_path = places_path;
+        compositor_remember_path = remember_path;
+
+        place_named(1, "probe", WINDOW_PLACE_AUTO, 0, 0, 20, 20);
+        check("remember: with nothing kept, a named window is where its program put it", compositor.x[1] == 20 && compositor.y[1] == 20);
+        place_dragged(1, 120, 90);
+        compositor_text(places_path, after, sizeof(after));
+        check("remember: let go of after a drag, its place is written under its name, from its screen's top left",
+              string_equals((string_address)after, "probe screen 0 0 120 90 100 60\n"));
+        table->pid[1] = 1;
+        compositor_leave(1);
+        place_named(1, "probe", WINDOW_PLACE_AUTO, 0, 0, 20, 20);
+        check("remember: the next window of the name opens where the hand put the last", compositor.x[1] == 120 && compositor.y[1] == 90);
+        place_named(2, "probe", WINDOW_PLACE_AUTO, 0, 0, 20, 20);
+        check("remember: and one more while it is there, a step down and across", compositor.x[2] == 140 && compositor.y[2] == 110);
+        place_named(3, "probe", WINDOW_PLACE_AT, 30, 40, 20, 20);
+        check("remember: a placement stands over what was kept", compositor.x[3] == 30 && compositor.y[3] == 40);
+        place_named(4, "probe", WINDOW_PLACE_SIZE, 0, 0, 20, 20);
+        check("remember: a size asked for is a placement too, where the program asked",
+              compositor.x[4] == 20 && compositor.y[4] == 20 && compositor.w[4] == 96 && compositor.h[4] == 48);
+
+        // A resize: the size the hand left is kept, and given back with the place.
+        compositor.resize = 2;
+        compositor_want(2, 180, 120);
+        compositor_release(COMPOSITOR_BTN_LEFT, 1);
+        compositor_text(places_path, after, sizeof(after));
+        check("remember: let go of after a resize, its size is kept with its place",
+              string_equals((string_address)after, "probe screen 0 0 75 110 180 120\n"));
+        place_named(5, "probe", WINDOW_PLACE_AUTO, 0, 0, 20, 20);
+        check("remember: and the next window of the name is asked for that size",
+              table->want_width[5] == 180 && table->want_height[5] == 120 && compositor.w[5] == 180);
+
+        place_named(6, null, WINDOW_PLACE_AUTO, 0, 0, 200, 10);
+        compositor_text(places_path, before, sizeof(before));
+        place_dragged(6, 60, 60);
+        compositor_text(places_path, after, sizeof(after));
+        check("remember: a window with no name is not kept", string_equals((string_address)before, (string_address)after));
+        place_named(7, "full", WINDOW_PLACE_MAXIMIZED, 0, 0, 10, 10);
+        compositor_remember(7);
+        compositor_text(places_path, after, sizeof(after));
+        check("remember: nor is one that fills a place", string_equals((string_address)before, (string_address)after));
+
+        place_file(remember_path, "off\n");
+        place_named(8, "other", WINDOW_PLACE_AUTO, 0, 0, 33, 33);
+        place_dragged(8, 150, 150);
+        compositor_text(places_path, after, sizeof(after));
+        check("remember: with remembering off nothing is written", string_equals((string_address)before, (string_address)after));
+        place_named(9, "probe", WINDOW_PLACE_AUTO, 0, 0, 22, 44);
+        check("remember: and nothing kept is given back", compositor.x[9] == 22 && compositor.y[9] == 44);
+        place_file(remember_path, "on\n");
+
+        place_file(places_path, "gone HDMI-A-9 1920 0 100 50 120 80\nfar screen 0 0 5000 -9000 100 60\nnot a line\n");
+        place_named(10, "gone", WINDOW_PLACE_AUTO, 0, 0, 3, 3);
+        check("remember: a place kept on a screen that is gone is on the nearest left, from its top left",
+              compositor.x[10] == 100 && compositor.y[10] == 50 && compositor.w[10] == 120);
+        place_named(11, "far", WINDOW_PLACE_AUTO, 0, 0, 3, 3);
+        check("remember: and one kept far off the screen is put back on it", compositor.x[11] == 155 && compositor.y[11] == 1);
+        system_remove_at(AT_FDCWD, (string_address)places_path, 0);
+        place_named(12, "far", WINDOW_PLACE_AUTO, 0, 0, 3, 3);
+        check("remember: the file taken away (canvas windows forget), the window is where its program puts it",
+              compositor.x[12] == 3 && compositor.y[12] == 3);
+
+        system_remove_at(AT_FDCWD, (string_address)places_path, 0);
+        system_remove_at(AT_FDCWD, (string_address)remember_path, 0);
+        compositor_places_path = SETTING_WINDOWS_PLACES_PATH;
+        compositor_remember_path = SETTING_WINDOWS_REMEMBER_PATH;
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
+                        0, 0);
+        memory_zero(&compositor, sizeof(compositor));
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
@@ -118490,6 +118732,7 @@ b32 main()
         check_compositor_hover();
         check_compositor_dismiss();
         check_compositor_place();
+        check_compositor_remember();
 #if MOONWATER_UI_LAUNCHER
         check_launcher();
 #endif
