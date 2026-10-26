@@ -141,6 +141,17 @@ already open, and a download's own redirects and revocation fetches, keep what t
 started with. `http off` leaves the CRL and caIssuers fetches inside TLS alone, which
 are plain http by design and checked by their signatures.
 
+At the tight and locked net tiers (`sec_net_hardened`, `sec_net_locked`) a closed
+port gives a scanner nothing: the kernel sysctl `net.ipv4.moonwater_silent` is set
+to 1 and the kernel drops the TCP reset and the ICMP port-unreachable it would
+otherwise send for a segment or datagram to a port with no socket, for traffic that
+did not arrive on loopback (IPv6 included). Loopback keeps refusing a closed port at
+once, and a port with a listener is reached as ever: it hides closed ports from the
+outside, it is not a firewall for open ones, and it adds nothing to the path of a
+packet for an open port. The default tier leaves it 0, so UDP `traceroute` still
+reads a port-unreachable. The sign it is working is that a scan stops moving
+`/proc/net/snmp`'s `TcpOutRsts` and `IcmpOutDestUnreachs`.
+
 Wi-Fi and Bluetooth are off until `moonwater wifi on` and `moonwater bluetooth on` raise
 them: a machine that has not asked for a radio has it soft-blocked from boot, and `wifi add` and
 `bluetooth add` keep a name for when it is on and do not switch it. A machine that already

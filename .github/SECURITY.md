@@ -386,6 +386,35 @@ attacker gets its invariants here once there is a lane that proves them.
   with a DHCPRELEASE broadcast from 0.0.0.0 (ciaddr the address, the server
   named, no parameter list). A window that ended unanswered gets no grace and
   nothing is released for it.
+- **FW-D1, a closed port is silent off loopback at the tight net tier
+  (`net.ipv4.moonwater_silent`):** a TCP segment to a port nothing listens on is
+  answered with a reset and a UDP datagram to a closed port with an ICMP port
+  unreachable, which tells a scanner the port is closed and is work done per
+  packet for whoever sent it. The switch (an int, `mw_net_silent_gate` in
+  `kernel/kernel.c`, written 1 by the network watcher at `STRICT_NET` 2 and 3,
+  left at the kernel's 0 at the default tier) has the four "no socket" ends of
+  the receive paths drop the packet with no answer unless it came in on a
+  loopback device: TCP skips the no-socket `tcp_v{4,6}_send_reset`, UDP skips
+  the port-unreachable `icmp_send`/`icmpv6_send`, and the packet is dropped
+  with the reason it would have carried after answering. Loopback keeps
+  answering, so a connect to a closed port of `127.0.0.1`, `::1` or the host's
+  own address (routed over `lo`) is still refused at once; the check is by
+  device, not by address. It is not a firewall: a port with a listener is
+  reached as ever, and nothing is added to the path of a packet for an open
+  port (the checks sit only on the cold no-socket paths, past the checksum).
+  Honest limits: a reset or an error for a packet that matches an existing
+  socket or TIME-WAIT is untouched, as is every other ICMP, neighbour
+  discovery, Packet Too Big and the ICMP errors of forwarded traffic, so the
+  host's existence still shows; dropping the reset does not hide the port's
+  silence, so a prober timing many ports can still tell a dropped reset from a
+  filtered path elsewhere. The switch is one int in the first network
+  namespace's table (`ipv4_table` is registered for `init_net`), so a namespace
+  of its own neither sees nor flips it, and a packet reaching the host over a
+  veth from another namespace is silenced by the one int like any other. A
+  `MOONWATER_STOCK` kernel has no such file. The observable is that a scan
+  stops moving `/proc/net/snmp`'s `TcpOutRsts` and `Icmp`/`Icmp6OutDestUnreachs`
+  (`TcpInSegs`, `UdpNoPorts` and `Udp6NoPorts` still count the packet): proved
+  between two guests on a private link by `sh test/run firewall`.
 - **Bad URL spellings:** `http:` and `https:` without `//` are refused in every
   tier (a host named `https` is not worth a plaintext connection to the wrong
   place); the tight tier refuses every leading scheme token (`ftp:21`).
@@ -594,7 +623,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
 | `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
 | `sec_text` | `STRICT_TEXT` 2 | 3 |
-| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise; a public certificate has to be logged (Certificate Transparency) | 3 |
+| `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise; a public certificate has to be logged (Certificate Transparency); a closed port off loopback is silent, no RST or ICMP unreachable (`net.ipv4.moonwater_silent`, FW-D1) | 3 |
 | `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation, USB locked at the first boot (USB-D1) | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec`, `usbcore.authorized_default=2` on the command line |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
@@ -698,6 +727,7 @@ ARM64 and RISC-V mandatory with UBSan trapping.
 | Shell, OS boundary | generated Bash and Dash differential; private edit files; `edit` draws a file's controls, DEL and invalid UTF-8 as `?` and drops C1 controls spelled in UTF-8, in rows and status line (`edit` lane, `hostile`); PTY setup; tar pinned parents; hostile environment and privilege matrices; `pathname_race`; effect-based coreutils (`sh test/run shell builtins files tar`) | |
 | Faults, resources | seccomp entropy failure; partial I/O, EINTR, ENOSPC, deadline and clock-jump faults; TLS 1.2/1.3 handshake writes and KeyUpdate replies share the operation deadline, including buffered writev batching; deferred read budgets are clamped to the enclosing body deadline; buffered payload cannot escape that body deadline; ordinary HTTP/TLS writes use one bounded nonblocking slow path, and queued whole writes need no clock or poll; interrupted output writev resumes its spans under one absolute retry budget, without a clock on uninterrupted writes; fatal TLS protocol errors spend both keys and cannot publish later buffered data (unexpected record types swept over both versions and sequence boundaries); descriptor and mmap exhaustion; once-armed `memory_reserve`, writev and socket faults mid-path; namespaces with netem (`sh test/run netem`) | SNTP allocation faults; a writev syscall that itself blocks on a disk or pipe is outside the interruption budget |
 | Kernel (ring 0) | `core_state`, `pane_pages`, `shared_page`, `console_queue`, `term_streams` (kit lane); `ring0_hostile` on KASAN, UBSAN, lockdep or KCSAN images (`MOONWATER_IMAGE=dist/bootx64.efi sh test/run ring0`); image defaults for redirects, router advertisements, RFC 1337, SYN cookies, `rp_filter` and the ARP settings (`sh test/run boot`, `net_sysctl`) | the `rp_filter` and ARP row of the boot lane has not run on an image yet |
+| Silent closed port (FW-D1) | `mw_net_silent_gate` (`kernel/kernel.c`) held to its rule in C on x86_64, arm64 and riscv64, over random device flags, a NULL device and seven switch values with the device unmapped while the switch is off (`kernel_ports`, kit lane); the watcher writing the switch 1 at `STRICT_NET` 2 and 3 and leaving it at the default, over a scratch `/proc/sys` and with the file absent (`net_sysctl`); two guests on a private link, a closed TCP and UDP port refused and the RST and unreachable counters moving at 0, dropped with no counter at 1 while loopback (v4 and v6) and an open listener still answer, back at 0, IPv6 over link-local, a tight tier booting at 1 (`sh test/run firewall`, 28 rows, 11 red on an image without the guard edits) | the flood A/B measures the gate's saving, not a line-rate generator or a distributed flood; the tight-tier boot row is NOT RUN without `MOONWATER_NET_TIER`; forwarded-traffic and other-ICMP paths are not driven; a prober timing a dropped RST against a filtered path elsewhere is not defeated |
 | Supply chain | bowl bootstraps pinned by digest or signing key, refusal on any mismatch; a download held to a kernel size ceiling (2 x the measured size + 64 MiB, `RLIMIT_FSIZE`); the signature reader under `bowl_sig_fuzz`; `sh test/run bowl` | |
 
 Revocation by hand, 2026-10-09: wget at both tiers, with the shipped anchors,
