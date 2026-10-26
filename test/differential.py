@@ -48058,6 +48058,25 @@ while True:
             check(finished and got["status"] == 1 and any("the compositor's desktop is not up" in line for line in got["out"]),
                   f"moonwater settings with a {word} pid in compositor.pid is no compositor, and exits 1",
                   repr(got)[:240])
+        #       The desktop switch ends the compositor and the supervisor the
+        #       machine script recorded, by the pids in their files, which are
+        #       numbers that fit a pid and nothing around their digits as
+        #       settings reads them: "pid123" names no process (it was read as
+        #       its trailing digits), and the switch must not send its signals
+        #       to 123.
+        script = ("rm -f /root/desktop /bowls/bin/desktop; mkdir -p /bowls/bin /run/moonwater\n"
+                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
+                  "chmod 755 /bowls/bin/desktop\n"
+                  "sleep 60 & victim=$!\n"
+                  "printf 'pid%s\\n' $victim > /run/moonwater/compositor.pid\n"
+                  "printf 'pid%s\\n' $victim > /run/moonwater/supervisor.pid\n" + say("desktop desktop") +
+                  "kill -0 $victim 2>/dev/null && echo '@@victim alive' || echo '@@victim gone'\n"
+                  "kill $victim; rm -f /run/moonwater/compositor.pid /run/moonwater/supervisor.pid "
+                  "/root/desktop /bowls/bin/desktop\n")
+        lines, finished = session(script)
+        check(finished and "@@victim alive" in lines,
+              "moonwater desktop PROFILE leaves alone the process a pid file names with junk before its digits",
+              repr([line for line in lines if line.startswith("@@")]))
         #       The settings a session keeps are read as the other state files
         #       are, through no link: a link at the name is no copy of them, so
         #       the list is the defaults (the image's copy is not reached either).

@@ -21700,13 +21700,19 @@ static b32 desktop_end(void)
 #define DESKTOP_COMPOSITOR HOST_STATE "/compositor.pid"
 #define DESKTOP_KIDS HOST_STATE "/desktop.kids"
 
-// The pid a file of the machine script holds, or 0.
+// The pid a file of the machine script holds, or 0: a whole number that fits what kill takes it as, and
+// nothing after its digits (4294967295 is -1, which every process answers to, and "123abc" is no pid).
 static positive desktop_pid_of(string_address path)
 {
         p8 word[24];
+        string_address stop;
+        b32 range = 0;
+        positive pid;
 
         return_if(host_read_word(path, word, sizeof(word)) <= 0, 0);
-        return string_to_positive(word);
+        stop = (string_address)word;
+        pid = string_to_number_unsigned_checked((string_address)word, address_of stop, 10, address_of range);
+        return *stop || range || pid > 0x7fffffff ? 0 : pid;
 }
 
 static bool desktop_alive(positive pid)
@@ -23858,7 +23864,7 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
 
 static b32 host_settings_window(string_address address_to arguments, positive count)
 {
-        p8 word[32], path[48] = "/proc/", line[512], face[256], bold[272];
+        p8 path[48] = "/proc/", line[512], face[256], bold[272];
         string_address words[8];
         positive pid = 0, length, at = 0, used = 0;
         bipolar handle, got = 0;
@@ -23866,20 +23872,9 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         (void)arguments;
         return_if(count != 2, host_usage());
 
-        //      A pid is what kill takes as an int: 4294967295 is -1, which every
-        //      process answers to, and "123abc" is not a pid at all.
-        host_read_word(HOST_STATE "/compositor.pid", word, sizeof(word));
-        {
-                string_address stop = (string_address)word;
-                b32 range = 0;
-
-                pid = string_to_number_unsigned_checked((string_address)word, address_of stop, 10,
-                                                        address_of range);
-                if (*stop || range || pid > 0x7fffffff)
-                        pid = 0;
-        }
+        pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
         return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
-                      system_access_at(AT_FDCWD, (string_address) "/run/moonwater/windows", 0) != 0,
+                      system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) != 0,
                   host_refuse("the compositor's desktop is not up, and the settings window is one of its "
                               "windows: moonwater desktop on starts it\n"));
 
