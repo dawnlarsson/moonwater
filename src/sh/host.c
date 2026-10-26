@@ -18085,6 +18085,13 @@ static bool locale_zone_read(p8 address_to title, positive title_room,
         return true;
 }
 
+//      The zone's title and how it came to be, on the line a verb opens with.
+static fn locale_zone_line(string_address title, string_address how)
+{
+        string_format(log, host_label "timezone %s " TERM_DIM "%s" TERM_RESET
+                                      "\n", title, how);
+}
+
 static b32 locale_zone_status(void)
 {
         p8 title[128];
@@ -18097,8 +18104,7 @@ static b32 locale_zone_status(void)
                 return 0;
         }
         locale_zone_moment(when, sizeof(when));
-        string_format(log, host_label "timezone %s " TERM_DIM "%s" TERM_RESET
-                                      "\n", title, how);
+        locale_zone_line(title, how);
         host_say(log, "  local %s\n", when);
         return 0;
 }
@@ -18272,8 +18278,7 @@ static b32 locale_zone_store(string_address zone, string_address mode)
         locale_zone_moment(after, sizeof(after));
         locale_zone_title(zone, title, sizeof(title));
         locale_zone_how(how, sizeof(how));
-        string_format(log, host_label "timezone %s " TERM_DIM "%s" TERM_RESET
-                                      "\n", title, how);
+        locale_zone_line(title, how);
         string_format(log, "  before  %s  " TERM_DIM "%s" TERM_RESET "\n",
                       before, old_shown);
         string_format(log, "  after   %s\n", after);
