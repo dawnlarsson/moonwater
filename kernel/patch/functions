@@ -39,11 +39,27 @@
 #                 Both become a #define in include/generated/asm-offsets.h,
 #                 through the arch's own asm-offsets.c, and kernel.c turns
 #                 them into assembler symbols with MWSET(NAME).
+#         //> guard <path under linux/> <anchor> => <C statement>
+#                 For a routine that replaces nothing and is called from
+#                 Linux's own C: the statement goes on a line of its own
+#                 directly above the anchor, indented as the anchor is. The
+#                 anchor is one whole line of the file as it stands, leading
+#                 and trailing blanks aside, and it has to be there exactly
+#                 once: missing or twice stops the build. A check that guards
+#                 the line below it is the use, and a table row the routine's
+#                 switch needs is the other.
+#         //> declare <path under linux/> <C declaration>
+#                 The declaration a guard's file needs, on a line of its own
+#                 after the last #include at the top of the file (outside any
+#                 #if), before the first line of code.
 #
 #       Every edit is idempotent, so running it twice changes nothing, and
 #       every edit stops the build when the line it is placed by has moved:
 #       an image built without a replacement is a kernel nobody chose, and
-#       one built with half of one does not link.
+#       one built with half of one does not link. A guard or a declaration
+#       ends in a mark, so a second run finds its own line, and a marked line
+#       above an anchor that says something else (an older text of the tag)
+#       stops the build too.
 #
 #       MOONWATER_STOCK keeps every function as Linux wrote it.
 #
@@ -69,42 +85,53 @@ if [ "${1:-}" = --index ] || [ "${1:-}" = --check ]; then
         trap 'rm -rf "$scratch"' EXIT
 
         awk '
-                function flush(    k, arches, row) {
-                        if (nrep) {
-                                for (k = 1; k <= nrep; k++) {
-                                        row = rep[k]
-                                        n++
-                                        name[n] = fn[k]; where[n] = file[k]; result[n] = perf
-                                        x86[n] = (!limited || has["x86_64"]) ? "yes" : "no"
-                                        a64[n] = (!limited || has["arm64"]) ? "yes" : "no"
-                                        rv[n] = (!limited || has["riscv64"]) ? "yes" : "no"
-                                }
+                function row(routine, replaced) {
+                        n++
+                        name[n] = routine; where[n] = replaced; result[n] = perf
+                        x86[n] = (!limited || has["x86_64"]) ? "yes" : "no"
+                        a64[n] = (!limited || has["arm64"]) ? "yes" : "no"
+                        rv[n] = (!limited || has["riscv64"]) ? "yes" : "no"
+                }
+                function flush(    k) {
+                        for (k = 1; k <= nrep; k++)
+                                row(fn[k], file[k] " " fn[k])
+                        # A routine that replaces nothing is named by the
+                        # first ASM_FUNC after its tags.
+                        if (!nrep && nguard) {
+                                row("(no ASM_FUNC after its guards)", "nothing; " nguard " guard line" (nguard == 1 ? "" : "s"))
+                                pending = n
                         }
-                        nrep = 0; limited = 0; perf = ""; delete has
+                        nrep = 0; nguard = 0; limited = 0; perf = ""; delete has
                 }
                 /^\/\/> / {
                         line = $0; sub(/^\/\/> /, "", line)
                         split(line, f, /[ \t]+/)
                         if (f[1] == "arch") { limited = 1; for (k = 2; k in f; k++) has[f[k]] = 1; next }
                         if (f[1] == "replace") { nrep++; rep[nrep] = line; file[nrep] = f[2]; fn[nrep] = f[3] }
+                        if (f[1] == "guard") nguard++
                         if (f[1] == "perf") { perf = line; sub(/^perf[ \t]+/, "", perf) }
                         next
                 }
-                { flush() }
+                {
+                        flush()
+                        if (pending && match($0, /ASM_FUNC\([A-Za-z0-9_]+\)/)) {
+                                name[pending] = substr($0, RSTART + 9, RLENGTH - 10)
+                                pending = 0
+                        }
+                }
                 END {
                         flush()
                         w1 = length("routine"); w2 = length("replaces")
                         for (i = 1; i <= n; i++) {
                                 if (length(name[i]) > w1) w1 = length(name[i])
-                                r = where[i] " " name[i]
-                                if (length(r) > w2) w2 = length(r)
+                                if (length(where[i]) > w2) w2 = length(where[i])
                         }
                         printf "//    %-*s  %-*s  %-7s %-7s %-7s %s\n", w1, "routine", w2, "replaces", "x86_64", "arm64", "riscv64", "measured"
                         d1 = ""; for (i = 0; i < w1; i++) d1 = d1 "-"
                         d2 = ""; for (i = 0; i < w2; i++) d2 = d2 "-"
                         printf "//    %s  %s  ------- ------- ------- --------\n", d1, d2
                         for (i = 1; i <= n; i++)
-                                printf "//    %-*s  %-*s  %-7s %-7s %-7s %s\n", w1, name[i], w2, where[i] " " name[i], x86[i], a64[i], rv[i], (result[i] == "" ? "-" : result[i])
+                                printf "//    %-*s  %-*s  %-7s %-7s %-7s %s\n", w1, name[i], w2, where[i], x86[i], a64[i], rv[i], (result[i] == "" ? "-" : result[i])
                         printf "//\n//    %d routine%s.\n", n, (n == 1 ? "" : "s")
                 }
         ' "$source" > "$scratch/table"
@@ -128,6 +155,32 @@ if [ "${1:-}" = --index ] || [ "${1:-}" = --check ]; then
                 grep -q "ASM_FUNC($function)" "$source" ||
                         { echo "kernel.c: $function is tagged replace and has no ASM_FUNC($function)" >&2; exit 1; }
         done || bad=1
+
+        if grep -q -F "(no ASM_FUNC after its guards)" "$scratch/table"; then
+                echo "kernel.c: a block of guards has no ASM_FUNC after it" >&2
+                bad=1
+        fi
+
+        #       A guard is a path, an anchor and a statement, and a declaration
+        #       a path and a declaration; one without them would stop the
+        #       build only when it was applied.
+        awk '
+                /^\/\/> guard / {
+                        line = $0; sub(/^\/\/> guard[ \t]+/, "", line)
+                        if (line !~ /^[^ \t]+[ \t]+[^ \t].* => [^ \t].*[^ \t]$/) {
+                                print "kernel.c: line " NR " is not //> guard <path> <anchor> => <statement>" > "/dev/stderr"
+                                bad = 1
+                        }
+                }
+                /^\/\/> declare / {
+                        line = $0; sub(/^\/\/> declare[ \t]+/, "", line)
+                        if (line !~ /^[^ \t]+[ \t]+[^ \t].*;$/) {
+                                print "kernel.c: line " NR " is not //> declare <path> <declaration;>" > "/dev/stderr"
+                                bad = 1
+                        }
+                }
+                END { exit bad }
+        ' "$source" || bad=1
 
         sed -n 's/^[[:space:]]*MWSET(\([A-Za-z0-9_]*\)).*/\1/p' "$source" | sort -u > "$scratch/mwset"
         awk '/^\/\/> (offset|const) / { print $3 }' "$source" | sort -u > "$scratch/tagged"
@@ -299,14 +352,110 @@ assert_in() {
         grep -q -F -- "$marker" "$file" && return 0
         { cat "$file"; printf '\n/* Moonwater */ %s\n' "$marker"; } > "$work/edit"
         put "$file"
-        echo "  functions: $1 asserts $expression"
+        echo "  functions: ${file#linux/} asserts $expression"
 }
 
-while read -r verb one two rest; do
-        case "$verb" in
-        replace) retire "$one" "$two" ;;
-        unstatic) unstatic "$one" "$two" ;;
-        assert) assert_in "$one" "$two" $rest ;;
+#       What a guard and a declaration end in: how a second run finds them.
+mark="/* Moonwater: kernel/kernel.c */"
+
+#       A tag's text after its verb and its path, blanks inside kept as they
+#       were written. Sets path and text.
+tag_split() {
+        text=${1#*[ 	]}
+        text=${text#"${text%%[! 	]*}"}
+        path=${text%%[ 	]*}
+        text=${text#"$path"}
+        text=${text#"${text%%[! 	]*}"}
+}
+
+#       A statement on its own line directly above the one line that is the
+#       anchor. The anchor and the line go to awk through the environment:
+#       awk -v reads escapes in what it is handed, and C is full of them.
+guard_in() {
+        tag_split "$1"
+        file=linux/$path
+        case $text in
+        ?*' => '?*) ;;
+        *) die "guard: '$1' is not <path> <anchor> => <statement>" ;;
+        esac
+        anchor=${text%% => *}
+        [ -f "$file" ] || die "guard: no $file"
+        MW_ANCHOR=$anchor MW_LINE="${text#* => } $mark" MW_MARK=$mark awk '
+                function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+                { line[NR] = $0 }
+                END {
+                        for (i = 1; i <= NR; i++)
+                                if (trim(line[i]) == ENVIRON["MW_ANCHOR"]) { found++; at = i }
+                        if (found != 1) exit found ? 4 : 3
+                        above = trim(line[at - 1])
+                        if (above == ENVIRON["MW_LINE"]) exit 5
+                        if (index(above, ENVIRON["MW_MARK"])) exit 6
+                        indent = line[at]; sub(/[^ \t].*$/, "", indent)
+                        for (i = 1; i <= NR; i++) {
+                                if (i == at) print indent ENVIRON["MW_LINE"]
+                                print line[i]
+                        }
+                }
+        ' "$file" > "$work/edit"
+        case $? in
+        0) put "$file"; echo "  functions: $path gains a guard above $anchor" ;;
+        5) ;;
+        3) die "guard: $file has no line $anchor" ;;
+        4) die "guard: $file has the line $anchor more than once" ;;
+        6) die "guard: $file carries another text above $anchor -- build --clean unpacks the kernel again" ;;
+        *) die "guard: $file could not be read" ;;
+        esac
+}
+
+#       A declaration after the last #include before the file's first line of
+#       code, which is a line that starts with a letter; an #include inside an
+#       #if does not count, since the declaration would be inside it too.
+declare_in() {
+        tag_split "$1"
+        file=linux/$path
+        [ -f "$file" ] || die "declare: no $file"
+        MW_LINE="$text $mark" awk '
+                { line[NR] = $0 }
+                END {
+                        for (i = 1; i <= NR; i++)
+                                if (line[i] == ENVIRON["MW_LINE"]) exit 5
+                        for (i = 1; i <= NR && !code; i++)
+                                if (line[i] ~ /^[A-Za-z_]/) code = i
+                        for (i = 1; i < code; i++) {
+                                if (line[i] ~ /^#[ \t]*if/) depth++
+                                else if (line[i] ~ /^#[ \t]*endif/) depth--
+                                else if (line[i] ~ /^#[ \t]*include/ && !depth) after = i
+                        }
+                        if (!after) exit 3
+                        for (i = 1; i <= NR; i++) {
+                                print line[i]
+                                if (i == after) print ENVIRON["MW_LINE"]
+                        }
+                }
+        ' "$file" > "$work/edit"
+        case $? in
+        0) put "$file"; echo "  functions: $path declares $text" ;;
+        5) ;;
+        3) die "declare: $file has no #include before its first line of code" ;;
+        *) die "declare: $file could not be read" ;;
+        esac
+}
+
+#       Whole lines: a guard's anchor and statement have blanks of their own.
+while IFS= read -r action; do
+        case "$action" in
+        guard[\ \	]*) guard_in "$action" ;;
+        declare[\ \	]*) declare_in "$action" ;;
+        *)
+                read -r verb one two rest <<EOF
+$action
+EOF
+                case "$verb" in
+                replace) retire "$one" "$two" ;;
+                unstatic) unstatic "$one" "$two" ;;
+                assert) assert_in "$one" "$two" $rest ;;
+                esac
+                ;;
         esac
 done < "$work/actions"
 
