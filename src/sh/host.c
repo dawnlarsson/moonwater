@@ -2187,6 +2187,34 @@ static b32 host_run(string_address address_to argv)
 }
 
 /*
+        What a /root keeps, put back once it is the one to keep it.
+
+        host_take runs it when a disk's /root has just been bound, and the
+        machine process runs it at every start, whatever the verdict. An
+        install's restores are so done a second time (each finds its work
+        done or tried, as radio_wifi_restored says), and a session with no
+        disk, or one that is only being asked, has no other place for them.
+
+        radio is false for the machine process under an ask, as radio_recover
+        has it: the radios wait for the answer, and the take that follows it
+        restores them. name is the caller's: a take settles the name of the
+        /root it bound, and the machine process leaves it to host_booted,
+        which settles it in every branch of boot. The order is the one both
+        callers always had, the name between usb and the locale.
+*/
+static fn host_restore_session(bool radio, bool name)
+{
+        if (radio)
+                radio_restore();
+        usb_restore();
+        if (name)
+                name_restore();
+        locale_restore();
+        dns_restore();
+        tune_restore();
+}
+
+/*
         Use an install's data, updating it first when asked, and say so.
 
         A session keeps one disk's data: a second set of binds over the first
@@ -2218,12 +2246,7 @@ static b32 host_take(host_install address_to install, bool update)
         host_say(log, host_label "%s, /root and /home are kept on %s\n",
                  BOWL_ROOT_DIRECTORY, install->disk);
         host_release_all();
-        radio_restore();
-        usb_restore();
-        name_restore();
-        locale_restore();
-        dns_restore();
-        tune_restore();
+        host_restore_session(true, true);
         return 0;
 }
 

@@ -2654,12 +2654,8 @@ static b32 host_machine_run(void)
         //      waiting for this and not for them.
         host_write_text(HOST_MACHINE_SOURCED, "1\n");
 
-        if (!string_has_prefix((string_address)verdict, "ask "))
-                radio_restore();
-        usb_restore();
-        locale_restore();
-        dns_restore();
-        tune_restore();
+        host_restore_session(!string_has_prefix((string_address)verdict, "ask "),
+                             false);
 
         host_machine_hold(slot, true);
 
