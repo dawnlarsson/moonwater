@@ -16041,7 +16041,8 @@ static b32 usb_unlock_now(void)
 /*
         The device a word names: a port, or an id. A VID:PID alone is the one
         device plugged in now that says it, and is refused when none or more
-        than one does; a whole id may name a device that is not plugged in.
+        than one does, as is a whole id that more than one says (the ports are
+        named); a whole id may name a device that is not plugged in.
         rule is the id the policy keeps, device the device plugged in now that
         it names, or null.
 */
@@ -16049,6 +16050,7 @@ static b32 usb_resolve(string_address word, usb_census address_to census, usb_ru
                        usb_device address_to address_to device)
 {
         positive count = 0;
+        p8 ports[120] = "";
 
         *device = null;
         usb_census_take(census);
@@ -16068,11 +16070,27 @@ static b32 usb_resolve(string_address word, usb_census address_to census, usb_ru
                 if (one->root || !string_equals((string_address)one->id, (string_address)rule->id) ||
                     (rule->key[0] && !usb_rule_names(rule, one)))
                         continue;
+                string_append_bounded(ports, count ? " " : "", sizeof(ports));
+                string_append_bounded(ports, (string_address)one->port, sizeof(ports));
                 count++;
                 *device = one;
         }
         if (rule->key[0])
-                return 0;
+        {
+                p8 line[256];
+                p8 many[24];
+
+                //      Two devices with one serial (a clone, or two long serials with one hash) are one id: the rule
+                //      names both, whichever is asked, and the one this configures and takes its classes from
+                //      would otherwise be the last of them, unsaid.
+                if (count < 2)
+                        return 0;
+                positive_into_string(many, count);
+                (void)string_join(line, sizeof(line), (string_address)many, " devices plugged in share ",
+                                  (string_address)rule->id, "/", (string_address)rule->key, " (ports ", (string_address)ports,
+                                  "): an id names all of them, and so does a rule for any one; name the port of the one meant");
+                return host_refuse("%s\n", (string_address)line);
+        }
         return_if(!count, host_refuse("no %s is plugged in; name it as VID:PID/SERIAL\n", rule->id));
         return_if(count > 1, host_refuse("%p devices plugged in are %s; name one by its port or its serial, "
                                          "as usb shows them\n",

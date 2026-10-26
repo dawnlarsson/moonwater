@@ -47253,6 +47253,30 @@ while True:
               "usb allow of a held device whose rule cannot be kept holds the device again",
               repr((seen.get("usb allow 2-1"), out.get("unkept allow"))))
 
+        # Two devices that say one VID:PID/SERIAL (a clone of a stick, or two long serials with
+        # one hash) are one id: usb allow or deny of it was taken for the last of them, which
+        # was configured and gave its classes, unsaid, to a rule that names both. It is
+        # refused, with the ports, and nothing is configured or written; a port still names
+        # the one meant, and its rule is the same one rule.
+        script = (usb_tree +
+                  "dev 2-2 0aaa 0001 TWIN 'Twin one' 0 unknown; face 2-2:1.0 08 0\n"
+                  "dev 2-3 0aaa 0001 TWIN 'Twin two' 0 unknown; face 2-3:1.0 08 0\n" +
+                  say("usb allow 0aaa:0001/TWIN") + say("usb deny 0aaa:0001/TWIN") +
+                  usb_show("twins", "v $d/2-2/authorized $d/2-3/authorized; ls /root/usb.policy 2>&1 | grep -c 'No such'") +
+                  say("usb allow 2-3") + usb_show("twin port", "grep -c '^allow 0aaa:0001/TWIN' /root/usb.policy") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and all(seen.get(f"usb {verb} 0aaa:0001/TWIN", {}).get("status") == 1 and
+                               re.search(r"2 devices plugged in share 0aaa:0001/TWIN \(ports 2-[23] 2-[23]\)",
+                                         out.get(f"usb {verb} 0aaa:0001/TWIN", ""))
+                               for verb in ("allow", "deny")) and
+              out.get("twins") == "0\n0\n1" and seen.get("usb allow 2-3", {}).get("status") == 0 and
+              out.get("twin port") == "1",
+              "usb allow and deny of an id two devices say are refused with their ports, and change nothing; a port still names one",
+              repr((seen.get("usb allow 0aaa:0001/TWIN"), seen.get("usb deny 0aaa:0001/TWIN"), out.get("twins"), out.get("twin port"))))
+
         # A rule the policy has no room for changes nothing: with 64 rules kept, usb
         # allow of a device held at its port is refused, and the device stays held (it
         # used to be configured first, and said allowed, before the refusal).
