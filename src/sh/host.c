@@ -20537,9 +20537,14 @@ static bool desktop_installed(string_address name)
 static positive desktop_session(void)
 {
         p8 word[24];
+        p32 member;
+        bool leader;
+        positive recorded = host_read_word(DESKTOP_SESSION, word, sizeof(word)) <= 0 ? 0 : string_to_positive(word);
+        positive found;
 
-        return_if(host_read_word(DESKTOP_SESSION, word, sizeof(word)) <= 0, 0);
-        return string_to_positive(word);
+        return_if(recorded && desktop_scan(recorded, address_of member, 1, address_of leader), recorded);
+        found = desktop_compositor_session();
+        return found ? found : recorded;
 }
 
 /*
@@ -20570,6 +20575,32 @@ static positive desktop_scan(positive session, p32 address_to pids, positive roo
                 address_to leader |= process->pid == session;
                 if (found < room)
                         pids[found] = process->pid;
+static positive desktop_scan(positive session, p32 address_to pids, positive room,
+                             bool address_to leader);
+
+// The session of a KWin that is running, 0 when none is: how a session nobody recorded is found.
+static positive desktop_compositor_session(void)
+{
+        static system_snapshot sample;
+
+        return_if(!system_snapshot_take(address_of sample, SPARK_SNAPSHOT_PROCESS, false), 0);
+        for (positive at = 0; at < sample.header.process_count; at++)
+        {
+                const struct snapshot_process address_to process = sample.processes + at;
+
+                if (process->state != 'Z' && process->session > 1 &&
+                    !string_compare_max((string_address)process->command, "kwin_wayland", sizeof("kwin_wayland") - 1))
+                        return process->session;
+        }
+        return 0;
+}
+
+/*
+        The session desktop off and stop end: the one the verb recorded, and where nothing of it is left (or none was
+        recorded, as when a session was started some other way) the session of the KWin that is running. A session
+        that was in no record was left running by desktop off, with Canvas gone: its compositor and the session bus
+        held the keyboard, and the console came back black and deaf until a reboot.
+*/
                 found++;
         }
 
