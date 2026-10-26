@@ -332,6 +332,41 @@ attacker gets its invariants here once there is a lane that proves them.
   that wants them off sets it. `unprivileged_bpf_disabled` has no knob: the
   image has no `bpf(2)` (the classic socket filters the DHCP client uses are
   separate).
+- **Two switches for bowls, `moonwater security packages` and `sudo`.** They
+  are kept in the security list of the image's settings and published in
+  /run/moonwater/security beside TLS's five (switch ids 6 and 7; TLS_SWITCHES
+  is 7, so a TLS client reads the file past them), and `security_switch_on`
+  (host.c) answers them for bowl.c and the command's root check. `packages`
+  (the programs of a bowl may run the package manager of their distribution)
+  is on at the default tier, as it always was, and off at the bowl's tight
+  tier (`MOONWATER_STRICT_BOWL` 2, `sec_bowl`), which refuses `packages on`:
+  it only tightens, and off takes from a compromised bowl program (attacker 8)
+  the one tool that installs more programs. `sudo` (the `moonwater` command
+  through sudo or su in a bowl, by a process that is root only inside the
+  bowl's user namespace) is off at every tier and can be turned on at the
+  default tier only; a tight build refuses `sudo on` and reads one kept by
+  another build as off. It is off because on trusts root in a bowl as root of
+  the machine for the command's verbs, and root in a bowl is whoever can start
+  one, the user and not a second account, so on hands every such user the
+  machine's settings: it is for a machine with one user. It cannot hand over
+  privilege. The root check is the command's manners, and whatever changes
+  the machine is the kernel's to allow (`capable()`, in the first user
+  namespace): a process that owns its mount namespace can plant a file of its
+  own at /run/moonwater/security and read sudo as on, and gains nothing the
+  kernel would not give it anyway. The reader takes the file only as a
+  regular file, not through a link, that a group and others may not write,
+  owned by root or by the overflow uid (which is how root's file looks from a
+  user namespace that does not map root, a bowl's), no longer than the
+  overlay and read whole; anything else is the tier's default, never sudo on.
+  A bowl has a /run of its own, so packages is asked before a bowl's
+  namespaces are made, and the command inside a bowl sees the switch only
+  when the bowl carries the file in. An older build that boots settings with
+  either switch turned publishes the entry and refuses the file whole, since
+  its reader knows five ids, so its TLS refuses every checked certificate
+  until a build that knows the switch sets it back. Held by `moonwater_cli`
+  (defaults, a turn and back, the published entries, a second run, nobody,
+  eight files that do not count, the tight build's lines and refusals) and
+  by `CHECK_bowl`'s `switches_asked` at both tiers (`sh test/run cli bowl`).
 - **The clients' network half runs apart (`net_apart`, `src/net/net.c`).**
   wget (`--spider` too), fetch, `host`, the NTS key establishment and every
   SNTP or NTS time query the machine's NTP child makes as root

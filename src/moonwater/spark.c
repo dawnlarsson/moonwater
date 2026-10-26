@@ -527,7 +527,8 @@ _Static_assert(sizeof(struct spawn) == 64, "spark spawn request ABI");
         client: a key refused (the SHA-256 of its DER SubjectPublicKeyInfo,
         which names a served certificate's key, an anchor's and a
         Certificate Transparency log's alike), a trust anchor added, and a
-        switch of TLS or HTTP turned from its default. A switch's id says
+        switch turned from its default: one of TLS or HTTP, or the bowls'
+        packages and sudo. A switch's id says
         which and it has no text; a block's and an anchor's id says who added
         it, which is a person with the moonwater command. Only the shape is
         checked here, in the kernel as anywhere: what a key's bytes are is

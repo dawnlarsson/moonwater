@@ -22371,6 +22371,10 @@ static b32 host_dns(string_address address_to arguments, positive count)
         published in /run/moonwater/security, which every TLS client reads
         and only root can write (tls_overlay_read in net.c says how it is
         read). Bare says what that file holds, to anybody.
+
+        The switches go in the same list and the same file: TLS's and
+        HTTP's five, and packages and sudo, which are the bowls' and which
+        security_switch_on answers to bowl.c and the root check.
 */
 #define HOST_SECURITY TLS_OVERLAY_PATH
 #define HOST_SECURITY_DER_MOST 8192
@@ -23597,7 +23601,7 @@ static const host_row host_rows[] = {
     {null, "@taskbar", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@dns", null, 'r'},
-    {null, "security [trust|block|SWITCH ...]", "keys TLS trusts and refuses besides the built-in ones, and its switches", 'm'},
+    {null, "security [trust|block|SWITCH ...]", "keys TLS trusts and refuses besides the built-in ones, and the switches of TLS and bowls", 'm'},
     {null, "security", "the built-in trust, and what was added to it or taken from it", 'f'},
     {null, "security trust", "every anchor, built in and added, by the SHA-256 of its key", 'f'},
     {null, "security trust add FILE", "trust a CA certificate, PEM or DER, as the built-in anchors are", 'f'},

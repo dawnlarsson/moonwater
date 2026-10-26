@@ -153,11 +153,21 @@ or RSA of 2048 to 4096 bits, no name constraints). Both lists are kept with the 
 settings, so they go along with `setup install` and `update`, and every program reads
 them from /run/moonwater/security when it connects; a file there that does not read
 refuses every checked certificate until boot or the next change writes it again. The
-five switches only tighten, each from what the default tier does today, and none can
-loosen a tight build; a change reaches every connection opened after it, while one
+five switches of TLS only tighten, each from what the default tier does today, and none
+can loosen a tight build; a change reaches every connection opened after it, while one
 already open, and a download's own redirects and revocation fetches, keep what they
 started with. `http off` leaves the CRL and caIssuers fetches inside TLS alone, which
 are plain http by design and checked by their signatures.
+
+`packages` and `sudo` are the bowls' two switches, kept and published the same way.
+`packages off` keeps the programs of a bowl from running their distribution's package
+manager (apk, apt and dpkg, pacman, dnf and rpm, zypper, nix); it is on by default and
+off at the bowl's tight tier (`sec_bowl`), which refuses `packages on`. `sudo on` lets
+the `moonwater` command be used through a bowl's sudo or su, by a process that is root
+only inside the bowl: it trusts root in a bowl as root of the machine, which is for a
+machine with one user, so it is off at every tier and only the default tier can turn
+it on. A published file that is not root's, that a group or others may write, or that
+does not read counts as no file: packages on, sudo off.
 
 At the tight and locked net tiers (`sec_net_hardened`, `sec_net_locked`) a closed
 port gives a scanner nothing: the kernel sysctl `net.ipv4.moonwater_silent` is set
