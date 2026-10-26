@@ -5501,10 +5501,14 @@ static b32 host_bios_set(void)
         p8 image[12];
         p32 attributes = HOST_EFI_ATTRIBUTES;
         bipolar handle;
+        bipolar failed;
         positive flags = 0;
 
-        //      The bits the firmware already had set stay set.
-        (void)host_efi_get(HOST_EFI_INDICATIONS, address_of indications);
+        //      The bits the firmware already had set stay set. A variable that
+        //      is not there has none; one that is there and cannot be read has
+        //      bits not known, and writing it from zero would clear them.
+        failed = host_efi_get(HOST_EFI_INDICATIONS, address_of indications);
+        return_if(failed < 0 && failed != -ENOENT, host_fail("firmware setup", failed));
         indications |= HOST_EFI_BOOT_TO_SETUP;
         memory_copy(image, address_of attributes, 4);
         memory_copy(image + 4, address_of indications, 8);

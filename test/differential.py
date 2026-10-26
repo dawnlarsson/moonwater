@@ -47012,6 +47012,25 @@ while True:
               any(line.endswith("running") for line in seen.get("desktop", {}).get("out", [])) and
               seen.get("desktop stop", {}).get("status") == 0 and "@@ record gone" in lines,
               "a session that was ended leaves no record of its number", repr(lines[-8:]))
+        #       The firmware's indications are read before they are written: a
+        #       variable that is there and cannot be read whole (five bytes, here)
+        #       has bits not known, and is left as it is and said, where it was
+        #       written from zero. (A variable that is not there is zero, and the
+        #       verb then reboots the machine, which no sandbox may do.)
+        script = ("mkdir -p /sys/firmware/efi/efivars; cd /sys/firmware/efi/efivars; "
+                  "printf '\\007\\000\\000\\000\\001\\000\\000\\000\\000\\000\\000\\000' "
+                  "> OsIndicationsSupported-8be4df61-93ca-11d2-aa0d-00e098032b8c\n"
+                  "printf 'abcde' > OsIndications-8be4df61-93ca-11d2-aa0d-00e098032b8c; cd /\n" +
+                  say("bios reboot") +
+                  "echo \"@@ left $(cat /sys/firmware/efi/efivars/OsIndications-8be4df61-93ca-11d2-aa0d-00e098032b8c)\"\n"
+                  "rm -rf /sys/firmware\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and seen.get("bios reboot", {}).get("status") == 1 and
+              any("firmware setup" in line for line in seen["bios reboot"]["out"]) and
+              "@@ left abcde" in lines,
+              "bios reboot with indications that cannot be read whole refuses and leaves them",
+              repr((seen.get("bios reboot"), lines[-2:])))
         # moonwater usb against a sysfs of the sandbox's own: /sys is a
         # directory here, so every device, interface and default is a file the
         # verb reads and writes, and what it wrote is read back. The kernel's
