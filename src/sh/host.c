@@ -20462,12 +20462,18 @@ static bool locale_ntp_server_ok(string_address name)
                         label = 0;
                 }
                 else if (byte_is_alnum(c) || (c == '-' && label))
-                        label++;
+                {
+                        //      The name is asked of the resolver (dns_write_name), which refuses a label of
+                        //      more than 63 bytes, as RFC 1035 does: it was kept and then never answered.
+                        if (++label > 63)
+                                return false;
+                }
                 else
                         return false;
         }
         //      A name may end in the dot that makes it absolute, as a name
-        //      typed that way always has.
+        //      typed that way always has: the resolver takes it, where the NTS
+        //      names (nts_name_ok) do not, being a TLS name's, which has none.
         return name[length - 1] != '-' && (label || name[length - 1] == '.');
 }
 
@@ -20487,8 +20493,8 @@ static b32 locale_ntp_server_set(string_address name)
 
         if (!automatic && !locale_ntp_server_ok(name))
                 return host_refuse("%s is not a server name: letters, digits, "
-                                   "dots and hyphens, under 80 characters, or "
-                                   "auto for the pool\n", name);
+                                   "dots and hyphens, labels of 63 characters at most, "
+                                   "under 80 characters, or auto for the pool\n", name);
         if (automatic)
         {
                 kept = system_remove_at(AT_FDCWD, LOCALE_NTP_SERVER_PATH, 0);

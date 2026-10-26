@@ -46556,8 +46556,16 @@ while True:
                    locale_say("ntp server " + "x" * 80) + locale_say("ntp server bad/name") +
                    locale_say("ntp server a b") + locale_say("ntp server -x") +
                    locale_say("ntp server .x") + locale_say('ntp server ""') +
-                   "echo \"@@word $(cat /root/ntp.server)\"\n" + locale_say("ntp server " + "x" * 79) +
+                   "echo \"@@word $(cat /root/ntp.server)\"\n" + locale_say("ntp server " + "x" * 39 + "." + "x" * 39) +
                    "echo \"@@word $(wc -c < /root/ntp.server)\"\n" +
+                   #   A label is at most 63 bytes and a name 79 characters here: 63 is kept, 64 is not, in a
+                   #   name of one label or of two, and a name of 80 in two labels is not either. The
+                   #   dot that makes a name absolute is kept.
+                   locale_say("ntp server " + "x" * 63) + "echo \"@@word $(cat /root/ntp.server)\"\n" +
+                   locale_say("ntp server " + "x" * 64) + locale_say("ntp server a." + "x" * 64) +
+                   locale_say("ntp server " + "x" * 40 + "." + "x" * 39) +
+                   "echo \"@@word $(cat /root/ntp.server)\"\n" +
+                   locale_say("ntp server time.example.net.") + "echo \"@@word $(cat /root/ntp.server)\"\n" +
                    locale_say("ntp server auto") +
                    "echo \"@@word $(test -e /root/ntp.server && echo kept || echo none)\"\n" +
                    locale_say("ntp server auto") +
@@ -46826,11 +46834,20 @@ while True:
             check(seen.get("ntp server " + bad, {}).get("status") not in (0, None) and
                   words[1:2] == ["time.example.net"],
                   f"ntp server {bad[:12]} is refused and keeps the server that was", repr(words[1:2]))
-        check(seen.get("ntp server " + "x" * 79, {}).get("status") == 0 and words[2:3] == ["80"],
+        check(seen.get("ntp server " + "x" * 39 + "." + "x" * 39, {}).get("status") == 0 and words[2:3] == ["80"],
               "a name of 79 characters is kept whole", repr(words[2:3]))
-        check(seen.get("ntp server auto", {}).get("status") == 0 and words[3:4] == ["none"] and
+        check(seen.get("ntp server " + "x" * 63, {}).get("status") == 0 and words[3:4] == ["x" * 63],
+              "a label of 63 characters is kept", repr(words[3:4]))
+        for bad in ("x" * 64, "a." + "x" * 64, "x" * 40 + "." + "x" * 39):
+            check(seen.get("ntp server " + bad, {}).get("status") not in (0, None) and
+                  "labels of 63 characters at most" in "\n".join(seen.get("ntp server " + bad, {}).get("out", [])) and
+                  words[4:5] == ["x" * 63],
+                  f"ntp server {bad[:12]}... ({len(bad)} characters) is refused and keeps the server that was", repr(words[4:5]))
+        check(seen.get("ntp server time.example.net.", {}).get("status") == 0 and words[5:6] == ["time.example.net."],
+              "a name that ends in the dot that makes it absolute is kept", repr(words[5:6]))
+        check(seen.get("ntp server auto", {}).get("status") == 0 and words[6:7] == ["none"] and
               any(line.startswith("@@back ") and "pool.ntp.org" in line for line in lines),
-              "ntp server auto takes the name off and the pool is asked again", repr(words[3:4]))
+              "ntp server auto takes the name off and the pool is asked again", repr(words[6:7]))
         #       The servers names are asked of: kept, written to resolv.conf at once,
         #       all of what is given or none of it, and forgotten for the lease's,
         #       which the watcher noted in /run/moonwater/dns.lease for `auto`.
