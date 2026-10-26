@@ -3797,10 +3797,12 @@ static long report_canvas(struct canvas_control __user *out)
         The window table the compositor shares is a memfd, which no path names
         that another process may open: its /proc/<pid>/fd link asks for the
         right to trace the compositor. The compositor gives it here, as root,
-        and any program takes a descriptor of it (close-on-exec) from the
-        device, as it could open the table's file before. The table is let go
-        when the compositor gives another or none, or closes the /dev/spark
-        descriptor it gave it with.
+        and a root program takes a descriptor of it (close-on-exec) from the
+        device, as it could open the table's file. Only root: the table is
+        every window's picture and input ring in one writable mapping (see
+        window.c WINDOWS_MODE), so a program that is not root is refused, as it
+        is at the 0600 file. The table is let go when the compositor gives
+        another or none, or closes the /dev/spark descriptor it gave it with.
 */
 static DEFINE_SPINLOCK(windows_table_lock);
 static struct file *windows_table, *windows_table_giver;
@@ -3836,6 +3838,19 @@ static long windows_table_get(void)
 {
         struct file *table;
         int fd;
+
+        /*
+                The table is every window's pixels and input ring in one
+                writable mapping. A descriptor of it lets its holder read the
+                root terminal's picture and write keys into the root shell's
+                window, so it is handed only to root, as its file (0600) and
+                WINDOWS_IOCTL_TABLE_SET already are. The compositor and the
+                windows the machine script starts are root; a program that is
+                not (a local user, or a bowl program on a real unprivileged
+                uid) is refused here as it is at the file.
+        */
+        if (!capable(CAP_SYS_ADMIN))
+                return -EPERM;
 
         spin_lock(&windows_table_lock);
         table = windows_table ? get_file(windows_table) : NULL;

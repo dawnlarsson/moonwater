@@ -17356,7 +17356,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, k1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, k1, g1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -19990,6 +19990,139 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/k1-answers"
+fi
+fi
+
+#       The window table is root's, not anyone's (security: agent 5, MW-2026-050).
+#
+#       The compositor's table is one writable mapping of every window's picture
+#       and input ring. A program that maps it reads the root terminal's picture
+#       and writes keys into the root shell's window, so it is a trust boundary:
+#       only root (the compositor and the windows the machine script starts) may
+#       take it. A helper on a stick opens it two ways -- /dev/spark's
+#       WINDOWS_IOCTL_TABLE_GET and the /run/moonwater/windows file -- as root
+#       (which must still work) and after dropping to an unprivileged uid (which
+#       must be refused), and reads back the table's mode and a door's. Before
+#       the fix (final-head.efi) the unprivileged helper took the table through
+#       the ioctl and the files were 0666; the GET row is the one a guest shows
+#       (the file route is already held by /proc tracing when the table is a
+#       memfd, so it is not the discriminating row here), and the modes are
+#       pinned in CHECK_socket's windows_header too.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = g1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/g1-answers" 2>"$work/g1-why" <<'PY'
+import os, subprocess, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/g1"
+stick = work + "/stick"
+os.makedirs(stick, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+open(work + "/tableget.c", "w").write(r"""
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define TABLE_GET 0x7312
+static void mode_of(const char *p, const char *tag)
+{
+        struct stat st;
+        if (stat(p, &st) == 0) printf("%s %o\n", tag, (unsigned)(st.st_mode & 0777));
+        else printf("%s err %d\n", tag, errno);
+}
+static void attempt(long fd, const char *how)
+{
+        void *p;
+        uint32_t *t;
+        if (fd < 0) { printf("%s denied %d\n", how, errno); return; }
+        p = mmap(0, 4096, PROT_READ, MAP_SHARED, (int)fd, 0);
+        if (p == MAP_FAILED) { printf("%s mmap %d\n", how, errno); close((int)fd); return; }
+        t = p;
+        printf("%s ok %ux%u\n", how, t[0], t[1]);
+        munmap(p, 4096);
+        close((int)fd);
+}
+int main(int argc, char **argv)
+{
+        int sp, pf;
+        if (argc > 1) {
+                int u = atoi(argv[1]);
+                setgid(u);
+                if (setuid(u)) { printf("drop %d\n", errno); return 2; }
+        }
+        printf("uid %d\n", (int)getuid());
+        if (getuid() == 0) {
+                mode_of("/run/moonwater/windows", "table-mode");
+                mode_of("/run/moonwater/window.0", "door-mode");
+        }
+        sp = open("/dev/spark", O_RDWR | O_CLOEXEC);
+        if (sp < 0) printf("spark %d\n", errno);
+        else { attempt(ioctl(sp, TABLE_GET, 0), "GET"); close(sp); }
+        pf = open("/run/moonwater/windows", O_RDWR | O_CLOEXEC);
+        attempt(pf, "PATH");
+        return 0;
+}
+""")
+built = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/tableget", work + "/tableget.c"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+names = ("g1.1 root may take the compositor's window table",
+         "g1.2 an unprivileged process is refused the window table",
+         "g1.3 the window table is owner-only",
+         "g1.4 the window doors are owner-only")
+if not built:
+    for name, want in zip(names, ("ok", "denied", "600", "600")):
+        out.append((name, "not run: no static cc for the helper", want))
+else:
+    guest = Guest(desktop(image) + [
+        "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
+        "-device", "usb-storage,drive=stick,removable=on",
+        "-no-reboot", "-display", "none",
+        "-append", "console=ttyS0 printk.time=1 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
+        work + "/qmp", work + "/mon", work, sockets=(ser,))
+    time.sleep(25)
+    shell = Shell(ser)
+    shell.ready()
+    shell.run("mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt", 20)
+    shell.run("/compositor & echo started", 10)
+    until(lambda: "yes" in shell.run("[ -e /run/moonwater/windows ] && echo yes || echo no", 10)[0], 30)
+    time.sleep(2)
+    root = shell.run("/mnt/tableget", 15)[0]
+    nobody = shell.run("/mnt/tableget 65534", 15)[0]
+
+    def line(text, tag):
+        for row in text.splitlines():
+            if row.startswith(tag + " "):
+                return row[len(tag) + 1:].strip()
+        return "(none)"
+
+    out.append((names[0], "ok" if line(root, "GET").startswith("ok") else line(root, "GET"), "ok"))
+    out.append((names[1], "denied" if line(nobody, "GET").startswith("denied") else line(nobody, "GET"), "denied"))
+    out.append((names[2], line(root, "table-mode"), "600"))
+    out.append((names[3], line(root, "door-mode"), "600"))
+    try:
+        guest.quit()
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/g1-answers" ]; then
+        same "the window-table isolation boot answered" "yes" "no"
+        sed 's/^/    /' "$work/g1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/g1-answers"
 fi
 fi
 

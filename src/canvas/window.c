@@ -472,6 +472,24 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
 
+/*
+        The mode of the table, its memfd and the doors: owner only, 0600.
+
+        The table is one mapping of every window's buffers and input rings:
+        whoever maps it reads any window's picture (the root terminal's among
+        them) and writes any window's event ring, focus and lift. It is a
+        trust boundary, not a public interface, and every program that uses it
+        legitimately -- the compositor and the windows the machine script
+        starts (the terminal, the log, the launcher, the settings) -- is root.
+        A program that is not root (an unprivileged local process, or a bowl
+        program once it runs as a real unprivileged uid) must not be able to
+        open it: it would be a confused deputy over a root shell. The door
+        FIFOs are the same owner, so a knock, too, is the owner's. The one
+        other way in, /dev/spark's WINDOWS_IOCTL_TABLE_GET, is held to
+        CAP_SYS_ADMIN beside this (canvas.c windows_table_get).
+*/
+#define WINDOWS_MODE 0600
+
 // event_type, with event_flags WINDOW_KEY_*: a key (a is its code, b its character), the pointer at a, b in
 // the window, a button (a its code), the wheel (a in 120ths of a notch, b 1 when it is sideways).
 #define WINDOW_EVENT_KEY 1u

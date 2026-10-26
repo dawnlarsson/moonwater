@@ -599,6 +599,25 @@ attacker gets its invariants here once there is a lane that proves them.
   through the whole build's level and does not compose `sec_host_locked`, so
   its image has the lock at first boot but not the command line unless
   `sec_host_locked` is named.
+- **UI-D1, the compositor's window table is root's, not anyone's.** The
+  compositor shares its state as one writable mapping (`/run/moonwater/windows`,
+  window.c `struct windows`): every window's pixel buffers and input ring in one
+  place, which every window program maps and reads and writes its row of. That
+  is a trust boundary, not a public interface -- a program that maps it reads the
+  Canvas terminal's picture (a root shell's) and writes keystrokes into the
+  focused window's ring (a confused deputy over root). Every legitimate
+  window program is root (the compositor and the terminal, log, launcher and
+  settings the machine script starts; a KDE or Chrome client speaks Wayland/X,
+  not this table), so the table, its memfd and its door FIFOs are `0600`
+  (`WINDOWS_MODE`) and `/dev/spark`'s `WINDOWS_IOCTL_TABLE_GET` needs
+  `CAP_SYS_ADMIN`, matching its `SET` side; a process that is only root in its
+  own user namespace (a bowl under `unshare -r`) is refused. Isolated
+  unprivileged windows are not supported: a single shared writable mapping
+  cannot keep one client out of another's pixels or input, and giving them each
+  their own would be a per-client protocol, not this table (MW-2026-050; the
+  settings window builds its `moonwater` commands as an argv, never a shell line,
+  and the Canvas terminal answers DA, DSR, DECRQM and XTWINOPS with fixed or
+  numeric text only, never the title or any attacker string).
 
 ## Security tiers
 

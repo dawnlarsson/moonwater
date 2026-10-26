@@ -321,6 +321,102 @@ after. Box run as above.
 
 **Still open.** Nothing further; the three-letter and shorter codes are a
 separate space (`link_code_shaped`) and were never names.
+### MW-2026-050: the compositor's window table was handed to any program
+
+| | |
+|---|---|
+| Status | Fixed on the sec-5 worktree, 2026-10-26 (coordinator cherry-picks to main) |
+| Class | Missing authorization on a shared root resource; confused-deputy keystroke injection into a root shell, and disclosure of a root window's pixels |
+| Attacker | (8) a compromised bowl program, (1) a local unprivileged process |
+| Fixed by | this commit (`src/canvas/window.c`, `src/canvas/canvas.c`, `src/canvas/compositor.c`) |
+
+**What it was.** The compositor (a root process) shares its window state as one
+mapping, `/run/moonwater/windows`: a header, then every window's two pixel
+buffers and every window's input ring (`event_head`, `event_type`, `event_a`,
+`event_b`, `focus`, `lift`, `pid`), all writable by whoever maps it. The design
+has every window program map the whole table and read and write the fields of
+its row; it presumes mutual trust. Two things let a program that is not a
+trusted desktop program in: the file and its door FIFOs were made `0666`
+(world read-write, `compositor_table`/`compositor_table_memfd`), and the kernel
+handed a descriptor of the table to any caller of `/dev/spark`'s
+`WINDOWS_IOCTL_TABLE_GET` with no capability check (`windows_table_get`,
+`src/canvas/canvas.c`) -- the comment even said "any program takes a descriptor
+of it". The `WINDOWS_IOCTL_TABLE_SET` giver side already required
+`CAP_SYS_ADMIN`; the get side did not.
+
+A program that maps the table can: read the pixel buffer of any window,
+including the Canvas terminal that runs a **root** shell (screen-scrape a
+password as it is typed, a key, anything on screen); write into the focused
+window's event ring to inject keystrokes into that root shell (a confused
+deputy: arbitrary commands as root); set `focus`, bump `lift`, and overwrite
+`pid`. The terminal the machine script starts (`desktop_terminal`) is a root
+shell, so injection there is root command execution.
+
+**Reachability, case R and case U.** Today a bowl program started from root (the
+Canvas terminal, the serial shell, a `/bowls/bin` launcher -- a KDE session
+`moonwater desktop` starts is one) runs as real kuid 0 with full capabilities
+and sees the host `/run/moonwater` (agent 4's finding; agent 1 is making bowl
+programs a real unprivileged uid). So **case R** (today): a root-launched bowl
+already has `CAP_SYS_ADMIN` and is inside the trust boundary -- root is not a
+wall, and this fix does not claim to stop it; that is the bowl boundary agent 1
+closes. **Case U** (a genuinely unprivileged kernel uid: a local user outside
+bowls now, and every bowl program after agent 1's fix): before this fix such a
+process took the table through the ioctl and read and wrote it; after it, the
+ioctl returns `EPERM` and the `0600` files return `EACCES`. The fix is what
+makes case U safe regardless of where the bowl boundary ends up.
+
+Which window-table requests stay available to a non-root program: **none.**
+Every legitimate window-table program is root (the compositor, and the
+terminal, log, launcher and settings the root machine script starts); a
+KDE/Chrome-style client speaks Wayland/X, not this table. Isolated unprivileged
+windows are not a feature today, and the single shared writable mapping could
+not enforce per-row isolation if they were (that needs a per-client protocol).
+So the boundary is root/not-root, and nothing a real client does breaks.
+
+**How it was reproduced.** A static helper `tableget` on a stick, in a booted
+guest with the compositor up: it opens `/dev/spark`, calls
+`WINDOWS_IOCTL_TABLE_GET`, maps the result and reads the live output size out of
+the header, then does the same dropped to uid 65534. On `final-head.efi` (main
+before the fix) the unprivileged run mapped the table (`GET ok 1280x800`) and
+the files were `666`; on an image built from the fix the unprivileged run is
+refused (`GET denied 1`) while root still succeeds, and the files are `600`.
+Lane `canvas`, scenario `g1` (`CANVAS_ONLY=g1 sh test/run canvas`).
+
+**The fix.**
+- `src/canvas/window.c`: `WINDOWS_MODE` is `0600`, the one mode the compositor
+  gives the table, its memfd and the door FIFOs.
+- `src/canvas/canvas.c` `windows_table_get`: `if (!capable(CAP_SYS_ADMIN))
+  return -EPERM;` before it hands out a descriptor, matching
+  `windows_table_set`. `capable(CAP_SYS_ADMIN)` is against the initial user
+  namespace, so a process that is only root in its own namespace (an
+  `unshare -r` bowl) is refused.
+- `src/canvas/compositor.c`: the table file, its memfd and the door FIFOs are
+  created and `fchmod`ed `WINDOWS_MODE` instead of `0666`.
+
+**Tests that fail without the fix.**
+- `canvas` lane, scenario `g1`, four rows: g1.1 root still takes the table
+  (`ok`), g1.2 an unprivileged process is refused it (`denied`), g1.3 the table
+  is `600`, g1.4 the doors are `600`. Run against `final-head.efi` (pre-fix)
+  g1.2 reads `ok`, g1.3 and g1.4 read `666`.
+- `CHECK_socket` `windows_header`: two rows pin `WINDOWS_MODE == 0600` and
+  `(WINDOWS_MODE & 0077) == 0`; a flip back to `0666` fails them.
+
+**Still open.**
+- The single shared writable table remains the design. A program that is root
+  (case R bowls today, and root itself -- root is not a wall) is inside it. An
+  isolated unprivileged window would need a per-client protocol, not this
+  mapping; that is an owner decision, not built here.
+- Behaviour change, stated: `moonwater debug` run by a non-root user can no
+  longer read the Canvas readout (it used the same open path) and prints "no
+  compositor is running". The verb is a diagnostic; its code is in the
+  contended `src/sh/host.c` and was left unchanged to merge cleanly.
+- The memfd route (`/run/moonwater/windows` as a `/proc/<pid>/fd` symlink) was
+  already held for non-root by `/proc` tracing when the table is a memfd; the
+  `0600` mode is what holds the regular-file fallback (a headless or no-card
+  compositor) and a local non-root user there.
+- The door FIFOs being `0600` also stops a non-root local process knocking the
+  compositor's door loop (the per-turn read bound added earlier capped the
+  work; this removes the reach).
 
 ## Reviews with no exposure found
 

@@ -57879,6 +57879,18 @@ static fn windows_header(void)
               !table.hover_off[3] && !table.glass[3] && !table.lift[3] && !table.spoiled_height[3][1] &&
               !table.damage_height[3] && !table.want_width[3]);
         check("and keeps pinned, which the card may still read", table.pinned[3] == 1);
+
+        /*
+                The table, its memfd and the doors are made owner-only (0600):
+                the mapping is every window's picture and input ring, so a
+                program that is not root must not open it and inject into the
+                root shell's window. The compositor's fchmod/mknod use this
+                one constant; a flip back to a group- or world-readable mode
+                fails here, and the guest canvas lane proves an unprivileged
+                opener is refused at the file and at WINDOWS_IOCTL_TABLE_GET.
+        */
+        check("the window table and its doors are private to the owner", WINDOWS_MODE == 0600);
+        check("no group or other bits reach the table or its doors", (WINDOWS_MODE & 0077) == 0);
 }
 
 b32 main(void)

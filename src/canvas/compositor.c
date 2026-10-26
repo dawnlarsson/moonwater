@@ -6393,7 +6393,7 @@ static long compositor_table_memfd(unsigned long bytes)
         // MFD_CLOEXEC | MFD_ALLOW_SEALING above; F_ADD_SEALS of F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW.
         compositor.memfd_failed = compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0 ? 8
                                   : compositor_call(syscall(fcntl), (positive)handle, 1033, 1 | 2 | 4, 0, 0, 0) < 0 ? 9
-                                  : compositor_call(syscall(fchmod), (positive)handle, 0666, 0, 0, 0, 0) < 0       ? 10
+                                  : compositor_call(syscall(fchmod), (positive)handle, WINDOWS_MODE, 0, 0, 0, 0) < 0 ? 10
                                   : compositor_call(syscall(symlinkat), (positive)path, (positive)AT_FDCWD,
                                                     (positive)WINDOWS_TABLE, 0, 0, 0) < 0
                                       ? 11
@@ -6439,7 +6439,7 @@ static int compositor_table(void)
         if (handle < 0)
         {
                 handle = (long)system_open_at_mode(AT_FDCWD, (string_address)WINDOWS_TABLE,
-                                                   FILE_READ_WRITE | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+                                                   FILE_READ_WRITE | O_CREAT | O_EXCL | O_CLOEXEC, WINDOWS_MODE);
                 if (handle < 0)
                         return (int)handle;
                 if (compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0)
@@ -6454,7 +6454,7 @@ static int compositor_table(void)
                 system_close(handle);
         if (mapped < 0 && mapped > -4096)
                 return (int)mapped;
-        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0666, 0, 0, 0);
+        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, WINDOWS_MODE, 0, 0, 0);
 
         compositor.table = (struct windows *)mapped;
         compositor.pixels = header;
@@ -6475,8 +6475,8 @@ static int compositor_table(void)
                 {
                         windows_door_name((char *)name, row, wake);
                         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)name, 0, 0, 0, 0);
-                        compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)name, 0010666, 0, 0, 0);
-                        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)name, 0666, 0, 0, 0);
+                        compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)name, 0010000 | WINDOWS_MODE, 0, 0, 0);
+                        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)name, WINDOWS_MODE, 0, 0, 0);
                         handle = (long)system_open_at(AT_FDCWD, name,
                                                       (wake ? FILE_READ_WRITE : FILE_READ) | O_NONBLOCK | O_CLOEXEC);
                         if (handle < 0)
