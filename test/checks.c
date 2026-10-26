@@ -115136,6 +115136,16 @@ static void check_compositor_screens(void)
                                                                             compositor.y[1] + 40 <= SCREENS_A_H);
     compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
     memory_zero(&compositor, sizeof(compositor));
+
+    // A hotplug is any uevent of the drm subsystem: its lines are each ended by a null, and only a whole line counts.
+    {
+        static const char card[] = "change@/devices/pci0000:00/0000:00:02.0/drm/card0\0ACTION=change\0SUBSYSTEM=drm\0HOTPLUG=1";
+        static const char usb[] = "add@/devices/usb1\0ACTION=add\0SUBSYSTEM=usb\0DEVTYPE=usb_device";
+        static const char near[] = "change@/x\0SUBSYSTEM=drmx\0NOTSUBSYSTEM=drm\0SUBSYSTEM=dr";
+        check("screens: a drm uevent is a reason to look at the screens again, and no other is",
+              compositor_uevent_drm(card, (long)sizeof(card)) && !compositor_uevent_drm(usb, (long)sizeof(usb)) &&
+                  !compositor_uevent_drm(near, (long)sizeof(near)) && !compositor_uevent_drm(card, 60));
+    }
 }
 
 /*
