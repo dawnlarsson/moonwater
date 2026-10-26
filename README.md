@@ -46,7 +46,10 @@ moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
+moonwater desktop start|stop           begin the chosen profile now, or end its session
 moonwater settings                     the settings window, on the desktop of the compositor
+moonwater latency [reset]              what the input handlers cost a report, and who has the display
+moonwater debug                        what the desktop is doing and why: the card, the pointer, windows shown straight
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
@@ -87,21 +90,29 @@ moonwater security ct [on|off]         ask Certificate Transparency of every cha
 moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
 moonwater wifi [on|off]                the radio, saved networks and those in range [off]
 moonwater bluetooth [on|off]           the radio and the remembered devices [off]
+moonwater bluetooth add NAME           keep the name of a device, found once the radio is on
+moonwater bluetooth remove NAME        forget a bluetooth device
 moonwater usb [lock|unlock]            lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]
 moonwater usb class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
 moonwater usb allow|deny ID|PORT       let one device in, or hold it, now and at every plug;
                                        ID is VID:PID, or VID:PID/SERIAL as usb shows it
 moonwater usb forget ID|PORT           drop the rule of one device
 moonwater usb log [N]                  the last decisions, the newest last [20]
+moonwater usb apply                    judge every device again now, as boot does
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
+moonwater cpu online|offline N         hotplug one processor
 moonwater charge [limit N|limit off]   where the battery stops charging, 20 to 100
 moonwater battery [NAME|auto|none]     which battery the Battery row reads:
                                        auto is the first present one, none is no battery [auto]
 moonwater bind init canvas [on|off]    start Canvas at boot [on]
 moonwater bind init mount [on|off]     mount kept disks at boot [on]
 moonwater sleep | hibernate            suspend to RAM or to disk
+moonwater bios [reboot]                whether firmware setup is on offer; reboot goes
+moonwater wifi add SSID [PASSWORD|-] [wpa2]  remember a network, joined once wifi is on; asks for
+                                       the password, - reads it from stdin; wpa2 lets a tight
+                                       tier join it without WPA3
 moonwater wifi remove SSID             forget a saved network, and leave it
 moonwater link                         who this machine is linked with, and what each may do
 moonwater link pair [NAME]             a code, and wait for the other machine to use it
@@ -110,7 +121,9 @@ moonwater link push NAME FILE PATH     a file here to PATH there, whole or not a
 moonwater link on|off                  the listener, kept across boots [off]
 ```
 
-`moonwater` alone prints every command and `moonwater help VERB` the page of one.
+`moonwater` alone prints the main page, and `moonwater help VERB` every row of one: the
+main page leaves out the rows that only a verb's own page shows, such as `bind poweroff`
+and `link key`.
 
 `moonwater desktop on|off|PROFILE` is the one switch of what is on the screen, kept for
 every start and put in force at once: `on` is the compositor, `off` the text console, a
@@ -118,9 +131,9 @@ profile (`bowl profile desktop` installs KDE) its session. A session has the dis
 only once the compositor has let go of it, since nothing else can be the card's master
 while it is, so the compositor ends first and `desktop on` brings it back.
 
-A verb with no word after it says where its switch stands, to anybody; with one
-it changes it and needs root, and a word it does not take is a usage page
-(exit 2) and not a refusal (exit 1). `bowl` runs other distributions' programs
+A switch with no word after it says where it stands, to anybody; with one it
+changes it and needs root, and a word it does not take is a usage page (exit 2)
+and not a refusal (exit 1). `bowl` runs other distributions' programs
 (`bowl profile desktop` installs KDE), and `main.moonwater.sh` is the machine
 script that sets a machine up at boot.
 
@@ -171,7 +184,7 @@ no driver sees it; a watcher puts the policy in force at each plug, and every de
 a line of /root/usb.log, with what a device says of itself escaped. It cannot stop the
 kernel reading a new device's descriptors and strings before anything decides, or a hub
 doing its own work; a device that copies the VID:PID and serial of one that was allowed
-is that device to it; DMA over Thunderbolt or PCIe is the IOMMU's (`sec_dma`); and root
+is that device to it; DMA over Thunderbolt or PCIe is the IOMMU's (the `sec_dma_*` profiles); and root
 can undo it. The policy is read when /root is, so a device plugged in during boot is up
 until then: only the kernel command line `usbcore.authorized_default=2`, which
 `sec_host_locked` sets, closes that window. The tight tier locks at the first boot, once
