@@ -45388,7 +45388,9 @@ def harness_moonwater_cli(argv):
                     "cmp /root/bluetooth /tmp/bluetooth.long && echo '@@ bluetooth whole'\n")
         seen = answers(got)
         joined = "\n".join(got)
-        check(all(seen[verb]["status"] == 1 and any("too long to change here" in line for line in seen[verb]["out"])
+        check(all(seen[verb]["status"] == 1 and
+                  any(line.endswith(("/root/bluetooth" if verb.startswith("bluetooth") else "/root/wifi") +
+                                    " is too long to change here") for line in seen[verb]["out"])
                   for verb in ("wifi remove net01", "wifi add net03 newpassword", "wifi add brand-new passpass1",
                                f"bluetooth remove device-01-{'p' * 80}", "bluetooth add another")),
               "a list longer than is read is refused by every verb that would rewrite it", repr(seen)[:400])
@@ -45694,6 +45696,84 @@ def harness_moonwater_cli(argv):
         check(between(got, "words") == ["on", "off"] and between(got, "left") in ([], None) and
               got[-3:] == ["@@ airplane", "[Moonwater] airplane off", "@@status 0"],
               "airplane off turns back on only what was on, and forgets", repr((between(got, "words"), between(got, "left"), got[-3:])))
+
+        # The kernel log is read a record at a time ("PRIORITY,SEQUENCE,TIME,FLAGS;TEXT"): what the sleep keeps in
+        # /root/sleep.log is the text after the header, cut at its newline, and only a line that names the card, the
+        # suspend or Canvas; a record with no header is skipped, and a log that cannot be opened adds no heading.
+        # The sandbox's /dev/kmsg is a file, so what it holds is read as one record.
+        def slept(kmsg):
+            sys_reset()
+            script = "rm -f /root/tune /root/sleep.log /dev/kmsg\n"
+            if kmsg is not None:
+                script += f"printf '{kmsg}' > /dev/kmsg\n"
+            got, done = session(script + say("sleep") + "echo '@@ log'; cat /root/sleep.log; echo '@@end'\n")
+            text = "\n".join(got)
+            check(done and "@@ log\n" in text, "a sleep with a kernel log session finished", text[-200:])
+            return text.split("@@ log\n", 1)[1].split("@@end", 1)[0] if "@@ log\n" in text else ""
+
+        slog = slept(None)
+        check("suspend_stats:" in slog and "kernel log lines:" not in slog,
+              "a sleep with no readable kernel log writes no heading for its lines", repr(slog))
+        slog = slept("6,1,2,-;PM: suspend entry (deep)\\nSUBSYSTEM=drm\\n")
+        check(slog.endswith("kernel log lines:\nPM: suspend entry (deep)\n"),
+              "a sleep keeps the text of a kernel record that names the suspend, cut at its newline", repr(slog))
+        slog = slept("no header but PM: here\\n")
+        check(slog.endswith("kernel log lines:\n"),
+              "a kernel record with no header is skipped", repr(slog))
+        slog = slept("6,1,2,-;unrelated words\\n")
+        check(slog.endswith("kernel log lines:\n"),
+              "a kernel record that names neither the card, the suspend nor Canvas is not kept", repr(slog))
+
+        # The reason wifi cannot be used reads the same log for what the driver said about the card: the last
+        # firmware file a load failed for, and the error of its last failed probe, cut at the newline of a record.
+        def wifi_said(kmsg):
+            sys_reset()
+            for leaf, text in (("class", "0x028000"), ("vendor", "0x8086"), ("device", "0x2725")):
+                sys_file(f"bus/pci/devices/0000:01:00.0/{leaf}", text + "\n")
+            script = "rm -f /root/wifi /dev/kmsg; echo on > /root/wifi.power\n"
+            if kmsg is not None:
+                script += f"printf '{kmsg}' > /dev/kmsg\n"
+            got, done = session(script + say("wifi"))
+            check(done, "a wifi session with a kernel log finished", kmsg)
+            return [line for line in got if "wifi: " in line]
+
+        wsaid = wifi_said(None)
+        check(wsaid and "found, no driver for it in this image" in wsaid[0],
+              "wifi says a card has no driver where the kernel log says nothing of it", repr(wsaid))
+        wsaid = wifi_said("6,1,2,-;iwlwifi 0000:01:00.0: Direct firmware load for iwlwifi-first.ucode failed with error -2\\n"
+                         "iwlwifi 0000:01:00.0: Direct firmware load for iwlwifi-second.ucode failed\\n")
+        check(wsaid and "found, firmware iwlwifi-first.ucode missing" in wsaid[0],
+              "wifi names the firmware file a load failed for, from the text of the record and no further", repr(wsaid))
+        wsaid = wifi_said("6,1,2,-;iwlwifi 0000:01:00.0: probe with driver iwlwifi failed with error -22\\n")
+        check(wsaid and "found, its driver failed with error -22" in wsaid[0],
+              "wifi names the error a driver's probe gave", repr(wsaid))
+        wsaid = wifi_said("6,1,2,-;iwlwifi 0000:09:00.0: Direct firmware load for other.ucode failed with error -2\\n")
+        check(wsaid and "found, no driver for it in this image" in wsaid[0],
+              "wifi does not take what the kernel said of another device", repr(wsaid))
+
+        # The watcher's lock is asked of without making its file: a machine that never ran one has none after usb
+        # has said so.
+        got, done = session("rm -f /run/moonwater/usb.watcher\n" + say("usb") + "ls /run/moonwater | grep -c watcher || :\n")
+        seen = answers(got)
+        check(done and any("watcher not running" in line for line in seen.get("usb", {"out": []})["out"]) and
+              got[-1] == "0", "usb says no watcher runs where there never was a lock file, and makes none", repr(got[-6:]))
+
+        # A DISK is looked for under /sys/class/block by its name, and a name that cannot be one is no disk.
+        for command, want in (("setup install /dev/sdb yes", "sdb is a partition; name the whole disk"),
+                              ("setup install sdb yes", "sdb is a partition; name the whole disk"),
+                              ("setup install sdc yes", "sdc is read-only"),
+                              ("setup install sdd yes", "sdd is removable media; moonwater setup install DISK removable takes it"),
+                              ("setup install sde yes", "there is no disk called sde"),
+                              ("setup install " + "d" * 80 + " yes", "there is no disk called " + "d" * 80)):
+            sys_reset()
+            sys_file("class/block/sdb/partition", "1\n")
+            sys_file("class/block/sdc/ro", "1\n")
+            sys_file("class/block/sdd/removable", "1\n")
+            got, done = session(say(command))
+            seen = answers(got)
+            check(done and seen.get(command, {"status": None})["status"] == 1 and
+                  any(line.endswith(want) for line in seen[command]["out"]),
+                  f"moonwater {command[:40]} looks at the disk's place under /sys/class/block", repr(seen.get(command)))
 
         # The saved lists survive a write cut short. RLIMIT_FSIZE 0 makes
         # every write fail and kills the writer with SIGXFSZ, the way a
@@ -47076,7 +47156,7 @@ while True:
         seen = answers(lines)
         out = {key: "\n".join(value["out"]) for key, value in seen.items()}
         check(finished and seen.get("usb apply", {}).get("status") == 1 and
-              "too long to change here" in out.get("usb apply", "") and out.get("cut") == "1",
+              "/root/usb.policy is too long to change here" in out.get("usb apply", "") and out.get("cut") == "1",
               "usb apply refuses a policy whose rules run past the room it reads, and holds nothing",
               repr((seen.get("usb apply"), out.get("cut"))))
         script = (usb_tree +
