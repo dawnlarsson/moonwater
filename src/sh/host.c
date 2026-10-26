@@ -20562,6 +20562,11 @@ static b32 locale_canvas_setting(string_address address_to arguments, positive c
                                    (positive)SPARK_CANVAS_SCALE_MOST, word);
         if (!scale && !locale_canvas_modes_ok(word))
                 return host_refuse("modes are largest or preferred, not %s\n", word);
+        //      Root is asked before the word is kept, not only by the kernel:
+        //      with no Canvas in it the write to /root is the only thing that
+        //      could refuse, and that answers with whatever /root's owner says.
+        if (!bowl_is_root())
+                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
         //      The kernel first, so a refusal keeps nothing; Canvas not being
         //      there at all keeps the word and takes it when it starts.
         live = locale_canvas_live(scale, word);
