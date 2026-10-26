@@ -2658,6 +2658,7 @@ static b32 host_machine_run(void)
 
         if (!string_has_prefix((string_address)verdict, "ask "))
                 radio_restore();
+        usb_restore();
         locale_restore();
         dns_restore();
         tune_restore();
@@ -2676,6 +2677,7 @@ static b32 host_machine_run(void)
                 const struct moonwater_pair *pair;
 
                 radio_recover();
+                usb_recover();
                 locale_recover();
                 link_keep();
                 failed = host_machine_wait(device, address_of control);
