@@ -49860,6 +49860,7 @@ FUZZ_VALID = {
     "PROFILE": ["default", "classic"], "ADDRESS": ["1.1.1.1", "9.9.9.9", "2606:4700:4700::1111"],
     "VERB": ["wifi", "usb", "link", "bind", "nosuch"], "PATH": ["/tmp/x", "/etc/hostname"],
     "SERVER": ["pool.ntp.org", "time.cloudflare.com"],
+    "PLACE": ["center", "maximized", "fullscreen"],
 }
 #   Strings that are wrong in the way hostile ones are, by the kind of wrong.
 FUZZ_LENGTHS = (1, 2, 31, 32, 33, 63, 64, 65, 127, 128, 255, 256, 257, 1023, 1024, 4095, 4096, 4097,
@@ -50487,7 +50488,7 @@ def harness_moonwater_cli_fuzz(argv):
         sandbox, private_dev, session, say, answers = moonwater_sandbox(args.shell, Path(temporary))
 
         #   The grammar: the verbs the table answers to, then every verb's page.
-        verbs = sorted(set(re.findall(r'^\s+\{"([a-z]+)", (?:host|tune|link)_\w+, (?:true|false)\},',
+        verbs = sorted(set(re.findall(r'^\s+\{"([a-z]+)", (?:host|tune|link)_\w+(?:, (?:true|false))+\},',
                                       (root / "src/sh/host.c").read_text(), re.M)))
         lines, finished = session("".join(say("help " + verb) for verb in verbs) + say("help"))
         pages = answers(lines)
