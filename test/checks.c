@@ -146225,6 +146225,35 @@ int main(int argc, char **argv)
                 return 0;
         }
 
+        if (!strcmp(mode, "flood"))
+        {
+                /* MS here is seconds of load, not a timeout: fire a SYN at the
+                   port as fast as one process can, a nonblocking connect and
+                   an immediate close each time, and print how many went. Each
+                   SYN to a closed port is a RST (switch 0) or a drop (switch
+                   1) for the target to make, which is the cost being weighed.
+                   The address is reachable, so the connect never blocks. */
+                struct timespec start, now;
+                unsigned long sent = 0;
+
+                clock_gettime(CLOCK_MONOTONIC, &start);
+                for (;;)
+                {
+                        clock_gettime(CLOCK_MONOTONIC, &now);
+                        if (now.tv_sec - start.tv_sec >= ms)
+                                break;
+                        fd = socket(ss.ss_family, SOCK_STREAM, 0);
+                        if (fd < 0)
+                                continue;
+                        fw_nonblock(fd);
+                        connect(fd, (void *)&ss, length);
+                        close(fd);
+                        sent++;
+                }
+                printf("sent %lu\n", sent);
+                return 0;
+        }
+
         fprintf(stderr, "firewall_probe: unknown mode %s\n", mode);
         return 2;
 }
