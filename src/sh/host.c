@@ -16088,7 +16088,9 @@ static b32 usb_resolve(string_address word, usb_census address_to census, usb_ru
         interface it has; one held and not configured is configured first,
         under the lock (the watcher would otherwise take it for a device no
         rule names and hold it again), so that its interfaces, which wait
-        while the policy is locked, can say what it is. A whole id for a
+        while the policy is locked, can say what it is, and held again if the
+        rule is then not kept (the rule is written from what it shows once
+        configured, so it cannot be kept first). A whole id for a
         device that is not plugged in lets it in whole.
 */
 static b32 usb_rule_verb(string_address word, p8 kind)
@@ -16099,6 +16101,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
         usb_policy policy;
         p8 text[USB_RULE_ROOM];
         bipolar lock = usb_lock_take(true);
+        bool configured = false;
         b32 failed;
 
         if (lock < 0)
@@ -16123,6 +16126,8 @@ static b32 usb_rule_verb(string_address word, p8 kind)
                 //      Its rule is written from what it shows now, so it has to be the same device.
                 if (!device || !string_equals((string_address)device->devnum, (string_address)devnum))
                         failed = host_refuse("the device at %s went while it was let in; no rule was kept\n", port);
+                else
+                        configured = true;
         }
         if (!failed && device)
                 usb_rule_from(address_of rule, kind, device, address_of census, true);
@@ -16138,6 +16143,10 @@ static b32 usb_rule_verb(string_address word, p8 kind)
         }
         if (failed)
         {
+                //      A device let in for a rule that was not kept would stay allowed with no rule at all:
+                //      it is put back as it was, held.
+                if (configured && usb_set_device(device, "0") >= 0)
+                        usb_tell(true, "held again", device, USB_WHY_NONE);
                 radio_unlock(lock);
                 return failed;
         }

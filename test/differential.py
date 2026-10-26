@@ -47232,6 +47232,27 @@ while True:
               "a lock that cannot be written to a read-only /root is in force from /run and says why",
               repr((seen.get("usb lock"), out.get("usb", "")[-300:], out.get("unkept ro"))))
 
+        # A rule that cannot be kept lets nothing in: usb allow of a held device
+        # configures it first (its rule is written from what it shows), and with the
+        # policy refused by a read-only /root the device stayed allowed with no rule
+        # at all. It is held again, and the answer says so.
+        script = (usb_tree +
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy\n"
+                  "dev 2-1 46f4 0001 STICK1 'QEMU USB HARDDRIVE' 0 unknown; face 2-1:1.0 08 0\n"
+                  "mount --bind /root /root && mount -o remount,ro,bind /root\n" + say("usb allow 2-1") +
+                  usb_show("unkept allow", "v $d/2-1/authorized; ls /root/usb.policy 2>&1 | grep -c 'No such'") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb allow 2-1", {}).get("status") == 1 and
+              "Read-only file system" in out.get("usb allow 2-1", "") and
+              "usb allowed 2-1 46f4:0001/STICK1 (rule)" in out.get("usb allow 2-1", "") and
+              "usb held again 2-1 46f4:0001/STICK1 (no rule)" in out.get("usb allow 2-1", "") and
+              out.get("unkept allow") == "0\n1",
+              "usb allow of a held device whose rule cannot be kept holds the device again",
+              repr((seen.get("usb allow 2-1"), out.get("unkept allow"))))
+
         # A rule the policy has no room for changes nothing: with 64 rules kept, usb
         # allow of a device held at its port is refused, and the device stays held (it
         # used to be configured first, and said allowed, before the refusal).
