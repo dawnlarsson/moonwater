@@ -554,8 +554,10 @@ import json, os, re, socket, subprocess, time
 W, H = 2560, 1080
 current = None
 
-def desktop(image):
-    """The machine every compositor guest starts from, as qemu arguments."""
+def desktop(image, outputs=1):
+    """The machine every compositor guest starts from, as qemu arguments. More than one output is
+    heads of the one card, id video0, which screendump_head reads; a head the host has no window
+    for is not connected, so the guest's command line forces each on (video=Virtual-N:WxHe)."""
     processor = ["-cpu", "Nehalem"]
     if os.access("/dev/kvm", os.R_OK | os.W_OK):
         # The floor is covered by boot.sh. Here the widest host path matters:
@@ -563,8 +565,11 @@ def desktop(image):
         # a real processor selected the AVX-512 body that KVM then had to
         # emulate.
         processor = ["-cpu", "host", "-enable-kvm"]
+    card = "virtio-gpu-pci,xres=3658,yres=1543"
+    if outputs > 1:
+        card = "virtio-gpu-pci,max_outputs=%d,id=video0,xres=3658,yres=1543" % outputs
     return ["qemu-system-x86_64", "-m", "2G", "-smp", "2"] + processor + [
-        "-kernel", image, "-vga", "none", "-device", "virtio-gpu-pci,xres=3658,yres=1543",
+        "-kernel", image, "-vga", "none", "-device", card,
         "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd"]
 
 class Guest(subprocess.Popen):
@@ -647,6 +652,12 @@ def shot(name, settle=2):
     current.hf.write(("screendump %s/%s.ppm\n" % (current.work, name)).encode())
     current.hf.flush()
     time.sleep(settle)
+
+def shot_head(name, head, settle=1):
+    """One head of a card of several outputs (desktop(image, outputs=N)), as load reads it."""
+    time.sleep(settle)
+    return qcmd({"execute": "screendump", "arguments": {
+        "filename": "%s/%s.ppm" % (current.work, name), "device": "video0", "head": head}})
 
 def load(name):
     d = open("%s/%s.ppm" % (current.work, name), "rb").read()
@@ -17373,7 +17384,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -20025,6 +20036,192 @@ fi
 #       (the file route is already held by /proc tracing when the table is a
 #       memfd, so it is not the discriminating row here), and the modes are
 #       pinned in CHECK_socket's windows_header too.
+#       Two screens, one desktop (the compositor's outputs section). One card with two heads: the first at 2560 by
+#       1080 (seventy percent of the EDID's 3658 by 1543, as every guest here) and the second at 1920 by 1080, which
+#       video= on the command line forces on and sizes, a head the host has no window for being otherwise not
+#       connected. The space is the first screen and the second to its right, 4480 by 1080, and the tablet spans it.
+#       Read per head: each screen shows the desktop's ink (set to 204060 first, so the kernel's own ground, which
+#       a screen the compositor did not take keeps, is told from it), the band is on the primary only (with no
+#       window its tray sits in the middle of the band, black), the pointer taken onto the second screen is drawn
+#       there, a window dragged by its top across the edge shows on both while it straddles and is on the second
+#       when let go (moonwater debug reads its place from the table), and the status lists both screens and where
+#       they are. Then the second screen is unplugged the way a hotplug is heard -- its connector forced off in
+#       sysfs and the card's uevent sent -- and the window and the pointer on it come to the first; plugged back
+#       in, the second is driven again; the arrangement put the other way round makes the second the primary,
+#       its band with it; and taskbar display all puts a band on each.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = x1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/x1-answers" 2>"$work/x1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/x1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+SW, SH, AW, BW = 4480, 1080, 2560, 1920
+INK, GROUND, BODY = "204060", "1e1e1e", "336699"
+
+guest = Guest(desktop(image, outputs=2) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 printk.time=1 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 "
+               "video=Virtual-2:1920x1080e " + os.environ.get("CANVAS_APPEND", "")],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def head(name, which):
+    # One head's picture, read as m1's picture() reads the screen.
+    shot_head(name, which)
+    width, height, data = load(name)
+    def at(x, y):
+        o = (y * width + x) * 3
+        return "%02x%02x%02x" % (data[o], data[o + 1], data[o + 2])
+    return width, height, at
+
+def point(x, y):
+    # The tablet spans the space: a report of x across it rounded up lands on x, as click() in m1 has it.
+    send([{"type": "abs", "data": {"axis": "x", "value": -(-x * 32767 // SW)}},
+          {"type": "abs", "data": {"axis": "y", "value": -(-y * 32767 // SH)}}])
+    time.sleep(0.15)
+
+def button(down):
+    send([{"type": "btn", "data": {"down": down, "button": "left"}}])
+    time.sleep(0.2)
+
+def pointer_near(at, x, y):
+    # The software pointer's cell from its hotspot: white fill and black outline, counted.
+    return sum(at(x + dx, y + dy) in ("ffffff", "000000") for dx in range(0, 12) for dy in range(0, 18))
+
+def band_on(at, width):
+    # The band's tabs and tray along the bottom: pixels of a tab's ink (taskbar.h, drawn as shapes with no font).
+    return sum(at(x, SH - 6) in ("000000", "38383c", "141416") for x in range(0, width, 4))
+
+def debug_window(title):
+    text = shell.run("moonwater debug", 15)[0]
+    found = re.search(r"window +\d+ +%s at (-?\d+),(-?\d+)" % title, text)
+    return "%s,%s" % found.groups() if found else "none: " + " / ".join(text.splitlines()[-4:])
+
+def screens_said():
+    return re.findall(r"compositor: screen (\d+) (\S+) (\d+) by (\d+) at (-?\d+),(-?\d+)", shell.run("cat /tmp/c.log", 10)[0])
+
+kernel = shell.run("dmesg | grep 'output(s)' | tail -1", 10)[0]
+out.append(("x1.1 Canvas drives both heads", "yes" if "desktop 4480x1080, 2 output(s)" in kernel else kernel, "yes"))
+
+shell.run("moonwater canvas background " + INK, 10)
+shell.run("/compositor > /tmp/c.log 2>&1 & echo started", 10)
+until(lambda: "yes" in shell.run("[ -e /run/moonwater/windows ] && echo yes || echo no", 10)[0], 30)
+time.sleep(2)
+said = screens_said()
+out.append(("x1.2 the compositor takes both screens, the second to the right of the first",
+            " ".join("%s:%s:%sx%s@%s,%s" % s for s in said),
+            "0:Virtual-1:2560x1080@0,0 1:Virtual-2:1920x1080@2560,0"))
+
+w0, h0, a = head("x1-a", 0)
+w1, h1, b = head("x1-b", 1)
+out.append(("x1.3 each head is its screen's size", "%dx%d %dx%d" % (w0, h0, w1, h1), "2560x1080 1920x1080"))
+out.append(("x1.4 both screens show the desktop's ink", "%s %s" % (a(40, 40), b(40, 40)), INK + " " + INK))
+out.append(("x1.5 the band is on the primary only: its tray along the first's bottom, nothing along the second's",
+            "%s %s" % ("band" if band_on(a, AW) > 5 else "none", "band" if band_on(b, BW) > 5 else "none"), "band none"))
+
+point(AW + 600, 500)
+time.sleep(0.5)
+w1, h1, b = head("x1-pointer-b", 1)
+w0, h0, a = head("x1-pointer-a", 0)
+out.append(("x1.6 the pointer taken across onto the second screen is drawn there and not on the first",
+            "%s %s" % ("drawn" if pointer_near(b, 600, 500) > 20 else "none", "none" if pointer_near(a, AW - 14, 500) < 3 else "drawn"),
+            "drawn none"))
+
+shell.run("/surface -x 2100 -y 300 -w 400 -h 300 -c %s -T across -s 300 > /tmp/s.log 2>&1 & echo started" % BODY, 10)
+until(lambda: "at" in shell.run("cat /tmp/s.log", 10)[0], 20)
+time.sleep(1)
+point(2150, 310)
+button(True)
+point(2250, 310)
+point(2400, 310)
+time.sleep(0.6)
+w0, h0, a = head("x1-straddle-a", 0)
+w1, h1, b = head("x1-straddle-b", 1)
+out.append(("x1.7 a window dragged across the edge shows on both screens while it straddles it",
+            "%s %s" % (a(AW - 40, 450), b(150, 450)), BODY + " " + BODY))
+point(2700, 310)
+point(2850, 310)
+time.sleep(0.4)
+button(False)
+time.sleep(0.8)
+w0, h0, a = head("x1-dropped-a", 0)
+w1, h1, b = head("x1-dropped-b", 1)
+out.append(("x1.8 let go, it is on the second screen and gone from the first",
+            "%s %s" % (b(2800 - AW + 200, 450), a(AW - 40, 450)), BODY + " " + INK))
+out.append(("x1.9 and the table has it there", debug_window("across"), "2800,300"))
+
+status = shell.run("moonwater canvas", 10)[0]
+out.append(("x1.10 moonwater canvas says where each screen is",
+            " / ".join("%s %sx%s %s" % s for s in re.findall(r"(Virtual-\d): (\d+) by (\d+), \d+ Hz, ([^\n]*)", status)),
+            "Virtual-1 2560x1080 at 0,0, primary / Virtual-2 1920x1080 at 2560,0"))
+
+# The second screen unplugged as a hotplug is heard: the connector off, the card's uevent.
+point(AW + 1440, 800)
+time.sleep(0.4)
+shell.run("echo off > /sys/class/drm/card0-Virtual-2/status; echo change > /sys/class/drm/card0/uevent", 10)
+time.sleep(2)
+said = screens_said()
+out.append(("x1.11 unplugged, the second screen goes and the first is the space",
+            " ".join("%s:%s" % (s[0], s[1]) for s in said[-1:]) + " of %d lines" % len(said), "0:Virtual-1 of 3 lines"))
+w0, h0, a = head("x1-gone-a", 0)
+out.append(("x1.12 the window that was on it is on the first, at its share of the room it had",
+            "%s %s" % (debug_window("across"), a(341 + 200, 450)), "341,300 " + BODY))
+out.append(("x1.13 and so is the pointer, never on a screen that went",
+            "drawn" if pointer_near(a, 1920, 800) > 20 else "none", "drawn"))
+status = shell.run("moonwater canvas", 10)[0]
+out.append(("x1.14 moonwater canvas says the second is dark",
+            "yes" if re.search(r"Virtual-2: [^\n]*, dark", status) else status.replace("\n", " / "), "yes"))
+
+shell.run("echo on > /sys/class/drm/card0-Virtual-2/status; echo change > /sys/class/drm/card0/uevent", 10)
+time.sleep(2)
+said = screens_said()
+w1, h1, b = head("x1-back-b", 1)
+out.append(("x1.15 plugged back in, the second screen is driven again",
+            "%s %s" % (" ".join("%s:%s" % (s[0], s[1]) for s in said[-2:]), b(40, 40)), "0:Virtual-1 1:Virtual-2 " + INK))
+
+shell.run("moonwater canvas arrange Virtual-2 Virtual-1", 10)
+time.sleep(2)
+said = screens_said()
+w0, h0, a = head("x1-swapped-a", 0)
+w1, h1, b = head("x1-swapped-b", 1)
+out.append(("x1.16 arranged the other way round, the second is the primary at the left, the band with it",
+            "%s %s %s" % (" ".join("%s:%s@%s,%s" % (s[0], s[1], s[4], s[5]) for s in said[-2:]),
+                          "band" if band_on(b, BW) > 5 else "none", "band" if band_on(a, AW) > 5 else "none"),
+            "0:Virtual-2@0,0 1:Virtual-1@1920,0 band none"))
+shell.run("moonwater taskbar display all", 10)
+time.sleep(2)
+w0, h0, a = head("x1-all-a", 0)
+w1, h1, b = head("x1-all-b", 1)
+out.append(("x1.17 with taskbar display all every screen has its band",
+            "%s %s" % ("band" if band_on(a, AW) > 5 else "none", "band" if band_on(b, BW) > 5 else "none"), "band band"))
+shell.run("moonwater taskbar display primary; moonwater canvas arrange default; moonwater canvas background default", 10)
+
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/x1-answers" ]; then
+        same "the two-screen boot answered" "yes" "no"
+        sed 's/^/    /' "$work/x1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/x1-answers"
+fi
+fi
+
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = g1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/g1-answers" 2>"$work/g1-why" <<'PY'
 import os, subprocess, sys, time
