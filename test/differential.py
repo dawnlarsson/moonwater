@@ -46246,10 +46246,13 @@ while True:
         # they have.
         peer = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         lines, finished = session(
-            "rm -f /root/link.peers\n" + say("link add peer1 " + peer) +
+            "rm -f /root/link.peers /root/link.groups\n" + say("link add peer1 " + peer) +
             "chmod 644 /root/link.peers\n" +
             say("link remove peer1") + say("link allow peer1 run") + say("link deny peer1 run") +
-            say("link add peer1 " + peer) + "rm -f /root/link.peers\n")
+            say("link add peer1 " + peer) +
+            #       The status says so too, and does not say nobody is linked.
+            say("link") + "printf g > /root/link.groups\n" + say("link") +
+            "rm -f /root/link.peers /root/link.groups\n")
         seen = answers(lines)
         refused = ("link remove peer1", "link allow peer1 run", "link deny peer1 run", "link add peer1 " + peer)
         check(finished and all(seen.get(command, {}).get("status") == 1 and
@@ -46257,6 +46260,15 @@ while True:
                                    for line in seen[command]["out"]) for command in refused),
               "link remove, allow and deny refuse a peers file that cannot be read, as add does",
               repr({command: seen.get(command) for command in refused}))
+        #       Two status answers, the first with the peers file unreadable and
+        #       the second with the groups file too; both are one "@@ link" block.
+        status_out = seen.get("link", {}).get("out", [])
+        check(seen.get("link", {}).get("status") == 0 and
+              any("/root/link.peers could not be read" in line for line in status_out) and
+              any("/root/link.groups could not be read" in line for line in status_out) and
+              not any("nobody linked" in line for line in status_out),
+              "link says a records file that cannot be read is so, and not that nobody is linked",
+              repr([line for line in status_out if "linked" in line or "read" in line]))
 
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line

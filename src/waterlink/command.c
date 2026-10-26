@@ -162,7 +162,8 @@ static b32 link_status(void)
         //      The groups: which, what members get, and whether the secret
         //      sits in the machine script, where /dev/spark shows it to any
         //      user on the machine.
-        link_groups_load(address_of groups);
+        if (!link_groups_for_change(address_of groups))
+                string_format(log, "  %s could not be read\n", LINK_GROUPS_PATH);
         {
                 p8 script[16384];
                 bipolar script_length = file_slurp_regular_at(
@@ -222,8 +223,11 @@ static b32 link_status(void)
                 crypto_forget(script, sizeof script);
         }
 
-        link_peers_load(address_of peers);
-        if (!peers.count)
+        //      A file that is there and cannot be read is not an empty list:
+        //      nobody linked is said only of one that is empty.
+        if (!link_peers_for_change(address_of peers))
+                string_format(log, "  %s could not be read\n", LINK_PEERS_PATH);
+        else if (!peers.count)
                 string_format(log, "  nobody linked yet: moonwater link pair here, "
                                    "and moonwater link NAME CODE there\n");
 
