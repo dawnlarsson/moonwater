@@ -544,13 +544,17 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         ground = taskbar_glass_tab(view, rect[0], rect[1], gw, lay.bx, lay.by, lay.bw, x, y, width,
                                                    height, at, view->marks[at]);
                         ink = window_contrast(ground);
+                        ink = view->marks[at] & COMPOSITOR_TAB_LIT    ? ink
+                              : view->marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 110)
+                                                                      : window_mix(ground, ink, 170);
 
-                        (lay.vertical ? taskbar_text_turned : taskbar_text_line)(
-                            view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
-                            view->marks[at] & COMPOSITOR_TAB_LIT    ? ink
-                            : view->marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 110)
-                                                                    : window_mix(ground, ink, 170),
-                            ground);
+                        // A band on a side writes its titles turned, a bottom or top one upright.
+                        if (lay.vertical)
+                                taskbar_text_turned(view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
+                                                    ink, ground);
+                        else
+                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
+                                                  ink, ground);
                 }
         }
 
@@ -572,8 +576,12 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         int cx, cy, cw, ch;
 
                         if (taskbar_slot(view, -3, &cx, &cy, &cw, &ch))
-                                (lay.vertical ? taskbar_text_turned : taskbar_text_line)(view, lay.bx, lay.by, lay.bw, cx, cy,
-                                                                                         cw, ch, clock, ink, ground);
+                        {
+                                if (lay.vertical)
+                                        taskbar_text_turned(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
+                                else
+                                        taskbar_text_line(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
+                        }
                 }
                 if (taskbar.battery_item)
                 {
@@ -581,8 +589,12 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                         taskbar_battery_text(text, taskbar.battery_charging, taskbar.battery_percent);
                         if (taskbar_slot(view, -4, &ax, &ay, &aw, &ah))
-                                (lay.vertical ? taskbar_text_turned : taskbar_text_line)(view, lay.bx, lay.by, lay.bw, ax, ay,
-                                                                                         aw, ah, text, ink, ground);
+                        {
+                                if (lay.vertical)
+                                        taskbar_text_turned(view, lay.bx, lay.by, lay.bw, ax, ay, aw, ah, text, ink, ground);
+                                else
+                                        taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay, aw, ah, text, ink, ground);
+                        }
                 }
         }
         return 1;
