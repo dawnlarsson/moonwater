@@ -2259,6 +2259,7 @@ static struct
         unsigned int saved_w[WINDOWS], saved_h[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
         char name[WINDOWS][WINDOWS_NAME]; // what it is remembered by, taken with its first picture; none for nothing
+        unsigned int moved[WINDOWS];      // the row's moved, as it was last taken
         unsigned char stack[WINDOWS];   // bottom first
         unsigned int stacked, next_made;
 
@@ -6259,6 +6260,48 @@ static void compositor_first_put(int row, int x, int y)
                 compositor_want(row, rect[2], rect[3]);
 }
 
+/*
+        A window that shows, put again where its row's placement says now (`moonwater window move`): taken out of
+        what it fills first, as a hand taking it would be, then put as compositor_first_put puts a new one, from
+        where it is, on the screen named or the one it is on; with a screen and no mode it is at the same place on
+        that screen. It is kept on the screen whatever it asked. One the hand holds is the hand's, and a placement
+        of nothing leaves it where it is. The name it opened with is its name still.
+*/
+static void compositor_move(int row)
+{
+        int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
+        unsigned int count = compositor_screens(screens), from, on, fills;
+        char name[WINDOWS_NAME];
+        struct window_place place;
+
+        memory_copy(name, compositor.name[row], WINDOWS_NAME);
+        compositor_place_read(row, &place);
+        memory_copy(compositor.name[row], name, WINDOWS_NAME);
+        if (compositor.drag == row || compositor.resize == row ||
+            !(place.how & (WINDOW_PLACE_HOW | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE)))
+                return;
+        compositor_float(row);
+        from = place_screen_at(compositor.x[row] + (int)compositor.w[row] / 2, compositor.y[row] + (int)compositor.h[row] / 2,
+                               screens, count);
+        on = (place.how & WINDOW_PLACE_SCREEN) && place.screen < count ? place.screen : from;
+        compositor_room(screens[on], room);
+        fills = place_rect(&place, screens[on], room, compositor.x[row] - screens[from][0] + screens[on][0],
+                           compositor.y[row] - screens[from][1] + screens[on][1], compositor.w[row], compositor.h[row],
+                           compositor_line(row), least_w, least_h, rect);
+        if (fills != COMPOSITOR_FLOATING)
+        {
+                compositor_arrange_rect(row, fills, rect);
+                return;
+        }
+        place_clamp(screens[on], rect[2], rect[3], compositor_line(row), &rect[0], &rect[1]);
+        compositor_damage_row(row);
+        compositor_put(row, rect[0], rect[1]);
+        compositor_damage_row(row);
+        if (rect[2] != (int)compositor.w[row] || rect[3] != (int)compositor.h[row])
+                compositor_want(row, rect[2], rect[3]);
+}
+
 static void compositor_reveal(int row);
 
 /*
@@ -6293,6 +6336,12 @@ static void compositor_take(int row)
         {
                 compositor.lifted[row] = table->lift[row];
                 compositor_reveal(row);
+        }
+        // Moved: put where its placement says now.
+        if (compositor.showing[row] && __atomic_load_n(&table->moved[row], __ATOMIC_ACQUIRE) != compositor.moved[row])
+        {
+                compositor.moved[row] = table->moved[row];
+                compositor_move(row);
         }
 
         if (frame == compositor.seen[row])
@@ -6333,6 +6382,7 @@ static void compositor_take(int row)
                 compositor.arranged[row] = COMPOSITOR_FLOATING;
                 compositor.edges[row] = 0;
                 compositor.lifted[row] = table->lift[row];
+                compositor.moved[row] = table->moved[row];
                 compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
                 compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS);
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;

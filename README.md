@@ -52,6 +52,7 @@ moonwater window                       the windows on the desktop: name, pid, pl
 moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says:
                                        center, at X,Y, maximized, fullscreen, screen N,
                                        size WxH, name NAME (what it is remembered by)
+moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater debug                        what the desktop is doing and why (root): the card, the pointer, windows shown straight
 moonwater name [NEW|random]            what this machine is called, like space-wizard
@@ -243,7 +244,8 @@ the command as MOONWATER_PLACE in its environment: the first window of the compo
 own that it opens (the terminal, the log, the settings, the launcher, `/surface`) takes
 it and empties it, so what that program starts after is not placed too, while programs
 the command starts before any window is open each take their own copy. A program that is
-no window of the compositor's, from a bowl, Wayland or X, never reads it.
+no window of the compositor's, from a bowl, Wayland or X, never reads it. `window move`
+puts windows already open: every one of the pid or the name `moonwater window` lists.
 
 A window the hand moves or resizes is remembered by its name (terminal, klog, settings,
 or the one `name NAME` gave it), and the next window of that name opens there: on the

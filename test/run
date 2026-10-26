@@ -20548,7 +20548,8 @@ fi
 #       place, a size, the room filled and following the band to the left edge and back, a place far off kept on
 #       the screen, a screen that is not there. Then one with a name, dragged by the hand with Alt held, closed
 #       and opened again where the hand left it; the file it is kept in, and `canvas windows` saying it; a
-#       placement standing over it; forget and remember off. The guest's /root is a tmpfs, so a second boot keeps
+#       placement standing over it; forget and remember off; and the open window moved by its name and its pid
+#       (`window move`). The guest's /root is a tmpfs, so a second boot keeps
 #       nothing: the file is what is asserted, and the checks hold its reader and writer.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = p1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/p1-answers" 2>"$work/p1-why" <<'PY'
@@ -20729,6 +20730,25 @@ gone = shell.run("ls /root/canvas.windows 2>&1; moonwater canvas windows", 10)[0
 out.append(("P2.7 with remember off, a drag keeps nothing",
             "yes" if "No such file" in gone and "no window is kept" in gone else gone[-200:], "yes"))
 said("P2.7")
+
+#   Moved while it is open: by its name, then by its pid, and a name no window has.
+moved = shell.run("moonwater window move n-probe at 400,300; echo status $?", 10)[0]
+time.sleep(1)
+listed = shell.run("moonwater window", 10)[0]
+out.append(("P3.1 window move by a name puts the open window where it says",
+            "yes" if "1 moved" in moved and re.search(r"n-probe, pid %s, at 400,300," % pid, listed) else (moved + listed)[-200:], "yes"))
+said("P3.1")
+moved = shell.run("moonwater window move %s center; echo status $?" % pid, 10)[0]
+time.sleep(1)
+screen = picture("p1-moved")
+listed = shell.run("moonwater window", 10)[0]
+x, y = (W - 200) // 2, (room - 100) // 2
+out.append(("P3.2 and by its pid to the middle of the room, drawn there",
+            "yes" if "1 moved" in moved and re.search(r"n-probe, pid %s, at %d,%d," % (pid, x, y), listed) and
+            pixel(screen, x + 60, y + 30) == "55aa55" else (moved + listed)[-200:], "yes"))
+said("P3.2")
+nobody = shell.run("moonwater window move nobody center; echo status $?", 10)[0]
+out.append(("P3.3 a name no window has is a refusal", "yes" if "no window is nobody" in nobody and "status 1" in nobody else nobody[-160:], "yes"))
 close(pid)
 shell.run("moonwater canvas windows remember default; moonwater canvas windows forget", 10)
 try:
@@ -20738,7 +20758,7 @@ except Exception:
     guest.kill()
 
 for name, got, want in out:
-    print("%s|%s|%s" % (name, got, want))
+    print("%s|%s|%s" % (name, str(got).replace("|", "/").replace("\n", " / "), want))
 PY
 if [ ! -s "$work/p1-answers" ]; then
         same "the placement boot answered" "yes" "no"

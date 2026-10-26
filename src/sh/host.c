@@ -23651,6 +23651,7 @@ static const host_row host_rows[] = {
     {null, "window PLACE... COMMAND...", "run COMMAND, its first window put where PLACE says:", 'b'},
     {null, "", "center, at X,Y, maximized, fullscreen, screen N,", 'b'},
     {null, "", "size WxH, name NAME (what it is remembered by)", 'b'},
+    {null, "window move PID|NAME PLACE...", "put the windows of a program, or of a name, where PLACE says", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why (root): the card, the pointer, windows shown straight", 'b'},
     {null, "@airplane", null, 'r'},
@@ -24429,7 +24430,7 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         placement (window.c's window_place_parse: center, at X,Y, maximized, fullscreen, screen N, size WxH, name
         NAME), then the command, which runs in this process's place as env runs one, with MOONWATER_PLACE in its
         environment: the first window it opens is put there, and the programs it starts after that are not. --
-        ends the words, for a command named like one of them.
+        ends the words, for a command named like one of them. move puts windows that are open (host_window_move).
 
         The words are judged first, then root is asked for, as the other verbs do: the window table and its doors
         are root's (WINDOWS_MODE), so no program that is not root opens a window to be placed. The placement goes
@@ -24439,11 +24440,15 @@ static b32 host_settings_window(string_address address_to arguments, positive co
 */
 #define HOST_WINDOW_ENVIRONMENT 512
 
-static b32 host_window_list(void)
+/*
+        The window table's header and columns, mapped to be read, or with writable to be written too (a move): from
+        the device, which hands root the compositor's, or at its path. A negative errno when there is none to map,
+        and -ENOENT for a table shorter than the struct, which no build can read the fields of (a compositor still
+        starting), as debug says it.
+*/
+static long host_windows_map(bool writable)
 {
-        const struct windows address_to table;
         long spark, file = -1, mapped;
-        positive shown = 0;
 
         spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
         if (spark >= 0)
@@ -24452,20 +24457,28 @@ static b32 host_window_list(void)
                 window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
         }
         if (file < 0)
-                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
-        //      As debug does: a table shorter than the struct is no table this build can map.
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, writable ? WINDOW_OPEN_FLAGS : 0x80000, 0, 0, 0);
         if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
         {
                 window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                file = -1;
+                file = -ENOENT;
         }
         if (file < 0)
-                return host_refuse("the compositor's desktop is not up: moonwater desktop on starts it\n");
-        // PROT_READ, MAP_SHARED
-        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 1, 1, file, 0);
+                return file;
+        // PROT_READ, with PROT_WRITE for a move; MAP_SHARED
+        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), writable ? 3 : 1, 1, file, 0);
         window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        return mapped;
+}
+
+static b32 host_window_list(void)
+{
+        const struct windows address_to table;
+        long mapped = host_windows_map(false);
+        positive shown = 0;
+
         if (mapped < 0 && mapped > -4096)
-                return host_fail("window", (b32)mapped);
+                return host_refuse("the compositor's desktop is not up: moonwater desktop on starts it\n");
         table = (const struct windows address_to)mapped;
         for (unsigned int row = 0; row < WINDOWS; row++)
         {
@@ -24491,6 +24504,63 @@ static b32 host_window_list(void)
         return 0;
 }
 
+/*
+        moonwater window move PID|NAME PLACE...: every window of that program, or of that name, that shows is put
+        where PLACE says, as a window started with it would be (no name: a window is not renamed by a move). The
+        placement is written into the window's row and its moved counted up, and its door knocked on, as a second
+        start lifts the first; the compositor reads the row and clamps it as it does any.
+*/
+static b32 host_window_move(string_address address_to arguments, positive count)
+{
+        struct windows address_to table;
+        struct window_place place;
+        string_address who = count > 3 ? arguments[3] : (string_address) "", stop = who;
+        int words = count > 4 ? window_place_parse(&place, (const char *const *)(arguments + 4), (unsigned int)(count - 4)) : 0;
+        positive pid = 0, moved = 0;
+        b32 range = 0;
+        long mapped;
+
+        if (byte_is_digit(who[0]))
+                pid = string_to_number_unsigned_checked(who, address_of stop, 10, address_of range);
+        //      A pid is digits that fit a pid and nothing after them; anything else is a name, or nothing.
+        return_if(words <= 0 || (positive)words != count - 4 || place.name[0] ||
+                      (byte_is_digit(who[0]) ? *stop || range || !pid || pid > 0x7fffffff || (who[0] == '0')
+                                             : !window_name_valid((const char *)who)),
+                  host_usage());
+        host_need_root();
+        mapped = host_windows_map(true);
+        return_if(mapped < 0 && mapped > -4096,
+                  host_refuse("the compositor's desktop is not up, so there is no window to move: moonwater desktop on "
+                              "starts it\n"));
+        table = (struct windows address_to)mapped;
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                unsigned int owner = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
+                char name[WINDOWS_NAME], door_name[48];
+                bipolar door;
+
+                memory_copy(name, table->name[row], sizeof(name));
+                name[sizeof(name) - 1] = 0;
+                if (!owner || owner == WINDOWS_TAKING || !__atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE) ||
+                    (pid ? owner != pid : !string_equals((string_address)name, who)))
+                        continue;
+                windows_place_set(table, row, &place);
+                __atomic_add_fetch(&table->moved[row], 1, __ATOMIC_RELEASE);
+                windows_door_name(door_name, row, 0);
+                door = system_open_at(AT_FDCWD, (string_address)door_name, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+                if (door >= 0)
+                {
+                        system_write_once((b32)door, "", 1);
+                        system_close(door);
+                }
+                moved++;
+        }
+        window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
+        return_if(!moved, host_refuse("no window is %w: moonwater window lists them\n", writer_terminal_name, who));
+        host_say(log, host_label "%p moved\n", moved);
+        return 0;
+}
+
 static b32 host_window(string_address address_to arguments, positive count)
 {
         static string_address environment[HOST_WINDOW_ENVIRONMENT + 2];
@@ -24500,6 +24570,8 @@ static b32 host_window(string_address address_to arguments, positive count)
         positive pid, at, used = 0, length = sizeof(WINDOW_PLACE_VARIABLE);
         int words = count > 2 ? window_place_parse(&place, (const char *const *)(arguments + 2), (unsigned int)(count - 2)) : 0;
 
+        if (count > 2 && string_equals(arguments[2], "move"))
+                return host_window_move(arguments, count);
         at = 2 + (positive)(words > 0 ? words : 0);
         if (words > 0 && at < count && string_equals(arguments[at], "--"))
                 at++;

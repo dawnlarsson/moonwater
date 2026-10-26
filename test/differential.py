@@ -48922,12 +48922,14 @@ PYEOF
                    "window screen 9 env", "window size 0x1 env", "window size 16385x1 env", "window size 8 env",
                    "window name Bad env", "window name -a env", "window name abcdefghijklmnop env",
                    "window center center env", "window center at 1,1 env", "window maximized size 8x8 env",
-                   "window --", "window -- env", "window center --")
+                   "window --", "window -- env", "window center --", "window move", "window move 12", "window move 12 bogus",
+                   "window move Bad center", "window move 12 name x", "window move 0 center", "window move 012 center",
+                   "window move 99999999999 center", "window move 12 center env", "window move 12x center")
         script = (up + "".join(say(command) for command in handed) + "".join(say(command) for command in refused) +
                   say('window screen 1 sh -c "exit 7"') + say("window center /nonexistent/program") +
                   say('window center sh -c "env | grep -c ^MOONWATER_PLACE="') +
                   "echo '@@ inherited'; MOONWATER_PLACE=junk timeout 20 /tmp/moonwater window at 1,2 env 2>&1; "
-                  "echo \"@@status $?\"\n" + say("window") +
+                  "echo \"@@status $?\"\n" + say("window") + say("window move 12 center") + say("window move probe at 1,2") +
                   "echo 2147483000 > /run/moonwater/compositor.pid\n" +
                   "echo '@@ dead'; timeout 20 /tmp/moonwater window maximized env 2>&1; echo \"@@status $?\"\n" + down +
                   "echo '@@ gone'; timeout 20 /tmp/moonwater window maximized env 2>&1; echo \"@@status $?\"\n")
@@ -48958,16 +48960,23 @@ PYEOF
         got = seen.get("window", {"out": [], "status": None})
         check(got["status"] == 1 and any("desktop is not up" in line for line in got["out"]),
               "moonwater window with no table it can map says the desktop is not up", repr(got)[:300])
+        for command in ("window move 12 center", "window move probe at 1,2"):
+            got = seen.get(command, {"out": [], "status": None})
+            check(got["status"] == 1 and any("no window to move" in line for line in got["out"]),
+                  f"moonwater {command} with no table it can map is a refusal", repr(got)[:300])
         for command in ("dead", "gone"):
             got = seen.get(command, {"out": [], "status": None})
             check(got["status"] == 1 and any("desktop is not up" in line for line in got["out"]) and not placed(command),
                   "a compositor that has gone, or none, is a refusal and runs nothing" + (" (no pid file)" if command == "gone" else ""),
                   repr(got)[:300])
         lines, finished = session(up + say("window center env") + say("window bogus") + say("window") +
-                                  say("window at 1,x env") + down, nobody=True)
+                                  say("window at 1,x env") + say("window move 12 center") + say("window move 12") + down,
+                                  nobody=True)
         seen = answers(lines)
         for command, (status, words) in {"window center env": (1, "moonwater window needs root"), "window bogus": (2, ""),
-                                         "window": (1, "moonwater window needs root"), "window at 1,x env": (2, "")}.items():
+                                         "window": (1, "moonwater window needs root"), "window at 1,x env": (2, ""),
+                                         "window move 12 center": (1, "moonwater window needs root"),
+                                         "window move 12": (2, "")}.items():
             got = seen.get(command, {"out": [], "status": None})
             check(got["status"] == status and words in "\n".join(got["out"]) and not placed(command),
                   f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""), repr(got)[:240])

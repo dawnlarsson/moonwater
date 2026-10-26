@@ -465,7 +465,9 @@ static inline int window_key(struct window *window, struct window_key *key)
         lift is a count anyone holding the table may add one to and knock
         for: the window is brought back if it was put away, raised over the
         others and given the keys, as its tab would. It is how a second
-        start of a program that keeps one window finds the first.
+        start of a program that keeps one window finds the first. moved is
+        the same for a window's place: the placement columns written again
+        and one more, and the window is put where they say now.
 */
 #define WINDOWS_TABLE "/run/moonwater/windows"
 #define WINDOWS_DOOR "/run/moonwater/window."
@@ -646,6 +648,8 @@ struct windows
         int place_x[WINDOWS], place_y[WINDOWS];
         unsigned int place_width[WINDOWS], place_height[WINDOWS], place_screen[WINDOWS];
         char name[WINDOWS][WINDOWS_NAME];
+        // Anyone's, as lift is: one more puts a window that shows where its placement says now (`window move`).
+        unsigned int moved[WINDOWS];
 
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
@@ -1055,6 +1059,7 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->place_width[row] = table->place_height[row] = 0;
         for (unsigned int at = 0; at < WINDOWS_NAME; at++)
                 table->name[row][at] = 0;
+        __atomic_store_n(&table->moved[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
 }

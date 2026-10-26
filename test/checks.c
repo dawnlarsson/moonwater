@@ -57905,9 +57905,11 @@ static fn windows_header(void)
         table.place_screen[3] = 2;
         table.name[3][0] = 't';
         table.name[3][14] = 'x';
+        table.moved[3] = 4;
         windows_reset_row(&table, 3);
-        check("a reset row has no placement and no name left, to its last byte",
-              !table.place[3] && !table.place_x[3] && !table.place_screen[3] && !table.name[3][0] && !table.name[3][14]);
+        check("a reset row has no placement, no name to its last byte and no move left",
+              !table.place[3] && !table.place_x[3] && !table.place_screen[3] && !table.name[3][0] && !table.name[3][14] &&
+                  !table.moved[3]);
 }
 
 /*
@@ -115832,6 +115834,51 @@ static fn check_compositor_place(void)
         check("place: a double click on a window that fills its room gives it back the place it would have had",
               compositor.arranged[3] == COMPOSITOR_FLOATING && compositor.x[3] == 30 && compositor.y[3] == 40 &&
                   table->want_width[3] == 100 && table->want_height[3] == 60);
+
+        // Moved (`moonwater window move`): the row's placement written again and its moved counted up.
+        {
+                struct window_place moving;
+
+                memory_zero(&moving, sizeof(moving));
+                moving.how = WINDOW_PLACE_AT, moving.x = 40, moving.y = 50;
+                windows_place_set(table, 2, &moving);
+                compositor_take(2);
+                check("place: a placement written again is nothing until moved is counted up", compositor.x[2] == 10 && compositor.y[2] == 20);
+                table->moved[2]++;
+                compositor_take(2);
+                check("place: moved, a window that shows is put where its placement says now", compositor.x[2] == 40 && compositor.y[2] == 50);
+                moving.how = WINDOW_PLACE_CENTER | WINDOW_PLACE_SIZE, moving.width = 120, moving.height = 80;
+                windows_place_set(table, 2, &moving);
+                table->moved[2]++;
+                compositor_take(2);
+                check("place: moved to the centre at a size, it is asked for the size and centred in the room at it",
+                      compositor.x[2] == 68 && compositor.y[2] == 76 && table->want_width[2] == 120 && table->want_height[2] == 80);
+                moving.how = WINDOW_PLACE_AT, moving.x = 10, moving.y = 12;
+                windows_place_set(table, 7, &moving);
+                table->moved[7]++;
+                compositor_take(7);
+                check("place: one that fills the output is taken out of it first, and put",
+                      compositor.arranged[7] == COMPOSITOR_FLOATING && compositor.x[7] == 10 && compositor.y[7] == 12 &&
+                          table->want_width[7] == 100 && table->want_height[7] == 60);
+                moving.how = WINDOW_PLACE_MAXIMIZED;
+                windows_place_set(table, 7, &moving);
+                table->moved[7]++;
+                compositor_take(7);
+                check("place: and moved to maximized it fills the room", compositor.arranged[7] == COMPOSITOR_ROOM &&
+                                                                              compositor.w[7] == 256 && compositor.h[7] == 232);
+                moving.how = WINDOW_PLACE_AT, moving.x = 5, moving.y = 5;
+                windows_place_set(table, 2, &moving);
+                table->moved[2]++;
+                compositor.drag = 2;
+                compositor_take(2);
+                compositor.drag = COMPOSITOR_NONE;
+                check("place: a window the hand holds is left to the hand", compositor.x[2] == 68 && compositor.y[2] == 76);
+                moving.how = 0;
+                windows_place_set(table, 2, &moving);
+                table->moved[2]++;
+                compositor_take(2);
+                check("place: and a placement of nothing leaves a window where it is", compositor.x[2] == 68 && compositor.y[2] == 76);
+        }
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
                         0, 0);
         memory_zero(&compositor, sizeof(compositor));
