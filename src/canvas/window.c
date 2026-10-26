@@ -488,6 +488,9 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOWS 32
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
+// The screens one desktop spans, at most, and a screen's connector name with its null.
+#define WINDOWS_OUTPUTS 8
+#define WINDOWS_OUTPUT_NAME 16
 
 /*
         The mode of the table, its memfd and the doors: owner only, 0600.
@@ -594,6 +597,24 @@ struct windows
         int overlay;
         unsigned long pixels;  // where row 0's first buffer is, in bytes from the table
         unsigned long buffer;  // the bytes of one buffer
+
+        /*
+                The screens the desktop spans, the compositor's. Every x and y of
+                the table is in one space across them, its top left 0, 0 (which
+                the primary screen is not always at). A screen is named by its
+                place in this list, and index 0 is the primary: the taskbar's
+                and where a window opens. The rest follow in the arrangement's
+                order. A screen's connector name (Virtual-1, HDMI-A-1, eDP-1)
+                is what outlives a list that changes, so what is remembered of a
+                screen is remembered by name. layout counts up each time the
+                list changes. output_width and output_height above are the
+                largest a window may be: the largest screen.
+        */
+        unsigned int outputs; // how many below are filled: 1 for one screen
+        unsigned int layout;
+        int output_x[WINDOWS_OUTPUTS], output_y[WINDOWS_OUTPUTS];
+        unsigned int output_w[WINDOWS_OUTPUTS], output_h[WINDOWS_OUTPUTS];
+        char output_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
@@ -1312,6 +1333,47 @@ static void windows_name(const struct window_row *own, const char *name)
                 return;
         for (unsigned int at = 0; name[at] && at < WINDOWS_NAME - 1; at++)
                 own->table->name[own->row][at] = name[at];
+}
+
+/*
+        Screen index of the table's list as x, y, width and height in the desktop's space: what a window that opens
+        on it centres on. A table that lists none (a headless compositor, or one from before the list) is one screen,
+        the output's size at 0, 0, and an index past the list is the primary's, 0. The header is shared and any
+        mapper may write it, so what is read is held to what the compositor's arithmetic takes (WINDOW_COORD_MAX).
+        Answers the index it read.
+*/
+static unsigned int windows_output(const struct windows *table, unsigned int index, int *x, int *y, int *width,
+                                   int *height)
+{
+        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
+        long values[4];
+
+        if (!count || count > WINDOWS_OUTPUTS)
+        {
+                index = 0;
+                values[0] = values[1] = 0;
+                values[2] = (long)table->output_width;
+                values[3] = (long)table->output_height;
+        }
+        else
+        {
+                index = index < count ? index : 0;
+                values[0] = table->output_x[index];
+                values[1] = table->output_y[index];
+                values[2] = (long)table->output_w[index];
+                values[3] = (long)table->output_h[index];
+        }
+        for (unsigned int at = 0; at < 4; at++)
+        {
+                long low = at < 2 ? -WINDOW_COORD_MAX : 1;
+
+                values[at] = values[at] < low ? low : values[at] > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : values[at];
+        }
+        *x = (int)values[0];
+        *y = (int)values[1];
+        *width = (int)values[2];
+        *height = (int)values[3];
+        return index;
 }
 
 /*

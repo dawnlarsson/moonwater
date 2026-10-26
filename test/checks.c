@@ -121661,6 +121661,137 @@ static void check_compositor_pointer(void) {
     }
 }
 
+/* The space the screens make (the outputs section): the arrangement's words and
+   what they lay, the pointer kept to the screens and crossing only onto one,
+   the screen a window belongs to, a window kept reachable, a drop read at a
+   screen's free edges only, the halves of a screen, and a window carried from
+   a screen that changed to the one it is on now. One screen is the old rules
+   to the pixel. */
+#define co_check(x) do{int ok_=!!(x);if(!ok_)fprintf(stderr,"outputs row failed, line %d: %s\n",__LINE__,#x);check(ok_);}while(0)
+static int co_rect(const int *r,int x,int y,int w,int h){return r[0]==x&&r[1]==y&&r[2]==w&&r[3]==h;}
+static unsigned int co_lay(const char *text,int (*rects)[4],unsigned char *order) {
+    static const char names[3][WINDOWS_OUTPUT_NAME]={"Virtual-1","Virtual-2","HDMI-A-1"};
+    static const int sizes[3][2]={{2560,1080},{1920,1080},{1280,1024}};
+    return compositor_screens_lay(text,names,sizes,2,rects,order);
+}
+static void check_compositor_outputs(void) {
+    char name[WINDOWS_OUTPUT_NAME];
+    int rects[WINDOWS_OUTPUTS][4];
+    unsigned char order[WINDOWS_OUTPUTS];
+    /* A connector is named as the kernel names it. */
+    compositor_connector_name(15,2,name);co_check(!strcmp(name,"Virtual-2"));
+    compositor_connector_name(11,1,name);co_check(!strcmp(name,"HDMI-A-1"));
+    compositor_connector_name(14,1,name);co_check(!strcmp(name,"eDP-1"));
+    compositor_connector_name(10,12,name);co_check(!strcmp(name,"DP-12"));
+    compositor_connector_name(99,3,name);co_check(!strcmp(name,"Unknown-3"));
+    compositor_connector_name(5,4000000000u,name);co_check(strlen(name)<WINDOWS_OUTPUT_NAME&&!strncmp(name,"Composite-",10));
+    /* The words: a name, NAME@X,Y, NAME@off, default alone, each name once. */
+    static const char *const valid[]={"","default"," default ","Virtual-2","Virtual-2 Virtual-1","DP-1@0,0","DP-1@-1920,40",
+        "DP-1@off eDP-1","a@32768,-32768","\tx\ny\r"};
+    static const char *const invalid[]={"Virtual-2@","Virtual-2@1","Virtual-2@1,","Virtual-2@1,2x","@1,2","a b a","default x",
+        "x default","abcdefghijklmnop","a@32769,0","a@1,,2","a@of","a_b","a@--1,2","a@1,2,3"};
+    for(unsigned i=0;i<sizeof(valid)/sizeof(valid[0]);i++)co_check(compositor_arrange_valid(valid[i]));
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)co_check(!compositor_arrange_valid(invalid[i]));
+    { unsigned int length;int how,x,y;
+      co_check(compositor_arrange_word("DP-1@-1920,40",13,&length,&how,&x,&y)&&length==4&&how==COMPOSITOR_PLACE_AT&&x==-1920&&y==40);
+      co_check(compositor_arrange_word("eDP-1@off",9,&length,&how,&x,&y)&&length==5&&how==COMPOSITOR_PLACE_OFF);
+      co_check(compositor_arrange_word("eDP-1",5,&length,&how,&x,&y)&&length==5&&how==COMPOSITOR_PLACE_FLOW); }
+    /* Left to right in the card's order, tops level, the first the primary. */
+    co_check(co_lay("",rects,order)==2&&co_rect(rects[0],0,0,2560,1080)&&co_rect(rects[1],2560,0,1920,1080)&&order[0]==0&&order[1]==1);
+    co_check(co_lay("default",rects,order)==2&&co_rect(rects[1],2560,0,1920,1080)&&order[0]==0);
+    /* Named first, in the setting's order: the named one is the primary, on the left. */
+    co_check(co_lay("Virtual-2 Virtual-1",rects,order)==2&&co_rect(rects[1],0,0,1920,1080)&&co_rect(rects[0],1920,0,2560,1080)&&
+             order[0]==1&&order[1]==0);
+    co_check(co_lay("Virtual-2",rects,order)==2&&co_rect(rects[1],0,0,1920,1080)&&co_rect(rects[0],1920,0,2560,1080)&&order[0]==1);
+    /* A name no screen has is a screen not plugged in now. */
+    co_check(co_lay("HDMI-A-1 Virtual-2",rects,order)==2&&order[0]==1&&co_rect(rects[0],1920,0,2560,1080));
+    /* Dark: off, and the rest close up; every screen off lights the first. */
+    co_check(co_lay("Virtual-2@off",rects,order)==1&&co_rect(rects[0],0,0,2560,1080)&&co_rect(rects[1],0,0,0,0)&&order[0]==0);
+    co_check(co_lay("Virtual-1@off",rects,order)==1&&co_rect(rects[1],0,0,1920,1080)&&rects[0][2]==0&&order[0]==1);
+    co_check(co_lay("Virtual-1@off Virtual-2@off",rects,order)==1&&co_rect(rects[0],0,0,2560,1080)&&rects[1][2]==0&&order[0]==0);
+    /* A place given is kept, the space moved so its top left is 0, 0. */
+    co_check(co_lay("Virtual-1@0,0 Virtual-2@0,-1080",rects,order)==2&&co_rect(rects[0],0,1080,2560,1080)&&
+             co_rect(rects[1],0,0,1920,1080)&&order[0]==0);
+    co_check(co_lay("Virtual-2@-1920,200",rects,order)==2&&co_rect(rects[1],0,200,1920,1080)&&co_rect(rects[0],1920,0,2560,1080));
+    /* Words that are not an arrangement are the default. */
+    co_check(co_lay("Virtual-2@x",rects,order)==2&&co_rect(rects[0],0,0,2560,1080)&&order[0]==0);
+    co_check(co_lay("Virtual-2 Virtual-2",rects,order)==2&&co_rect(rects[0],0,0,2560,1080)&&order[0]==0);
+
+    /* The pointer: A 2560x1080 and, to its right, B taller at 1920x1200. */
+    static const int two[2][4]={{0,0,2560,1080},{2560,0,1920,1200}};
+    int x,y;
+    x=100,y=100;compositor_screen_keep_point(two,2,90,90,&x,&y);co_check(x==100&&y==100);
+    x=2570,y=500;compositor_screen_keep_point(two,2,2550,500,&x,&y);co_check(x==2570&&y==500); /* across where they meet */
+    x=2550,y=1150;compositor_screen_keep_point(two,2,2570,1150,&x,&y);co_check(x==2560&&y==1150); /* beside A's bottom: stops */
+    x=2570,y=1090;compositor_screen_keep_point(two,2,2550,1070,&x,&y);co_check(x==2570&&y==1090); /* onto B's taller part */
+    x=-50,y=100;compositor_screen_keep_point(two,2,10,100,&x,&y);co_check(x==0&&y==100);
+    x=9000,y=1300;compositor_screen_keep_point(two,2,4000,1100,&x,&y);co_check(x==4479&&y==1199);
+    /* From nowhere (a tablet's point): the nearest point of the nearest screen, the lower index of two as near. */
+    x=2000,y=1150;compositor_screen_keep_point(two,2,-1,-1,&x,&y);co_check(x==2000&&y==1079);
+    x=2540,y=1150;compositor_screen_keep_point(two,2,-1,-1,&x,&y);co_check(x==2560&&y==1150);
+    { static const int gap[2][4]={{0,0,1000,1000},{1100,0,1000,1000}},even[2][4]={{0,0,1000,1000},{1101,0,1000,1000}};
+      x=1050,y=500;compositor_screen_keep_point(gap,2,990,500,&x,&y);co_check(x==999&&y==500); /* a gap: stops */
+      x=1150,y=500;compositor_screen_keep_point(gap,2,990,500,&x,&y);co_check(x==1150&&y==500); /* ends on B: there */
+      x=1049,y=500;compositor_screen_keep_point(gap,2,-5,-5,&x,&y);co_check(x==999&&y==500);
+      x=1051,y=500;compositor_screen_keep_point(gap,2,-5,-5,&x,&y);co_check(x==1100&&y==500);
+      x=1050,y=500;compositor_screen_keep_point(even,2,-5,-5,&x,&y);co_check(x==999&&y==500); }
+    co_check(compositor_screen_at(two,2,2559,1079)==0&&compositor_screen_at(two,2,2560,1199)==1&&compositor_screen_at(two,2,2559,1080)==-1&&
+             compositor_screen_at(two,2,4480,0)==-1);
+    /* A window's screen: the most of it, the lower index on a tie, the nearest when none holds any. */
+    co_check(compositor_screen_owner(two,2,2400,100,400,300)==1&&compositor_screen_owner(two,2,2300,100,400,300)==0&&
+             compositor_screen_owner(two,2,2360,100,400,300)==0&&compositor_screen_owner(two,2,2000,1100,100,50)==0&&
+             compositor_screen_owner(two,2,4600,1300,100,50)==1);
+    { int box[4];compositor_screens_box(two,2,box);co_check(co_rect(box,0,0,4480,1200));
+      static const int shifted[2][4]={{100,50,10,10},{-20,70,5,100}};compositor_screens_box(shifted,2,box);co_check(co_rect(box,-20,50,130,120)); }
+    /* Kept reachable: on one screen exactly the old rule (all of it when it fits, its top left when not), line inside. */
+    for(int seed=1;seed<4000;seed++) {
+        int w=1+(seed*7919)%3000,h=1+(seed*104729)%1500,line=seed&1,wx=(seed*31337)%6000-3000,wy=(seed*7177)%3000-1500;
+        static const int one[1][4]={{0,0,2560,1080}};
+        int kx=wx,ky=wy,old_x=wx,old_y=wy;
+        compositor_screen_keep_window(one,1,&kx,&ky,w,h,line,24);
+        old_x=old_x>2560-w-line?2560-w-line:old_x;old_y=old_y>1080-h-line?1080-h-line:old_y;
+        old_x=old_x<line?line:old_x;old_y=old_y<line?line:old_y;
+        if(kx!=old_x||ky!=old_y){co_check(0);break;}
+    }
+    x=2450,y=100;compositor_screen_keep_window(two,2,&x,&y,400,300,1,24);co_check(x==2450&&y==100); /* across both: left alone */
+    x=2000,y=1100;compositor_screen_keep_window(two,2,&x,&y,100,60,1,24);co_check(x==2000&&y==1019); /* top in no screen: onto A */
+    x=2450,y=1100;compositor_screen_keep_window(two,2,&x,&y,200,60,1,24);co_check(x==2450&&y==1100); /* top on B for 90 px */
+    x=2545,y=1100;compositor_screen_keep_window(two,2,&x,&y,30,60,1,24);co_check(x==2561&&y==1100); /* 15 of 24 on B: onto B */
+    /* Snap: the free edges of the screen under the pointer, the top before the sides; a shared edge is crossed. */
+    { static const int level[2][4]={{0,0,2560,1080},{2560,0,1920,1080}};
+      int at;
+      co_check(compositor_screen_snap(level,2,2,500,8,&at)==COMPOSITOR_LEFT&&at==0);
+      co_check(compositor_screen_snap(level,2,2555,500,8,&at)==COMPOSITOR_FLOATING&&at==0);
+      co_check(compositor_screen_snap(level,2,2562,500,8,&at)==COMPOSITOR_FLOATING&&at==1);
+      co_check(compositor_screen_snap(level,2,4475,500,8,&at)==COMPOSITOR_RIGHT&&at==1);
+      co_check(compositor_screen_snap(level,2,3000,3,8,&at)==COMPOSITOR_MAXIMIZED&&at==1);
+      co_check(compositor_screen_snap(level,2,4477,2,8,&at)==COMPOSITOR_MAXIMIZED&&at==1);
+      co_check(compositor_screen_snap(level,2,5000,500,8,&at)==COMPOSITOR_FLOATING&&at==-1);
+      co_check(compositor_screen_snap(two,2,2563,1150,8,&at)==COMPOSITOR_LEFT&&at==1);  /* A is not against B down there */
+      co_check(compositor_screen_snap(two,2,2563,1000,8,&at)==COMPOSITOR_FLOATING&&at==1);
+      static const int one[1][4]={{0,0,2560,1080}};
+      co_check(compositor_screen_snap(one,1,7,7,8,&at)==COMPOSITOR_MAXIMIZED&&compositor_screen_snap(one,1,7,500,8,&at)==COMPOSITOR_LEFT&&
+               compositor_screen_snap(one,1,2552,500,8,&at)==COMPOSITOR_RIGHT&&compositor_screen_snap(one,1,2551,500,8,&at)==COMPOSITOR_FLOATING&&
+               compositor_screen_snap(one,1,8,500,8,&at)==COMPOSITOR_FLOATING); }
+    /* What an arrangement fills of a screen. */
+    { int part[4];
+      compositor_screen_part(two[1],COMPOSITOR_MAXIMIZED,part);co_check(co_rect(part,2560,0,1920,1200));
+      compositor_screen_part(two[1],COMPOSITOR_LEFT,part);co_check(co_rect(part,2560,0,960,1200));
+      compositor_screen_part(two[1],COMPOSITOR_RIGHT,part);co_check(co_rect(part,3520,0,960,1200));
+      static const int odd[4]={10,20,101,50};
+      compositor_screen_part(odd,COMPOSITOR_LEFT,part);co_check(co_rect(part,10,20,50,50));
+      compositor_screen_part(odd,COMPOSITOR_RIGHT,part);co_check(co_rect(part,60,20,51,50)); }
+    /* Carried: a screen that only moved takes its windows along; another size keeps the share of the room. */
+    { static const int was[4]={2560,0,1920,1080},moved[4]={0,0,1920,1080},bigger[4]={0,0,2560,1080};
+      x=2560+700,y=390;compositor_screen_carry(was,moved,&x,&y,400,300);co_check(x==700&&y==390);
+      x=2560+760,y=390;compositor_screen_carry(was,bigger,&x,&y,400,300);co_check(x==1080&&y==390);
+      x=2560-50,y=-10;compositor_screen_carry(was,bigger,&x,&y,400,300);co_check(x==0&&y==0);
+      x=4000,y=900;compositor_screen_carry(was,bigger,&x,&y,400,300);co_check(x==2046&&y==780);
+      x=4100,y=900;compositor_screen_carry(was,bigger,&x,&y,400,300);co_check(x==2160&&y==780);
+      x=3000,y=10;compositor_screen_carry(was,moved,&x,&y,1920,300);co_check(x==0&&y==10);
+      x=3000,y=10;compositor_screen_carry(bigger,moved,&x,&y,2000,300);co_check(x==0); }
+}
+
 /* The scene is the painter's picture: surfaces drawn bottom to top over a
    desktop, inside the damage, and no pixel outside it. Random surfaces (some
    off the screen, some with round corners of every radius up to past half
@@ -121877,6 +122008,7 @@ int main(void) {
     check_compositor_title_length();
     check_compositor_keymap();
     check_compositor_pointer();
+    check_compositor_outputs();
     check_compositor_scene();
     printf("  canvas-cells %u of %u\n",checks,checks);
     const char *tally=getenv("TEST_TALLY");

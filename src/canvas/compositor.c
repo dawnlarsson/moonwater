@@ -1500,6 +1500,451 @@ static void compositor_cursor_draw(const struct compositor_target *t, int x, int
 
 /* ---- end of the pointer ---- */
 
+/* ---- outputs: the screens one desktop spans ---- */
+
+/*
+        Every screen the card has connected is driven, each at its own mode,
+        and the desktop is one space across them: a screen is a rectangle of
+        it, x, y, width, height, and the space's top left is 0, 0. These are
+        the rules of that space, each a function of the rectangles alone, so
+        the checks hold them without a card:
+
+        The arrangement. A screen the setting does not name is laid to the
+        right of the ones before it, tops level, in the order the card lists
+        its connectors; a named one comes first, in the setting's order, at
+        the place it gives when it gives one, and dark when it says off. The
+        first screen laid is the primary: the taskbar's, and where a window
+        opens. The space is then moved so its top left is 0, 0.
+
+        The pointer is on a screen and nowhere else: it crosses from one to
+        the next only where their edges meet, and beside that part of an edge
+        (a shorter screen's bottom, an offset one's corner, a gap) it stops,
+        as at the desktop's own edge. A movement that ends off every screen
+        is kept on the screen it started on; a point that came from nowhere
+        (a tablet's, which spans the space) goes to the nearest point of the
+        nearest screen.
+
+        A window's screen is the one that holds the most of it, the lower
+        index of two that hold as much, and the nearest when none holds any
+        of it: that is the screen it is maximized and halved on, and the one
+        whose taskbar lists it. A drag is aimed by the hand, so where one
+        ends is read on the screen under the pointer, and only at an edge no
+        other screen is against: a window let go just past a shared edge has
+        crossed it, and is not arranged.
+*/
+
+// A connector's name as the kernel spells it: its type's name, a dash and its number among those of the type.
+static void compositor_connector_name(unsigned int type, unsigned int number, char *into)
+{
+        static const char *const types[] = {"Unknown", "VGA", "DVI-I", "DVI-D", "DVI-A", "Composite", "SVIDEO",
+                                            "LVDS", "Component", "DIN", "DP", "HDMI-A", "HDMI-B", "TV", "eDP",
+                                            "Virtual", "DSI", "DPI", "Writeback", "SPI", "USB"};
+        const char *name = type < sizeof(types) / sizeof(types[0]) ? types[type] : types[0];
+        char digits[12];
+        unsigned int length = 0, count = 0;
+
+        while (name[length] && length < WINDOWS_OUTPUT_NAME - 2)
+                into[length] = name[length], length++;
+        into[length++] = '-';
+        do
+                digits[count++] = (char)('0' + number % 10), number /= 10;
+        while (number && count < sizeof(digits));
+        while (count && length < WINDOWS_OUTPUT_NAME - 1)
+                into[length++] = digits[--count];
+        into[length] = 0;
+}
+
+// A rectangle, x, y, width, height, and the point x, y: whether the one holds the other.
+static int compositor_screen_holds(const int *screen, int x, int y)
+{
+        return x >= screen[0] && y >= screen[1] && x - screen[0] < screen[2] && y - screen[1] < screen[3];
+}
+
+// The screen a point is on, the first of the list that holds it; -1 for none.
+static int compositor_screen_at(const int (*screens)[4], unsigned int count, int x, int y)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (compositor_screen_holds(screens[at], x, y))
+                        return (int)at;
+        return -1;
+}
+
+// A value held to low to high, low winning where they cross: a window that does not fit keeps its top left.
+static int compositor_fit(int value, int low, int high)
+{
+        value = value > high ? high : value;
+        return value < low ? low : value;
+}
+
+// The point of a screen nearest x, y, and how far that is, squared.
+static long long compositor_screen_nearest(const int *screen, int *x, int *y)
+{
+        int nx = compositor_fit(*x, screen[0], screen[0] + screen[2] - 1);
+        int ny = compositor_fit(*y, screen[1], screen[1] + screen[3] - 1);
+        long long dx = (long long)*x - nx, dy = (long long)*y - ny;
+
+        *x = nx;
+        *y = ny;
+        return dx * dx + dy * dy;
+}
+
+/*
+        The pointer moved from from_x, from_y to x, y: where it is, on a
+        screen. A point on one is where it is; one off them all is kept on
+        the screen the movement started on, at its edge; and one with no
+        screen to start from goes to the nearest point of the nearest screen
+        (the lower index of two as near).
+*/
+static void compositor_screen_keep_point(const int (*screens)[4], unsigned int count, int from_x, int from_y, int *x,
+                                         int *y)
+{
+        int from = compositor_screen_at(screens, count, from_x, from_y), best_x = *x, best_y = *y;
+        long long least = -1;
+
+        if (!count || compositor_screen_at(screens, count, *x, *y) >= 0)
+                return;
+        if (from >= 0)
+        {
+                compositor_screen_nearest(screens[from], x, y);
+                return;
+        }
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int nx = *x, ny = *y;
+                long long far = compositor_screen_nearest(screens[at], &nx, &ny);
+
+                if (least < 0 || far < least)
+                        least = far, best_x = nx, best_y = ny;
+        }
+        *x = best_x;
+        *y = best_y;
+}
+
+// How much of a rectangle, x, y, width, height, lies on a screen, in pixels.
+static long long compositor_screen_cover(const int *screen, int x, int y, int width, int height)
+{
+        long long x1 = x > screen[0] ? x : screen[0], y1 = y > screen[1] ? y : screen[1];
+        long long x2 = (long long)x + width < (long long)screen[0] + screen[2] ? (long long)x + width
+                                                                               : (long long)screen[0] + screen[2];
+        long long y2 = (long long)y + height < (long long)screen[1] + screen[3] ? (long long)y + height
+                                                                                : (long long)screen[1] + screen[3];
+
+        return x2 > x1 && y2 > y1 ? (x2 - x1) * (y2 - y1) : 0;
+}
+
+// A window's screen: the one that holds the most of it, the lower index of two that hold as much, and with none
+// holding any, the one nearest its middle.
+static int compositor_screen_owner(const int (*screens)[4], unsigned int count, int x, int y, int width, int height)
+{
+        long long most = 0, least = -1;
+        int owner = -1;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                long long cover = compositor_screen_cover(screens[at], x, y, width, height);
+
+                if (cover > most)
+                        most = cover, owner = (int)at;
+        }
+        if (owner >= 0 || !count)
+                return owner < 0 ? 0 : owner;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int mx = (int)(((long long)x * 2 + width) / 2), my = (int)(((long long)y * 2 + height) / 2);
+                long long far = compositor_screen_nearest(screens[at], &mx, &my);
+
+                if (least < 0 || far < least)
+                        least = far, owner = (int)at;
+        }
+        return owner;
+}
+
+// The rectangle that holds every screen.
+static void compositor_screens_box(const int (*screens)[4], unsigned int count, int *box)
+{
+        box[0] = box[1] = box[2] = box[3] = 0;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int x2 = at ? box[0] + box[2] : screens[at][0] + screens[at][2];
+                int y2 = at ? box[1] + box[3] : screens[at][1] + screens[at][3];
+
+                x2 = x2 > screens[at][0] + screens[at][2] ? x2 : screens[at][0] + screens[at][2];
+                y2 = y2 > screens[at][1] + screens[at][3] ? y2 : screens[at][1] + screens[at][3];
+                box[0] = at && box[0] < screens[at][0] ? box[0] : screens[at][0];
+                box[1] = at && box[1] < screens[at][1] ? box[1] : screens[at][1];
+                box[2] = x2 - box[0];
+                box[3] = y2 - box[1];
+        }
+}
+
+/*
+        A window, width by height with a line round it, kept where a person
+        can reach it: on the space, all of it when it fits and its top left
+        when it does not, as on one screen; and its top, the strip a press
+        takes it by (grab rows of it, or all of a shorter window), wholly on
+        a screen for as much of it as a press needs (grab pixels of it, or
+        all of a narrower window). A window whose top is not is put on its
+        screen, all of it when it fits and its top left when not.
+*/
+static void compositor_screen_keep_window(const int (*screens)[4], unsigned int count, int *x, int *y, int width,
+                                          int height, int line, int grab)
+{
+        int box[4], strip = height < grab ? height : grab, need = width < grab ? width : grab, owner;
+
+        compositor_screens_box(screens, count, box);
+        *x = compositor_fit(*x, box[0] + line, box[0] + box[2] - width - line);
+        *y = compositor_fit(*y, box[1] + line, box[1] + box[3] - height - line);
+        if (count < 2)
+                return;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const int *s = screens[at];
+                long long x1 = *x > s[0] ? *x : s[0];
+                long long x2 = (long long)*x + width < (long long)s[0] + s[2] ? (long long)*x + width : (long long)s[0] + s[2];
+
+                if (*y >= s[1] && (long long)*y + strip <= (long long)s[1] + s[3] && x2 - x1 >= need)
+                        return;
+        }
+        owner = compositor_screen_owner(screens, count, *x, *y, width, height);
+        *x = compositor_fit(*x, screens[owner][0] + line, screens[owner][0] + screens[owner][2] - width - line);
+        *y = compositor_fit(*y, screens[owner][1] + line, screens[owner][1] + screens[owner][3] - height - line);
+}
+
+/*
+        Where a drag let go at x, y arranges its window: the screen under the
+        pointer and what of it the window fills (COMPOSITOR_MAXIMIZED at its
+        top, the halves at its sides, the top before the sides so a corner
+        fills it), or COMPOSITOR_FLOATING. An edge another screen is against
+        is no edge: the pointer goes on across it.
+*/
+static unsigned int compositor_screen_snap(const int (*screens)[4], unsigned int count, int x, int y, int margin,
+                                           int *screen)
+{
+        int at = compositor_screen_at(screens, count, x, y);
+        const int *s;
+
+        *screen = at;
+        if (at < 0)
+                return COMPOSITOR_FLOATING;
+        s = screens[at];
+        if (y - s[1] < margin && compositor_screen_at(screens, count, x, s[1] - 1) < 0)
+                return COMPOSITOR_MAXIMIZED;
+        if (x - s[0] < margin && compositor_screen_at(screens, count, s[0] - 1, y) < 0)
+                return COMPOSITOR_LEFT;
+        if (s[0] + s[2] - 1 - x < margin && compositor_screen_at(screens, count, s[0] + s[2], y) < 0)
+                return COMPOSITOR_RIGHT;
+        return COMPOSITOR_FLOATING;
+}
+
+// What a window arranged as how fills of a screen, x, y, width, height: all of it, or its left or right half.
+static void compositor_screen_part(const int *screen, unsigned int how, int *part)
+{
+        int half = screen[2] / 2;
+
+        part[0] = how == COMPOSITOR_RIGHT ? screen[0] + half : screen[0];
+        part[1] = screen[1];
+        part[2] = how == COMPOSITOR_LEFT ? half : how == COMPOSITOR_RIGHT ? screen[2] - half : screen[2];
+        part[3] = screen[3];
+}
+
+/*
+        A window width by height at x, y on the screen was, taken to the
+        screen now: at the same share of the room it had to move in, across
+        and down, so a screen that only moved takes its windows with it and
+        one that went sends them to the same corner of another.
+*/
+static int compositor_carry_axis(int at, int was_at, int was_size, int now_at, int now_size, int size)
+{
+        long long room_was = (long long)was_size - size, room_now = (long long)now_size - size;
+        long long offset = (long long)at - was_at;
+
+        // A window as large as the room it had, or larger than the room it has, keeps its top left at the screen's.
+        if (room_was <= 0 || room_now <= 0)
+                return now_at;
+        offset = offset < 0 ? 0 : offset > room_was ? room_was : offset;
+        return now_at + (int)(offset * room_now / room_was);
+}
+
+static void compositor_screen_carry(const int *was, const int *now, int *x, int *y, int width, int height)
+{
+        *x = compositor_carry_axis(*x, was[0], was[2], now[0], now[2], width);
+        *y = compositor_carry_axis(*y, was[1], was[3], now[1], now[3], height);
+}
+
+// A word of the arrangement, as long as length: whether it is one, NAME, NAME@X,Y or NAME@off, with the name's length
+// and what it says. A name is letters, digits and dashes, as a connector's is.
+#define COMPOSITOR_PLACE_FLOW 0
+#define COMPOSITOR_PLACE_AT 1
+#define COMPOSITOR_PLACE_OFF 2
+#define COMPOSITOR_PLACE_MOST 32768
+
+static int compositor_arrange_word(const char *word, unsigned int length, unsigned int *name, int *how, int *x, int *y)
+{
+        unsigned int at = 0;
+
+        while (at < length && ((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
+                               word[at] == '-'))
+                at++;
+        *name = at;
+        *how = COMPOSITOR_PLACE_FLOW;
+        *x = *y = 0;
+        if (!at || at >= WINDOWS_OUTPUT_NAME)
+                return 0;
+        if (at == length)
+                return 1;
+        if (word[at++] != '@')
+                return 0;
+        if (length - at == 3 && word[at] == 'o' && word[at + 1] == 'f' && word[at + 2] == 'f')
+        {
+                *how = COMPOSITOR_PLACE_OFF;
+                return 1;
+        }
+        for (int axis = 0; axis < 2; axis++)
+        {
+                int sign = 1, value = 0, digits = 0, *into = axis ? y : x;
+
+                if (at < length && word[at] == '-')
+                        sign = -1, at++;
+                while (at < length && word[at] >= '0' && word[at] <= '9' && digits < 6)
+                        value = value * 10 + (word[at++] - '0'), digits++;
+                if (!digits || value > COMPOSITOR_PLACE_MOST)
+                        return 0;
+                *into = sign * value;
+                if (!axis && (at >= length || word[at++] != ','))
+                        return 0;
+        }
+        *how = COMPOSITOR_PLACE_AT;
+        return at == length;
+}
+
+// Whether count bytes at a and at b are the same.
+static int compositor_same(const char *a, const char *b, unsigned int count)
+{
+        while (count && *a == *b)
+                a++, b++, count--;
+        return !count;
+}
+
+// Whether a whole arrangement is one: default or nothing, or words each of which is one, a name once.
+static int compositor_arrange_valid(const char *text)
+{
+        unsigned int at = 0, words = 0, starts[WINDOWS_OUTPUTS * 2], names[WINDOWS_OUTPUTS * 2];
+
+        while (text[at])
+        {
+                unsigned int start, name;
+                int how, x, y;
+
+                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                        at++;
+                if (!text[at])
+                        break;
+                start = at;
+                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
+                        at++;
+                // default is a word alone, never a screen's name among others.
+                if (at - start == 7 && compositor_same(text + start, "default", 7))
+                {
+                        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                                at++;
+                        return !words && !text[at];
+                }
+                if (words == WINDOWS_OUTPUTS * 2 || !compositor_arrange_word(text + start, at - start, &name, &how, &x, &y))
+                        return 0;
+                for (unsigned int other = 0; other < words; other++)
+                        if (names[other] == name && compositor_same(text + starts[other], text + start, name))
+                                return 0;
+                starts[words] = start;
+                names[words++] = name;
+        }
+        return 1;
+}
+
+/*
+        The arrangement: count screens in the card's order, each its name and
+        its width and height, laid by the words of the setting (default or
+        none for the card's own order). Each screen's rectangle comes back in
+        rects, x, y, width, height, in the card's order, with a width of 0 for
+        one that is dark; order is the screens lit, the primary first and the
+        rest as they were laid. Answers how many are lit, at least one when
+        any is connected: a setting that would leave every screen dark lights
+        the first.
+*/
+static unsigned int compositor_screens_lay(const char *text, const char (*names)[WINDOWS_OUTPUT_NAME], const int (*sizes)[2],
+                                           unsigned int count, int (*rects)[4], unsigned char *order)
+{
+        unsigned char laid[WINDOWS_OUTPUTS] = {0}, placed[WINDOWS_OUTPUTS] = {0}, dark[WINDOWS_OUTPUTS] = {0};
+        int place[WINDOWS_OUTPUTS][2] = {{0}}, valid = compositor_arrange_valid(text);
+        unsigned int lit = 0, at = 0, used = 0;
+        int right = 0, low_x = 0, low_y = 0;
+
+        count = count < WINDOWS_OUTPUTS ? count : WINDOWS_OUTPUTS;
+
+        // The named screens first, in the setting's order; a name no screen has is a screen not plugged in now.
+        while (valid && text[at])
+        {
+                unsigned int start, name;
+                int how, x, y;
+
+                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                        at++;
+                start = at;
+                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
+                        at++;
+                if (at == start || !compositor_arrange_word(text + start, at - start, &name, &how, &x, &y))
+                        continue;
+                for (unsigned int screen = 0; screen < count; screen++)
+                {
+                        unsigned int same = 0;
+
+                        while (same < name && names[screen][same] == text[start + same])
+                                same++;
+                        if (same != name || names[screen][name] || laid[screen])
+                                continue;
+                        laid[screen] = 1;
+                        dark[screen] = how == COMPOSITOR_PLACE_OFF;
+                        placed[screen] = how == COMPOSITOR_PLACE_AT;
+                        place[screen][0] = x, place[screen][1] = y;
+                        order[used++] = (unsigned char)screen;
+                }
+        }
+        for (unsigned int screen = 0; screen < count; screen++)
+                if (!laid[screen])
+                        order[used++] = (unsigned char)screen;
+
+        for (unsigned int screen = 0; screen < count; screen++)
+                lit += !dark[screen];
+        if (!lit && count)
+                dark[0] = 0;
+
+        // Those given a place have it; the rest go to the right of everything laid before them, tops level.
+        lit = 0;
+        for (unsigned int each = 0; each < used; each++)
+        {
+                unsigned int screen = order[each];
+
+                if (dark[screen])
+                        continue;
+                rects[screen][0] = placed[screen] ? place[screen][0] : right;
+                rects[screen][1] = placed[screen] ? place[screen][1] : 0;
+                rects[screen][2] = sizes[screen][0];
+                rects[screen][3] = sizes[screen][1];
+                right = rects[screen][0] + rects[screen][2] > right || !lit ? rects[screen][0] + rects[screen][2] : right;
+                low_x = !lit || rects[screen][0] < low_x ? rects[screen][0] : low_x;
+                low_y = !lit || rects[screen][1] < low_y ? rects[screen][1] : low_y;
+                order[lit++] = (unsigned char)screen;
+        }
+        for (unsigned int screen = 0; screen < count; screen++)
+                if (dark[screen])
+                        rects[screen][0] = rects[screen][1] = rects[screen][2] = rects[screen][3] = 0;
+                else
+                        rects[screen][0] -= low_x, rects[screen][1] -= low_y;
+        return lit;
+}
+
+/* ---- end of the outputs ---- */
+
 /*
         The DRM and evdev interface this needs, as the kernel's uapi lays it
         out. The ioctl numbers are _IOWR('d', n, size) with the size in bits
@@ -1705,6 +2150,22 @@ struct compositor_poll
 #define COMPOSITOR_NONE (-1)
 #define COMPOSITOR_OVER (-1) // damage_by: the pointer or the tabs, over every window and under none
 
+/*
+        A screen the compositor drives: its connector and the crtc that scans
+        it, the mode that crtc is at, and its name. Its rectangle of the space
+        is compositor.screen at the same index. The cursor plane is a crtc's,
+        so what each screen's plane was given is its own: shows is the shape
+        it wears (the paint it was given, 0 for none), at x, y on the screen.
+*/
+struct compositor_output
+{
+        unsigned int crtc, crtc_index, connector;
+        struct compositor_mode mode;
+        char name[WINDOWS_OUTPUT_NAME];
+        unsigned int shows;
+        int cursor_x, cursor_y;
+};
+
 static struct
 {
         int card;
@@ -1717,7 +2178,15 @@ static struct
         unsigned int *composing, *mirror;
         unsigned long mirror_pitch;
         int changed, mirror_stale;
-        int width, height;
+        int width, height;   // the space every screen is a rectangle of, and the scanout that is as large
+        /*
+                The screens, how many there are (none listed is one screen, the whole space: a headless
+                compositor, a check), and each one's rectangle of the space, x, y, width, height, in the order of
+                the table's list: the primary first. layout counts the times the list changed.
+        */
+        struct compositor_output output[WINDOWS_OUTPUTS];
+        int screen[WINDOWS_OUTPUTS][4];
+        unsigned int outputs, layout;
         int damage[COMPOSITOR_DAMAGE][4]; // x1, y1, x2, y2: what changed, apart
         unsigned int damages;
 
@@ -1900,6 +2369,49 @@ static int compositor_cursor_in_scene(void)
 {
         return compositor.cursor.soft ||
                (compositor.cursor.handle[0] && compositor.cursor.size > compositor_cursor_fit(compositor.cursor.size));
+}
+
+// The screens as rectangles of the space, and how many: one, the whole space, where none is listed.
+static const int (*compositor_screens(unsigned int *count))[4]
+{
+        static int whole[1][4];
+
+        if (compositor.outputs)
+        {
+                *count = compositor.outputs;
+                return (const int (*)[4])compositor.screen;
+        }
+        whole[0][0] = whole[0][1] = 0;
+        whole[0][2] = compositor.width;
+        whole[0][3] = compositor.height;
+        *count = 1;
+        return (const int (*)[4])whole;
+}
+
+// How many screens the desktop spans: at least one.
+static int compositor_output_count(void)
+{
+        return compositor.outputs ? (int)compositor.outputs : 1;
+}
+
+// Screen index's rectangle of the space, as the table lists it (0 the primary); an index past the list is the primary's.
+static void compositor_output_rect(int index, int *x, int *y, int *width, int *height)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        index = index >= 0 && (unsigned int)index < count ? index : 0;
+        *x = screens[index][0];
+        *y = screens[index][1];
+        *width = screens[index][2];
+        *height = screens[index][3];
+}
+
+// Screen index's connector name; "" for a screen that is not a connector (headless) or past the list.
+static const char *compositor_output_name(int index)
+{
+        return compositor.outputs && index >= 0 && (unsigned int)index < compositor.outputs ? compositor.output[index].name
+                                                                                            : "";
 }
 
 static long compositor_call(positive number, positive a, positive b, positive c,
@@ -4159,6 +4671,7 @@ static b32 compositor_card_open(void)
                 crtc = crtcs[0];
                 mode = modes[0];
                 have_mode = 1;
+                compositor_connector_name(probe.connector_type, probe.connector_type_id, compositor.output[0].name);
 
                 encoder.encoder_id = probe.encoder_id;
                 if (probe.encoder_id &&
@@ -4190,6 +4703,14 @@ static b32 compositor_card_open(void)
                         compositor.crtc_index = at;
         compositor.mode = mode;
         compositor.connector = connector;
+        compositor.output[0].crtc = crtc;
+        compositor.output[0].crtc_index = compositor.crtc_index;
+        compositor.output[0].connector = connector;
+        compositor.output[0].mode = mode;
+        compositor.screen[0][0] = compositor.screen[0][1] = 0;
+        compositor.screen[0][2] = compositor.width;
+        compositor.screen[0][3] = compositor.height;
+        compositor.outputs = 1;
         compositor.period = 1000000000ull / (mode.vrefresh >= 24 && mode.vrefresh <= 1000 ? mode.vrefresh : 60);
 
         struct compositor_dumb dumb = {(unsigned int)compositor.height,
@@ -6738,6 +7259,36 @@ static long compositor_table_memfd(unsigned long bytes)
 }
 
 /*
+        What the table says of the screens, at the start and whenever they change: the list, the primary first, each
+        one's rectangle and connector name, and that it changed (layout).
+*/
+static void compositor_table_outputs(void)
+{
+        struct windows *table = compositor.table;
+        int count = compositor_output_count();
+
+        if (!table)
+                return;
+        for (int at = 0; at < count && at < WINDOWS_OUTPUTS; at++)
+        {
+                int x, y, width, height;
+                const char *name = compositor_output_name(at);
+                unsigned int length = 0;
+
+                compositor_output_rect(at, &x, &y, &width, &height);
+                table->output_x[at] = x;
+                table->output_y[at] = y;
+                table->output_w[at] = (unsigned int)width;
+                table->output_h[at] = (unsigned int)height;
+                while (name[length] && length < WINDOWS_OUTPUT_NAME - 1)
+                        table->output_name[at][length] = name[length], length++;
+                memory_zero(table->output_name[at] + length, WINDOWS_OUTPUT_NAME - length);
+        }
+        table->layout = compositor.layout;
+        __atomic_store_n(&table->outputs, (unsigned int)count, __ATOMIC_RELEASE);
+}
+
+/*
         The table and its doors, made new: whatever is at the paths is from a
         compositor whose session is over. The table is sparse, so its size is
         the most every window could draw and what it costs is the pages that
@@ -6801,6 +7352,7 @@ static int compositor_table(void)
         compositor.table->refused = compositor.memfd_failed;
         compositor.table->pixels = header;
         compositor.table->buffer = buffer;
+        compositor_table_outputs();
 
         // The door is read here and the wake written, each end kept for the session; S_IFIFO.
         for (unsigned int row = 0; row < WINDOWS; row++)

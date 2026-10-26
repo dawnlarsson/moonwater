@@ -27559,7 +27559,8 @@ def harness_core_state(argv):
         # The userspace compositor's CPU backend, its scene held to its own
         # draw and its golden scenes to their own hashes, with
         # what of window.c it reads: the keys' flags, the table's rows and
-        # the contrast the close button's X is drawn in.
+        # the contrast the close button's X is drawn in; and the rules of
+        # the space its screens make (the outputs section).
         (work / "compositor-backend.inc").write_text(
             canvas_abi_region(root)
             + section(window, "#define WINDOW_KEYS 64", "struct window_key\n")
@@ -27573,7 +27574,10 @@ def harness_core_state(argv):
             "/* ---- end of the keymap ---- */") + section(
             (root / "src/canvas/compositor.c").read_text(),
             "/* ---- pointer: what a hand means ---- */",
-            "/* ---- end of the pointer ---- */"))
+            "/* ---- end of the pointer ---- */") + section(
+            (root / "src/canvas/compositor.c").read_text(),
+            "/* ---- outputs: the screens one desktop spans ---- */",
+            "/* ---- end of the outputs ---- */"))
         # The backend's taskbar constants come from ui/taskbar.h, which the extract includes.
         (work / "ui").mkdir(exist_ok=True)
         (work / "ui" / "taskbar.h").write_text((root / "src/canvas/ui/taskbar.h").read_text())
