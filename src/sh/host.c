@@ -20124,6 +20124,10 @@ static b32 locale_nts_command(string_address address_to arguments,
                         p16 port;
                         positive size = string_length(arguments[at]);
 
+                        //      default stands alone: beside a name it would be
+                        //      a server of that name, asked for the time.
+                        return_if(string_equals(arguments[at], "default"),
+                                  host_usage());
                         if (size >= LOCALE_NTS_ENTRY_ROOM ||
                             !locale_nts_entry(arguments[at], host, address_of port))
                                 return host_refuse("%s is not a server: a name or "
@@ -20185,15 +20189,31 @@ static b32 locale_ntp_set(bool sampling, string_address word)
 static bool locale_ntp_server_ok(string_address name)
 {
         positive length = string_length(name);
+        positive label = 0;
 
         if (!length || length >= LOCALE_NTP_SERVER_ROOM ||
             !byte_is_alnum((p8)name[0]) || string_equals(name, "auto"))
                 return false;
+        //      Labels as the NTS names are read: none empty, none beginning or
+        //      ending in a dash, so a.-b and a..b are refused here too.
         for (positive at = 0; at < length; at++)
-                if (!byte_is_alnum((p8)name[at]) && name[at] != '.' &&
-                    name[at] != '-')
+        {
+                p8 c = (p8)name[at];
+
+                if (c == '.')
+                {
+                        if (!label || name[at - 1] == '-')
+                                return false;
+                        label = 0;
+                }
+                else if (byte_is_alnum(c) || (c == '-' && label))
+                        label++;
+                else
                         return false;
-        return true;
+        }
+        //      A name may end in the dot that makes it absolute, as a name
+        //      typed that way always has.
+        return name[length - 1] != '-' && (label || name[length - 1] == '.');
 }
 
 static b32 locale_ntp_server_status(void)
