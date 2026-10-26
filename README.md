@@ -49,7 +49,7 @@ moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off 
 moonwater desktop start|stop           begin the chosen desktop now, or end its session
 moonwater settings                     the settings window, on the desktop of the compositor
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
-moonwater debug                        what the desktop is doing and why: the card, the pointer, windows shown straight
+moonwater debug                        what the desktop is doing and why (root): the card, the pointer, windows shown straight
 moonwater name [NEW|random]            what this machine is called, like space-wizard
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
