@@ -75944,6 +75944,50 @@ def harness_moonwater_state_fuzz(argv):
             break
     restore(world, state)
 
+    #   A disk that is wrecked: every file of /root and /run/moonwater made the same
+    #   mutant at once, and a verb of each kind run against it. Each has to answer, and
+    #   nothing outside the two directories may change (the canary beside /etc).
+    wrecked = [path for path, entry in world.items()
+               if entry[0] == "f" and path.startswith(("/root/", "/run/moonwater/"))]
+    wreck_runs = 0
+    wreck_verbs = ["status", "boot again", "wifi", "wifi add wreck passpass1", "wifi remove oldnet", "bluetooth",
+                   "bluetooth add wreck", "priority internet wifi", "dns", "dns 9.9.9.9", "dns tls on", "ntp",
+                   "ntp on", "ntp nts servers a.example", "ntp server auto", "timezone", "timezone se", "time",
+                   "keyboard", "keyboard de", "name", "name other", "airplane on", "airplane off", "power", "cpu",
+                   "usb", "usb lock", "usb allow 0627:0001/S9", "usb forget 0627:0001/S1", "usb unlock", "usb log",
+                   "link", "link key", "link add wreck " + other_key, "link group wreck S3cretWreck33xyz allow run",
+                   "link on", "link off", "security", "security block add " + "ef" * 32, "canvas scale 2",
+                   "canvas background 010203", "mouse sensitivity 130", "taskbar position top", "desktop",
+                   "desktop off", "settings", "bind init add echo x", "bind exit", "wipe yes"]
+    wreck_specs = [("dir", ("dir",)), ("fifo", ("fifo",)), ("link", ("link", "/etc/canary")), ("empty", ("data", b"")),
+                   ("junk", ("data", b"\x1b[31m%s\xff\0" * 40)), ("A", ("data", b"A" * 4097)),
+                   ("sparse", ("sparse", 64 << 20)), ("no newline", ("data", b"x")), ("newlines", ("data", b"\n" * 300))]
+    if not only and clock.monotonic() - started < seconds + 30:
+        for label, spec in wreck_specs:
+            for verb in wreck_verbs:
+                restore(world, state)
+                for path in wrecked:
+                    keep(state, path, spec)
+                pre = capture()
+                outcome = run(verb)
+                state = capture()
+                wreck_runs += 1
+                problems = []
+                if outcome[0] not in (0, 1, 2):
+                    problems.append("on a wrecked disk ends with %s" % (outcome[0],))
+                if control.search(sgr.sub(b"", outcome[1])):
+                    problems.append("on a wrecked disk puts a control byte on the screen")
+                if died:
+                    problems.append("on a wrecked disk leaves a process that dies of signal %s" % died[0])
+                if state.get("/etc/canary") != world["/etc/canary"]:
+                    problems.append("on a wrecked disk changes what a link names")
+                reported = [report("a wrecked disk", label, verb, problem, outcome[0], outcome[1], spec)
+                            for problem in problems]
+                totals["checked"] += 1
+                totals["failed"] += any(reported)
+        restore(world, state)
+        state = world
+
     #   The verbs that only read, as nobody, against the file as nobody may and may not
     #   read it: they answer, change nothing, print no secret and no control byte.
     nobody_runs = 0
@@ -75987,8 +76031,9 @@ def harness_moonwater_state_fuzz(argv):
     checks.failures += totals["failed"]
     if show:
         print("  time by verb: " + ", ".join("%s %.0f s" % item for item in spent.most_common(8)))
-    print("moonwater state fuzz: %d files, %d mutants, %d verb runs, %d as nobody%s, %d s%s" % (
-        len(plan), mutant_runs, ran, nobody_runs, "" if mapped else " (no user nobody here)", clock.monotonic() - started,
+    print("moonwater state fuzz: %d files, %d mutants, %d verb runs, %d on a wrecked disk, %d as nobody%s, %d s%s" % (
+        len(plan), mutant_runs, ran, wreck_runs, nobody_runs, "" if mapped else " (no user nobody here)",
+        clock.monotonic() - started,
         " (stopped at its budget)" if stopped else ""))
     return checks.verdict("moonwater state fuzz", "moonwater-state-fuzz-inside")
 
