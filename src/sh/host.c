@@ -19840,6 +19840,14 @@ static bool locale_nts_load(nts_state address_to state)
         return good;
 }
 
+/*      The keys and cookies of the last key establishment, kept so that the
+        next query does not make another. A write that fails is not said, as
+        none of the clock's /run files' is: all that is lost is the saving.
+        The next query finds the cookies this one spent, is refused for them
+        (SNTP_NTS_NAK) and establishes again, one handshake; the query that
+        asked has its answer already. The loop that keeps the clock calls this
+        at every query, so a /run that cannot be written would be said at each
+        of them, with nobody to say it to. */
 static fn locale_nts_save(const nts_state address_to state)
 {
         p8 bytes[4 + sizeof(nts_state)];
@@ -19979,6 +19987,10 @@ static bool locale_nts_backed_off(bool by_hand)
                    then * SNTP_NANOSECONDS + LOCALE_NTS_BACKOFF_NS;
 }
 
+/*      The time the NTS servers failed, which locale_nts_backed_off reads so
+        that they are not asked again at every query. Not said when it cannot
+        be written, for locale_nts_save's reason: the cost is a retry sooner
+        than the pause says, which is what a machine that kept no mark does. */
 static fn locale_nts_failed(void)
 {
         p8 text[24];
