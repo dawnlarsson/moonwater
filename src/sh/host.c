@@ -13409,19 +13409,49 @@ static positive tune_profile_cpus(string_address governor, string_address prefer
         return profile.written;
 }
 
-/* Apply one of performance, balanced and powersave; false when the machine has no way to. */
-static bool tune_power_apply(string_address profile)
+/*
+        The three profiles, each as the platform names it, and the governor and
+        the energy preference it sets on every processor. Only the lowest has a
+        fallback: firmware that has no low-power may name its lowest quiet or cool.
+*/
+typedef struct
 {
-        bool performance = string_equals(profile, "performance");
-        bool balanced = string_equals(profile, "balanced");
-        string_address platform = performance ? (string_address)"performance"
-                                  : balanced ? (string_address)"balanced" : (string_address)"low-power";
+        string_address name;
+        string_address platform;
+        string_address governor;
+        string_address preference;
+        bool lowest;
+} tune_mode;
+
+static const tune_mode tune_modes[] = {
+    {(string_address)"performance", (string_address)"performance", (string_address)"performance",
+     (string_address)"performance", false},
+    {(string_address)"balanced", (string_address)"balanced", (string_address)"schedutil",
+     (string_address)"balance_performance", false},
+    {(string_address)"powersave", (string_address)"low-power", (string_address)"powersave",
+     (string_address)"power", true},
+};
+
+/* The profile a word names, or null. */
+static const tune_mode address_to tune_mode_named(string_address name)
+{
+        for (positive at = 0; at < sizeof(tune_modes) / sizeof(tune_modes[0]); at++)
+                if (string_equals(name, tune_modes[at].name))
+                        return &tune_modes[at];
+        return null;
+}
+
+/* Apply one of performance, balanced and powersave; false when the machine has no way to. */
+static bool tune_power_apply(string_address name)
+{
+        const tune_mode address_to mode = tune_mode_named(name);
+        string_address platform;
         bool any = false;
 
-        if (!performance && !balanced && !string_equals(profile, "powersave"))
+        if (!mode)
                 return false;
-        if (!tune_lists(TUNE_SYS_PROFILE "_choices", platform) && !performance && !balanced)
-                //      Firmware that names its lowest profile quiet or cool.
+        platform = mode->platform;
+        if (!tune_lists(TUNE_SYS_PROFILE "_choices", platform) && mode->lowest)
                 platform = tune_lists(TUNE_SYS_PROFILE "_choices", "quiet") ? (string_address)"quiet"
                            : tune_lists(TUNE_SYS_PROFILE "_choices", "cool") ? (string_address)"cool"
                                                                               : platform;
@@ -13430,10 +13460,7 @@ static bool tune_power_apply(string_address profile)
 
         //      A way to is a write that went through: a governor that can be read
         //      and never set is no profile applied.
-        any |= tune_profile_cpus(performance ? (string_address)"performance"
-                                 : balanced ? (string_address)"schedutil" : (string_address)"powersave",
-                                 performance ? (string_address)"performance"
-                                 : balanced ? (string_address)"balance_performance" : (string_address)"power") > 0;
+        any |= tune_profile_cpus(mode->governor, mode->preference) > 0;
         return any;
 }
 
@@ -13469,9 +13496,7 @@ static b32 tune_power(string_address address_to arguments, positive count)
                 host_say(log, "\n");
                 return 0;
         }
-        if (count != 3 || (!string_equals(arguments[2], "performance") &&
-                           !string_equals(arguments[2], "balanced") &&
-                           !string_equals(arguments[2], "powersave")))
+        if (count != 3 || !tune_mode_named(arguments[2]))
                 return host_usage();
         host_need_root();
         if (!tune_power_apply(arguments[2]))
