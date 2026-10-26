@@ -13209,15 +13209,15 @@ static b32 tune_brightness(string_address address_to arguments, positive count)
                 return host_refuse("this machine has no backlight to set\n");
         }
 
+        positive now = (current * 100 + maximum / 2) / maximum;
+
         if (count == 2)
         {
-                host_say(log, host_label "brightness %p%% (%p of %p)\n",
-                         (current * 100 + maximum / 2) / maximum, current, maximum);
+                host_say(log, host_label "brightness %p%% (%p of %p)\n", now, current, maximum);
                 return 0;
         }
 
         {
-                positive now = (current * 100 + maximum / 2) / maximum;
                 positive target = percent;
                 positive value;
                 bipolar failed;
@@ -14043,16 +14043,13 @@ static fn tune_restore(void)
    in /root/tune like the charge limit, with auto kept as nothing. */
 static b32 tune_battery_verb(string_address address_to arguments, positive count)
 {
-        p8 text[512];
         p8 value[72];
-        bipolar got;
         string_address name;
         string_address stored;
 
         if (count == 1)
         {
-                got = tune_load(text, sizeof(text));
-                if (got > 0 && tune_find(text, (positive)got, "battery", value, sizeof(value)) && value[0])
+                if (tune_kept("battery", value, sizeof(value)) && value[0])
                         host_say(log, host_label "battery %s\n", (string_address)value);
                 else
                         host_say(log, host_label "battery auto\n");
