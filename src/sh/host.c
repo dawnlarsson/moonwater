@@ -15780,7 +15780,7 @@ static fn usb_watch_stop(void)
         A lock that cannot be kept is put in force all the same: a boot's
         first lock that could not write /root/usb.policy (a full or read-only
         disk), or that found something there it cannot read and does not
-        write over, used to leave the machine as the kernel had it -- on a
+        write over (at boot, and when asked for), used to leave the machine as the kernel had it -- on a
         sec_host_locked image every USB device held, the keyboard too, and
         nothing said -- and usb lock refused with the held devices it had
         configured left half done. Now the lock is held in /run
@@ -15937,8 +15937,11 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
         }
         policy.lock = true;
         policy.allowed = 0;
-        //      At boot what cannot be read is not written over: it may be the owner's, on a disk that is failing.
-        write = how == USB_LOCK_ASKED || policy.known;
+        //      What cannot be read is not written over, at boot or asked for, as allow, deny, forget and class
+        //      refuse it (usb_policy_whole): it may be the owner's, on a disk that is failing, or a link to
+        //      the owner's policy. The lock is still put in force, from /run: refusing it would leave a
+        //      machine whose policy cannot be read with no way to lock at all.
+        write = policy.known;
         error = write ? usb_policy_write(address_of policy) : policy.error;
         if (error < 0)
         {
@@ -15955,9 +15958,12 @@ static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
         usb_tell_text(false, "mode lock", "");
         usb_apply_all(address_of policy, null, null, say);
         if (error < 0)
-                return host_refuse(USB_POLICY " could not be written (%s): the lock is in force until the machine "
-                                   "restarts\n",
-                                   file_reason(error));
+                return write ? host_refuse(USB_POLICY " could not be written (%s): the lock is in force until the "
+                                                      "machine restarts\n",
+                                           file_reason(error))
+                             : host_refuse(USB_POLICY " cannot be read (%s) and is not written over: the lock is in "
+                                                      "force until the machine restarts\n",
+                                           file_reason(error));
         if (say)
                 host_say(log, host_label "usb lock: %p devices plugged in now are kept as rules; "
                                          "a new one waits for usb allow\n",

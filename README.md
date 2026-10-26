@@ -190,7 +190,8 @@ can undo it. The policy is read when /root is, so a device plugged in during boo
 until then: only the kernel command line `usbcore.authorized_default=2`, which
 `sec_host_locked` sets, closes that window. The tight tier locks at the first boot, once
 USB has settled, and a /root it takes later with no policy of its own; a lock that cannot
-be written to /root is in force from /run until the machine restarts, and `usb` says why.
+be written to /root, or finds a policy there it cannot read (which it does not write over), is in
+force from /run until the machine restarts, and `usb` says why.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
 (machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are

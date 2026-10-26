@@ -47182,7 +47182,8 @@ while True:
               repr((out.get("held kept"), out.get("held grown"), out.get("held log"))))
 
         # A lock that cannot be kept is in force all the same: with /root/usb.policy a
-        # directory, usb lock answers 1 and says why, the root hub and usbcore hold what
+        # directory (a policy it cannot read, which it does not write over), usb lock
+        # answers 1 and says why, the root hub and usbcore hold what
         # is new, the held device's keyboard is let in, usb and the watcher read the lock
         # from /run, a stick plugged in after is held, and once the file can be written a
         # verb keeps the policy and /run lets go.
@@ -47200,15 +47201,36 @@ while True:
         seen = answers(lines)
         out = {key: "\n".join(value["out"]) for key, value in seen.items()}
         check(finished and seen.get("usb lock", {}).get("status") == 1 and
-              "could not be written (Is a directory): the lock is in force until the machine restarts" in out.get("usb lock", "") and
+              "/root/usb.policy cannot be read (" in out.get("usb lock", "") and
+              ") and is not written over: the lock is in force until the machine restarts" in out.get("usb lock", "") and
               out.get("unkept force") == "0\n0\n0\n1" and
-              "in force until the machine restarts, not kept: /root/usb.policy could not be written" in out.get("usb", "") and
+              "in force until the machine restarts, not kept: /root/usb.policy cannot be read" in out.get("usb", "") and
               "watcher running, pid" in out.get("usb", "") and "rule allow 5555:0008/HELD8 hid" in out.get("usb", "") and
               out.get("unkept held") == "0" and out.get("unkept kept") == "2\n1",
-              "a lock that cannot be written is in force from /run: new devices held, the held keyboard let in, usb "
+              "a lock that cannot be kept is in force from /run: new devices held, the held keyboard let in, usb "
               "says why, and a verb that can write the file keeps it and lets /run go",
               repr((seen.get("usb lock"), out.get("unkept force"), out.get("usb", "")[-400:], out.get("unkept held"),
                     out.get("unkept kept"))))
+
+        # The same with a /root that is read only: the policy is not there (it reads as
+        # none), the write is refused, and the lock is in force from /run with the
+        # kernel's reason.
+        script = (usb_tree +
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy\n"
+                  "mount --bind /root /root && mount -o remount,ro,bind /root\n" + say("usb lock") + say("usb") +
+                  usb_show("unkept ro", "v $d/usb1/authorized_default; ls /run/moonwater/usb.policy /run/moonwater/usb.unkept") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n"
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb lock", {}).get("status") == 1 and
+              "/root/usb.policy could not be written (Read-only file system): the lock is in force until the machine "
+              "restarts" in out.get("usb lock", "") and
+              "in force until the machine restarts, not kept: /root/usb.policy could not be written" in out.get("usb", "") and
+              out.get("unkept ro") == "0\n/run/moonwater/usb.policy\n/run/moonwater/usb.unkept",
+              "a lock that cannot be written to a read-only /root is in force from /run and says why",
+              repr((seen.get("usb lock"), out.get("usb", "")[-300:], out.get("unkept ro"))))
 
         # A rule the policy has no room for changes nothing: with 64 rules kept, usb
         # allow of a device held at its port is refused, and the device stays held (it
@@ -47273,6 +47295,29 @@ while True:
               out.get("linked") == "mode lock\ndeny 0627:0001/68284-kbd\nlink",
               "usb class refuses a policy it cannot read, and leaves the link and what it names as they were",
               repr((seen.get("usb class storage allow"), out.get("linked"))))
+        #       usb lock asked for does the same: it used to write the policy it made from nothing over the
+        #       link (and answer 0), where the boot's lock has always left what it cannot read. It is put
+        #       in force from /run all the same, and says why.
+        script = (usb_tree +
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy\n"
+                  "printf '%s\\n' 'mode off' 'deny 0627:0001/68284-kbd' > /root/usb.keep; ln -s /root/usb.keep /root/usb.policy\n" +
+                  say("usb lock") +
+                  usb_show("linked lock", "cat /root/usb.keep; test -L /root/usb.policy && echo link; v $d/usb1/authorized_default; "
+                                          "ls /run/moonwater/usb.policy /run/moonwater/usb.unkept") +
+                  say("usb") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n"
+                  "rm -f /root/usb.policy /root/usb.keep\nrm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb lock", {}).get("status") == 1 and
+              "/root/usb.policy cannot be read (" in out.get("usb lock", "") and
+              "is not written over: the lock is in force until the machine restarts" in out.get("usb lock", "") and
+              out.get("linked lock") == "mode off\ndeny 0627:0001/68284-kbd\nlink\n0\n"
+                                        "/run/moonwater/usb.policy\n/run/moonwater/usb.unkept" and
+              "in force until the machine restarts, not kept: /root/usb.policy cannot be read" in out.get("usb", ""),
+              "usb lock refuses to write over a policy it cannot read, as the verbs do, and is in force from /run",
+              repr((seen.get("usb lock"), out.get("linked lock"), out.get("usb", "")[-300:])))
 
         # The usb log is shown from its newest line, however much of it there is: a log
         # grown past what usb log reads (another hand's, or a cut that did not happen)
