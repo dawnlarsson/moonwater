@@ -56,7 +56,7 @@
 //    ext4_htree_store_dirent  fs/ext4/dir.c ext4_htree_store_dirent   yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
 //    free_rb_tree_fname       fs/ext4/dir.c free_rb_tree_fname        yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
 //    ext4_dir_open            fs/ext4/dir.c ext4_dir_open             yes     yes     yes     x86_64 ext4 getdents: 1000 names 54.4 -> 35.8 us (-34%) with call_filldir; the tree half -17%
-//    mw_net_silent_gate       nothing; 5 guard lines                  yes     yes     yes     closed-port SYN flood: target CPU 21.2 -> 7.4 ms/1000 pkt (-65%, no RST), busy 42% -> 16%; loopback refusal 158 us unchanged (x86_64 KVM guest)
+//    mw_net_silent_gate       nothing; 5 guard lines                  yes     yes     yes     closed-port SYN flood: target CPU 21.2 -> 7.4 ms/1000 pkt (-65%, no RST) at switch 1; loopback flood (gate on-path, exempt) 1.52 ms/1000 at 0, 1 and no-gate alike (x86_64 KVM guest)
 //
 //    8 routines.
 //  (index end)
@@ -2809,33 +2809,45 @@ __asm__(
 //       switch off is the first path through it and the shortest: one load,
 //       one test, a branch not taken and the return.
 //
-//       MEASURED (x86_64). A closed-port TCP SYN flood between two KVM guests
-//       on a Ryzen 9 9950X over a point-to-point socket link, the peer firing
-//       nonblocking connects at a port with no socket (~39-41k a second), the
-//       target a 2-vCPU guest, four interleaved eight-second trials, switch 0
-//       against switch 1 on the one image:
+//       MEASURED (x86_64, KVM guests on a Ryzen 9 9950X, four interleaved
+//       eight-second trials each). A closed-port TCP SYN flood from a peer
+//       guest at a target guest (2 vCPU) over a point-to-point socket link,
+//       the peer firing nonblocking connects at a port with no socket
+//       (~38-41k a second), switch 0 against 1 on the one image, the target's
+//       own CPU and counters read either side:
 //
-//           switch   SYN/s    OutRsts        target busy   CPU per 1000 SYN
-//           0        38-39k   one per SYN    ~42%          ~21.2 ms
-//           1        40-41k   none           ~16%          ~7.4 ms
+//           switch   OutRsts        target busy   CPU per 1000 SYN
+//           0        one per SYN    ~42%          ~21.2 ms
+//           1        none           ~16%          ~7.4 ms
 //
-//       so silencing the reset is 2.8x less of the target's CPU to absorb the
-//       flood (about -65%): what is left is the receive, lookup and drop that
-//       happen regardless, and the saving is the reset the kernel no longer
-//       builds and sends. RSTs are not rate-limited, so this is the gate and
-//       not a limiter. The loopback refusal path (which the gate exempts, so
-//       it takes the longer branch: load, test, and on to the reset) is
-//       unchanged: a connect to a closed 127.0.0.1 port is 158 us with the
-//       switch 0, 158 with it 1, and 158 on an image built without the guard
-//       edits at all -- the one load, test and call lost in the cost of a
-//       refusal. NOT measured: line rate and a saturated NIC (the generator
-//       is a userspace connect loop, ~40k/s, not the wire's limit), a
-//       distributed flood, the UDP flood's CPU (its ICMP reply is
-//       rate-limited, a poor A/B; the port-unreachable being dropped is shown
-//       by the counter, not by CPU), bare metal, and a real NIC driver.
+//       so silencing the reset is about -65% of the target's CPU to absorb
+//       the flood (2.8x less): what is left is the receive, lookup and drop
+//       that happen regardless, and the saving is the reset the kernel no
+//       longer builds and sends. RSTs are not rate-limited, so this weighs
+//       the gate and not a limiter.
+//
+//       What the gate's own call costs is read on the path it sits on: a
+//       closed-port flood over loopback, which the gate exempts so the reset
+//       is built either way (~0.64 M a second in one guest). Switch 0, switch
+//       1 and an image built with no guard edits at all are the same within
+//       noise -- ~1.52 ms per 1000 packets, ~50.6% of a CPU, OutRsts counting
+//       every one at switch 1 as at 0 -- so the load, test (and, on loopback,
+//       second load and test) of mw_net_silent_gate is lost in the cost of
+//       the reset, and loopback keeps answering with the switch on.
+//
+//       NOT measured: line rate and a saturated NIC (the generators are
+//       userspace connect loops, ~40k/s over the link and ~0.64M/s on
+//       loopback, not the wire's limit), a distributed flood, the UDP flood's
+//       CPU (its ICMP reply is rate-limited, a poor A/B; the port-unreachable
+//       being dropped is shown by the counter, not by CPU), the path of a
+//       packet for an OPEN port (it never reaches the gate -- a socket exists
+//       -- so it is unchanged by construction, shown only that a listener
+//       still accepts), bare metal and a real NIC driver, and arm64 and
+//       riscv64 as booted kernels (the gate is held there by the qemu-user
+//       differential and by both assemblers, not by a boot).
 //
 //> arch x86_64 arm64 riscv64
-//> perf closed-port SYN flood: target CPU 21.2 -> 7.4 ms/1000 pkt (-65%, no RST), busy 42% -> 16%; loopback refusal 158 us unchanged (x86_64 KVM guest)
+//> perf closed-port SYN flood: target CPU 21.2 -> 7.4 ms/1000 pkt (-65%, no RST) at switch 1; loopback flood (gate on-path, exempt) 1.52 ms/1000 at 0, 1 and no-gate alike (x86_64 KVM guest)
 //> declare net/ipv4/tcp_ipv4.c int mw_net_silent_gate(const struct sk_buff *skb);
 //> guard net/ipv4/tcp_ipv4.c tcp_v4_send_reset(NULL, skb, sk_rst_convert_drop_reason(drop_reason)); => if (mw_net_silent_gate(skb)) goto discard_it;
 //> declare net/ipv6/tcp_ipv6.c int mw_net_silent_gate(const struct sk_buff *skb);

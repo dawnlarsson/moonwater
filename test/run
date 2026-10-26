@@ -21961,6 +21961,9 @@ out.append(("F2 no unreachable went out", "yes" if a == b else "no (%d->%d)" % (
 out.append(("F2 loopback TCP on the target is still refused", fw(tsh, "tcp", "127.0.0.1", CLOSED_T, 1500), "refused"))
 out.append(("F2 loopback v6 TCP on the target is still refused", fw(tsh, "tcp", "::1", CLOSED_T, 1500), "refused"))
 out.append(("F2 loopback UDP on the target is still refused", fw(tsh, "udp", "127.0.0.1", CLOSED_U, 1500), "refused"))
+#       The target's own address routes over lo, so it is refused too: the
+#       check is by device, not by address.
+out.append(("F2 the target's own address is still refused (by device, not address)", fw(tsh, "tcp", TARGET4, CLOSED_T, 1500), "refused"))
 #       An open listener still takes the peer with the switch at 1.
 tsh.sock.sendall(("/tmp/fw accept %s %d 9000 > /tmp/acc 2>&1 &\n" % (TARGET4, OPEN_T)).encode())
 time.sleep(1.5)
