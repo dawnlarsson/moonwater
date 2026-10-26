@@ -14147,6 +14147,7 @@ typedef struct
         p8 port[USB_PORT_ROOM];    // its name in sysfs: 1-4.1, or usb1 for a root hub
         p8 place[USB_PLACE_ROOM];  // 0000:00:14.0/0002/4.1 (a root hub's: 0000:00:14.0/0002), or empty
         p8 id[10];                 // vvvv:pppp
+        p8 devnum[8];              // which enumeration this is: another at the same port has another
         p8 key[USB_KEY_ROOM];      // its serial as usb_key spells it, or -
         p8 product[USB_TEXT_ROOM]; // what it says it is, as it says it
         positive product_length;
@@ -14207,8 +14208,12 @@ typedef struct
         on is \xNN, as memory_into_escaped spells them (a control, a blank,
         a quote, a backslash, anything past ASCII), and a leading - is too,
         which leaves - alone to mean none. A serial too long to spell in the
-        room is none as well, and its rule names its port: a serial cut short
-        would name every device that starts the same way.
+        room is -# and the sixteen hex digits of its xxh64, which no serial
+        spells (a key begins with - only as these two): a serial cut short
+        would name every device that starts the same way, and spelled as
+        none it was pinned to its port, where a device with no serial and
+        the same VID:PID was the same device to its rule. Anyone who can read
+        the serial can copy it, hashed or not, as with any serial.
 */
 static fn usb_key(p8 address_to into, p8 address_to serial, bipolar length)
 {
@@ -14224,7 +14229,13 @@ static fn usb_key(p8 address_to into, p8 address_to serial, bipolar length)
                                       USB_KEY_ROOM - 1 - 4 * skip, 63);
         if (spelled.x != (positive)length - skip)
         {
-                string_copy(into, "-");
+                p64 hash = hash_xxh64(serial, (positive)length, 0);
+                p8 bytes[8];
+
+                for (positive at = 0; at < 8; at++)
+                        bytes[at] = (p8)(hash >> (56 - 8 * at));
+                memory_copy(into, "-#", 2);
+                into[2 + memory_into_hex(into + 2, bytes, 8)] = end;
                 return;
         }
         into[spelled.y + 4 * skip] = end;
@@ -14326,6 +14337,14 @@ static bool usb_id_parse(string_address text, usb_rule address_to rule)
                 string_copy(rule->port, rest + 2);
                 return true;
         }
+        //      A serial too long to keep, as usb_key spells it.
+        if (string_has_prefix(rest, "-#"))
+        {
+                if (string_length(rest) != 18 || string_span_of_set(rest + 2, "0123456789abcdef") != 16)
+                        return false;
+                string_copy(rule->key, rest);
+                return true;
+        }
         if (!usb_key_typed(rest))
                 return false;
         string_copy(rule->key, rest);
@@ -14411,6 +14430,83 @@ static bipolar usb_set(string_address name, string_address leaf, string_address 
         return tune_write((string_address)path, word);
 }
 
+/*
+        The usb lock. A pass holds it while it writes authorized files, and
+        the kernel answers a device's only once the device has (a set
+        configuration, with its timeouts, for one that stalls): so every
+        taker waits a bounded time, a verb says why after two seconds, and
+        an interrupted wait is asked again. Negative: the open's own error,
+        or -ETIMEDOUT.
+*/
+#define USB_LOCK_WAIT_NS ((p64)20000000000)
+#define USB_LOCK_SAY_NS ((p64)2000000000)
+#define USB_LOCK_POLL_NS ((p64)50000000)
+
+static bipolar usb_lock_take(bool say)
+{
+        p64 start = system_clock_ns(HOST_CLOCK_BOOTTIME);
+        bool said = false;
+
+        for (;;)
+        {
+                bipolar lock = host_lock(USB_LOCK_PATH, false);
+                p64 waited = system_clock_ns(HOST_CLOCK_BOOTTIME) - start;
+
+                if (lock >= 0 || (lock != -EAGAIN && lock != -EINTR))
+                        return lock;
+                if (waited >= USB_LOCK_WAIT_NS)
+                        return -ETIMEDOUT;
+                if (say && !said && waited >= USB_LOCK_SAY_NS)
+                {
+                        host_say(log, host_label "usb waits for the usb lock: the watcher is judging a device "
+                                                 "that is slow to answer\n");
+                        said = true;
+                }
+                host_pause(USB_LOCK_POLL_NS);
+        }
+}
+
+// A verb that could not take the usb lock, said: it changed nothing.
+static b32 usb_lock_refused(bipolar error)
+{
+        b32 owner = host_lock_owner(USB_WATCHER_PATH);
+
+        if (error != -ETIMEDOUT)
+                return host_fail(USB_LOCK_PATH, error);
+        return owner ? host_refuse("the usb lock is still held after 20 seconds (the watcher, pid %p, is judging a "
+                                   "device that does not answer); nothing was changed\n",
+                                   (positive)owner)
+                     : host_refuse("the usb lock is still held after 20 seconds; nothing was changed\n");
+}
+
+/*
+        Interfaces authorized by a pass are asked to bind (drivers_probe)
+        once the usb lock is let go: a driver's probe of a device that stalls
+        waits out its own timeouts, and the next verb is not held behind it.
+*/
+static p8 usb_probes[USB_INTERFACES_MOST][USB_PORT_ROOM];
+static positive usb_probe_count;
+
+static fn usb_probe_flush(void)
+{
+        for (positive at = 0; at < usb_probe_count; at++)
+                (void)tune_write(USB_PROBE, (string_address)usb_probes[at]);
+        usb_probe_count = 0;
+}
+
+/* A device's authorized set, unless the device at its port is no longer the
+   one the census read: one plugged in since at the same port (or the same
+   one enumerated again) has another devnum, and the next pass judges it. */
+static bipolar usb_set_device(usb_device address_to device, string_address word)
+{
+        p8 now[sizeof(device->devnum)];
+
+        usb_read((string_address)device->port, "devnum", now, sizeof(now));
+        if (!string_equals((string_address)now, (string_address)device->devnum))
+                return -ESTALE;
+        return usb_set((string_address)device->port, "authorized", word);
+}
+
 static bool usb_census_visit(string_address directory, string_address name, address_any opaque)
 {
         usb_census address_to census = (usb_census address_to)opaque;
@@ -14473,6 +14569,7 @@ static bool usb_census_visit(string_address directory, string_address name, addr
         (void)string_join(device->id, sizeof(device->id), (string_address)vendor, ":",
                           (string_address)product);
         device->root = host_starts(name, "usb");
+        (void)usb_read(name, "devnum", device->devnum, sizeof(device->devnum));
         got = usb_read(name, "serial", word, sizeof(word));
         usb_key(device->key, word, got);
         //      A root hub's serial is its controller's bus address, the kernel's to say: the start of a place.
@@ -14592,17 +14689,21 @@ static fn usb_census_take(usb_census address_to census)
 /* Whether a rule names a device: its id, and its serial wherever it is; with
    no serial (-), the place it is pinned to. A pin written before places
    (usb_port_valid's 1-4) is read as it was, by the port its bus number
-   gives, until usb lock or usb allow writes it again by place. */
+   gives -- and as it was, it names a device whose serial is too long to
+   keep as well, which was spelled - then -- until usb lock or usb allow
+   writes it again by place or by the serial's hash. */
 static bool usb_rule_names(usb_rule address_to rule, usb_device address_to device)
 {
-        if (!string_equals((string_address)rule->id, (string_address)device->id) ||
-            !string_equals((string_address)rule->key, (string_address)device->key))
+        bool none = string_equals((string_address)device->key, "-");
+
+        if (!string_equals((string_address)rule->id, (string_address)device->id))
                 return false;
         if (!string_equals((string_address)rule->key, "-"))
-                return true;
-        return usb_port_valid((string_address)rule->port)
-                   ? string_equals((string_address)rule->port, (string_address)device->port)
-                   : device->place[0] && string_equals((string_address)rule->port, (string_address)device->place);
+                return string_equals((string_address)rule->key, (string_address)device->key);
+        if (usb_port_valid((string_address)rule->port))
+                return (none || string_has_prefix(device->key, "-#")) &&
+                       string_equals((string_address)rule->port, (string_address)device->port);
+        return none && device->place[0] && string_equals((string_address)rule->port, (string_address)device->place);
 }
 
 static usb_rule address_to usb_rule_for(usb_policy address_to policy, usb_device address_to device)
@@ -14807,10 +14908,23 @@ static fn usb_tell_text(bool say, string_address first, string_address second)
         arrives later starts with: 0 while locked, so its devices wait until
         the watcher has seen it and set its own.
 */
+/*
+        A default the kernel would not take leaves a root hub configuring new
+        devices while the mode is lock. It is said in the log when that
+        starts and when it ends (USB_DEFAULTS_PATH says it is failing, from
+        one process to the next), and the watcher walks every quarter second
+        until a pass sets it (usb_defaults_failing), judging each new device
+        as it comes, where it waited ten seconds for a uevent.
+*/
+#define USB_DEFAULTS_PATH HOST_STATE "/usb.defaults"
+
+static bool usb_defaults_failing;
+
 static fn usb_defaults(usb_policy address_to policy, usb_census address_to census)
 {
         string_address device = policy->lock && !policy->allowed ? "0" : "1";
         string_address interface = policy->lock ? "0" : "1";
+        bool held = true;
         p8 have[8];
 
         for (positive at = 0; at < census->count; at++)
@@ -14820,13 +14934,24 @@ static fn usb_defaults(usb_policy address_to policy, usb_census address_to censu
                 if (!census->device[at].root)
                         continue;
                 if (device[0] == '0')
-                        (void)usb_set(hub, "authorized_default", device);
-                (void)usb_set(hub, "interface_authorized_default", interface);
-                (void)usb_set(hub, "authorized_default", device);
+                        held &= usb_set(hub, "authorized_default", device) >= 0;
+                held &= usb_set(hub, "interface_authorized_default", interface) >= 0;
+                held &= usb_set(hub, "authorized_default", device) >= 0;
         }
         if (host_read_kernel(USB_MODULE_DEFAULT, have, sizeof(have)) >= 0 &&
             !string_equals((string_address)have, policy->lock ? "0" : "1"))
-                (void)tune_write(USB_MODULE_DEFAULT, policy->lock ? "0" : "1");
+                held &= tune_write(USB_MODULE_DEFAULT, policy->lock ? "0" : "1") >= 0;
+        usb_defaults_failing = system_access_at(AT_FDCWD, USB_DEFAULTS_PATH, 0) >= 0;
+        if (held == usb_defaults_failing)
+        {
+                if (held)
+                        (void)system_remove_at(AT_FDCWD, USB_DEFAULTS_PATH, 0);
+                else
+                        (void)host_write_text(USB_DEFAULTS_PATH, "1\n");
+                usb_tell_text(false, held ? "the defaults hold again" : "a default could not be set: a new device may be "
+                                                                         "configured until a pass sets it", "");
+        }
+        usb_defaults_failing = !held;
 }
 
 /* The device of the last pass at the same port with the same identity. */
@@ -14845,14 +14970,20 @@ static usb_device address_to usb_before(usb_census address_to before, usb_device
         one wanted is authorized before any is probed, since a driver such as
         cdc_ether binds two interfaces at once. An interface authorized binds
         nothing by itself: the kernel probes it when asked through
-        drivers_probe. One held that the last pass (before) did not have is
-        logged once.
+        drivers_probe, which usb_probe_flush asks once the usb lock is let
+        go. One held that the last pass (before) did not have is logged
+        once. A device enumerated again since the census (another devnum)
+        is left to the next pass.
 */
 static fn usb_interfaces(usb_policy address_to policy, usb_census address_to census,
                          usb_device address_to device, p8 why, usb_census address_to before, bool say)
 {
-        bool probe = false;
+        p8 now[sizeof(device->devnum)];
 
+        //      Not the device the census read: the next pass judges what is there.
+        usb_read((string_address)device->port, "devnum", now, sizeof(now));
+        if (!string_equals((string_address)now, (string_address)device->devnum))
+                return;
         for (positive at = 0; at < census->interfaces; at++)
         {
                 usb_interface address_to one = census->interface + at;
@@ -14871,12 +15002,10 @@ static fn usb_interfaces(usb_policy address_to policy, usb_census address_to cen
                         continue;
                 one->authorized = let;
                 one->fresh = let && !one->bound;
-                probe |= one->fresh;
+                if (one->fresh && usb_probe_count < USB_INTERFACES_MOST)
+                        string_copy(usb_probes[usb_probe_count++], (string_address)one->name);
                 usb_tell_interface(say, let ? "allowed" : "held", one, why, let);
         }
-        for (positive at = 0; probe && at < census->interfaces; at++)
-                if (census->interface[at].fresh && usb_owns(device, census->interface + at))
-                        (void)tune_write(USB_PROBE, (string_address)census->interface[at].name);
 }
 
 /*
@@ -14906,8 +15035,7 @@ static positive usb_apply(usb_policy address_to policy, usb_census address_to ce
                 was = usb_before(before, device);
                 if (before && !was)
                         usb_tell(false, device->authorized ? "seen allowed" : "seen held", device, why);
-                if (let != device->authorized &&
-                    usb_set((string_address)device->port, "authorized", let ? "1" : "0") >= 0)
+                if (let != device->authorized && usb_set_device(device, let ? "1" : "0") >= 0)
                 {
                         usb_tell(say, let ? "allowed" : "held", device, why);
                         opened += let;
@@ -15204,13 +15332,21 @@ static positive usb_rules_drop(usb_policy address_to policy, usb_rule address_to
         or a socket that overflowed, is another walk of sysfs, one walk for a
         burst (a device and its interfaces are several), and one every ten
         seconds whatever is heard. Where no uevent socket can be had it walks
-        every quarter of a second. Kernel-level holding (the defaults above)
-        is what makes its latency safe: a new device is held by the kernel
-        until a pass lets it in.
+        every quarter of a second, and so does it while a default will not
+        hold (soon). Kernel-level holding (the defaults above) is what makes
+        its latency safe: a new device is held by the kernel until a pass
+        lets it in. The datagrams of a burst are dropped up to a count and a
+        deadline: every kernel uevent wakes it (a trusted keyboard's battery
+        reports among them), and what is left of a flood wakes the next wait
+        at once, one pass for each.
 */
-static fn usb_wait(bipolar events)
+#define USB_DRAIN_MOST 512
+#define USB_DRAIN_NS ((p64)100000000)
+
+static fn usb_wait(bipolar events, bool soon)
 {
-        timespec span = {USB_REWALK_NS / 1000000000, 0};
+        timespec span = {soon ? 0 : USB_REWALK_NS / 1000000000, soon ? USB_POLL_NS : 0};
+        p64 until;
 
         if (events < 0)
         {
@@ -15220,8 +15356,11 @@ static fn usb_wait(bipolar events)
         if (descriptor_wait_readable(events, address_of span, null) <= 0)
                 return;
         host_pause(USB_SETTLE_NS);
-        while (socket_receive((b32)events, null, 0, MSG_DONTWAIT, 0, 0) >= 0)
-                ;
+        until = system_clock_ns(HOST_CLOCK_BOOTTIME) + USB_DRAIN_NS;
+        for (positive drained = 0; drained < USB_DRAIN_MOST; drained++)
+                if (socket_receive((b32)events, null, 0, MSG_DONTWAIT, 0, 0) < 0 ||
+                    system_clock_ns(HOST_CLOCK_BOOTTIME) >= until)
+                        break;
 }
 
 static b32 usb_watch_run(void)
@@ -15230,6 +15369,7 @@ static b32 usb_watch_run(void)
         bipolar held = host_lock_file(USB_WATCHER_PATH, HOST_FILE_SETLK, null);
         bipolar events;
         bool first = true;
+        bool waiting = false;
 
         if (held < 0)
                 return 1;
@@ -15238,8 +15378,19 @@ static b32 usb_watch_run(void)
         while (system_access_at(AT_FDCWD, USB_DEVICES, 0) >= 0)
         {
                 usb_policy policy;
-                bipolar lock = host_lock(USB_LOCK_PATH, true);
+                bipolar lock = usb_lock_take(false);
 
+                //      A verb that has held the lock this long, or no lock to be had: the pass is
+                //      asked again soon, and the log says so once (without the lock, as it cannot have it).
+                if (lock < 0)
+                {
+                        if (!waiting)
+                                usb_tell_text(false, "the watcher waits for the usb lock: ", file_reason(lock));
+                        waiting = true;
+                        usb_wait(events, true);
+                        continue;
+                }
+                waiting = false;
                 usb_policy_load(address_of policy);
                 if (!usb_watched(address_of policy))
                 {
@@ -15248,8 +15399,9 @@ static b32 usb_watch_run(void)
                 }
                 usb_apply_all(address_of policy, first ? null : address_of before, address_of before, false);
                 radio_unlock(lock);
+                usb_probe_flush();
                 first = false;
-                usb_wait(events);
+                usb_wait(events, usb_defaults_failing);
         }
         if (events >= 0)
                 socket_close((b32)events);
@@ -15267,10 +15419,16 @@ static fn usb_watch_start(void)
         system_call_1(syscall(exit_group), 0);
 }
 
+/* The watcher ended, waited for as long as the usb lock is: one in a write
+   to a device that stalls ends when the kernel gives up on it. */
 static fn usb_watch_stop(void)
 {
-        if (host_lock_signal(USB_WATCHER_PATH, SIGTERM))
-                host_lock_wait(USB_WATCHER_PATH);
+        p64 start = system_clock_ns(HOST_CLOCK_BOOTTIME);
+
+        if (!host_lock_signal(USB_WATCHER_PATH, SIGTERM))
+                return;
+        while (host_lock_owner(USB_WATCHER_PATH) && system_clock_ns(HOST_CLOCK_BOOTTIME) - start < USB_LOCK_WAIT_NS)
+                host_pause(USB_LOCK_POLL_NS);
 }
 
 /*
@@ -15318,7 +15476,60 @@ enum
         USB_LOCK_CARRIED
 };
 
-static positive usb_configure_held(usb_policy address_to policy, usb_census address_to census)
+/*
+        A boot's first lock trusts what is plugged in once USB has settled,
+        and a device that keeps plugging and unplugging keeps it from
+        settling until the cap, fifteen seconds of uptime, when the lock was
+        taken over whatever was there at that instant, the device doing the
+        plugging included. So the settle keeps when each device (its port and
+        identity) was first seen, and at the lock a device younger than the
+        quiet time (USB_STILL_NS: first seen in the last two seconds of the
+        settle, or since) is given no rule and is held: a lock taken because
+        everything was quiet for two seconds has no such device, and one
+        taken at the cap does not let in what was still coming and going.
+        What it costs: a device the owner plugs in during those last two
+        seconds, or one that resets itself as the cap falls, is held and
+        waits for usb allow PORT, and on a machine whose command line holds
+        every device a keyboard that was only then enumerating has to be
+        let in from another one or by ssh. It does not stop a second device,
+        plugged in early and left still while another keeps the settle
+        going: that one is trusted, as whatever is plugged in at the first
+        boot is.
+*/
+typedef struct
+{
+        p8 port[USB_PORT_ROOM];
+        p8 id[10];
+        p8 key[USB_KEY_ROOM];
+        p64 since;
+} usb_age;
+
+typedef struct
+{
+        usb_age age[USB_MOST];
+        positive count;
+        p64 cutoff; // first seen after this is young
+} usb_settle;
+
+static usb_age address_to usb_age_of(usb_settle address_to settle, usb_device address_to device)
+{
+        for (positive at = 0; at < settle->count; at++)
+                if (string_equals((string_address)settle->age[at].port, (string_address)device->port) &&
+                    string_equals((string_address)settle->age[at].id, (string_address)device->id) &&
+                    string_equals((string_address)settle->age[at].key, (string_address)device->key))
+                        return settle->age + at;
+        return null;
+}
+
+static bool usb_young(usb_settle address_to settle, usb_device address_to device)
+{
+        usb_age address_to age = settle ? usb_age_of(settle, device) : null;
+
+        return settle && (!age || age->since > settle->cutoff);
+}
+
+static positive usb_configure_held(usb_policy address_to policy, usb_census address_to census,
+                                   usb_settle address_to settle)
 {
         positive count = 0;
 
@@ -15326,7 +15537,8 @@ static positive usb_configure_held(usb_policy address_to policy, usb_census addr
         {
                 usb_device address_to device = census->device + at;
 
-                if (device->root || device->fixed || device->authorized || usb_rule_for(policy, device))
+                if (device->root || device->fixed || device->authorized || usb_rule_for(policy, device) ||
+                    usb_young(settle, device))
                         continue;
                 //      Every root hub's new interfaces wait before the first is
                 //      configured, so nothing binds before the policy says.
@@ -15334,12 +15546,12 @@ static positive usb_configure_held(usb_policy address_to policy, usb_census addr
                         if (census->device[hub].root)
                                 (void)usb_set((string_address)census->device[hub].port,
                                               "interface_authorized_default", "0");
-                count += usb_set((string_address)device->port, "authorized", "1") >= 0;
+                count += usb_set_device(device, "1") >= 0;
         }
         return count;
 }
 
-static b32 usb_lock_held(bool say, p8 how)
+static b32 usb_lock_held(bool say, p8 how, usb_settle address_to settle)
 {
         static usb_census census;
         usb_policy policy;
@@ -15360,7 +15572,7 @@ static b32 usb_lock_held(bool say, p8 how)
                         return host_refuse("more devices are plugged in than the %p rules a policy keeps; "
                                            "nothing was locked\n",
                                            (positive)USB_RULES_MOST);
-        if (!stay && usb_configure_held(address_of policy, address_of census))
+        if (!stay && usb_configure_held(address_of policy, address_of census, settle))
                 usb_census_take(address_of census);
         for (positive at = 0; at < census.count; at++)
         {
@@ -15368,12 +15580,25 @@ static b32 usb_lock_held(bool say, p8 how)
                 usb_rule address_to had = usb_rule_for(address_of policy, device);
                 usb_rule rule;
 
-                //      A pin written before places is written again by the place of the device it names.
-                if (had && string_equals((string_address)had->key, "-") && usb_port_valid((string_address)had->port) &&
-                    device->place[0])
-                        string_copy(had->port, (string_address)device->place);
+                //      A pin written before places is written again by the place of the device it names,
+                //      or by its serial's hash for a device whose serial is too long to keep.
+                if (had && string_equals((string_address)had->key, "-") && usb_port_valid((string_address)had->port))
+                {
+                        if (!string_equals((string_address)device->key, "-"))
+                        {
+                                string_copy(had->key, (string_address)device->key);
+                                had->port[0] = end;
+                        }
+                        else if (device->place[0])
+                                string_copy(had->port, (string_address)device->place);
+                }
                 if (device->root || device->fixed || had)
                         continue;
+                if (usb_young(settle, device))
+                {
+                        usb_tell(false, "not kept, it came while USB was settling:", device, USB_WHY_NONE);
+                        continue;
+                }
                 usb_rule_from(address_of rule, USB_ALLOW, device, address_of census, false);
                 if (!rule.kinds && !stay)
                         usb_rule_from(address_of rule, USB_ALLOW, device, address_of census, true);
@@ -15421,10 +15646,14 @@ static b32 usb_lock_held(bool say, p8 how)
 
 static b32 usb_lock_now(void)
 {
-        bipolar lock = host_lock(USB_LOCK_PATH, true);
-        b32 failed = usb_lock_held(true, USB_LOCK_ASKED);
+        bipolar lock = usb_lock_take(true);
+        b32 failed;
 
+        if (lock < 0)
+                return usb_lock_refused(lock);
+        failed = usb_lock_held(true, USB_LOCK_ASKED, null);
         radio_unlock(lock);
+        usb_probe_flush();
         //      A lock in force but not kept is watched as well.
         usb_watch_start();
         return failed;
@@ -15432,10 +15661,12 @@ static b32 usb_lock_now(void)
 
 static b32 usb_unlock_now(void)
 {
-        bipolar lock = host_lock(USB_LOCK_PATH, true);
+        bipolar lock = usb_lock_take(true);
         usb_policy policy;
         b32 failed;
 
+        if (lock < 0)
+                return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
         if (policy.cut)
         {
@@ -15450,6 +15681,7 @@ static b32 usb_unlock_now(void)
                 usb_apply_all(address_of policy, null, null, true);
         }
         radio_unlock(lock);
+        usb_probe_flush();
         if (failed)
                 return failed;
         if (!usb_watched(address_of policy))
@@ -15519,21 +15751,28 @@ static b32 usb_rule_verb(string_address word, p8 kind)
         usb_device address_to device;
         usb_policy policy;
         p8 text[USB_RULE_ROOM];
-        bipolar lock = host_lock(USB_LOCK_PATH, true);
-        b32 failed = usb_resolve(word, address_of census, address_of rule, address_of device);
+        bipolar lock = usb_lock_take(true);
+        b32 failed;
 
+        if (lock < 0)
+                return usb_lock_refused(lock);
+        failed = usb_resolve(word, address_of census, address_of rule, address_of device);
         usb_policy_load(address_of policy);
         if (!failed && policy.cut)
                 failed = host_refuse("%s is too long to change here\n", USB_POLICY);
-        if (!failed && kind == USB_ALLOW && device && !device->authorized &&
-            usb_set((string_address)device->port, "authorized", "1") >= 0)
+        if (!failed && kind == USB_ALLOW && device && !device->authorized && usb_set_device(device, "1") >= 0)
         {
                 p8 port[USB_PORT_ROOM];
+                p8 devnum[sizeof(device->devnum)];
 
                 usb_tell(true, "allowed", device, USB_WHY_RULE);
                 string_copy(port, (string_address)device->port);
+                string_copy(devnum, (string_address)device->devnum);
                 usb_census_take(address_of census);
                 device = usb_find(address_of census, (string_address)port);
+                //      Its rule is written from what it shows now, so it has to be the same device.
+                if (!device || !string_equals((string_address)device->devnum, (string_address)devnum))
+                        failed = host_refuse("the device at %s went while it was let in; no rule was kept\n", port);
         }
         if (!failed && device)
                 usb_rule_from(address_of rule, kind, device, address_of census, true);
@@ -15558,6 +15797,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
                       (string_address)text);
         usb_apply_all(address_of policy, null, null, true);
         radio_unlock(lock);
+        usb_probe_flush();
         if (usb_watched(address_of policy))
                 usb_watch_start();
         host_say(log, host_label "usb %s %s%s\n", kind == USB_ALLOW ? "allows" : "holds", text,
@@ -15588,7 +15828,9 @@ static b32 usb_forget(string_address word)
                                       "as usb shows it)\n",
                                       writer_terminal_name, word));
 
-        lock = host_lock(USB_LOCK_PATH, true);
+        lock = usb_lock_take(true);
+        if (lock < 0)
+                return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
         //      A VID:PID alone is the one rule for it.
         if (!rule.key[0])
@@ -15612,6 +15854,7 @@ static b32 usb_forget(string_address word)
                 usb_apply_all(address_of policy, null, null, true);
         }
         radio_unlock(lock);
+        usb_probe_flush();
         if (failed)
                 return failed;
         if (!usb_watched(address_of policy))
@@ -15657,7 +15900,9 @@ static b32 usb_class(string_address address_to arguments, positive count)
                   host_usage());
         host_need_root();
         allow = arguments[4][0] == 'a';
-        lock = host_lock(USB_LOCK_PATH, true);
+        lock = usb_lock_take(true);
+        if (lock < 0)
+                return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
         if (policy.cut)
         {
@@ -15675,6 +15920,7 @@ static b32 usb_class(string_address address_to arguments, positive count)
                 usb_apply_all(address_of policy, null, null, true);
         }
         radio_unlock(lock);
+        usb_probe_flush();
         if (failed)
                 return failed;
         host_say(log, host_label "usb class %s %s%s\n", usb_kinds[kind], allow ? "allow" : "deny",
@@ -15753,12 +15999,34 @@ static bool usb_kernel_says(usb_census address_to census, p8 address_to into, po
         somebody who cannot read the policy the mode is what the kernel's
         defaults show, and the rest of it is unknown.
 */
+/* Who holds the watcher's lock, asked without making or writing its file:
+   0 for nobody; known false for somebody who cannot open it (it is root's,
+   0600), who used to be told that no watcher ran. */
+static b32 usb_watcher_owner(bool address_to known)
+{
+        host_record_lock lock = {.type = HOST_FILE_WRLCK};
+        bipolar handle = system_open_at(AT_FDCWD, USB_WATCHER_PATH,
+                                        FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        bipolar asked;
+
+        *known = handle >= 0 || handle == -ENOENT;
+        if (handle < 0)
+                return 0;
+        do
+                asked = system_call_3(syscall(fcntl), (positive)handle, HOST_FILE_GETLK, (positive)address_of lock);
+        while (asked == -EINTR);
+        system_close(handle);
+        *known = asked >= 0;
+        return asked < 0 || lock.type == HOST_FILE_UNLCK ? 0 : lock.pid;
+}
+
 static b32 usb_status(void)
 {
         static usb_census census;
         usb_policy policy;
         p8 line[USB_LOG_LINE];
-        b32 watcher = host_lock_owner(USB_WATCHER_PATH);
+        bool told;
+        b32 watcher = usb_watcher_owner(address_of told);
         bool locked;
 
         usb_policy_load(address_of policy);
@@ -15769,6 +16037,8 @@ static b32 usb_status(void)
         string_format(log, host_label "%s\n", line);
         if (watcher)
                 string_format(log, host_label "  watcher running, pid %p\n", (positive)watcher);
+        else if (!told)
+                string_format(log, host_label "  whether the watcher runs is root's to see\n");
         else
                 string_format(log, host_label "  watcher not running\n");
         if (!policy.known)
@@ -15834,12 +16104,15 @@ static b32 usb_status(void)
 
 static b32 usb_apply_verb(void)
 {
-        bipolar lock = host_lock(USB_LOCK_PATH, true);
+        bipolar lock = usb_lock_take(true);
         usb_policy policy;
 
+        if (lock < 0)
+                return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
         usb_apply_all(address_of policy, null, null, true);
         radio_unlock(lock);
+        usb_probe_flush();
         if (usb_watched(address_of policy))
                 usb_watch_start();
         host_say(log, host_label "usb applied\n");
@@ -15876,8 +16149,11 @@ static fn usb_restore(void)
         static usb_census before;
         bool first = !host_lock_owner(USB_WATCHER_PATH);
         usb_policy policy;
-        bipolar lock = host_lock(USB_LOCK_PATH, true);
+        bipolar lock = usb_lock_take(false);
 
+        //      The policy is put in force at boot whether or not the lock can be had.
+        if (lock < 0)
+                usb_tell_text(false, "boot applies the policy without the usb lock: ", file_reason(lock));
         usb_policy_load(address_of policy);
         if (policy.kept)
         {
@@ -15887,6 +16163,7 @@ static fn usb_restore(void)
         else if (!first && policy.known && MOONWATER_STRICT_HOST < STRICT_TIGHT)
                 usb_apply_all(address_of policy, null, null, false);
         radio_unlock(lock);
+        usb_probe_flush();
         if (!policy.kept && (MOONWATER_STRICT_HOST >= STRICT_TIGHT || !policy.known))
                 usb_first_lock();
         else if (usb_watched(address_of policy))
@@ -15936,9 +16213,12 @@ static fn usb_ports(usb_census address_to census, p8 address_to into, positive r
 static fn usb_first_lock(void)
 {
         static usb_census census;
+        static usb_settle settle;
+        static usb_settle next;
         static p8 seen[USB_MOST * (USB_PORT_ROOM + 2) + 1];
         static p8 now[sizeof(seen)];
         p64 still = 0;
+        p64 uptime = 0;
         usb_policy policy;
         bipolar settling;
         bipolar lock;
@@ -15951,11 +16231,28 @@ static fn usb_first_lock(void)
                 system_call_1(syscall(exit_group), 0);
         carried = system_access_at(AT_FDCWD, USB_SETTLED_PATH, 0) >= 0;
         seen[0] = end;
+        settle.count = 0;
         while (!carried)
         {
-                p64 uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
-
+                uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
                 usb_census_take(address_of census);
+                //      When each device was first seen, carried from census to census.
+                next.count = 0;
+                for (positive at = 0; at < census.count; at++)
+                {
+                        usb_device address_to device = census.device + at;
+                        usb_age address_to was = usb_age_of(address_of settle, device);
+                        usb_age address_to age;
+
+                        if (device->root)
+                                continue;
+                        age = next.age + next.count++;
+                        string_copy(age->port, (string_address)device->port);
+                        string_copy(age->id, (string_address)device->id);
+                        string_copy(age->key, (string_address)device->key);
+                        age->since = was ? was->since : uptime;
+                }
+                memory_copy(address_of settle, address_of next, sizeof(settle));
                 usb_ports(address_of census, now, sizeof(now));
                 if (!string_equals((string_address)now, (string_address)seen) || !still)
                 {
@@ -15966,12 +16263,16 @@ static fn usb_first_lock(void)
                         break;
                 host_pause(USB_POLL_NS);
         }
+        settle.cutoff = uptime > USB_STILL_NS ? uptime - USB_STILL_NS : 0;
         (void)host_write_text(USB_SETTLED_PATH, "1\n");
-        lock = host_lock(USB_LOCK_PATH, true);
+        lock = usb_lock_take(false);
+        if (lock < 0)
+                usb_tell_text(false, "the first lock is taken without the usb lock: ", file_reason(lock));
         usb_policy_load(address_of policy);
         if (!policy.kept)
-                (void)usb_lock_held(false, carried ? USB_LOCK_CARRIED : USB_LOCK_FIRST);
+                (void)usb_lock_held(false, carried ? USB_LOCK_CARRIED : USB_LOCK_FIRST, carried ? null : address_of settle);
         radio_unlock(lock);
+        usb_probe_flush();
         system_close(settling);
         (void)usb_watch_run();
         system_call_1(syscall(exit_group), 0);

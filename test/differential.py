@@ -46643,11 +46643,12 @@ while True:
               "allow 0627:0001/28754-tablet hid" in kept and "allow 0627:0001/68284-kbd hid" in kept and
               "allow 46f4:0001/E\\x1b[31mVIL\\x07 storage" in kept and
               "allow abcd:1111/-@0000:00:03.0/0002/6.1 hid" in kept and
-              "allow cccc:0007/-@0000:00:03.0/0002/7 other" in kept and "allow 2109:2818/-@0000:00:03.0/0002/6 hub" in kept and
+              any(re.fullmatch(r"allow cccc:0007/-#[0-9a-f]{16} other", line) for line in kept) and
+              "allow 2109:2818/-@0000:00:03.0/0002/6 hub" in kept and
               not any("1234:5678" in line or "1234:9999" in line or "2109:2817" in line for line in kept) and
               "mode lock" in kept and "class storage deny" in kept and kept[-3:] == ["0", "0", "0"],
-              "usb lock keeps every device plugged in as a rule with its classes, a serial too long to keep pinned to "
-              "its port, none for what is fixed (and a device behind a hub that is not is not), every class denied, "
+              "usb lock keeps every device plugged in as a rule with its classes, a serial too long to keep as its "
+              "hash, none for what is fixed (and a device behind a hub that is not is not), every class denied, "
               "and the root hub and usbcore holding what is new", repr((seen.get("usb lock"), kept)))
         check("watcher running, pid" in out.get("usb", "") and seen.get("usb watch", {}).get("status") == 1 and
               "already running" in out.get("usb watch", ""),
@@ -46777,6 +46778,40 @@ while True:
               "by place, the place survives the buses numbered in another order, and a typed place is taken",
               repr((out.get("place old"), out.get("place kept"), out.get("place moved"), out.get("place denied"))))
 
+        # A serial too long to keep is kept as its hash, so a device with the same
+        # VID:PID and no serial at the same port is not the device its rule names
+        # (pinned to the port, it was). A default the kernel will not take is said in
+        # the log, and so is its holding again. A verb waits for the usb lock a
+        # bounded time, says why after two seconds and changes nothing.
+        script = (usb_tree + say("usb lock") +
+                  "rm $d/1-7/serial; echo 0 > $d/1-7/authorized\n" + say("usb apply") +
+                  usb_show("clone", "v $d/1-7/authorized; /tmp/moonwater usb | grep -c ' 1-7 cccc:0007/- held (no rule)'") +
+                  "rm $d/usb1/interface_authorized_default; mkdir $d/usb1/interface_authorized_default\n" +
+                  say("usb apply") +
+                  "rmdir $d/usb1/interface_authorized_default; echo 1 > $d/usb1/interface_authorized_default\n" +
+                  say("usb apply") +
+                  usb_show("defaults", "grep -c 'a default could not be set' /root/usb.log; "
+                                       "grep -c 'the defaults hold again' /root/usb.log; v $d/usb1/interface_authorized_default") +
+                  "flock /run/moonwater/usb.lock sleep 24 & holder=$!; sleep 1\n"
+                  "echo '@@ usb held lock'; timeout 40 /tmp/moonwater usb class audio allow 2>&1; echo \"@@status $?\"\n"
+                  "wait $holder\n" +
+                  usb_show("held lock class", "grep -c '^class audio deny$' /root/usb.policy") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and out.get("clone") == "0\n1",
+              "a device with no serial at the port of one whose serial was too long to keep is not named by its rule",
+              repr(out.get("clone")))
+        check(out.get("defaults") == "1\n1\n0",
+              "a default the kernel will not take is said in the log, and so is its holding again once a pass sets it",
+              repr(out.get("defaults")))
+        check(seen.get("usb held lock", {}).get("status") == 1 and
+              "usb waits for the usb lock" in out.get("usb held lock", "") and
+              "still held after 20 seconds" in out.get("usb held lock", "") and out.get("held lock class") == "1",
+              "a verb waits for a held usb lock a bounded time, says why, and changes nothing",
+              repr((seen.get("usb held lock"), out.get("held lock class"))))
+
         # The file: lines that are no rule are left out and counted, a policy
         # read at boot (apply) lets in the device it names, and the cap.
         script = (usb_tree +
@@ -46816,18 +46851,23 @@ while True:
               "an allow past the 64 rules is refused", repr(seen.get("usb allow 2222:2222/T")))
 
         # Somebody who is not root reads the mode from the kernel and the
-        # devices, and nothing of the rules.
+        # devices, and nothing of the rules, nor whether the watcher runs: its
+        # lock's file is root's (0600 on a machine; 000 here, where the user
+        # this runs as owns it), and saying "not running" was a guess.
         session(usb_tree + "printf 'mode lock\\n' > /root/usb.policy; chmod 000 /root/usb.policy; "
+                "mkdir -p /run/moonwater; : >> /run/moonwater/usb.watcher; chmod 000 /run/moonwater/usb.watcher; "
                 "echo 0 > $d/usb1/authorized_default\n")
         lines, finished = session(say("usb") + say("usb lock"), nobody=True)
         seen = answers(lines)
         said = "\n".join(seen.get("usb", {}).get("out", []))
         check(finished and seen.get("usb", {}).get("status") == 0 and "usb lock" in said and
               "the rules are root's" in said and "storage unknown" in said and "1-1 0627:0001/28754-tablet allowed (unknown)" in said and
+              "whether the watcher runs is root's to see" in said and
               seen.get("usb lock", {}).get("status") == 1,
-              "usb to somebody who is not root: the mode from the kernel, the devices, the rules unknown",
+              "usb to somebody who is not root: the mode from the kernel, the devices, the rules and whether the watcher "
+              "runs unknown",
               repr(said[-500:]))
-        session("rm -rf /sys /root/usb.policy /root/usb.log\n")
+        session("rm -rf /sys /root/usb.policy /root/usb.log; chmod 600 /run/moonwater/usb.watcher\n")
 
         # Wipe against what a machine really has under /home and /root.
         #   A file system mounted there is not userspace to forget: a stick
