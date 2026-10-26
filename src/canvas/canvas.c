@@ -1083,7 +1083,18 @@ static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
                         finished, and restoring that size leaves a real
                         screen at 1024x768 for the rest of the boot.
                 */
-                if (saved)
+                if (connector->cmdline_mode.specified)
+                {
+                        // A mode the kernel command line names for this
+                        // connector (video=Virtual-2:1920x1080) is the
+                        // person's word, and the probe has already put it
+                        // here: it is kept, with its crtc timings filled, over
+                        // anything Canvas would choose and over a saved size.
+                        taken = output_mode_take(dev, mode_set->mode);
+                        if (!taken)
+                                continue;
+                }
+                else if (saved)
                 {
                         want = output_pick_mode(connector, 0, saved->hdisplay,
                                                 saved->vdisplay, true,
@@ -1249,6 +1260,7 @@ static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
 }
 
 static void desktop_place_outputs(void);
+static void output_drop(struct output *output);
 static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mode_set);
 static void output_disable_modeset(struct drm_device *dev,
                                    struct drm_mode_set *mode_set);
@@ -1324,10 +1336,27 @@ static int canvas_rebind(struct canvas *canvas)
         mutex_lock(&client->modeset_mutex);
         drm_client_for_each_modeset(mode_set, client)
         {
-                if (!mode_set->mode)
-                        continue;
-
                 output = output_for_modeset(canvas, mode_set);
+
+                /*
+                        The probe left this crtc nothing to show: its screen
+                        was unplugged, or went to another crtc. Its output
+                        goes with it. Kept, its buffer was set on a modeset
+                        with no mode before every commit, which the commit
+                        warns of each time, and the screen stayed in the
+                        desktop's size and in what moonwater canvas lists.
+                */
+                if (!mode_set->mode)
+                {
+                        if (output)
+                        {
+                                pr_info("[moonwater canvas] " "a screen went, and its %ux%u output with it\n", output->width, output->height);
+                                output_drop(output);
+                                placed = true;
+                        }
+                        continue;
+                }
+
                 if (output)
                 {
                         if (output_grow(output, mode_set, retarget))
