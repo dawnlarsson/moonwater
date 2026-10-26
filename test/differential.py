@@ -47991,6 +47991,32 @@ while True:
         check(not any("every window closes" in line for line in lines),
               "the desktop off without a Canvas does not announce closing windows", lines[:6])
 
+        #       The two verbs that read the compositor's files as more than a
+        #       word: debug maps the table, which must be as long as the
+        #       table it reads (an empty file was a bus error), and settings
+        #       takes the pid, which is a number that fits a pid and nothing
+        #       after its digits (4294967295 is kill's -1, every process).
+        script = ("mkdir -p /run/moonwater\n: > /run/moonwater/windows\n"
+                  "echo '@@ debug empty'; timeout 5 /tmp/moonwater debug 2>&1; echo \"@@status $?\"\n"
+                  "printf 'short\\n' > /run/moonwater/windows\n"
+                  "echo '@@ debug short'; timeout 5 /tmp/moonwater debug 2>&1; echo \"@@status $?\"\n"
+                  "printf '4294967295\\n' > /run/moonwater/compositor.pid\n"
+                  "echo '@@ pid max'; timeout 5 /tmp/moonwater settings 2>&1; echo \"@@status $?\"\n"
+                  "printf '%sabc\\n' $$ > /run/moonwater/compositor.pid\n"
+                  "echo '@@ pid junk'; timeout 5 /tmp/moonwater settings 2>&1; echo \"@@status $?\"\n"
+                  "rm -f /run/moonwater/windows /run/moonwater/compositor.pid\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        for word in ("debug empty", "debug short"):
+            got = seen.get(word, {"out": [], "status": None})
+            check(finished and got["status"] == 0 and any("no compositor is running" in line for line in got["out"]),
+                  f"moonwater debug over a table too short to map ({word}) says no compositor, and exits 0",
+                  repr(got)[:240])
+        for word in ("pid max", "pid junk"):
+            got = seen.get(word, {"out": [], "status": None})
+            check(finished and got["status"] == 1 and any("the compositor's desktop is not up" in line for line in got["out"]),
+                  f"moonwater settings with a {word} pid in compositor.pid is no compositor, and exits 1",
+                  repr(got)[:240])
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 

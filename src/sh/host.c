@@ -21202,6 +21202,14 @@ static b32 host_debug(string_address address_to arguments, positive count)
         }
         if (file < 0)
                 file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
+        //      A table shorter than the struct is no table this build can map:
+        //      the page past its end is a bus error on the first field read,
+        //      which is what an empty file (a compositor still starting) was.
+        if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
+        {
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                file = -1;
+        }
         if (file < 0)
         {
                 host_say(log, "canvas\n  no compositor is running\n");
@@ -23791,9 +23799,18 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         (void)arguments;
         return_if(count != 2, host_usage());
 
+        //      A pid is what kill takes as an int: 4294967295 is -1, which every
+        //      process answers to, and "123abc" is not a pid at all.
         host_read_word(HOST_STATE "/compositor.pid", word, sizeof(word));
-        for (positive digit = 0; word[digit] >= '0' && word[digit] <= '9' && digit < 10; digit++)
-                pid = pid * 10 + (positive)(word[digit] - '0');
+        {
+                string_address stop = (string_address)word;
+                b32 range = 0;
+
+                pid = string_to_number_unsigned_checked((string_address)word, address_of stop, 10,
+                                                        address_of range);
+                if (*stop || range || pid > 0x7fffffff)
+                        pid = 0;
+        }
         return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
                       system_access_at(AT_FDCWD, (string_address) "/run/moonwater/windows", 0) != 0,
                   host_refuse("the compositor's desktop is not up, and the settings window is one of its "
