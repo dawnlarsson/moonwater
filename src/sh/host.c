@@ -14525,6 +14525,16 @@ static bool usb_id_parse(string_address text, usb_rule address_to rule)
         return true;
 }
 
+// A word a verb names, parsed into rule; said and refused, 1, when it names neither a port nor an id. What
+// it names keeps no classes until a device it names is seen to have some (usb_policy_line parses its own).
+static b32 usb_id_word(string_address word, usb_rule address_to rule)
+{
+        rule->kinds = 0;
+        return usb_id_parse(word, rule) ? 0
+               : host_refuse("%w is no port (like 1-4.1) and no device (VID:PID, or VID:PID/SERIAL as usb shows it)\n",
+                             writer_terminal_name, word);
+}
+
 // A rule as the policy keeps it and usb shows it: its id, and an allow rule's classes after a blank.
 static fn usb_rule_text(p8 address_to into, positive room, usb_rule address_to rule)
 {
@@ -14546,7 +14556,7 @@ static fn usb_rule_text(p8 address_to into, positive room, usb_rule address_to r
 static bool usb_kinds_parse(string_address text, p8 address_to kinds)
 {
         *kinds = 0;
-        while (*text)
+        for (;;)
         {
                 positive length = (positive)(string_first_of_or_end(text, ',') - text);
                 bipolar kind = usb_kind_word(text, length);
@@ -14554,9 +14564,13 @@ static bool usb_kinds_parse(string_address text, p8 address_to kinds)
                 if (kind < 0)
                         return false;
                 *kinds |= (p8)(1u << kind);
-                text += length + (text[length] == ',');
+                if (!text[length])
+                        return true;
+                //      A comma is between two words, never after the last one.
+                if (text[length] != ',' || !text[length + 1])
+                        return false;
+                text += length + 1;
         }
-        return *kinds != 0;
 }
 
 /* A sysfs file of a device or an interface, as it is but for the newline the
@@ -14964,6 +14978,49 @@ static fn usb_shown(p8 address_to into, positive room, p8 address_to text, posit
 }
 
 /*
+        The newest of the usb log that room holds, as the bytes from its first
+        whole line: where they start in text, and how many, or negative when
+        the log cannot be read. A log no bigger than room is all of it, its
+        first line whole; a bigger one is read from its end, and the line the
+        room cuts is dropped. Through no link, as every state file is read.
+*/
+static bipolar usb_log_tail(p8 address_to text, positive room, p8 address_to address_to tail)
+{
+        system_path_identity facts;
+        bipolar handle = system_open_at(AT_FDCWD, USB_LOG, FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        bipolar got;
+        bipolar size;
+        positive length;
+        positive from = 0;
+
+        *tail = text;
+        if (handle < 0)
+                return handle;
+        got = system_path_identity_at(handle, (string_address)"", SYSTEM_PATH_AT_EMPTY_PATH,
+                                      SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (got >= 0 && (facts.mode & 0170000) != 0100000)
+                got = -22;
+        size = got >= 0 ? system_seek(handle, 0, 2) : got;
+        if (size < 0)
+        {
+                system_close(handle);
+                return size;
+        }
+        length = (positive)size < room ? (positive)size : room;
+        got = file_transfer_exact(syscall(pread64), handle, text, length, (p64)size - length);
+        system_close(handle);
+        if (got < 0)
+                return got;
+        if (length < (positive)size)
+        {
+                from = memory_span_without_byte(text, '\n', length);
+                from += from < length;
+        }
+        *tail = text + from;
+        return (bipolar)(length - from);
+}
+
+/*
         A line of the log: when, in UTC, and what was decided. The log is
         root's (0600, beside the policy), is only ever added to, and is cut
         to its newer half once it passes USB_LOG_MOST. Whoever writes holds
@@ -14981,7 +15038,7 @@ static fn usb_log_line(string_address what)
         bipolar handle;
         bipolar size;
         bipolar got;
-        positive from;
+        p8 address_to tail;
 
         gmtime_r(address_of stamp, address_of broken);
         strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ ", address_of broken);
@@ -14998,18 +15055,11 @@ static fn usb_log_line(string_address what)
         if (size <= USB_LOG_MOST)
                 return;
 
-        //      The newer half, read from the end, from the first whole line in
-        //      it: a log another hand grew past the room keeps its newest lines.
-        handle = system_open_at(AT_FDCWD, USB_LOG, FILE_READ | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-        if (handle < 0)
+        //      The newer half, from its first whole line.
+        got = usb_log_tail(text, sizeof(text), address_of tail);
+        if (got < 0)
                 return;
-        got = file_transfer_exact(syscall(pread64), handle, text, sizeof(text), (p64)size - sizeof(text));
-        system_close(handle);
-        if (got <= 0)
-                return;
-        from = memory_span_without_byte(text, '\n', (positive)got);
-        from += from < (positive)got;
-        (void)host_write_file(USB_LOG, text + from, (positive)got - from, 0600, true);
+        (void)host_write_file(USB_LOG, tail, (positive)got, 0600, true);
 }
 
 /* A decision about a device, to the log, and to the terminal of whoever
@@ -15406,6 +15456,22 @@ static b32 usb_policy_save(usb_policy address_to policy)
         return failed < 0 ? host_fail(USB_POLICY, failed) : 0;
 }
 
+/* A policy a verb may act on: whole, and read. What is read short, or not at
+   all, is refused, since what it reads as is not the owner's policy: a verb
+   that acted on it would let in what the rules past the cut hold, or write
+   the policy over with what it says. */
+static b32 usb_policy_too_long(void)
+{
+        return host_refuse("%s is too long to change here\n", USB_POLICY);
+}
+
+static b32 usb_policy_whole(usb_policy address_to policy)
+{
+        if (!policy->known)
+                return host_fail(USB_POLICY, policy->error);
+        return policy->cut ? usb_policy_too_long() : 0;
+}
+
 /*
         A lock put in force that /root/usb.policy does not keep -- it could
         not be written (a disk full or read only), or what is there cannot be
@@ -15461,19 +15527,40 @@ static bool usb_rule_same(usb_rule address_to one, usb_rule address_to other)
                string_equals((string_address)one->port, (string_address)other->port);
 }
 
-/* The rules of the policy but those that name the same device as rule, and
-   any that names device (plugged in now, or null): a pin written before
-   places goes with the rule that replaces it. How many went. */
+/* Whether a rule of the policy is replaced by rule: the same identity, or one
+   that names device (plugged in now, or null). A pin written before places
+   goes with the rule that replaces it. */
+static bool usb_rule_replaced(usb_rule address_to old, usb_rule address_to rule, usb_device address_to device)
+{
+        return usb_rule_same(old, rule) || (device && usb_rule_names(old, device));
+}
+
+/* The rules of the policy but those rule replaces, and how many went. */
 static positive usb_rules_drop(usb_policy address_to policy, usb_rule address_to rule, usb_device address_to device)
 {
         positive kept = 0;
         positive count = policy->count;
 
         for (positive at = 0; at < count; at++)
-                if (!usb_rule_same(policy->rule + at, rule) && !(device && usb_rule_names(policy->rule + at, device)))
+                if (!usb_rule_replaced(policy->rule + at, rule, device))
                         policy->rule[kept++] = policy->rule[at];
         policy->count = kept;
         return count - kept;
+}
+
+/* How many rules the policy would keep once rule replaces its own. */
+static positive usb_rules_left(usb_policy address_to policy, usb_rule address_to rule, usb_device address_to device)
+{
+        positive left = 0;
+
+        for (positive at = 0; at < policy->count; at++)
+                left += !usb_rule_replaced(policy->rule + at, rule, device);
+        return left;
+}
+
+static b32 usb_rules_full(void)
+{
+        return host_refuse("the policy keeps %p rules at most; usb forget one first\n", (positive)USB_RULES_MOST);
 }
 
 /*
@@ -15863,9 +15950,8 @@ static b32 usb_resolve(string_address word, usb_census address_to census, usb_ru
                 usb_rule_from(rule, 0, *device, census, true);
                 return 0;
         }
-        return_if(!usb_id_parse(word, rule),
-                  host_refuse("%w is no port (like 1-4.1) and no device (VID:PID, or VID:PID/SERIAL as usb shows it)\n",
-                              writer_terminal_name, word));
+        if (usb_id_word(word, rule))
+                return 1;
         for (positive at = 0; at < census->count; at++)
         {
                 usb_device address_to one = census->device + at;
@@ -15910,8 +15996,11 @@ static b32 usb_rule_verb(string_address word, p8 kind)
                 return usb_lock_refused(lock);
         failed = usb_resolve(word, address_of census, address_of rule, address_of device);
         usb_policy_load(address_of policy);
-        if (!failed && policy.cut)
-                failed = host_refuse("%s is too long to change here\n", USB_POLICY);
+        if (!failed)
+                failed = usb_policy_whole(address_of policy);
+        //      Before anything is configured: a rule the policy has no room for changes nothing.
+        if (!failed && usb_rules_left(address_of policy, address_of rule, device) >= USB_RULES_MOST)
+                failed = usb_rules_full();
         if (!failed && kind == USB_ALLOW && device && !device->authorized && usb_set_device(device, "1") >= 0)
         {
                 p8 port[USB_PORT_ROOM];
@@ -15932,8 +16021,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
         if (!failed)
                 (void)usb_rules_drop(address_of policy, address_of rule, device);
         if (!failed && policy.count == USB_RULES_MOST)
-                failed = host_refuse("the policy keeps %p rules at most; usb forget one first\n",
-                                     (positive)USB_RULES_MOST);
+                failed = usb_rules_full();
         if (!failed)
         {
                 policy.rule[policy.count++] = rule;
@@ -15974,16 +16062,19 @@ static b32 usb_forget(string_address word)
                 if (failed)
                         return failed;
         }
-        else
-                return_if(!usb_id_parse(word, address_of rule),
-                          host_refuse("%w is no port (like 1-4.1) and no device (VID:PID, or VID:PID/SERIAL "
-                                      "as usb shows it)\n",
-                                      writer_terminal_name, word));
+        else if (usb_id_word(word, address_of rule))
+                return 1;
 
         lock = usb_lock_take(true);
         if (lock < 0)
                 return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
+        failed = usb_policy_whole(address_of policy);
+        if (failed)
+        {
+                radio_unlock(lock);
+                return failed;
+        }
         //      A VID:PID alone is the one rule for it.
         if (!rule.key[0])
                 for (positive at = 0; at < policy.count; at++)
@@ -15991,13 +16082,11 @@ static b32 usb_forget(string_address word)
                             matched++ == 0)
                                 rule = policy.rule[at];
         usb_rule_text(text, sizeof(text), address_of rule);
-        if (policy.cut || matched > 1 || !rule.key[0] || !usb_rules_drop(address_of policy, address_of rule, device))
+        if (matched > 1 || !rule.key[0] || !usb_rules_drop(address_of policy, address_of rule, device))
         {
                 radio_unlock(lock);
-                return policy.cut     ? host_refuse("%s is too long to change here\n", USB_POLICY)
-                       : matched > 1 ? host_refuse("%p rules are for %s; name one as usb shows it\n", matched,
-                                                    rule.id)
-                                      : host_refuse("no rule is for %s\n", rule.key[0] ? text : rule.id);
+                return matched > 1 ? host_refuse("%p rules are for %s; name one as usb shows it\n", matched, rule.id)
+                                   : host_refuse("no rule is for %s\n", rule.key[0] ? text : rule.id);
         }
         failed = usb_policy_save(address_of policy);
         if (!failed)
@@ -16056,10 +16145,11 @@ static b32 usb_class(string_address address_to arguments, positive count)
         if (lock < 0)
                 return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
-        if (policy.cut)
+        failed = usb_policy_whole(address_of policy);
+        if (failed)
         {
                 radio_unlock(lock);
-                return host_refuse("%s is too long to change here\n", USB_POLICY);
+                return failed;
         }
         policy.allowed = allow ? policy.allowed | (p8)(1u << kind) : policy.allowed & (p8) ~(1u << kind);
         failed = usb_policy_save(address_of policy);
@@ -16083,7 +16173,8 @@ static b32 usb_class(string_address address_to arguments, positive count)
 static b32 usb_log_show(positive asked)
 {
         static p8 text[USB_LOG_MOST + USB_LOG_LINE * 2];
-        bipolar got = host_read_state(USB_LOG, text, sizeof(text));
+        p8 address_to tail;
+        bipolar got = usb_log_tail(text, sizeof(text) - 1, address_of tail);
         positive at;
 
         if (got == -ENOENT)
@@ -16092,10 +16183,11 @@ static b32 usb_log_show(positive asked)
                 return 0;
         }
         return_if(got < 0, host_fail(USB_LOG, got));
+        tail[got] = end;
         //      The start of the asked-th line from the end: past the asked-th newline counted back, a
         //      newline ending the last byte not counted.
         {
-                positive2 nth = got > 1 ? memory_nth_last_of(text, '\n', (positive)got - 1, asked) : (positive2){0, 0};
+                positive2 nth = got > 1 ? memory_nth_last_of(tail, '\n', (positive)got - 1, asked) : (positive2){0, 0};
 
                 at = nth.y == asked ? nth.x + 1 : 0;
         }
@@ -16103,10 +16195,10 @@ static b32 usb_log_show(positive asked)
         //      all the same, so a line written by anything else cannot act.
         for (positive start = at; start < (positive)got;)
         {
-                positive length = memory_span_without_byte(text + start, '\n', (positive)got - start);
+                positive length = memory_span_without_byte(tail + start, '\n', (positive)got - start);
 
-                text[start + length] = end;
-                string_format(log, "%w\n", writer_terminal_name, (string_address)text + start);
+                tail[start + length] = end;
+                string_format(log, "%w\n", writer_terminal_name, (string_address)tail + start);
                 start += length + 1;
         }
         log_flush();
@@ -16260,13 +16352,19 @@ static b32 usb_apply_verb(void)
 {
         bipolar lock = usb_lock_take(true);
         usb_policy policy;
+        b32 failed;
 
         if (lock < 0)
                 return usb_lock_refused(lock);
         usb_policy_load(address_of policy);
-        usb_apply_all(address_of policy, null, null, true);
+        //      A policy that is not read whole judges nothing: what it reads as is not what the owner wrote.
+        failed = usb_policy_whole(address_of policy);
+        if (!failed)
+                usb_apply_all(address_of policy, null, null, true);
         radio_unlock(lock);
         usb_probe_flush();
+        if (failed)
+                return failed;
         if (usb_watched(address_of policy))
                 usb_watch_start();
         host_say(log, host_label "usb applied\n");

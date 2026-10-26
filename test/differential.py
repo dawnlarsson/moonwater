@@ -47019,6 +47019,114 @@ while True:
               repr((seen.get("usb lock"), out.get("unkept force"), out.get("usb", "")[-400:], out.get("unkept held"),
                     out.get("unkept kept"))))
 
+        # A rule the policy has no room for changes nothing: with 64 rules kept, usb
+        # allow of a device held at its port is refused, and the device stays held (it
+        # used to be configured first, and said allowed, before the refusal).
+        rules = "".join(f"allow ffff:{number:04x}/S{number}\n" for number in range(1, 65))
+        script = (usb_tree +
+                  "dev 2-1 46f4 0001 STICK1 'QEMU USB HARDDRIVE' 0 unknown\n"
+                  "cat > /root/usb.policy <<'EOF'\nmode lock\n" + rules + "EOF\n" +
+                  say("usb allow 2-1") +
+                  usb_show("full", "v $d/2-1/authorized; grep -c '^allow ' /root/usb.policy") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb allow 2-1", {}).get("status") == 1 and
+              "the policy keeps 64 rules at most" in out.get("usb allow 2-1", "") and
+              "allowed" not in out.get("usb allow 2-1", "") and out.get("full") == "0\n64",
+              "a rule the policy has no room for is refused before its device is configured or let in",
+              repr((seen.get("usb allow 2-1"), out.get("full"))))
+
+        # A policy the verbs cannot read whole is not applied: a file cut short (its
+        # rules past the room are not read) or one that cannot be read at all (a
+        # directory here) used to be applied as no policy: a held device let in, a
+        # keyboard with no rule held. usb apply refuses, and nothing changes.
+        filler = "".join(f"# filler {number} {'.' * 24}\n" for number in range(1100))
+        script = (usb_tree +
+                  "cat > /root/usb.policy <<'EOF'\nmode lock\n" + filler + "allow 0627:0001/68284-kbd hid\nEOF\n" +
+                  say("usb apply") + usb_show("cut", "v $d/1-2/authorized") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb apply", {}).get("status") == 1 and
+              "too long to change here" in out.get("usb apply", "") and out.get("cut") == "1",
+              "usb apply refuses a policy whose rules run past the room it reads, and holds nothing",
+              repr((seen.get("usb apply"), out.get("cut"))))
+        script = (usb_tree +
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy; mkdir /root/usb.policy\n" +
+                  "dev 2-1 46f4 0001 STICK1 'QEMU USB HARDDRIVE' 0 unknown\n" +
+                  say("usb apply") + usb_show("unreadable", "v $d/2-1/authorized") +
+                  "rmdir /root/usb.policy\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb apply", {}).get("status") == 1 and
+              "/root/usb.policy:" in out.get("usb apply", "") and out.get("unreadable") == "0",
+              "usb apply refuses a policy it cannot read at all, and lets in nothing it has not read",
+              repr((seen.get("usb apply"), out.get("unreadable"))))
+        #       A verb that changes the policy refuses one it cannot read, rather than writing over it
+        #       from what it reads as: a link to the owner's policy is left a link, and the policy as it was.
+        script = (usb_tree +
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy\n"
+                  "printf '%s\\n' 'mode lock' 'deny 0627:0001/68284-kbd' > /root/usb.keep; ln -s /root/usb.keep /root/usb.policy\n" +
+                  say("usb class storage allow") +
+                  usb_show("linked", "cat /root/usb.keep; test -L /root/usb.policy && echo link") +
+                  "rm -f /root/usb.policy /root/usb.keep\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb class storage allow", {}).get("status") == 1 and
+              "/root/usb.policy:" in out.get("usb class storage allow", "") and
+              out.get("linked") == "mode lock\ndeny 0627:0001/68284-kbd\nlink",
+              "usb class refuses a policy it cannot read, and leaves the link and what it names as they were",
+              repr((seen.get("usb class storage allow"), out.get("linked"))))
+
+        # The usb log is shown from its newest line, however much of it there is: a log
+        # grown past what usb log reads (another hand's, or a cut that did not happen)
+        # shows the last lines it has, not the first.
+        script = (usb_tree +
+                  "for n in $(seq 1 1200); do printf 'line %06d 0123456789012345678901234567890123456789012345678901234567890123\\n' $n; done > /root/usb.log\n" +
+                  say("usb log 2") +
+                  "rm -f /root/usb.log\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        tail = out.get("usb log 2", "").split("\n")
+        check(finished and seen.get("usb log 2", {}).get("status") == 0 and len(tail) == 2 and
+              tail[0].startswith("line 001199 ") and tail[1].startswith("line 001200 "),
+              "usb log N shows the newest N lines of a log bigger than the room it reads",
+              repr(tail[:2] + tail[-1:]))
+
+        # A typed class list that ends in a comma is no class list (storage, and a comma
+        # after it, is what a line written by hand could say; the policy writes none).
+        script = (usb_tree +
+                  "printf '%s\\n' 'mode off' 'allow 0627:0001/68284-kbd storage,' > /root/usb.policy\n" +
+                  say("usb") + "rm -f /root/usb.policy\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and "1 lines of /root/usb.policy are no rule" in out.get("usb", "") and
+              "rule allow 0627:0001/68284-kbd" not in out.get("usb", ""),
+              "a policy line whose class list ends in a comma is left out as no rule",
+              repr(out.get("usb", "")[-300:]))
+
+        # A rule for a device that is not plugged in is a whole id (no classes): usb
+        # allow and usb deny of one wrote whatever class bits the verb's stack held, and
+        # a line with classes on a deny is no rule to the next read.
+        script = (usb_tree +
+                  say("usb deny 1234:5678/SERIAL9") + say("usb allow 1234:5678/SERIAL8") +
+                  usb_show("absent", "grep '^[ad]' /root/usb.policy") + say("usb") + "rm -f /root/usb.policy\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb deny 1234:5678/SERIAL9", {}).get("status") == 0 and
+              sorted(out.get("absent", "").split("\n")) == ["allow 1234:5678/SERIAL8", "deny 1234:5678/SERIAL9"] and
+              "no rule" not in out.get("usb", ""),
+              "a rule for a device that is not plugged in keeps no classes, and reads back as the rule it was",
+              repr((out.get("absent"), out.get("usb", "")[-200:])))
+
         # Places: a device with no serial is pinned by its controller (the root hub's
         # serial), its root hub and its port path, which a boot that numbers the buses
         # in another order does not move. A pin written before places (-@1-6.1) is read
