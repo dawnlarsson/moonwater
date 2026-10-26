@@ -24,6 +24,27 @@ never a pass.
    stop only off-path forgery.
 4. **Hostile service:** owns the connected endpoint and streams bytes and
    timing forever. Bounds and absolute deadlines contain it.
+5. **Physical peripheral:** a device plugged into a port while the machine is
+   on or booting (a stick, a keyboard that types, a hub, a network or audio or
+   camera function, a DMA-capable bus device). It speaks descriptors and
+   protocol bytes to the kernel and chooses the classes it claims. The policy
+   that holds against it is `moonwater usb` (an unknown device and every
+   interface of a known one stay unauthorized until a rule or the owner lets
+   them in); what it cannot hold against is what the kernel does before a
+   device is authorized (reading its device descriptor, the hub's own work) and
+   DMA, which is the IOMMU's (`sec_dma`).
+6. **Physical disk or image access:** somebody who can read or replace what is
+   on the disk or the stick the machine boots from while it is off.
+7. **Supply chain and update:** a changed source, firmware blob, trust anchor,
+   package or update image that the build or `setup update` takes in.
+8. **Compromised program:** a program of a bowl, or one started by the shell,
+   that has been taken over and now acts as its own user, with whatever doors
+   (sockets, FIFOs, files, ioctls) the machine leaves open to it.
+
+Attackers 1 to 4 are covered by the evidence below. 5 to 8 were added with the
+air-gap work (2026-10-26) and are being audited in that order; the audit's
+findings are logged in `incident_response.md` as they are fixed, and each
+attacker gets its invariants here once there is a lane that proves them.
 
 ## Invariants
 
