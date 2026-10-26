@@ -217,6 +217,18 @@ attacker gets its invariants here once there is a lane that proves them.
   history on purpose: it works once, for five minutes, and is read off the other
   machine's screen; a link key is public. The tight tier refuses both argument
   forms; a terminal user at the default tier is told to use `-`.
+- **A Waterlink group's grants are its members' grants, taken back together**
+  (`link_group_join`, MW-2026-040). A machine paired through a group carries
+  the group's grants copied into its own peer record; narrowing the group
+  (`link group NAME SECRET allow GRANT...` with a bit dropped) clears the
+  dropped bit from every member the group paired, under the peers lock, and
+  writes the members before the group so a half-written change grants less,
+  never more. A grant the group starts giving is not pushed onto members
+  already paired (each is widened only by name); a peer paired by hand (group
+  mark 0) is never touched. Before the fix a group grant was a pair-time
+  snapshot that revocation did not reach, so a machine the operator had taken
+  `run` from kept running commands as root. A machine is never called by a
+  word `link` uses, the `port` verb included (MW-2026-041).
 - **OUT-D1, boot takes an install without asking** only when it is the disk
   the session started from (the settings an image boots with and the image on
   the disk carry the same random medium), or the only disk with this build and

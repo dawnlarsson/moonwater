@@ -675,8 +675,12 @@ static p32 link_grants_of(string_address address_to words, positive count,
         PBKDF2 makes of it. Without one, the group already joined is joined
         again, or a new group gets a secret of 160 random bits, printed once
         for the other machines.
-        Members get the grants named here, and none when none are. The
-        link is switched on.
+        Members get the grants named here, and none when none are. A grant
+        the group stops giving is taken from the machines it paired, at
+        once: what a member got from the group it does not keep after the
+        group no longer gives it. A grant the group starts giving is not
+        handed to the machines already paired, which are each given more by
+        name, as before. The link is switched on.
 */
 static const char link_base32[] = "abcdefghijklmnopqrstuvwxyz234567";
 #define LINK_SECRET_LEAST 8
@@ -693,6 +697,9 @@ static b32 link_group_join(string_address address_to words, positive count)
         bool granted = false;
         bool good;
         p32 may = 0;
+        p32 taken = 0;
+        p32 mark = 0;
+        positive narrowed = 0;
         positive at = 1;
         p8 grants[96];
         bipolar lock;
@@ -787,6 +794,20 @@ static b32 link_group_join(string_address address_to words, positive count)
                         generated = true;
                 }
 
+                /*      The machines this group paired carry the mark of the
+                        key they were paired under, which is the record's
+                        before a new secret derives another. Mark 0 is a
+                        machine paired by hand, never a member. */
+                if (record)
+                {
+                        struct waterlink_group_keys keys;
+
+                        waterlink_group_keys_from(address_of keys, record->key,
+                                                  namespace);
+                        mark = keys.mark;
+                        crypto_forget(address_of keys, sizeof keys);
+                }
+
                 if (!record)
                 {
                         if (groups.count >= LINK_GROUPS_MAX)
@@ -817,7 +838,40 @@ static b32 link_group_join(string_address address_to words, positive count)
                         memory_zero(record->check, sizeof record->check);
                 }
                 if (granted)
+                {
+                        taken = record->may & ~may;
                         record->may = may;
+                }
+
+                /*      What the group stops giving, its members lose, and
+                        they lose it first: a failure between the two files
+                        leaves less granted than was asked, never more. A
+                        peers file that cannot be read or written changes
+                        neither, as a groups file that cannot be does. */
+                if (taken && mark)
+                {
+                        link_peers peers;
+
+                        if (!link_peers_for_change(address_of peers))
+                        {
+                                link_peers_unlock(lock);
+                                return host_refuse("%s could not be read\n",
+                                                   LINK_PEERS_PATH);
+                        }
+                        for (positive look = 0; look < peers.count; look++)
+                                if (peers.peer[look].group == mark &&
+                                    (peers.peer[look].may & taken))
+                                {
+                                        peers.peer[look].may &= ~taken;
+                                        narrowed++;
+                                }
+                        if (narrowed && link_peers_save(address_of peers) < 0)
+                        {
+                                link_peers_unlock(lock);
+                                return host_refuse("%s could not be written\n",
+                                                   LINK_PEERS_PATH);
+                        }
+                }
 
                 if (link_groups_save(address_of groups) < 0)
                 {
@@ -830,6 +884,13 @@ static b32 link_group_join(string_address address_to words, positive count)
                 link_grants_text(record->may, grants, sizeof grants);
                 string_format(log, host_label "in group %s; its members may %s here\n",
                               namespace, (string_address)grants);
+                if (narrowed)
+                {
+                        link_grants_text(taken, grants, sizeof grants);
+                        string_format(log, host_label "the %p machines it paired "
+                                                      "may no longer %s\n",
+                                      narrowed, (string_address)grants);
+                }
                 if (generated)
                         string_format(log,
                                       host_label "the secret is %s -- on each other "

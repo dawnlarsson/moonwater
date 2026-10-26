@@ -207,6 +207,121 @@ The eight key hashes were taken from Go's fix
 (`golang/go@7f86f957633e`) and from Jackson's `impacted-intermediates.json`;
 they agree, and the scalars above reproduce them.
 
+### MW-2026-040: a Waterlink group grant taken back left its members holding it
+
+| | |
+|---|---|
+| Status | Fixed on the worktree branch, 2026-10-26; awaiting cherry-pick to main |
+| Class | Stale authorization: revoking a grant from a group did not reach the machines the group had already paired |
+| Attacker | A linked peer (attacker 8) that was paired through a group, after the operator narrowed the group's grants to take an authority back |
+| Reachable | `moonwater link group NAME SECRET allow GRANT...`, src/waterlink/command.c `link_group_join` |
+
+**What happened.** A machine joins a group with a set of grants
+(`link group lab SECRET allow run shell`). Every peer that later pairs itself
+through that group is written into `/root/link.peers` with the group's grants
+copied into its own `may` word (`link_pair_keep`, src/waterlink/nearby.c), and
+carries the group's mark. When the operator then narrows the group
+(`link group lab SECRET allow shell`, dropping `run`), the old code wrote the
+new grants onto the group record alone. The peers keep the `run` bit in their
+own records, and `link_request`/`link_sessions_granted` read authority from the
+peer record, not the group. So a machine the operator believed they had taken
+`run` from went on running commands as root. Revoking a grant from a group was
+silently a no-op for everyone already in it; the only way to take it back was
+`link remove` or `link deny` on each peer by name, which the operator has no
+reason to know they must do.
+
+This is the group analogue of the revocation the lane already proves for a peer
+named by hand (`link deny NAME run`). A group is the form made for a fleet, so
+it is the form whose revocation matters most.
+
+**Reproduced.** In the two-namespace link lane (`sh test/run link`), machine a
+pairs itself to b through group `lab` (granted `run shell`). b runs
+`link group lab SECRET allow shell`, then a runs
+`moonwater link run <a> 'echo kept-run'`: on the old code the command runs and
+prints `kept-run` (status 0). The peer line on b still reads
+`may shell run files, in group lab`.
+
+**The fix.** `link_group_join`, when `allow` narrows a group's grants, computes
+`taken = old_may & ~new_may`, and, under the peers lock it already holds, clears
+those bits from every peer carrying the group's mark before it saves the group
+record. Members lose the authority first (peers written, then the group), so a
+failure between the two files leaves less granted than asked, never more; a
+peers file that cannot be read or written changes neither. A grant the group
+*starts* giving is not pushed onto existing members (they are each given more by
+name as before). Machines paired by hand carry mark 0 and are never touched. The
+verb now says how many members lost what.
+
+**Tests that fail without the fix.** `waterlink-link` (`test/differential.py
+--harness waterlink_link`, run by `lane_link` / `sh test/run link`), the group
+block, new rows:
+- `sec: a machine lab paired may no longer run once b takes run from lab` —
+  RED on the parent tree (the far command runs, status 0, `kept-run`), GREEN
+  after (`run is not granted`, status 255, no output).
+- `sec: and keeps shell, which lab still grants, and files, which lab never
+  did` — holds that narrowing takes only the dropped bit, not every bit.
+- `sec: a machine paired by hand keeps the run lab took from its members` —
+  holds that mark-0 records are untouched.
+- `saying lab's grants again as they are takes nothing from its member` —
+  a no-op `allow` of the current grants changes nothing.
+
+Box run (`/home/dawn/sec-4`): parent tree `waterlink-link` 198 of 202 (the two
+new `sec:` grant rows and the `port` row below red); with the fix 201 of 202.
+The one remaining red (`a FIFO at the groups and the machines is read as
+nothing`) is a pre-existing lane failure unrelated to this change (a FIFO
+planted at `/root/link.groups` by the harness as root; present on the parent
+tree before any of my edits) and is reported separately as open.
+
+**Still open.** `link_pair_keep` copies grants at pairing time by design (a
+member's record is its own authority), so this fix keeps the two in step only at
+the moment the group is narrowed; a grant the group gives is still a
+pair-time snapshot. The mutation lane has not been run on the new branch in
+`link_group_join`.
+
+### MW-2026-041: a machine could be named `port`, colliding with the `port` verb
+
+| | |
+|---|---|
+| Status | Fixed on the worktree branch, 2026-10-26; awaiting cherry-pick to main |
+| Class | Verb/name namespace collision; a peer name that shadows a command word |
+| Attacker | Operator error weaponized by confusion: `link port ...` meant for a peer named `port` instead moves this machine's own listener |
+| Reachable | src/waterlink/service.c `link_words`, used by `link_name_good` |
+
+**What happened.** `moonwater link port [N|auto]` became a verb in `b5ec7de8`
+(2026-10-06), but `port` was not added to `link_words`, the list of words
+`link_name_good` refuses as machine names. So `link add port KEY HOST`
+succeeded, and a machine called `port` could be linked. Afterwards
+`moonwater link port` (meant as "a terminal on the machine called port") is read
+as the port verb and prints this machine's listener port; `moonwater link port
+22360` (meant as "run `22360` on port"? — or simply a fat-fingered peer command)
+is read as `link port 22360` and silently rebinds this machine's own Waterlink
+listener to UDP 22360 at the next `link on`. The other verb words
+(`on`, `off`, `pair`, `add`, `log`, …) are all refused as names; `port` was the
+one that slipped through when the verb was added, so the one reserved word a
+machine could still be called.
+
+No peer could exploit this against another machine — a peer name is chosen
+locally — but it is a real confused-deputy footgun: a name the operator picks
+for a peer turns a later `link port` from a command on that peer into a change
+to the local listener. The invariant the other verb words already keep (a
+machine is never called by a word link uses) was violated for exactly one word.
+
+**Reproduced.** Link lane, new row in the existing "a machine cannot be called
+WORD" loop: `moonwater link add port KEY` succeeds on the parent tree (the peer
+is stored) and the row `a machine cannot be called port` is RED; with `port`
+added to `link_words` the add is refused (`is not a name`) and the row is GREEN.
+
+**The fix.** `port` added to `link_words` in src/waterlink/service.c, one line,
+so `link_name_good` refuses it as it refuses every other verb word. A peer
+already saved under the name `port` from before the fix still reads (the stored
+record is not re-validated against the word list); `link remove port` drops it.
+
+**Tests that fail without the fix.** `waterlink-link`, the "a machine cannot be
+called WORD" loop, `port` added to the word tuple: RED on the parent tree, GREEN
+after. Box run as above.
+
+**Still open.** Nothing further; the three-letter and shorter codes are a
+separate space (`link_code_shaped`) and were never names.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was

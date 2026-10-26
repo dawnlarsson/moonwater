@@ -76029,6 +76029,40 @@ if len(names) == 2:
     say(status == 0 and out == b"still-lab\n", "and lab's member still runs on b")
 on("c", moon + " link group leave ops forget")
 
+#       What a group no longer grants, the machines it paired no longer have
+#       (MW-2026-040): lab paired a on b with shell and run, and b takes run
+#       from lab. Only what lab took is taken: files, which b gave a by hand
+#       and lab never had, stays, a machine paired by hand keeps its run, and
+#       saying lab's grants again as they are takes nothing.
+def lab_line(side_name):
+    status, out, err = on("b", moon + " link")
+    return [l for l in out.decode(errors="replace").splitlines() if l.startswith("  " + side_name + " ")]
+if len(names) == 2:
+    on("b", "%s link allow %s files" % (moon, names["b"]))
+    on("b", "%s link add hand-c %s" % (moon, keys["c"]))
+    on("b", moon + " link allow hand-c run")
+    status, out, err = on("b", moon + " link group lab allow shell run")
+    a_line = lab_line(names["b"])
+    say(status == 0 and a_line and "may shell run files, in group lab" in a_line[0],
+        "saying lab's grants again as they are takes nothing from its member (%r %r)" % (a_line, err[-120:]))
+    status, out, err = on("b", moon + " link group lab allow shell")
+    say(status == 0 and b"its members may shell here" in out,
+        "b takes run from lab (%r %r)" % (out[-160:], err[-160:]))
+    status, out, err = on("a", "%s link run %s 'echo kept-run'" % (moon, names["a"]), timeout=30)
+    say(status == 255 and b"run is not granted" in err and out == b"",
+        "sec: a machine lab paired may no longer run once b takes run from lab (%r %r %r)" %
+        (status, out, err[-80:]))
+    a_line = lab_line(names["b"])
+    say(a_line and "may shell files, in group lab" in a_line[0],
+        "sec: and keeps shell, which lab still grants, and files, which lab never did (%r)" % (a_line,))
+    hand = lab_line("hand-c")
+    say(hand and "may run" in hand[0] and "in group" not in hand[0],
+        "sec: a machine paired by hand keeps the run lab took from its members (%r)" % (hand,))
+    on("b", moon + " link remove hand-c")
+    on("b", moon + " link group lab allow run shell")
+    on("b", "%s link allow %s run" % (moon, names["b"]))
+    on("b", "%s link deny %s files" % (moon, names["b"]))
+
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
 #       each would be kept busy by a sender with a few thousand source ports.
