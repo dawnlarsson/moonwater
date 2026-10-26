@@ -23840,13 +23840,17 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         // Its bold, where a face named Regular has one beside it.
         string_copy_bounded(bold, face, sizeof(bold));
         length = string_length(bold);
-        for (positive from = 0; from + 7 <= length; from++)
-                if (!memory_compare(bold + from, "Regular", 7) && length + 1 < sizeof(bold))
+        {
+                p8 address_to regular = (p8 address_to)memory_search(bold, length, "Regular", 7);
+
+                if (regular && length + 1 < sizeof(bold))
                 {
+                        positive from = (positive)(regular - bold);
+
                         string_copy_bounded(bold + from, (string_address) "Bold", sizeof(bold) - from);
                         string_copy_bounded(bold + from + 4, face + from + 7, sizeof(bold) - from - 4);
-                        break;
                 }
+        }
 
         words[used++] = (string_address) "/settings";
         words[used++] = (string_address) "-f";
