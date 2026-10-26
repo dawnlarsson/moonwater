@@ -48874,7 +48874,7 @@ for name, lock, words, token in [
     held = open(lock, "a+")
     fcntl.flock(held, fcntl.LOCK_EX)
     waiter = start(words)
-    time.sleep(0.4)
+    time.sleep(0.8)
     fcntl.flock(held, fcntl.LOCK_UN)
     held.close()
     said = waiter.communicate(timeout=60)[0].decode(errors="replace")
@@ -48882,7 +48882,7 @@ for name, lock, words, token in [
     quiet = "waiting for another moonwater command" not in said
     print("@@wait %s %d" % (name, 1 if waiter.returncode != 0 or quiet or not kept else 0), repr(said[:160]))
 #   A verb that keeps a word in /root and puts it somewhere else too does both
-#   under the machine's lock, so two of them at once cannot cross (A kept, B kept,
+#   under the machine's lock (airplane reads the radios under it as well), so two of them at once cannot cross (A kept, B kept,
 #   B put, A put, and the two files name different servers, links or names):
 #   with the lock held here, the verb has changed nothing a quarter second on,
 #   and has done all of it once the lock is let go.
@@ -48891,7 +48891,8 @@ for name, before, words, gone in [
         ("dns auto", ["dns 9.9.9.9"], "dns auto", "-/root/dns"),
         ("dns tls", [], "dns tls on", "/root/dns.tls"),
         ("priority", [], "priority internet wifi", "/root/internet"),
-        ("name", [], "name aa-bb", "/root/name")]:
+        ("name", [], "name aa-bb", "/root/name"),
+        ("airplane", [], "airplane on", "/root/tune")]:
     clear()
     for word in before:
         sh(word)
@@ -48956,7 +48957,7 @@ PYEOF
                   "%s lock: a command held back by it says what it waits for, and then does its work" % found[1],
                   " ".join(found))
         locks = [line.split(None, 3) for line in lines if line.startswith("@@lock ")]
-        check(len(locks) == 5, "the machine lock rows ran", lines[-4:])
+        check(len(locks) == 6, "the machine lock rows ran", lines[-4:])
         for found in locks:
             check(len(found) > 2 and found[2] == "0",
                   "%s: waits for the machine's lock before it keeps or puts anything, and finishes after" % found[1],

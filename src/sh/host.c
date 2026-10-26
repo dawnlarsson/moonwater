@@ -670,6 +670,15 @@ static bipolar host_lock(string_address path, bool wait)
         //      every network tried, which is a minute for a few) was waited for
         //      with nothing said: a command that takes the lock says what it is
         //      waiting for once, and then waits as it did.
+        //      A holder that lets go within the half second it takes to notice a wait is
+        //      not worth a line: the output of a verb that met another for a moment is the
+        //      output of one that did not.
+        for (positive turn = 0; locked == -EAGAIN && wait && turn < 250; turn++)
+        {
+                host_pause(2000000);
+                locked = system_call_2(syscall(flock), (positive)handle,
+                                       RADIO_LOCK_EX | RADIO_LOCK_NB);
+        }
         if (locked == -EAGAIN && wait)
         {
                 host_say(log, host_label "waiting for another moonwater command to let go of %s\n",
@@ -13296,6 +13305,15 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         host_need_root();
         on = host_onoff(arguments[2]) > 0;
 
+        //      What it goes by is read under the machine's lock, and held to the end: on and
+        //      off at once each read the radios as they were, and each did half of the other's
+        //      work (airplane off recorded, and both radios left off).
+        if (!host_acquire())
+                return 1;
+        wifi_off = radio_kept(NET_WIFI_POWER) == 0;
+        bluetooth_off = radio_kept(NET_BLUETOOTH_POWER) == 0;
+        kept = tune_kept("airplane", was, sizeof(was));
+
         //      Type zero is every radio, the modem included.
         if (on)
         {
@@ -13335,6 +13353,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                         failed |= tune_remember("airplane", "");
         }
         failed |= sent < 0 ? host_fail("/dev/rfkill", sent) : 0;
+        host_release();
         return radio_done(failed, on ? "airplane on" : "airplane off");
 }
 
