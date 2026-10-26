@@ -45028,6 +45028,27 @@ def harness_moonwater_cli(argv):
             check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
                   f"{verb} is not held by a FIFO at /etc/resolv.conf", got)
 
+        #       The zone file the clock library reads for every program that prints a
+        #       local time is state too: date, time, timezone and status asked the
+        #       time of a FIFO there and waited for it for good (the zone words under
+        #       /root were read without blocking and this file, beside them, was not;
+        #       it is the one asked when no zone is kept).
+        script = ("mv /etc/localtime /tmp/localtime.kept 2>/dev/null; mkfifo /etc/localtime\n"
+                  "mv /root/timezone /tmp/timezone.kept 2>/dev/null; mv /root/timezone.mode /tmp/timezone.mode.kept 2>/dev/null\n")
+        readers = ("date", "time", "timezone", "status")
+        for verb in readers:
+            program = "/tmp/date" if verb == "date" else f"/tmp/moonwater {verb}"
+            script += (f"timeout 5 {program} >/dev/null 2>&1; "
+                       f"echo \"@@fifo localtime {verb}: $?\"\n")
+        script += ("rm -f /etc/localtime; mv /tmp/localtime.kept /etc/localtime 2>/dev/null\n"
+                   "mv /tmp/timezone.kept /root/timezone 2>/dev/null; mv /tmp/timezone.mode.kept /root/timezone.mode 2>/dev/null || :\n")
+        lines, finished = session(script)
+        check(finished, "the FIFO at localtime session finished", "")
+        for verb in readers:
+            got = [line for line in lines if line.startswith(f"@@fifo localtime {verb}: ")]
+            check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
+                  f"{verb} is not held by a FIFO at /etc/localtime", got)
+
         # A saved network on a machine with no wireless interface is not
         # waited for: boot and `wifi on` come back at once, where they once
         # held for eight seconds each.

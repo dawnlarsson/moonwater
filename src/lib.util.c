@@ -23121,8 +23121,10 @@ static positive clock_history_be(const p8 address_to at, positive bytes)
 // has one and rules is asked for, is returned in footer.
 static bool clock_history_load(string_address path, p8 address_to footer, positive footer_room)
 {
+        //      Nonblocking, as clock_zone_load is: a FIFO at a zone file's name
+        //      reads as no file and does not hold every program that prints a time.
         bipolar handle = system_call_4(syscall(openat), AT_FDCWD, (positive)path,
-                                       O_RDONLY | O_CLOEXEC, 0);
+                                       O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
         positive used = 0;
 
         clock_zone_epoch++;
@@ -23338,7 +23340,7 @@ static fn clock_tz_load_localtime(void)
 
         handle = system_call_4(syscall(openat), AT_FDCWD,
                                (positive)(string_address)CLOCK_LOCALTIME_PATH,
-                               O_RDONLY | O_CLOEXEC, 0);
+                               O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0);
         if (handle < 0)
                 return;
         do
