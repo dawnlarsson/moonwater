@@ -13440,6 +13440,70 @@ machine_run_failed=$(printf '%s\n' "$machine_run_body" |
 same 'a machine that could not start is not a machine init has retired' \
         '0:3' "$machine_run_fails:$machine_run_failed"
 
+#       The restores after a disk are one sequence in one function, and the
+#       two places that run it do not spell the calls out again: a restore
+#       added to one copy and not the other is how they came apart. The
+#       function holds the order (the name between usb and the locale);
+#       host_take runs it after it lets the lock go, with both arguments
+#       true; the machine process runs it after it has said it sourced the
+#       script, for the radios unless the verdict is a question, and not
+#       for the name.
+restore_body=$(awk '/^static fn host_restore_session\(bool radio, bool name\)$/,/^}$/' \
+        src/sh/host.c)
+restore_order=$(printf '%s\n' "$restore_body" | grep -o '[a-z]*_restore()' | tr '\n' ' ')
+same 'the restores after a disk are run in one order' \
+        'radio_restore() usb_restore() name_restore() locale_restore() dns_restore() tune_restore() ' \
+        "$restore_order"
+take_body=$(awk '/^static b32 host_take\(host_install address_to install, bool update\)$/,/^}$/' \
+        src/sh/host.c)
+restore_spelled=$(printf '%s\n%s\n' "$take_body" "$machine_run_body" |
+        grep -c '\(radio\|usb\|name\|locale\|dns\|tune\)_restore()')
+restore_take=$(printf '%s\n' "$take_body" | grep -c 'host_restore_session(true, true);')
+restore_machine=$(printf '%s' "$machine_run_body" | tr -d '\n' | tr -s ' ' |
+        grep -cF 'host_restore_session(!string_has_prefix((string_address)verdict, "ask "), false);')
+release_line=$(printf '%s\n' "$take_body" | grep -n 'host_release_all();' | head -1 | cut -d: -f1)
+restore_line=$(printf '%s\n' "$take_body" | grep -n 'host_restore_session(' | head -1 | cut -d: -f1)
+if [ -n "$release_line" ] && [ -n "$restore_line" ] && [ "$release_line" -lt "$restore_line" ]; then
+        restore_after_release=yes
+else
+        restore_after_release=no
+fi
+same 'a take and the machine process call the one sequence and spell none of it' \
+        '0:1:1:yes' "$restore_spelled:$restore_take:$restore_machine:$restore_after_release"
+
+#       The machine process says it sourced the script before the restores,
+#       which can take a join's time, and says so when it cannot write the
+#       marker: unheard, a boot waits out five seconds and runs the settings'
+#       init list beside the script's own moonwater_init.
+sourced_said=$(printf '%s' "$machine_run_body" | tr -d '\n' | tr -s ' ' |
+        grep -cF 'failed = host_write_text(HOST_MACHINE_SOURCED, "1\n"); if (failed < 0) host_fail(HOST_MACHINE_SOURCED, failed);')
+sourced_line=$(printf '%s\n' "$machine_run_body" | grep -n 'HOST_MACHINE_SOURCED, "1' | head -1 | cut -d: -f1)
+restores_line=$(printf '%s\n' "$machine_run_body" | grep -n 'host_restore_session(' | head -1 | cut -d: -f1)
+if [ -n "$sourced_line" ] && [ -n "$restores_line" ] && [ "$sourced_line" -lt "$restores_line" ]; then
+        sourced_first=yes
+else
+        sourced_first=no
+fi
+same 'the machine process says it sourced the script before it restores, and says when it cannot' \
+        '1:yes' "$sourced_said:$sourced_first"
+
+#       reboot(2)'s words are defined once, in shell.c, with the values the
+#       kernel's LINUX_REBOOT_MAGIC1, MAGIC2, CMD_RESTART and CMD_POWER_OFF
+#       have; no other file in the shell defines or spells them again, and the
+#       three that stop the machine hand them to shell_stop, the one call.
+reboot_defs=$(LC_ALL=C grep -h '^#define \(HOST_\)\{0,1\}REBOOT_' src/sh/*.c src/moonwater/moonwater.c |
+        LC_ALL=C sort | tr '\n' ' ')
+same 'reboot(2)'"'"'s magic words and commands are defined once, with the kernel'"'"'s values' \
+        '#define REBOOT_MAGIC 0xfee1dead #define REBOOT_MAGIC_SECOND 672274793 #define REBOOT_POWER_OFF 0x4321fedc #define REBOOT_RESTART 0x01234567 ' \
+        "$reboot_defs"
+reboot_calls=$(grep -c 'syscall(reboot), REBOOT_MAGIC, REBOOT_MAGIC_SECOND, command' src/sh/builtin.c)
+reboot_builtin=$(grep -c 'shell_stop(write, REBOOT_RESTART);\|shell_stop(write, REBOOT_POWER_OFF);' src/sh/builtin.c)
+reboot_firmware=$(grep -c 'shell_stop(log, REBOOT_RESTART);' src/sh/host.c)
+reboot_machine=$(printf '%s' "$machine_run_body" | tr -d '\n' | tr -s ' ' |
+        grep -cF 'shell_stop(log, stopping == SPARK_BIND_POWEROFF ? REBOOT_POWER_OFF : REBOOT_RESTART);')
+same 'reboot, poweroff, the firmware restart and the machine process'"'"'s stop hand the one call the one set' \
+        '1:2:1:1' "$reboot_calls:$reboot_builtin:$reboot_firmware:$reboot_machine"
+
 #       An edited script has to reach the process that runs it.
 #
 #       host_machine_refresh re-asked the kernel for the overlay on every

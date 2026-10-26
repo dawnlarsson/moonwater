@@ -73432,6 +73432,13 @@ static void system_close(bipolar h) { (void)h; }
 static p64 system_clock_ns(int c) { (void)c;return now_ns; }
 static void host_pause(p64 ns) { now_ns += ns; }
 static void host_machine_end_run(void) { runs++; }
+static char trace[16];
+static void radio_restore(void) { strcat(trace, "r"); }
+static void usb_restore(void) { strcat(trace, "u"); }
+static void name_restore(void) { strcat(trace, "n"); }
+static void locale_restore(void) { strcat(trace, "l"); }
+static void dns_restore(void) { strcat(trace, "d"); }
+static void tune_restore(void) { strcat(trace, "t"); }
 static unsigned said_failures, removed_marks;
 static bipolar write_result;
 static bipolar host_write_text(const char *path, const char *text) { (void)path; (void)text; return write_result; }
@@ -73456,7 +73463,7 @@ static bipolar system_control(bipolar d, unsigned op, void *p) {
     }
     return -1;
 }
-""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + section(machine, "static bool host_machine_sourced(p64 wait)", "static b32 host_machine_call(") + section(machine, "static fn host_machine_dirty(bool on)", "static fn host_machine_close(") + r"""
+""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + section(machine, "static bool host_machine_sourced(p64 wait)", "static b32 host_machine_call(") + section(machine, "static fn host_machine_dirty(bool on)", "static fn host_machine_close(") + section(host, "static fn host_restore_session(bool radio, bool name)", "/*\n        Use an install's data") + r"""
 static unsigned bad, total;
 static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
 static void world(bool a, bool m, bool l, bool s) {
@@ -73536,6 +73543,14 @@ int main(void)
     check(!said_failures && !removed_marks, "one that was written says nothing");
     host_machine_dirty(false);
     check(!said_failures && removed_marks == 1, "and taking it off is not a failure");
+    /* The restores after a disk: one order, the name between usb and the
+       locale, and the two callers' differences are its two arguments. */
+    trace[0] = 0; host_restore_session(true, true);
+    check(!strcmp(trace, "runldt"), "a take restores radio, usb, name, locale, dns, tune in that order");
+    trace[0] = 0; host_restore_session(false, false);
+    check(!strcmp(trace, "uldt"), "the machine process under an ask leaves the radios and the name");
+    trace[0] = 0; host_restore_session(true, false);
+    check(!strcmp(trace, "ruldt"), "and otherwise leaves only the name, which host_booted settles");
     printf("%u %u\n", total, bad);
     return bad != 0;
 }
@@ -73557,7 +73572,7 @@ int main(void)
         total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
         for _ in range(total - sum(1 for line in lines if line.startswith("FAIL"))):
             checks(True, "machine stop")
-        checks(total == 19 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
+        checks(total == 22 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
 
     #   The CLI's side of the bind ioctl and of the settings block, lifted
     #   and run: what is handed to the kernel for a command of every length
