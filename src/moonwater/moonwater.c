@@ -2094,6 +2094,13 @@ static fn host_machine_publish(void)
                 return;
         }
 
+        //      A file that is absent and one that is empty publish the same
+        //      thing, a length of 0, which the kernel takes as the builtin
+        //      script. That is meant: an empty script defines no function, so
+        //      there is no row it could own, and it is taken rather than
+        //      refused (test/run holds this, "and an empty one"); moonwater
+        //      bind then names the builtin as where a row comes from, as it
+        //      does with no file at all.
         memory_zero(address_of host_machine, sizeof(host_machine));
         if (loaded == HOST_MACHINE_OK) {
                 host_machine.length = (unsigned int)text.used;
@@ -2630,6 +2637,15 @@ static b32 host_machine_run(void)
         bowl_session_prepare("/root", null);
         SPARK_COMMAND_ENVIRONMENT(HOST_MACHINE_ASSIGN)
 
+        //      The three returns below come before the restores, and init
+        //      starts this process again after each (it answers
+        //      HOST_MACHINE_FAILED), every start doing them. What they skip
+        //      is done elsewhere for a session with a disk, whose take did it
+        //      (host_take), and for a start after another process's, which
+        //      did it before it died or kept the attach. A session with no
+        //      disk, or one that is being asked, has only this process for
+        //      them: when every try fails they are not done, and init says so
+        //      once, "the machine script keeps exiting; leaving it alone".
         device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
         if (device < 0) {
                 host_fail(SPARK_DEVICE, device);
