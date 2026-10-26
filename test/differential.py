@@ -45053,7 +45053,6 @@ def harness_moonwater_cli(argv):
                 got = [line for line in lines if line.startswith(f"@@fifo {word} {verb}: ")]
                 check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
                       f"{verb} is not held by a FIFO at /root/{word}", got)
-
         #       The resolver's file is state the same way: dns, status and time sync
         #       read it, and a FIFO at its name held every one of them for good. So
         #       did bowl, which copies it into the root of a guest that runs a
@@ -45073,7 +45072,6 @@ def harness_moonwater_cli(argv):
             got = [line for line in lines if line.startswith(f"@@fifo resolv.conf {verb}: ")]
             check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
                   f"{verb} is not held by a FIFO at /etc/resolv.conf", got)
-
         #       The zone file the clock library reads for every program that prints a
         #       local time is state too: date, time, timezone and status asked the
         #       time of a FIFO there and waited for it for good (the zone words under
@@ -49185,6 +49183,1197 @@ PYEOF
               repr((sizes, lines[-3:])))
 
     return checks.verdict("moonwater cli", "moonwater-cli")
+
+
+#   What the fuzz harness runs INSIDE the sandbox, as python3 under the
+#   chroot: it resets the machine's state before every chain of vectors,
+#   runs each vector as a process of its own under a deadline, and writes
+#   what happened -- status, signal, both streams as hex, and every entry
+#   of the state directories that appeared, changed or went -- as one JSON
+#   line a chain, flushed, so a session that is cut short still leaves its
+#   first answers. It judges nothing; the parent does.
+MOONWATER_FUZZ_DRIVER = r'''
+import json, os, random, re, resource, shutil, signal, stat, subprocess, sys, time
+
+ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+KEPT = {"moonwater", "script", "fuzz_driver.py", "fuzz_chains.json", "fuzz_out.jsonl",
+        "fuzz.out", "fuzz.err", "plant", "date"}
+WATCH = ("/root", "/run", "/etc", "/home", "/tmp", "/bowls", "/sys")
+
+
+def put(base, path, text):
+    target = os.path.join(base, path)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w") as handle:
+        handle.write(text)
+
+
+def machine(base):
+    """The sysfs the verbs read and write, of plain files: a backlight, a
+    battery, the cpu's governors, a USB tree with a keyboard, a stick and a
+    hub, the keys of sleep."""
+    put(base, "class/backlight/fake0/brightness", "50\n")
+    put(base, "class/backlight/fake0/max_brightness", "200\n")
+    put(base, "class/power_supply/AC/type", "Mains\n")
+    put(base, "class/power_supply/BAT0/type", "Battery\n")
+    put(base, "class/power_supply/BAT0/capacity", "73\n")
+    put(base, "class/power_supply/BAT0/status", "Discharging\n")
+    put(base, "class/power_supply/BAT0/charge_control_end_threshold", "100\n")
+    put(base, "firmware/acpi/platform_profile", "balanced\n")
+    put(base, "firmware/acpi/platform_profile_choices", "low-power balanced performance\n")
+    put(base, "devices/system/cpu/cpufreq/boost", "1\n")
+    put(base, "devices/system/cpu/smt/control", "on\n")
+    cpu = "devices/system/cpu/cpu0/cpufreq/"
+    put(base, cpu + "scaling_governor", "schedutil\n")
+    put(base, cpu + "scaling_available_governors", "performance schedutil powersave\n")
+    put(base, cpu + "energy_performance_preference", "balance_performance\n")
+    put(base, cpu + "energy_performance_available_preferences",
+        "default performance balance_performance balance_power power\n")
+    put(base, "devices/system/cpu/cpu1/online", "1\n")
+    put(base, "devices/system/cpu/cpu2/online", "1\n")
+    put(base, "power/state", "freeze mem disk\n")
+    put(base, "power/mem_sleep", "[s2idle] deep\n")
+    put(base, "bus/serio/devices/serio0/power/wakeup", "disabled\n")
+    put(base, "module/usbcore/parameters/authorized_default", "1\n")
+    put(base, "bus/usb/drivers_probe", "")
+    usb = "bus/usb/devices/"
+
+    def device(name, vendor, product, serial, label, klass, authorized="1", removable="unknown"):
+        put(base, usb + name + "/idVendor", vendor + "\n")
+        put(base, usb + name + "/idProduct", product + "\n")
+        if serial:
+            put(base, usb + name + "/serial", serial + "\n")
+        put(base, usb + name + "/product", label + "\n")
+        put(base, usb + name + "/authorized", authorized + "\n")
+        put(base, usb + name + "/removable", removable + "\n")
+        put(base, usb + name + "/power/wakeup", "disabled\n")
+        put(base, usb + name + ":1.0/bInterfaceClass", klass + "\n")
+        put(base, usb + name + ":1.0/bInterfaceSubClass", "00\n")
+        put(base, usb + name + ":1.0/bInterfaceProtocol", "01\n")
+        put(base, usb + name + ":1.0/authorized", authorized + "\n")
+
+    device("1-1", "0627", "0001", "28754-tablet", "QEMU USB Tablet", "03")
+    device("1-2", "0627", "0001", "68284-kbd", "QEMU USB Keyboard", "03")
+    device("1-3", "46f4", "0001", "STICK1", "QEMU USB HARDDRIVE", "08", "0")
+    device("1-4", "2109", "2817", "", "Fixed hub", "09", "1", "fixed")
+    put(base, usb + "usb1/idVendor", "1d6b\n")
+    put(base, usb + "usb1/idProduct", "0002\n")
+    put(base, usb + "usb1/product", "xHCI Host Controller\n")
+    put(base, usb + "usb1/authorized", "1\n")
+    put(base, usb + "usb1/authorized_default", "1\n")
+    put(base, usb + "usb1/interface_authorized_default", "1\n")
+
+
+ETC = {}
+for _name in ("passwd", "group", "hosts"):
+    try:
+        with open("/etc/" + _name, "rb") as _handle:
+            ETC[_name] = _handle.read()
+    except OSError:
+        pass
+
+
+def wipe(path, keep=()):
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return
+    for name in names:
+        if name in keep:
+            continue
+        full = os.path.join(path, name)
+        try:
+            if os.path.isdir(full) and not os.path.islink(full):
+                os.chmod(full, 0o755)
+                shutil.rmtree(full)
+            else:
+                os.unlink(full)
+        except OSError:
+            pass
+
+
+def reset(template):
+    """Every state directory as a new machine has it. Done as root; a run as
+    nobody can remove nothing of root's and settles for what it can."""
+    for top in ("/root", "/run", "/home"):
+        wipe(top)
+    wipe("/etc")
+    for name, data in ETC.items():
+        try:
+            with open("/etc/" + name, "wb") as handle:
+                handle.write(data)
+        except OSError:
+            pass
+    wipe("/tmp", keep=KEPT)
+    wipe("/bowls/one/etc")
+    wipe("/bowls/two/etc")
+    try:
+        os.symlink("/usr/share/zoneinfo/UTC", "/bowls/one/etc/localtime")
+    except OSError:
+        pass
+    wipe("/sys")
+    try:
+        shutil.copytree(template, "/sys", dirs_exist_ok=True)
+    except OSError:
+        pass
+    try:
+        open("/dev/rfkill", "w").close()
+    except OSError:
+        pass
+
+
+def plant():
+    """Things a path argument can name that a regular file would not be."""
+    here = "/tmp/plant"
+    os.makedirs(here, exist_ok=True)
+    for name, make in (("link", lambda p: os.symlink("/root", p)),
+                       ("loop", lambda p: os.symlink("loop", p)),
+                       ("dangling", lambda p: os.symlink("/nowhere/at/all", p)),
+                       ("fifo", lambda p: os.mkfifo(p)),
+                       ("dir", lambda p: os.mkdir(p)),
+                       ("empty", lambda p: open(p, "w").close()),
+                       ("junk", lambda p: open(p, "wb").write(bytes(range(256)) * 64)),
+                       ("pem", lambda p: open(p, "w").write("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"))):
+        try:
+            make(os.path.join(here, name))
+        except OSError:
+            pass
+
+
+def snapshot():
+    seen = {}
+    for top in WATCH:
+        for base, dirs, files in os.walk(top, followlinks=False):
+            if base == "/tmp":
+                dirs[:] = [d for d in dirs if d not in KEPT]
+            for name in dirs + files:
+                if base == "/tmp" and name in KEPT:
+                    continue
+                path = os.path.join(base, name)
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                seen[path] = (stat.S_IFMT(info.st_mode), info.st_mode & 0o7777, info.st_size,
+                              info.st_mtime_ns, info.st_ino, info.st_uid)
+    for name in os.listdir("/"):
+        if name not in ("proc", "usr"):
+            try:
+                info = os.lstat("/" + name)
+            except OSError:
+                continue
+            seen["/" + name] = (stat.S_IFMT(info.st_mode), info.st_mode & 0o7777, info.st_size,
+                                info.st_mtime_ns, info.st_ino, info.st_uid)
+    try:
+        info = os.lstat("/dev/rfkill")
+        seen["/dev/rfkill"] = (stat.S_IFMT(info.st_mode), info.st_mode & 0o7777, info.st_size,
+                               info.st_mtime_ns, info.st_ino, info.st_uid)
+    except OSError:
+        pass
+    return seen
+
+
+def head(path):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(160).hex()
+    except OSError:
+        return None
+
+
+def changes(before, after):
+    found = []
+    for path in sorted(set(before) | set(after)):
+        old, new = before.get(path), after.get(path)
+        if old == new:
+            continue
+        what = "created" if old is None else "removed" if new is None else "changed"
+        entry = {"path": path, "what": what}
+        if new is not None:
+            entry.update(kind=new[0], mode=new[1], size=new[2], uid=new[5])
+            if stat.S_ISREG(new[0]):
+                entry["head"] = head(path)
+            elif stat.S_ISLNK(new[0]):
+                try:
+                    entry["target"] = os.readlink(path).encode().hex()
+                except OSError:
+                    pass
+        found.append(entry)
+    return found
+
+
+def strays():
+    me = os.getpid()
+    for name in os.listdir("/proc"):
+        if name.isdigit() and int(name) != me:
+            try:
+                os.kill(int(name), signal.SIGKILL)
+            except OSError:
+                pass
+    while True:
+        try:
+            if os.waitpid(-1, os.WNOHANG)[0] == 0:
+                break
+        except ChildProcessError:
+            break
+
+
+def plant_state(path, kind, content):
+    """A file of the machine's state replaced by something it did not write:
+    bytes, a directory, a link to something endless or to itself."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.lexists(path):
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        if kind == b"d":
+            os.mkdir(path)
+        elif kind == b"z":
+            os.symlink("/dev/zero", path)
+        elif kind == b"l":
+            os.symlink(os.path.basename(path), path)
+        elif kind == b"f":
+            os.mkfifo(path)
+        else:
+            with open(path, "wb") as handle:
+                handle.write(content)
+    except OSError:
+        pass
+
+
+LIMITS = {}
+RLIMITS = {"nofile": resource.RLIMIT_NOFILE, "fsize": resource.RLIMIT_FSIZE, "as": resource.RLIMIT_AS,
+           "data": resource.RLIMIT_DATA, "nproc": resource.RLIMIT_NPROC}
+
+
+def limited():
+    for name, value in LIMITS.items():
+        resource.setrlimit(RLIMITS[name], (value, value))
+
+
+def mutate_state(seed):
+    """One file of the state, as the verbs wrote it, changed a little the way a
+    cut, a bad block or a careless editor would: the seed picks the file and
+    the change."""
+    found = []
+    for top in ("/root", "/run/moonwater", "/etc"):
+        for base, dirs, files in os.walk(top):
+            for name in files:
+                path = os.path.join(base, name)
+                if os.path.isfile(path) and not os.path.islink(path) and not name.endswith(".lock") \
+                        and name not in ("passwd", "group", "hosts"):
+                    found.append(path)
+    found.sort()
+    if not found:
+        return None
+    rng = random.Random(seed)
+    path = found[rng.randrange(len(found))]
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        lines = data.split(b"\n")
+        for _ in range(1 + rng.randrange(3)):
+            choice = rng.randrange(11)
+            if choice == 0:
+                data = data[:rng.randrange(len(data) + 1)]
+            elif choice == 1:
+                data = data[:-1]
+            elif choice == 2 and lines:
+                del lines[rng.randrange(len(lines))]
+                data = b"\n".join(lines)
+            elif choice == 3 and lines:
+                lines.insert(rng.randrange(len(lines)), lines[rng.randrange(len(lines))])
+                data = b"\n".join(lines)
+            elif choice == 4:
+                lines.insert(rng.randrange(len(lines) + 1), rng.choice(
+                    (b"", b"junk", b"-1", b"99999999999999999999", b"\x1b[2J", b"a b c d e f", b"\xff\xfe", b"%s%n")))
+                data = b"\n".join(lines)
+            elif choice == 5 and data:
+                at = rng.randrange(len(data))
+                data = data[:at] + bytes([rng.choice((0, 0x1b, 0xff, 0x0a, 0x20, 0x0d, 0x7f))]) + data[at + 1:]
+            elif choice == 6 and lines:
+                at = rng.randrange(len(lines))
+                lines[at] = lines[at] + b"x" * rng.choice((60, 70, 300, 4096, 70000))
+                data = b"\n".join(lines)
+            elif choice == 7 and len(lines) > 1:
+                a, b = rng.randrange(len(lines)), rng.randrange(len(lines))
+                lines[a], lines[b] = lines[b], lines[a]
+                data = b"\n".join(lines)
+            elif choice == 8:
+                data = data * (2 + rng.randrange(60))
+            elif choice == 9:
+                data = data + b"\0"
+            elif choice == 10:
+                data = data.replace(b" ", b"\t", 1) if rng.randrange(2) else data.replace(b"\n", b"\r\n")
+        with open(path, "wb") as handle:
+            handle.write(data)
+    except OSError:
+        pass
+    return path
+
+
+def keep_state(template):
+    """The state the prefab verbs made, kept to be put back before a chain."""
+    for top in ("/root", "/run"):
+        shutil.rmtree(template + top, ignore_errors=True)
+        try:
+            shutil.copytree(top, template + top, symlinks=True)
+        except OSError:
+            pass
+
+
+def restore_state(template):
+    for top in ("/root", "/run"):
+        wipe(top)
+        try:
+            shutil.copytree(template + top, top, symlinks=True, dirs_exist_ok=True)
+        except OSError:
+            pass
+
+
+def meta(argv, template):
+    """The words of a chain that are for the driver and not for moonwater."""
+    if argv[0] == b"@plant":
+        plant_state(argv[1].decode(), argv[2], argv[3])
+        shown = argv[:3]
+    elif argv[0] == b"@limit":
+        LIMITS[argv[1].decode()] = int(argv[2])
+        shown = argv
+    elif argv[0] == b"@template":
+        restore_state(template)
+        shown = argv
+    else:
+        shown = argv[:1] + [(mutate_state(int(argv[1])) or "").encode()]
+    return {"argv": [a.hex() for a in shown], "planted": True, "out": "", "err": "", "ms": 0}
+
+
+def run(argv, limit, template):
+    if argv and argv[0][:1] == b"@":
+        return meta(argv, template)
+    started = time.monotonic()
+    with open("/tmp/fuzz.out", "wb") as out, open("/tmp/fuzz.err", "wb") as err:
+        process = subprocess.Popen(["/tmp/moonwater"] + argv, stdin=subprocess.DEVNULL,
+                                   stdout=out, stderr=err, env=ENV, start_new_session=True,
+                                   restore_signals=False, preexec_fn=limited if LIMITS else None)
+        hung = waited = False
+        try:
+            #   A verb that says it is waiting for the other machine is doing
+            #   what it was asked (link pair, link NAME CODE wait five minutes
+            #   for someone who is not there); it is not held for the deadline.
+            try:
+                status = process.wait(timeout=min(limit, 1))
+            except subprocess.TimeoutExpired:
+                with open("/tmp/fuzz.out", "rb") as seen:
+                    waited = re.search(b"waiting (for|five)", seen.read()) is not None
+                if waited:
+                    raise
+                status = process.wait(timeout=max(limit - 1, 1))
+        except subprocess.TimeoutExpired:
+            hung = not waited
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                process.kill()
+            status = process.wait()
+    record = {"argv": [a.hex() for a in argv], "ms": int((time.monotonic() - started) * 1000)}
+    if hung:
+        record["hung"] = True
+    elif waited:
+        record["waited"] = True
+    elif status < 0:
+        record["signal"] = -status
+    else:
+        record["status"] = status
+    for name, path in (("out", "/tmp/fuzz.out"), ("err", "/tmp/fuzz.err")):
+        with open(path, "rb") as handle:
+            data = handle.read(65536 + 1)
+        record[name] = data[:65536].hex()
+        if len(data) > 65536:
+            record[name + "_cut"] = True
+    return record
+
+
+def main():
+    with open("/tmp/fuzz_chains.json") as handle:
+        job = json.load(handle)
+    deadline = time.monotonic() + job["seconds"] if job["seconds"] else None
+    template = "/tmp/plant/sys.template"
+    plant()
+    shutil.rmtree(template, ignore_errors=True)
+    try:
+        machine(template)
+    except OSError:
+        pass
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    #   The machine as a person who has set it up leaves it, to be put back for
+    #   the chains that change a file of it.
+    reset(template)
+    for argv in job["prefab"]:
+        run([bytes.fromhex(a) for a in argv], job["limit"], template)
+    strays()
+    keep_state("/tmp/plant/state")
+    with open("/tmp/fuzz_out.jsonl", "w") as results:
+        for number, chain in enumerate(job["chains"]):
+            if deadline and time.monotonic() > deadline:
+                break
+            reset(template)
+            plant()
+            LIMITS.clear()
+            runs = []
+            at = 0
+            while at < len(chain) and chain[at] and bytes.fromhex(chain[at][0])[:1] == b"@" and \
+                    bytes.fromhex(chain[at][0]) != b"@mutate":
+                runs.append(run([bytes.fromhex(a) for a in chain[at]], job["limit"], "/tmp/plant/state"))
+                at += 1
+            before = snapshot()
+            runs += [run([bytes.fromhex(a) for a in argv], job["limit"], "/tmp/plant/state")
+                     for argv in chain[at:]]
+            after = snapshot()
+            strays()
+            results.write(json.dumps({"chain": number, "runs": runs,
+                                      "changes": changes(before, after)}) + "\n")
+            results.flush()
+
+
+main()
+'''
+
+
+#   The usage of the moonwater command, read as a grammar. A usage line is
+#   "wifi add SSID [PASSWORD|-] [wpa2]": words that are typed as they stand,
+#   UPPERCASE words that stand for a value, [..] for what may be left out,
+#   a|b for a choice, ... for more of the same. Inside brackets a bar that
+#   has blanks around its alternatives splits whole runs of words
+#   ("[size [N|auto]|look [light|dark|auto]]"); between two words that touch
+#   it chooses one of them ("[N%|+N|-N]"). A line the bars of which are read
+#   the second way for lack of knowing which is meant is not "plain", and is
+#   not held to the rule that valid words are never answered with a usage.
+
+def fuzz_split(text, separator):
+    """text cut at separator wherever it stands outside brackets and quotes."""
+    pieces, depth, quoted, start = [], 0, False, 0
+    for index, character in enumerate(text):
+        if character == '"':
+            quoted = not quoted
+        elif quoted:
+            continue
+        elif character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+        elif depth == 0 and (character.isspace() if separator is None else character == separator):
+            pieces.append(text[start:index])
+            start = index + 1
+    pieces.append(text[start:])
+    return [piece for piece in pieces if piece != ""] if separator is None else pieces
+
+
+def fuzz_parse(text):
+    """A usage line's tree: ("lit", s), ("ph", NAME), ("cat", [..]), ("alt", [..]),
+    ("opt", node), ("rep", node), ("seq", [..])."""
+    def group(inner):
+        runs = fuzz_split(inner, "|")
+        if len(runs) > 1 and len(fuzz_split(inner, None)) > 1:
+            return ("alt", [sequence(run) for run in runs])
+        return sequence(inner)
+
+    def sequence(inner):
+        return ("seq", [word(piece) for piece in fuzz_split(inner, None)])
+
+    def word(piece):
+        options = fuzz_split(piece, "|")
+        if len(options) > 1:
+            return ("alt", [atom(option) for option in options])
+        return atom(piece)
+
+    def atom(piece):
+        if piece.endswith("...") and len(piece) > 3:
+            return ("rep", atom(piece[:-3]))
+        if len(piece) > 1 and piece[0] == '"' and piece[-1] == '"':
+            return ("ph", "COMMAND")
+        parts, index = [], 0
+        while index < len(piece):
+            if piece[index] == "[":
+                depth, end = 0, index
+                while end < len(piece):
+                    depth += piece[end] == "["
+                    depth -= piece[end] == "]"
+                    if depth == 0:
+                        break
+                    end += 1
+                parts.append(("opt", group(piece[index + 1:end])))
+                index = end + 1
+                continue
+            end = piece.find("[", index)
+            end = len(piece) if end < 0 else end
+            for run in re.findall(r"[A-Z][A-Z0-9-]*|[^A-Z]+", piece[index:end]):
+                parts.append(("ph", run) if re.fullmatch(r"[A-Z][A-Z0-9-]*", run) else ("lit", run))
+            index = end
+        return parts[0] if len(parts) == 1 else ("cat", parts)
+    return sequence(text)
+
+
+def fuzz_plain(node):
+    """Whether a tree reads one way only: no repetition, and no choice between runs."""
+    kind = node[0]
+    if kind == "rep":
+        return False
+    if kind == "alt":
+        return all(option[0] != "seq" or len(option[1]) == 1 for option in node[1]) and \
+            all(fuzz_plain(option) for option in node[1])
+    if kind in ("opt",):
+        return fuzz_plain(node[1])
+    if kind in ("seq", "cat"):
+        return all(fuzz_plain(child) for child in node[1])
+    return True
+
+
+def fuzz_expand(node, rng, value):
+    """One instance of a tree as a list of words (bytes): value(NAME) fills a placeholder."""
+    kind = node[0]
+    if kind == "lit":
+        return [node[1].encode()]
+    if kind == "ph":
+        return [value(node[1])]
+    if kind == "cat":
+        return [b"".join(b"".join(fuzz_expand(child, rng, value)) for child in node[1])]
+    if kind == "alt":
+        return fuzz_expand(node[1][rng.randrange(len(node[1]))], rng, value)
+    if kind == "opt":
+        return fuzz_expand(node[1], rng, value) if rng.randrange(2) else []
+    if kind == "rep":
+        words = []
+        for _ in range(1 + rng.randrange(3)):
+            words += fuzz_expand(node[1], rng, value)
+        return words
+    return [word for child in node[1] for word in fuzz_expand(child, rng, value)]
+
+
+#   Words that are right, by what the usage calls them.
+FUZZ_VALID = {
+    "N": ["1", "2", "3", "4", "80", "100"], "MS": ["100", "250", "300", "1200", "2000"],
+    "PERCENT": ["10", "100", "150", "500"], "PER-SECOND": ["1", "30", "100"],
+    "COLOUR": ["112233", "1e1e1e", "ffffff"], "ZONE": ["UTC", "Europe/London", "+1", "se", "UTC+14"],
+    "LAYOUT": ["us", "uk", "de", "sv", "nb"], "NAME": ["alpha", "space-wizard", "a1", "x"],
+    "NEW": ["alpha", "space-wizard", "a1", "random"], "SSID": ["home", "Cafe Wifi", "net-1"],
+    "PASSWORD": ["hunter22x", "-", "correct horse"], "DISK": ["/dev/null", "sda", "nvme0n1"],
+    "ID": ["0627:0001", "0627:0001/68284-kbd", "46f4:0001/STICK1", "1-1"], "PORT": ["1-1", "1-2", "1-3"],
+    "EVENT": ["poweroff", "canvas"], "COMMAND": ["true", "echo hi", "false"],
+    "SHA256": ["ab" * 32, "0" * 64], "FILE": ["/tmp/plant/pem", "/tmp/plant/junk", "/etc/passwd", "/nonexistent"],
+    "KEY": ["bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="], "HOST": ["peer.example", "192.0.2.1"],
+    "CODE": ["abcd-efgh", "AAAA"], "GRANT": ["shell", "run", "log", "files"], "SECRET": ["S3cretOne11", "-"],
+    "PROFILE": ["default", "classic"], "ADDRESS": ["1.1.1.1", "9.9.9.9", "2606:4700:4700::1111"],
+    "VERB": ["wifi", "usb", "link", "bind", "nosuch"], "PATH": ["/tmp/x", "/etc/hostname"],
+    "SERVER": ["pool.ntp.org", "time.cloudflare.com"],
+}
+#   Strings that are wrong in the way hostile ones are, by the kind of wrong.
+FUZZ_LENGTHS = (1, 2, 31, 32, 33, 63, 64, 65, 127, 128, 255, 256, 257, 1023, 1024, 4095, 4096, 4097,
+                65535, 65536, 65537)
+FUZZ_FILLERS = (b"a", b"A", b"0", b"9", b"x-", b".", b"/", b"\xc3\xa9", b"\xff", b" ", b"\x1b", b"a.", b"%s")
+FUZZ_STRINGS = (
+    b"", b" ", b"  ", b"\t", b"\n", b"\r", b"a\nb", b"a\rb", b"\x01", b"\x07", b"\x08", b"\x7f", b"\x1b",
+    b"\x1b[31m", b"\x1b[2J", b"\x1b]0;title\x07", b"\x1b]52;c;aGk=\x07", b"\x1bP1;1|abc\x1b\\", b"\x9b31m",
+    b"\x1b[6n", b"\x1b[?1049h", b"\x1bc", b"a\x1b[1;2H", b"%s", b"%n", b"%s%n", b"%x%x%x%x", b"%%", b"%99999999d",
+    b"%.*s", b"${x}", b"$(id)", b"`id`", b"$((1+1))", b"\\", b"\\n", b"'", b'"', b"a'b", b'a"b', b";", b"&&", b"|",
+    b">", b"<", b"*", b"?", b"~", b"{a,b}", b"[a]", b"#", b"!", b"=",
+    "é".encode(), "日本語".encode(), "😀".encode(), "‮".encode(), " ".encode(), "́".encode(),
+    "é".encode(), "﻿".encode(), "​".encode(), "ｱｲｳ".encode(),
+    b"\xff", b"\xfe\xff", b"\xc0\x80", b"\xc1\xbf", b"\xed\xa0\x80", b"\xf4\x90\x80\x80", b"\xf8\x88\x80\x80\x80",
+    b"\xe2\x82", b"\x80", b"\xbf", b"a\xffb", b"\xef\xbf\xbe",
+    b" x", b"x ", b"\tx", b"x\t", b" x ", b"x  y", b"-", b"--", b"-x", b"--x", b"-h", b"--help", b"-1", b"+1",
+    b"..", b".", b"/", b"//", b"///", b"a/../b", b"./x", b"x/", b"/x", b"../x", b"../../../etc/passwd",
+    b"/etc/passwd", b"/root/wifi", b"/proc/self/fd/0", b"/proc/self/mem", b"/dev/null", b"/dev/zero", b"/dev/full",
+    b"/dev/tty", b"/tmp/plant/link", b"/tmp/plant/loop", b"/tmp/plant/dangling", b"/tmp/plant/fifo",
+    b"/tmp/plant/dir", b"/tmp/plant/empty", b"/tmp/plant/junk", b"/tmp/plant/link/wifi", b"/root", b"/run/moonwater",
+    b"0", b"00", b"007", b"1", b"-0", b"+0", b"-1", b"2147483647", b"2147483648", b"-2147483648", b"-2147483649",
+    b"4294967295", b"4294967296", b"4294967297", b"9223372036854775807", b"9223372036854775808",
+    b"-9223372036854775808", b"-9223372036854775809", b"18446744073709551615", b"18446744073709551616",
+    b"99999999999999999999999999999999", b"0x10", b"0X7fffffff", b"0b101", b"0o17", b"1e3", b"1e999", b"1.5", b".5",
+    b"1.", b"1,5", b"1_000", b"12a", b"a12", b"1 2", b"1\t2", b"\xd9\xa3", b"NaN", b"inf", b"-inf", b"1/2", b"50%",
+    b"%50", b"+10%", b"-10%", b"1+1", b"10%%",
+    b"a.b", b"a..b", b".a", b"a.", b"a-b", b"-a", b"a-", b"a_b", b"A", b"AB", b"aB", b"a b", b"a:b", b"a:", b":a",
+    b":80", b"a:80", b"a:0", b"a:65535", b"a:65536", b"a:-1", b"a:80:81", b"[::1]", b"[::1]:80", b"::1", b"1.2.3.4",
+    b"1.2.3", b"1.2.3.4.5", b"256.1.1.1", b"01.1.1.1", b"1.2.3.4:5", b"0.0.0.0", b"255.255.255.255", b"::", b"fe80::1%lo",
+    b"random", b"default", b"auto", b"on", b"off", b"only", b"list", b"xkb", b"none", b"help", b"status", b"null",
+    b"UTC", b"utc", b"Etc/UTC", b"Europe/", b"Europe/Nope", b"UTC+99", b"UTC-99:99", b"<+0530>-5:30", b"<>0", b"<a",
+    b"EST5EDT,M3.2.0,M11.1.0", b"A1B,M1.1.1,M2.2.2", b"posix:", b"zoneinfo/UTC", b"se", b"SE", b"gb",
+    b"ab" * 32, b"AB" * 32, b"zz" * 32, b"ab" * 31, b"ab" * 33, b"ab" * 31 + b"a",
+    b"abcd-efgh", b"ABCD-EFGH", b"abcd", b"AAAA", b"bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI=", b"bZOZjGi3",
+    b"0627:0001", b"0627:0001/", b"0627:0001/a/b", b"0627:0001@1-1", b"0627:0001/-@1-1", b"ffff:ffff", b"FFFF:FFFF",
+    b"1-1", b"1-1.1", b"1-1:1.0", b"99-99", b"usb1", b"1-", b"-1-1",
+    b"poweroff", b"init", b"exit", b"canvas", b"wifi", b"usb", b"link", b"bind", b"setup", b"security", b"ntp",
+    b"shell", b"run", b"log", b"files", b"allow", b"deny", b"add", b"remove", b"forget", b"leave", b"pair", b"key",
+)
+
+
+def fuzz_mutant(rng):
+    """One hostile word, drawn from the lists above or built to a length."""
+    choice = rng.randrange(10)
+    if choice < 2:
+        filler = FUZZ_FILLERS[rng.randrange(len(FUZZ_FILLERS))]
+        length = FUZZ_LENGTHS[rng.randrange(len(FUZZ_LENGTHS))]
+        return (filler * length)[:length] if rng.randrange(4) else filler * (length // len(filler) + 1)
+    if choice == 2:
+        a, b = FUZZ_STRINGS[rng.randrange(len(FUZZ_STRINGS))], FUZZ_STRINGS[rng.randrange(len(FUZZ_STRINGS))]
+        return a + b
+    return FUZZ_STRINGS[rng.randrange(len(FUZZ_STRINGS))]
+
+
+#   Words that are right for one verb where the same placeholder means
+#   something else in another.
+FUZZ_VALID_FOR = {
+    ("usb", "NAME"): ["storage", "hid", "audio", "video", "net", "bluetooth", "hub", "other"],
+    ("battery", "NAME"): ["BAT0", "none", "auto"],
+    ("link", "NAME"): ["alpha", "space-wizard", "peer-1"],
+    ("help", "VERB"): ["wifi", "usb", "link", "bind", "setup", "security"],
+}
+#   Two verbs that name the same thing are held to each other: with {S} a
+#   word of the first kind, {I} a USB id, {H} a key's hash, {K} a public key.
+#   "implies" is: where the first is taken, the second is too (a name that
+#   was added can be removed; a machine name is a name to link by); "same" is
+#   that each way.
+FUZZ_PAIRS = (
+    ("name {S}", "link add {S} {K}", "implies"),
+    ("link add {S} {K}", "link remove {S}", "implies"),
+    ("link add {S} {K}", "link allow {S} shell", "implies"),
+    ("wifi add {S} hunter22x", "wifi remove {S}", "implies"),
+    ("bluetooth add {S}", "bluetooth remove {S}", "implies"),
+    ("usb allow {I}", "usb forget {I}", "implies"),
+    ("usb deny {I}", "usb forget {I}", "implies"),
+    ("usb allow {I}", "usb deny {I}", "same"),
+    ("ntp server {S}", "ntp nts servers {S}", "implies"),
+    ("link group {S} S3cretOne11", "link group leave {S}", "implies"),
+    ("security block add {H}", "security block remove {H}", "implies"),
+    ("dns {A}", "ntp server {A}", "implies"),
+    ("link add peer-a {K} {A}", "link remove peer-a", "implies"),
+)
+FUZZ_ADDRESSES = ("1.1.1.1", "9.9.9.9", "127.0.0.1", "192.0.2.1", "0.0.0.0", "255.255.255.255", "01.1.1.1", "256.1.1.1",
+                  "1.1.1", "1.1.1.1.1", "1.1.1.", ".1.1.1.1", " 1.1.1.1", "1.1.1.1 ", "1.1.1.1:53", "1.1.1.1:0",
+                  "1.1.1.1:65536", "1.1.1.1:", "::1", "[::1]", "[::1]:22348", "2606:4700:4700::1111", "fe80::1%lo",
+                  "::ffff:1.2.3.4", "1::", "1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8:9", "g::1", "localhost", "a.example",
+                  "a.example:22348", "a_b.example", "-a.example", "a-.example", "a..example", "1e3.example", "0x7f.1",
+                  "2130706433", "127.1", "1.2.3.4/24", "a" * 63 + ".example", "a" * 64 + ".example", "1.1.1.1\n")
+#   A machine as a person sets it up: what the driver runs once, and puts back
+#   before a chain that changes one of the files that makes.
+FUZZ_PREFAB = (
+    "wifi add home hunter22x", "wifi add 'Cafe Wifi' correct-horse wpa2", "bluetooth add kbd", "usb lock",
+    "usb allow 0627:0001/68284-kbd", "usb deny 1-3", "usb class hub allow", "ntp server pool.ntp.org",
+    "ntp nts servers a.example:4460 b.example", "dns 1.1.1.1 9.9.9.9", "keyboard de", "timezone Europe/London",
+    "name alpha-one", "link key", "link add peer1 bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI= 192.0.2.1:22348",
+    "link allow peer1 shell", "link group lab S3cretOne11 allow run", "link port 4000",
+    "priority internet wifi", "charge limit 80", "power powersave", "canvas scale 2", "canvas background 112233",
+    "mouse sensitivity 150", "keyboard repeat rate 20", "security block add " + "ab" * 32, "wired off",
+    "sleep", "battery BAT0", "brightness 40", "cpu smt off", "taskbar position top", "airplane on")
+#   What is said of that machine after a file of it was changed.
+FUZZ_AFTER = (
+    "wifi", "wifi remove home", "bluetooth", "bluetooth remove kbd", "usb", "usb log", "usb apply",
+    "usb forget 0627:0001/68284-kbd", "link", "link key", "link remove peer1", "link group leave lab",
+    "security", "security block", "security trust", "security block remove " + "ab" * 32, "ntp",
+    "ntp nts servers default", "dns auto", "timezone", "keyboard", "name", "time", "priority internet",
+    "charge", "power", "cpu", "mouse", "canvas")
+#   What a process can be short of.
+FUZZ_LIMITS = (("nofile", 3), ("nofile", 4), ("nofile", 5), ("nofile", 6), ("nofile", 8), ("fsize", 0),
+               ("fsize", 100), ("fsize", 4096), ("as", 64 << 20), ("as", 128 << 20), ("data", 48 << 20))
+FUZZ_NAMES = ("alpha", "space-wizard", "a", "a1", "x" * 31, "x" * 32, "x" * 33, "x" * 63, "x" * 64, "a-b", "-a",
+              "a-", "A", "Alpha", "a_b", "a.b", "a b", "", "1", "123", "0", "a.example", "pool.ntp.org", "1.2.3.4",
+              "::1", "[::1]", "a:123", "a:0", "a:65536", "xn--bcher-kva.example", "日本", "a\nb", "a\tb", " a", "a ",
+              "random", "default", "auto", "link", "pair", "key", "help", "status", "a" * 253 + ".b", "a." * 100,
+              "-", "--", ".", "..", "a/b", "é", "a\x1b[31mb", "a%sb", "a‮b", "a,b", "a;b", "a=b", "a\\b")
+FUZZ_IDS = ("0627:0001", "0627:0001/68284-kbd", "46f4:0001/STICK1", "1-1", "1-3", "1-1.1", "0627:0001/", "0627:0001/a b",
+            "FFFF:ffff", "ffff:ffff/x", "0627:0001/" + "a" * 64, "0627:0001/" + "a" * 255, "627:1", "0627:00011", "zz:zz",
+            "0627:0001/a\nb", "0627:0001/a\x1bb", "0627:0001/-", "0627:0001/-@1-1", "0627:0001@1-1", "1-1:1.0", "usb1",
+            "0627:0001/é", "0627:0001/%s", "0627:0001/a/b", "0627:0001//", "0627:0001/ ", "1-", "-1", "1-1-1", "9-9")
+
+
+def fuzz_garbage(rng):
+    """What a state file can hold that the command did not write."""
+    choice = rng.randrange(14)
+    if choice == 0:
+        return b""
+    if choice == 1:
+        return bytes(rng.randrange(256) for _ in range(1 + rng.randrange(300)))
+    if choice == 2:
+        return b"\0" * (1 + rng.randrange(64))
+    if choice == 3:
+        return b"x" * (1 + rng.randrange(100000))
+    if choice == 4:
+        return b"x\n" * (1 + rng.randrange(20000))
+    if choice == 5:
+        return b"\r\n".join(fuzz_mutant(rng) for _ in range(1 + rng.randrange(6))) + b"\r\n"
+    if choice == 6:
+        return fuzz_mutant(rng)
+    if choice < 12:
+        return b"\n".join(fuzz_mutant(rng) for _ in range(1 + rng.randrange(8))) + (b"\n" if rng.randrange(2) else b"")
+    return rng.choice((b"on\n", b"off\n", b"1\n", b"0\n", b"-1\n", b"auto\n", b"UTC\n", b"mode lock\n",
+                       b"99999999999999999999\n", b"\n\n\n", b" \n", b"a b c d e f g h\n"))
+
+
+def fuzz_vectors(commands, descriptions, rng, count, files=()):
+    """Chains of argument vectors, [(argv, kind, plain)] each: first the edges
+    of every number the usage gives a range for, then the pairs of verbs that
+    name one thing, then `count` chains drawn from the usage lines. A quarter
+    of those end by asking the machine what it holds."""
+    trees = [(command, fuzz_parse(command)) for command in commands]
+    by_verb = {}
+    for command, tree in trees:
+        by_verb.setdefault(command.split()[0], []).append((command, tree, fuzz_plain(tree)))
+    words = sorted({word for command, _ in trees for word in re.findall(r"[a-z][a-z0-9-]*", command)})
+    verb_names = sorted(by_verb)
+
+    def good_for(verb):
+        def good(name):
+            pool = FUZZ_VALID_FOR.get((verb, name)) or FUZZ_VALID.get(name)
+            return (pool[rng.randrange(len(pool))] if pool else "x").encode()
+        return good
+
+    def make(verb, mode):
+        command, tree, plain = by_verb[verb][rng.randrange(len(by_verb[verb]))]
+        good = good_for(verb)
+        if mode == "valid":
+            return fuzz_expand(tree, rng, good), "valid", plain
+        if mode == "mutated":
+            hostile = 0.1 + 0.5 * rng.random()
+            words_out = fuzz_expand(tree, rng,
+                                    lambda name: fuzz_mutant(rng) if rng.random() < hostile else good(name))
+            for _ in range(rng.randrange(3)):
+                shape = rng.randrange(7)
+                spot = rng.randrange(len(words_out) + 1)
+                if shape == 0:
+                    words_out.insert(spot, fuzz_mutant(rng))
+                elif shape == 1 and words_out:
+                    del words_out[rng.randrange(len(words_out))]
+                elif shape == 2 and words_out:
+                    words_out.insert(spot, words_out[rng.randrange(len(words_out))])
+                elif shape == 3 and len(words_out) > 1:
+                    a, b = rng.randrange(len(words_out)), rng.randrange(len(words_out))
+                    words_out[a], words_out[b] = words_out[b], words_out[a]
+                elif shape == 4:
+                    words_out.insert(spot, words[rng.randrange(len(words))].encode())
+                elif shape == 5 and words_out:
+                    words_out[rng.randrange(len(words_out))] = words[rng.randrange(len(words))].encode()
+                elif shape == 6:
+                    words_out += [b"extra"]
+            return words_out, "mutated", False
+        arguments = [verb.encode()]
+        for _ in range(rng.randrange(6)):
+            arguments.append(fuzz_mutant(rng) if rng.randrange(2) else words[rng.randrange(len(words))].encode())
+        return arguments, "wild", False
+
+    #   What each verb says bare, on the machine as it starts: the answer a probe
+    #   at the end of a chain is held to.
+    chains = [[([verb.encode()], "baseline", False)] for verb in verb_names + ["status"]]
+    #   The edges of every range the usage names: both ends taken, a step past each refused.
+    for command, tree in trees:
+        found = re.search(r"\b(\d+) to (\d+)\b", descriptions.get(command, ""))
+        names = set(re.findall(r"\b(N|MS|PERCENT|PER-SECOND)\b", command))
+        if not found or not names:
+            continue
+        low, high = int(found.group(1)), int(found.group(2))
+        for value, kind in ((low - 1, "range-bad"), (low, "range-ok"), (high, "range-ok"), (high + 1, "range-bad"),
+                            (0, "range-bad"), (-1, "range-bad"), (2 ** 32 + low, "range-bad"), (2 ** 64 + low, "range-bad")):
+            for _ in range(40):
+                made = fuzz_expand(tree, rng, lambda name, value=value: str(value).encode()
+                                   if name in names else good_for(command.split()[0])(name))
+                if str(value).encode() in made:
+                    chains.append([(made, kind, False)])
+                    break
+    #   A setting said and then asked for: "canvas scale 3" and then "canvas scale".
+    for command, tree in trees:
+        if tree[0] != "seq" or len(tree[1]) < 2 or tree[1][-1][0] != "opt" or \
+                any(node[0] != "lit" for node in tree[1][:-1]):
+            continue
+        prefix = [node[1].encode() for node in tree[1][:-1]]
+        #   Only the verbs that keep a setting and say it back as it was given: not a
+        #   brightness that moves by a step, a zone a country code expands, a
+        #   list or a count of lines, nor a thing that is done.
+        if prefix[0] not in (b"airplane", b"canvas", b"keyboard", b"mouse", b"ntp", b"security", b"taskbar",
+                             b"wired", b"dns", b"desktop"):
+            continue
+        for _ in range(3):
+            values = fuzz_expand(tree[1][-1], rng, good_for(prefix[0].decode()))
+            if values and not {b"default", b"auto", b"random", b"list", b"xkb", b"-", b"yes"} & set(values):
+                chains.append([(prefix + values, "roundtrip-a", False), (prefix, "roundtrip-b", False)])
+    #   Pairs of verbs that name one thing.
+    for first, second, relation in FUZZ_PAIRS:
+        base = (FUZZ_IDS if "{I}" in first else FUZZ_ADDRESSES if "{A}" in first or "{A}" in second else
+                ["ab" * 32, "AB" * 32, "ab" * 31, "zz" * 32, "ab" * 33, "0" * 64] if "{H}" in first else FUZZ_NAMES)
+        for word in [item.encode() for item in base] + [fuzz_mutant(rng) for _ in range(len(base) // 2)]:
+            #   A plain time server may end in the dot of an absolute name, and an NTS
+            #   name, being a TLS name, may not: said where each is decided.
+            if "ntp nts" in second and word.endswith(b"."):
+                continue
+            chain = []
+            for template, kind in ((first, relation + "-a"), (second, relation + "-b")):
+                made = []
+                for piece in template.split():
+                    made.append(word if piece in ("{S}", "{I}", "{H}", "{A}") else
+                                b"bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI=" if piece == "{K}" else piece.encode())
+                chain.append((made, kind, False))
+            chains.append(chain)
+    #   Every file of the state in turn holding a title and a clear-screen, a FIFO,
+    #   a link to /dev/zero, a link to itself and a directory, then every verb said
+    #   bare: whatever one of them reads and shows is shown as it is, and none waits
+    #   for what is not coming.
+    escape = b"\x1b]0;pwn\x07\x9b31m\x7f\x1b[2J\x1b[31mred\n"
+    for path in files:
+        for kind in (b"x", b"f", b"z", b"l", b"d"):
+            chains.append([([b"@plant", path.encode(), kind, escape], "plant", False)] +
+                          [([verb.encode()], "plant-probe", False) for verb in ["status"] + verb_names])
+    #   A file of the state replaced by garbage, then the verbs that read it.
+    for _ in range(count // 4 if files else 0):
+        path = files[rng.randrange(len(files))]
+        kind = rng.choice((b"f", b"z", b"l", b"d", b"x", b"x", b"x", b"x", b"x", b"x", b"x", b"x"))
+        chain = [([b"@plant", path.encode(), kind, fuzz_garbage(rng)], "plant", False)]
+        stem = os.path.basename(path).split(".")[0]
+        stem = {"internet": "priority", "tune": "power"}.get(stem, stem)
+        chain += [([b"status"], "plant-probe", False)]
+        if stem in by_verb:
+            chain += [([stem.encode()], "plant-probe", False), make(stem, "valid"), make(stem, "mutated")]
+        for _ in range(3):
+            chain.append(make(verb_names[rng.randrange(len(verb_names))], "valid" if rng.randrange(2) else "mutated"))
+        chains.append(chain)
+    #   A file the verbs wrote, changed as a cut or a careless hand would, and then
+    #   what the verbs say of the machine and do to what is in it.
+    for _ in range(count // 10):
+        chains.append([([b"@template"], "plant", False), ([b"@mutate", str(rng.randrange(1 << 30)).encode()], "plant", False)]
+                      + [([word.encode() for word in shlex.split(line)], "plant-probe", False)
+                         for line in ["status"] + list(FUZZ_AFTER)])
+    #   Every usage line once, with good words, short of descriptors (three and
+    #   four of them leave nothing for a file beside the standard three and the
+    #   directory a write pins) and of room to write: what each verb says and
+    #   leaves behind when it cannot do what it was asked.
+    for command, tree in trees:
+        for name, value in (("nofile", 4), ("nofile", 5), ("fsize", 0)):
+            made = fuzz_expand(tree, rng, good_for(command.split()[0]))
+            chains.append([([b"@template"], "limit", False),
+                           ([b"@limit", name.encode(), str(value).encode()], "limit", False),
+                           (made, "valid", False)])
+    #   Draws from the usage, a process short of descriptors, of room to write or
+    #   of memory, and the machine as it was set up.
+    for _ in range(count // 10):
+        name, value = FUZZ_LIMITS[rng.randrange(len(FUZZ_LIMITS))]
+        verb = verb_names[rng.randrange(len(verb_names))]
+        chains.append([([b"@template"], "limit", False), ([b"@limit", name.encode(), str(value).encode()], "limit", False)]
+                      + [make(verb, "valid" if rng.randrange(2) else "mutated") for _ in range(1 + rng.randrange(3))])
+    #   Draws from the usage.
+    for _ in range(count):
+        verb = verb_names[rng.randrange(len(verb_names))]
+        length = 1 + (rng.randrange(4) if rng.randrange(5) == 0 else 0)
+        chain = []
+        for _ in range(length):
+            roll = rng.randrange(10)
+            chain.append(make(verb, "valid" if roll < 4 else "mutated" if roll < 8 else "wild"))
+        if rng.randrange(4) == 0:
+            chain += [([b"status"], "probe", False), ([verb.encode()], "probe", False)]
+        chains.append(chain)
+    return chains
+
+
+def fuzz_show(arguments):
+    """A vector as the shell takes it back: plain words as they stand, the rest
+    in $'...', a long one by its length and head."""
+    shown = []
+    for argument in arguments:
+        if re.fullmatch(rb"[\w@%+=:,./-]+", argument):
+            shown.append(argument.decode())
+        elif len(argument) > 80:
+            shown.append("<%d bytes from %s>" % (len(argument), repr(argument[:20])))
+        else:
+            shown.append("$'" + "".join(
+                chr(c) if 0x20 <= c < 0x7f and chr(c) not in "'\\" else "\\x%02x" % c
+                for c in argument) + "'")
+    return " ".join(shown)
+
+
+#   What the machine's state directories may hold after a chain: a file is 0600
+#   or 0644, a directory 0700 or 0755, and what is not a file or a directory is
+#   a link only where the bowls' zone is.
+FUZZ_STATE = ("/root", "/run", "/etc", "/home")
+#   What the machine keeps that is neither a file nor a directory: the wake
+#   channel of the network watcher is a FIFO. (The locks under /run/moonwater
+#   are files that hold nothing and are taken by name.)
+FUZZ_EXPECTED = {"/run/moonwater/net.wake"}
+
+
+def fuzz_judge(chains, results, user):
+    """{what was wrong: [the vectors that showed it]} for one pass."""
+    found = {}
+
+    def note(kind, chain, run, detail=""):
+        words = [bytes.fromhex(a) for a in run["argv"]] if run else []
+        shown = ("moonwater " + fuzz_show(words)) if run else "chain " + str(chain)
+        if len(chains[chain]) > 1:
+            shown = "[chain of %d: %s] " % (len(chains[chain]), " ; ".join(
+                fuzz_show(vector[0]) for vector in chains[chain])[:300]) + shown
+        found.setdefault(kind, []).append(shown + (" => " + detail if detail else ""))
+
+    baseline = {}
+    for result in results:
+        run = result["runs"][0]
+        if chains[result["chain"]][0][1] == "baseline" and "status" in run:
+            baseline[bytes.fromhex(run["argv"][0])] = (run["status"], bool(run["err"]))
+    for result in results:
+        number = result["chain"]
+        for place, run in enumerate(result["runs"]):
+            vector = chains[number][place]
+            if chains[number][0][1] == "limit" and vector[1] in ("valid", "range-ok", "probe"):
+                vector = (vector[0], "mutated", False)
+            out, err = bytes.fromhex(run["out"]), bytes.fromhex(run["err"])
+            text = out + err
+            if run.get("planted") or run.get("waited"):
+                continue
+            if run.get("hung"):
+                note("hang past the deadline", number, run, repr(text[:120]))
+                continue
+            if "signal" in run:
+                note("death by signal %d" % run["signal"], number, run, repr(text[:120]))
+                continue
+            status = run["status"]
+            if status not in (0, 1, 2):
+                note("status %d" % status, number, run, repr(text[:120]))
+            if status == 0 and err:
+                note("status 0 with text on standard error", number, run, repr(err[:160]))
+            if vector[1] == "range-ok" and status != 0 and not user:
+                note("a number at the edge of its documented range was not taken", number, run, repr(text[:160]))
+            if vector[1] == "range-bad" and status == 0:
+                note("a number past its documented range was taken", number, run, repr(text[:160]))
+            if vector[1] == "probe":
+                was = baseline.get(bytes.fromhex(run["argv"][0]), (0, False))
+                if status != was[0] or (err and not was[1]):
+                    note("the machine answers differently after this chain than before it", number, run,
+                         "was %s, is %s: %r" % (was[0], status, text[:160]))
+            if status == 2 and vector[1] == "valid" and vector[2]:
+                note("a usage page for words that are all valid", number, run, repr(text[:100]))
+            bare = re.sub(rb"\x1b\[[0-9;]*m", b"", text)
+            if re.search(rb"[\x00-\x08\x0b-\x1f\x7f]", bare):
+                note("a control byte in what it printed", number, run, repr(bare[:160]))
+            elif re.search(rb"\xc2[\x80-\x9f]", bare):
+                note("a C1 control in what it printed", number, run, repr(bare[:160]))
+        for place, run in enumerate(result["runs"][:-1]):
+            kind = chains[number][place][1]
+            following = result["runs"][place + 1]
+            if not kind.endswith("-a") or "status" not in run or "status" not in following:
+                continue
+            if user:
+                continue
+            first, second = run["status"] == 0, following["status"] == 0
+            if kind == "roundtrip-a" and first and second:
+                shown = (bytes.fromhex(following["out"]) + bytes.fromhex(following["err"])).lower()
+                said = [bytes.fromhex(a) for a in run["argv"][len(following["argv"]):]]
+                if not all(word.lower() in shown for word in said):
+                    note("a setting that was taken is not what is then shown", number, following,
+                         "%s => %r" % (fuzz_show(said), shown[:160]))
+            if (kind == "implies-a" and first and not second) or (kind == "same-a" and first != second):
+                note("two verbs disagree on one word (%s)" % kind[:-2], number, following,
+                     "first %s: %r; then %r" % (fuzz_show([bytes.fromhex(a) for a in run["argv"]]),
+                                                (bytes.fromhex(run["out"]) + bytes.fromhex(run["err"]))[:100],
+                                                (bytes.fromhex(following["out"]) + bytes.fromhex(following["err"]))[:100]))
+        if user:
+            continue
+        failed_all = all(run.get("status") not in (None, 0) for run in result["runs"])
+        planted = {bytes.fromhex(run["argv"][1]).decode() for run in result["runs"]
+                   if run.get("planted") and bytes.fromhex(run["argv"][0]) == b"@plant"}
+        for change in result["changes"]:
+            path, kind, mode = change["path"], change.get("kind"), change.get("mode")
+            if not path.startswith(FUZZ_STATE) or change["what"] == "removed":
+                continue
+            if path in planted and kind != stat.S_IFREG:
+                continue
+            where = lambda detail: note(detail, number, None, "%s (mode %o, %s bytes)" % (
+                path, mode or 0, change.get("size")))
+            if path in FUZZ_EXPECTED:
+                continue
+            if "/.moonwater-stage-" in path:
+                where("a stage directory left behind")
+                continue
+            if kind == stat.S_IFREG:
+                if mode not in (0o600, 0o644):
+                    where("a state file in mode other than 0600 or 0644")
+                #   A lock is a file that holds nothing; any other file a failed chain
+                #   made and left empty is half of a write.
+                if change["what"] == "created" and change.get("size") == 0 and failed_all and \
+                        not path.startswith("/run/moonwater/"):
+                    where("an empty state file left")
+                if re.search(r"(\.tmp|\.new|\.part|~|\.\d+|\.XXXX\w*)$", path):
+                    where("a temporary left in a state directory")
+            elif kind == stat.S_IFDIR:
+                if mode not in (0o700, 0o755):
+                    where("a state directory in mode other than 0700 or 0755")
+            else:
+                where("a state entry that is neither file nor directory")
+            if change.get("uid") not in (0, None):
+                where("a state entry owned by someone else")
+        for change in result["changes"]:
+            if change["what"] == "created" and change["path"].count("/") == 1:
+                note("a new entry at the root of the machine", number, None, change["path"])
+    return found
+
+
+def harness_moonwater_cli_fuzz(argv):
+    """Argument vectors drawn from the command's own usage, run for real.
+
+    The grammar is read from what the command says of itself: the verb table
+    in src/sh/host.c, README's table, and the page of every verb (`moonwater
+    help VERB`). Each usage line is expanded with good words and with hostile
+    ones (empty, 1 to 65536 bytes long, controls and escapes, format
+    directives, UTF-8 and bytes that are not, blanks, numbers at and past
+    every limit, paths that are links, loops, FIFOs, words of the other
+    verbs, words missing, doubled and surplus), in single vectors and in short
+    chains that share a state. Beside those, from the same pages:
+
+      - the edges of every number a usage gives a range for (both ends taken,
+        a step past each refused, 0, -1, 2^32 and 2^64 past);
+      - pairs of verbs that name one thing (a machine name and a link's, a
+        saved network and its removal, a USB id to allow, deny and forget, a
+        time server and an NTS one): what the first takes the second takes;
+      - every file of the state, from the sources' own list of them, replaced in
+        turn by an escape sequence, a FIFO, a link to /dev/zero, a link to
+        itself, a directory and random bytes, and then every verb said bare;
+      - the machine as a person sets it up, one file of it cut, doubled,
+        bit-flipped or stretched, and what the verbs then say and do;
+      - every usage line once with a process short of descriptors (three to
+        five of them) and of room to write (RLIMIT_FSIZE 0), and some with
+        little memory.
+
+    Every vector runs in the cli harness's sandbox (a pid namespace of its own,
+    so nothing it does to a process reaches one of ours) as root and as an
+    ordinary user, over a machine reset before each chain: an empty /root,
+    /run, /etc and /home, a sysfs of plain files with a backlight, a battery, a
+    cpu and a few USB devices.
+
+    A vector is wrong when it dies of a signal, outlasts its deadline, ends
+    with a status that is not 0, 1 or 2, ends 0 with a complaint on standard
+    error, answers a usage page (2) where its words were all valid, writes a
+    control or escape byte of its own to the terminal, answers differently
+    after a chain than before it, or when a chain leaves a state entry that
+    is empty after failing, temporary, a stage directory, a link, owned by
+    someone else or in a mode other than 0600 or 0644 (0700 or 0755 for a
+    directory), or anything new at the root of the machine. What is allowed
+    and why is said beside FUZZ_EXPECTED and the pairs.
+
+        python3 test/differential.py --harness moonwater_cli_fuzz --shell PATH
+
+    The seed is fixed and the count is bounded, so a run is the same run:
+    MOONWATER_FUZZ_SEED chooses another, MOONWATER_FUZZ_RUNS the number of
+    chains drawn from the usage (default 1000, a couple of minutes) and
+    MOONWATER_FUZZ_SECONDS a wall-clock cap for a longer look (a cap only cuts
+    the same sequence short). The only verdict that depends on time is a hang,
+    and its deadline is 20 s for a verb that answers in milliseconds. --dump
+    FILE keeps every answer, one JSON line a chain, for reading; --show N
+    prints N vectors of each kind of finding.
+
+    Built the way the lanes build the shell with MW_UBSAN=1 MW_HARDEN=1
+    MW_AUTOINIT=pattern (traps on undefined behaviour, locals filled with
+    0xFE, a probed stack, the stack protector) it answers the same vectors the
+    same way, a trap showing as a signal.
+    """
+    import platform
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_cli_fuzz")
+    parser.add_argument("--shell", required=True)
+    parser.add_argument("--runs", type=int, default=int(os.environ.get("MOONWATER_FUZZ_RUNS", "1000")))
+    parser.add_argument("--seconds", type=int, default=int(os.environ.get("MOONWATER_FUZZ_SECONDS", "0")))
+    parser.add_argument("--seed", type=int, default=int(os.environ.get("MOONWATER_FUZZ_SEED", "1")))
+    parser.add_argument("--hang", type=int, default=20)
+    parser.add_argument("--dump")
+    parser.add_argument("--show", type=int, default=3, help="how many vectors of each kind to print")
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("moonwater cli fuzz: NOT RUN -- Linux namespaces")
+        return 2
+    probe = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "true"], capture_output=True)
+    if probe.returncode:
+        print("moonwater cli fuzz: NOT RUN -- no unprivileged user and pid namespaces here")
+        return 2
+    if not Path("/usr/bin/python3").exists():
+        print("moonwater cli fuzz: NOT RUN -- the sandbox's /usr has no python3 to drive it")
+        return 2
+
+    checks = Checks()
+    root = Path(__file__).resolve().parent.parent
+
+    def check(ok, what, detail=""):
+        checks(ok, what + ("" if ok else " -- " + str(detail)[:400 + 500 * args.show]))
+
+    with tempfile.TemporaryDirectory(prefix="moonwater-fuzz-") as temporary:
+        sandbox, private_dev, session, say, answers = moonwater_sandbox(args.shell, Path(temporary))
+
+        #   The grammar: the verbs the table answers to, then every verb's page.
+        verbs = sorted(set(re.findall(r'^\s+\{"([a-z]+)", (?:host|tune|link)_\w+, (?:true|false)\},',
+                                      (root / "src/sh/host.c").read_text(), re.M)))
+        lines, finished = session("".join(say("help " + verb) for verb in verbs) + say("help"))
+        pages = answers(lines)
+        described = {}
+        for verb in verbs + [""]:
+            page = "\n".join(pages.get(("help " + verb) if verb else "help", {"out": []})["out"])
+            last = None
+            for line in page.splitlines():
+                if line.startswith("  ") and not line.startswith("   "):
+                    last, _, text = line[2:].strip().partition("  ")
+                    described.setdefault(last, "")
+                    described[last] += " " + text.strip()
+                elif last and line.startswith(" " * 30):
+                    described[last] += " " + line.strip()
+        for line in (root / "README.md").read_text().splitlines():
+            if line.startswith("moonwater "):
+                last, _, text = line[len("moonwater "):].strip().partition("  ")
+                described.setdefault(last, "")
+                described[last] += " " + text.strip()
+        expanded = {}
+        for command, text in described.items():
+            for part in (command.split(" | ") if " | " in command else [command]):
+                if part and part.split()[0] in verbs and "`" not in part:
+                    expanded[part.strip()] = expanded.get(part.strip(), "") + text
+        commands = sorted(expanded)
+        check(finished and len(verbs) > 30 and len(commands) > 100,
+              "the grammar is read from the verb table, the pages and the README",
+              f"{len(verbs)} verbs, {len(commands)} usage lines")
+        rng = random.Random(args.seed)
+        sources = "".join(path.read_text(errors="replace") for path in sorted((root / "src").rglob("*.c")))
+        files = sorted({name for name in re.findall(r'"(/root/[A-Za-z0-9._-]+|/etc/[A-Za-z0-9._-]+)"', sources)
+                        if name not in ("/root/main.moonwater.sh", "/root/.nix-channels", "/root/link")})
+        chains = fuzz_vectors(commands, expanded, rng, args.runs, files)
+
+        def drive(nobody):
+            (sandbox / "tmp/fuzz_driver.py").write_text(MOONWATER_FUZZ_DRIVER)
+            (sandbox / "tmp/fuzz_chains.json").write_text(json.dumps({
+                "chains": [[[a.hex() for a in vector[0]] for vector in chain] for chain in chains],
+                "limit": args.hang, "seconds": args.seconds,
+                "prefab": [[a.hex() for a in (item.encode() for item in shlex.split(line))] for line in FUZZ_PREFAB]}))
+            (sandbox / "tmp/fuzz_out.jsonl").unlink(missing_ok=True)
+            wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
+                       f"mount --rbind /proc {sandbox}/proc && "
+                       f"exec {'unshare -U --keep-caps ' if nobody else ''}chroot {sandbox} "
+                       "/usr/bin/python3 -I /tmp/fuzz_driver.py")
+            try:
+                ran = subprocess.run(["unshare", "-Urmnpu", "--fork", "--mount-proc", "sh", "-c", wrapper],
+                                     stdin=subprocess.DEVNULL, capture_output=True, timeout=3000,
+                                     env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except subprocess.TimeoutExpired:
+                return [], "ran past 3000 s"
+            results = []
+            produced = sandbox / "tmp/fuzz_out.jsonl"
+            for line in (produced.read_text().splitlines() if produced.exists() else []):
+                results.append(json.loads(line))
+            return results, (ran.stderr.decode(errors="replace")[-600:] if ran.returncode else "")
+
+        started = time.monotonic()
+        for who, nobody in (("root", False), ("an ordinary user", True)):
+            results, trouble = drive(nobody)
+            check(not trouble and (args.seconds or len(results) == len(chains)),
+                  f"the fuzz driver ran every chain as {who}", f"{len(results)} of {len(chains)}; {trouble}")
+            if args.dump:
+                with open(args.dump + (".user" if nobody else ".root"), "w") as dump:
+                    for result in results:
+                        dump.write(json.dumps(result) + "\n")
+            found = fuzz_judge(chains, results, nobody)
+            for kind, instances in sorted(found.items()):
+                check(False, f"as {who}: {kind} ({len(instances)} vectors)", "\n      ".join([""] + instances[:args.show]))
+            vectors = sum(len(result["runs"]) for result in results)
+            check(True, f"{vectors} vectors as {who} in {time.monotonic() - started:.0f} s")
+    return checks.verdict("moonwater cli fuzz", "moonwater-cli-fuzz")
 
 
 def harness_moonwater_lock(argv):
@@ -94789,6 +95978,7 @@ HARNESS_CHECKS = {
     "host_writes": harness_host_writes,
     "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
+    "moonwater_cli_fuzz": harness_moonwater_cli_fuzz,
     "moonwater_lock": harness_moonwater_lock,
     "moonwater_races": harness_moonwater_races,
     "moonwater_script": harness_moonwater_script,

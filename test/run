@@ -209,7 +209,7 @@ describe()
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
         tensor) echo "the f32 transformer kernels against a double-precision model: every count, guard pages, in place, each x86 tier, and riscv64 with no V and V at 128, 256, 512 and 1024 bits" ;;
-        cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes" ;;
+        cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes, and argument vectors drawn from its usage" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
         term)     echo "the emulator driven a byte and a read at a time, and the line being edited" ;;
         edit)     echo "the full-screen editor, its key protocol, buffer, undo and redraws" ;;
@@ -3575,6 +3575,17 @@ lane_cli()
         need_shell || return 1
         python3 test/differential.py --harness moonwater_cli --shell "$shell_binary"
         cli_outcome=$?
+        #       And the same command with argument vectors drawn from its own usage,
+        #       hostile words, the state it keeps replaced by what it did not write,
+        #       and a process short of descriptors or room to write: a fixed seed and
+        #       a bounded count, MOONWATER_FUZZ_RUNS / _SECONDS / _SEED for a longer
+        #       look, as the net fuzz lanes are named.
+        python3 test/differential.py --harness moonwater_cli_fuzz --shell "$shell_binary"
+        case $? in
+        0) ;;
+        2) [ "$cli_outcome" != 0 ] || cli_outcome=2 ;;
+        *) cli_outcome=1 ;;
+        esac
         python3 test/differential.py --harness state_cuts --shell "$shell_binary"
         case $? in
         0) ;;
