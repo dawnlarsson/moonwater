@@ -2363,9 +2363,15 @@ static fn host_machine_emit(positive event_slot, unsigned int event,
 
 static fn host_machine_dirty(bool on)
 {
-        if (on)
-                host_write_text(HOST_MACHINE_DIRTY, "1\n");
-        else
+        if (on) {
+                //      The mark is how the next process knows this one died
+                //      with an event in hand: one that was not written is a
+                //      crash that raises no recover event, so it is said.
+                bipolar failed = host_write_text(HOST_MACHINE_DIRTY, "1\n");
+
+                if (failed < 0)
+                        host_fail(HOST_MACHINE_DIRTY, failed);
+        } else
                 system_remove_at(AT_FDCWD, HOST_MACHINE_DIRTY, 0);
 }
 
@@ -2651,8 +2657,12 @@ static b32 host_machine_run(void)
 
         //      Said before the restores below, which can take a join's time:
         //      a boot waiting to see whether this process has the script is
-        //      waiting for this and not for them.
-        host_write_text(HOST_MACHINE_SOURCED, "1\n");
+        //      waiting for this and not for them. A write that is lost is said:
+        //      unheard, the boot waits out HOST_MACHINE_SOURCED_WAIT_NS and
+        //      runs the settings' init list beside the script's moonwater_init.
+        failed = host_write_text(HOST_MACHINE_SOURCED, "1\n");
+        if (failed < 0)
+                host_fail(HOST_MACHINE_SOURCED, failed);
 
         host_restore_session(!string_has_prefix((string_address)verdict, "ask "),
                              false);

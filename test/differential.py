@@ -73407,6 +73407,8 @@ typedef unsigned long positive;
 #define HOST_EXIT_EACH_NS ((p64)10000000000)
 #define HOST_EVENT_POLL_NS ((p64)20000000)
 #define HOST_MACHINE_SOURCED "/run/moonwater/machine.sourced"
+#define HOST_MACHINE_DIRTY "/run/moonwater/machine.dirty"
+#define fn void
 #define MOONWATER_HOOK_INIT 1
 #define SPARK_BIND_NAME_MAX 24
 #define memory_zero(at, n) memset(at, 0, n)
@@ -73430,6 +73432,11 @@ static void system_close(bipolar h) { (void)h; }
 static p64 system_clock_ns(int c) { (void)c;return now_ns; }
 static void host_pause(p64 ns) { now_ns += ns; }
 static void host_machine_end_run(void) { runs++; }
+static unsigned said_failures, removed_marks;
+static bipolar write_result;
+static bipolar host_write_text(const char *path, const char *text) { (void)path; (void)text; return write_result; }
+static int host_fail(const char *what, bipolar error) { (void)what; (void)error; said_failures++; return 1; }
+static bipolar system_remove_at(int at, const char *path, int flags) { (void)at; (void)path; (void)flags; removed_marks++; return 0; }
 static bipolar system_control(bipolar d, unsigned op, void *p) {
     struct machine_control *c = p; (void)d;(void)op;
     if (c->op == MOONWATER_END) {
@@ -73449,7 +73456,7 @@ static bipolar system_control(bipolar d, unsigned op, void *p) {
     }
     return -1;
 }
-""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + section(machine, "static bool host_machine_sourced(p64 wait)", "static b32 host_machine_call(") + r"""
+""" + section(machine, "static bipolar host_machine_ioctl(", "#define HOST_RADIO_WAIT_MS") + section(machine, "static bool host_machine_stop(void)", "static b32 host_machine_source(void)") + section(machine, "static bool host_machine_sourced(p64 wait)", "static b32 host_machine_call(") + section(machine, "static fn host_machine_dirty(bool on)", "static fn host_machine_close(") + r"""
 static unsigned bad, total;
 static void check(int ok, const char *name) { total++; if (!ok) { bad++; printf("FAIL %s\n", name); } }
 static void world(bool a, bool m, bool l, bool s) {
@@ -73519,6 +73526,16 @@ int main(void)
     check(host_init_list_runs() && now_ns >= HOST_MACHINE_SOURCED_WAIT_NS &&
           now_ns < HOST_MACHINE_SOURCED_WAIT_NS + 2 * HOST_EVENT_POLL_NS,
           "one whose machine process never does leaves the list to run, after the wait and no longer");
+    /* The crash marker: one that could not be written is said, because
+       without it the next process raises no recover event. */
+    said_failures = removed_marks = 0; write_result = -28;
+    host_machine_dirty(true);
+    check(said_failures == 1 && !removed_marks, "a crash marker that could not be written is said");
+    said_failures = 0; write_result = 1;
+    host_machine_dirty(true);
+    check(!said_failures && !removed_marks, "one that was written says nothing");
+    host_machine_dirty(false);
+    check(!said_failures && removed_marks == 1, "and taking it off is not a failure");
     printf("%u %u\n", total, bad);
     return bad != 0;
 }
@@ -73540,7 +73557,7 @@ int main(void)
         total = int(lines[-1].split()[0]) if lines and lines[-1][:1].isdigit() else 0
         for _ in range(total - sum(1 for line in lines if line.startswith("FAIL"))):
             checks(True, "machine stop")
-        checks(total == 16 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
+        checks(total == 19 and ran.returncode == 0, "the stop checks ran: " + ran.stderr[-300:])
 
     #   The CLI's side of the bind ioctl and of the settings block, lifted
     #   and run: what is handed to the kernel for a command of every length
