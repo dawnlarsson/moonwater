@@ -45195,6 +45195,34 @@ def harness_moonwater_cli(argv):
         got = tuned(say("charge limit 60") + "echo '@@ kept'; cat /root/tune; echo '@@end'\n")
         check("charge.limit 60" in got, "a limit is kept for the next boot", repr(got[-6:]))
 
+        #       moonwater battery counted its words from the verb, not from the
+        #       program: bare it asked for a battery called "battery", and the
+        #       name it took was the verb's, so no word of its usage was ever
+        #       answered and the Battery row of the settings window could not
+        #       be set.
+        def kept_tune():
+            return (sandbox / "root/tune").read_text() if (sandbox / "root/tune").exists() else ""
+
+        got = answers(tuned(say("battery") + say("battery BAT0 BAT0") + say("battery nosuch") +
+                            say("battery ../power_supply/BAT0")))
+        check(got["battery"]["status"] == 0 and any("battery auto" in line for line in got["battery"]["out"]),
+              "bare battery says auto where nothing was chosen", repr(got["battery"]))
+        check(got["battery nosuch"]["status"] == 1 and got["battery ../power_supply/BAT0"]["status"] == 1 and
+              got["battery BAT0 BAT0"]["status"] == 2,
+              "a battery the machine has not is refused, a path is no name, a second word is a usage",
+              repr((got["battery nosuch"], got["battery ../power_supply/BAT0"], got["battery BAT0 BAT0"])))
+        got = answers(tuned(say("battery BAT0") + say("battery")))
+        check(got["battery BAT0"]["status"] == 0 and "battery BAT0" in kept_tune() and
+              any("battery BAT0" in line for line in got["battery"]["out"]),
+              "battery BAT0 chooses the battery the machine has, keeps it, and bare battery says it",
+              repr((got["battery BAT0"], got["battery"], kept_tune())))
+        got = answers(tuned(say("battery none")))
+        check(got["battery none"]["status"] == 0 and "battery none" in kept_tune(),
+              "battery none is kept", repr((got["battery none"], kept_tune())))
+        got = answers(tuned(say("battery BAT0") + say("battery auto")))
+        check(got["battery auto"]["status"] == 0 and "battery BAT0" not in kept_tune(),
+              "battery auto takes the choice back", repr((got["battery auto"], kept_tune())))
+
         tuned(say("power powersave"))
         check(sys_read("firmware/acpi/platform_profile") == "low-power" and
               sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave" and

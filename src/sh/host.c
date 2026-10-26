@@ -14197,7 +14197,7 @@ static b32 tune_battery_verb(string_address address_to arguments, positive count
         string_address name;
         string_address stored;
 
-        if (count == 1)
+        if (count == 2)
         {
                 if (tune_kept("battery", value, sizeof(value)) && value[0])
                         host_say(log, host_label "battery %s\n", (string_address)value);
@@ -14205,10 +14205,10 @@ static b32 tune_battery_verb(string_address address_to arguments, positive count
                         host_say(log, host_label "battery auto\n");
                 return 0;
         }
-        if (count != 2)
+        if (count != 3)
                 return host_usage();
 
-        name = arguments[1];
+        name = arguments[2];
         if (string_equals(name, (string_address) "auto"))
                 stored = (string_address) "";
         else if (string_equals(name, (string_address) "none"))
