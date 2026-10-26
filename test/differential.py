@@ -75244,8 +75244,11 @@ os.rename(top + "/c/root/link.peers", top + "/c/root/link.peers.kept")
 os.mkfifo(top + "/c/root/link.groups")
 os.mkfifo(top + "/c/root/link.peers")
 status, out, err = on("c", moon + " link", timeout=20)
-say(status == 0 and b"nobody linked yet" in out,
-    "sec: a FIFO at the groups and the machines is read as nothing, and not waited on (%r)" % (status,))
+#       Said, not read as nothing: a file that cannot be read is not an empty one (the status used to say 'nobody
+#       linked yet' for it, which hid a machine whose peers were there and unreadable), and still not waited on.
+say(status == 0 and b"/root/link.groups could not be read" in out and b"/root/link.peers could not be read" in out and
+    b"nobody linked yet" not in out,
+    "sec: a FIFO at the groups and the machines is said to be unreadable, and not waited on (%r)" % (status,))
 os.unlink(top + "/c/root/link.groups")
 os.unlink(top + "/c/root/link.peers")
 os.rename(top + "/c/root/link.peers.kept", top + "/c/root/link.peers")
