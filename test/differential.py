@@ -41908,8 +41908,55 @@ int main(void) {
     if parent_lost < 1:
         failures.append("the parent's walk lost nothing: the fixture no longer reaches the "
                         "thirty names one read holds\n%s" % before)
+
+    # The tier's half: net_kernel_defaults itself, its /proc/sys made a scratch
+    # tree, built at each STRICT_NET. moonwater_silent (kernel/kernel.c,
+    # mw_net_silent_gate) is written 1 at the tight and locked tiers and left
+    # at what it was at the default one, and a kernel without the file (built
+    # MOONWATER_STOCK) is not given one and is no error.
+    silent_said = []
+    try:
+        defaults = src_slice(net, "static COLD fn net_kernel_defaults(void)", "\n}\n", "net sysctl") + "\n}\n"
+    except ValueError as error:
+        failures.append("net_kernel_defaults lift: " + str(error))
+        defaults = None
+    for tier, want in ((1, "0\n"), (2, "1\n"), (3, "1\n")) if defaults else ():
+        for present in (True, False):
+            with tempfile.TemporaryDirectory(prefix="net-silent-") as temporary:
+                top = Path(temporary).resolve()
+                ipv4 = top / "proc/sys/net/ipv4"
+                ipv4.mkdir(parents=True)
+                if present:
+                    (ipv4 / "moonwater_silent").write_text("0\n")
+                (top / "fixture.c").write_text(
+                    "#define STRICT_TIGHT 2\n#define MOONWATER_STRICT_NET %d\n"
+                    "#define array_count(a) (sizeof (a) / sizeof (a)[0])\n" % tier +
+                    shim + listing + walk + defaults.replace('"/proc/sys/', '"proc/sys/') +
+                    "int main(void) { net_kernel_defaults(); return 0; }\n")
+                built = build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+                                  capture_output=True, text=True)
+                if built.returncode:
+                    failures.append("net_kernel_defaults did not build at STRICT_NET %d:\n%s"
+                                    % (tier, built.stderr[-1500:]))
+                    continue
+                ran = subprocess.run([str(top / "fixture")], cwd=top, capture_output=True, text=True,
+                                     timeout=30)
+                leaf = ipv4 / "moonwater_silent"
+                if present:
+                    seen = leaf.read_text()
+                    if ran.returncode or seen != want:
+                        failures.append("STRICT_NET %d leaves moonwater_silent %r, want %r (exit %d)"
+                                        % (tier, seen, want, ran.returncode))
+                    silent_said.append("%d:%s" % (tier, seen.strip()))
+                elif ran.returncode or leaf.exists():
+                    failures.append("STRICT_NET %d with no moonwater_silent: exit %d, %s"
+                                    % (tier, ran.returncode, "made one" if leaf.exists() else "none made"))
+
     for failure in failures:
         print("  FAIL " + failure)
+    if silent_said:
+        print("net sysctl: moonwater_silent by STRICT_NET %s, none made where the kernel has none"
+              % " ".join(silent_said))
     print("net sysctl: %s, parent lost %d%s"
           % (said.strip().splitlines()[-1] if said.strip() else "?", parent_lost,
              " (" + "; ".join(lost) + ")" if lost else ""))
@@ -47717,7 +47764,7 @@ static int host_starts(string_address text, string_address prefix)
 #define string_has_prefix(text, literal) \
         (!strncmp((const char *)(text), literal, sizeof(literal) - 1))
 static void radio_internet_copy(void) { copied++; }
-static long radio_power(string_address path)
+static long radio_kept(string_address path)
 {
         return !strcmp((const char *)path, "bluetooth") ? bluetooth_power : wifi_power;
 }
@@ -85482,6 +85529,10 @@ struct dentry {
 struct dir_context;
 typedef bool (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
 struct dir_context { filldir_t actor; loff_t pos; int count; unsigned int dt_flags_mask; };
+/* what mw_net_silent_gate reads: the packet's device and that device's flags */
+#define IFF_LOOPBACK 0x8
+struct net_device { unsigned long priv_flags; const void *ops[22]; unsigned long state; unsigned int flags; unsigned short hard_header_len; };
+struct sk_buff { struct sk_buff *next, *prev; struct net_device *dev; char cb[48]; };
 """
 
 KERNEL_PORTS_LIBFS_PRELUDE = r"""
@@ -86407,6 +86458,47 @@ int main(int argc, char **argv)
 }
 """
 
+KERNEL_PORTS_GATE_ORACLE = r"""
+/* mw_net_silent_gate is new, so its oracle is the rule it keeps, in C */
+extern int mw_net_silent;
+static int mw_net_silent_gate_c(const struct sk_buff *skb)
+{
+        return mw_net_silent && skb->dev && !(skb->dev->flags & IFF_LOOPBACK);
+}
+"""
+
+KERNEL_PORTS_GATE_TEST = r"""
+int mw_net_silent_gate(const struct sk_buff *skb);
+
+int main(int argc, char **argv)
+{
+        long iters = argc > 1 ? atol(argv[1]) : 3000, bad = 0, asked = 0;
+        static const int switches[] = {0, 1, 2, -1, 0x7fffffff, (int)0x80000000u, 0x100};
+        struct net_device dev;
+        struct sk_buff skb;
+        for (long it = 0; it < iters; it++) {
+                /* the bytes around each field poisoned, so a read of the wrong width or place disagrees */
+                memset(&dev, 0xa5, sizeof dev);
+                memset(&skb, 0x5a, sizeof skb);
+                dev.flags = rnd() | (rnd() << 16);
+                if (rnd() % 3 == 0) dev.flags = IFF_LOOPBACK;
+                else if (rnd() % 2) dev.flags &= ~IFF_LOOPBACK;
+                for (int s = 0; s < 7; s++) {
+                        mw_net_silent = switches[s];
+                        /* switched off it reads nothing more: a device that is not memory is never touched */
+                        skb.dev = !mw_net_silent ? (struct net_device *)8 : rnd() % 5 ? &dev : NULL;
+                        int want = mw_net_silent_gate_c(&skb), got = mw_net_silent_gate(&skb);
+                        asked++;
+                        if (want != got && bad++ < 5)
+                                printf("case %ld differs: switch %d device %s flags %x: %d, the rule says %d\n", it, mw_net_silent,
+                                       skb.dev ? "present" : "NULL", dev.flags, got, want);
+                }
+        }
+        printf("cases %ld differ %ld stores %ld\n", iters, bad, asked);
+        return bad != 0;
+}
+"""
+
 def harness_kernel_ports(argv):
     """The kernel functions in kernel/kernel.c against Linux's own C, call for call.
 
@@ -86431,6 +86523,12 @@ def harness_kernel_ports(argv):
     reach is the kernel itself: the real offsets, the real FPU bracket, the
     real ext4 -- x86_64 boots on them; the others run the walk here and have
     not been booted.
+
+    mw_net_silent_gate replaces nothing, so its oracle is its rule written as
+    one C expression (switched on, a device, and not a loopback one), over
+    devices whose flags are random with the loopback bit on and off, a NULL
+    device and seven values of the switch; switched off, the device is a
+    pointer to nothing, which it must not read.
     """
     import tarfile
     root = HARNESS_ROOT
@@ -86504,6 +86602,8 @@ def harness_kernel_ports(argv):
                                    KERNEL_PORTS_HTREE_TEST, "count++;", "count += 2;"),
         "ext4_find_dest_de": (oracle_of("ext4_find_dest_de", "int ext4_find_dest_de(struct inode *dir, struct buffer_head *bh,"),
                               KERNEL_PORTS_FIND_TEST, "return -EEXIST;", "return -EEXIST - 1;"),
+        "mw_net_silent_gate": (KERNEL_PORTS_GATE_ORACLE, KERNEL_PORTS_GATE_TEST,
+                               "skb->dev && !(skb->dev->flags & IFF_LOOPBACK);", "skb->dev;"),
     }
     kernel_c = (root / "kernel/kernel.c").read_text()
 
@@ -86605,6 +86705,9 @@ def harness_kernel_ports(argv):
         return 0
     for arch, compiler, runner, cflags, count in targets:
         replaced = {rest.split()[1] for verb, rest in tags(arch) if verb == "replace"}
+        # the gate replaces nothing; its guards are what put it in this architecture's kernel
+        if "ASM_FUNC(mw_net_silent_gate)" in kernel_c and any(verb == "guard" for verb, rest in tags(arch)):
+            replaced.add("mw_net_silent_gate")
         if not replaced:
             print("kernel ports: %s has no port to test" % arch)
             continue
