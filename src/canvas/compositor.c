@@ -6207,27 +6207,19 @@ static void compositor_resize_move(void)
 }
 
 /*
-        Filling a screen, or half of it: a window is asked for the size the
-        rectangle gives it and put where the rectangle begins, and the
-        rectangle it had is kept, from the time it left floating and not at
-        every arrangement, so snapping left, then right, then dragging off
-        puts it back where it was and not on the left half. The edge that is
-        the screen's stays where it is whatever size comes back: the right
-        half is held by its right. The screen is the one named, or with none
-        (-1) the window's own (compositor_screen_of).
+        Filling a rectangle as how says: all of a screen or half of it, or
+        the room a placement fills (COMPOSITOR_ROOM). A window is asked for
+        the size the rectangle gives it and put where the rectangle begins,
+        and the rectangle it had is kept, from the time it left floating and
+        not at every arrangement, so snapping left, then right, then dragging
+        off puts it back where it was and not on the left half. The edge that
+        is the screen's stays where it is whatever size comes back: the right
+        half is held by its right.
 */
-static void compositor_arrange_on(int row, unsigned int how, int on)
+static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
 {
-        unsigned int count;
-        const int (*screens)[4] = compositor_screens(&count);
-        int part[4], left, right;
-
         if (!compositor.showing[row])
                 return;
-
-        compositor_screen_part(screens[on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row)], how, part);
-        left = part[0];
-        right = part[0] + part[2];
 
         if (compositor.arranged[row] == COMPOSITOR_FLOATING)
         {
@@ -6240,10 +6232,25 @@ static void compositor_arrange_on(int row, unsigned int how, int on)
         compositor_damage_row(row);
         compositor.arranged[row] = how;
         compositor.edges[row] = how == COMPOSITOR_RIGHT ? COMPOSITOR_EDGE_LEFT : 0;
-        compositor.far_x[row] = right;
-        compositor_put(row, left, part[1]);
+        compositor.far_x[row] = rect[0] + rect[2];
+        compositor_put(row, rect[0], rect[1]);
         compositor_damage_row(row);
-        compositor_want(row, right - left, part[3]);
+        compositor_want(row, rect[2], rect[3]);
+}
+
+// All of a screen or half of it (compositor_screen_part): the screen named, or with none (-1) the window's own
+// (compositor_screen_of).
+static void compositor_arrange_on(int row, unsigned int how, int on)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int part[4];
+
+        if (!compositor.showing[row])
+                return;
+
+        compositor_screen_part(screens[on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row)], how, part);
+        compositor_arrange_rect(row, how, part);
 }
 
 static void compositor_arrange(int row, unsigned int how)
@@ -6467,31 +6474,6 @@ static void compositor_room(const int *screen, int *room)
                 }
         }
         compositor.band_at = 0;
-}
-
-/*
-        Filling a rectangle, as compositor_arrange fills the output or half of it, for what a placement fills: the
-        room of a screen, or all of one. The rectangle it had floating is kept, as there.
-*/
-static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
-{
-        if (!compositor.showing[row])
-                return;
-
-        if (compositor.arranged[row] == COMPOSITOR_FLOATING)
-        {
-                compositor.saved_x[row] = compositor.x[row];
-                compositor.saved_y[row] = compositor.y[row];
-                compositor.saved_w[row] = compositor.w[row];
-                compositor.saved_h[row] = compositor.h[row];
-        }
-        compositor_damage_row(row);
-        compositor.arranged[row] = how;
-        compositor.edges[row] = 0;
-        compositor.far_x[row] = rect[0] + rect[2];
-        compositor_put(row, rect[0], rect[1]);
-        compositor_damage_row(row);
-        compositor_want(row, rect[2], rect[3]);
 }
 
 // The taskbar moved, or its screen changed: every window that fills the room of a screen fills it where it is now.
