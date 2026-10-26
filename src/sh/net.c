@@ -2862,6 +2862,16 @@ static COLD bipolar net_watch_events(b32 events, netlink_buffer address_to messa
         with the best local source (arp_announce 2), and announced when a
         link comes up (arp_notify 1; a new address is announced by
         net_arp_announce).
+
+        At the tight tier a closed port gives nothing away:
+        net.ipv4.moonwater_silent 1 (kernel/kernel.c, mw_net_silent_gate)
+        has the kernel drop a TCP segment or a UDP datagram for a port
+        nothing listens on without the reset or the ICMP port unreachable,
+        unless it came over loopback; IPv6 too. The default tier does not
+        write it, so it stays at the kernel's 0 and a hand that sets it keeps
+        it across a watcher's restart: traceroute over UDP reads the port
+        unreachable of its last hop. A kernel built MOONWATER_STOCK has no
+        such file, and the write is refused as the others would be.
 */
 #if MOONWATER_STRICT_NET >= STRICT_SAFE
 static COLD fn net_sysctl(string_address path, string_address value)
@@ -2974,6 +2984,9 @@ static COLD fn net_kernel_defaults(void)
                                   "0\n", true);
         net_sysctl("/proc/sys/net/ipv4/tcp_rfc1337", "1\n");
         net_sysctl("/proc/sys/net/ipv4/tcp_syncookies", "1\n");
+#if MOONWATER_STRICT_NET >= STRICT_TIGHT
+        net_sysctl("/proc/sys/net/ipv4/moonwater_silent", "1\n");
+#endif
 }
 #endif
 
