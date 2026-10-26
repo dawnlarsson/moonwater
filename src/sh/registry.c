@@ -356,11 +356,23 @@ static bool setting_whole(string_address word, long address_to into)
 */
 static long setting_standard(const struct settings_row address_to row);
 
+// The words a value is one of: a switch's on and off, else the row's choices.
+static const char address_to setting_words_of(const struct settings_row address_to row)
+{
+        return row->kind == SETTINGS_SWITCH ? "on off" : row->choices;
+}
+
+// The word kept when a row is put back: its reset word, else default.
+static const char address_to setting_reset_of(const struct settings_row address_to row)
+{
+        return row->reset ? row->reset : "default";
+}
+
 static bool setting_parse(const struct settings_row address_to row, string_address word, p8 address_to kept, positive room,
                           long address_to value)
 {
-        const char address_to words = row->kind == SETTINGS_SWITCH ? "on off" : row->choices;
-        const char address_to reset = row->reset ? row->reset : "default";
+        const char address_to words = setting_words_of(row);
+        const char address_to reset = setting_reset_of(row);
         p8 colour[8];
         long place;
 
@@ -407,7 +419,7 @@ static long setting_standard(const struct settings_row address_to row)
         if (row->type == SETTING_COLOUR)
                 return window_colour_parse((string_address)row->standard);
         // A word's own place among its words.
-        value = setting_place(row->kind == SETTINGS_SWITCH ? "on off" : row->choices, (string_address)row->standard);
+        value = setting_place(setting_words_of(row), (string_address)row->standard);
         return value < 0 ? 0 : value;
 }
 
@@ -418,7 +430,7 @@ static long setting_standard(const struct settings_row address_to row)
 static bool setting_kept(const struct settings_row address_to row, string_address word, long address_to value)
 {
         p8 kept[16];
-        const char address_to reset = row->reset ? row->reset : "default";
+        const char address_to reset = setting_reset_of(row);
 
         long found;
 

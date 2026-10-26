@@ -4073,7 +4073,7 @@ static bool host_settings_map_visit(string_address path, address_any opaque)
                 failed = "keeps its image in blocks this cannot map";
 
         place->size = failed ? 512 : (positive)size;
-        place->target = host_settings_older(place->slots);
+        place->target = failed ? 0 : host_settings_older(place->slots);
 
         for (positive at = 0; !failed && at < SPARK_SETTINGS_SLOT / place->size; at++)
         {
@@ -4382,6 +4382,18 @@ static b32 host_settings_refused(string_address verb, string_address why,
         return HOST_SETTINGS_REFUSED;
 }
 
+/* The row of host_switches a verb's word names; the count when it names none. */
+static positive host_switch_find(string_address verb, string_address word)
+{
+        positive at = 0;
+
+        while (at < array_count(host_switches) &&
+               !(string_equals(verb, host_switches[at].verb) &&
+                 string_equals(word, host_switches[at].word)))
+                at++;
+        return at;
+}
+
 /*
         Whether the words are a settings command at all: a list alone, a
         switch alone or with on or off, add or remove with words. Said before
@@ -4397,11 +4409,9 @@ static bool host_settings_shaped(string_address address_to arguments, positive c
         if (count == 2)
                 return true;
 
-        for (positive at = 0; at < array_count(host_switches); at++)
-                if (string_equals(arguments[1], host_switches[at].verb) &&
-                    string_equals(arguments[2], host_switches[at].word))
-                        return count == 3 ||
-                               (count == 4 && host_onoff(arguments[3]) >= 0);
+        if (host_switch_find(arguments[1], arguments[2]) < array_count(host_switches))
+                return count == 3 ||
+                       (count == 4 && host_onoff(arguments[3]) >= 0);
 
         return count >= 4 && (string_equals(arguments[2], "add") ||
                               string_equals(arguments[2], "remove"));
@@ -4415,13 +4425,14 @@ static bool host_settings_shaped(string_address address_to arguments, positive c
         nothing to add or remove, or REFUSED once it said why.
 */
 static b32 host_settings_apply(host_settings address_to settings,
-                               string_address address_to arguments, positive count)
+                               string_address address_to arguments, positive count,
+                               p8 address_to text)
 {
         string_address verb = arguments[1];
-        p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
         host_setting setting;
         string_address failed;
         positive length = 0;
+        positive at;
         positive which = string_table_find(verb, host_lists,
                                            sizeof(host_lists[0]),
                                            array_count(host_lists));
@@ -4435,28 +4446,23 @@ static b32 host_settings_apply(host_settings address_to settings,
                 host_settings_lines(settings, which, false);
                 return HOST_SETTINGS_SHOWN;
         }
+        at = host_switch_find(verb, arguments[2]);
 
+        //      A list a machine script sets is the script's, and only its
+        //      switches are still this command's.
         {
                 p16 overlay = host_machine_hook_line(host_lists[which].hook);
 
-                if (overlay)
+                if (overlay && at == array_count(host_switches))
                 {
-                        if (!string_equals(arguments[2], "mount") &&
-                            !string_equals(arguments[2], "canvas"))
-                        {
-                                host_machine_refused(verb, overlay);
-                                return HOST_SETTINGS_REFUSED;
-                        }
+                        host_machine_refused(verb, overlay);
+                        return HOST_SETTINGS_REFUSED;
                 }
         }
 
-        for (positive at = 0; at < array_count(host_switches); at++)
+        if (at < array_count(host_switches))
         {
                 p32 flag = host_switches[at].flag;
-
-                if (!string_equals(verb, host_switches[at].verb) ||
-                    !string_equals(arguments[2], host_switches[at].word))
-                        continue;
 
                 if (count == 3)
                 {
@@ -4487,7 +4493,7 @@ static b32 host_settings_apply(host_settings address_to settings,
         {
                 bool adding = string_equals(arguments[2], "add");
 
-                if (!host_words_join(text, sizeof(text), arguments + 3, count - 3,
+                if (!host_words_join(text, SPARK_SETTINGS_TEXT_MOST + 1, arguments + 3, count - 3,
                                          address_of length))
                         return host_settings_refused(verb, "an entry is 4096 bytes at most",
                                                      settings);
@@ -4588,13 +4594,12 @@ static b32 host_settings_locked(string_address address_to arguments, positive co
 {
         host_settings settings;
         p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
-        positive length = 0;
         b32 outcome;
 
         host_state_ready();
         host_settings_session(address_of settings);
 
-        outcome = host_settings_apply(address_of settings, arguments, count);
+        outcome = host_settings_apply(address_of settings, arguments, count, text);
         return_if(outcome == HOST_SETTINGS_USAGE, host_usage());
         if (outcome != HOST_SETTINGS_CHANGED)
                 return outcome == HOST_SETTINGS_SHOWN ? 0 : 1;
@@ -4602,9 +4607,8 @@ static b32 host_settings_locked(string_address address_to arguments, positive co
         if (!host_settings_save(address_of settings))
                 return 1;
 
-        if (count > 3 && string_equals(arguments[2], "add") &&
-            host_words_join(text, sizeof(text), arguments + 3, count - 3,
-                                address_of length))
+        //      The words of an added command, as apply joined them.
+        if (count > 3 && string_equals(arguments[2], "add"))
                 host_settings_note(address_of settings, arguments[1], text);
 
         return 0;
@@ -4756,7 +4760,7 @@ static fn host_kmsg(string_address address_to parts)
         for (; *parts; parts++)
                 string_append_bounded(line, *parts, sizeof(line));
 
-        handle = system_open_at(AT_FDCWD, "/dev/kmsg", 01 | O_CLOEXEC);
+        handle = system_open_at(AT_FDCWD, "/dev/kmsg", O_WRONLY | O_CLOEXEC);
         if (handle < 0)
                 return;
 
@@ -20506,9 +20510,7 @@ static b32 locale_canvas_status(bool scale)
         bool readable = locale_readable(path, kept, sizeof(kept));
         string_address and_kept = kept[0] ? ", kept across boots" : "";
 
-        memory_zero(address_of control, sizeof(control));
-        control.request = SPARK_CANVAS_STATUS;
-        if (host_spark_once(SPARK_IOCTL_CANVAS, address_of control, FILE_READ) < 0)
+        if (host_canvas_request(SPARK_CANVAS_STATUS, address_of control) < 0)
         {
                 if (!readable)
                         host_say(log, host_label "%s " LOCALE_NEEDS_ROOT "\n",
@@ -20662,9 +20664,10 @@ static b32 host_setting_refuse(const struct settings_row address_to row, string_
                 host_say(log_error, "%s is a number from %p to %p %s, %sor default, not %s\n", (string_address)says,
                          (positive)row->low, (positive)row->high, (string_address)(row->unit ? row->unit : ""),
                          row->choices ? (string_address)"off, " : (string_address)"", word);
+        else if (row->kind == SETTINGS_SWITCH)
+                host_say(log_error, "%s is on or off, not %s\n", (string_address)says, word);
         else
-                host_say(log_error, row->kind == SETTINGS_SWITCH ? "%s is on or off, not %s\n" : "%s is %s, not %s\n",
-                         (string_address)says, row->kind == SETTINGS_SWITCH ? word : (string_address)row->choices, word);
+                host_say(log_error, "%s is %s, not %s\n", (string_address)says, (string_address)row->choices, word);
         return 1;
 }
 
@@ -22755,26 +22758,16 @@ static fn host_bind_say(bool label, struct bind_control address_to control)
 static fn host_bind_forget(host_settings address_to settings, p16 event)
 {
         host_setting setting;
-        positive at;
-        bool dropped;
+        positive at = 0;
 
-        for (;;)
-        {
-                at = 0;
-                dropped = false;
-                while (host_settings_next(settings, address_of at, address_of setting))
+        //      A drop moves the entries after it down to where it was, so the
+        //      scan goes on from there and not from the start again.
+        while (host_settings_next(settings, address_of at, address_of setting))
+                if (setting.entry.list == SPARK_SETTINGS_BIND && setting.entry.id == event)
                 {
-                        if (setting.entry.list == SPARK_SETTINGS_BIND &&
-                            setting.entry.id == event)
-                        {
-                                host_settings_drop(settings, address_of setting);
-                                dropped = true;
-                                break;
-                        }
+                        host_settings_drop(settings, address_of setting);
+                        at = setting.at;
                 }
-                if (!dropped)
-                        return;
-        }
 }
 
 /*
