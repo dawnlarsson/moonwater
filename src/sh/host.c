@@ -22903,10 +22903,7 @@ static b32 security_switch(positive which, string_address word)
         //      A word the tight tier takes no notice of, where it refuses
         //      one, is not kept.
         if ((tight == SECURITY_TIGHT_SHUT && !turn) || (tight == SECURITY_TIGHT_HELD && turn))
-                return host_refuse("security %s stays %s: the tight tier has it so\n",
-                                   security_switches[which].word,
-                                   turn ? security_switches[which].standard
-                                        : security_switches[which].turned);
+                return host_refuse("security %s stays as the tight tier has it\n", security_switches[which].word);
         if (!host_acquire())
                 return 1;
         host_state_ready();
@@ -23538,7 +23535,7 @@ static const host_row host_rows[] = {
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
-    {null, "debug", "what the desktop is doing and why: the card, the pointer, windows shown straight", 'b'},
+    {null, "debug", "what the desktop is doing and why (root): the card, the pointer, windows shown straight", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},

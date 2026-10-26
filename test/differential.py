@@ -41423,7 +41423,7 @@ def harness_host_writes(argv):
 
     host = (root / "src/sh/host.c").read_text()
     marks = ("static bipolar host_open_state(", "static bipolar host_write_text(",
-             "static fn host_state_directory(", "static fn host_verdict_set(")
+             "static fn host_state_directory(", "static b32 host_verdict_set(")
     if not all(mark in host for mark in marks):
         for failure in failures:
             print("  FAIL " + failure)
