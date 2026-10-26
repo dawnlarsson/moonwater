@@ -57794,6 +57794,14 @@ static fn windows_client(void)
         check("row 17's wake",
               string_compare((string_address)name, (string_address) "/run/moonwater/window.17.wake") == 0);
 
+        //      The compositor runs as root and frees a row when its door's last
+        //      writer closes, so a door the whole machine may write is one it
+        //      may hold open against the window it names: the mode the
+        //      compositor makes a door and its wake is root's, with no group or
+        //      other access. This is the constant compositor_table uses.
+        check("a window door is root-only",
+              WINDOWS_DOOR_MODE == 0600 && (WINDOWS_DOOR_MODE & 0077) == 0);
+
         check("an empty ring has no event", !windows_event(&own, &event));
         for (unsigned int at = 0; at < WINDOWS_EVENTS; at++)
         {

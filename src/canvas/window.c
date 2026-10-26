@@ -468,6 +468,22 @@ static inline int window_key(struct window *window, struct window_key *key)
 */
 #define WINDOWS_TABLE "/run/moonwater/windows"
 #define WINDOWS_DOOR "/run/moonwater/window."
+/*      A door is read by the compositor, which runs as root, and the row it
+        names is freed when every writer of the door has closed (the program
+        ended). A door anyone may write is a door anyone may hold open: a
+        process that is not the window's keeps the door's writer count above
+        zero, so the compositor never hears the keeper leave and never frees
+        the row, and thirty-two held rows leave no room for a new window --
+        the desktop denied to the machine by whoever can open the FIFO. The
+        table itself is the compositor's memfd, reached only through
+        /proc/PID/fd of a root process, so no program that is not root (or the
+        compositor's own user) can map it and be a window at all; a door no
+        such program can use is a door it has no business opening. So the door
+        is root's, 0600, as the wake beside it and the keys FIFO (0600) are:
+        the compositor and the programs a desktop session starts open it as
+        root. A design that lets an unprivileged program be a window must hand
+        it the door (and the table) as a descriptor, not leave the FIFO open
+        to the whole machine. */
 #define WINDOWS 32
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
@@ -489,6 +505,8 @@ static inline int window_key(struct window *window, struct window_key *key)
         CAP_SYS_ADMIN beside this (canvas.c windows_table_get).
 */
 #define WINDOWS_MODE 0600
+// The doors and their wakes are the table's owner's too.
+#define WINDOWS_DOOR_MODE WINDOWS_MODE
 
 // event_type, with event_flags WINDOW_KEY_*: a key (a is its code, b its character), the pointer at a, b in
 // the window, a button (a its code), the wheel (a in 120ths of a notch, b 1 when it is sideways).

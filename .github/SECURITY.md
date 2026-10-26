@@ -278,6 +278,17 @@ attacker gets its invariants here once there is a lane that proves them.
   adds `hidepid=invisible` to `/proc`). `/` is the initramfs's tmpfs root, 1777 as the kernel makes it:
   sticky, so another user cannot replace or remove a name root made there, but
   anyone can make a new name at the top.
+- **The compositor's doors are root's (`WINDOWS_DOOR_MODE`, MW-2026-020).** The
+  compositor runs as root and frees a window's row when every writer of its
+  FIFO door (`/run/moonwater/window.N`, and the wake beside it) has closed, so
+  a door the whole machine could write was a door any local program could hold
+  open to keep a dead window's row forever and, after thirty-two, deny the
+  machine a new window. The window table is the compositor's `memfd`, reachable
+  only through `/proc/PID/fd` of a root process, so no non-root program can map
+  it and be a window; the doors are now `0600`, which every client (a program a
+  desktop session starts, root, and the compositor) opens as root. An
+  unprivileged window client, if ever wanted, is handed the door and the table
+  as descriptors, never a world-writable FIFO.
 - **The image's own programs, built with the compiler's hardening, are a region
   (`sec_build_hardened`):** locals zeroed (`-ftrivial-auto-var-init=zero`),
   frames probed (`-fstack-clash-protection`), call-used registers cleared

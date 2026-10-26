@@ -6411,7 +6411,10 @@ static long compositor_table_memfd(unsigned long bytes)
         The table and its doors, made new: whatever is at the paths is from a
         compositor whose session is over. The table is sparse, so its size is
         the most every window could draw and what it costs is the pages that
-        are drawn. Any program may open a window.
+        are drawn. The table is the compositor's memfd and the doors are
+        root's (WINDOWS_DOOR_MODE): a window is a program a desktop session
+        started, which is root, and a door the whole machine could write is a
+        door the whole machine could hold open against the row it names.
 */
 static int compositor_table(void)
 {

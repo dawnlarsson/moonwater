@@ -20934,6 +20934,8 @@ b=$(sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /proc/$t/status)
 echo "m5 idle wakeups: $((b - a))"
 echo "m5 memory: $(grep -E '^(VmSize|VmRSS|RssAnon|RssFile|RssShmem)' /proc/$t/status | tr -s ' \t\n' ' ')"
 echo m5-idle-done
+echo "m5 door mode: $(stat -c %a /run/moonwater/window.0 2>/dev/null)"
+if setpriv --reuid 1000 --regid 1000 --clear-groups sh -c 'exec 9>/run/moonwater/window.0' 2>/dev/null; then echo "m5 door nonroot: opened"; else echo "m5 door nonroot: denied"; fi
 sleep 150
 kill $c
 wait $c
@@ -21213,6 +21215,16 @@ if btop:
 
 done = wait_for(b"m5-done", 170)
 out.append(("M5 the compositor ends and Canvas has the card back", "yes" if done else "no", "yes"))
+
+#   The compositor runs as root and frees a window's row when every writer of
+#   its door has closed, so a door the whole machine may write is a door any
+#   local program can hold open to keep a dead window's row forever and, after
+#   thirty-two, deny the machine a new window. The door is root's, 0600.
+text = serial().decode("utf8", "replace")
+mode = re.search(r"m5 door mode: *(\d+)", text)
+hold = re.search(r"m5 door nonroot: *(\w+)", text)
+out.append(("M5 a window door is root-owned 0600", mode.group(1) if mode else "no answer", "600"))
+out.append(("M5 a non-root program cannot open a window door", hold.group(1) if hold else "no answer", "denied"))
 
 try:
     guest.quit()

@@ -417,6 +417,89 @@ Lane `canvas`, scenario `g1` (`CANVAS_ONLY=g1 sh test/run canvas`).
 - The door FIFOs being `0600` also stops a non-root local process knocking the
   compositor's door loop (the per-turn read bound added earlier capped the
   work; this removes the reach).
+### MW-2026-020: a compositor window door any program may hold open against its row
+
+| | |
+|---|---|
+| Status | Fixed on this branch, 2026-10-26 (awaiting cherry-pick) |
+| Class | World-writable control FIFO a root process acts on; denial of service |
+| Attacker | (1) a local unprivileged process; (8) a bowl program once it is a genuine unprivileged uid. A root-launched bowl today is host uid 0 (case R, agent 4's finding) and reaches it as root; that path is moot once bowls are an unprivileged uid, but the hole remains for case U |
+| Fixed by | this commit (`src/canvas/window.c`, `src/canvas/compositor.c`) |
+
+**What it was.** The compositor (`/compositor`, root) gives each window a row of
+a shared table and a FIFO door at `/run/moonwater/window.N` (and a wake beside
+it, `window.N.wake`). `compositor_table` made both with mode `0666`
+(`mknodat 0010666` then `fchmodat 0666`). The compositor frees a row --
+`compositor_leave`, which takes the window off the screen, gives its pixels
+back and clears its pid -- when the door's poll returns `POLLHUP`, which a read
+end sees only when the door's *last writer* has closed, i.e. when the program
+that owns the window has ended.
+
+A door the whole machine may write is a door the whole machine may hold open. A
+local process that is not the window's owner opens `window.N` for writing and
+keeps it open; the writer count never falls to zero when the real owner ends,
+so the compositor never hears it leave and never frees the row. The window
+stays as a ghost, and with all thirty-two doors held and the windows behind
+them gone, no row is ever free again: the desktop can open no new window. (A
+flood of knock bytes on a held door also keeps the root compositor's poll loop
+hot, bounded at 64 reads a turn but woken every turn.)
+
+**Why it is denial of service and not worse.** The window *table* -- every
+field a program and the compositor read and write, and the pixels -- is the
+compositor's `memfd`, published as a symlink to `/proc/PID/fd` of the root
+compositor. A process that is not root (or the compositor's own user) cannot
+open that descriptor (`ptrace_may_access`), so it cannot map the table and
+cannot be a window at all; the door carries only a content-free knock that
+tells the compositor to re-read the row's fields, which only root can have
+written. So the exposure is the row never freed (a dead window's pixels held,
+new windows refused), not reading or writing another window's state.
+
+**Reproduced.** Booted guest (`final-head.efi`, current main, the Canvas
+desktop up):
+
+```
+# stat -c %a /run/moonwater/window.0            -> 666
+# setpriv --reuid 1000 --regid 1000 --clear-groups \
+      sh -c 'exec 9>/run/moonwater/window.0'    -> succeeds (a non-root
+                                                   program holds the door)
+# as uid 65534: head -c 16 /run/moonwater/windows -> denied (cannot map the
+                                                     table: knock-only)
+```
+
+On an image built from the fix the door is `600` and the non-root open is
+denied (`EACCES`).
+
+**The fix.** `WINDOWS_DOOR_MODE` is `0600` (`src/canvas/window.c`), and
+`compositor_table` makes the door and its wake with it (`src/canvas/compositor.c`).
+Every window is a program a desktop session started, which is root, and the
+compositor is root, so a root-only door breaks no client that can function (a
+non-root program cannot map the table and so cannot be a window). A future
+design that wants an unprivileged program to be a window must hand it the door
+and the table as descriptors, not leave a world-writable FIFO on the machine's
+shared `/run`.
+
+**Tests that fail without the fix.**
+
+- `desktop` lane, the M5 terminal check, two rows: `M5 a window door is
+  root-owned 0600` (got `666` on the pre-fix image, `600` on the fix) and `M5 a
+  non-root program cannot open a window door` (got `opened`, then `denied`).
+- `checks.c` `windows_client`, row `a window door is root-only`, pins
+  `WINDOWS_DOOR_MODE == 0600 && (WINDOWS_DOOR_MODE & 0077) == 0` (kit/term
+  lane); it is red if the constant is put back to `0666`.
+- Red-on-old shown by hand: the exact commands the M5 rows parse, run against
+  `final-head.efi`, print `MODE=666` and `NONROOT=opened`; against the fix's
+  image, `MODE=600` and `NONROOT=denied`.
+
+**Still open.**
+
+- The fallback table at `WINDOWS_TABLE` for a machine with no card
+  (`compositor_table`'s no-`memfd` branch) is still made `0666`; a headless
+  machine has no desktop, but it could be `0600` too, left for a follow-up.
+- Reclamation is still `POLLHUP`-only. Binding a row's freeing to the owner
+  pid's liveness (`kill(pid, 0)`) would reclaim a dead owner's row even if a
+  squatter holds the door, and is the deeper fix should an unprivileged
+  window-client design ever reopen the door to non-root. Not built.
+- The mutation lane has not been run on the changed lines.
 
 ## Reviews with no exposure found
 
