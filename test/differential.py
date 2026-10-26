@@ -46286,6 +46286,36 @@ while True:
             escaped = "".join("\\0%03o" % byte for byte in data)
             return f"printf '%b' '{escaped}' > {path}; chmod 600 {path}\n"
 
+        # A machine that came in by a group keeps the group when its key is
+        # added again, with or without an address: leave forget takes its
+        # members, and a machine that is no longer one is kept. Each answer
+        # has a label of its own here, the status read three times.
+        def labelled(name, command):
+            return f"echo '@@ {name}'; timeout 20 /tmp/moonwater {command} 2>&1; echo \"@@status $?\"\n"
+
+        lines, finished = session(
+            "rm -f /root/link.peers /root/link.groups /root/main.moonwater.sh\n" +
+            printf_file(group_record, "/root/link.groups") +
+            printf_file(peer_record, "/root/link.peers") +
+            labelled("before", "link") + labelled("add", "link add peer1 " + peer) +
+            labelled("after", "link") + labelled("leave", "link group leave lab forget") +
+            labelled("gone", "link") + "rm -f /root/link.peers /root/link.groups\n")
+        seen = answers(lines)
+
+        def said(name, text):
+            return any(text in line for line in seen.get(name, {}).get("out", []))
+
+        check(finished and said("before", "peer1") and said("before", "in group lab"),
+              "link shows a machine a group paired as in it, from the records the listener writes",
+              repr(seen.get("before")))
+        check(finished and seen.get("add", {}).get("status") == 0 and
+              said("after", "peer1") and said("after", "in group lab"),
+              "link add of a linked key keeps the group that paired it",
+              repr({name: seen.get(name) for name in ("add", "after")})[:400])
+        check(finished and said("leave", "removed the 1 machines") and not said("gone", "peer1"),
+              "link group leave forget takes the machine the group paired, after its key was added again",
+              repr({name: seen.get(name) for name in ("leave", "gone")})[:400])
+
         # A pairing that asks for a name too long for one is refused as not a
         # name, and not paired under its first 31 characters.
         #       The listener a pairing that is not refused starts is switched off

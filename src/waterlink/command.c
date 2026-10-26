@@ -417,7 +417,13 @@ static b32 link_add_locked(string_address name, string_address text,
                 //      when none is given.
                 if (crypto_same(found->key, peer.key, 32))
                 {
+                        //      The group that paired it and the last greeting
+                        //      heard from it stay too: without them the machine
+                        //      is no longer a member, and a leave forget does not
+                        //      take it, and an old greeting would be heard again.
                         peer.may = found->may;
+                        peer.group = found->group;
+                        peer.seen = found->seen;
                         if (!where)
                         {
                                 memory_copy(peer.address, found->address,
