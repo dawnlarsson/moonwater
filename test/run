@@ -221,7 +221,7 @@ describe()
         sleep)    echo "moonwater sleep from the serial shell, woken by a key: the compositor's desktop back on a card that lost its pipe" ;;
         desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it, and weston drawing on the card once desktop off has handed it over (NOT RUN without a network, an image or mke2fs)" ;;
         chrome)   echo "a browser that will not run as root, from Debian's package in a booted guest: who a bowl's programs are, and Chromium's sandbox on (NOT RUN without a network, an image or mke2fs)" ;;
-        usb)      echo "moonwater usb in a booted guest with devices hot-plugged over QMP: what lock keeps, a stick and a keyboard held, allow, a class, a deny across unlock, hostile serials, and the policy read at a second boot (NOT RUN without qemu-system-x86_64 or an image)" ;;
+        usb)      echo "moonwater usb in a booted guest with devices hot-plugged over QMP: what lock keeps, a stick and a keyboard held, allow, a class, a deny across unlock, hostile serials, the policy read at a second boot, and with MOONWATER_USB_TIER a sec_host_locked image's first boot (NOT RUN without qemu-system-x86_64 or an image)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
@@ -21478,7 +21478,11 @@ counted
 #       comes back, and a serial of escapes and one too long to keep reach
 #       neither the status nor the log as raw bytes. A second guest boots on
 #       the same disk: the policy is read at boot, the stick it allows is a
-#       disk and the stick it does not know is held.
+#       disk and the stick it does not know is held. With MOONWATER_USB_TIER
+#       naming an image built with sec_host_locked, a third boots it with no
+#       disk: the command line holds every device from the start, the first
+#       boot locks once USB has settled and keeps the tablet and the keyboard,
+#       and a stick plugged in after is held.
 lane_usb()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -21495,6 +21499,9 @@ done
 if [ ! -f "$image" ]; then
         echo "  usb          NOT RUN -- no image at $image"
         exit 2
+fi
+if [ ! -f "${MOONWATER_USB_TIER:-}" ]; then
+        note "usb tier: NOT RUN -- MOONWATER_USB_TIER names no image built with sec_host_locked"
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-usb.XXXXXX") || exit 1
@@ -21520,13 +21527,14 @@ image = sys.argv[1]
 work = os.environ["MOONWATER_USB_WORK"]
 out = []
 
-def machine(name, boot_sticks=(), source=False):
+def machine(name, boot_sticks=(), source=False, kernel=image, disk=True):
     """The compositor guest's machine with its xHCI widened, the disk, the sticks as drives, and a serial shell
        with the kernel's console lines off it, once boot has settled."""
-    args = desktop(image)
+    args = desktop(kernel)
     args[args.index("qemu-xhci")] = "qemu-xhci,id=xhci,p2=8,p3=8"
-    args += ["-drive", "if=none,id=disk,format=raw,file=" + work + "/disk.img",
-             "-device", "nvme,serial=usbdisk,drive=disk"]
+    if disk:
+        args += ["-drive", "if=none,id=disk,format=raw,file=" + work + "/disk.img",
+                 "-device", "nvme,serial=usbdisk,drive=disk"]
     if source:
         args += ["-drive", "if=none,id=source,format=raw,file=fat:ro:" + work + "/source,readonly=on",
                  "-device", "usb-storage,bus=xhci.0,drive=source,removable=on"]
@@ -21699,6 +21707,31 @@ out.append(("U9 a stick plugged in after that boot is held", disks(shell), "1"))
 alive, status = shell.run("echo answers", 10)
 out.append(("U9 and the machine answers on its serial shell", "yes" if status == 0 and "answers" in alive else "no", "yes"))
 stop(guest)
+
+#       The tight tier's first boot, from an image built with sec_host_locked:
+#       every device held from the first moment, and the lock taken once USB
+#       has settled (taken at the first restore, it held this guest's tablet
+#       and keyboard, which had not enumerated yet).
+tier = os.environ.get("MOONWATER_USB_TIER", "")
+if os.path.isfile(tier):
+    guest, shell = machine("three", kernel=tier, disk=False)
+    words, _ = shell.run("cat /proc/cmdline", 10)
+    out.append(("U10 the tier's command line holds every USB device from boot",
+                "yes" if "usbcore.authorized_default=2" in words else "no: " + words[-200:], "yes"))
+    for _ in range(30):
+        if shell.number("grep -c '^mode lock$' /root/usb.policy 2> /dev/null") == "1":
+            break
+        time.sleep(1)
+    policy, _ = shell.run("cat /root/usb.policy", 10)
+    out.append(("U10 its first boot locks and keeps the tablet and the keyboard",
+                "%s %d" % ("mode lock" in policy, len([line for line in policy.split("\n") if line.startswith("allow 0627:0001/")])),
+                "True 2"))
+    time.sleep(2)
+    out.append(("U10 and both give input",
+                shell.number("grep -c -e 'QEMU USB Tablet' -e 'QEMU USB Keyboard' /proc/bus/input/devices"), "2"))
+    plug("usb-storage", "s8", drive="st8", serial="STICK8")
+    out.append(("U10 a stick plugged in after it is held", disks(shell), "0"))
+    stop(guest)
 
 for name, got, want in out:
     print("%s|%s|%s" % (name, " ".join(got.split()).replace("|", "/"), want))

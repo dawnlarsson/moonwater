@@ -46563,6 +46563,12 @@ while True:
                   say("usb") +
                   "{ echo 'mode off'; i=0; while [ $i -lt 65 ]; do printf 'allow 1111:%04x/S%d\\n' $i $i; i=$((i+1)); done; }"
                   " > /root/usb.policy\n" + say("usb") + say("usb allow 2222:2222/T") +
+                  #     A log past 64 KiB is cut to its newer half at the next line.
+                  "i=0; while [ $i -lt 1400 ]; do printf 'old line %05d %s\\n' $i "
+                  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done > /root/usb.log; chmod 644 /root/usb.log\n" +
+                  say("usb class audio allow") +
+                  usb_show("cut", "wc -c < /root/usb.log; head -1 /root/usb.log; "
+                                  "tail -8 /root/usb.log | grep -c ' class audio allow$'; stat -c %a /root/usb.log") +
                   "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
         lines, finished = session(script)
         seen = answers(lines)
@@ -46575,6 +46581,11 @@ while True:
         check("4 lines of /root/usb.policy are no rule" in said and "1 lines of /root/usb.policy are no rule" in said,
               "a line that is no rule is left out and counted, and so is a rule past the 64 a policy keeps",
               repr(said)[:400])
+        cut = seen.get("cut", {}).get("out", [])
+        check(len(cut) == 4 and cut[0].strip().isdigit() and 30000 < int(cut[0]) < 40000 and
+              cut[1].startswith("old line ") and cut[1] != "old line 00000 " + "x" * 40 and
+              cut[2] == "1" and cut[3] == "600",
+              "a log past 64 KiB is cut to its newer half, keeps the newest line, and is root's alone", repr(cut))
         check(seen.get("usb allow 2222:2222/T", {}).get("status") == 1 and
               "64 rules at most" in "\n".join(seen.get("usb allow 2222:2222/T", {}).get("out", [])),
               "an allow past the 64 rules is refused", repr(seen.get("usb allow 2222:2222/T")))
