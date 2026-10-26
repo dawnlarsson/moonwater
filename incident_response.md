@@ -727,6 +727,56 @@ residual). The `sudo` switch's enforcement (the CLI's own root check, which must
 distinguish a bowl's namespace-root from the test harness's `unshare -Urmnu`) is
 a separate change in `host.c` and is not in this entry.
 
+### MW-2026-042: a bowl's guest could have the host's files copied into its own configuration
+
+| | |
+|---|---|
+| Status | Fixed on the worktree branch, 2026-10-26; awaiting cherry-pick to main |
+| Class | Link following: a path inside a guest tree resolved by the host, read and written into the guest |
+| Attacker | A guest: a bowl archive from a mirror, or whatever runs as root inside a bowl, that plants a link at one of the files the bowl rewrites |
+| Reachable | `bowl --isolated ROOT ...`, `bowl setup`, the landing of a tree (`bowl_configure`, `bowl_write_resolv`), src/bowl.c |
+
+**What happened.** The bowl rewrites a guest's `/etc/hosts` (an isolated entry
+keeps the guest's own and adds the machine's line), `/etc/pacman.d/mirrorlist`,
+`/etc/pacman.conf`, `/etc/apk/repositories` and the Nix seed, and reads each
+before it writes. The reads joined the root onto the path (`/bowls/x` +
+`/etc/hosts`) and gave the string to `file_slurp` or `file_read_once_at`, so
+the *host* resolved it. An absolute link in the guest (`/etc/hosts ->
+/root/wifi`, `/etc/shadow`, `/root/link.key`) named the host's file. The write
+is safe (the parent is opened without following a link and the new file is
+renamed over the name), but what it wrote was the host file's first four
+kilobytes with the machine's line after it: the host's file, in a copy of mode
+0644 inside the guest, readable by every program in the guest. The same read
+was a blocking open, so a FIFO at the name held the verb.
+
+**Reproduced.** `/bowls/x/etc/hosts -> /root/hostsecret` (a host file holding
+`secret-from-the-host`), then `bowl --isolated /bowls/x /bin/true`: the guest's
+`/etc/hosts` reads `secret-from-the-host` and `127.0.1.1 box`. With a FIFO at
+the name the run ends at its limit (124). Nothing else was needed: a guest
+that can make a link in its own tree.
+
+**The fix.** `bowl_slurp_in_root` opens the path with `bowl_open_in_root`
+(absolute links resolve inside the guest, nothing climbs above it: the rule
+`bowl_has` and the program lookups already keep), nonblocking, and reads it
+only when it is a regular file. The six reads use it with `file_slurp`'s
+capacity. A name the guest does not have inside itself is a file that is not
+there. A hosts file past the room it is read into is no longer written back
+cut (it is left as it is).
+
+**Tests that fail without the fix.** The cli lane (`sh test/run cli`,
+`--harness moonwater_cli`), the rows after "a FIFO at /etc/resolv.conf": the
+guest's hosts file holds no line of the host's and starts with the machine's
+own `127.0.0.1 localhost`, and the FIFO run does not end 124. Red on the parent
+shell, green after. Commits: fdbd44d0 (the read; aab14b5a on the worktree branch), 10773ac5 (the cut write).
+
+**Still open.** The other reads of the guest are in-root already
+(`bowl_open_in_root`: programs, the unpacked archive's markers); the writes
+open the parent without following a link. The bowl's configuration files are
+read once and written once, with no lock against a guest that swaps a
+directory for a link between the two; the write's parent is opened without
+following, so the swap can only send a write to a different name inside the
+tree it already owns.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
