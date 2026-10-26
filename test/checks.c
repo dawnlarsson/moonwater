@@ -115326,6 +115326,51 @@ static fn check_registry(void)
         }
         check("registry: more than the six new rows are plain, and no two rows are labelled alike", plain >= 6 && !labels_equal);
 
+        /* The keyboard row's menu names each layout once; the help names the other spellings of three as well
+           (gb, sv and nb are uk, se and no: host.c's locale_keyboards and the compositor's table take both). A
+           layout the help names that the menu does not is one of those three with its twin in the menu, and
+           every word of the menu is in the help. */
+        {
+                const struct settings_row address_to row = null;
+                positive menu = 0, named = 0, aliases = 0;
+                bool menu_in_help = true, others_twinned = true;
+                string_address spelt[] = {(string_address) "gb", (string_address) "sv", (string_address) "nb"};
+                string_address twin[] = {(string_address) "uk", (string_address) "se", (string_address) "no"};
+
+                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                        row = string_equals((string_address)settings_rows[at].label, (string_address) "Keyboard") ? &settings_rows[at] : row;
+                check("registry: the keyboard row is found", row && row->choices && row->help);
+                for (const char address_to word = row ? row->choices : ""; *word; menu++)
+                {
+                        p8 one[8];
+                        positive size = (positive)(string_first_of_or_end((string_address)word, ' ') - (string_address)word);
+
+                        string_copy_bounded(one, (string_address)word, size < sizeof(one) ? size + 1 : sizeof(one));
+                        menu_in_help &= setting_place(row->help, (string_address)one) >= 0;
+                        word += size + (word[size] == ' ');
+                }
+                for (const char address_to word = row ? row->help : ""; *word && *word != '['; named++)
+                {
+                        p8 one[8];
+                        positive size = (positive)(string_first_of_or_end((string_address)word, ' ') - (string_address)word);
+
+                        string_copy_bounded(one, (string_address)word, size < sizeof(one) ? size + 1 : sizeof(one));
+                        if (setting_place(row->choices, (string_address)one) < 0)
+                        {
+                                bool twinned = false;
+
+                                aliases++;
+                                for (positive at = 0; at < 3; at++)
+                                        twinned |= string_equals((string_address)one, spelt[at]) && setting_place(row->choices, twin[at]) >= 0;
+                                others_twinned &= twinned;
+                        }
+                        word += size + (word[size] == ' ');
+                }
+                check("registry: every layout the keyboard menu names is in its help", menu && menu_in_help);
+                check("registry: the help names only gb, sv and nb besides, each beside its twin in the menu",
+                      others_twinned && aliases == 3 && named == menu + aliases);
+        }
+
         /* The longest verb that the words start with is the row. */
         {
                 string_address delay[] = {(string_address) "canvas", (string_address) "cursor", (string_address) "shake", (string_address) "delay", (string_address) "500"};

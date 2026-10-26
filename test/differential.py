@@ -47808,6 +47808,17 @@ while True:
               "every row of the settings table is a row of the pages", repr([row for row in table_rows if row not in on_pages][:4]))
         check(all(row in in_readme for row in table_rows),
               "and every one has its row in the README, word for word", repr([row for row in table_rows if row not in in_readme][:4]))
+        #       The keyboard row of that table is the layouts of the keyboard table (host.c, asked as keyboard list):
+        #       its help names every one, and its menu names each layout once, leaving out gb, sv and nb, which
+        #       are the same layouts as uk, se and no under their country's name.
+        keyboard_row = re.search(r'"Keyboard", .*?\{"keyboard"\}, "((?:[a-z]{2} ?)+)", 0, null,\s*\.usage = "[^"]*",\s*'
+                                 r'\.help = "([^"]*)"', registry_source, re.S)
+        menu = keyboard_row.group(1).split() if keyboard_row else []
+        helped = [word for word in keyboard_row.group(2).split() if not word.startswith("[")] if keyboard_row else []
+        check(len(layouts) == 13 and sorted(helped) == sorted(layouts) and set(menu) < set(layouts) and
+              set(layouts) - set(menu) == {"gb", "sv", "nb"} and len(menu) == len(set(menu)),
+              "the keyboard row's help names the layouts keyboard list does, and its menu all but the spellings gb, sv and nb",
+              repr((layouts, menu, helped)))
         markers = set(re.findall(r'\{null, "@(\w+)", null, \'r\'\}', host_source))
         check({usage.split()[0] for usage, _ in table_rows} <= markers,
               "every verb of the table has its marker on the main page", repr(sorted({u.split()[0] for u, _ in table_rows} - markers)))

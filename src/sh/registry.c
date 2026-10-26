@@ -130,6 +130,8 @@ struct settings_row
 static const struct settings_row settings_rows[] = {
     {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0, null,
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
+    //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
+    //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
     {null, "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it", 0, null,
      .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it [us]"},
     SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
