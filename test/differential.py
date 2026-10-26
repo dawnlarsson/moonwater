@@ -47439,6 +47439,13 @@ while True:
         check(clock_rows and all(command in readme_commands for command in clock_rows),
               "the README has a line for every row of the time, timezone, ntp, keyboard and name pages",
               [command for command in clock_rows if command not in readme_commands])
+        #       The gate above reads one way: a page row the README lacks is a verb nobody reads about.
+        #       The usb page is also asked of the README row by row, so a row added to the page is
+        #       written in the README too (usb apply was on the page and not in the README).
+        usb_page = page_rows(seen.get("help usb", {"out": []})["out"])
+        check(len(usb_page) >= 5 and all(row in in_readme for row in usb_page),
+              "every row of the usb page is a row of the README, word for word",
+              "missing from the README: %r" % [row for row in usb_page if row not in in_readme])
         #       The settings table (src/sh/registry.c) is where a setting is written once: its row of the
         #       pages and its line in the README are asked of it, each setting the window lists is a row
         #       of it and the window keeps no list of its own, and a verb it names has its marker on the
