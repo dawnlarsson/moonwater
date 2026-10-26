@@ -11,8 +11,9 @@
         bottom or top band runs left to right, with the tray at the right end and
         the tabs centred in what the tray leaves; a left or right band runs top to
         bottom, with the tray at the bottom, its clock on two rows (hour, then
-        minute) and the battery above them. A band on a side has no titles: the
-        font has no rotation, so its tabs are shapes with their marks.
+        minute) and the battery above them. A band on a side writes its titles
+        turned a quarter, the tops of the letters toward the middle of its
+        output or toward the edge it is on, as `taskbar text` says.
 
         Every rectangle here is on the output and in device pixels. The painting
         works in the band's own coordinates (the pixels start at its top left) and
@@ -30,6 +31,7 @@ static struct taskbar_state
         char battery[BATTERY_NAME];      // the settings' word: "" or "auto" for the first battery found, "none", or a name
         int battery_item;                       // the battery is shown: its row is not none and a battery was read
         int battery_percent, battery_charging;  // what it read
+        int edge;                               // a side band's letters have their tops toward its edge, not the middle
 } taskbar = {1, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
@@ -340,6 +342,84 @@ static void taskbar_text_line(const struct taskbar_view *view, int bx, int by, i
 }
 
 /*
+        Which way a band at position turns its text: none on a bottom or top
+        band, and on a side the way that puts the tops of the letters toward
+        the middle of the output, or toward the edge the band is on when
+        `taskbar text edge` says so. A left band's middle is to its right.
+*/
+static unsigned int taskbar_turn(unsigned int position)
+{
+        if (!taskbar_vertical(position))
+                return 0;
+        return (position == TASKBAR_LEFT) != (taskbar.edge != 0) ? FONT_TOPS_RIGHT : FONT_TOPS_LEFT;
+}
+
+/*
+        A text cut to room pixels as the settings cut a label: whole when it
+        fits, else the longest beginning that ends before a character and fits
+        with "..." after it, found by halving (a beginning grows with its
+        length), else its first character alone. Written to fitted; answers
+        its length.
+*/
+static positive taskbar_fit(const struct taskbar_view *view, const font_face address_to const address_to faces,
+                            const char *text, p32 em, int room, char *fitted, positive capacity)
+{
+        positive length = string_length((string_address)text), low = 1, high, best = 0, one = 1;
+
+        length = length + 4 > capacity ? capacity - 4 : length;
+        memory_copy(fitted, text, length);
+        if (length <= 1 || (int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16) <= room)
+                return length;
+        high = length - 1;
+        while (low <= high)
+        {
+                positive middle = (low + high) / 2, at = middle;
+
+                while (at && ((unsigned char)text[at] & 0xc0) == 0x80)
+                        at--;
+                memory_copy(fitted, text, at);
+                memory_copy(fitted + at, "...", 3);
+                if (at && (int)(font_extent(view->engine, faces, 1, (const p8 address_to)fitted, at + 3, em, 0) >> 16) <= room)
+                        best = at, low = middle + 1;
+                else
+                        high = middle - 1;
+        }
+        memory_copy(fitted, text, length);
+        if (best)
+        {
+                memory_copy(fitted + best, "...", 3);
+                return best + 3;
+        }
+        while (one < length && ((unsigned char)text[one] & 0xc0) == 0x80)
+                one++;
+        return one;
+}
+
+/*
+        One line of text in a slot of a band on a side, turned as taskbar_turn
+        says: laid out as a bottom band lays a slot's text, along the slot's
+        length and in the middle of its thickness, and turned onto it. What is
+        longer than the slot less the margin either end (the room above and
+        below a capital) is cut to fit.
+*/
+static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by, int bw, int x, int y, int width,
+                                int height, const char *text, unsigned int ink, unsigned int ground)
+{
+        const font_face address_to faces[1] = {view->face};
+        p32 em = (p32)(width * 11 / 20) << 6;
+        font_metrics grid = font_metrics_at(view->face, em);
+        font_target here = {view->pixels + (long)(y - by) * bw + (x - bx), (positive)bw, width, height};
+        char fitted[WINDOWS_TITLE + 4];
+        int capital = (int)((grid.cap_height + 32768) >> 16), pad;
+        positive length = taskbar_fit(view, faces, text, em, height - (width - capital), fitted, sizeof(fitted));
+
+        pad = (height - (int)(font_extent(view->engine, faces, 1, (const p8 address_to)fitted, length, em, 0) >> 16)) / 2;
+        font_draw_turned(view->engine, faces, 1, (const p8 address_to)fitted, length, em, 0, taskbar_turn(view->position),
+                         &here, (b32)(pad > 0 ? pad : 0) << 16, (width - grid.cell_height) / 2 + grid.baseline, ink,
+                         ground);
+}
+
+/*
         A tab is glass: the blurred scene under it (view->glass, the rectangle
         gx, gy, gw wide) made more vivid and tinted toward its own side of
         lightness. Answers what it came to in its middle, which its text stands
@@ -471,13 +551,12 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                                    height, at, view->marks[at]);
                         ink = window_contrast(ground);
 
-                        // A band on a side has no titles: the font has no rotation.
-                        if (!lay.vertical)
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
-                                                  view->marks[at] & COMPOSITOR_TAB_LIT    ? ink
-                                                  : view->marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 110)
-                                                                                          : window_mix(ground, ink, 170),
-                                                  ground);
+                        (lay.vertical ? taskbar_text_turned : taskbar_text_line)(
+                            view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
+                            view->marks[at] & COMPOSITOR_TAB_LIT    ? ink
+                            : view->marks[at] & COMPOSITOR_TAB_AWAY ? window_mix(ground, ink, 110)
+                                                                    : window_mix(ground, ink, 170),
+                            ground);
                 }
         }
 
@@ -648,4 +727,11 @@ static void taskbar_settings_set(const char *position, const char *display, cons
 static int taskbar_display_all(void)
 {
         return taskbar.all;
+}
+
+// `taskbar text`: edge turns a side band's letters' tops toward the edge it is on, else toward the middle.
+static void taskbar_text_set(int edge)
+{
+        taskbar.edge = edge != 0;
+        taskbar.stale = 1;
 }

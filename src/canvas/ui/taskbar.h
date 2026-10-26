@@ -96,6 +96,7 @@ static unsigned int taskbar_position(void);
 static void taskbar_position_default(unsigned int position);
 static void taskbar_settings_set(const char *position, const char *display, const char *tune);
 static int taskbar_display_all(void);
+static void taskbar_text_set(int edge);
 
 #else
 
@@ -126,6 +127,7 @@ static inline void taskbar_position_default(unsigned int position) { (void)posit
 static inline void taskbar_settings_set(const char *position, const char *display, const char *tune)
 { (void)position, (void)display, (void)tune; }
 static inline int taskbar_display_all(void) { return 0; }
+static inline void taskbar_text_set(int edge) { (void)edge; }
 
 #endif
 

@@ -44582,7 +44582,9 @@ def harness_moonwater_cli(argv):
                 "latency", "latency reset", "latency bogus", "latency reset extra",
                 "debug", "debug extra", "taskbar", "taskbar position", "taskbar position top",
                 "taskbar position bottom", "taskbar position sideways", "taskbar display all",
-                "taskbar display primary", "taskbar display", "taskbar display sideways", "taskbar bogus"]
+                "taskbar display primary", "taskbar display", "taskbar display sideways", "taskbar bogus",
+                "taskbar text", "taskbar text edge", "taskbar text center", "taskbar text sideways",
+                "taskbar text edge extra"]
         #       What each vector of the walk answers, as a class: 0 it did what was
         #       asked or showed it, 1 it refused or failed in words, 2 it was not
         #       a command and printed its usage. A signal, a hang or any other
@@ -44886,15 +44888,17 @@ def harness_moonwater_cli(argv):
             walk_classes[vector] = 2
         for vector in [
             'latency', 'latency reset', 'taskbar position sideways', 'taskbar display sideways',
+            'taskbar text sideways',
         ]:
             walk_classes[vector] = 1
         for vector in [
-            'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus',
+            'latency bogus', 'latency reset extra', 'debug extra', 'taskbar bogus', 'taskbar text edge extra',
         ]:
             walk_classes[vector] = 2
         for vector in [
             'debug', 'taskbar', 'taskbar position', 'taskbar position top', 'taskbar position bottom',
-            'taskbar display all', 'taskbar display primary', 'taskbar display',
+            'taskbar display all', 'taskbar display primary', 'taskbar display', 'taskbar text', 'taskbar text edge',
+            'taskbar text center',
         ]:
             walk_classes[vector] = 0
         # State the mode rules act on: neither file, then a zone with no mode.
@@ -46840,6 +46844,8 @@ while True:
              "sensitivity 150 percent", "sensitivity 100 percent"),
             ("mouse acceleration", "mouse.acceleration", "off", "off", ["maybe", "0", '""'],
              "acceleration off", "acceleration on"),
+            ("taskbar text", "taskbar.text", "edge", "edge", ["middle", "Center", "left", '""', "edge,center"],
+             "text edge", "text center"),
         ]
 
         def plain_step(label, command):
@@ -47957,7 +47963,8 @@ while True:
             "canvas scale 2", "canvas modes preferred",
             "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
             "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
-            "mouse sensitivity 150", "mouse acceleration off", "usb lock", "usb allow 1-1", "usb class storage allow",
+            "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
+            "usb lock", "usb allow 1-1", "usb class storage allow",
             "usb forget 1-1", "usb log", "usb apply", "usb watch", "usb sideways", "usb class")))
         lines, finished = session(script, nobody=True)
         seen = answers(lines)
@@ -47996,6 +48003,8 @@ while True:
             "keyboard repeat rate off": (1, "moonwater keyboard needs root"),
             "mouse sensitivity 150": (1, "moonwater mouse needs root"),
             "mouse acceleration off": (1, "moonwater mouse needs root"),
+            "taskbar text edge": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+            "taskbar text sideways": (1, "taskbar text is center or edge, not sideways"),
             "usb lock": (1, "moonwater usb needs root"), "usb allow 1-1": (1, "moonwater usb needs root"),
             "usb class storage allow": (1, "moonwater usb needs root"), "usb forget 1-1": (1, "moonwater usb needs root"),
             "usb log": (1, "moonwater usb needs root"), "usb apply": (1, "moonwater usb needs root"),

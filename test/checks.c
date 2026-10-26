@@ -114860,11 +114860,14 @@ static int band_glass(void *context, int x, int y, int width, int height)
     return width;
 }
 
-/* The view of a band at a position with the three tabs, its pixels cleared. */
-static struct taskbar_view band_view(unsigned int position)
+/* The view of a band at a position with the three tabs, its pixels cleared: titles, else the three above, which its
+   tabs fit. */
+static struct taskbar_view band_view(unsigned int position, const char *const *titles)
 {
     struct taskbar_view view;
     static unsigned char lengths[3];
+
+    titles = titles ? titles : band_titles;
 
     memory_zero(&view, sizeof(view));
     memory_zero(band_pixels, sizeof(band_pixels));
@@ -114881,8 +114884,21 @@ static struct taskbar_view band_view(unsigned int position)
     view.marks = band_marks;
     view.lengths = lengths;
     for (unsigned int at = 0; at < 3; at++)
-        view.titles[at] = band_titles[at], lengths[at] = compositor_title_length(band_titles[at], WINDOWS_TITLE);
+        view.titles[at] = titles[at], lengths[at] = compositor_title_length(titles[at], WINDOWS_TITLE);
     return view;
+}
+
+/* A band at position with its tabs fitted to titles, drawn into into: written with them, or with none for bare (the
+   glass alone, the tabs the same). */
+static void band_draw(unsigned int position, const char *const *titles, int bare, unsigned int *into)
+{
+    struct taskbar_view view = band_view(position, titles);
+    int rect[4];
+
+    for (unsigned int at = 0; bare && at < 3; at++)
+        view.titles[at] = "";
+    taskbar_draw(&view, 7, band_glass, null, rect);
+    memory_copy(into, band_pixels, sizeof(band_pixels));
 }
 
 static p64 band_hash(p64 hash)
@@ -114896,12 +114912,44 @@ static p64 band_hash(p64 hash)
 /* A bottom and a top band are the bytes they were before a band on a side could turn its text. */
 #define BAND_UPRIGHT 15291459019951173845ull
 
+/* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
+   would not fit, and what fits whole is not cut. */
+static int band_fit_ok(const struct taskbar_view *view, const char *title, int room)
+{
+    const font_face address_to faces[1] = {view->face};
+    p32 em = 11 << 6;
+    char fitted[WINDOWS_TITLE + 4], longer[WINDOWS_TITLE + 4];
+    positive length = string_length((string_address)title), n = taskbar_fit(view, faces, title, em, room, fitted, sizeof(fitted)), next;
+    int width = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)fitted, n, em, 0) >> 16);
+
+    if (n == length && !memory_compare(fitted, title, length))
+        return width <= room || length <= 1;
+    if (n > 3 && !memory_compare(fitted + n - 3, "...", 3))
+    {
+        next = n - 3 + 1;
+        while (next < length && ((unsigned char)title[next] & 0xc0) == 0x80)
+            next++;
+        memory_copy(longer, title, next);
+        memory_copy(longer + next, "...", 3);
+        return width <= room && !memory_compare(fitted, title, n - 3) && ((unsigned char)title[n - 3] & 0xc0) != 0x80 &&
+               (next >= length || (int)(font_extent(view->engine, faces, 1, (const p8 address_to)longer, next + 3, em, 0) >> 16) > room);
+    }
+    // The first character alone, when no beginning fits with the dots.
+    memory_copy(longer, title, n);
+    memory_copy(longer + n, "...", 3);
+    return n < length && !memory_compare(fitted, title, n) &&
+           (int)(font_extent(view->engine, faces, 1, (const p8 address_to)longer, n + 3, em, 0) >> 16) > room;
+}
+
 static void check_taskbar_text(string_address face_path)
 {
     static p8 bytes[1 << 19];
+    static unsigned int lit[BAND_W * COMPOSITOR_PANEL], bare[BAND_W * COMPOSITOR_PANEL];
+    static const char *const sides[3] = {"TTTTTTTT", "shell", "AVATAR To Wa: a title too long"};
+    static const char *const cuts[4] = {"AVATAR To Wa: a title too long", "Settings \xe2\x80\x94 T\xc3\xa4st",
+                                        "\xc3\xa5\xc3\xa4\xc3\xb6\xc3\xa5\xc3\xa4\xc3\xb6\xc3\xa5\xc3\xa4\xc3\xb6 W", "W"};
     bipolar got = face_path ? file_slurp_regular_at(AT_FDCWD, face_path, bytes, sizeof(bytes), 0) : -1;
-    p64 hash = 0xcbf29ce484222325ull;
-    int rect[4];
+    int rect[4], turns = 1, inked = 1, inside = 1, tall = 1, tops = 1, fits = 1, sized = 1, flat[2] = {0, 0};
 
     if (got <= 0 || font_load(&band_face, bytes, (positive)got, 0) != 0)
     {
@@ -114909,18 +114957,107 @@ static void check_taskbar_text(string_address face_path)
         return;
     }
     font_start(&band_engine, band_atlas, 128, 128);
-    for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_TOP; position++)
+    for (int edge = 0; edge < 2; edge++)
     {
-        struct taskbar_view view = band_view(position);
+        p64 hash = 0xcbf29ce484222325ull;
 
-        taskbar_settings_set(position == TASKBAR_TOP ? "top" : "bottom", "primary", "battery none\n");
-        check("taskbar text: a bottom and a top band draw their tabs", taskbar_draw(&view, 7, band_glass, null, rect) == 1);
-        hash = band_hash(hash);
+        taskbar_text_set(edge);
+        for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_TOP; position++)
+        {
+            struct taskbar_view view = band_view(position, null);
+
+            taskbar_settings_set(position == TASKBAR_TOP ? "top" : "bottom", "primary", "battery none\n");
+            check("taskbar text: a bottom and a top band draw their tabs", taskbar_draw(&view, 7, band_glass, null, rect) == 1);
+            hash = band_hash(hash);
+        }
+        if (hash != BAND_UPRIGHT)
+            string_format(log, "  the bottom and top bands hash to %p\n", (positive)hash);
+        check("taskbar text: a bottom and a top band are the bytes they were before a side band could turn its text, with center and with edge",
+              hash == BAND_UPRIGHT);
+        // The way a band turns: center puts a left band's tops to its right, toward the middle, and a right band's to
+        // its left; edge the other way; a bottom or top band turns nothing.
+        turns &= taskbar_turn(TASKBAR_LEFT) == (edge ? FONT_TOPS_LEFT : FONT_TOPS_RIGHT) &&
+                 taskbar_turn(TASKBAR_RIGHT) == (edge ? FONT_TOPS_RIGHT : FONT_TOPS_LEFT) && !taskbar_turn(TASKBAR_BOTTOM) &&
+                 !taskbar_turn(TASKBAR_TOP);
     }
-    if (hash != BAND_UPRIGHT)
-        string_format(log, "  the bottom and top bands hash to %p\n", (positive)hash);
-    check("taskbar text: a bottom and a top band are the bytes they were before a side band could turn its text",
-          hash == BAND_UPRIGHT);
+    check("taskbar text: center turns a side band's tops toward the middle of the output, edge toward its edge, a bottom or top band none", turns);
+
+    /* A band on each side with each word, after a bottom one: every tab is written in (the band with its titles is not
+       the band without them there), and nothing is written outside the tabs; the text of a tab is taller than it is
+       wide, and as long and as thick as the bottom band's of the same title is wide and high, to a pixel; and in a tab
+       of capital Ts the column with the most ink, their bars, is on the side the tops face: the right for a left band
+       with center and a right band with edge. */
+    for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position += position == TASKBAR_BOTTOM ? 2 : 1)
+        for (int edge = 0; edge < 2; edge++)
+        {
+            static const char *const words[4] = {"bottom", "top", "left", "right"};
+            struct taskbar_view view;
+            int bx, by, bw, bh, slot[3][4], tops_right = (position == TASKBAR_LEFT) != edge;
+
+            taskbar_settings_set(words[position], "primary", "battery none\n");
+            taskbar_text_set(edge);
+            band_draw(position, sides, 0, lit);
+            band_draw(position, sides, 1, bare);
+            view = band_view(position, sides);
+            taskbar_band(&view, &bx, &by, &bw, &bh);
+            for (int at = 0; at < 3; at++)
+            {
+                taskbar_slot(&view, at, &slot[at][0], &slot[at][1], &slot[at][2], &slot[at][3]);
+                slot[at][0] -= bx, slot[at][1] -= by;
+            }
+            for (int y = 0; y < bh; y++)
+                for (int x = 0; x < bw; x++)
+                {
+                    int in = 0;
+
+                    for (int at = 0; at < 3; at++)
+                        in |= x >= slot[at][0] && x < slot[at][0] + slot[at][2] && y >= slot[at][1] && y < slot[at][1] + slot[at][3];
+                    inside &= in || lit[y * bw + x] == bare[y * bw + x];
+                }
+            for (int at = 0; at < 3; at++)
+            {
+                int left = bw, right = -1, top = bh, bottom = -1, column[BAND_W] = {0}, most = 0;
+
+                for (int y = slot[at][1]; y < slot[at][1] + slot[at][3]; y++)
+                    for (int x = slot[at][0]; x < slot[at][0] + slot[at][2]; x++)
+                    {
+                        int ink = look_luma(lit[y * bw + x]) - look_luma(bare[y * bw + x]);
+
+                        ink = ink < 0 ? -ink : ink;
+                        if (!ink)
+                            continue;
+                        left = x < left ? x : left, right = x > right ? x : right;
+                        top = y < top ? y : top, bottom = y > bottom ? y : bottom;
+                        column[x - slot[at][0]] += ink;
+                    }
+                inked &= right >= 0;
+                if (position == TASKBAR_BOTTOM)
+                {
+                    if (at == 1)
+                        flat[0] = right - left, flat[1] = bottom - top;
+                    continue;
+                }
+                tall &= bottom - top > right - left;
+                if (at == 1)
+                    sized &= bottom - top - flat[0] <= 1 && flat[0] - (bottom - top) <= 1 && right - left - flat[1] <= 1 &&
+                             flat[1] - (right - left) <= 1;
+                for (int x = 1; x < slot[at][2]; x++)
+                    most = column[x] > column[most] ? x : most;
+                if (!at)
+                    tops &= tops_right ? most + slot[at][0] > (left + right) / 2 : most + slot[at][0] < (left + right) / 2;
+            }
+            for (unsigned int at = 0; position != TASKBAR_BOTTOM && at < sizeof(cuts) / sizeof(cuts[0]); at++)
+                for (int room = 0; room < 240; room += 3)
+                    fits &= band_fit_ok(&view, cuts[at], room);
+        }
+    check("taskbar text: every tab of a band on a side is written in, both sides, both ways", inked);
+    check("taskbar text: and nothing is written outside its tabs", inside);
+    check("taskbar text: a side tab's text is taller than it is wide", tall);
+    check("taskbar text: and it is the size of the bottom band's: as long as that is wide and as thick as that is high, to a pixel",
+          sized && flat[0] > flat[1] && flat[1] > 4);
+    check("taskbar text: the bars of a tab of capital Ts are on the side their tops face: right for a left band's center and a right band's edge", tops);
+    check("taskbar text: a title is cut to fit its tab with dots after a whole character, the longest that fits, or whole when it fits", fits);
+    taskbar_text_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
 }
 

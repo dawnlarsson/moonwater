@@ -5222,7 +5222,8 @@ static void compositor_input_settings_set(const char *shake, const char *shake_d
 }
 
 /*
-        The taskbar's settings: its position, the display it is on and its battery, as the files in /root hold them.
+        The taskbar's settings: its position, the display it is on, its battery and which way a side band's text faces
+        (the place of the word kept among center and edge, the row's standard when none is), as the files in /root hold them.
         Read when the compositor starts and again when a file of them is written. A band that moves is damaged where it
         was as well as where it is now, and a window that fills a screen's room fills the room the band leaves now.
 */
@@ -5230,15 +5231,19 @@ static void compositor_room_follow(void);
 
 static void compositor_taskbar_settings_read(void)
 {
-        char position[16], display[16], tune[512];
+        char position[16], display[16], tune[512], text[16];
         struct taskbar_view view = compositor_taskbar_view();
         int was[4], now[4];
+        long edge;
 
         compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
+        compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
+        compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
         taskbar_band(&view, &was[0], &was[1], &was[2], &was[3]);
         taskbar_settings_set(position, display, tune);
+        taskbar_text_set(edge == 1);
         view = compositor_taskbar_view();
         taskbar_band(&view, &now[0], &now[1], &now[2], &now[3]);
         if (was[0] != now[0] || was[1] != now[1] || was[2] != now[2] || was[3] != now[3])

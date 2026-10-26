@@ -82,6 +82,7 @@
 #define SETTING_ACCELERATION_PATH "/root/mouse.acceleration"
 #define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
 #define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
+#define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
 
 struct settings_row
 {
@@ -187,6 +188,14 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
                       .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
                       .usage = "taskbar display [primary|all]", .help = "the display the taskbar is drawn on: the one Canvas draws on [primary]"),
+    //  The letters' tops toward the middle by default: a side band is then the bottom band stood on its end, its titles
+    //  facing the round corners of its tabs as the bottom band's do. Flipping the default is this row's standard, its
+    //  help and the README's line; the compositor takes the standard from here, and a file that says default follows it.
+    SETTING_PLAIN_ROW(null, "Side taskbar text faces", SETTINGS_CHOICE, 0, ("taskbar", "text"), "text ", "center edge",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_TEXT_PATH, .standard = "center",
+                      .need = "how Canvas draws", .refusal = "taskbar text is center or edge, not %s\n",
+                      .usage = "taskbar text [center|edge]",
+                      .help = "on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]"),
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
