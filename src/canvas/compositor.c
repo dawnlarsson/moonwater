@@ -6029,10 +6029,14 @@ static void compositor_inputs_watch(void)
         behind: a swipe is sixty to a hundred and fifty events a second, a
         wheel that reports in 120ths sends eight to a notch, and a program
         that is busy for a moment had the rest of the swipe cut off where the
-        ring filled. Half a ring behind, the event joined to is one the
-        program is not reading as it is changed; and an event holds at most
-        COMPOSITOR_WHEEL_JOIN, since a program bounds what one event may do
-        (a terminal scrolls a screen at most).
+        ring filled. A program takes an event's number and leaves 0 where it
+        was (windows_event), so a turn is added only to a number that is
+        still there, in one compare and swap: one the program takes before
+        the add is not added to, and the turn goes in an event of its own,
+        and one it takes after has the turn in it. Below half a ring every
+        turn is an event of its own, as it always was; and an event holds at
+        most COMPOSITOR_WHEEL_JOIN, since a program bounds what one event may
+        do (a terminal scrolls a screen at most).
 */
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
@@ -6057,12 +6061,15 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
 
         if (type == WINDOW_EVENT_WHEEL && used >= WINDOWS_EVENTS / 2 && used <= WINDOWS_EVENTS &&
             table->event_type[row][last] == WINDOW_EVENT_WHEEL && table->event_b[row][last] == b &&
-            table->event_flags[row][last] == flags && (table->event_a[row][last] < 0) == (a < 0) &&
-            (long)table->event_a[row][last] + a <= COMPOSITOR_WHEEL_JOIN &&
-            (long)table->event_a[row][last] + a >= -COMPOSITOR_WHEEL_JOIN)
+            table->event_flags[row][last] == flags)
         {
-                table->event_a[row][last] += a;
-                return 1;
+                int held = __atomic_load_n(&table->event_a[row][last], __ATOMIC_ACQUIRE);
+
+                if (held && (held < 0) == (a < 0) && (long)held + a <= COMPOSITOR_WHEEL_JOIN &&
+                    (long)held + a >= -COMPOSITOR_WHEEL_JOIN &&
+                    __atomic_compare_exchange_n(&table->event_a[row][last], &held, held + a, 0, __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                        return 1;
         }
 
         if (used >= WINDOWS_EVENTS)

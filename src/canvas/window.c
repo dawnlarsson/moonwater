@@ -1891,7 +1891,8 @@ static int windows_ready(const struct window_row *own)
         return __atomic_load_n(&own->table->shown[own->row], __ATOMIC_ACQUIRE) == own->table->frame[own->row];
 }
 
-// The next event, or false when there is none.
+// The next event, or false when there is none. Its number is taken and 0 left in its place, which tells the compositor
+// that joins a wheel's turns to the last unread one (compositor_post) that this one is read and no longer to be added to.
 static int windows_event(const struct window_row *own, struct window_event *event)
 {
         struct windows *table = own->table;
@@ -1902,7 +1903,7 @@ static int windows_event(const struct window_row *own, struct window_event *even
 
         event->type = table->event_type[row][at];
         event->flags = table->event_flags[row][at];
-        event->a = table->event_a[row][at];
+        event->a = __atomic_exchange_n(&table->event_a[row][at], 0, __ATOMIC_ACQ_REL);
         event->b = table->event_b[row][at];
         __atomic_store_n(&table->event_tail[row], tail + 1, __ATOMIC_RELEASE);
         return 1;

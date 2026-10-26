@@ -115936,6 +115936,26 @@ static void check_compositor_wheel(void)
     check("wheel: and a swipe turned back half way comes to nothing, ending the way it was turned last", sum == 0 && last < 0);
     table->event_tail[1] = table->event_head[1];
 
+    /*
+            The program takes an event's number before its tail moves on (windows_event leaves 0 in its place). A turn
+            that comes between the two is not added to the taken number, where the program would never see it: it is
+            an event of its own.
+    */
+    for (int notch = 0; notch < 40; notch++)
+        wheel_notch(1);
+    compositor_input_read(0);
+    {
+        unsigned int head = table->event_head[1], taken = (head - 1) % WINDOWS_EVENTS;
+        int number = __atomic_exchange_n(&table->event_a[1][taken], 0, __ATOMIC_ACQ_REL);
+
+        wheel_notch(1);
+        compositor_input_read(0);
+        check("wheel: a turn after the program took the last one's number is an event of its own, not lost in the taken one",
+              number > 0 && table->event_a[1][taken] == 0 && table->event_head[1] == head + 1 &&
+                  table->event_a[1][head % WINDOWS_EVENTS] == 120);
+    }
+    table->event_tail[1] = table->event_head[1];
+
     /* With no window under the pointer, and when the kernel had to drop what was not read in time. */
     compositor.pointer_x = 5;
     compositor.pointer_y = 5;
