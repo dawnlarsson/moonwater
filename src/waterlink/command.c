@@ -1466,10 +1466,14 @@ static b32 link_main(string_address address_to arguments, positive count)
         {
                 if (count == 3)
                         return link_status();
-                if (string_equals(arguments[3], "leave") &&
-                    (count == 5 ||
-                     (count == 6 && string_equals(arguments[5], "forget"))))
-                        return link_group_leave(arguments[4], count == 6);
+                //      leave is a word no group may be called, so a leave
+                //      that is not spelled group leave NAME [forget] is a
+                //      misspelt leave, and the page is what it is owed.
+                if (string_equals(arguments[3], "leave"))
+                        return count == 5 ||
+                                       (count == 6 && string_equals(arguments[5], "forget"))
+                                   ? link_group_leave(arguments[4], count == 6)
+                                   : host_usage();
                 if (count >= 4)
                         return link_group_join(arguments + 3, count - 3);
         }
