@@ -45404,6 +45404,24 @@ def harness_moonwater_cli(argv):
               any("File too large" in line for line in seen["power balanced"]["out"]),
               "a /root/tune longer than is read is not written back short", repr(seen))
 
+        # A /root/tune that is there and cannot be read is keys not known, and
+        # not no keys: a link planted at the name read as empty, was replaced by
+        # the one key and took the others with it. A file that is not there is
+        # the only empty one.
+        got = tuned("printf 'charge.limit 80\\n' > /root/tune.real; ln -s tune.real /root/tune\n" +
+                    say("power balanced") +
+                    "echo \"@@ link $(readlink /root/tune)\"; echo \"@@ real $(cat /root/tune.real)\"\n"
+                    "rm -f /root/tune /root/tune.real\n")
+        seen = answers(got)
+        check(seen["power balanced"]["status"] == 1 and "@@ link tune.real" in got and
+              "@@ real charge.limit 80" in got and
+              any("/root/tune" in line for line in seen["power balanced"]["out"]),
+              "a /root/tune that cannot be read is said and left as it is, not made the one key", repr(seen))
+        got = tuned(say("power balanced") + "echo \"@@ kept $(cat /root/tune)\"\n")
+        seen = answers(got)
+        check(seen["power balanced"]["status"] == 0 and "@@ kept power balanced" in got,
+              "and a /root/tune that is not there is the only empty one", repr(seen))
+
         # Four verbs at once each keep a value in /root/tune: it is read,
         # changed and written whole, and without the radio lock the last
         # writer's key was all that was left of the four.

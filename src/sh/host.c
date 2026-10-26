@@ -13134,6 +13134,11 @@ static bipolar tune_store(string_address key, string_address value)
         //      would be written back without the rest of it.
         if (got >= (bipolar)sizeof(text) - 1)
                 return -EFBIG;
+        //      No file is no keys. A file that is there and cannot be read (a
+        //      link planted at the name, a directory, a device) is keys not
+        //      known, and writing the one key over it dropped the rest.
+        if (got < 0 && got != -ENOENT)
+                return got;
         if (got < 0)
                 got = 0;
         while (host_line_next(text, (positive)got, address_of at, address_of start,
