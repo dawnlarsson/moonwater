@@ -107116,6 +107116,7 @@ static b32 settings_block_run(string_address first, string_address second,
 {
         string_address arguments[] = {"moonwater", first, second, third, fourth, null};
         positive count = 1;
+        p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
 
         b32 outcome;
 
@@ -107129,7 +107130,7 @@ static b32 settings_block_run(string_address first, string_address second,
 
         //      A change leaves its line for saving to finish, and nothing is
         //      saved here: end it, or the verdict lands on the same line.
-        outcome = host_settings_apply(address_of settings_block_slot, arguments, count);
+        outcome = host_settings_apply(address_of settings_block_slot, arguments, count, text);
         if (outcome == HOST_SETTINGS_CHANGED)
         {
                 string_format(log, "\n");
