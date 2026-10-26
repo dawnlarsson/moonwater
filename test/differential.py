@@ -49207,6 +49207,10 @@ PAIRS = [
     ("link on over", "link on", "link on", lambda: cat("/root/link").strip() == "on", ["link on", "link off"]),
     ("link off over", "link off", "link off", lambda: cat("/root/link").strip() == "off", ["link on"]),
     ("link port over", "link port 4001", "link port 4002", lambda: cat("/root/link.port").strip() in ("4001", "4002"), ["link port 4000"]),
+    ("usb allow/allow", "usb allow 1234:5678/AAA", "usb allow 1234:5678/BBB", lambda: says("usb", "1234:5678/AAA", "1234:5678/BBB")),
+    ("usb allow/deny", "usb allow 1234:5678/AAA", "usb deny 1234:5679/CCC", lambda: says("usb", "allow 1234:5678/AAA", "deny 1234:5679/CCC")),
+    ("usb forget/allow", "usb forget 1234:5678/AAA", "usb allow 1234:5678/BBB", lambda: says("usb", "1234:5678/BBB") and not says("usb", "1234:5678/AAA"), ["usb allow 1234:5678/AAA"]),
+    ("usb class/allow", "usb class hid allow", "usb allow 1234:5678/AAA", lambda: says("usb", "hid allow", "1234:5678/AAA")),
     ("wifi add/add", "wifi add neta passpass1", "wifi add netb passpass2", lambda: "neta" in cat("/root/wifi") and "netb" in cat("/root/wifi")),
     ("wifi add/same", "wifi add neta passpass1", "wifi add neta passpass2", lambda: cat("/root/wifi").count("neta") == 1),
     ("bluetooth add/add", "bluetooth add dev1", "bluetooth add dev2", lambda: "dev1" in cat("/root/bluetooth") and "dev2" in cat("/root/bluetooth")),
@@ -49342,7 +49346,7 @@ PYEOF
         lines, finished = session(script)
         races = [line.split(None, 3) for line in lines if line.startswith("@@race ")]
         reads = [line.split(None, 3) for line in lines if line.startswith("@@read ")]
-        check(finished and len(races) == 26 and len(reads) == 6,
+        check(finished and len(races) == 30 and len(reads) == 6,
               "every pair and every reader ran", (finished, len(races), len(reads), lines[-6:]))
         for found in races:
             check(len(found) > 2 and found[2] == "0",
@@ -73525,6 +73529,11 @@ def harness_state_cuts(argv):
         ("usb class", ["usb class hid allow"], "usb class storage allow", None),
         ("usb lock", ["usb class hid allow"], "usb lock", None),
         ("usb unlock", ["usb lock"], "usb unlock", None),
+        #   A whole id may name a device that is not plugged in, so the rules are
+        #   kept and dropped here without a controller.
+        ("usb allow", ["usb allow 1234:5678/AAA"], "usb allow 1234:5678/BBB", None),
+        ("usb deny", ["usb allow 1234:5678/AAA"], "usb deny 1234:5679/CCC", None),
+        ("usb forget", ["usb allow 1234:5678/AAA", "usb deny 1234:5679/CCC"], "usb forget 1234:5678/AAA", None),
         ("airplane on", ["airplane off"], "airplane on", None),
         ("airplane off", ["airplane on"], "airplane off", None),
         ("wifi add wpa2", ["wifi add oldnet oldpass11"], "wifi add plantnet passpass1 wpa2", b"passpass1"),
