@@ -1584,7 +1584,7 @@ static b32 link_dispatch(string_address address_to arguments, positive count)
 
 /*
         The verbs that change what the machine keeps end what they began when
-        the reader of their output has gone, as host_main's quiet verbs do:
+        the reader of their output has gone, as host_main's finishing verbs do:
         `link group lab SECRET | true` died of SIGPIPE at its first line, with
         the group not joined and the listener not started. The ones that carry
         a stream (a terminal, a command, push, pull, log, serve) keep the
@@ -1608,7 +1608,6 @@ static b32 link_main(string_address address_to arguments, positive count)
         if (ignored)
         {
                 log_flush();
-                log_failure_reset();
                 system_signal_action(13, previous, null, 8);
         }
         return answer;

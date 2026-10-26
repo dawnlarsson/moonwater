@@ -457,6 +457,34 @@ static bipolar host_open_state(bipolar directory, string_address path,
         return handle;
 }
 
+/* A stage published over a state name. The name is looked at again when the
+   stage is renamed onto it: one that was not there is published only if it
+   still is not (EEXIST: a creator that came between is not written over unseen),
+   and one that was there only if it is still the file the stage was made
+   against (EAGAIN: nor a replacement). For a word that is kept the later writer
+   is the one that stands, so the one that lost the race writes again, over what
+   is there now. Two commands at once that set one word -- name, dns, keyboard,
+   ntp server, canvas scale, mouse, link on, link port -- left the later of them
+   with "Resource temporarily unavailable", or "File exists" when the word was
+   not there yet, and its word unkept, one run in three. A name taken away
+   between the look and the rename (dns auto beside dns ADDRESS) is the same
+   race, once or twice; a directory that is not there answers the same and is
+   not asked sixteen times. Only the writers of a whole word come through here:
+   a file that is read, changed and written back is under its lock, and the
+   machine's key is made by a publish that refuses to replace. */
+static bipolar host_publish_again(string_address path, address_any bytes, positive length,
+                                  positive mode, bool sync, positive behavior)
+{
+        bipolar result = file_publish_with(path, bytes, length, mode, sync, behavior);
+
+        for (positive attempt = 0; attempt < 16 &&
+                                   (result == -EEXIST || result == -EAGAIN ||
+                                    (result == -ENOENT && attempt < 2));
+             attempt++)
+                result = file_publish_with(path, bytes, length, mode, sync, behavior);
+        return result;
+}
+
 /* Bytes over a state file, made if it is not there. A choice that has to
    survive the power going is synced: written beside itself under a name of
    its own, and renamed over the old one, so a crash or a signal part way (the
@@ -471,8 +499,8 @@ static bipolar host_write_file(string_address path, p8 address_to bytes,
         bipolar failed;
 
         if (sync)
-                return file_publish_with(path, bytes, length, mode, true,
-                                         FILE_STAGED_EXACT_MODE);
+                return host_publish_again(path, bytes, length, mode, true,
+                                          FILE_STAGED_EXACT_MODE);
 
         handle = host_open_state(AT_FDCWD, path, mode, FILE_WRITE);
         if (handle < 0)
@@ -492,7 +520,7 @@ static bipolar host_publish(string_address path, address_any bytes, positive len
                             positive mode)
 {
         file_stage_sweep(path);
-        return file_publish_bytes(path, bytes, length, mode, false);
+        return host_publish_again(path, bytes, length, mode, false, 0);
 }
 
 static bipolar host_write_text(string_address path, string_address text)
@@ -2204,6 +2232,8 @@ static b32 host_run(string_address address_to argv)
 
         if (child == 0)
         {
+                //      An ignored signal is ignored by what is exec'd as well.
+                (void)system_signal_install(13, 0, 0, 0, null);
                 // Through the launch decision every other exec here takes.
                 (void)shell_exec_file(argv[0], argv, pointer_vector_count(argv),
                                       file_environment_all());
@@ -4884,6 +4914,7 @@ static bipolar host_shell_start(string_address address_to argv, positive count,
         }
 
         system_signal_install(1, 0, 0, 0, null);
+        system_signal_install(13, 0, 0, 0, null);
         system_call_1(syscall(chdir), (positive)(string_address) "/root");
         (void)shell_exec_file(HOST_EVENT_SHELL, argv, count, host_event_environment());
         system_call_1(syscall(exit), 127);
@@ -24507,15 +24538,19 @@ static b32 host_window(string_address address_to arguments, positive count)
         what it does and nothing else (quiet) has its output set aside from
         its answer: standard output closed or full or a pipe whose reader has
         gone is no reason for `moonwater name` to say it failed after the name
-        was kept, or for `status | head` to die of SIGPIPE. That holds most
-        for a verb that changes something: it says a line while it works and
-        keeps what it changed after, the settings' list and the file TLS reads
-        after the line that names them, the usb watcher after the lock, so a
-        pipe closed at the line left the half it had done (`security block add
-        KEY | true` was kept in the image and never published). Only a verb
-        that starts processes of its own, or streams, keeps the signal as it
-        found it. The table is host_main's own, where the lane that works out
-        which applets can start a program reads the handlers it names.
+        was kept, or for `status | head` to die of SIGPIPE. A verb that changes
+        something (finish) is not killed by it either: it says a line while it
+        works and keeps what it changed after, the settings' list and the file
+        TLS reads after the line that names them, the usb watcher after the
+        lock, so a pipe closed at the line left the half it had done (`security
+        block add KEY | true` was kept in the image and never published). Its
+        answer is still what a lost write makes it, a status of 1, since what it
+        printed may be what was asked for; a quiet verb's is not. A verb that
+        starts a program puts the signal back before it execs it (host_run,
+        host_shell_start, link_serve_start), and one that streams or waits on a
+        person keeps it as it found it. The table is host_main's own, where the
+        lane that works out which applets can start a program reads the
+        handlers it names.
 */
 
 static b32 host_main()
@@ -24525,13 +24560,14 @@ static b32 host_main()
                 string_address verb;
                 b32 (*run)(string_address address_to arguments, positive count);
                 bool quiet;
+                bool finish;
         } host_verbs[] = {
             {"status", host_status_verb, true},
             {"help", host_help, true},
-            {"setup", host_setup, true},
+            {"setup", host_setup, false, true},
             // Reading needs nothing, and the kernel decides who may set a bound
             // event. init and exit still need root.
-            {"bind", host_bind, true},
+            {"bind", host_bind, false, true},
             {"canvas", host_canvas, false},
             {"desktop", host_desktop, false},
             {"settings", host_settings_window, false},
@@ -24539,28 +24575,28 @@ static b32 host_main()
             {"latency", host_latency, false},
             {"debug", host_debug, true},
             {"bios", host_bios, false},
-            {"airplane", tune_airplane, true},
-            {"brightness", tune_brightness, true},
-            {"charge", tune_charge, true},
-            {"battery", tune_battery_verb, true},
-            {"power", tune_power, true},
-            {"cpu", tune_cpu, true},
-            {"sleep", tune_sleep_verb, true},
-            {"hibernate", tune_hibernate_verb, true},
-            {"wifi", host_wifi, true},
-            {"bluetooth", host_bluetooth, true},
-            {"priority", host_priority, true},
-            {"wired", host_wired, true},
-            {"usb", host_usb, true},
-            {"timezone", host_timezone, true},
-            {"ntp", host_ntp, true},
-            {"keyboard", host_keyboard, true},
-            {"mouse", host_setting_verb, true},
-            {"taskbar", host_setting_verb, true},
-            {"time", host_time, true},
+            {"airplane", tune_airplane, false, true},
+            {"brightness", tune_brightness, false, true},
+            {"charge", tune_charge, false, true},
+            {"battery", tune_battery_verb, false, true},
+            {"power", tune_power, false, true},
+            {"cpu", tune_cpu, false, true},
+            {"sleep", tune_sleep_verb, false, true},
+            {"hibernate", tune_hibernate_verb, false, true},
+            {"wifi", host_wifi, false, true},
+            {"bluetooth", host_bluetooth, false, true},
+            {"priority", host_priority, false, true},
+            {"wired", host_wired, false, true},
+            {"usb", host_usb, false, true},
+            {"timezone", host_timezone, false, true},
+            {"ntp", host_ntp, false, true},
+            {"keyboard", host_keyboard, false, true},
+            {"mouse", host_setting_verb, false, true},
+            {"taskbar", host_setting_verb, false, true},
+            {"time", host_time, false, true},
             {"name", host_name, true},
-            {"dns", host_dns, true},
-            {"security", host_security, true},
+            {"dns", host_dns, false, true},
+            {"security", host_security, false, true},
             {"link", link_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
@@ -24610,7 +24646,7 @@ static b32 host_main()
         return_if(which == array_count(host_verbs), host_usage());
 
         host_state_once = host_verbs[which].run != host_machine_verb;
-        if (host_verbs[which].quiet)
+        if (host_verbs[which].quiet || host_verbs[which].finish)
                 ignored = system_signal_install(13, 1, 0, 0, previous);
         answer = host_verbs[which].run(arguments, count);
         if (host_verbs[which].quiet)
@@ -24618,6 +24654,11 @@ static b32 host_main()
                 log_flush();
                 log_failure_reset();
         }
+        else if (host_verbs[which].finish)
+                //      What was lost to a reader that went is flushed here, with the signal
+                //      still ignored, and stays lost: the answer is the verb's own, and the
+                //      status is the one a write that failed has always given.
+                log_flush();
         if (ignored)
                 system_signal_action(13, previous, null, 8);
         return answer;

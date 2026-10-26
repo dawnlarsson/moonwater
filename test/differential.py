@@ -48067,7 +48067,7 @@ while True:
         # word for word.
         host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
         verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
-        dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)\}', verb_table)
+        dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)(?:, (?:true|false))?\}', verb_table)
         public = [verb for verb in dispatched if verb not in ("boot", "ask", "machine")]
         check(len(public) > 20 and "status" in public and "help" in public and "link" in public,
               "the dispatcher's table names the verbs", repr(dispatched))
@@ -49248,8 +49248,15 @@ for round_ in range(40):
         odd.append((round_, [p.returncode for p in running], cat("/root/tune")))
 print("@@race tune_four %d" % len(odd), odd[:1])
 #   A command that has to wait for a lock says what for, once, and then waits
-#   as it did: the radio lock (held through a join) and the clock's.
+#   as it did: the radio lock (held through a join) and the clock's. The lock is
+#   let go when the line has been read from the command, not after a time.
 import fcntl
+import select
+def holds_open(pid, path):
+    try:
+        return any(os.readlink("/proc/%d/fd/%s" % (pid, fd)) == path for fd in os.listdir("/proc/%d/fd" % pid))
+    except OSError:
+        return False
 for name, lock, words, token in [
         ("radio", "/run/moonwater/radio.lock", "bluetooth add dev1", "dev1"),
         ("locale", "/run/moonwater/locale.lock", "timezone de", "Berlin")]:
@@ -49257,18 +49264,24 @@ for name, lock, words, token in [
     held = open(lock, "a+")
     fcntl.flock(held, fcntl.LOCK_EX)
     waiter = start(words)
-    time.sleep(0.8)
+    heard = b""
+    limit = time.time() + 15
+    while time.time() < limit and b"waiting for another moonwater command" not in heard and waiter.poll() is None:
+        if select.select([waiter.stdout], [], [], 0.05)[0]:
+            heard += os.read(waiter.stdout.fileno(), 4096)
     fcntl.flock(held, fcntl.LOCK_UN)
     held.close()
-    said = waiter.communicate(timeout=60)[0].decode(errors="replace")
+    said = heard + waiter.communicate(timeout=60)[0]
+    said = said.decode(errors="replace")
     kept = token in cat("/root/bluetooth") + cat("/root/timezone")
     quiet = "waiting for another moonwater command" not in said
     print("@@wait %s %d" % (name, 1 if waiter.returncode != 0 or quiet or not kept else 0), repr(said[:160]))
 #   A verb that keeps a word in /root and puts it somewhere else too does both
-#   under the machine's lock (airplane reads the radios under it as well), so two of them at once cannot cross (A kept, B kept,
-#   B put, A put, and the two files name different servers, links or names):
-#   with the lock held here, the verb has changed nothing a quarter second on,
-#   and has done all of it once the lock is let go.
+#   under the machine's lock (airplane reads the radios under it as well), so two
+#   of them at once cannot cross (A kept, B kept, B put, A put, and the two files
+#   name different servers, links or names): with the lock held here, the verb
+#   has changed nothing at the moment it is waiting on the lock (it has the lock's
+#   file open, or it has ended), and has done all of it once the lock is let go.
 for name, before, words, gone in [
         ("dns", [], "dns 1.1.1.1", "/root/dns"),
         ("dns auto", ["dns 9.9.9.9"], "dns auto", "-/root/dns"),
@@ -49282,7 +49295,9 @@ for name, before, words, gone in [
     held = open("/run/moonwater/lock", "a+")
     fcntl.flock(held, fcntl.LOCK_EX)
     waiter = start(words)
-    time.sleep(0.3)
+    limit = time.time() + 15
+    while time.time() < limit and waiter.poll() is None and not holds_open(waiter.pid, "/run/moonwater/lock"):
+        time.sleep(0.002)
     early = waiter.poll() is None and (os.path.exists(gone[1:]) if gone[0] == "-" else not os.path.exists(gone))
     fcntl.flock(held, fcntl.LOCK_UN)
     held.close()
