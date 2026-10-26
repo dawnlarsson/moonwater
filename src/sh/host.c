@@ -214,7 +214,7 @@ static fn usb_restore(void);
 static fn usb_recover(void);
 static fn locale_restore(void);
 static fn dns_restore(void);
-static fn security_publish(host_settings address_to settings);
+static bipolar security_publish(host_settings address_to settings);
 //      Set by the machine process alone, in moonwater.c: only it asks the time.
 static bool host_machine_self;
 static fn name_restore(void);
@@ -21964,14 +21964,19 @@ static const struct
     {"http", "on", "off", TLS_SWITCH_HTTP_OFF, false},
 };
 
-/* The file of what the settings' security list holds, or none when it holds
-   nothing, which is the built-in trust as it has always been. */
-static fn security_publish(host_settings address_to settings)
+/*
+        The file of what the settings' security list holds, or none when it holds
+        nothing, which is the built-in trust as it has always been. What the write
+        or the removal failed with is answered: TLS reads this file and not the
+        settings, so a list kept and not published is not in force.
+*/
+static bipolar security_publish(host_settings address_to settings)
 {
         static p8 file[TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM];
         host_setting setting;
         positive used = TLS_OVERLAY_HEAD;
         positive at = 0;
+        bipolar failed;
 
         while (settings && host_settings_next(settings, address_of at, address_of setting))
         {
@@ -21985,8 +21990,8 @@ static fn security_publish(host_settings address_to settings)
         }
         if (used == TLS_OVERLAY_HEAD)
         {
-                (void)system_remove_at(AT_FDCWD, HOST_SECURITY, 0);
-                return;
+                failed = system_remove_at(AT_FDCWD, HOST_SECURITY, 0);
+                return failed < 0 && failed != -ENOENT ? failed : 0;
         }
         memory_copy_apart(file, TLS_OVERLAY_MAGIC, 8);
         for (positive k = 0; k < 4; k++)
@@ -21995,7 +22000,15 @@ static fn security_publish(host_settings address_to settings)
                 file[12 + k] = 0;
         }
         host_state_ready();
-        (void)file_publish_bytes(HOST_SECURITY, file, used, 0644, false);
+        return file_publish_bytes(HOST_SECURITY, file, used, 0644, false);
+}
+
+/* The settings are kept and the file is published, or the verb says the file was not. */
+static b32 security_publish_answer(host_settings address_to settings)
+{
+        bipolar failed = security_publish(settings);
+
+        return failed < 0 ? host_fail("security not published to " HOST_SECURITY, failed) : 0;
 }
 
 /* A key as it is named on a line: 64 hexadecimal digits. */
@@ -22382,7 +22395,8 @@ static b32 security_switch(positive which, string_address word)
                 host_settings_drop(address_of settings, address_of found);
         string_format(log, host_label "security %s %s; ", security_switches[which].word, word);
         answer = host_settings_save(address_of settings) ? 0 : 1;
-        security_publish(address_of settings);
+        if (!answer)
+                answer = security_publish_answer(address_of settings);
         if (!turn && security_switches[which].tight && MOONWATER_STRICT_NET >= STRICT_TIGHT)
                 host_say(log, host_label "security %s stays %s: the tight tier has it so\n",
                          security_switches[which].word, security_switches[which].turned);
@@ -22523,7 +22537,8 @@ static b32 security_change(bool trust, bool adding, string_address word)
                               security_hex(digest));
         }
         answer = host_settings_save(address_of settings) ? 0 : 1;
-        security_publish(address_of settings);
+        if (!answer)
+                answer = security_publish_answer(address_of settings);
 
 done:
         host_release();

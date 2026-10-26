@@ -46199,6 +46199,23 @@ while True:
                              "power and charge ones too), the link's key and switch, and the bowls",
                              line)
         check(dns_lines > 0, "a bare dns says its state, one or more lines", dns_lines)
+        #       The same for moonwater security: a switch and an entry kept while the
+        #       file TLS reads cannot be written are said and answer 1, and the next
+        #       change, once the file can be written, publishes what the settings hold.
+        key = "1" * 64
+        lines, finished = session(
+            "rm -rf /run/moonwater/security\nmkdir -p /run/moonwater/security/x\n" + say("security tls12 off") +
+            say("security block add " + key) + "rm -rf /run/moonwater/security\n" +
+            say("security tls12 on") + say("security block remove " + key))
+        seen = answers(lines)
+        switch = seen.get("security tls12 off", {"out": [], "status": None})
+        check(finished and switch["status"] == 1 and
+              any("/run/moonwater/security" in line for line in switch["out"]) and
+              seen.get("security block add " + key, {}).get("status") == 1 and
+              seen.get("security tls12 on", {}).get("status") == 0 and
+              seen.get("security block remove " + key, {}).get("status") == 0,
+              "a security change whose published file cannot be written says so and answers 1",
+              repr((switch, seen.get("security block add " + key), seen.get("security tls12 on"))))
 
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line
