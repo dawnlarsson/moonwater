@@ -49267,7 +49267,7 @@ import json, os, random, re, resource, shutil, signal, stat, subprocess, sys, ti
 
 ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 KEPT = {"moonwater", "script", "fuzz_driver.py", "fuzz_chains.json", "fuzz_out.jsonl",
-        "fuzz.out", "fuzz.err", "plant", "date"}
+        "fuzz.out", "fuzz.err", "fuzz.in", "plant", "date"}
 WATCH = ("/root", "/run", "/etc", "/home", "/tmp", "/bowls", "/sys")
 
 
@@ -49514,6 +49514,9 @@ def plant_state(path, kind, content):
 
 
 LIMITS = {}
+STDIN = []
+EXTRA = {}
+ARGV0 = []
 RLIMITS = {"nofile": resource.RLIMIT_NOFILE, "fsize": resource.RLIMIT_FSIZE, "as": resource.RLIMIT_AS,
            "data": resource.RLIMIT_DATA, "nproc": resource.RLIMIT_NPROC}
 
@@ -49523,12 +49526,12 @@ def limited():
         resource.setrlimit(RLIMITS[name], (value, value))
 
 
-def mutate_state(seed):
-    """One file of the state, as the verbs wrote it, changed a little the way a
-    cut, a bad block or a careless editor would: the seed picks the file and
-    the change."""
+def mutate_state(seed, tops=("/root", "/run/moonwater", "/etc")):
+    """One file of the state, as the verbs wrote it (or as the kernel shows it,
+    for /sys), changed a little the way a cut, a bad block or a careless
+    editor would: the seed picks the file and the change."""
     found = []
-    for top in ("/root", "/run/moonwater", "/etc"):
+    for top in tops:
         for base, dirs, files in os.walk(top):
             for name in files:
                 path = os.path.join(base, name)
@@ -49614,8 +49617,18 @@ def meta(argv, template):
     elif argv[0] == b"@template":
         restore_state(template)
         shown = argv
+    elif argv[0] == b"@stdin":
+        STDIN[:] = [argv[1]]
+        shown = argv[:1]
+    elif argv[0] == b"@env":
+        EXTRA[argv[1]] = argv[2]
+        shown = argv[:2]
+    elif argv[0] == b"@argv0":
+        ARGV0[:] = [argv[1]]
+        shown = argv[:1]
     else:
-        shown = argv[:1] + [(mutate_state(int(argv[1])) or "").encode()]
+        shown = argv[:1] + [(mutate_state(int(argv[1]), ("/sys",) if argv[0] == b"@sysmutate" else
+                                          ("/root", "/run/moonwater", "/etc")) or "").encode()]
     return {"argv": [a.hex() for a in shown], "planted": True, "out": "", "err": "", "ms": 0}
 
 
@@ -49623,9 +49636,16 @@ def run(argv, limit, template):
     if argv and argv[0][:1] == b"@":
         return meta(argv, template)
     started = time.monotonic()
-    with open("/tmp/fuzz.out", "wb") as out, open("/tmp/fuzz.err", "wb") as err:
-        process = subprocess.Popen(["/tmp/moonwater"] + argv, stdin=subprocess.DEVNULL,
-                                   stdout=out, stderr=err, env=ENV, start_new_session=True,
+    if STDIN:
+        with open("/tmp/fuzz.in", "wb") as handle:
+            handle.write(STDIN[0])
+    environment = {key.encode(): value.encode() for key, value in ENV.items()}
+    environment.update(EXTRA)
+    with open("/tmp/fuzz.out", "wb") as out, open("/tmp/fuzz.err", "wb") as err, \
+            open("/tmp/fuzz.in" if STDIN else "/dev/null", "rb") as given:
+        process = subprocess.Popen([ARGV0[0] if ARGV0 else b"/tmp/moonwater"] + argv,
+                                   executable="/tmp/moonwater", stdin=given,
+                                   stdout=out, stderr=err, env=environment, start_new_session=True,
                                    restore_signals=False, preexec_fn=limited if LIMITS else None)
         hung = waited = False
         try:
@@ -49691,10 +49711,13 @@ def main():
             reset(template)
             plant()
             LIMITS.clear()
+            STDIN.clear()
+            EXTRA.clear()
+            ARGV0.clear()
             runs = []
             at = 0
             while at < len(chain) and chain[at] and bytes.fromhex(chain[at][0])[:1] == b"@" and \
-                    bytes.fromhex(chain[at][0]) != b"@mutate":
+                    bytes.fromhex(chain[at][0]) not in (b"@mutate", b"@sysmutate"):
                 runs.append(run([bytes.fromhex(a) for a in chain[at]], job["limit"], "/tmp/plant/state"))
                 at += 1
             before = snapshot()
@@ -49946,6 +49969,17 @@ FUZZ_AFTER = (
 #   What a process can be short of.
 FUZZ_LIMITS = (("nofile", 3), ("nofile", 4), ("nofile", 5), ("nofile", 6), ("nofile", 8), ("fsize", 0),
                ("fsize", 100), ("fsize", 4096), ("as", 64 << 20), ("as", 128 << 20), ("data", 48 << 20))
+#   The lists the command keeps, filled one add at a time until it says no or
+#   has taken a few hundred, then asked for, then taken from at both ends and
+#   in the middle: {i} the number of the entry, {k} a key of its own.
+FUZZ_FILL = (
+    ("wifi add net{i} password{i}", "wifi remove net{i}"),
+    ("bluetooth add device{i}", "bluetooth remove device{i}"),
+    ("link add peer{i} {k} 192.0.2.{j}", "link remove peer{i}"),
+    ("usb allow 0627:{x}/serial{i}", "usb forget 0627:{x}/serial{i}"),
+    ("security block add {h}", "security block remove {h}"),
+    ("link group group{i} S3cretOne{i}", "link group leave group{i}"),
+)
 FUZZ_NAMES = ("alpha", "space-wizard", "a", "a1", "x" * 31, "x" * 32, "x" * 33, "x" * 63, "x" * 64, "a-b", "-a",
               "a-", "A", "Alpha", "a_b", "a.b", "a b", "", "1", "123", "0", "a.example", "pool.ntp.org", "1.2.3.4",
               "::1", "[::1]", "a:123", "a:0", "a:65536", "xn--bcher-kva.example", "日本", "a\nb", "a\tb", " a", "a ",
@@ -49955,6 +49989,28 @@ FUZZ_IDS = ("0627:0001", "0627:0001/68284-kbd", "46f4:0001/STICK1", "1-1", "1-3"
             "FFFF:ffff", "ffff:ffff/x", "0627:0001/" + "a" * 64, "0627:0001/" + "a" * 255, "627:1", "0627:00011", "zz:zz",
             "0627:0001/a\nb", "0627:0001/a\x1bb", "0627:0001/-", "0627:0001/-@1-1", "0627:0001@1-1", "1-1:1.0", "usb1",
             "0627:0001/é", "0627:0001/%s", "0627:0001/a/b", "0627:0001//", "0627:0001/ ", "1-", "-1", "1-1-1", "9-9")
+
+
+def fuzz_input(rng):
+    """What a person, a script or a broken pipe can put on standard input."""
+    choice = rng.randrange(9)
+    if choice == 0:
+        return b""
+    if choice == 1:
+        return b"hunter22x\n"
+    if choice == 2:
+        return b"hunter22x"
+    if choice == 3:
+        return b"x" * (1 + rng.randrange(200000))
+    if choice == 4:
+        return b"correct horse battery staple\r\n" * (1 + rng.randrange(3))
+    if choice == 5:
+        return b"\n" * (1 + rng.randrange(100))
+    if choice == 6:
+        return b"\0" * (1 + rng.randrange(80)) + b"\n"
+    if choice == 7:
+        return b"\x1b[31m" + fuzz_mutant(rng) + b"\n"
+    return b"a" * rng.choice((7, 8, 63, 64, 65, 255, 256, 4095, 4096, 65536)) + b"\n"
 
 
 def fuzz_garbage(rng):
@@ -50065,6 +50121,23 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
             values = fuzz_expand(tree[1][-1], rng, good_for(prefix[0].decode()))
             if values and not {b"default", b"auto", b"random", b"list", b"xkb", b"-", b"yes"} & set(values):
                 chains.append([(prefix + values, "roundtrip-a", False), (prefix, "roundtrip-b", False)])
+    #   A list filled, asked for and emptied.
+    for fill, take in FUZZ_FILL:
+        total = 150 + rng.randrange(250)
+
+        def entry(template, i):
+            made = []
+            for piece in template.split():
+                made.append(piece.format(i=i, j=1 + i % 250, x="%04x" % i,
+                                         k=base64.b64encode(bytes([i % 256, i // 256] * 16)).decode(),
+                                         h="%064x" % (i * 0x10001)).encode())
+            return made
+
+        chain = [(entry(fill, i), "fill-add-%d" % i, False) for i in range(total)]
+        chain += [([word], "plant-probe", False) for word in (b"status", b"wifi", b"bluetooth", b"link", b"usb", b"security")]
+        chain += [(entry(take, i), "fill-del-%d" % i, False) for i in sorted({0, total // 2, total - 1, 1, total - 2})]
+        chain += [([word], "plant-probe", False) for word in (b"status", b"wifi", b"bluetooth", b"link", b"usb", b"security")]
+        chains.append(chain)
     #   Pairs of verbs that name one thing.
     for first, second, relation in FUZZ_PAIRS:
         base = (FUZZ_IDS if "{I}" in first else FUZZ_ADDRESSES if "{A}" in first or "{A}" in second else
@@ -50082,6 +50155,8 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
                                 b"bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI=" if piece == "{K}" else piece.encode())
                 chain.append((made, kind, False))
             chains.append(chain)
+    #   (Not sleep and hibernate: each syncs every disk of the machine, and the sysfs
+    #   chains below say them.)
     #   Every file of the state in turn holding a title and a clear-screen, a FIFO,
     #   a link to /dev/zero, a link to itself and a directory, then every verb said
     #   bare: whatever one of them reads and shows is shown as it is, and none waits
@@ -50090,7 +50165,8 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
     for path in files:
         for kind in (b"x", b"f", b"z", b"l", b"d"):
             chains.append([([b"@plant", path.encode(), kind, escape], "plant", False)] +
-                          [([verb.encode()], "plant-probe", False) for verb in ["status"] + verb_names])
+                          [([verb.encode()], "plant-probe", False) for verb in ["status"] + verb_names
+                           if verb not in ("sleep", "hibernate")])
     #   A file of the state replaced by garbage, then the verbs that read it.
     for _ in range(count // 4 if files else 0):
         path = files[rng.randrange(len(files))]
@@ -50104,6 +50180,36 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
         for _ in range(3):
             chain.append(make(verb_names[rng.randrange(len(verb_names))], "valid" if rng.randrange(2) else "mutated"))
         chains.append(chain)
+    #   A file of the kernel's sysfs, as the verbs read it, changed the same way, and
+    #   then every verb said bare and the ones that move what sysfs holds.
+    for _ in range(count // 10):
+        chains.append([([b"@sysmutate", str(rng.randrange(1 << 30)).encode()], "plant", False)] +
+                      [([word.encode() for word in shlex.split(line)], "plant-probe", False)
+                       for line in ["status"] + verb_names + [
+                           "brightness 50", "brightness +10", "charge limit 80", "power balanced", "cpu boost off",
+                           "cpu smt on", "cpu online 1", "cpu offline 2", "usb apply", "usb log", "usb lock", "usb unlock",
+                           "usb allow 1-1", "usb deny 1-2", "wifi on", "bluetooth on", "airplane on", "airplane off"]])
+    #   What a verb that takes a password or a secret from standard input is given
+    #   there, and what the environment and the name a program is run by can be.
+    for command, tree in trees:
+        if not re.search(r"\|-[\]\s]", command + " "):
+            continue
+        for _ in range(4):
+            for _ in range(40):
+                made = fuzz_expand(tree, rng, lambda name, verb=command.split()[0]: b"-" if name in ("PASSWORD", "SECRET") else good_for(verb)(name))
+                if b"-" in made:
+                    break
+            chains.append([([b"@stdin", fuzz_input(rng)], "stdin", False), (made, "stdin", False)])
+    for _ in range(count // 20):
+        name = rng.choice((b"TZ", b"TZ", b"TZ", b"TERM", b"COLUMNS", b"LINES", b"LC_ALL", b"LANG", b"HOME", b"PATH", b"USER"))
+        value = fuzz_mutant(rng).replace(b"\0", b"")
+        chains.append([([b"@env", name, value], "env", False)] +
+                      [([word], "env", False) for word in (b"time", b"timezone", b"status", b"wifi", b"help")])
+    for _ in range(count // 20):
+        #   Run by the name it answers to, from wherever: a path of any kind before it.
+        chains.append([([b"@argv0", rng.choice((b"", b"./", b"../", b"//tmp//", b"/")) + b"moonwater" if rng.randrange(2)
+                         else fuzz_mutant(rng).replace(b"\0", b"").replace(b"/", b"") + b"/moonwater"], "argv0", False)] +
+                      [(words, "argv0", False) for words in ([], [b"status"], [b"help", b"wifi"], [b"name"])])
     #   A file the verbs wrote, changed as a cut or a careless hand would, and then
     #   what the verbs say of the machine and do to what is in it.
     for _ in range(count // 10):
@@ -50221,6 +50327,16 @@ def fuzz_judge(chains, results, user):
                 note("a control byte in what it printed", number, run, repr(bare[:160]))
             elif re.search(rb"\xc2[\x80-\x9f]", bare):
                 note("a C1 control in what it printed", number, run, repr(bare[:160]))
+        added = {}
+        for place, run in enumerate(result["runs"]):
+            kind = chains[number][place][1]
+            if kind.startswith("fill-") and "status" in run:
+                what, _, which = kind[5:].partition("-")
+                if what == "add":
+                    added[which] = run["status"]
+                elif added.get(which) == 0 and run["status"] != 0:
+                    note("an entry that was added cannot be taken away", number, run,
+                         repr((bytes.fromhex(run["out"]) + bytes.fromhex(run["err"]))[:160]))
         for place, run in enumerate(result["runs"][:-1]):
             kind = chains[number][place][1]
             following = result["runs"][place + 1]
@@ -50402,8 +50518,11 @@ def harness_moonwater_cli_fuzz(argv):
               f"{len(verbs)} verbs, {len(commands)} usage lines")
         rng = random.Random(args.seed)
         sources = "".join(path.read_text(errors="replace") for path in sorted((root / "src").rglob("*.c")))
-        files = sorted({name for name in re.findall(r'"(/root/[A-Za-z0-9._-]+|/etc/[A-Za-z0-9._-]+)"', sources)
-                        if name not in ("/root/main.moonwater.sh", "/root/.nix-channels", "/root/link")})
+        files = {name for name in re.findall(r'"(/root/[A-Za-z0-9._-]+|/etc/[A-Za-z0-9._-]+|/run/moonwater/[A-Za-z0-9._-]+)"', sources)
+                 if name not in ("/root/main.moonwater.sh", "/root/.nix-channels", "/root/link")}
+        #   The state directory's files are named in the sources as the directory's macro and a leaf.
+        files |= {"/run/moonwater" + leaf for leaf in re.findall(r'(?:HOST_STATE|NET_STATE_DIR) "(/[A-Za-z0-9._-]+)"', sources)}
+        files = sorted(files)
         chains = fuzz_vectors(commands, expanded, rng, args.runs, files)
 
         def drive(nobody):
