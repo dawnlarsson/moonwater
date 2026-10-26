@@ -122763,6 +122763,16 @@ static void check_compositor_outputs(void) {
       co_check(!compositor_screen_cell(two[0],2560,100,64,&cx,&cy)&&compositor_screen_cell(two[1],2560,100,64,&cx,&cy)&&cx==0);
       co_check(compositor_screen_cell(two[0],2496,1016,64,&cx,&cy)&&!compositor_screen_cell(two[0],2496,1080,64,&cx,&cy)&&
                !compositor_screen_cell(two[0],-64,0,64,&cx,&cy)&&compositor_screen_cell(two[0],-63,0,64,&cx,&cy)); }
+    /* A change is told to each screen's framebuffer for what of it is on that screen: one on the first alone is the
+       first's, one across the edge is each screen's part, one under the shorter screen is the taller's, and one that is
+       on no screen is told to none -- so a DIRTYFB waits on the vertical blanks of the screens that changed only. */
+    { static const unsigned short change[4][4]={{100,100,500,400},{2400,50,2700,300},{3000,1150,3100,1190},{2000,1100,2100,1150}};
+      unsigned short cut[4][4];
+      co_check(compositor_screen_clips(two[0],change,4,cut)==2&&cut[0][0]==100&&cut[0][2]==500&&cut[0][3]==400&&
+               cut[1][0]==2400&&cut[1][2]==2560&&cut[1][1]==50&&cut[1][3]==300);
+      co_check(compositor_screen_clips(two[1],change,4,cut)==2&&cut[0][0]==2560&&cut[0][2]==2700&&cut[1][0]==3000&&
+               cut[1][1]==1150&&cut[1][3]==1190);
+      co_check(compositor_screen_clips(two[1],change,1,cut)==0&&compositor_screen_clips(two[0],change+3,1,cut)==0); }
     /* Carried: a screen that only moved takes its windows along; another size keeps the share of the room. */
     { static const int was[4]={2560,0,1920,1080},moved[4]={0,0,1920,1080},bigger[4]={0,0,2560,1080};
       x=2560+700,y=390;compositor_screen_carry(was,moved,&x,&y,400,300);co_check(x==700&&y==390);

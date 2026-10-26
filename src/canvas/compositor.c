@@ -1782,6 +1782,29 @@ static int compositor_screen_cell(const int *screen, int left, int top, int size
         return *x < screen[2] && *y < screen[3] && *x + size > 0 && *y + size > 0;
 }
 
+// What of a change (clips x1, y1, x2, y2 in the space) is on a screen: each clip cut to the screen, and those that miss
+// it left out. Answers how many are left, into into.
+static unsigned int compositor_screen_clips(const int *screen, const unsigned short (*clips)[4], unsigned int count,
+                                            unsigned short (*into)[4])
+{
+        unsigned int kept = 0;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int x1 = clips[at][0] > screen[0] ? clips[at][0] : screen[0];
+                int y1 = clips[at][1] > screen[1] ? clips[at][1] : screen[1];
+                int x2 = clips[at][2] < screen[0] + screen[2] ? clips[at][2] : screen[0] + screen[2];
+                int y2 = clips[at][3] < screen[1] + screen[3] ? clips[at][3] : screen[1] + screen[3];
+
+                if (x2 <= x1 || y2 <= y1)
+                        continue;
+                into[kept][0] = (unsigned short)x1, into[kept][1] = (unsigned short)y1;
+                into[kept][2] = (unsigned short)x2, into[kept][3] = (unsigned short)y2;
+                kept++;
+        }
+        return kept;
+}
+
 /* ---- end of the outputs ---- */
 
 /*
@@ -2010,6 +2033,10 @@ struct compositor_output
         char name[WINDOWS_OUTPUT_NAME];
         unsigned int shows;
         int cursor_x, cursor_y;
+        // The framebuffer its crtc shows: on one screen the scanout's own, and on more a framebuffer of the same buffer
+        // for each, so a DIRTYFB of one screen's change commits that screen's crtc and waits on its vertical blank
+        // and on no other's: one framebuffer every crtc showed held a 60 Hz screen to a 50 Hz one's pace.
+        unsigned int fb;
 };
 
 static struct
@@ -4321,6 +4348,53 @@ static int compositor_damage_cut(const int *rect)
 }
 
 /*
+        A change told to the card a framebuffer at a time, on more than one
+        screen: each framebuffer is told what of the change is on the screens
+        that show it, and none that shows nothing of it is told anything, so
+        the commit a DIRTYFB is waits on the vertical blanks of the screens
+        that changed and on no other's. A screen that has no framebuffer of
+        its own shares the scanout's with the primary, and is told with it.
+*/
+static void compositor_dirty_screens(const unsigned short (*clip)[4], unsigned int clips)
+{
+        for (unsigned int at = 0; at < compositor.outputs; at++)
+        {
+                unsigned int fb = compositor.output[at].fb ? compositor.output[at].fb : compositor.fb, told = 0, users = 0;
+                unsigned short mine[COMPOSITOR_DAMAGE][4];
+                int seen = 0;
+
+                for (unsigned int before = 0; before < at && !seen; before++)
+                        seen = (compositor.output[before].fb ? compositor.output[before].fb : compositor.fb) == fb;
+                if (seen)
+                        continue;
+                for (unsigned int screen = at; screen < compositor.outputs; screen++)
+                {
+                        unsigned short cut[COMPOSITOR_DAMAGE][4];
+                        unsigned int count;
+
+                        if ((compositor.output[screen].fb ? compositor.output[screen].fb : compositor.fb) != fb)
+                                continue;
+                        users++;
+                        count = compositor_screen_clips(compositor.screen[screen], clip, clips, cut);
+                        for (unsigned int each = 0; each < count && told < COMPOSITOR_DAMAGE; each++)
+                                memory_copy(mine[told++], cut[each], sizeof(cut[each]));
+                }
+                // A framebuffer two screens share is told the change whole, as one framebuffer always was.
+                if (users > 1)
+                {
+                        memory_copy(mine, clip, clips * sizeof(clip[0]));
+                        told = clips;
+                }
+                if (told)
+                {
+                        struct compositor_dirty dirty = {fb, 0, 0, told, (unsigned long)mine};
+
+                        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+                }
+        }
+}
+
+/*
         The damage, composed straight onto the scanout and then announced.
         The scanout is a mapping of the card's memory, so it is only ever
         written: every pixel of the damage once, by the stores of
@@ -4507,8 +4581,10 @@ static void compositor_present(void)
 
         // No clips at all would tell the card everything changed.
         dirty.clip_count = clips;
-        if (clips)
+        if (clips && compositor_output_count() < 2)
                 system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+        else if (clips)
+                compositor_dirty_screens((const unsigned short (*)[4])clip, clips);
         compositor.damages = 0;
 
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
@@ -4767,6 +4843,16 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
         system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
 }
 
+// Another framebuffer of the scanout, as large and over the same buffer, for a screen of its own; 0 when the card will
+// not make one, and that screen shares the scanout's.
+static unsigned int compositor_screen_fb(void)
+{
+        struct compositor_fb fb = {0, (unsigned int)compositor.width, (unsigned int)compositor.height,
+                                   (unsigned int)compositor.scanout_pitch, 32, 24, compositor.scanout_handle};
+
+        return system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) == 0 ? fb.fb_id : 0;
+}
+
 // A crtc that shows nothing: off, its screen dark.
 static void compositor_crtc_off(unsigned int crtc)
 {
@@ -4866,7 +4952,7 @@ static b32 compositor_space_take(int first)
         struct compositor_connected found;
         int rects[WINDOWS_OUTPUTS][4], was[WINDOWS_OUTPUTS][4];
         char was_names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
-        unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0;
+        unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
         unsigned char order[WINDOWS_OUTPUTS];
         b32 status = compositor_connected_read(&found);
 
@@ -4936,7 +5022,12 @@ static b32 compositor_space_take(int first)
                                 return status;
                 }
 
-                // The screens, the primary first, each at its own mode.
+                // The screens, the primary first, each at its own mode; the framebuffers the screens before had of their
+                // own are given back once no crtc shows them.
+                extras = 0;
+                for (unsigned int at = 0; at < compositor.outputs; at++)
+                        if (compositor.output[at].fb && compositor.output[at].fb != compositor.fb)
+                                extra[extras++] = compositor.output[at].fb;
                 memory_zero(compositor.output, sizeof(compositor.output));
                 for (unsigned int at = 0; at < lit; at++)
                 {
@@ -4994,6 +5085,9 @@ static b32 compositor_space_take(int first)
                         compositor.width = box[2];
                         compositor.height = box[3];
                 }
+                // The primary shows the scanout's framebuffer, and each other screen one of its own over it.
+                for (unsigned int at = 0; at < lit; at++)
+                        compositor.output[at].fb = at ? compositor_screen_fb() : compositor.fb;
                 if (!first)
                 {
                         // The card shows the compositor's own scanout from here on, on every crtc.
@@ -5012,8 +5106,10 @@ static b32 compositor_space_take(int first)
                 for (unsigned int at = 0; at < lit; at++)
                 {
                         struct compositor_crtc set = {(unsigned long)address_of compositor.output[at].connector, 1,
-                                                      compositor.output[at].crtc, compositor.fb, (unsigned int)screens[at][0],
-                                                      (unsigned int)screens[at][1], 0, 1, compositor.output[at].mode};
+                                                      compositor.output[at].crtc,
+                                                      compositor.output[at].fb ? compositor.output[at].fb : compositor.fb,
+                                                      (unsigned int)screens[at][0], (unsigned int)screens[at][1], 0, 1,
+                                                      compositor.output[at].mode};
 
                         if (system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) != 0)
                                 refused |= 1u << order[at];
@@ -5031,6 +5127,8 @@ static b32 compositor_space_take(int first)
                 for (unsigned int n = 0; n < found.count; n++)
                         if (found.current[n] && !rects[n][2])
                                 compositor_crtc_off(found.crtc[n]);
+                for (unsigned int at = 0; at < extras; at++)
+                        system_control(compositor.card, COMPOSITOR_RMFB, address_of extra[at]);
                 if (old_fb && old_fb != compositor.fb)
                         compositor_scanout_free(old_fb, old_handle, old_pixels, old_bytes);
 
@@ -5355,7 +5453,8 @@ static void compositor_resume(int cycle)
         {
                 struct compositor_output *output = &compositor.output[at];
                 struct compositor_crtc off = {0, 0, output->crtc, 0, 0, 0, 0, 0, {0}};
-                struct compositor_crtc on = {(unsigned long)address_of output->connector, 1, output->crtc, compositor.fb,
+                struct compositor_crtc on = {(unsigned long)address_of output->connector, 1, output->crtc,
+                                             output->fb ? output->fb : compositor.fb,
                                              (unsigned int)compositor.screen[at][0], (unsigned int)compositor.screen[at][1],
                                              0, 1, output->mode};
 

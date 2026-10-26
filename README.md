@@ -244,7 +244,9 @@ that holds the most of it, which is where it is maximized and halved and, with `
 display all`, whose taskbar lists it, and one let go just past a shared edge has crossed
 it and is not arranged. A screen plugged in joins the desktop, and one unplugged takes
 nothing with it: its windows and the pointer come to the primary, at the same share of
-the room they had. The desktop is drawn at one scale on every screen.
+the room they had. The desktop is drawn at one scale on every screen, and each screen
+at its own rate: a change on one waits on that screen's refresh alone, so a 60 Hz screen
+beside a 50 Hz one still draws sixty frames a second.
 
 `moonwater window PLACE... COMMAND...` starts COMMAND with where its first window goes.
 `center` is the middle of the screen's room, the screen less the taskbar; `at X,Y` puts

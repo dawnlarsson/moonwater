@@ -20059,7 +20059,8 @@ fi
 #       they are. Then the second screen is unplugged the way a hotplug is heard -- its connector forced off in
 #       sysfs and the card's uevent sent -- and the window and the pointer on it come to the first; plugged back
 #       in, the second is driven again; the arrangement put the other way round makes the second the primary,
-#       its band with it; and taskbar display all puts a band on each.
+#       its band with it; taskbar display all puts a band on each; and the 60 Hz screen draws at 60 Hz beside
+#       the 50 Hz one.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = x1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/x1-answers" 2>"$work/x1-why" <<'PY'
 import os, re, sys, time
@@ -20122,7 +20123,7 @@ kernel = shell.run("dmesg | grep 'output(s)' | tail -1", 10)[0]
 out.append(("x1.1 Canvas drives both heads", "yes" if "desktop 4480x1080, 2 output(s)" in kernel else kernel, "yes"))
 
 shell.run("moonwater canvas background " + INK, 10)
-shell.run("/compositor > /tmp/c.log 2>&1 & echo started", 10)
+shell.run("/compositor > /tmp/c.log 2>&1 & echo $! > /tmp/c.pid; echo started", 10)
 until(lambda: "yes" in shell.run("[ -e /run/moonwater/windows ] && echo yes || echo no", 10)[0], 30)
 time.sleep(2)
 said = screens_said()
@@ -20213,6 +20214,28 @@ w1, h1, b = head("x1-all-b", 1)
 out.append(("x1.17 with taskbar display all every screen has its band",
             "%s %s" % ("band" if band_on(a, AW) > 5 else "none", "band" if band_on(b, BW) > 5 else "none"), "band band"))
 shell.run("moonwater taskbar display primary; moonwater canvas arrange default; moonwater canvas background default", 10)
+
+# Each screen at its own rate: the pointer swept over one screen alone, by a report every 4 ms for five seconds, is a
+# frame for each of that screen's vertical blanks, and a 60 Hz screen beside a 50 Hz one is not held to the 50 Hz
+# one's pace. The frames are the compositor's own count (pointer to the frame, said as it ends); the two sweeps are
+# held to each other, so a loaded host slows both alike.
+def frames_of_sweep(left, width):
+    shell.run("kill $(cat /tmp/c.pid 2>/dev/null) 2>/dev/null; sleep 1; /compositor > /tmp/sweep.log 2>&1 & "
+              "echo $! > /tmp/c.pid", 10)
+    time.sleep(3)
+    stop, step = time.time() + 5, 0
+    while time.time() < stop:
+        send([{"type": "abs", "data": {"axis": "x", "value": (left + (step * 7) % width) * 32767 // SW}},
+              {"type": "abs", "data": {"axis": "y", "value": (200 + (step * 3) % 600) * 32767 // SH}}])
+        step += 1
+        time.sleep(0.004)
+    shell.run("kill $(cat /tmp/c.pid); sleep 1", 10)
+    found = re.search(r"pointer to the frame: (\d+)", shell.run("cat /tmp/sweep.log", 10)[0])
+    return int(found.group(1)) if found else 0
+
+fast, slow = frames_of_sweep(AW + 40, BW - 80), frames_of_sweep(40, AW - 80)
+out.append(("x1.18 the 60 Hz screen's frames are its own, not the 50 Hz one's pace",
+            "yes" if slow and fast * 100 >= slow * 110 else "60 Hz %d frames, 50 Hz %d" % (fast, slow), "yes"))
 
 try:
     guest.quit()
