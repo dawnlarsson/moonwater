@@ -212,6 +212,7 @@ static fn usb_recover(void);
 static fn locale_restore(void);
 static fn dns_restore(void);
 static bipolar security_publish(host_settings address_to settings);
+static b32 security_publish_answer(host_settings address_to settings);
 //      Set by the machine process alone, in moonwater.c: only it asks the time.
 static bool host_machine_self;
 static fn name_restore(void);
@@ -2265,7 +2266,10 @@ static fn host_booted(host_settings address_to settings)
         //      What follows starts commands that outlive this one.
         host_release_all();
         name_restore();
-        security_publish(settings);
+        //      Said, and boot goes on: TLS reads the file and not the settings, so
+        //      a list that is kept and not published is not in force (or the last
+        //      one is, where the removal failed), and nothing else would tell.
+        (void)security_publish_answer(settings);
         host_events_boot(settings);
 }
 
@@ -2418,8 +2422,9 @@ static b32 host_boot(void)
         if (known)
         {
                 host_settings_keep(address_of settings);
-                //      Before the disks are waited for: TLS can start sooner.
-                security_publish(address_of settings);
+                //      Before the disks are waited for: TLS can start sooner. Said
+                //      when it cannot be, as host_booted says it for the rest.
+                (void)security_publish_answer(address_of settings);
                 host_bind_apply(address_of settings);
         }
 

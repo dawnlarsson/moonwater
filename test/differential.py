@@ -47490,6 +47490,20 @@ while True:
               "a second moonwater boot is refused and leaves the verdict as it was",
               repr((seen.get("boot"), seen.get("again"), verdicts)))
 
+        # What TLS reads is published at the end of boot, and a boot that
+        # could not publish it (here the name is a directory, which a removal
+        # cannot take) said nothing: the list kept was not in force and nothing
+        # told the person. Boot still settles the session.
+        script = ("rm -rf /run/moonwater; mkdir -p /run/moonwater/security/x\n" + say("boot") +
+                  "echo \"@@verdict $(cat /run/moonwater/verdict)\"\nrm -rf /run/moonwater\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and seen.get("boot", {}).get("status") == 0 and
+              any("/run/moonwater/security" in line for line in seen.get("boot", {}).get("out", [])) and
+              any(line.startswith("@@verdict live") for line in lines),
+              "a boot whose security file cannot be published says so and still settles",
+              repr((seen.get("boot"), lines[-2:])))
+
         # A session that keeps a disk is not live until it powers off: the
         # disk's /root and /home stay bound, so `setup live` said live and
         # left the status saying nothing was kept, and a verdict that was
