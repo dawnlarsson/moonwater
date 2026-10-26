@@ -41477,6 +41477,11 @@ static bipolar system_open_at_mode(bipolar d, string_address p, positive f, posi
 static bipolar system_make_directory_at(bipolar d, string_address p, positive m) {
         return answer(mkdirat((int)d, p, (mode_t)m));
 }
+static bipolar system_make_directory_exact_at(bipolar d, string_address p, positive m) {
+        bipolar made = answer(mkdirat((int)d, p, (mode_t)m));
+        if (made < 0 && made != -EEXIST) return made;
+        return answer(fchmodat((int)d, p, (mode_t)m, 0));
+}
 typedef struct { unsigned short mode; } system_path_identity;
 #define address_of &
 #define SYSTEM_PATH_AT_EMPTY_PATH AT_EMPTY_PATH
@@ -41501,6 +41506,8 @@ static fn system_close(bipolar h) { close((int)h); }
    name of their own, with the mode asked for, and renamed over it, which
    replaces a link at the name and never writes through one. */
 #define FILE_STAGED_EXACT_MODE 8
+typedef void *address_any;
+static void file_stage_sweep(string_address path) { (void)path; }
 static bipolar file_publish_with(string_address path, const void *bytes, positive length,
                                  positive mode, bool sync, positive behavior) {
         char stage[4096];
