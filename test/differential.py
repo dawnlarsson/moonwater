@@ -48017,6 +48017,19 @@ while True:
             check(finished and got["status"] == 1 and any("the compositor's desktop is not up" in line for line in got["out"]),
                   f"moonwater settings with a {word} pid in compositor.pid is no compositor, and exits 1",
                   repr(got)[:240])
+        #       The settings a session keeps are read as the other state files
+        #       are, through no link: a link at the name is no copy of them, so
+        #       the list is the defaults (the image's copy is not reached either).
+        script = ("rm -f /run/moonwater/settings /run/moonwater/settings.real\n" + say("bind init add kept") +
+                  "mv /run/moonwater/settings /run/moonwater/settings.real\n"
+                  "ln -s /run/moonwater/settings.real /run/moonwater/settings\n" + say("bind init") +
+                  "rm -f /run/moonwater/settings /run/moonwater/settings.real\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and seen.get("bind init", {}).get("out") == ["[Moonwater] init: nothing runs at boot"],
+              "moonwater bind init reads no settings through a link at /run/moonwater/settings",
+              repr(seen.get("bind init")))
+
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 

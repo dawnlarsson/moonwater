@@ -3861,8 +3861,10 @@ static b32 host_settings_image(string_address path, host_settings address_to int
 
 static bool host_settings_kept(host_settings address_to into)
 {
+        //      Not through a link, as host_read_state reads every other state
+        //      file: a link planted at the name is no copy of this session's.
         bipolar handle = system_open_at(AT_FDCWD, HOST_SETTINGS,
-                                        FILE_READ | O_NONBLOCK | O_CLOEXEC);
+                                        FILE_READ | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         bipolar got;
 
         if (handle < 0)
