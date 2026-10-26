@@ -47100,6 +47100,9 @@ while True:
         check(in_readme and in_readme <= on_pages,
               "the README's rows are rows of the pages, word for word",
               "only in the README: %r" % sorted(in_readme - on_pages)[:4])
+        check(("cpu online|offline N", "hotplug one processor") in in_readme,
+              "the README shows the cpu online and offline rows the pages have",
+              repr(sorted(command for command, _ in in_readme if command.startswith("cpu"))))
         #       The settings table (src/sh/registry.c) is where a setting is written once: its row of the
         #       pages and its line in the README are asked of it, each setting the window lists is a row
         #       of it and the window keeps no list of its own, and a verb it names has its marker on the
