@@ -7960,8 +7960,14 @@ static b32 bowl_profile_refresh(const struct bowl_profile address_to profile)
         got = file_read_once_at(AT_FDCWD, path, have, sizeof(have) - 1);
         return_if(got < (bipolar)string_length(want), 0);
         have[got] = end;
+        //      Only one that is the install's own: it holds the session's last line, which no other script does.
+        positive last = 0;
+
+        while (profile->session[last + 1])
+                last++;
         return_if(string_compare_max(have, want, string_length(want)) ||
-                      string_find(have + string_length(want), "exec bowl profile "),
+                      string_find(have + string_length(want), "exec bowl profile ") ||
+                      !string_find(have + string_length(want), profile->session[last]),
                   0);
         return bowl_profile_script(profile);
 }
