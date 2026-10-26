@@ -9501,6 +9501,15 @@ static COLD bipolar radio_rules_put(p8 address_to ssid, positive ssid_length, p8
         //      not there at all has no networks, and its rules go.
         unknown = !count && system_access_at(AT_FDCWD, NET_WIFI_LIST, 0) == 0;
         got = host_read_state(RADIO_RULES_PATH, text, sizeof(text));
+        //      No file is no rules. One that is there and cannot be read (a link,
+        //      a FIFO, a directory) or fills the room is rules not known, and the
+        //      rules written over it were the one network's: what the other
+        //      networks had taught the join, which is what stops its next
+        //      downgrade, was gone with it.
+        if (got < 0 && got != -ENOENT)
+                return got;
+        if (got >= (bipolar)sizeof(text) - 1)
+                return -EFBIG;
 
         while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
                                          address_of length))

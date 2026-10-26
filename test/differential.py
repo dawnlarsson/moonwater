@@ -45179,6 +45179,42 @@ def harness_moonwater_cli(argv):
         check(block("kept") == ["unread-a", "passpass1", "unread-b", "passpass2"],
               "and the network it could not forget is still saved", repr(block("kept")))
 
+        # The rules are read before they are written: a file there that cannot
+        # be read (a link, a FIFO) is rules not known, and an add, a remove or
+        # a join's lesson does not write the one network's over it. A rules
+        # file that is not there is none, as before.
+        lines, finished = session(
+            "rm -rf /root/wifi /root/wifi.rules /root/rules.real\n" +
+            say("wifi add rl-a passpass1 wpa2") +
+            "printf 'pmf rl-a\\nsae rl-a\\nwpa2 rl-a\\n' > /root/rules.real; rm -f /root/wifi.rules\n"
+            "ln -s /root/rules.real /root/wifi.rules\n" +
+            say("wifi add rl-b passpass2 wpa2") + say("wifi remove rl-a") +
+            "echo '@@ link'; test -L /root/wifi.rules && echo still-a-link; echo '@@end'\n"
+            "echo '@@ real'; cat /root/rules.real; echo '@@end'\n"
+            "echo '@@ saved'; cat /root/wifi; echo '@@end'\n"
+            "rm -f /root/wifi.rules /root/rules.real; mkfifo /root/wifi.rules\n" +
+            say("wifi add rl-c passpass3") +
+            "echo '@@ fifo'; test -p /root/wifi.rules && echo still-a-fifo; echo '@@end'\n"
+            "rm -f /root/wifi.rules\n" +
+            say("wifi add rl-d passpass4 wpa2") + "echo '@@ fresh'; cat /root/wifi.rules; echo '@@end'\n")
+        seen = answers(lines)
+        check(finished, "the unread rules session finished", "")
+        check(seen["wifi add rl-b passpass2 wpa2"]["status"] == 1 and
+              any("wifi.rules" in line for line in seen["wifi add rl-b passpass2 wpa2"]["out"]) and
+              seen["wifi remove rl-a"]["status"] == 1 and
+              any("wifi.rules" in line for line in seen["wifi remove rl-a"]["out"]),
+              "a rules file that is a link is said by wifi add and wifi remove",
+              repr((seen.get("wifi add rl-b passpass2 wpa2"), seen.get("wifi remove rl-a"))))
+        check(block("link") == ["still-a-link"] and block("real") == ["pmf rl-a", "sae rl-a", "wpa2 rl-a"],
+              "and it is left a link to the rules it names, which are as they were",
+              repr((block("link"), block("real"))))
+        check("rl-a" in block("saved"),
+              "and the network whose rules could not be known is still saved", repr(block("saved")))
+        check(seen["wifi add rl-c passpass3"]["status"] == 1 and block("fifo") == ["still-a-fifo"],
+              "a rules file that is a FIFO is said and left", repr((seen.get("wifi add rl-c passpass3"), block("fifo"))))
+        check(block("fresh") == ["wpa2 rl-d"],
+              "a rules file that is not there is none, and is made", repr(block("fresh")))
+
         # A list saved twice under one name (made by hand, or damaged) is
         # forgotten whole: the second row of the name is not left to keep the
         # network, and its password, saved.
