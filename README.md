@@ -233,6 +233,19 @@ throws away what is kept is run by a second Enter.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away.
 
+Every screen the card has connected is one desktop. `moonwater canvas arrange` lays the
+screens by their connectors' names, left to right with their tops level, the first the
+primary (the taskbar's, and where a window opens), one at a place given as NAME@X,Y or
+dark as NAME@off; with nothing kept they go left to right in the card's order, and
+`moonwater canvas` lists them in that order with where each is. The pointer crosses from
+one screen to the next where their edges meet and stops beside the rest of an edge. A
+window dragged across shows on both while it straddles them; it belongs to the screen
+that holds the most of it, which is where it is maximized and halved and, with `taskbar
+display all`, whose taskbar lists it, and one let go just past a shared edge has crossed
+it and is not arranged. A screen plugged in joins the desktop, and one unplugged takes
+nothing with it: its windows and the pointer come to the primary, at the same share of
+the room they had. The desktop is drawn at one scale on every screen.
+
 `moonwater window PLACE... COMMAND...` starts COMMAND with where its first window goes.
 `center` is the middle of the screen's room, the screen less the taskbar; `at X,Y` puts
 the window's top left at X,Y from the screen's; `maximized` fills the room and keeps to

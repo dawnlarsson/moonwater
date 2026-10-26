@@ -5184,10 +5184,12 @@ static fn host_windows_unmap(const struct windows address_to table);
 
 /*
         Where each of Canvas's screens is in the desktop's space, into places
-        (x, y, and 1 for the primary, or -1 for a screen that is dark): the
-        compositor's own list when one is running and its table can be read,
-        and else where the kept arrangement lays the screens Canvas has
-        (windows_arrange_lay), which is where a desktop that starts puts them.
+        (x, y, and its place in the desktop's list of screens -- 0 the
+        primary, which is the order screen N of moonwater window counts in --
+        or -1 for a screen that is dark): the compositor's own list when one
+        is running and its table can be read, and else where the kept
+        arrangement lays the screens Canvas has (windows_arrange_lay), which
+        is where a desktop that starts puts them.
 */
 static fn host_canvas_places(struct canvas_control address_to control, int (*places)[3])
 {
@@ -5218,7 +5220,7 @@ static fn host_canvas_places(struct canvas_control address_to control, int (*pla
                                         int width, height;
 
                                         windows_output(table, screen, &places[at][0], &places[at][1], &width, &height);
-                                        places[at][2] = !screen;
+                                        places[at][2] = (int)screen;
                                 }
                 host_windows_unmap(table);
                 return;
@@ -5232,8 +5234,37 @@ static fn host_canvas_places(struct canvas_control address_to control, int (*pla
         {
                 places[order[at]][0] = rects[order[at]][0];
                 places[order[at]][1] = rects[order[at]][1];
-                places[order[at]][2] = !at;
+                places[order[at]][2] = (int)at;
         }
+}
+
+// Canvas's screens in the desktop's order, the primary first and the dark ones last: each a line from say.
+static fn host_canvas_screens(struct canvas_control address_to control, int (*places)[3],
+                              fn (*say)(struct canvas_control address_to control, positive at, int (*places)[3], bool label),
+                              bool label)
+{
+        positive count = control->output_count < SPARK_CANVAS_OUTPUTS ? control->output_count : SPARK_CANVAS_OUTPUTS;
+
+        for (int index = 0; index < (int)count; index++)
+                for (positive at = 0; at < count; at++)
+                        if (places[at][2] == index)
+                                say(control, at, places, label);
+        for (positive at = 0; at < count; at++)
+                if (places[at][2] < 0)
+                        say(control, at, places, label);
+}
+
+static fn host_canvas_screen_line(struct canvas_control address_to control, positive at, int (*places)[3], bool label)
+{
+        host_prefix(label);
+        string_format(log, "  %s: %p by %p, %p Hz", (string_address)control->output[at].connector,
+                      (positive)control->output[at].width, (positive)control->output[at].height,
+                      (positive)control->output[at].refresh);
+        if (places[at][2] < 0)
+                string_format(log, ", dark\n");
+        else
+                string_format(log, ", at %b,%b%s\n", (bipolar)places[at][0], (bipolar)places[at][1],
+                              places[at][2] ? (string_address) "" : (string_address) ", primary");
 }
 
 static fn host_canvas_write(bool label,
@@ -5251,20 +5282,7 @@ static fn host_canvas_write(bool label,
         string_format(log, "Canvas is on: %s\n", (string_address)control->driver);
 
         host_canvas_places(control, places);
-        for (positive at = 0; at < control->output_count && at < SPARK_CANVAS_OUTPUTS; at++)
-        {
-                host_prefix(label);
-                string_format(log, "  %s: %p by %p, %p Hz",
-                              (string_address)control->output[at].connector,
-                              (positive)control->output[at].width,
-                              (positive)control->output[at].height,
-                              (positive)control->output[at].refresh);
-                if (places[at][2] < 0)
-                        string_format(log, ", dark\n");
-                else
-                        string_format(log, ", at %b,%b%s\n", (bipolar)places[at][0], (bipolar)places[at][1],
-                                      places[at][2] ? (string_address) ", primary" : (string_address) "");
-        }
+        host_canvas_screens(control, places, host_canvas_screen_line, label);
 
         if (control->suspended)
         {
@@ -21069,6 +21087,17 @@ static b32 host_setting_group(string_address address_to words, positive count)
         default alone). Bare it says what is kept, the default when nothing
         is, and then each screen and where it is.
 */
+static fn locale_canvas_arrange_line(struct canvas_control address_to control, positive at, int (*places)[3], bool label)
+{
+        (void)label;
+        if (places[at][2] < 0)
+                host_say(log, host_label "  %s dark\n", (string_address)control->output[at].connector);
+        else
+                host_say(log, host_label "  %s at %b,%b%s\n", (string_address)control->output[at].connector,
+                         (bipolar)places[at][0], (bipolar)places[at][1],
+                         places[at][2] ? (string_address) "" : (string_address) ", primary");
+}
+
 static b32 locale_canvas_arrange_status(void)
 {
         p8 text[512];
@@ -21091,13 +21120,7 @@ static b32 locale_canvas_arrange_status(void)
                 int places[SPARK_CANVAS_OUTPUTS][3];
 
                 host_canvas_places(address_of control, places);
-                for (positive at = 0; at < control.output_count && at < SPARK_CANVAS_OUTPUTS; at++)
-                        if (places[at][2] < 0)
-                                host_say(log, host_label "  %s dark\n", (string_address)control.output[at].connector);
-                        else
-                                host_say(log, host_label "  %s at %b,%b%s\n", (string_address)control.output[at].connector,
-                                         (bipolar)places[at][0], (bipolar)places[at][1],
-                                         places[at][2] ? (string_address) ", primary" : (string_address) "");
+                host_canvas_screens(address_of control, places, locale_canvas_arrange_line, true);
         }
         return 0;
 }
