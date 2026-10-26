@@ -47392,6 +47392,21 @@ while True:
               "a second moonwater boot is refused and leaves the verdict as it was",
               repr((seen.get("boot"), seen.get("again"), verdicts)))
 
+        # A session that keeps a disk is not live until it powers off: the
+        # disk's /root and /home stay bound, so `setup live` said live and
+        # left the status saying nothing was kept, and a verdict that was
+        # changed let a second disk's use past host_take's refusal.
+        script = ("rm -rf /run/moonwater; mkdir -p /run/moonwater\n"
+                  "printf 'disk nobody\\n' > /run/moonwater/verdict\n" + say("setup live") +
+                  "echo \"@@verdict $(cat /run/moonwater/verdict)\"\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and seen.get("setup live", {}).get("status") == 1 and
+              any("already keeps nobody" in line for line in seen.get("setup live", {}).get("out", [])) and
+              "@@verdict disk nobody" in lines,
+              "setup live refuses a session that keeps a disk, and the verdict stays as it was",
+              repr((seen.get("setup live"), lines[-3:])))
+
         # The settings and lists are root's too: for anybody else the page said
         # `init mount is on` and nothing at boot of a machine it could not
         # read, as facts; it says nothing of them. (The zone, ntp and keyboard

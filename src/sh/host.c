@@ -938,6 +938,12 @@ static bool host_name_valid(string_address name)
                                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == length;
 }
 
+/* The name a DISK argument gives, with a /dev/ in front of it taken off. */
+static string_address host_disk_word(string_address word)
+{
+        return string_has_prefix(word, "/dev/") ? word + 5 : word;
+}
+
 /* Whether a block device's sysfs attribute (/ro, /removable) reads 1. */
 static bool host_block_flag(string_address sysfs, string_address attribute)
 {
@@ -2939,7 +2945,7 @@ static bool host_install_place(p64 bytes, b32 sector, storage_format_partition a
 */
 static b32 host_install_locked(string_address asked, bool removable, bool said_yes)
 {
-        string_address name = string_has_prefix(asked, "/dev/") ? asked + 5 : asked;
+        string_address name = host_disk_word(asked);
         p8 sysfs[HOST_PATH_ROOM];
         p8 path[HOST_PATH_ROOM];
         p8 text[128];
@@ -23654,12 +23660,6 @@ static b32 host_wipe(bool said_yes)
         return failed;
 }
 
-/* The name a DISK argument gives, with a /dev/ in front of it taken off. */
-static string_address host_disk_word(string_address word)
-{
-        return string_has_prefix(word, "/dev/") ? word + 5 : word;
-}
-
 /*
         `moonwater setup`: a live session, or one that keeps its data on a
         disk, and the ways to change which. Arguments are judged before
@@ -23709,8 +23709,16 @@ static b32 host_setup(string_address address_to arguments, positive count)
 
         if (string_equals(verb, "live") && count == 3)
         {
+                p8 kept[HOST_NAME_ROOM];
+
                 host_need_root();
                 host_state_ready();
+                //      What a disk has bound stays bound until the power goes, so
+                //      a session that keeps one is not live, and the verdict is
+                //      left saying so for the status and for the next use.
+                if (host_session_disk(kept, sizeof(kept)))
+                        return host_refuse("this session already keeps %s, and is not "
+                                           "live until it powers off\n", kept);
                 system_remove_at(AT_FDCWD, HOST_QUESTION, 0);
                 host_verdict_set("live", "");
                 host_say(log, host_label "the disks are left alone this session\n");
