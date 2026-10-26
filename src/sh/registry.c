@@ -225,7 +225,7 @@ static const struct settings_row settings_rows[] = {
     {null, "Network adapters", SETTINGS_CHOICE, 0, 0, {"usb"}, "net ", null, {"usb", "class", "net"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
     {null, "Bluetooth adapters", SETTINGS_CHOICE, 0, 0, {"usb"}, "bluetooth ", null, {"usb", "class", "bluetooth"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
     {null, "Hubs", SETTINGS_CHOICE, 0, 0, {"usb"}, "hub ", null, {"usb", "class", "hub"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
-    {null, "Anything else", SETTINGS_CHOICE, 0, 0, {"usb"}, "other ", null, {"usb", "class", "other"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
+    {null, "Other devices", SETTINGS_CHOICE, 0, 0, {"usb"}, "other ", null, {"usb", "class", "other"}, "deny allow", 0, null, .how = SETTING_SPECIAL},
     {"Power", "Battery", SETTINGS_INFO, 1, SETTINGS_LINE | SETTINGS_TICK, {"charge"}, "battery ", null, {null}, null, ';', null},
     {null, "Battery shown", SETTINGS_CHOICE, 1, SETTINGS_BATTERIES, {"battery"}, "battery ", null, {"battery"}, null, 0, null,
      .usage = "battery [NAME|auto|none]", .help = "which battery the Battery row reads: auto is the first present one, none is no battery [auto]"},
