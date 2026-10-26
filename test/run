@@ -20252,16 +20252,20 @@ def bars(found):
 def summary(found):
     return " ".join("%dx%d" % extent(ink)[:2] for _, _, ink in found)
 
-width, height, rgb, bottom = look("bottom", "t1-bottom", flat)
+def alike(found, again, one, other, rows):
+    """Whether two pictures of a bottom band have the same tabs, pixel for pixel, the tray (the clock) left out."""
+    return len(found) == len(again) and [f[:2] for f in found[:-1]] == [a[:2] for a in again[:-1]] and all(
+        one(x, y) == other(x, y) for first, last, _ in found[:-1] for x in range(first, last) for y in rows)
+
+width, height, bottom_rgb, bottom = look("bottom", "t1-bottom", flat)
 out.append(("T1.1 a bottom band's titles are upright: each tab's ink wider than tall",
             "yes" if flat(bottom, width) else "no: " + summary(bottom), "yes"))
 shell.run("moonwater taskbar text edge", 10)
 time.sleep(2)
-width, height, rgb, bottom_edge = look("bottom", "t1-bottom-edge", flat)
-same_pixels = len(bottom) == len(bottom_edge) and all(
-    (a[0], a[1], a[2]) == (b[0], b[1], b[2]) for a, b in zip(bottom[:-1], bottom_edge[:-1]))
-out.append(("T1.2 taskbar text edge leaves a bottom band's tabs as they were, ink for ink",
-            "yes" if same_pixels else "no: %s against %s" % (summary(bottom), summary(bottom_edge)), "yes"))
+width, height, edge_rgb, bottom_edge = look("bottom", "t1-bottom-edge", flat)
+out.append(("T1.2 taskbar text edge leaves a bottom band's tabs as they were, pixel for pixel",
+            "yes" if alike(bottom, bottom_edge, bottom_rgb, edge_rgb, range(height - band, height))
+            else "no: %s against %s" % (summary(bottom), summary(bottom_edge)), "yes"))
 shell.run("moonwater taskbar text center; moonwater taskbar position left", 10)
 width, height, rgb, left = look("left", "t1-left-center", lambda f, w: standing(f, w) and bars(f) == "right")
 out.append(("T1.3 moved to the left, the band's titles stand: each tab's ink taller than wide",
