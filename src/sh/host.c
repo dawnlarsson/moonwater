@@ -5179,9 +5179,68 @@ static bipolar host_canvas_request(positive request,
         return host_spark_once(SPARK_IOCTL_CANVAS, control, FILE_READ);
 }
 
+static const struct windows address_to host_windows_header(void);
+static fn host_windows_unmap(const struct windows address_to table);
+
+/*
+        Where each of Canvas's screens is in the desktop's space, into places
+        (x, y, and 1 for the primary, or -1 for a screen that is dark): the
+        compositor's own list when one is running and its table can be read,
+        and else where the kept arrangement lays the screens Canvas has
+        (windows_arrange_lay), which is where a desktop that starts puts them.
+*/
+static fn host_canvas_places(struct canvas_control address_to control, int (*places)[3])
+{
+        const struct windows address_to table = host_windows_header();
+        positive count = control->output_count < SPARK_CANVAS_OUTPUTS ? control->output_count : SPARK_CANVAS_OUTPUTS;
+        char names[SPARK_CANVAS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        int sizes[SPARK_CANVAS_OUTPUTS][2], rects[SPARK_CANVAS_OUTPUTS][4];
+        unsigned char order[SPARK_CANVAS_OUTPUTS];
+        p8 text[512];
+        bipolar got;
+        unsigned int lit;
+
+        for (positive at = 0; at < count; at++)
+        {
+                string_copy_bounded((p8 address_to)names[at], (string_address)control->output[at].connector, WINDOWS_OUTPUT_NAME);
+                sizes[at][0] = (int)control->output[at].width;
+                sizes[at][1] = (int)control->output[at].height;
+                places[at][0] = places[at][1] = 0;
+                places[at][2] = -1;
+        }
+        if (table && table->outputs && table->outputs <= WINDOWS_OUTPUTS)
+        {
+                for (positive at = 0; at < count; at++)
+                        for (unsigned int screen = 0; screen < table->outputs; screen++)
+                                if (!memory_compare(table->output_name[screen], names[at], WINDOWS_OUTPUT_NAME - 1) &&
+                                    !table->output_name[screen][WINDOWS_OUTPUT_NAME - 1])
+                                {
+                                        int width, height;
+
+                                        windows_output(table, screen, &places[at][0], &places[at][1], &width, &height);
+                                        places[at][2] = !screen;
+                                }
+                host_windows_unmap(table);
+                return;
+        }
+        host_windows_unmap(table);
+        got = host_read_state(SETTING_CANVAS_ARRANGE_PATH, text, sizeof(text) - 1);
+        text[got > 0 ? got : 0] = end;
+        lit = windows_arrange_lay((const char address_to)text, (const char (*)[WINDOWS_OUTPUT_NAME])names,
+                                  (const int (*)[2])sizes, (unsigned int)count, rects, order);
+        for (unsigned int at = 0; at < lit; at++)
+        {
+                places[order[at]][0] = rects[order[at]][0];
+                places[order[at]][1] = rects[order[at]][1];
+                places[order[at]][2] = !at;
+        }
+}
+
 static fn host_canvas_write(bool label,
                             struct canvas_control address_to control)
 {
+        int places[SPARK_CANVAS_OUTPUTS][3];
+
         host_prefix(label);
         if (!control->running)
         {
@@ -5191,14 +5250,20 @@ static fn host_canvas_write(bool label,
 
         string_format(log, "Canvas is on: %s\n", (string_address)control->driver);
 
+        host_canvas_places(control, places);
         for (positive at = 0; at < control->output_count && at < SPARK_CANVAS_OUTPUTS; at++)
         {
                 host_prefix(label);
-                string_format(log, "  %s: %p by %p, %p Hz\n",
+                string_format(log, "  %s: %p by %p, %p Hz",
                               (string_address)control->output[at].connector,
                               (positive)control->output[at].width,
                               (positive)control->output[at].height,
                               (positive)control->output[at].refresh);
+                if (places[at][2] < 0)
+                        string_format(log, ", dark\n");
+                else
+                        string_format(log, ", at %b,%b%s\n", (bipolar)places[at][0], (bipolar)places[at][1],
+                                      places[at][2] ? (string_address) ", primary" : (string_address) "");
         }
 
         if (control->suspended)
@@ -21499,6 +21564,46 @@ static fn name_restore(void)
 }
 
 /*
+        The head of the compositor's window table, mapped to be read, or null
+        when no compositor is running or the table cannot be had: taken from
+        /dev/spark and else from its path, both root's. Nothing in it is
+        written, and no window is taken; host_windows_unmap gives it back.
+*/
+static const struct windows address_to host_windows_header(void)
+{
+        long spark, file = -1, mapped;
+
+        spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
+        if (spark >= 0)
+        {
+                file = window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0);
+                window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
+        }
+        if (file < 0)
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
+        //      A table shorter than the struct is no table this build can map:
+        //      the page past its end is a bus error on the first field read,
+        //      which is what an empty file (a compositor still starting) was.
+        if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
+        {
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                file = -1;
+        }
+        if (file < 0)
+                return null;
+        // PROT_READ, MAP_SHARED
+        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 1, 1, file, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        return mapped < 0 && mapped > -4096 ? null : (const struct windows address_to)mapped;
+}
+
+static fn host_windows_unmap(const struct windows address_to table)
+{
+        if (table)
+                window_call(WINDOW_SYS_MUNMAP, (long)table, (long)sizeof(struct windows), 0, 0, 0, 0);
+}
+
+/*
         moonwater debug: what the desktop is doing and why, read from the head
         of the window table the compositor keeps -- its card, whether the
         pointer has a plane, the overlay, how many frames the card showed
@@ -21518,45 +21623,54 @@ static b32 host_debug(string_address address_to arguments, positive count)
             "shown straight", "no card", "the table is no memfd", "the pointer is drawn in software",
             "no window, or one dragged or resized", "it is glass", "it is not at the size it drew",
             "it is not wholly on the screen", "it is too short past its corners and close button", "it meets the tabs",
-            "the card has no overlay for it", "the card refused its framebuffer", "the card refused the overlay"};
+            "the card has no overlay for it", "the card refused its framebuffer", "the card refused the overlay",
+            "the desktop spans more than one screen"};
         const struct windows address_to table;
-        long spark, file = -1, mapped;
         char driver[17];
+        unsigned int screens;
 
         (void)arguments;
         return_if(count > 2, host_usage());
-        spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
-        if (spark >= 0)
-        {
-                file = window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0);
-                window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
-        }
-        if (file < 0)
-                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, 0x80000, 0, 0, 0);
-        //      A table shorter than the struct is no table this build can map:
-        //      the page past its end is a bus error on the first field read,
-        //      which is what an empty file (a compositor still starting) was.
-        if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
-        {
-                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                file = -1;
-        }
-        if (file < 0)
+        table = host_windows_header();
+        if (!table)
         {
                 host_say(log, "canvas\n  no compositor is running\n");
                 return 0;
         }
-        // PROT_READ, MAP_SHARED
-        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 1, 1, file, 0);
-        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-        if (mapped < 0 && mapped > -4096)
-                return host_fail("debug", (b32)mapped);
-        table = (const struct windows address_to)mapped;
         memory_copy(driver, table->driver, sizeof(table->driver));
         driver[16] = 0;
         host_say(log, "canvas\n");
         host_say(log, "  card            %s, %px%p, scale %p\n", driver[0] ? (string_address)driver : (string_address) "none",
                  (positive)table->output_width, (positive)table->output_height, (positive)table->scale);
+        //      The screens as the table lists them, the primary first.
+        screens = table->outputs <= WINDOWS_OUTPUTS ? table->outputs : 0;
+        for (unsigned int at = 0; at < screens; at++)
+        {
+                int x, y, width, height;
+                char name[WINDOWS_OUTPUT_NAME];
+
+                windows_output(table, at, &x, &y, &width, &height);
+                memory_copy(name, table->output_name[at], sizeof(name));
+                name[sizeof(name) - 1] = 0;
+                //      Spelled: the table is any mapper's to write, and a name is printed to a terminal.
+                host_say(log, "  screen %p        %w, %px%p at %b,%b%s\n", (positive)at, writer_terminal_name,
+                         name[0] ? (string_address)name : (string_address) "-", (positive)width, (positive)height, (bipolar)x,
+                         (bipolar)y, at ? (string_address) "" : (string_address) ", primary");
+        }
+        //      The windows the table holds, each where the compositor put it: its row, its title (a program's, so
+        //      spelled), its place in the space and the size of its picture.
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                char title[WINDOWS_TITLE];
+
+                if (!table->pid[row])
+                        continue;
+                memory_copy(title, table->title[row], sizeof(title));
+                title[sizeof(title) - 1] = 0;
+                host_say(log, "  window %p%s       %w at %b,%b, %px%p\n", (positive)row, row < 10 ? (string_address) " " : (string_address) "",
+                         writer_terminal_name, title[0] ? (string_address)title : (string_address) "-", (bipolar)table->x[row],
+                         (bipolar)table->y[row], (positive)table->width[row], (positive)table->height[row]);
+        }
         host_say(log, "  pointer         %s\n", table->pointer_plane ? (string_address) "on a plane of its own"
                                                                     : (string_address) "drawn in software");
         host_say(log, "  overlay         %s\n", table->overlay > 0    ? (string_address) "found"
@@ -21567,7 +21681,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",
                  table->unscanned < sizeof(reasons) / sizeof(reasons[0]) ? reasons[table->unscanned] : (string_address) "?");
-        window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
+        host_windows_unmap(table);
         return 0;
 }
 
@@ -23662,7 +23776,7 @@ static const host_row host_rows[] = {
     {null, "", "size WxH, name NAME (what it is remembered by)", 'b'},
     {null, "window move PID|NAME PLACE...", "put the windows of a program, or of a name, where PLACE says", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
-    {null, "debug", "what the desktop is doing and why (root): the card, the pointer, windows shown straight", 'b'},
+    {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer", 'b'},
     {null, "@airplane", null, 'r'},
     {null, "@brightness", null, 'r'},
     {null, "@power", null, 'r'},
