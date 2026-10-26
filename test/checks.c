@@ -146004,6 +146004,232 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_ring0_hostile */
 
+#ifdef CHECK_firewall_probe
+/*
+        A probe of what a closed port answers, for the `firewall` lane in
+        test/run. The shell has no /dev/tcp, so a closed-port connect and a
+        closed-port datagram are made here, in a static binary built on the
+        host and carried into a guest on a stick, as ring0_hostile is. One
+        word is printed for a scripted shell to read:
+
+            firewall_probe tcp  HOST PORT MS   connected | refused | timeout | error:E
+            firewall_probe udp  HOST PORT MS   reply | refused | none | error:E
+            firewall_probe accept ADDR PORT MS accepted | none | error:E
+
+        tcp is a nonblocking connect watched for MS milliseconds: refused is
+        ECONNREFUSED (a RST, or loopback's instant refusal), connected is an
+        open listener answering, timeout is neither (a silent drop). udp
+        connects, sends one byte and waits MS for the connected socket to
+        take an ICMP error: refused is ECONNREFUSED (port unreachable came
+        back), reply is a datagram (a listener answered), none is silence.
+        accept binds and listens on ADDR and takes one connection within MS,
+        for the row that an open port still serves the peer. HOST and ADDR
+        are numeric, v4 (dotted) or v6 (with a colon, and an optional %zone
+        for a link-local address); nothing here resolves a name.
+*/
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+/* Fill *ss from a numeric address and a port; the length, or 0 on a bad
+   address. A v6 address may carry %zone for a link-local scope. */
+static socklen_t fw_addr(const char *host, int port, struct sockaddr_storage *ss)
+{
+        memset(ss, 0, sizeof *ss);
+        if (strchr(host, ':'))
+        {
+                struct sockaddr_in6 *a = (void *)ss;
+                char copy[128], *zone;
+
+                snprintf(copy, sizeof copy, "%s", host);
+                zone = strchr(copy, '%');
+                if (zone)
+                        *zone++ = 0;
+                a->sin6_family = AF_INET6;
+                a->sin6_port = htons((unsigned short)port);
+                if (inet_pton(AF_INET6, copy, &a->sin6_addr) != 1)
+                        return 0;
+                if (zone)
+                        a->sin6_scope_id = if_nametoindex(zone);
+                return sizeof *a;
+        }
+        else
+        {
+                struct sockaddr_in *a = (void *)ss;
+
+                a->sin_family = AF_INET;
+                a->sin_port = htons((unsigned short)port);
+                if (inet_pton(AF_INET, host, &a->sin_addr) != 1)
+                        return 0;
+                return sizeof *a;
+        }
+}
+
+static int fw_nonblock(int fd)
+{
+        int flags = fcntl(fd, F_GETFL, 0);
+
+        return flags < 0 ? -1 : fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int main(int argc, char **argv)
+{
+        struct sockaddr_storage ss;
+        socklen_t length;
+        int port, ms, fd;
+        const char *mode, *host;
+
+        if (argc != 5)
+        {
+                fprintf(stderr, "firewall_probe tcp|udp|accept HOST PORT MS\n");
+                return 2;
+        }
+        mode = argv[1];
+        host = argv[2];
+        port = atoi(argv[3]);
+        ms = atoi(argv[4]);
+        length = fw_addr(host, port, &ss);
+        if (!length)
+        {
+                printf("error:address\n");
+                return 1;
+        }
+
+        if (!strcmp(mode, "tcp"))
+        {
+                struct pollfd pfd;
+                int error = 0;
+                socklen_t errlen = sizeof error;
+
+                fd = socket(ss.ss_family, SOCK_STREAM, 0);
+                if (fd < 0 || fw_nonblock(fd) < 0)
+                {
+                        printf("error:socket\n");
+                        return 1;
+                }
+                if (connect(fd, (void *)&ss, length) == 0)
+                {
+                        printf("connected\n");
+                        return 0;
+                }
+                if (errno != EINPROGRESS)
+                {
+                        printf(errno == ECONNREFUSED ? "refused\n" : "error:%d\n", errno);
+                        return 0;
+                }
+                pfd.fd = fd;
+                pfd.events = POLLOUT;
+                if (poll(&pfd, 1, ms) <= 0)
+                {
+                        printf("timeout\n");
+                        return 0;
+                }
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) < 0)
+                {
+                        printf("error:getsockopt\n");
+                        return 0;
+                }
+                printf(error == 0 ? "connected\n"
+                       : error == ECONNREFUSED ? "refused\n" : "error:%d\n", error);
+                return 0;
+        }
+
+        if (!strcmp(mode, "udp"))
+        {
+                struct pollfd pfd;
+                struct timespec start, now;
+                char byte = 'x', buffer[64];
+
+                fd = socket(ss.ss_family, SOCK_DGRAM, 0);
+                if (fd < 0 || fw_nonblock(fd) < 0 || connect(fd, (void *)&ss, length) < 0)
+                {
+                        printf("error:socket\n");
+                        return 1;
+                }
+                (void)send(fd, &byte, 1, 0);
+                clock_gettime(CLOCK_MONOTONIC, &start);
+                pfd.fd = fd;
+                pfd.events = POLLIN;
+                for (;;)
+                {
+                        long left;
+                        ssize_t got;
+
+                        clock_gettime(CLOCK_MONOTONIC, &now);
+                        left = ms - ((now.tv_sec - start.tv_sec) * 1000 +
+                                     (now.tv_nsec - start.tv_nsec) / 1000000);
+                        if (left <= 0)
+                        {
+                                printf("none\n");
+                                return 0;
+                        }
+                        if (poll(&pfd, 1, (int)left) <= 0)
+                                continue;
+                        got = recv(fd, buffer, sizeof buffer, 0);
+                        if (got >= 0)
+                        {
+                                printf("reply\n");
+                                return 0;
+                        }
+                        if (errno == ECONNREFUSED)
+                        {
+                                printf("refused\n");
+                                return 0;
+                        }
+                        if (errno != EAGAIN && errno != EWOULDBLOCK)
+                        {
+                                printf("error:%d\n", errno);
+                                return 0;
+                        }
+                }
+        }
+
+        if (!strcmp(mode, "accept"))
+        {
+                struct pollfd pfd;
+                int one = 1, client;
+
+                fd = socket(ss.ss_family, SOCK_STREAM, 0);
+                if (fd < 0)
+                {
+                        printf("error:socket\n");
+                        return 1;
+                }
+                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+                if (bind(fd, (void *)&ss, length) < 0 || listen(fd, 4) < 0)
+                {
+                        printf("error:bind\n");
+                        return 1;
+                }
+                pfd.fd = fd;
+                pfd.events = POLLIN;
+                if (poll(&pfd, 1, ms) <= 0)
+                {
+                        printf("none\n");
+                        return 0;
+                }
+                client = accept(fd, NULL, NULL);
+                printf(client < 0 ? "error:accept\n" : "accepted\n");
+                if (client >= 0)
+                        close(client);
+                return 0;
+        }
+
+        fprintf(stderr, "firewall_probe: unknown mode %s\n", mode);
+        return 2;
+}
+#endif /* CHECK_firewall_probe */
+
 #ifdef COVERAGE_hook
 /*
         The other half of `sh test/run coverage`: built on its own, without

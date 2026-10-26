@@ -125,7 +125,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged"
 
@@ -222,6 +222,7 @@ describe()
         desktop)  echo "a compositor's input in a booted guest: Alpine's libinput over a bowl's udev, keys and a pointer reaching it, and weston drawing on the card once desktop off has handed it over (NOT RUN without a network, an image or mke2fs)" ;;
         chrome)   echo "a browser that will not run as root, from Debian's package in a booted guest: who a bowl's programs are, and Chromium's sandbox on (NOT RUN without a network, an image or mke2fs)" ;;
         usb)      echo "moonwater usb in a booted guest with devices hot-plugged over QMP: what lock keeps, a stick and a keyboard held, allow, a class, a deny across unlock, hostile serials, the policy read at a second boot, and with MOONWATER_USB_TIER a sec_host_locked image's first boot (NOT RUN without qemu-system-x86_64 or an image)" ;;
+        firewall) echo "net.ipv4.moonwater_silent between two guests on a private link: a closed TCP and UDP port refused with the switch 0 and the RST and unreachable counters moving, silently dropped with it 1 while loopback and an open port still answer, back at 0, IPv6 over link-local, and a tight net tier booting at 1 (NOT RUN without qemu-system-x86_64, cc or an image)" ;;
         wifi)     echo "networks in the air of a machine with simulated radios, joined and listed" ;;
         fuzz)     echo "every network libFuzzer target for an hour each, or a release report" ;;
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
@@ -272,7 +273,7 @@ seam_apart()
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
         desktop) echo "desktop chrome" ;;
-        image) echo "ring0 tier usb" ;;
+        image) echo "ring0 tier usb firewall" ;;
         *) ;;
         esac
 }
@@ -21742,6 +21743,283 @@ if [ ! -s "$work/answers" ]; then
         sed 's/^/    /' "$work/why" | tail -5
         exit 1
 fi
+
+while IFS='|' read -r name got want; do
+        same "$name" "$want" "$got"
+done < "$work/answers"
+
+counted
+)
+
+#       net.ipv4.moonwater_silent against two machines on a private link.
+#
+#       A closed port answers -- a TCP reset, a UDP ICMP port unreachable --
+#       and mw_net_silent_gate (kernel/kernel.c) drops that answer for traffic
+#       off a non-loopback device when the switch is 1. The shell has no
+#       /dev/tcp, so the probe is a static binary (test/checks.c,
+#       CHECK_firewall_probe) carried in on a stick and run in the guests:
+#       `tcp`/`udp` say what a closed port did (refused, timeout/none), and
+#       `accept` holds an open port open for the peer.
+#
+#       Two guests of the image boot on a point-to-point socket link (the
+#       target listens, the peer connects, each a distinct MAC), take static
+#       v4 addresses with `ip`, and use their link-local v6 as it forms. The
+#       peer probes closed ports of the target while the target's
+#       /proc/net/snmp TcpOutRsts and Icmp OutDestUnreachs (and snmp6's
+#       Icmp6OutDestUnreachs) are read either side of each probe. With the
+#       switch 0 a closed TCP port is refused and the RST counter moves, a
+#       closed UDP port is refused and the unreachable counter moves; with it
+#       1 the TCP connect times out and no RST goes out, the UDP probe hears
+#       nothing and no unreachable goes out, yet a closed port on the target's
+#       own 127.0.0.1 and ::1 is still refused at once and an open listener
+#       still takes the peer's connection; back at 0 the answers return. The
+#       target's ICMP rate limits are turned off so the unreachable rows at 0
+#       measure the gate and not the limiter. With MOONWATER_NET_TIER naming
+#       an image built with a tight net tier, a third guest boots it and the
+#       switch reads 1 with nothing set by hand.
+#
+#       NOT RUN cleanly without qemu-system-x86_64, cc or the image.
+lane_firewall()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting firewall 10 52
+
+for need in qemu-system-x86_64 python3 cc; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  firewall     NOT RUN -- no $need"
+                exit 2
+        fi
+done
+if [ ! -f "$image" ]; then
+        echo "  firewall     NOT RUN -- no image at $image"
+        exit 2
+fi
+if [ ! -f "${MOONWATER_NET_TIER:-}" ]; then
+        note "firewall tier: NOT RUN -- MOONWATER_NET_TIER names no image built with a tight net tier"
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-firewall.XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT INT TERM
+
+mkdir -p "$work/stick"
+if ! cc -static -O2 -DCHECK_firewall_probe -o "$work/stick/firewall_probe" test/checks.c \
+        > "$work/cc.log" 2>&1; then
+        lost 'firewall_probe' "$(tail -3 "$work/cc.log" | tr '\n' ' ')"
+        counted
+        exit 1
+fi
+
+MOONWATER_FW_WORK=$work
+export MOONWATER_FW_WORK
+qmp_guest_module "$work"
+
+PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
+import os, socket, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_FW_WORK"]
+tier = os.environ.get("MOONWATER_NET_TIER", "")
+out = []
+
+#       A free TCP port on the host for the point-to-point socket link.
+probe = socket.socket()
+probe.bind(("127.0.0.1", 0))
+link_port = probe.getsockname()[1]
+probe.close()
+
+accel = ["-cpu", "Nehalem"]
+if os.access("/dev/kvm", os.R_OK | os.W_OK):
+    accel = ["-cpu", "host", "-enable-kvm"]
+
+def machine(name, link, mac, kernel=image, disk_stick=True):
+    """A guest of the image with one end of the private link, a stick with
+       the probe, and a serial shell once the verdict is in."""
+    args = ["qemu-system-x86_64", "-m", "1G", "-smp", "2"] + accel + [
+        "-kernel", kernel, "-no-reboot", "-display", "none", "-vga", "none",
+        "-device", "VGA,xres=1024,yres=768",
+        "-netdev", link, "-device", "e1000,netdev=n0,mac=" + mac]
+    if disk_stick:
+        args += ["-device", "qemu-xhci",
+                 "-drive", "if=none,id=stick,format=raw,file=fat:ro:%s/stick,readonly=on" % work,
+                 "-device", "usb-storage,drive=stick,removable=on"]
+    args += ["-chardev", "socket,id=s0,path=%s/%s.ser,server=on,wait=off" % (work, name),
+             "-serial", "chardev:s0",
+             "-append", "console=ttyS0 drm_client_lib.active= moonwater.desktop=none mac80211_hwsim.radios=0"]
+    guest = Guest(args, "%s/%s.qmp" % (work, name), "%s/%s.mon" % (work, name), work,
+                  sockets=("%s/%s.ser" % (work, name),))
+    shell = Shell("%s/%s.ser" % (work, name))
+    shell.ready()
+    shell.run("echo 1 > /proc/sys/kernel/printk", 10)
+    return guest, shell
+
+def stop(guest):
+    guest.quit()
+    time.sleep(1)
+    guest.terminate()
+    try:
+        guest.wait(10)
+    except Exception:
+        guest.kill()
+
+def wait_probe(shell):
+    """The guests mount the stick and copy the probe out of it."""
+    for _ in range(80):
+        if shell.run("[ -b /dev/sda1 ] && echo yes", 5)[0].strip().endswith("yes"):
+            break
+        time.sleep(0.25)
+    shell.run("mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick && "
+              "cp /mnt/stick/firewall_probe /tmp/fw && chmod 755 /tmp/fw", 20)
+    return shell.run("[ -x /tmp/fw ] && echo ok", 10)[0].strip().endswith("ok")
+
+def up(shell, v4):
+    shell.run("ip link set eth0 up; ip addr add %s/24 dev eth0" % v4, 20)
+
+def linklocal(shell):
+    """eth0's fe80:: address as the guest formed it, or '' if none did."""
+    text = shell.run("cat /proc/net/if_inet6 2>/dev/null", 10)[0]
+    for line in text.split("\n"):
+        f = line.split()
+        if len(f) >= 6 and f[0].startswith("fe80") and f[-1] == "eth0":
+            a = f[0]
+            return ":".join(a[i:i+4] for i in range(0, 32, 4)).replace("0000", "0") + "%eth0"
+    return ""
+
+def silent(shell, value):
+    shell.run("echo %d > /proc/sys/net/ipv4/moonwater_silent" % value, 10)
+    return shell.run("cat /proc/sys/net/ipv4/moonwater_silent", 10)[0].strip()
+
+def snmp(shell, proto, field):
+    rows = [l.split() for l in shell.run("cat /proc/net/snmp", 10)[0].split("\n")
+            if l.startswith(proto + ":")]
+    if len(rows) < 2 or field not in rows[0]:
+        return -1
+    try:
+        return int(rows[1][rows[0].index(field)])
+    except (ValueError, IndexError):
+        return -1
+
+def snmp6(shell, name):
+    for line in shell.run("cat /proc/net/snmp6 2>/dev/null", 10)[0].split("\n"):
+        f = line.split()
+        if len(f) == 2 and f[0] == name:
+            return int(f[1])
+    return 0
+
+def fw(shell, *a):
+    return shell.run("/tmp/fw %s" % " ".join(str(x) for x in a), 20)[0].strip().split("\n")[-1]
+
+TARGET4, PEER4 = "10.9.9.1", "10.9.9.2"
+CLOSED_T, CLOSED_U, OPEN_T = 9999, 9998, 7777
+
+#       The target listens for the link; the peer connects to it.
+target, tsh = machine("t1", "socket,id=n0,listen=127.0.0.1:%d" % link_port, "52:54:00:00:f9:01")
+peer, psh = machine("p2", "socket,id=n0,connect=127.0.0.1:%d" % link_port, "52:54:00:00:f9:02")
+
+ok = wait_probe(tsh) and wait_probe(psh)
+out.append(("F0 both guests have the probe", "yes" if ok else "no", "yes"))
+up(tsh, TARGET4)
+up(psh, PEER4)
+time.sleep(2)
+#       The ICMP limiter off, so the unreachable rows measure the gate.
+tsh.run("echo 0 > /proc/sys/net/ipv4/icmp_ratelimit; echo 0 > /proc/sys/net/ipv6/icmp/ratelimit", 10)
+#       The link is up when the peer's probe to a closed port is answered.
+got = fw(psh, "tcp", TARGET4, OPEN_T, 1500)
+out.append(("F0 the private link carries traffic", "yes" if got in ("refused", "connected", "timeout") else got, "yes"))
+
+def tcp_row(tag, want, host, port, ms=2500):
+    before = snmp(tsh, "Tcp", "OutRsts")
+    got = fw(psh, "tcp", host, port, ms)
+    time.sleep(0.5)
+    after = snmp(tsh, "Tcp", "OutRsts")
+    out.append((tag + " connect", got, want))
+    return before, after
+
+def udp_row(tag, want, host, port, v6=False, ms=1800):
+    field = None
+    before = snmp6(tsh, "Icmp6OutDestUnreachs") if v6 else snmp(tsh, "Icmp", "OutDestUnreachs")
+    got = fw(psh, "udp", host, port, ms)
+    time.sleep(0.5)
+    after = snmp6(tsh, "Icmp6OutDestUnreachs") if v6 else snmp(tsh, "Icmp", "OutDestUnreachs")
+    out.append((tag + " datagram", got, want))
+    return before, after
+
+#       Switch 0: a closed port is refused and the counters move.
+out.append(("F1 switch starts at 0", silent(tsh, 0), "0"))
+b, a = tcp_row("F1 v4 closed TCP, switch 0", "refused", TARGET4, CLOSED_T)
+out.append(("F1 and a RST went out (OutRsts moved)", "yes" if a > b else "no (%d->%d)" % (b, a), "yes"))
+b, a = udp_row("F1 v4 closed UDP, switch 0", "refused", TARGET4, CLOSED_U)
+out.append(("F1 and an unreachable went out", "yes" if a > b else "no (%d->%d)" % (b, a), "yes"))
+
+#       Switch 1: no RST, no unreachable, but loopback and an open port stay.
+out.append(("F2 switch set to 1", silent(tsh, 1), "1"))
+b, a = tcp_row("F2 v4 closed TCP, switch 1", "timeout", TARGET4, CLOSED_T)
+out.append(("F2 no RST went out (OutRsts still)", "yes" if a == b else "no (%d->%d)" % (b, a), "yes"))
+b, a = udp_row("F2 v4 closed UDP, switch 1", "none", TARGET4, CLOSED_U)
+out.append(("F2 no unreachable went out", "yes" if a == b else "no (%d->%d)" % (b, a), "yes"))
+out.append(("F2 loopback TCP on the target is still refused", fw(tsh, "tcp", "127.0.0.1", CLOSED_T, 1500), "refused"))
+out.append(("F2 loopback v6 TCP on the target is still refused", fw(tsh, "tcp", "::1", CLOSED_T, 1500), "refused"))
+out.append(("F2 loopback UDP on the target is still refused", fw(tsh, "udp", "127.0.0.1", CLOSED_U, 1500), "refused"))
+#       An open listener still takes the peer with the switch at 1.
+tsh.sock.sendall(("/tmp/fw accept %s %d 9000 > /tmp/acc 2>&1 &\n" % (TARGET4, OPEN_T)).encode())
+time.sleep(1.5)
+out.append(("F2 an open port still accepts the peer", fw(psh, "tcp", TARGET4, OPEN_T, 4000), "connected"))
+time.sleep(1)
+out.append(("F2 and the listener saw it", tsh.run("cat /tmp/acc", 10)[0].strip().split("\n")[-1], "accepted"))
+
+#       Back to 0: the answers return.
+out.append(("F3 switch back to 0", silent(tsh, 0), "0"))
+b, a = tcp_row("F3 v4 closed TCP, switch 0 again", "refused", TARGET4, CLOSED_T)
+out.append(("F3 and a RST went out again", "yes" if a > b else "no (%d->%d)" % (b, a), "yes"))
+
+#       IPv6 over the link-local address, if one formed.
+tll = linklocal(tsh)
+pll = linklocal(psh)
+if tll and pll:
+    target6 = tll.split("%")[0] + "%eth0"
+    silent(tsh, 0)
+    b6 = snmp6(tsh, "Icmp6OutDestUnreachs")
+    out.append(("F4 v6 closed UDP, switch 0", fw(psh, "udp", target6, CLOSED_U, 1800), "refused"))
+    time.sleep(0.5)
+    out.append(("F4 and a v6 unreachable went out", "yes" if snmp6(tsh, "Icmp6OutDestUnreachs") > b6 else "no", "yes"))
+    out.append(("F4 v6 closed TCP, switch 0", fw(psh, "tcp", target6, CLOSED_T, 2500), "refused"))
+    silent(tsh, 1)
+    rb = snmp(tsh, "Tcp", "OutRsts")
+    u6 = snmp6(tsh, "Icmp6OutDestUnreachs")
+    out.append(("F4 v6 closed TCP, switch 1", fw(psh, "tcp", target6, CLOSED_T, 2500), "timeout"))
+    out.append(("F4 no RST for the v6 connect", "yes" if snmp(tsh, "Tcp", "OutRsts") == rb else "no", "yes"))
+    out.append(("F4 v6 closed UDP, switch 1", fw(psh, "udp", target6, CLOSED_U, 1800), "none"))
+    out.append(("F4 no v6 unreachable", "yes" if snmp6(tsh, "Icmp6OutDestUnreachs") == u6 else "no", "yes"))
+    out.append(("F4 loopback v6 stays refused at 1", fw(tsh, "tcp", "::1", CLOSED_T, 1500), "refused"))
+else:
+    out.append(("F4 IPv6 link-local", "NOT RUN -- no fe80 on eth0", "NOT RUN -- no fe80 on eth0"))
+
+stop(peer)
+stop(target)
+
+#       A tight net tier's image carries the switch at 1 from boot.
+if os.path.isfile(tier):
+    g, sh = machine("t3", "socket,id=n0,listen=127.0.0.1:%d" % link_port, "52:54:00:00:f9:03", kernel=tier, disk_stick=False)
+    value = ""
+    for _ in range(40):
+        value = sh.run("cat /proc/sys/net/ipv4/moonwater_silent 2>/dev/null", 10)[0].strip()
+        if value == "1":
+            break
+        time.sleep(0.5)
+    out.append(("F5 a tight net tier boots with the switch at 1", value or "unset", "1"))
+    stop(g)
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, " ".join(got.split()).replace("|", "/"), want))
+PY
+
+if [ ! -s "$work/answers" ]; then
+        echo "  firewall     the guests answered nothing"
+        sed 's/^/    /' "$work/why" | tail -8
+        exit 1
+fi
+[ -n "${MOONWATER_FW_ANSWERS:-}" ] && cp "$work/answers" "$MOONWATER_FW_ANSWERS"
 
 while IFS='|' read -r name got want; do
         same "$name" "$want" "$got"
