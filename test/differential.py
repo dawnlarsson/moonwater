@@ -47508,6 +47508,33 @@ while True:
               any(line.endswith("running") for line in seen.get("desktop", {}).get("out", [])) and
               seen.get("desktop stop", {}).get("status") == 0 and "@@ record gone" in lines,
               "a session that was ended leaves no record of its number", repr(lines[-8:]))
+        #       The KDE session draws Qt Quick on the main thread where GL is
+        #       software (llvmpipe's shader compiler overflows a musl thread's
+        #       128 KiB stack, and plasmashell crashed at every start on arm64),
+        #       and leaves a card that draws as it was. The session runs to
+        #       its last line, where a dbus-run-session of the sandbox's own
+        #       says what it was given.
+        cards = [("a virtio GPU without virgl", "mkdir -p /sys/class/drm/renderD128/device/virtio0; "
+                  "printf '0100000000\\n' > /sys/class/drm/renderD128/device/virtio0/features", "", "basic"),
+                 ("no render node", ":", "", "basic"),
+                 ("a virtio GPU with virgl", "mkdir -p /sys/class/drm/renderD128/device/virtio0; "
+                  "printf '1100000000\\n' > /sys/class/drm/renderD128/device/virtio0/features", "", "unset"),
+                 ("a card of another driver", "mkdir -p /sys/class/drm/renderD128/device", "", "unset"),
+                 ("software with a loop the person chose", ":", "QSG_RENDER_LOOP=threaded ", "threaded")]
+        script = "mkdir -p /tmp/fake; ln -sf /tmp/moonwater /tmp/bowl\n" \
+                 "printf '#!/bin/sh\\necho \"@@loop ${QSG_RENDER_LOOP:-unset}\"\\n' > /tmp/fake/dbus-run-session; " \
+                 "chmod 755 /tmp/fake/dbus-run-session\n"
+        for name, made, preset, want in cards:
+            script += (f"rm -rf /sys/class/drm; {made}\n"
+                       f"{preset}MOONWATER_SESSION=1 HOME=/tmp PATH=/tmp/fake:/usr/bin:/bin "
+                       "timeout 20 /tmp/bowl profile desktop session > /tmp/session.out 2>&1; "
+                       "grep '^@@loop' /tmp/session.out || echo '@@loop none'\n")
+        script += "rm -rf /sys/class/drm /tmp/fake /tmp/bowl /tmp/session.out /tmp/.config\n"
+        lines, finished = session(script)
+        loops = [line.split()[1] for line in lines if line.startswith("@@loop")]
+        check(finished and loops == [want for _, _, _, want in cards],
+              "the desktop session draws Qt Quick on the main thread where GL is software, and only there: " +
+              ", ".join(f"{name} {want}" for name, _, _, want in cards), repr(loops))
         #       The firmware's indications are read before they are written: a
         #       variable that is there and cannot be read whole (five bytes, here)
         #       has bits not known, and is left as it is and said, where it was

@@ -7747,6 +7747,21 @@ static const struct bowl_component bowl_desktop_components[] = {
         a session started on the spot never got the display (KWin: failed to
         authenticate the drm magic token) and was in no record, so a desktop
         off left it running and the console black and deaf.
+
+        With no card that draws GL of its own, Qt Quick draws in software
+        (Mesa's llvmpipe), and plasmashell drew nothing and crashed at every
+        start on arm64: Qt draws a scene on a thread of its own, musl gives a
+        thread 128 KiB of stack where glibc gives 8 MiB, and llvmpipe compiles
+        each shader with LLVM on that thread, deep enough on aarch64 to step
+        over the stack's guard page (sp past the guard, the fault in it, in
+        llvm::AsmPrinter::doFinalization under MCJIT). The desktop was black,
+        with no panel, wallpaper or launcher. QSG_RENDER_LOOP=basic draws on
+        the main thread, whose stack is the process's; it is set only where
+        GL is software: no render node, or render nodes that are all virtio
+        GPUs without virgl (the feature's bit is the first of the device's
+        virtio features). A render node of any other driver, or a virtio GPU
+        with virgl, is a card that draws, and the session is left as it was;
+        a QSG_RENDER_LOOP already set is the person's.
 */
 static string_address bowl_desktop_session[] = {
     "[ -n \"$MOONWATER_SESSION\" ] || exec moonwater desktop \"$0\"",
@@ -7765,6 +7780,9 @@ static string_address bowl_desktop_session[] = {
     "> /bowls/alpine/etc/pam.d/kde",
     "bowl udev",
     "bowl bus",
+    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node\" ] || continue; "
+    "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done; "
+    "[ \"$gl\" = card ] || export QSG_RENDER_LOOP=${QSG_RENDER_LOOP:-basic}",
     "exec dbus-run-session -- startplasma-wayland",
     null};
 
