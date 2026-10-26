@@ -45,6 +45,9 @@
             layout      UTF-8 through lib.util.c's decoder, advances,
                         kerning, a chain of faces for missing glyphs, line
                         metrics, and the terminal's monospace cell
+            turning     a line a quarter turn either way, for a band on the
+                        side of a screen, each glyph's coverage turned byte
+                        for byte as it is laid
 
         Refused at load: CFF and CFF2 outlines, variable fonts (fvar), and
         colour fonts with no outlines (CBDT, sbix). Not done: bytecode hinting

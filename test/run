@@ -17364,7 +17364,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -20131,6 +20131,175 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/g1-answers"
+fi
+fi
+
+#       The band's text on every side (taskbar text). The compositor with the image's Inter and two windows, the first
+#       titled TTTTTTTT and the second shell, and the band moved and its text turned by the verb while it runs, as a
+#       person would. Read off the screen: a tab is a run of anything but the desktop along a line just inside the
+#       band's edge (the tabs' square corners are there), and a tab's ink is what is far lighter than the tab's own
+#       median (light text on glass over the dark desktop). On a bottom or top band a tab's ink is wider than tall and
+#       the word does not move it a pixel; on a side its ink is taller than wide, and in the Ts' tab the column with the
+#       most ink, their bars, is toward the middle of the screen with center and toward the edge with edge; and the
+#       tray's clock is turned with the titles.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = t1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/t1-answers" 2>"$work/t1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/t1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 printk.time=1 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("rm -f /root/taskbar.position /root/taskbar.text; "
+          "/compositor -f /usr/share/fonts/inter/Inter-Regular.ttf > /tmp/compositor.out 2>&1 & echo started", 10)
+until(lambda: "yes" in shell.run("[ -e /run/moonwater/windows ] && echo yes || echo no", 10)[0], 30)
+shell.run("/surface -x 300 -y 300 -w 300 -h 150 -c 336699 -T TTTTTTTT -s 600 > /dev/null 2>&1 & echo one", 10)
+time.sleep(1)
+shell.run("/surface -x 700 -y 300 -w 300 -h 150 -c 996633 -T shell -s 600 > /dev/null 2>&1 & echo two", 10)
+time.sleep(2)
+said = shell.run("cat /tmp/compositor.out", 10)[0]
+scale = int((re.findall(r"\(scale (\d+)\)", said) or ["1"])[-1])
+band = 24 * scale
+DESKTOP = (0x1e, 0x1e, 0x1e)
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    def rgb(x, y):
+        o = (y * width + x) * 3
+        return data[o], data[o + 1], data[o + 2]
+    return width, height, rgb
+
+def luma(p):
+    return (299 * p[0] + 587 * p[1] + 114 * p[2]) // 1000
+
+def tabs(position, width, height, rgb):
+    """Each tab of the band as (along from, along to, its ink as (x, y) points), from the first tab to the tray."""
+    side = position in ("left", "right")
+    length = height if side else width
+    probe = {"left": lambda a: (scale, a), "right": lambda a: (width - 1 - scale, a),
+             "bottom": lambda a: (a, height - 1 - scale), "top": lambda a: (a, scale)}[position]
+    across = {"left": range(0, band - 3 * scale), "right": range(width - band + 3 * scale, width),
+              "bottom": range(height - band + 3 * scale, height), "top": range(0, band - 3 * scale)}[position]
+    runs, start = [], None
+    for a in range(length + 1):
+        on = a < length and rgb(*probe(a)) != DESKTOP
+        if on and start is None:
+            start = a
+        elif not on and start is not None:
+            if a - start > 8:
+                runs.append((start, a))
+            start = None
+    found = []
+    for first, last in runs:
+        points = [(c, a) if side else (a, c) for a in range(first, last) for c in across]
+        ground = sorted(luma(rgb(x, y)) for x, y in points)[len(points) // 2]
+        found.append((first, last, [(x, y) for x, y in points if luma(rgb(x, y)) > ground + 60]))
+    return found
+
+def extent(ink):
+    """The ink's width and height, and the column with the most of it."""
+    if not ink:
+        return 0, 0, None, None
+    xs = [x for x, _ in ink]
+    ys = [y for _, y in ink]
+    columns = {}
+    for x, _ in ink:
+        columns[x] = columns.get(x, 0) + 1
+    return max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, max(columns, key=columns.get), (min(xs) + max(xs)) / 2
+
+def look(position, name, test, tries=10):
+    """The band's tabs once test says they are what was set, or after tries pictures: the compositor reads the
+    setting when its file is written, and draws it at its next frame."""
+    for _ in range(tries):
+        width, height, rgb = picture(name)
+        found = tabs(position, width, height, rgb)
+        if test(found, width):
+            break
+        time.sleep(0.5)
+    return width, height, rgb, found
+
+def flat(found, width):
+    return len(found) >= 3 and all(extent(ink)[0] > extent(ink)[1] for _, _, ink in found[:2])
+
+def standing(found, width):
+    return len(found) >= 3 and all(extent(ink)[1] > extent(ink)[0] for _, _, ink in found[:2])
+
+def bars(found):
+    """Where the Ts' bars are across the band: right or left of their ink's middle."""
+    w, h, most, middle = extent(found[0][2]) if found else (0, 0, None, None)
+    return "none" if most is None else "right" if most > middle else "left" if most < middle else "middle"
+
+def summary(found):
+    return " ".join("%dx%d" % extent(ink)[:2] for _, _, ink in found)
+
+width, height, rgb, bottom = look("bottom", "t1-bottom", flat)
+out.append(("T1.1 a bottom band's titles are upright: each tab's ink wider than tall",
+            "yes" if flat(bottom, width) else "no: " + summary(bottom), "yes"))
+shell.run("moonwater taskbar text edge", 10)
+time.sleep(2)
+width, height, rgb, bottom_edge = look("bottom", "t1-bottom-edge", flat)
+same_pixels = len(bottom) == len(bottom_edge) and all(
+    (a[0], a[1], a[2]) == (b[0], b[1], b[2]) for a, b in zip(bottom[:-1], bottom_edge[:-1]))
+out.append(("T1.2 taskbar text edge leaves a bottom band's tabs as they were, ink for ink",
+            "yes" if same_pixels else "no: %s against %s" % (summary(bottom), summary(bottom_edge)), "yes"))
+shell.run("moonwater taskbar text center; moonwater taskbar position left", 10)
+width, height, rgb, left = look("left", "t1-left-center", lambda f, w: standing(f, w) and bars(f) == "right")
+out.append(("T1.3 moved to the left, the band's titles stand: each tab's ink taller than wide",
+            "yes" if standing(left, width) else "no: " + summary(left), "yes"))
+out.append(("T1.4 with center the tops of a left band's letters face the middle: the Ts' bars on the right",
+            bars(left), "right"))
+#   The tray is the bottom band's stood on end: as long, and its clock's ink as long as the bottom clock's is wide
+#   (to a few pixels: the minute may have turned between the pictures).
+tray = extent(left[-1][2]) if left else (0, 0, None, None)
+clock = extent(bottom[-1][2]) if bottom else (0, 0, None, None)
+lengths = (left[-1][1] - left[-1][0] if left else 0, bottom[-1][1] - bottom[-1][0] if bottom else 0)
+out.append(("T1.5 and its tray is the bottom band's turned: as long, its clock's ink taller than wide and as long as the bottom clock's is wide",
+            "yes" if lengths[0] == lengths[1] and tray[1] > tray[0] > 0 and abs(tray[1] - clock[0]) <= 4
+            else "no: tray %d against %d, clock %dx%d against %dx%d" % (lengths + tray[:2] + clock[:2]), "yes"))
+shell.run("moonwater taskbar text edge", 10)
+width, height, rgb, left_edge = look("left", "t1-left-edge", lambda f, w: bars(f) == "left")
+out.append(("T1.6 taskbar text edge, set while it runs, turns them toward the edge: the Ts' bars on the left",
+            bars(left_edge), "left"))
+shell.run("moonwater taskbar position right", 10)
+width, height, rgb, right_edge = look("right", "t1-right-edge", lambda f, w: standing(f, w) and bars(f) == "right")
+out.append(("T1.7 on the right with edge, the tops face the right edge: the Ts' bars on the right",
+            bars(right_edge) if standing(right_edge, width) else "not standing: " + summary(right_edge), "right"))
+shell.run("moonwater taskbar text center", 10)
+width, height, rgb, right_center = look("right", "t1-right-center", lambda f, w: bars(f) == "left")
+out.append(("T1.8 on the right with center, they face the middle: the Ts' bars on the left",
+            bars(right_center), "left"))
+shell.run("moonwater taskbar position top", 10)
+width, height, rgb, top = look("top", "t1-top", flat)
+out.append(("T1.9 a top band's titles are upright: each tab's ink wider than tall",
+            "yes" if flat(top, width) else "no: " + summary(top), "yes"))
+shell.run("moonwater taskbar position default; moonwater taskbar text default", 10)
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/t1-answers" ]; then
+        same "the band's text boot answered" "yes" "no"
+        sed 's/^/    /' "$work/t1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/t1-answers"
 fi
 fi
 
