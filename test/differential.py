@@ -79784,8 +79784,9 @@ def harness_wifi_air(argv):
     prep.append("L=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib\"")
     prep.append("W=\"$L /mnt/stick/wpa_supplicant\"")
     prep.append("rm -f /root/wifi /run/moonwater/wifi.last")
-    # Off until it is switched on: the scenarios are of a radio that is on.
-    prep.append("printf 'on\\n' > /root/wifi.power")
+    # Off until it is switched on, and soft-blocked at boot, which blocks the access points' radios too: the
+    # scenarios are of a radio that is on.
+    prep.append("moonwater wifi on > /dev/null 2>&1")
     prep.append("printf 'wifi\\n' > /root/internet")
     # Every access point's radio made first, so each is wlanN by its place;
     # all but the WPA3-only one then go to the access points' namespace.
