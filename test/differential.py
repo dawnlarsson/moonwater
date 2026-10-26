@@ -48619,6 +48619,171 @@ PYEOF
     return checks.verdict("moonwater lock", "moonwater-lock")
 
 
+def harness_moonwater_races(argv):
+    """Pairs of moonwater commands at the same time, in the cli harness's
+    sandbox, and a reader against a writer.
+
+    Each pair runs forty times, the second started 0 to 4 ms after the first
+    by a fixed pattern (and the pair swapped on the odd rounds), from a state
+    made again each round; both must end 0, and what each changed must be there
+    after: two writers of one list lose neither (wifi, bluetooth, the link's
+    peers, the security list, the settings' list), two writers of a word that
+    does not exist yet both stand (the name, the resolvers and the internet
+    word each made /root/NAME first by a rename that refuses a name made in
+    between, and the later writer was told "File exists" and kept nothing),
+    and what a pair of verbs of one family writes in two files (the zone and
+    its TZif, the name and the host name, the resolvers' file and the word) is
+    one writer's and not a mix. Then a writer that adds and removes a machine,
+    a network, a device, a key and a command in turn for the length of
+    four thousand reads: the reader never sees the entry that was there all the
+    time missing, and never fails. No round waits on the clock for its answer;
+    the jitter is a pattern and not a race of its own.
+    """
+    import platform
+    import tempfile
+    parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_races")
+    parser.add_argument("--shell", required=True)
+    args = parser.parse_args(argv)
+    if platform.system() != "Linux":
+        print("moonwater races: NOT RUN -- Linux namespaces")
+        return 2
+    probe = subprocess.run(["unshare", "-Urmnu", "--fork", "true"], capture_output=True)
+    if probe.returncode:
+        print("moonwater races: NOT RUN -- no unprivileged user namespaces here")
+        return 2
+
+    script = """python3 - <<'PYEOF'
+import os, shutil, signal, subprocess, time
+M = "/tmp/moonwater"
+K1 = "bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI="
+K2 = "kL8Wk4yX3lq2pCq2HfV1m4mJm7m6Zl0Q4Q2c0jV3m2c="
+H1, H2 = "a" * 64, "b" * 64
+def reap():
+    me = os.getpid()
+    for e in os.listdir("/proc"):
+        if e.isdigit() and int(e) != me:
+            try:
+                if os.readlink("/proc/%s/exe" % e).endswith("moonwater"):
+                    os.kill(int(e), 9)
+            except OSError:
+                pass
+    try:
+        while os.waitpid(-1, os.WNOHANG)[0]:
+            pass
+    except ChildProcessError:
+        pass
+def clear():
+    reap()
+    for top in ("/root", "/run/moonwater"):
+        shutil.rmtree(top, ignore_errors=True)
+        os.makedirs(top, exist_ok=True)
+    for name in ("hostname", "resolv.conf", "localtime"):
+        try:
+            os.unlink("/etc/" + name)
+        except OSError:
+            pass
+def cat(path):
+    try:
+        return open(path).read()
+    except OSError:
+        return ""
+def sh(words):
+    done = subprocess.run([M] + words.split(), stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+    return done.returncode, (done.stdout + done.stderr).decode(errors="replace")
+def start(words):
+    return subprocess.Popen([M] + words.split(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+def says(words, *needles):
+    out = sh(words)[1]
+    return all(needle in out for needle in needles)
+def zone_ok():
+    zone = cat("/root/timezone").strip()
+    try:
+        footer = open("/usr/share/zoneinfo/" + zone, "rb").read().rstrip(b"\\n").rsplit(b"\\n", 1)[-1]
+        return footer in open("/etc/localtime", "rb").read()
+    except OSError:
+        return False
+PAIRS = [
+    ("name/name", "name aa-bb", "name cc-dd", lambda: cat("/root/name").strip() in ("aa-bb", "cc-dd") and cat("/etc/hostname").strip() == cat("/root/name").strip()),
+    ("dns/dns", "dns 1.1.1.1", "dns 8.8.8.8", lambda: cat("/etc/resolv.conf").split()[-1] in cat("/root/dns")),
+    ("internet/internet", "priority internet wifi", "priority internet wired", lambda: cat("/root/internet") == cat("/run/moonwater/internet") != ""),
+    ("airplane/bluetooth", "airplane on", "bluetooth add dev1", lambda: "dev1" in cat("/root/bluetooth") and cat("/root/bluetooth.power") != ""),
+    ("zone/zone", "timezone de", "timezone Asia/Tokyo", zone_ok),
+    ("zone/name", "timezone de", "name aa-bb", lambda: zone_ok() and cat("/root/name").strip() == "aa-bb"),
+    ("wifi add/add", "wifi add neta passpass1", "wifi add netb passpass2", lambda: "neta" in cat("/root/wifi") and "netb" in cat("/root/wifi")),
+    ("wifi add/same", "wifi add neta passpass1", "wifi add neta passpass2", lambda: cat("/root/wifi").count("neta") == 1),
+    ("bluetooth add/add", "bluetooth add dev1", "bluetooth add dev2", lambda: "dev1" in cat("/root/bluetooth") and "dev2" in cat("/root/bluetooth")),
+    ("bind add/add", "bind init add aaa", "bind init add bbb", lambda: says("bind init", "aaa", "bbb")),
+    ("bind add/security", "bind init add aaa", "security block add " + H1, lambda: says("bind init", "aaa") and says("security block", H1)),
+    ("security add/add", "security block add " + H1, "security block add " + H2, lambda: says("security block", H1, H2)),
+    ("link add/add", "link add peera " + K1, "link add peerb " + K2, lambda: says("link", "peera", "peerb")),
+    ("link group/add", "link group lab S3cretOne11 allow run", "link add peerb " + K2, lambda: says("link", "lab", "peerb")),
+]
+JITTER = [0, 0.001, 0.003, 0.0005, 0.0015, 0.002, 0.004, 0.0002]
+for name, first, second, holds in PAIRS:
+    odd = []
+    for round_ in range(40):
+        clear()
+        a, b = (second, first) if round_ % 2 else (first, second)
+        pa = start(a)
+        time.sleep(JITTER[round_ % 8])
+        pb = start(b)
+        oa, ob = pa.communicate(timeout=60)[0], pb.communicate(timeout=60)[0]
+        codes = (pa.returncode, pb.returncode)
+        reap()
+        if codes != (0, 0) or not holds():
+            odd.append((round_, codes, (oa + ob).decode(errors="replace")[:160]))
+    print("@@race %s %d" % (name.replace(" ", "_"), len(odd)), odd[:1])
+READERS = [
+    ("wifi", "wifi add stable passpass1", ["wifi add churn passpass2", "wifi remove churn"], "wifi", "stable"),
+    ("bluetooth", "bluetooth add stable", ["bluetooth add churn", "bluetooth remove churn"], "bluetooth", "stable"),
+    ("link", "link add stable " + K1, ["link add churn " + K2, "link remove churn"], "link", "stable"),
+    ("security", "security block add " + H1, ["security block add " + H2, "security block remove " + H2], "security block", H1),
+    ("bind", "bind init add stable", ["bind init add churn", "bind init remove churn"], "bind init", "stable"),
+    ("internet", "priority internet wifi", ["priority internet wired", "priority internet wifi"], "priority", "internet"),
+]
+for name, setup, writers, reader, token in READERS:
+    clear()
+    sh(setup)
+    child = os.fork()
+    if child == 0:
+        at = 0
+        while True:
+            sh(writers[at % 2])
+            at += 1
+    torn = []
+    for read in range(4000):
+        code, out = sh(reader)
+        if code != 0 or token not in out:
+            torn.append((code, out[:120]))
+    os.kill(child, signal.SIGKILL)
+    os.waitpid(child, 0)
+    reap()
+    print("@@read %s %d" % (name, len(torn)), torn[:1])
+PYEOF
+"""
+    checks = Checks()
+
+    def check(ok, what, detail=""):
+        checks(ok, what + ("" if ok else " -- " + str(detail)[:500]))
+
+    with tempfile.TemporaryDirectory(prefix="moonwater-races-") as temporary:
+        sandbox, private_dev, session, say, answers = moonwater_sandbox(args.shell, Path(temporary))
+        lines, finished = session(script)
+        races = [line.split(None, 3) for line in lines if line.startswith("@@race ")]
+        reads = [line.split(None, 3) for line in lines if line.startswith("@@read ")]
+        check(finished and len(races) == 14 and len(reads) == 6,
+              "every pair and every reader ran", (finished, len(races), len(reads), lines[-6:]))
+        for found in races:
+            check(len(found) > 2 and found[2] == "0",
+                  "%s: both commands end 0 and both effects stand, forty rounds" % found[1],
+                  " ".join(found))
+        for found in reads:
+            check(len(found) > 2 and found[2] == "0",
+                  "%s: four thousand reads beside a writer, none fails or misses the entry that stays" % found[1],
+                  " ".join(found))
+    return checks.verdict("moonwater races", "moonwater-races")
+
+
 def harness_moonwater_script(argv):
     """Every verb as the machine script runs it: root, no terminal, standard
     input /dev/null (or closed, or a pipe nobody writes to), in the cli
@@ -92964,6 +93129,7 @@ HARNESS_CHECKS = {
     "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
     "moonwater_lock": harness_moonwater_lock,
+    "moonwater_races": harness_moonwater_races,
     "moonwater_script": harness_moonwater_script,
     "machine_reap": harness_machine_reap,
     "tls_chains": harness_tls_chains,

@@ -8315,7 +8315,7 @@ static bipolar file_transfer_exact(positive operation, bipolar handle,
                                    p8 address_to buffer, positive length,
                                    p64 offset);
 
-static COLD bipolar file_publish_with(string_address path, address_any bytes,
+static COLD bipolar file_publish_once(string_address path, address_any bytes,
                                       positive length, positive mode, bool sync,
                                       positive behavior)
 {
@@ -8337,6 +8337,25 @@ static COLD bipolar file_publish_with(string_address path, address_any bytes,
                 return written < 0 ? written : -ERROR_INPUT_OUTPUT;
         }
         return file_staged_name_publish(address_of stage, sync);
+}
+
+/* A name that was not there when the stage was made is published only if it
+   still is not: a creator that came between is not written over unseen. For
+   a file that is kept, the later writer is the one that stands, so the one
+   that lost the race for the name writes again, now over a name that is
+   there. Two commands that first made /root/name, /root/dns or /root/internet
+   at once left one with "File exists" and its word unkept. */
+static COLD bipolar file_publish_with(string_address path, address_any bytes,
+                                      positive length, positive mode, bool sync,
+                                      positive behavior)
+{
+        bipolar result = file_publish_once(path, bytes, length, mode, sync, behavior);
+
+        for (positive attempt = 0; attempt < 3 && result == -ERROR_EXISTS &&
+                                   !(behavior & FILE_STAGED_NO_REPLACE);
+             attempt++)
+                result = file_publish_once(path, bytes, length, mode, sync, behavior);
+        return result;
 }
 
 static COLD bipolar file_publish_bytes(string_address path, address_any bytes,
