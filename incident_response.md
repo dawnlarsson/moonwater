@@ -683,6 +683,50 @@ the default tier is intentionally 1:1 with before.
 - The `moonwater security packages` and `sudo` switches (coordinator, API on
   main at `12f31f6b`) are enforced separately; this entry is the id drop only.
 
+### MW-2026-011: `moonwater security packages off` is enforced in the bowl launcher
+
+| | |
+|---|---|
+| Status | Enforced on the worktree branch, 2026-10-26 |
+| Class | Hardening control (attacker 8): a bowl's programs running the distribution's package manager |
+| Related | `12f31f6b` (the switch, its settings entry, `security_switch_on`) |
+
+**What this is.** The owner's `packages` switch (`12f31f6b`) says whether a
+bowl's programs may run the distribution's package manager -- on by default, off
+(and refused as on) at the bowl's tight tier. The switch, its publishing to
+`/run/moonwater/security` and the accessor `security_switch_on` landed on main;
+this is the enforcement half in `bowl.c`. A package manager, run in a bowl's
+isolated view, is root in the bowl's own system tree and can install or replace
+anything in it -- a persistence and tampering surface a taken-over program of a
+bowl (attacker 8) should not reach once the owner has closed it.
+
+**The enforcement.** `bowl_main` (src/bowl.c), before any namespace is entered,
+refuses a launch that is a known package manager (by executable name,
+`bowl_needs_isolated`, with `zypper` added) or that asks for a root-in-the-tree
+view (`--root`, `--isolated`, an auto-isolated manager) when
+`security_switch_on("packages")` is false: "the package manager is off for the
+programs of a bowl". It is asked host-side on purpose -- a fast program's view
+keeps the host's `/run`, so a program that reaches `bowl` by its launcher reads
+the machine's switch, not a bowl's own tmpfs `/run` (which would answer the
+default). `bowl setup` and `bowl profile`, the owner's own host actions, are
+dispatched above this point and stay allowed.
+
+**Tests that fail without the fix.** `sh test/run desktop`, two rows in
+`lane_desktop` (test/run): with `moonwater security packages off`,
+`bowl /bowls/alpine /sbin/apk --version` is refused; with it on, `apk` runs and
+prints its version. Proven in a guest with the Alpine bowl: on an image built
+from this, packages off refuses apk and packages on runs it
+(`apk-tools 3.0.6-r0`); on an image with the gate removed (12f31f6b present, so
+the switch exists and publishes), packages off still runs apk -- red.
+
+**Still open.** The name check does not catch a package manager copied to
+another name (a canonical-path check in the bowl was not added; at the hardened
+tier a renamed manager run in a fast view is the unprivileged id of MW-2026-010
+and cannot write the root-owned tree anyway, and at the default tier this is a
+residual). The `sudo` switch's enforcement (the CLI's own root check, which must
+distinguish a bowl's namespace-root from the test harness's `unshare -Urmnu`) is
+a separate change in `host.c` and is not in this entry.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was

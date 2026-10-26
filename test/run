@@ -21768,6 +21768,21 @@ if os.environ.get("MOONWATER_BOWL_TIER"):
     out.append(("and cannot signal a root process of the machine",
                 sig.strip() if sig.strip() in ("CAN", "refused") else "?", "refused"))
 
+#       moonwater security packages: whether a bowl's programs may run the
+#       distribution's package manager. A runtime switch, on by default, so
+#       this runs at the default tier. Off, bowl refuses a manager (by its
+#       launcher path, as a program of the bowl reaches it) before any
+#       namespace is entered; on, it runs it again. Red on an image built
+#       before the gate (apk runs with packages off).
+run("moonwater security packages off", 15)
+off_run, _ = run("bowl /bowls/alpine /sbin/apk --version 2>&1")
+out.append(("with packages off, a bowl may not run the package manager",
+            "refused" if "package manager is off" in off_run else "ran: " + off_run[-120:], "refused"))
+run("moonwater security packages on", 15)
+on_run, _ = run("bowl /bowls/alpine /sbin/apk --version 2>&1")
+out.append(("and with packages on it runs again",
+            "yes" if "package manager is off" not in on_run and "apk-tools" in on_run else "no: " + on_run[-120:], "yes"))
+
 before, _ = run("libinput list-devices 2>&1 | grep -c 'Capabilities:'")
 out.append(("libinput lists no device while no udev has named one", before or "no answer", "0"))
 

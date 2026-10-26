@@ -504,7 +504,7 @@ static bool bowl_needs_isolated(string_address program)
             "repo-remove", "apt", "apt-get", "apt-cache", "apt-cdrom",
             "apt-config", "apt-key", "apt-mark", "aptitude", "dpkg",
             "dpkg-deb", "dpkg-query", "dpkg-reconfigure", "dpkg-divert",
-            "apk", "dnf", "dnf5", "rpm", "yum", "nix", "nix-env",
+            "apk", "dnf", "dnf5", "rpm", "yum", "zypper", "nix", "nix-env",
             "nix-build", "nix-shell", "nix-channel", "nix-store",
             "nix-instantiate", "nix-collect-garbage"};
         p8 name[256];
@@ -8556,6 +8556,22 @@ static b32 bowl_main()
 
         if (!isolated_told)
                 isolated = bowl_needs_isolated(program);
+
+        /*  packages off (moonwater security packages; always off at the bowl's
+            tight tier) means a program of a bowl may not run the distribution's
+            package manager, nor take a root-in-the-tree view (--root or
+            --isolated, and an auto-isolated manager) that could write the
+            bowl's own system tree. Asked here, before any namespace is entered,
+            so the answer is the machine's file and not a bowl's own /run: a
+            fast program's view keeps the host's /run, so a program that reaches
+            this by its launcher reads the real switch. `bowl setup` and `bowl
+            profile`, the owner's own host actions, are dispatched above and do
+            not pass here. */
+        if ((isolated || bowl_as_root || bowl_needs_isolated(program)) &&
+            !security_switch_on("packages"))
+                return bowl_refuse(
+                    "the package manager is off for the programs of a bowl: "
+                    "moonwater security packages on turns it on\n");
 
         /* Isolated guests need the host's nameservers. Pacman/apk/apt conf
            and lock files are written when the tree is landed, not on every
