@@ -5887,17 +5887,25 @@ _Static_assert(TLS_OVERLAY_LIST == SPARK_SETTINGS_SECURITY &&
 #endif
 /*
         The switches, by the id a switch entry carries: each is turned from
-        its default when its entry is there, and each only tightens. They
-        apply to every connection opened after the file says so; one already
-        open keeps what it was opened with, and a fetch keeps what its
-        confined child read for its redirects and its revocation fetches.
+        its default when its entry is there, and each of TLS's only tightens.
+        They apply to every connection opened after the file says so; one
+        already open keeps what it was opened with, and a fetch keeps what
+        its confined child read for its redirects and its revocation fetches.
+
+        6 and 7 are not TLS's: they are the bowl's, kept in the same list and
+        published in the same file (host.c's security_switch_on reads them),
+        and a TLS client reads past them, since a file with an id this build
+        has no word for is refused whole. sudo is the one switch that
+        loosens, and a tight build reads it as off whatever the file says.
 */
 #define TLS_SWITCH_TLS12_OFF 1      // TLS 1.2 refused: a hello offers 1.3 alone
 #define TLS_SWITCH_AIA_OFF 2        // no CA a server left out is fetched
 #define TLS_SWITCH_REVOCATION_HARD 3 // revocation that cannot be told refuses
 #define TLS_SWITCH_CT_ON 4          // Certificate Transparency asked of every chain
 #define TLS_SWITCH_HTTP_OFF 5       // wget and fetch take no plain http
-#define TLS_SWITCHES 5
+#define SECURITY_SWITCH_PACKAGES_OFF 6 // a bowl's programs run no package manager
+#define SECURITY_SWITCH_SUDO_ON 7   // moonwater takes a bowl's root as the machine's
+#define TLS_SWITCHES 7              // the ids a file may carry, 1 to this
 #define tls_switched(id) ((tls_overlay_now.switches >> ((id) - 1)) & 1)
 //      What was read: no file, a file taken, or one that is not one.
 #define TLS_OVERLAY_NONE 0

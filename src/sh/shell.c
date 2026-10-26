@@ -906,6 +906,10 @@ static bipolar file_exec_path_try(string_address address_to words);
         early and be the one place that says where a root is.
 */
 #include "../canvas/terminfo.c"
+/* moonwater security's switches as a program asks them (host.c says how
+   the answer is read): bowl asks packages before a bowl's programs may run
+   the distribution's package manager, and the root check asks sudo. */
+static bool security_switch_on(string_address name);
 #include "../bowl.c"
 #include "process_tools.c"
 #include "monitor.c"

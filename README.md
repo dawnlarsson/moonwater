@@ -89,6 +89,9 @@ moonwater security aia [on|off]        fetch a CA a server left out, from where 
 moonwater security revocation [soft|hard]  hard refuses a certificate whose revocation cannot be told [soft]
 moonwater security ct [on|off]         ask Certificate Transparency of every chain, not only at the tight tier [off]
 moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
+moonwater security packages [on|off]   programs of a bowl may run the package manager of its distribution [on]
+moonwater security sudo [on|off]       moonwater through sudo or su in a bowl; on trusts root in a bowl as root
+                                       of the machine, for single-user machines [off]
 moonwater wifi [on|off]                the radio, saved networks and those in range [off]
 moonwater bluetooth [on|off]           the radio and the remembered devices [off]
 moonwater bluetooth add NAME           keep the name of a device, found once the radio is on

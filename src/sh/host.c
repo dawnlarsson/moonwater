@@ -22292,24 +22292,147 @@ static b32 host_dns(string_address address_to arguments, positive count)
 
 /*
         The switches, each its word, the word that is its default, the word
-        that turns it (an entry of the security list, TLS_SWITCH_*), and
-        whether the tight tier has it turned whatever is kept. Each only
-        tightens, so none can take back what a build or a tier asks.
+        that turns it (an entry of the security list, TLS_SWITCH_* and
+        SECURITY_SWITCH_*), the tier of the region it belongs to (TLS's are
+        the net's, packages and sudo the bowl's), and what that tier does
+        with it when it is tight. All but sudo only tighten, so none of them
+        can take back what a build or a tier asks; sudo loosens, so a tight
+        build never has it turned and refuses the word that would.
 */
+#define SECURITY_TIGHT_NONE 0   // the list says, at every tier
+#define SECURITY_TIGHT_TURNED 1 // turned whatever is kept; its default word is kept and said to stay
+#define SECURITY_TIGHT_SHUT 2   // turned whatever is kept, and its default word refused
+#define SECURITY_TIGHT_HELD 3   // at its default whatever is kept, and the word that turns it refused
+
 static const struct
 {
         string_address word;
         string_address standard;
         string_address turned;
         p16 id;
-        bool tight;
+        p8 tier;
+        p8 tight;
 } security_switches[] = {
-    {"tls12", "on", "off", TLS_SWITCH_TLS12_OFF, false},
-    {"aia", "on", "off", TLS_SWITCH_AIA_OFF, false},
-    {"revocation", "soft", "hard", TLS_SWITCH_REVOCATION_HARD, true},
-    {"ct", "off", "on", TLS_SWITCH_CT_ON, true},
-    {"http", "on", "off", TLS_SWITCH_HTTP_OFF, false},
+    {"tls12", "on", "off", TLS_SWITCH_TLS12_OFF, MOONWATER_STRICT_NET, SECURITY_TIGHT_NONE},
+    {"aia", "on", "off", TLS_SWITCH_AIA_OFF, MOONWATER_STRICT_NET, SECURITY_TIGHT_NONE},
+    {"revocation", "soft", "hard", TLS_SWITCH_REVOCATION_HARD, MOONWATER_STRICT_NET,
+     SECURITY_TIGHT_TURNED},
+    {"ct", "off", "on", TLS_SWITCH_CT_ON, MOONWATER_STRICT_NET, SECURITY_TIGHT_TURNED},
+    {"http", "on", "off", TLS_SWITCH_HTTP_OFF, MOONWATER_STRICT_NET, SECURITY_TIGHT_NONE},
+    {"packages", "on", "off", SECURITY_SWITCH_PACKAGES_OFF, MOONWATER_STRICT_BOWL,
+     SECURITY_TIGHT_SHUT},
+    {"sudo", "off", "on", SECURITY_SWITCH_SUDO_ON, MOONWATER_STRICT_BOWL, SECURITY_TIGHT_HELD},
 };
+
+/* Whether a switch is turned, from the bits of a switch word as the file has
+   them and from what its region's tier does with it when tight. */
+static bool security_switch_turned(positive at, p32 kept)
+{
+        p8 tight = security_switches[at].tier >= STRICT_TIGHT ? security_switches[at].tight
+                                                               : SECURITY_TIGHT_NONE;
+
+        if (tight == SECURITY_TIGHT_TURNED || tight == SECURITY_TIGHT_SHUT)
+                return true;
+        return tight != SECURITY_TIGHT_HELD && ((kept >> (security_switches[at].id - 1)) & 1);
+}
+
+/*
+        The switch word of a published security file, or -1 when there is
+        none to believe: the name does not open without following a link, or
+        it is not a regular file, or a group or others may write it, or it is
+        longer than the overlay, or it does not read whole as
+        tls_overlay_read reads it, or its owner is neither owner (root, but
+        for a check that makes its own files) nor the uid the kernel shows
+        for an owner the caller's user namespace does not map, which is how
+        root's own file looks from inside a bowl's.
+*/
+static bipolar security_switches_read_at(string_address path, p32 owner)
+{
+        static p8 text[TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM + 2];
+        static tls_overlay overlay;
+        system_path_identity facts;
+        bipolar handle = system_open_at(AT_FDCWD, path,
+                                        FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        bipolar got;
+
+        return_if(handle < 0, -1);
+        got = system_path_identity_at(handle, (string_address) "", SYSTEM_PATH_AT_EMPTY_PATH,
+                                      SYSTEM_PATH_STATX_TYPE | SYSTEM_PATH_STATX_MODE |
+                                          SYSTEM_PATH_STATX_UID,
+                                      address_of facts);
+        if (got >= 0 && ((facts.mode & 0170000) != 0100000 || (facts.mode & 022)))
+                got = -1;
+        if (got >= 0 && facts.user != owner)
+        {
+                //      The kernel's overflowuid, which only a sysctl moves from 65534.
+                p8 number[16];
+                string_address digits = (string_address)number;
+                bool over = false;
+                positive unmapped = 65534;
+                positive read = 0;
+
+                if (file_slurp_once_at(AT_FDCWD, (string_address) "/proc/sys/kernel/overflowuid",
+                                       number, sizeof number) > 0)
+                        read = string_decimal_saturated(address_of digits, 0xffffffffu,
+                                                        address_of over);
+                if (digits != (string_address)number && !over)
+                        unmapped = read;
+                if (facts.user != unmapped)
+                        got = -1;
+        }
+        if (got >= 0)
+                got = system_read_retry((positive)handle, text, sizeof text);
+        system_close(handle);
+        return_if(got < 0 || (positive)got > TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM ||
+                      !tls_overlay_read(text, (positive)got, address_of overlay),
+                  -1);
+        return (bipolar)overlay.switches;
+}
+
+/*
+        Whether a switch is on: its word, as moonwater security sets it and
+        bare moonwater security says it, is "on". It answers for packages
+        (true: a bowl's programs may run the distribution's package manager)
+        and for sudo (true: the moonwater command takes a bowl's root as the
+        machine's root), and false for a switch whose words are not on and
+        off, and for a name that is no switch.
+
+        The answer is what /run/moonwater/security says
+        (security_switches_read_at holds the file to root's, written by
+        root alone, and read whole), else the default of the switch's tier:
+        on for packages at the default tier, off at the tight one whatever
+        the file says, and off for sudo everywhere unless a file that counts
+        turns it at the default tier. A caller treats an answer it could not
+        read as that default, which is never on for sudo.
+
+        The answer is the file at the caller's own name for it. A bowl has a
+        /run of its own, where the file is not unless the bowl carries it
+        in, so inside one the answer is the default: packages is asked
+        before a bowl's namespaces are made. And a process that owns its
+        mount namespace shows itself whatever file it likes there, so it
+        reads what it planted; nothing that changes the machine takes that
+        process's root for root (the kernel asks capable(), in the first
+        namespace), so for such a process sudo's answer is the command's
+        manners and not a privilege.
+*/
+static bool security_switch_on(string_address name)
+{
+        bipolar kept = -1;
+
+        for (positive at = 0; at < array_count(security_switches); at++)
+                if (string_equals(name, security_switches[at].word))
+                {
+                        if (security_switches[at].tier < STRICT_TIGHT ||
+                            security_switches[at].tight == SECURITY_TIGHT_NONE)
+                                kept = security_switches_read_at(
+                                    (string_address)TLS_OVERLAY_PATH, 0);
+                        return string_equals(security_switch_turned(at, kept < 0 ? 0 : (p32)kept)
+                                                 ? security_switches[at].turned
+                                                 : security_switches[at].standard,
+                                             "on");
+                }
+        return false;
+}
 
 /*
         The file of what the settings' security list holds, or none when it holds
@@ -22663,11 +22786,16 @@ static fn security_block_lines(void)
 }
 
 /* A switch's line: its word and where it stands, as the file and the tier
-   have it. */
+   have it. TLS's are what a TLS client reads; the bowl's are what
+   security_switch_on answers, which holds the file to more. */
 static fn security_switch_line(positive at, bool label)
 {
-        bool forced = security_switches[at].tight && MOONWATER_STRICT_NET >= STRICT_TIGHT;
-        bool turned = forced || ((security_shown.switches >> (security_switches[at].id - 1)) & 1);
+        bool forced = security_switches[at].tier >= STRICT_TIGHT &&
+                      security_switches[at].tight != SECURITY_TIGHT_NONE;
+        bool turned = security_switches[at].id < SECURITY_SWITCH_PACKAGES_OFF
+                          ? security_switch_turned(at, security_shown.switches)
+                          : security_switch_on(security_switches[at].word) ==
+                                string_equals(security_switches[at].turned, "on");
 
         string_format(log, label ? host_label "security %s %s%s\n" : "  %s %s%s\n",
                       security_switches[at].word,
@@ -22706,11 +22834,20 @@ static b32 security_switch(positive which, string_address word)
         bool have = false;
         positive at = 0;
         p16 id = security_switches[which].id;
+        p8 tight = security_switches[which].tier >= STRICT_TIGHT ? security_switches[which].tight
+                                                                  : SECURITY_TIGHT_NONE;
         string_address failed;
         b32 answer = 0;
 
         return_if(!turn && !string_equals(word, security_switches[which].standard), host_usage());
         host_need_root();
+        //      A word the tight tier takes no notice of, where it refuses
+        //      one, is not kept.
+        if ((tight == SECURITY_TIGHT_SHUT && !turn) || (tight == SECURITY_TIGHT_HELD && turn))
+                return host_refuse("security %s stays %s: the tight tier has it so\n",
+                                   security_switches[which].word,
+                                   turn ? security_switches[which].standard
+                                        : security_switches[which].turned);
         if (!host_acquire())
                 return 1;
         host_state_ready();
@@ -22744,7 +22881,7 @@ static b32 security_switch(positive which, string_address word)
         answer = host_settings_save(address_of settings) ? 0 : 1;
         if (!answer)
                 answer = security_publish_answer(address_of settings);
-        if (!turn && security_switches[which].tight && MOONWATER_STRICT_NET >= STRICT_TIGHT)
+        if (!turn && tight == SECURITY_TIGHT_TURNED)
                 host_say(log, host_label "security %s stays %s: the tight tier has it so\n",
                          security_switches[which].word, security_switches[which].turned);
 
@@ -23383,6 +23520,8 @@ static const host_row host_rows[] = {
     {null, "security revocation [soft|hard]", "hard refuses a certificate whose revocation cannot be told [soft]", 'f'},
     {null, "security ct [on|off]", "ask Certificate Transparency of every chain, not only at the tight tier [off]", 'f'},
     {null, "security http [on|off]", "plain http in wget and fetch, and redirects to it [on]", 'f'},
+    {null, "security packages [on|off]", "programs of a bowl may run the package manager of its distribution [on]", 'f'},
+    {null, "security sudo [on|off]", "moonwater through sudo or su in a bowl; on trusts root in a bowl as root of the machine, for single-user machines [off]", 'f'},
     {null, "link", "who this machine is linked with, and what each may do", 'f'},
     {null, "link [pair|NAME]", "machines linked by name, with a code", 'm'},
     {null, "link pair [NAME]", "a code, and wait for the other machine to use it", 'f'},
