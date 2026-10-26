@@ -4162,7 +4162,10 @@ static string_address host_settings_write(string_address name, string_address pa
                         return "is no longer the partition it was found as";
         }
 
-        if (storage_mount_table_load(address_of table, null))
+        //      A table that cannot be read says nothing about what is mounted,
+        //      and is no reason to write over a partition that may be.
+        if (!storage_mount_table_load(address_of table, null))
+                return "could not be checked for mounts, so nothing was written";
         {
                 bool mounted = false;
 
