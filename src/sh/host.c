@@ -20585,7 +20585,7 @@ static b32 desktop_launch(string_address name)
         bipolar child;
 
         host_state_ready();
-        return_if(!host_join(text, sizeof(text), "exec " BOWL_EXPOSE_DIRECTORY "/", name),
+        return_if(!host_join(text, sizeof(text), "export MOONWATER_SESSION=1; exec " BOWL_EXPOSE_DIRECTORY "/", name),
                   host_refuse("%s is too long a name\n", name));
 
         output = host_open_state(AT_FDCWD, DESKTOP_LOG, 0600, FILE_WRITE);

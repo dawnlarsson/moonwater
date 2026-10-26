@@ -7527,8 +7527,18 @@ static const struct bowl_component bowl_desktop_components[] = {
         else, and the idle lock is off until a kscreenlockerrc says otherwise.
         A second `desktop` while kwin runs is refused, and the display the
         shell was started under is not the one the session draws on.
+
+        The script is the session only when moonwater desktop started it
+        (that sets MOONWATER_SESSION): the machine's own compositor has the
+        card's master and has to be ended first, and the verb records the
+        session so that desktop off and stop can end it. Typed by hand, the
+        launcher hands over to the verb, which does both and comes back, where
+        a session started on the spot never got the display (KWin: failed to
+        authenticate the drm magic token) and was in no record, so a desktop
+        off left it running and the console black and deaf.
 */
 static string_address bowl_desktop_session[] = {
+    "[ -n \"$MOONWATER_SESSION\" ] || exec moonwater desktop \"$0\"",
     "[ -z \"$(pidof kwin_wayland)\" ] || "
     "{ echo \"a desktop session is already running\" >&2; exit 1; }",
     "unset WAYLAND_DISPLAY DISPLAY",
