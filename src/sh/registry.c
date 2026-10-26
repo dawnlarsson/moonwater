@@ -156,6 +156,12 @@ static const struct settings_row settings_rows[] = {
      .usage = "canvas scale [N|auto]", .help = "device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]"},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
+    //  A special row (host.c locale_canvas_arrange) whose file the compositor watches: the words are screens' names.
+    {null, "Screens left to right (names, NAME@X,Y, NAME@off)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT,
+     {"canvas", "arrange"}, "arrange ", null, {"canvas", "arrange"}, null, 0, null,
+     .usage = "canvas arrange [NAME[@X,Y|@off]...|default]",
+     .help = "where each screen is: names left to right, the first the primary [default]",
+     .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CANVAS_ARRANGE_PATH},
     SETTING_PLAIN_ROW(null, "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
                       .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",

@@ -5371,6 +5371,7 @@ static fn host_tty1_shell(void)
 static b32 locale_canvas_setting(string_address address_to arguments, positive count);
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
 static b32 locale_canvas_windows(string_address address_to arguments, positive count);
+static b32 locale_canvas_arrange(string_address address_to arguments, positive count);
 
 /*
         Canvas off: every window closes and the console is the text one. What `moonwater desktop off` does after it has
@@ -5462,7 +5463,7 @@ static b32 host_canvas_on(void)
 
 }
 
-/* moonwater canvas [scale [N|auto]|modes [largest|preferred]|
+/* moonwater canvas [scale [N|auto]|modes [largest|preferred]|arrange [NAME[@X,Y|@off]...|default]|
    background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
@@ -5478,6 +5479,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return locale_canvas_cursor(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "windows"))
                 return locale_canvas_windows(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "arrange"))
+                return locale_canvas_arrange(arguments, count);
 
         return_if(count > 3, host_usage());
 
@@ -21053,6 +21056,84 @@ static b32 host_setting_group(string_address address_to words, positive count)
         return 0;
 }
 
+/*
+        moonwater canvas arrange [NAME[@X,Y|@off]...|default]: where each
+        screen is in the desktop's space, by its connector's name: laid left
+        to right in the order named, the first the primary, at a place given
+        (NAME@X,Y, in pixels) or dark (NAME@off); a screen no word names
+        follows in the card's order. The words are kept in /root as a line
+        and taken by the compositor as soon as the file is written (it
+        watches /root), and a name that is no screen's now is kept for when
+        it is plugged in. They are judged together before root is asked for
+        (windows_arrange_valid: a name once, a place inside 32768 pixels,
+        default alone). Bare it says what is kept, the default when nothing
+        is, and then each screen and where it is.
+*/
+static b32 locale_canvas_arrange_status(void)
+{
+        p8 text[512];
+        bipolar got = host_read_state(SETTING_CANVAS_ARRANGE_PATH, text, sizeof(text) - 1);
+        struct canvas_control control;
+
+        text[got > 0 ? got : 0] = end;
+        for (positive at = 0; text[at]; at++)
+                if (text[at] == '\n' || text[at] == '\r' || text[at] == '\t')
+                        text[at] = ' ';
+        while (got > 0 && text[got - 1] == ' ')
+                text[--got] = end;
+        if (got < 0 && got != -ENOENT && !bowl_is_root())
+                host_say(log, host_label "arrange " LOCALE_NEEDS_ROOT "\n");
+        else
+                host_say(log, host_label "arrange %s\n", text[0] && windows_arrange_valid((const char address_to)text)
+                                                                ? (string_address)text : (string_address) "default");
+        if (host_canvas_request(SPARK_CANVAS_STATUS, address_of control) >= 0 && control.running)
+        {
+                int places[SPARK_CANVAS_OUTPUTS][3];
+
+                host_canvas_places(address_of control, places);
+                for (positive at = 0; at < control.output_count && at < SPARK_CANVAS_OUTPUTS; at++)
+                        if (places[at][2] < 0)
+                                host_say(log, host_label "  %s dark\n", (string_address)control.output[at].connector);
+                        else
+                                host_say(log, host_label "  %s at %b,%b%s\n", (string_address)control.output[at].connector,
+                                         (bipolar)places[at][0], (bipolar)places[at][1],
+                                         places[at][2] ? (string_address) ", primary" : (string_address) "");
+        }
+        return 0;
+}
+
+static b32 locale_canvas_arrange(string_address address_to arguments, positive count)
+{
+        p8 text[512];
+        positive at = 0;
+        bipolar failed;
+
+        if (count == 3)
+                return locale_canvas_arrange_status();
+        for (positive word = 3; word < count; word++)
+        {
+                positive length = string_length(arguments[word]);
+
+                if (at + length + 2 > sizeof(text))
+                        return host_refuse("arrange is a word for each screen, not %p words\n", (positive)(count - 3));
+                if (word > 3)
+                        text[at++] = ' ';
+                memory_copy(text + at, arguments[word], length);
+                at += length;
+        }
+        text[at] = end;
+        if (!windows_arrange_valid((const char address_to)text))
+                return host_refuse("arrange is screens' names, each alone, NAME@X,Y or NAME@off and named once, "
+                                   "or default, not %s\n", text);
+        if (!bowl_is_root())
+                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
+        text[at++] = '\n';
+        failed = host_write_file(SETTING_CANVAS_ARRANGE_PATH, text, at, 0644, true);
+        if (failed < 0)
+                return host_fail("canvas arrange", failed);
+        return locale_canvas_arrange_status();
+}
+
 //      moonwater canvas cursor: bare it says the size and the look in one line, then the rows that are
 //      the shake's; any other word is a usage page (the rows have words of their own, found before this).
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count)
@@ -24224,6 +24305,7 @@ static string_address host_wipe_keep[96] = {
     HOST_WIPE_KEEP(LOCALE_KEYBOARD_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_SCALE_PATH),
     HOST_WIPE_KEEP(LOCALE_CANVAS_MODES_PATH),
+    HOST_WIPE_KEEP(SETTING_CANVAS_ARRANGE_PATH),
     HOST_WIPE_KEEP(DESKTOP_PATH),
     HOST_WIPE_KEEP(NET_DNS_PATH),
     HOST_WIPE_KEEP(DNS_TLS_KEPT),

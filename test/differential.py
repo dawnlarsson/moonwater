@@ -44531,7 +44531,9 @@ def harness_moonwater_cli(argv):
                 "canvas scale 2 3", "canvas modes", "canvas modes preferred", "canvas modes sideways",
                 "canvas modes largest preferred",
                 "canvas background", "canvas background 112233", "canvas background default", "canvas background red",
-                "canvas background a b", "canvas cursor", "canvas cursor size", "canvas cursor size 2",
+                "canvas background a b", "canvas arrange", "canvas arrange Virtual-2 Virtual-1",
+                "canvas arrange Virtual-2@off", "canvas arrange default", "canvas arrange x@", "canvas arrange a a",
+                "canvas cursor", "canvas cursor size", "canvas cursor size 2",
                 "canvas cursor size 9", "canvas cursor size 2 3", "canvas cursor look", "canvas cursor look dark",
                 "canvas cursor look sideways", "canvas cursor look dark light", "canvas cursor bogus",
                 #       The rows of the settings table that one generic path answers.
@@ -44647,6 +44649,10 @@ def harness_moonwater_cli(argv):
             'canvas background',
             'canvas background 112233',
             'canvas background default',
+            'canvas arrange',
+            'canvas arrange Virtual-2 Virtual-1',
+            'canvas arrange Virtual-2@off',
+            'canvas arrange default',
             'canvas cursor',
             'canvas cursor size',
             'canvas cursor size 2',
@@ -44740,6 +44746,8 @@ def harness_moonwater_cli(argv):
             'canvas scale 9',
             'canvas modes sideways',
             'canvas background red',
+            'canvas arrange x@',
+            'canvas arrange a a',
             'canvas cursor size 9',
             'canvas cursor look sideways',
             'canvas cursor shake maybe',
@@ -47035,6 +47043,17 @@ while True:
                    locale_say("canvas background a b") + locale_say("canvas cursor bogus") +
                    locale_say("canvas cursor size 2 3") + locale_say("canvas cursor look dark light") +
                    look_kept("background") + look_kept("cursor.size") + look_kept("cursor.look"))
+        #       Where each screen is: the words kept as a line in /root, judged together (a name once, a place
+        #       inside 32768, default alone) before anything is kept, so a refusal keeps nothing, and default
+        #       putting the default back; the bare verb says what is kept.
+        def arrange_kept():
+            return "echo \"@@arrange $(cat /root/canvas.arrange 2>/dev/null || echo none)\"\n"
+        arrange_bad = ("x@", "a@1", "a@1,2x", "a a", "default x", "a_b", "abcdefghijklmnop", "a@32769,0")
+        script += ("rm -f /root/canvas.arrange\n" + locale_say("canvas arrange") + arrange_kept() +
+                   locale_say("canvas arrange Virtual-2 Virtual-1") + arrange_kept() +
+                   locale_say("canvas arrange") +
+                   locale_say("canvas arrange DP-1@-1920,40 eDP-1@off") + arrange_kept() +
+                   "".join(locale_say("canvas arrange " + bad) + arrange_kept() for bad in arrange_bad))
         #       One query at a time: the clock is moved by what a query measured,
         #       so two that measured before either applied would move it twice. A
         #       hand's `time sync` against a query that holds the lock says so and
@@ -47047,9 +47066,31 @@ while True:
         more, done = session(script)
         lines += more
         finished = finished and done
+        #       Asked by one who is not root: refused in words, and the line kept stays; then put back.
+        more, done = session(locale_say("canvas arrange Virtual-1"), nobody=True)
+        lines += [line.replace("@@ canvas arrange Virtual-1", "@@ nobody canvas arrange Virtual-1") for line in more]
+        more, done2 = session(arrange_kept() + locale_say("canvas arrange default") + arrange_kept() +
+                              "echo '@@ again'; timeout 20 /tmp/moonwater canvas arrange 2>&1; echo \"@@status $?\"\n")
+        lines += more
+        finished = finished and done and done2
         seen = answers(lines)
         text = lambda name: "\n".join(seen.get(name, {}).get("out", []))
         check(finished, "the clock verbs' session finished", "")
+        arranged = [line[len("@@arrange "):] for line in lines if line.startswith("@@arrange ")]
+        check(arranged == ["none", "Virtual-2 Virtual-1"] + ["DP-1@-1920,40 eDP-1@off"] * (1 + len(arrange_bad) + 1) +
+              ["default"],
+              "canvas arrange keeps the words it was given as a line, and nothing a refusal or one not root was given",
+              repr(arranged))
+        check(seen.get("canvas arrange", {}).get("status") == 0 and "arrange Virtual-2 Virtual-1" in text("canvas arrange") and
+              "arrange default" in text("again"),
+              "canvas arrange says what is kept, and default when that is put back", text("canvas arrange") + text("again"))
+        for bad in arrange_bad:
+            check(seen.get("canvas arrange " + bad, {}).get("status") == 1 and
+                  "arrange is screens' names" in text("canvas arrange " + bad),
+                  f"canvas arrange {bad} is refused in words", text("canvas arrange " + bad))
+        check(seen.get("nobody canvas arrange Virtual-1", {}).get("status") == 1 and
+              "needs root" in text("nobody canvas arrange Virtual-1"),
+              "canvas arrange needs root to change", text("nobody canvas arrange Virtual-1"))
         check("+01" in text("tz").split("after", 1)[-1] and "QQQ" not in text("tz"),
               "a TZ in the caller's environment is not the zone a change is shown in", text("tz"))
         check("QQQ" not in text("tz time"), "nor the zone the clock is read in", text("tz time"))
