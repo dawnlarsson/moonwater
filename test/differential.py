@@ -45237,6 +45237,21 @@ def harness_moonwater_cli(argv):
               "a FIFO at /etc/resolv.conf does not hold dns or status",
               repr((seen.get("dns"), seen.get("status"))))
 
+        # A hosts file of a bowl that is larger than the room it is read into
+        # is left as it is: the machine's line is not added by writing back
+        # the first four kilobytes of it.
+        lines, finished = session(
+            "cp /tmp/moonwater /tmp/bowl; mkdir -p /bowls/x/etc /bowls/x/bin\n"
+            "awk 'BEGIN { print \"127.0.0.1 localhost\"; for (i = 0; i < 400; i++) "
+            "print \"10.1.\" int(i / 250) \".\" i % 250 \" blocked\" i \".example\" }' > /bowls/x/etc/hosts\n"
+            "cp /bowls/x/etc/hosts /tmp/hosts.before\n"
+            "timeout 20 /tmp/bowl --isolated /bowls/x /bin/true > /dev/null 2>&1\n"
+            "echo '@@ big'; cmp /tmp/hosts.before /bowls/x/etc/hosts && echo same; echo '@@end'\n"
+            "rm -rf /bowls/x /tmp/bowl /tmp/hosts.before\n")
+        check(finished and block("big") == ["same"],
+              "a hosts file of a bowl past the room it is read into is not written back cut",
+              repr(block("big")))
+
         # A bowl's files are read as the bowl names them. A guest whose
         # /etc/hosts is a link to a file of the host (absolute, so the host
         # resolves it) had that file read into the hosts it was given, and one

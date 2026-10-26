@@ -2329,6 +2329,7 @@ static fn bowl_hosts_write_in(string_address root, string_address name,
         positive length = string_length(name);
 
         bool have = false;
+        bool whole = true;
 
         if (!bowl_root_path(hosts, sizeof(hosts), root, "/etc/hosts") ||
             !bowl_root_path(hostname, sizeof(hostname), root, "/etc/hostname"))
@@ -2344,6 +2345,10 @@ static fn bowl_hosts_write_in(string_address root, string_address name,
                 bipolar got = bowl_slurp_in_root(root, "/etc/hosts", text,
                                                  sizeof(text) - 99);
 
+                //      A file that filled the room has more behind it, and
+                //      written back it would lose that: the machine's line
+                //      is not added to it.
+                whole = got < (bipolar)(sizeof(text) - 100);
                 used = got > 0 ? (positive)got : 0;
                 for (positive at = 0; at + length <= used && !have; at++)
                         have = !memory_compare(text + at, name, length) &&
@@ -2354,7 +2359,7 @@ static fn bowl_hosts_write_in(string_address root, string_address name,
                         text[used++] = '\n';
         }
         bowl_quiet = true;
-        if (!have)
+        if (!have && whole)
         {
                 if (!used)
                 {
