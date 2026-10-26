@@ -374,6 +374,31 @@ attacker gets its invariants here once there is a lane that proves them.
   second run, nobody, nine files that do not count, the tight build's lines
   and refusals) and by `CHECK_bowl`'s `switches_asked` at both tiers (`sh
   test/run cli bowl`).
+- **BOWL-D1, who a bowl's programs are against attacker 8 (`bowl_become_user`,
+  src/bowl.c; MW-2026-010).** A bowl's programs run in a user namespace. At the
+  default tier the user's inside id 1000 is mapped to the launcher's outside id,
+  which is 0 when root launches the session (the Canvas terminal, the console,
+  the `/bowls/bin` launchers, the KDE session): a program of the bowl is then
+  the machine's root to the kernel (every file it makes is root's, every file
+  root owns is its own, a signal it sends is root's) and the fast view keeps the
+  host's `/root` and `/run/moonwater`. This was deliberate (`6b81fbd2`, so a
+  desktop's home, devices and runtime directory "need no other mode") and is 1:1
+  with before, but under attacker 8 a taken-over browser or KDE component is
+  unconfined root (it reads `/root/link.key`, writes `/root/main.moonwater.sh`
+  to be run as root, signals any root process). The **hardened bowl tier**
+  (`MOONWATER_STRICT_BOWL >= STRICT_TIGHT`, `sec_bowl_hardened` and the locked
+  tier) drops a root-launched fast launch to a real unprivileged kernel id 1000
+  before the namespace, in the device groups a compositor needs (`video`,
+  `render`, `input`, `audio`, `tty`, not `disk` or `kmem`), with
+  `NO_NEW_PRIVS` and only the namespace's capabilities (which reach nothing the
+  machine owns, since root is unmapped), binds a home the user owns over `/root`
+  and gives it its own `/run/user/1000`; it fails closed. `bowl setup`,
+  `bowl --root`, `bowl udev`, `bowl bus` and a bare `bowl ROOT` console shell
+  stay root in the bowl's own tree. Held by `lane_desktop` under
+  `MOONWATER_BOWL_TIER` (three confinement rows and the existing weston draw
+  rows). Default **not decided by the owner**: whether to make the dropped id
+  the default (it moves a session's config from `/root` to `/home/user`), which
+  is the behaviour change `6b81fbd2` deferred.
 - **The clients' network half runs apart (`net_apart`, `src/net/net.c`).**
   wget (`--spider` too), fetch, `host`, the NTS key establishment and every
   SNTP or NTS time query the machine's NTP child makes as root

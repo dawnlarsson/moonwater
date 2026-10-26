@@ -21739,6 +21739,35 @@ out.append(("an Alpine bowl lands on the disk", "yes" if setup == 0 else "no, st
 _, added = run("apk add eudev libinput-tools", 600)
 out.append(("with eudev and libinput's tools added", "yes" if added == 0 else "no, status %d" % added, "yes"))
 
+#       Attacker 8 (a taken-over program of a bowl). A program a bowl runs
+#       that was started by root -- the Canvas terminal, the console, every
+#       /bin launcher the machine runs -- must be a real unprivileged kernel
+#       id, not the machine's root mapped in through the user namespace, so it
+#       cannot read /root's secrets (the link key, the machine script), write
+#       /root/main.moonwater.sh to be run as root at the next event, or signal
+#       a root process. Only the hardened bowl tier (sec_bowl_hardened,
+#       MOONWATER_STRICT_BOWL >= 2) confines it; the default tier is 1:1 with
+#       before by the owner's deferred decision, so these are asked only of a
+#       hardened image, named by MOONWATER_BOWL_TIER as the firewall and usb
+#       lanes name their tiers. Red on an image built before the fix at the
+#       same tier (uid 0, the secret read, pid 1 signalled).
+if os.environ.get("MOONWATER_BOWL_TIER"):
+    run("head -c 32 /dev/urandom > /root/secret.test; chmod 600 /root/secret.test", 10)
+    #   The inside id is 1000 either way (the old view mapped the user's 1000
+    #   to the host's root); what the fix changes is the host side of the map
+    #   -- the kernel id the program really is -- from 0 to 1000. That is the
+    #   second column of uid_map.
+    khost, _ = run("bowl /bowls/alpine /bin/sh -c 'read a b c < /proc/self/uid_map; echo $b'")
+    khost = khost.strip()
+    out.append(("a bowl program started by root is a real unprivileged kernel id, not root",
+                "nonzero" if khost.isdigit() and int(khost) != 0 else "host uid " + (khost or "?"), "nonzero"))
+    secret, _ = run("bowl /bowls/alpine /bin/sh -c 'cat /root/secret.test >/dev/null 2>&1 && echo READ || echo hidden'")
+    out.append(("and cannot read a 0600 secret the machine keeps under /root",
+                secret.strip() if secret.strip() in ("READ", "hidden") else "?", "hidden"))
+    sig, _ = run("bowl /bowls/alpine /bin/sh -c 'kill -0 1 2>/dev/null && echo CAN || echo refused'")
+    out.append(("and cannot signal a root process of the machine",
+                sig.strip() if sig.strip() in ("CAN", "refused") else "?", "refused"))
+
 before, _ = run("libinput list-devices 2>&1 | grep -c 'Capabilities:'")
 out.append(("libinput lists no device while no udev has named one", before or "no answer", "0"))
 

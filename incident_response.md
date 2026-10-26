@@ -579,6 +579,109 @@ shared `/run`.
   squatter holds the door, and is the deeper fix should an unprivileged
   window-client design ever reopen the door to non-root. Not built.
 - The mutation lane has not been run on the changed lines.
+### MW-2026-010: a program of a bowl started by root is the machine's root
+
+| | |
+|---|---|
+| Status | Fixed at the hardened bowl tier on the worktree branch, 2026-10-26; default tier unchanged (owner's decision, below) |
+| Class | Confused-deputy / sandbox escape: a compromised bowl program (attacker 8) acts as host root |
+| Attacker | 8 (a taken-over program of a bowl: a browser, a KDE component), and by the same mechanism anything a bowl runs |
+| Found by | This review and, independently, agent 4, 2026-10-26 |
+
+**What happened.** A bowl's programs run in a user namespace. `bowl_become_user`
+(src/bowl.c) made the namespace with `ul_namespace_map("/proc/self/uid_map",
+BOWL_USER_ID, uid, 1, ...)`, mapping the bowl user's inside id 1000 to the
+launcher's *outside* id. When the launcher is root -- the Canvas terminal, the
+serial console, every `/bowls/bin` launcher the machine runs, the whole KDE
+session -- that outside id is 0, so the bowl program was the machine's root to
+the kernel: `id -u` reads 1000 inside, but every file it creates is root's,
+every file root owns is its own, and a signal it sends is root's. The
+non-isolated ("fast") view also keeps the host's `/root` and `/run/moonwater`.
+This was deliberate (commit `6b81fbd2`, "the machine still sees root ... so the
+home, /etc, the runtime directory and the devices a compositor opens need no
+other mode"), left in that commit as "the one behaviour change to decide on";
+it was never reconciled with attacker 8, under whom it means a compromised bowl
+program is unconfined root.
+
+**How it was reproduced.** A disposable QEMU guest on the build box, image of
+current main (`final-head.efi`) with the KDE/Alpine bowls disk, driven from the
+root serial shell. As a bowl program (`bowl /bowls/alpine /bin/sh -c ...`):
+
+    id                      -> uid=1000(user) ...
+    cat /proc/self/uid_map  -> 1000 0 1          (inside 1000 == host root)
+    grep CapEff /proc/self/status -> 000001ffffffffff
+    od -An -tx1 /root/link.key  -> the 32 bytes of the machine's private link key
+    echo ... > /root/main.moonwater.sh ; ls -ln  -> written, owner 0 0, mode 644
+    kill -0 1               -> succeeds
+
+The written `/root/main.moonwater.sh` is a root-owned, non-group/non-world
+writable regular file, which passes the machine script's own validation
+(test/run rows at `1-ow`/`1-gp`/`1-nl`/`1-if`) and is sourced and run as root
+at the next event: full root code execution and persistence. Agent 4 reproduced
+the same, reading `/root/link.key`.
+
+**The fix (worktree branch).** At the hardened bowl tier
+(`MOONWATER_STRICT_BOWL >= STRICT_TIGHT`, profile `sec_bowl_hardened` and the
+locked tier) `bowl_become_user` now drops the launch to a *real* unprivileged
+kernel id before it makes the namespace: it sets the supplementary groups a
+desktop's devices need (`video`, `render`, `input`, `audio`, `tty` -- not
+`disk` or `kmem`), `setresgid`/`setresuid` to 1000, restores `PR_SET_DUMPABLE`
+(the drop cleared it, which would refuse the id-map writes), makes a user
+namespace mapping 1000 to 1000 (identity), keeps that namespace's capabilities
+across exec for nested launches and a browser's own sandbox (they are the
+namespace's, not the host's: root is unmapped, so they reach nothing the
+machine owns), and sets `PR_SET_NO_NEW_PRIVS`. The fast view binds a home the
+user owns (`/home/user`, prepared 0700 before the drop) over `/root`, so the
+session has a writable HOME and the machine's `/root` is out of view; the
+runtime directory `/run/user/1000` is prepared as the user's (replacing the
+`-> /run/user/0` symlink the mapped-root design left). It fails closed: a step
+it cannot take refuses the launch, where the default tier runs it as root.
+`bowl setup`, `bowl --root`, `bowl udev`, `bowl bus` and a bare `bowl ROOT`
+console shell stay root inside the bowl's own tree, as before. The default tier
+is unchanged, 1:1 with before.
+
+Proven in a guest built from this branch at `sec_bowl_hardened`
+(`/home/dawn/sec-1-img`): a bowl program from root reads `uid_map` `1000 1000
+1`, cannot read `/root/link.key` (hidden), cannot write the machine's real
+`/root/main.moonwater.sh` (its write lands in its own `/home/user`, the real
+`/root` untouched), and cannot `kill -0 1`; after `bowl udev` sets the DRM nodes
+to 0660 group `video`/`input`/`render` it opens `card0`, `renderD128` and
+`event0`; and the KDE session's `kwin_wayland`, `plasmashell` and `kded6` run as
+`user` (uid 1000) with a working `wayland-0` socket and nested launches
+(`dbus-run-session` -> `startplasma-wayland`) succeed.
+
+**Tests that fail without the fix.** `sh test/run desktop` with
+`MOONWATER_BOWL_TIER=hardened` against a hardened-bowl image, three rows in
+`lane_desktop` (test/run): "a bowl program started by root is a real
+unprivileged kernel id, not root" (uid_map host side), "and cannot read a 0600
+secret the machine keeps under /root", "and cannot signal a root process of the
+machine". Built OLD (this review's `src/bowl.c` reverted to HEAD) at the same
+tier (`/home/dawn/sec-1-old-img`), the same three in the same guest read `host
+uid 0`, `READ`, `CAN` -- red; built from the fix they read `nonzero`, `hidden`,
+`refused` -- green. The lane's existing weston rows ("finds the screen", "draws
+its shell: a panel and a body, neither black") run weston as the bowl user and
+so also cover that the confined compositor still draws. The rows are gated by
+`MOONWATER_BOWL_TIER`, as the firewall and usb lanes gate their tiers, because
+the default tier is intentionally 1:1 with before.
+
+**What is still open.**
+
+- **Owner decision (behaviour change for legitimate users).** The confinement
+  is at the hardened bowl tier only; the default tier still runs a bowl program
+  started by root as the machine's root, by the owner's deferred decision from
+  `6b81fbd2`. Promoting it to the default would move a desktop session's config
+  from the machine's `/root` into `/home/user` and could affect a setup that
+  reads `/root` from inside a bowl. Recommended to promote once the full KDE
+  session (seat-managed, via `lane_desktop` with a network) is confirmed to
+  draw at the hardened tier.
+- The full `lane_desktop` weston draw at the hardened tier was not run offline
+  (base.img has no weston/seatd and the lane installs them over the network);
+  the building blocks were verified by hand (device-node access for the dropped
+  id, kwin/plasmashell running as 1000 with a Wayland socket). KWin's "Failed to
+  open drm node" in a hand-run session was the absent seat manager, not the id
+  change.
+- The `moonwater security packages` and `sudo` switches (coordinator, API on
+  main at `12f31f6b`) are enforced separately; this entry is the id drop only.
 
 ## Reviews with no exposure found
 

@@ -1603,10 +1603,30 @@ static bipolar bowl_fast_usr(string_address root, bool address_to whole)
         return bowl_bind_ro(usr, "/usr");
 }
 
+/* A home on the data partition that the hardened tier's dropped id owns (it
+   cannot write the machine's root-owned /root), bound over /root by the fast
+   view so the session's HOME is writable and the machine's own /root -- its
+   link key, its script, its settings -- is out of the program's view. Set
+   true only for a launch that dropped the id; a root console shell, udev and
+   a bus service keep the machine's /root. "/home/user" is BOWL_SESSION_HOME's
+   sibling; both are spelled out here because the session macros come later. */
+#define BOWL_USER_HOME_STORE "/home/user"
+#define BOWL_FAST_HOME "/root"
+static bool bowl_home_over_root;
+
 static bipolar bowl_fast_enter(string_address root)
 {
         bool whole = false;
         bipolar failed;
+
+        if (bowl_home_over_root)
+        {
+                bowl_doing("bind", BOWL_FAST_HOME);
+                failed = system_mount(BOWL_USER_HOME_STORE, BOWL_FAST_HOME, 0,
+                                      MS_BIND, 0);
+                if (failed)
+                        return failed;
+        }
 
         failed = bowl_fast_snapshot("/bin", BOWL_HOST_BIN);
         if (!failed)
@@ -2540,8 +2560,12 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
                         /* The user is 1000 to itself and the machine's root
                            to the kernel, whose runtime directory is
                            /run/user/0: a program that spells it from its own
-                           id finds the same one. */
-                        if (system_access_at(AT_FDCWD, "/run/user/0", 0) >= 0)
+                           id finds the same one. At the hardened tier the user
+                           is a real id 1000, not the machine's root, so it has
+                           its own /run/user/1000 (the store prepared before the
+                           drop) and must not be sent to root's. */
+                        if (MOONWATER_STRICT_BOWL < STRICT_TIGHT &&
+                            system_access_at(AT_FDCWD, "/run/user/0", 0) >= 0)
                                 bowl_dev_link("0", BOWL_RUNTIME_DIR BOWL_USER_ID_TEXT);
                         if (markable)
                         {
@@ -2923,6 +2947,138 @@ static bool bowl_is_root(void);
 static fn bowl_reconcile(string_address root);
 static fn bowl_bus_refresh(string_address root);
 
+#define BOWL_PR_SET_NO_NEW_PRIVS 38
+#define BOWL_PR_SET_DUMPABLE 4
+
+/*  The groups a desktop's devices are opened by on the host's devtmpfs, where
+    the nodes are mode 0660 and group-owned: the card and the render node, the
+    input devices, sound and the controlling terminal. A disk or a memory
+    group is deliberately not here, so a confined program reads no block device
+    and no kernel memory through a group. The user's own group leads, so its
+    files are its own. These are the numbers `bowl udev` writes into the bowl's
+    /etc/group, and a program in a namespace of its own keeps them as host ids
+    (unmapped inside, which is cosmetic) because the device files it opens are
+    the machine's, judged in the initial namespace. */
+static const p32 bowl_device_groups[] = {
+    BOWL_USER_ID, 5 /* tty */, 29 /* audio */, 44 /* video */,
+    104 /* input */, 105 /* render */,
+};
+
+/*
+        The fast view's directories, made by the machine's root before the id
+        drops. A program that is no longer root cannot make a directory under
+        the machine's root-owned /run and /, so the mount points the fast view
+        binds onto (its /bin, /sbin and /etc snapshots and the library trees an
+        empty host lacks) are made here first; the view then only binds onto
+        what is already there, which its namespace capabilities allow whatever
+        a directory's owner. The three the dropped id writes into -- its home,
+        its runtime directory and where the session writes passwd and group --
+        are made the user's; the bind targets stay the machine's, since a
+        read-only bind over them needs no write.
+*/
+static fn bowl_user_store_prepare(void)
+{
+        static const struct { string_address path; bool owned; } made[] = {
+            {BOWL_RUNTIME_DIR BOWL_USER_ID_TEXT, true},
+            {BOWL_USER_HOME_STORE, true},
+            {BOWL_ACCOUNTS_DIRECTORY, true},
+            {BOWL_HOST_BIN, false}, {BOWL_HOST_SBIN, false},
+            {BOWL_HOST_ETC, false},
+            {"/lib", false}, {"/lib64", false}, {"/opt", false},
+            {"/nix", false}, {"/usr/lib", false}, {"/usr/lib64", false},
+            {"/usr/share", false}, {"/usr/share/terminfo", false},
+            {"/usr/libexec", false}, {"/usr/local/lib", false},
+            {"/usr/local/share", false}, {"/usr/local/bin", false},
+            {"/usr/local/sbin", false},
+        };
+
+        bowl_quiet = true;
+        for (positive at = 0; at < array_count(made); at++)
+        {
+                /*  A /run/user/<uid> a root-run bowl left as a symlink to
+                    /run/user/0 (the mapped-root design's) is the machine's
+                    root's directory, not the user's: take the link away so a
+                    real directory the user owns is made in its place. The
+                    remove is harmless on the directory it should be (EISDIR)
+                    and on an absent name. */
+                if (made[at].owned)
+                        system_remove_at(AT_FDCWD, made[at].path, 0);
+                if (bowl_mkdir_parents(made[at].path) < 0)
+                        continue;
+                if (!made[at].owned)
+                        continue;
+                system_call_5(syscall(fchownat), AT_FDCWD,
+                              (positive)made[at].path, BOWL_USER_ID,
+                              BOWL_USER_ID, 0);
+                bowl_chmod_directory(made[at].path, 0700);
+        }
+        bowl_quiet = false;
+}
+
+/*
+        The hardened bowl tier: a program of a bowl is a real unprivileged
+        kernel id on the host, not the machine's root mapped in. Until this,
+        a fast launch started by root (the Canvas terminal, the console, every
+        /bowls/bin launcher the machine runs) mapped the user's inside id to
+        the launcher's outside id, which is 0 for root: the machine saw root
+        in every file the program made, every signal it sent and a socket's
+        credentials, so a program of a bowl that had been taken over (a
+        browser, a KDE component) could read /root's keys and settings, write
+        /root/main.moonwater.sh and be run as root at the next event, and
+        signal any process of the machine's. Attacker 8 of SECURITY.md.
+
+        Here the program is made a real host uid and gid 1000, in the device
+        groups a compositor needs and nothing that reads a disk or memory, with
+        no new privileges, and only then is it the user inside a namespace of
+        its own. The capabilities it keeps across exec are that namespace's,
+        not the host's: the namespace maps only id 1000, so a capability in it
+        reaches the program's own files and its nested namespaces (a browser's
+        sandbox, the mount view a launcher of another bowl makes) and nothing
+        the machine owns -- it cannot override the machine's root on a file
+        root owns, signal a root process, or map root into a namespace of its
+        own, because root is unmapped here. It fails closed: a step it cannot
+        take is a launch that does not happen, where the default tier runs the
+        program as root when no namespace can be made. The id is dropped before
+        the namespace, so the maps it writes are its own id, identity for
+        identity; the dumpable flag the drop cleared is set again so the maps
+        can be written and a desktop's crash handlers work.
+*/
+static fn bowl_become_user_hardened(void)
+{
+        bowl_user_store_prepare();
+
+        /*  Dropping from root to the user clears the dumpable flag, which
+            makes /proc/self root-owned and would refuse the id-map writes
+            below; a desktop program is dumpable to its own user anyway (its
+            debuggers and crash handlers need it), so it is set back before the
+            namespace is made. No new privileges is set last, once the maps are
+            in: it does not stop a browser making its own sandbox namespace. */
+        if (system_call_2(syscall(setgroups), array_count(bowl_device_groups),
+                          (positive)bowl_device_groups) < 0 ||
+            system_call_3(syscall(setresgid), BOWL_USER_ID, BOWL_USER_ID,
+                          BOWL_USER_ID) < 0 ||
+            system_call_3(syscall(setresuid), BOWL_USER_ID, BOWL_USER_ID,
+                          BOWL_USER_ID) < 0 ||
+            system_call_5(syscall(prctl), BOWL_PR_SET_DUMPABLE, 1, 0, 0, 0) <
+                0 ||
+            system_call_1(syscall(unshare), CLONE_NEWUSER) < 0 ||
+            ul_namespace_write("/proc/self/setgroups", "deny", 4, "bowl") ||
+            ul_namespace_map("/proc/self/uid_map", BOWL_USER_ID, BOWL_USER_ID,
+                             1, "bowl") ||
+            ul_namespace_map("/proc/self/gid_map", BOWL_USER_ID, BOWL_USER_ID,
+                             1, "bowl") ||
+            !bowl_keep_capabilities() ||
+            system_call_5(syscall(prctl), BOWL_PR_SET_NO_NEW_PRIVS, 1, 0, 0,
+                          0) < 0)
+        {
+                bowl_refuse("cannot become the user\n");
+                exit(1);
+        }
+
+        bowl_home_over_root = true;
+        bowl_fill_valid = false;
+}
+
 /*  The launch is run as the user. A refusal of the namespace itself is the
     machine's to make and is not an error; a namespace that was made and could
     not be given its ids is no process to go on with. */
@@ -2930,6 +3086,12 @@ static fn bowl_become_user(void)
 {
         positive uid = (positive)system_call(syscall(geteuid));
         positive gid = (positive)system_call(syscall(getegid));
+
+        if (MOONWATER_STRICT_BOWL >= STRICT_TIGHT)
+        {
+                bowl_become_user_hardened();
+                return;
+        }
 
         /*  The maps are written through /proc, and a process that has
             unshared and cannot be mapped is nobody. */
