@@ -87,6 +87,12 @@ moonwater security ct [on|off]         ask Certificate Transparency of every cha
 moonwater security http [on|off]       plain http in wget and fetch, and redirects to it [on]
 moonwater wifi [on|off]                the radio, saved networks and those in range
 moonwater bluetooth [on|off]           the radio and the remembered devices
+moonwater usb [lock|unlock]            lock keeps what is plugged in now, and holds a new device until it is allowed [unlock]
+moonwater usb class NAME [allow|deny]  what a new device no rule names may bring up: storage hid audio video net bluetooth hub other [deny]
+moonwater usb allow|deny ID|PORT       let one device in, or hold it, now and at every plug;
+                                       ID is VID:PID, or VID:PID/SERIAL as usb shows it
+moonwater usb forget ID|PORT           drop the rule of one device
+moonwater usb log [N]                  the last decisions, the newest last [20]
 moonwater power [performance|balanced|powersave]  profile and CPU governor, kept across boots
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater cpu [boost|smt on|off]       turbo and SMT, kept across boots
@@ -135,8 +141,24 @@ already open, and a download's own redirects and revocation fetches, keep what t
 started with. `http off` leaves the CRL and caIssuers fetches inside TLS alone, which
 are plain http by design and checked by their signatures.
 
+`moonwater usb lock` holds what somebody plugs in: a stick, a keyboard that types on its
+own, a hub, a network, audio or camera function. Every device plugged in when it runs
+becomes a rule in /root/usb.policy, with the classes it shows then, and keeps working;
+a new device, one no rule names, or a class a known device never had (a stick that comes
+back as a keyboard too) stays unauthorized until `usb allow` lets it in or `usb class`
+allows what it is. The kernel holds the switches (the `authorized` file of each device
+and interface, the defaults of each root hub), so a held device is never configured and
+no driver sees it; a watcher puts the policy in force at each plug, and every decision is
+a line of /root/usb.log, with what a device says of itself escaped. It cannot stop the
+kernel reading a new device's descriptors and strings before anything decides, or a hub
+doing its own work; a device that copies the VID:PID and serial of one that was allowed
+is that device to it; DMA over Thunderbolt or PCIe is the IOMMU's (`sec_dma`); and root
+can undo it. The policy is read when /root is, so a device plugged in during boot is up
+until then: only the kernel command line `usbcore.authorized_default=2`, which
+`sec_host_locked` sets, closes that window. The tight tier locks at the first boot.
+
 `moonwater settings` opens the same command as a window on the desktop: the groups
-(machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, power, boot, and all commands) are
+(machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are
 listed at the left and the rows of the one chosen at the right, each row a setting a
 person flips, and under All commands a row to every line of `moonwater help`, so no
 verb is out of its reach. Tab goes between the groups and the rows, the arrow keys

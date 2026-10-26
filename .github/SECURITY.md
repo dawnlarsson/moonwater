@@ -485,6 +485,55 @@ attacker gets its invariants here once there is a lane that proves them.
   reader that dies or answers what cannot be believed is ended and started
   again. **It fails closed:** a reader that cannot be confined reads nothing,
   and the listener hears no machine nearby (the link without discovery).
+- **USB-D1, a device plugged in is let in by a rule (attacker 5,
+  `moonwater usb`, src/sh/host.c).** The kernel holds the switches and the
+  policy turns them: each device's and each interface's `authorized`, each
+  root hub's `authorized_default` and `interface_authorized_default`, and
+  usbcore's `authorized_default` for a controller that arrives later.
+  `usb lock` keeps every device plugged in at the time as an allow rule
+  (`VID:PID/SERIAL`, or `VID:PID/-@PORT` for one with no serial or one too
+  long to keep) with the classes of the interfaces it has then, denies every
+  class, and puts it in force: a new device is then never configured, so no
+  driver binds to it. Locked, the interfaces of a device that is configured
+  wait at 0 until each is judged, and are authorized and probed only for a
+  class its rule keeps or a class allowed (`usb class storage allow`, which
+  also has a new device configured so its interfaces can be judged): a stick
+  that comes back as a keyboard as well has the keyboard held. A rule for a
+  device that was not configured when it was made (one the command line held,
+  or one named by its whole id while unplugged) lets it in whole. A deny rule
+  holds its device locked or not. One function judges
+  (`usb_judge`) and one applies (`usb_apply`); boot, every verb and the
+  watcher (a process of its own while the policy holds anything, woken by
+  uevents it never reads and walking sysfs again every ten seconds) call
+  those two and nothing else. A device that is built in is exempt from the
+  lock's default only when it and every hub above it say `removable` is
+  `fixed`, since a hub's own descriptor says that of its ports and a hub
+  somebody plugs in can call every port it has fixed. A lock from off never
+  holds a device present when it runs, which is the one net against a machine
+  left with no keyboard (a lock while locked keeps only what the policy lets
+  work); apply has none on purpose, since a machine whose keyboard has gone
+  would admit the next one plugged in. What a device says of itself
+  (product, serial) is attacker input: it reaches the status, the policy and
+  the append-only log (`/root/usb.log`, 0600, cut to its newer half past 64
+  KiB) only escaped and bounded, a serial in one spelling everywhere that is
+  printable ASCII, and a serial typed with a control byte is refused. **What
+  it cannot hold:** the kernel reads a new device's device descriptor and
+  strings before anything decides (the descriptor parsers are the kernel's
+  attack surface either way), a hub that is let in enumerates what is behind
+  it, a device that copies the VID:PID, serial and classes of an allowed one
+  is that device to the policy, DMA over Thunderbolt or PCIe is the IOMMU's
+  (`sec_dma`), and root can undo all of it. The policy is read once `/root`
+  is the kept one, so a device plugged in during boot is up until the first
+  restore deauthorizes it: only `usbcore.authorized_default=2` on the kernel
+  command line, which `sec_host_locked` sets, holds every device the firmware
+  does not declare internal from the first moment. With the policy off, a
+  deny rule is reactive (the watcher deauthorizes the device once it has
+  enumerated). The tight host tier (`MOONWATER_STRICT_HOST` 2 and 3) locks a
+  machine with no `/root/usb.policy` at its first boot; the default tier
+  changes nothing until the owner locks. `sec_locked` reaches `STRICT_HOST` 3
+  through the whole build's level and does not compose `sec_host_locked`, so
+  its image has the lock at first boot but not the command line unless
+  `sec_host_locked` is named.
 
 ## Security tiers
 
@@ -542,7 +591,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | `sec_files` | `STRICT_FILES` 2 and find without `-delete` or `-fprint*` | 3 |
 | `sec_text` | `STRICT_TEXT` 2 | 3 |
 | `sec_net` | `STRICT_NET` 2 and no `wget` or `fetch`; wifi with protected management frames always, and WPA2 only for a network saved with `wpa2`; time from NTS only and names over DNS over TLS only, unless `/root/ntp.nts` or `/root/dns.tls` says otherwise; a public certificate has to be logged (Certificate Transparency) | 3 |
-| `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec` |
+| `sec_host` | `STRICT_HOST` 2: a disk is asked about, `kptr_restrict` 2, io_uring refused, Yama 2, widest mmap randomisation, USB locked at the first boot (USB-D1) | 3: no module loads, no ptrace attach (Yama 3), `hidepid` on /proc, the data partition `nosuid`, `/dev/shm` `noexec`, `usbcore.authorized_default=2` on the command line |
 | `sec_bowl` | `STRICT_BOWL` 2 | 3 |
 | `sec_exec` | Floodlight sealed with every command-making switch off | (none) |
 | `sec_build` | the image's own programs built with zeroed locals, probed stack frames, cleared call-used registers and the stack protector (+5.7% on a shell start, inside the noise on a compute loop) | (none) |
