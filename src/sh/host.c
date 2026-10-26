@@ -13334,6 +13334,9 @@ static b32 tune_charge(string_address address_to arguments, positive count)
                         positive used;
 
                         number = string_digits_max(arguments[3], 4, address_of used);
+                        //      A letter after the digits is no number, so a usage; more digits are one out of range.
+                        if (arguments[3][used] && !byte_is_digit(arguments[3][used]))
+                                return host_usage();
                         if (arguments[3][used] || number < 20 || number > 100)
                                 return host_refuse("a charge limit is 20 to 100 percent\n");
                 }
@@ -13555,6 +13558,8 @@ static b32 tune_cpu(string_address address_to arguments, positive count)
                 p8 text[8];
 
                 number = string_digits_max(arguments[3], 5, address_of used);
+                if (arguments[3][used] && !byte_is_digit(arguments[3][used]))
+                        return host_usage();
                 if (arguments[3][used])
                         return host_refuse("a cpu is a number of at most five digits\n");
                 if (!number)

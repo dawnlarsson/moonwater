@@ -45463,8 +45463,8 @@ def harness_moonwater_cli(argv):
                  "brightness 0050": 0, "brightness 0000050": 0, "brightness 00000000000000000050": 2,
                  "brightness 50%": 0, "brightness %": 2, "brightness 5%%": 2, "brightness +": 2,
                  "charge limit 0080": 0, "charge limit 00080": 1, "charge limit 00000000000000000080": 1,
-                 "charge limit 100": 0, "charge limit 19": 1, "charge limit 101": 1, "charge limit 80x": 1,
-                 "cpu online 99999": 1, "cpu online 100000": 1, "cpu online 0": 1, "cpu online 1x": 1,
+                 "charge limit 100": 0, "charge limit 19": 1, "charge limit 101": 1, "charge limit 80x": 2,
+                 "cpu online 99999": 1, "cpu online 100000": 1, "cpu online 0": 1, "cpu online 1x": 2,
                  "cpu offline 2": 0}
         got = tuned("".join(say(verb) for verb in edges))
         seen = answers(got)
@@ -45480,6 +45480,16 @@ def harness_moonwater_cli(argv):
               any("cannot be switched" in line for line in seen["cpu online 99999"]["out"]),
               "a cpu that is too long a number, cpu 0 and a cpu that is not there are each said so",
               repr(seen))
+
+        # A word with a letter after its digits is a usage, as brightness's is.
+        # A charge limit of 80x was refused as a number out of range, and cpu
+        # online 1x as a cpu of more than five digits, which it is not.
+        got = tuned(say("charge limit 80x") + say("cpu online 1x") + say("brightness 50x"))
+        seen = answers(got)
+        said = seen["charge limit 80x"]["out"] + seen["cpu online 1x"]["out"]
+        check(seen["charge limit 80x"]["status"] == 2 and seen["cpu online 1x"]["status"] == 2 and
+              not any("a charge limit is 20 to 100" in line or "at most five digits" in line for line in said),
+              "a limit or cpu with a letter after its digits is a usage, not a number out of range", repr(seen)[:300])
 
         # cpu says whether boost is on from the switch the machine has. A
         # no_turbo that reads empty is no answer, and was read as off.
