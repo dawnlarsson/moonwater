@@ -46320,12 +46320,18 @@ while True:
         # name, and not paired under its first 31 characters.
         #       The listener a pairing that is not refused starts is switched off
         #       after it, so a run that waited out its timeout leaves none.
-        lines, finished = session(say("link pair " + "a" * 40) + say("link off"))
+        lines, finished = session(say("link pair " + "a" * 40) + say("link pair -ABC") + say("link off"))
         seen = answers(lines)
         check(finished and seen.get("link pair " + "a" * 40, {}).get("status") == 1 and
               any("is not a machine name" in line for line in seen["link pair " + "a" * 40]["out"]),
               "link pair refuses a name of 32 characters or more, and does not pair under its first 31",
               repr(seen.get("link pair " + "a" * 40)))
+        #       A name is held in lowercase: the refusal of a capitalised one
+        #       names it as the other machine would type it.
+        check(finished and seen.get("link pair -ABC", {}).get("status") == 1 and
+              any("-abc is not a machine name" in line for line in seen["link pair -ABC"]["out"]),
+              "link pair folds the name it is given to lowercase, in the refusal as in the pairing",
+              repr(seen.get("link pair -ABC")))
 
         # The machine script's secret: a secret that begins with the word
         # allow is still a secret, and the status says the script holds it;

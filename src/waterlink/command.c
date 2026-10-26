@@ -987,11 +987,11 @@ static bool link_code_clean(string_address text, p8 address_to code)
 //      A machine's name as the other one prints it: lowercase.
 static fn link_fold_name(string_address name, p8 address_to into)
 {
-        positive at = 0;
+        positive length = string_length_max(name, WATERLINK_NAME_MAX - 1);
 
-        for (; name[at] && at < WATERLINK_NAME_MAX - 1; at++)
-                into[at] = byte_to_lower((p8)name[at]);
-        into[at] = 0;
+        memory_copy(into, name, length);
+        memory_to_lower_ascii(into, length);
+        into[length] = 0;
 }
 
 //      abc-def, as it is said aloud and typed.
