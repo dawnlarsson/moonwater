@@ -41963,14 +41963,17 @@ int main(void) {
     except ValueError as error:
         failures.append("net_kernel_defaults lift: " + str(error))
         defaults = None
-    for tier, want in ((1, "0\n"), (2, "1\n"), (3, "1\n")) if defaults else ():
+    # Each tier starts from the value it must not end at, so a tier that
+    # leaves the switch alone (the safe one, over a 1 set by hand) cannot pass
+    # by writing the 0 it was found at, and the tight ones must write their 1.
+    for tier, before, want in ((1, "1\n", "1\n"), (2, "0\n", "1\n"), (3, "0\n", "1\n")) if defaults else ():
         for present in (True, False):
             with tempfile.TemporaryDirectory(prefix="net-silent-") as temporary:
                 top = Path(temporary).resolve()
                 ipv4 = top / "proc/sys/net/ipv4"
                 ipv4.mkdir(parents=True)
                 if present:
-                    (ipv4 / "moonwater_silent").write_text("0\n")
+                    (ipv4 / "moonwater_silent").write_text(before)
                 (top / "fixture.c").write_text(
                     "#define STRICT_TIGHT 2\n#define MOONWATER_STRICT_NET %d\n"
                     "#define array_count(a) (sizeof (a) / sizeof (a)[0])\n" % tier +

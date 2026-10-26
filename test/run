@@ -21483,7 +21483,9 @@ counted
 #       naming an image built with sec_host_locked, a third boots it with no
 #       disk: the command line holds every device from the start, the first
 #       boot locks once USB has settled and keeps the tablet and the keyboard,
-#       and a stick plugged in after is held.
+#       and a stick plugged in after is held; it installs to a disk of its own,
+#       and a fourth boots not from that disk, so the tight tier asks: the
+#       session locks its own /root and the answer's take locks the disk's.
 lane_usb()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -21515,6 +21517,11 @@ mkdir -p "$work/source/EFI/BOOT" && cp "$image" "$work/source/EFI/BOOT/BOOTX64.E
 for stick in 1 2 3 4 5 6 7 8 9; do
         truncate -s 32M "$work/stick$stick.img" || exit 1
 done
+#       The tier's own disk and the stick it installs from.
+if [ -f "${MOONWATER_USB_TIER:-}" ]; then
+        mkdir -p "$work/source2/EFI/BOOT" && cp "$MOONWATER_USB_TIER" "$work/source2/EFI/BOOT/BOOTX64.EFI" &&
+                truncate -s 4G "$work/disk2.img" || exit 1
+fi
 
 MOONWATER_USB_WORK=$work
 export MOONWATER_USB_WORK
@@ -21528,16 +21535,16 @@ image = sys.argv[1]
 work = os.environ["MOONWATER_USB_WORK"]
 out = []
 
-def machine(name, boot_sticks=(), source=False, kernel=image, disk=True):
+def machine(name, boot_sticks=(), source=False, kernel=image, disk=True, disk_file="disk.img", source_dir="source"):
     """The compositor guest's machine with its xHCI widened, the disk, the sticks as drives, and a serial shell
        with the kernel's console lines off it, once boot has settled."""
     args = desktop(kernel)
     args[args.index("qemu-xhci")] = "qemu-xhci,id=xhci,p2=8,p3=8"
     if disk:
-        args += ["-drive", "if=none,id=disk,format=raw,file=" + work + "/disk.img",
+        args += ["-drive", "if=none,id=disk,format=raw,file=" + work + "/" + disk_file,
                  "-device", "nvme,serial=usbdisk,drive=disk"]
     if source:
-        args += ["-drive", "if=none,id=source,format=raw,file=fat:ro:" + work + "/source,readonly=on",
+        args += ["-drive", "if=none,id=source,format=raw,file=fat:ro:" + work + "/" + source_dir + ",readonly=on",
                  "-device", "usb-storage,bus=xhci.0,drive=source,removable=on"]
     for stick in range(1, 10):
         args += ["-drive", "if=none,id=st%d,format=raw,file=%s/stick%d.img" % (stick, work, stick)]
@@ -21580,6 +21587,18 @@ def stop(guest):
         guest.wait(10)
     except Exception:
         guest.kill()
+
+def plugged_held(shell, driver, ident, serial, leaf="authorized", **properties):
+    """A device hot-plugged, and what its port's leaf says (an interface's when leaf names one, as 1.0/authorized),
+       or what went wrong: a row that a device is held has to see the device first, or a plug that failed passes it."""
+    error = plug(driver, ident, serial=serial, **properties)
+    if error:
+        return "plug: " + error
+    port = port_of(shell, "[ \"$s\" = %s ]" % serial)
+    if not port:
+        return "not enumerated"
+    return shell.run("cat /sys/bus/usb/devices/%s%s 2>&1" % (port, ":" + leaf if leaf != "authorized" else "/authorized"),
+                     10)[0].strip()
 
 def keyboards(shell):
     return shell.number("grep -c 'QEMU USB Keyboard' /proc/bus/input/devices")
@@ -21656,8 +21675,9 @@ time.sleep(3)
 got = disks(shell)
 out.append(("U6 with storage allowed a new stick is a disk", got if got == str(present + 2) else got + ": " + why(shell),
             str(present + 2)))
-plug("usb-kbd", "k3", serial="KBD3")
-out.append(("U6 and a new keyboard still gives no input", keyboards(shell), "1"))
+#       Configured, since a class is allowed, and its keyboard interface held.
+state = plugged_held(shell, "usb-kbd", "k3", "KBD3", leaf="1.0/authorized")
+out.append(("U6 and a new keyboard still gives no input, its interface held", keyboards(shell) + " " + state, "1 0"))
 
 #       A deny holds across unlock, and holds the keyboard again when it is back.
 said, status = shell.run("moonwater usb deny %s" % keyboard, 30)
@@ -21705,8 +21725,8 @@ log, _ = shell.run("moonwater usb log 50", 20)
 out.append(("U9 the boot logged every device it found",
             "yes" if re.search(r"seen \w+ \S+ 46f4:0001/STICK5", log) and re.search(r"held \S+ 46f4:0001/STICK5", log)
             else "no: " + log[-300:], "yes"))
-plug("usb-storage", "s7", drive="st7", serial="STICK7")
-out.append(("U9 a stick plugged in after that boot is held", disks(shell), "1"))
+state = plugged_held(shell, "usb-storage", "s7", "STICK7", drive="st7")
+out.append(("U9 a stick plugged in after that boot is held", disks(shell) + " " + state, "1 0"))
 alive, status = shell.run("echo answers", 10)
 out.append(("U9 and the machine answers on its serial shell", "yes" if status == 0 and "answers" in alive else "no", "yes"))
 stop(guest)
@@ -21717,7 +21737,8 @@ stop(guest)
 #       and keyboard, which had not enumerated yet).
 tier = os.environ.get("MOONWATER_USB_TIER", "")
 if os.path.isfile(tier):
-    guest, shell = machine("three", kernel=tier, disk=False)
+    #       With an empty disk of its own (the boot is a live one) and the stick of the tier image it installs from.
+    guest, shell = machine("three", kernel=tier, disk_file="disk2.img", source=True, source_dir="source2")
     words, _ = shell.run("cat /proc/cmdline", 10)
     out.append(("U10 the tier's command line holds every USB device from boot",
                 "yes" if "usbcore.authorized_default=2" in words else "no: " + words[-200:], "yes"))
@@ -21726,14 +21747,56 @@ if os.path.isfile(tier):
             break
         time.sleep(1)
     policy, _ = shell.run("cat /root/usb.policy", 10)
+    rules = [line for line in policy.split("\n") if line.startswith("allow 0627:0001/")]
     out.append(("U10 its first boot locks and keeps the tablet and the keyboard",
-                "%s %d" % ("mode lock" in policy, len([line for line in policy.split("\n") if line.startswith("allow 0627:0001/")])),
-                "True 2"))
+                "%s %d" % ("mode lock" in policy, len(rules)), "True 2"))
+    #       Held from boot, each was configured before its rule was written, and keeps its class.
+    out.append(("U10 and each is kept as the class it showed once configured, not whole",
+                " ".join(sorted(line.split()[-1] for line in rules)), "hid hid"))
     time.sleep(2)
     out.append(("U10 and both give input",
                 shell.number("grep -c -e 'QEMU USB Tablet' -e 'QEMU USB Keyboard' /proc/bus/input/devices"), "2"))
-    plug("usb-storage", "s8", drive="st8", serial="STICK8")
-    out.append(("U10 a stick plugged in after it is held", disks(shell), "0"))
+    state = plugged_held(shell, "usb-storage", "s8", "STICK8", drive="st8")
+    #       The disk there is the stick the image came from, plugged in at boot and kept as storage.
+    out.append(("U10 a stick plugged in after it is held", disks(shell) + " " + state, "1 0"))
+    #       An install of the tier to a disk of its own, from a stick of the tier image.
+    said, status = shell.run("moonwater setup install nvme0n1 yes > /tmp/install 2>&1; echo $?; tail -3 /tmp/install", 300)
+    out.append(("U11 the tier installs to a disk", said.split()[0] if said.split()[:1] == ["0"] else "no: " + said[-300:], "0"))
+    stop(guest)
+
+    #       Booted again not from that disk, the tight tier asks about it. The session locks its own /root once USB
+    #       has settled (with the command line holding every device, that lock is what lets the keyboard in), and
+    #       the answer takes the disk, whose /root has no policy: the disk is locked then, carried over the
+    #       session's lock, and the watcher reads the disk's policy (before, the disk got none, the watcher ended,
+    #       and the kernel held every new device with usb saying unlock).
+    guest, shell = machine("five", kernel=tier, disk_file="disk2.img")
+    verdict, _ = shell.run("cat /run/moonwater/verdict", 10)
+    out.append(("U11 booted not from it, the tier asks about the disk", "yes" if verdict.startswith("ask") else "no: " + verdict, "yes"))
+    for _ in range(30):
+        if shell.number("grep -c '^mode lock$' /root/usb.policy 2> /dev/null") == "1":
+            break
+        time.sleep(1)
+    said, status = shell.run("moonwater setup use nvme0n1 > /tmp/use 2>&1; echo $?; cat /run/moonwater/verdict", 120)
+    out.append(("U11 the answer takes the disk", "yes" if "disk nvme0n1" in said else "no: " + said[-200:], "yes"))
+    for _ in range(30):
+        if shell.number("grep -c '^mode lock$' /root/usb.policy 2> /dev/null") == "1":
+            break
+        time.sleep(1)
+    policy, _ = shell.run("cat /root/usb.policy 2>&1", 10)
+    out.append(("U11 the disk's /root is locked, keeping the tablet and the keyboard",
+                "%s %d" % ("mode lock" in policy, len([line for line in policy.split("\n") if line.startswith("allow 0627:0001/")])),
+                "True 2"))
+    time.sleep(3)
+    said, _ = shell.run("moonwater usb; cat /sys/bus/usb/devices/usb1/authorized_default "
+                        "/sys/bus/usb/devices/usb1/interface_authorized_default "
+                        "/sys/module/usbcore/parameters/authorized_default | tr '\\n' ' '", 20)
+    out.append(("U11 and usb says lock, the watcher runs, and the kernel holds what is new",
+                "%s %s %s" % (said.split("\n")[0].endswith("usb lock"), "watcher running" in said,
+                              said.strip().split("\n")[-1].strip()), "True True 0 0 0"))
+    out.append(("U11 the tablet and the keyboard give input",
+                shell.number("grep -c -e 'QEMU USB Tablet' -e 'QEMU USB Keyboard' /proc/bus/input/devices"), "2"))
+    state = plugged_held(shell, "usb-storage", "s9", "STICK9", drive="st9")
+    out.append(("U11 a stick plugged in after the take is held", state, "0"))
     stop(guest)
 
 for name, got, want in out:
@@ -21998,7 +22061,8 @@ if tll and pll:
     out.append(("F4 no v6 unreachable", "yes" if snmp6(tsh, "Icmp6OutDestUnreachs") == u6 else "no", "yes"))
     out.append(("F4 loopback v6 stays refused at 1", fw(tsh, "tcp", "::1", CLOSED_T, 1500), "refused"))
 else:
-    out.append(("F4 IPv6 link-local", "NOT RUN -- no fe80 on eth0", "NOT RUN -- no fe80 on eth0"))
+    #       Said, and not counted: a row whose answer was its want counted a lane that did not run as a pass.
+    out.append(("NOTE", "firewall v6: NOT RUN -- no fe80 on eth0", ""))
 
 stop(peer)
 stop(target)
@@ -22027,7 +22091,10 @@ fi
 [ -n "${MOONWATER_FW_ANSWERS:-}" ] && cp "$work/answers" "$MOONWATER_FW_ANSWERS"
 
 while IFS='|' read -r name got want; do
-        same "$name" "$want" "$got"
+        case $name in
+        NOTE) note "$got" ;;
+        *) same "$name" "$want" "$got" ;;
+        esac
 done < "$work/answers"
 
 counted
