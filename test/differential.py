@@ -45118,6 +45118,19 @@ def harness_moonwater_cli(argv):
         check(block("kept") == ["unread-a", "passpass1", "unread-b", "passpass2"],
               "and the network it could not forget is still saved", repr(block("kept")))
 
+        # A list saved twice under one name (made by hand, or damaged) is
+        # forgotten whole: the second row of the name is not left to keep the
+        # network, and its password, saved.
+        lines, finished = session(
+            "rm -f /root/wifi /root/wifi.rules\n"
+            "printf 'dup-a\\npasspass1\\ndup-b\\npasspass2\\ndup-a\\npasspass3\\n' > /root/wifi\n" +
+            say("wifi remove dup-a") + "echo '@@ dup'; cat /root/wifi; echo '@@end'\n" +
+            say("wifi remove dup-a"))
+        seen = answers(lines)
+        check(finished and seen["wifi remove dup-a"]["status"] == 1 and block("dup") == ["dup-b", "passpass2"],
+              "wifi remove forgets every row of the name, and the second remove has nothing left to forget",
+              repr((seen.get("wifi remove dup-a"), block("dup"))))
+
         # A FIFO at /etc/resolv.conf is no resolv.conf, and the lookups of
         # the machine do not wait for a writer to it: dns answers.
         lines, finished = session(

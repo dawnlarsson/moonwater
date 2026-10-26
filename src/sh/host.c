@@ -12242,11 +12242,17 @@ static b32 radio_wifi_forget(string_address ssid)
                         was_joined = heard->joined;
         }
 
-        for (; at + 1 < count; at++)
-                memory_copy(address_of networks[at], address_of networks[at + 1],
-                            sizeof(networks[at]));
-        count--;
-        crypto_forget(address_of networks[count], sizeof(networks[count]));
+        //      Every row of the name goes: a list that holds it twice (made by
+        //      hand, or damaged) would still have the network saved, and with
+        //      it the password, after it was forgotten.
+        for (; at < count; at = radio_saved_index(networks, count, ssid, string_length(ssid)))
+        {
+                for (positive move = at; move + 1 < count; move++)
+                        memory_copy(address_of networks[move], address_of networks[move + 1],
+                                    sizeof(networks[move]));
+                count--;
+                crypto_forget(address_of networks[count], sizeof(networks[count]));
+        }
 
         //      Its rules first: a remove cut between the two leaves the
         //      network saved, and the next remove does both.
