@@ -14039,6 +14039,9 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 // Held by the one first lock that is waiting for USB to settle; there once a settle has ended this boot.
 #define USB_SETTLE_PATH HOST_STATE "/usb.settle"
 #define USB_SETTLED_PATH HOST_STATE "/usb.settled"
+// A lock in force that /root/usb.policy does not keep: the policy, and which /root it is for and why.
+#define USB_RUN_POLICY HOST_STATE "/usb.policy"
+#define USB_UNKEPT_PATH HOST_STATE "/usb.unkept"
 #define USB_DEVICES "/sys/bus/usb/devices"
 #define USB_PROBE "/sys/bus/usb/drivers_probe"
 #define USB_MODULE_DEFAULT "/sys/module/usbcore/parameters/authorized_default"
@@ -14186,9 +14189,11 @@ typedef struct
         positive skipped; // lines that are no rule, and rules past the most
         p8 allowed;       // a bit for each kind a device no rule names may bring up
         bool lock;
-        bool kept;  // the file is there
-        bool known; // and could be read: it is root's
-        bool cut;   // longer than is read
+        bool kept;    // the file is there, or a lock this /root could not keep is in force (unkept)
+        bool known;   // and could be read: it is root's
+        bool cut;     // longer than is read
+        bool unkept;  // what is read is USB_RUN_POLICY: /root/usb.policy could not be written or read
+        bipolar error; // why /root/usb.policy could not be read, when it could not
 } usb_policy;
 
 /*
@@ -14933,9 +14938,54 @@ static bool usb_policy_line(usb_policy address_to policy, string_address line)
         return true;
 }
 
+/* Which /root this is, as the kernel names it (its device and inode): a take
+   binds the disk's over the session's, and a lock held in /run for one is
+   not the other's. Empty when it cannot be said. */
+static fn usb_root_mark(p8 address_to into, positive room)
+{
+        system_path_identity facts;
+        p8 major[24];
+        p8 minor[24];
+        p8 inode[24];
+
+        into[0] = end;
+        if (system_path_identity_at(AT_FDCWD, "/root", 0, SYSTEM_PATH_STATX_IDENTITY, address_of facts) < 0)
+                return;
+        positive_into_string(major, facts.device_major);
+        positive_into_string(minor, facts.device_minor);
+        positive_into_string(inode, facts.inode);
+        if (!string_join(into, room, (string_address)major, ":", (string_address)minor, ":", (string_address)inode))
+                into[0] = end;
+}
+
+/* Whether a lock this /root could not keep is in force (USB_UNKEPT_PATH
+   names this /root on its first line), and why, from its second. */
+static bool usb_unkept_why(p8 address_to why, positive room)
+{
+        p8 text[256];
+        p8 mark[64];
+        bipolar got = host_read_state(USB_UNKEPT_PATH, text, sizeof(text));
+        positive line;
+        positive rest;
+
+        why[0] = end;
+        if (got <= 0)
+                return false;
+        usb_root_mark(mark, sizeof(mark));
+        line = memory_span_without_byte(text, '\n', (positive)got);
+        if (!mark[0] || line != string_length((string_address)mark) || memory_compare(text, mark, line))
+                return false;
+        line += line < (positive)got;
+        rest = memory_span_without_byte(text + line, '\n', (positive)got - line);
+        string_copy_bounded(why, (string_address)text + line, rest < room ? rest + 1 : room);
+        return true;
+}
+
 /* The policy as /root/usb.policy keeps it. Not there is off with no rules;
    not readable (not root) is the same, and known false says so. A line that
-   is no line of the policy is left out and counted. */
+   is no line of the policy is left out and counted. Where a lock this /root
+   could not keep is in force (usb_policy_unkept), what is read is that
+   lock, in /run, and unkept says so. */
 static fn usb_policy_load(usb_policy address_to policy)
 {
         static p8 text[USB_POLICY_ROOM];
@@ -14943,10 +14993,18 @@ static fn usb_policy_load(usb_policy address_to policy)
         positive at = 0;
         positive start;
         positive length;
+        p8 why[8];
 
         memory_zero(policy, sizeof(*policy));
-        policy->kept = got >= 0;
+        policy->error = got < 0 ? got : 0;
         policy->known = got >= 0 || got == -ENOENT;
+        if (got < 0 && usb_unkept_why(why, sizeof(why)))
+        {
+                got = host_read_state(USB_RUN_POLICY, text, sizeof(text));
+                policy->unkept = got >= 0;
+                policy->known |= policy->unkept;
+        }
+        policy->kept = got >= 0;
         policy->cut = got >= (bipolar)sizeof(text) - 1;
         while (got > 0 && host_line_next(text, (positive)got, address_of at, address_of start,
                                          address_of length))
@@ -14968,29 +15026,68 @@ static fn usb_policy_load(usb_policy address_to policy)
         }
 }
 
-static b32 usb_policy_save(usb_policy address_to policy)
+// The policy as its file keeps it, into text; how long it is.
+static positive usb_policy_text(usb_policy address_to policy, p8 address_to text, positive room)
 {
-        static p8 text[USB_POLICY_ROOM];
-        bipolar failed;
-
-        string_copy(text, policy->lock ? "mode lock\n" : "mode off\n");
+        string_copy_bounded(text, policy->lock ? "mode lock\n" : "mode off\n", room);
         for (positive kind = 0; kind < USB_KINDS; kind++)
         {
-                string_append_bounded(text, "class ", sizeof(text));
-                string_append_bounded(text, usb_kinds[kind], sizeof(text));
-                string_append_bounded(text, (policy->allowed >> kind) & 1 ? " allow\n" : " deny\n", sizeof(text));
+                string_append_bounded(text, "class ", room);
+                string_append_bounded(text, usb_kinds[kind], room);
+                string_append_bounded(text, (policy->allowed >> kind) & 1 ? " allow\n" : " deny\n", room);
         }
         for (positive at = 0; at < policy->count; at++)
         {
                 p8 rule[USB_RULE_ROOM];
 
                 usb_rule_text(rule, sizeof(rule), policy->rule + at);
-                string_append_bounded(text, policy->rule[at].kind == USB_ALLOW ? "allow " : "deny ", sizeof(text));
-                string_append_bounded(text, (string_address)rule, sizeof(text));
-                string_append_bounded(text, "\n", sizeof(text));
+                string_append_bounded(text, policy->rule[at].kind == USB_ALLOW ? "allow " : "deny ", room);
+                string_append_bounded(text, (string_address)rule, room);
+                string_append_bounded(text, "\n", room);
         }
-        failed = host_write_file(USB_POLICY, text, string_length((string_address)text), 0600, true);
+        return string_length((string_address)text);
+}
+
+/* The policy over /root/usb.policy, synced; a lock held in /run for want of
+   it is let go once it is kept. */
+static bipolar usb_policy_write(usb_policy address_to policy)
+{
+        static p8 text[USB_POLICY_ROOM];
+        bipolar failed = host_write_file(USB_POLICY, text, usb_policy_text(policy, text, sizeof(text)), 0600, true);
+
+        if (failed >= 0)
+        {
+                (void)system_remove_at(AT_FDCWD, USB_UNKEPT_PATH, 0);
+                (void)system_remove_at(AT_FDCWD, USB_RUN_POLICY, 0);
+        }
+        return failed;
+}
+
+static b32 usb_policy_save(usb_policy address_to policy)
+{
+        bipolar failed = usb_policy_write(policy);
+
         return failed < 0 ? host_fail(USB_POLICY, failed) : 0;
+}
+
+/*
+        A lock put in force that /root/usb.policy does not keep -- it could
+        not be written (a disk full or read only), or what is there cannot be
+        read and is not written over at boot: the policy in /run, which the
+        watcher and every verb read in its place until the machine restarts
+        or a verb keeps one, and why, beside which /root it is for.
+*/
+static fn usb_policy_unkept(usb_policy address_to policy, string_address what, bipolar error)
+{
+        static p8 text[USB_POLICY_ROOM];
+        p8 note[256];
+        p8 mark[64];
+
+        usb_root_mark(mark, sizeof(mark));
+        (void)host_write_file(USB_RUN_POLICY, text, usb_policy_text(policy, text, sizeof(text)), 0600, false);
+        (void)string_join(note, sizeof(note), (string_address)mark, "\n" USB_POLICY " ", what, ": ",
+                          file_reason(error), "\n");
+        (void)host_write_file(USB_UNKEPT_PATH, note, string_length((string_address)note), 0600, false);
 }
 
 // Whether the policy holds anything, which is what the watcher is for.
@@ -15136,11 +15233,29 @@ static fn usb_watch_stop(void)
         keeps the classes it has). One that cannot be configured, or shows
         no interface once it is, is not kept: held, it is let in by usb
         allow PORT. Locked already, the lock keeps only what the policy lets
-        work: a device it holds stays held. carried is the same for a lock
-        that another /root's policy put in force this boot (the session's,
-        before the disk was taken): what that lock holds was judged, and the
-        first lock of this /root does not let it in.
+        work: a device it holds stays held. A lock carried over another
+        /root's, which that /root's policy put in force this boot (the
+        session's, before the disk was taken), is the same: what that lock
+        holds was judged, and the first lock of this /root does not let it in.
+
+        A lock that cannot be kept is put in force all the same: a boot's
+        first lock that could not write /root/usb.policy (a full or read-only
+        disk), or that found something there it cannot read and does not
+        write over, used to leave the machine as the kernel had it -- on a
+        sec_host_locked image every USB device held, the keyboard too, and
+        nothing said -- and usb lock refused with the held devices it had
+        configured left half done. Now the lock is held in /run
+        (usb_policy_unkept), in force until the machine restarts or a verb
+        keeps a policy, the log and usb say why, and usb lock answers 1
+        with the reason.
 */
+enum
+{
+        USB_LOCK_ASKED,
+        USB_LOCK_FIRST,
+        USB_LOCK_CARRIED
+};
+
 static positive usb_configure_held(usb_policy address_to policy, usb_census address_to census)
 {
         positive count = 0;
@@ -15162,18 +15277,19 @@ static positive usb_configure_held(usb_policy address_to policy, usb_census addr
         return count;
 }
 
-static b32 usb_lock_held(bool say, bool carried)
+static b32 usb_lock_held(bool say, p8 how)
 {
         static usb_census census;
         usb_policy policy;
         bool stay;
+        bool write;
         positive kept = 0;
-        b32 failed;
+        bipolar error;
 
         usb_policy_load(address_of policy);
         if (policy.cut)
                 return host_refuse("%s is too long to change here\n", USB_POLICY);
-        stay = policy.lock || carried;
+        stay = policy.lock || how == USB_LOCK_CARRIED;
         usb_census_take(address_of census);
         //      Refused before anything is configured: at most each device no rule names is a rule more.
         for (positive at = 0, more = 0; at < census.count; at++)
@@ -15209,9 +15325,14 @@ static b32 usb_lock_held(bool say, bool carried)
         }
         policy.lock = true;
         policy.allowed = 0;
-        failed = usb_policy_save(address_of policy);
-        if (failed)
-                return failed;
+        //      At boot what cannot be read is not written over: it may be the owner's, on a disk that is failing.
+        write = how == USB_LOCK_ASKED || policy.known;
+        error = write ? usb_policy_write(address_of policy) : policy.error;
+        if (error < 0)
+        {
+                usb_policy_unkept(address_of policy, write ? "could not be written" : "cannot be read", error);
+                usb_tell_text(false, "the lock is in force until the machine restarts, and not kept: ", file_reason(error));
+        }
         for (positive at = policy.count - kept; at < policy.count; at++)
         {
                 p8 rule[USB_RULE_ROOM];
@@ -15221,6 +15342,9 @@ static b32 usb_lock_held(bool say, bool carried)
         }
         usb_tell_text(false, "mode lock", "");
         usb_apply_all(address_of policy, null, null, say);
+        if (error < 0)
+                return host_refuse("%s could not be written (%s): the lock is in force until the machine restarts\n",
+                                   USB_POLICY, file_reason(error));
         if (say)
                 host_say(log, host_label "usb lock: %p devices plugged in now are kept as rules; "
                                          "a new one waits for usb allow\n",
@@ -15231,11 +15355,11 @@ static b32 usb_lock_held(bool say, bool carried)
 static b32 usb_lock_now(void)
 {
         bipolar lock = host_lock(USB_LOCK_PATH, true);
-        b32 failed = usb_lock_held(true, false);
+        b32 failed = usb_lock_held(true, USB_LOCK_ASKED);
 
         radio_unlock(lock);
-        if (!failed)
-                usb_watch_start();
+        //      A lock in force but not kept is watched as well.
+        usb_watch_start();
         return failed;
 }
 
@@ -15585,6 +15709,13 @@ static b32 usb_status(void)
                 string_format(log, host_label "  watcher not running\n");
         if (!policy.known)
                 string_format(log, host_label "  the rules are root's\n");
+        if (policy.unkept)
+        {
+                p8 why[256];
+
+                (void)usb_unkept_why(why, sizeof(why));
+                string_format(log, host_label "  in force until the machine restarts, not kept: %s\n", (string_address)why);
+        }
         if (policy.skipped)
                 string_format(log, host_label "  %p lines of %s are no rule and are left out\n", policy.skipped,
                               USB_POLICY);
@@ -15692,7 +15823,7 @@ static fn usb_restore(void)
         else if (!first && policy.known && MOONWATER_STRICT_HOST < STRICT_TIGHT)
                 usb_apply_all(address_of policy, null, null, false);
         radio_unlock(lock);
-        if (!policy.kept && MOONWATER_STRICT_HOST >= STRICT_TIGHT && policy.known)
+        if (!policy.kept && (MOONWATER_STRICT_HOST >= STRICT_TIGHT || !policy.known))
                 usb_first_lock();
         else if (usb_watched(address_of policy))
                 usb_watch_start();
@@ -15774,8 +15905,8 @@ static fn usb_first_lock(void)
         (void)host_write_text(USB_SETTLED_PATH, "1\n");
         lock = host_lock(USB_LOCK_PATH, true);
         usb_policy_load(address_of policy);
-        if (!policy.kept && policy.known)
-                (void)usb_lock_held(false, carried);
+        if (!policy.kept)
+                (void)usb_lock_held(false, carried ? USB_LOCK_CARRIED : USB_LOCK_FIRST);
         radio_unlock(lock);
         system_close(settling);
         (void)usb_watch_run();

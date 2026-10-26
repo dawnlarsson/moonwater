@@ -46719,6 +46719,35 @@ while True:
               "network it brings up later stay held, and one that shows no interface is not kept",
               repr((out.get("held kept"), out.get("held grown"), out.get("held log"))))
 
+        # A lock that cannot be kept is in force all the same: with /root/usb.policy a
+        # directory, usb lock answers 1 and says why, the root hub and usbcore hold what
+        # is new, the held device's keyboard is let in, usb and the watcher read the lock
+        # from /run, a stick plugged in after is held, and once the file can be written a
+        # verb keeps the policy and /run lets go.
+        script = (usb_tree +
+                  "dev 1-8 5555 0008 HELD8 'Held at lock' 0 unknown; face 1-8:1.0 03 0\n"
+                  "rm -rf /run/moonwater/usb.unkept /run/moonwater/usb.policy; mkdir /root/usb.policy\n" + say("usb lock") +
+                  usb_show("unkept force", "v $d/usb1/authorized_default $d/usb1/interface_authorized_default "
+                                           "/sys/module/usbcore/parameters/authorized_default $d/1-8:1.0/authorized") +
+                  say("usb") + "dev 2-1 46f4 0001 STICK1 'QEMU USB HARDDRIVE' 0 unknown\n" + say("usb apply") +
+                  usb_show("unkept held", "v $d/2-1/authorized") + "rmdir /root/usb.policy\n" + say("usb allow 2-1") +
+                  usb_show("unkept kept", "ls /run/moonwater/usb.unkept /run/moonwater/usb.policy 2>&1 | grep -c 'No such'; "
+                                          "grep -c '^allow 46f4:0001/STICK1' /root/usb.policy") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and seen.get("usb lock", {}).get("status") == 1 and
+              "could not be written (Is a directory): the lock is in force until the machine restarts" in out.get("usb lock", "") and
+              out.get("unkept force") == "0\n0\n0\n1" and
+              "in force until the machine restarts, not kept: /root/usb.policy could not be written" in out.get("usb", "") and
+              "watcher running, pid" in out.get("usb", "") and "rule allow 5555:0008/HELD8 hid" in out.get("usb", "") and
+              out.get("unkept held") == "0" and out.get("unkept kept") == "2\n1",
+              "a lock that cannot be written is in force from /run: new devices held, the held keyboard let in, usb "
+              "says why, and a verb that can write the file keeps it and lets /run go",
+              repr((seen.get("usb lock"), out.get("unkept force"), out.get("usb", "")[-400:], out.get("unkept held"),
+                    out.get("unkept kept"))))
+
         # The file: lines that are no rule are left out and counted, a policy
         # read at boot (apply) lets in the device it names, and the cap.
         script = (usb_tree +
