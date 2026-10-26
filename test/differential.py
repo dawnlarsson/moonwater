@@ -48995,6 +48995,25 @@ PYEOF
             check(got["status"] == status and words in "\n".join(got["out"]),
                   f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""), repr(got)[:240])
 
+        #       A command started with a standard descriptor closed does not say its
+        #       lines into the first file it opens, which took the closed one's
+        #       number: the lock of the machine, `bind init add` run with standard
+        #       output closed, held the line it said. The three are open before the
+        #       command is (a closed one is /dev/null), and the lock stays empty.
+        script = ("rm -rf /run/moonwater /root/*\n"
+                  "/tmp/moonwater bind init add zzz >&- 2>&-\n"
+                  "echo \"@@size one $(stat -c %s /run/moonwater/lock)\"\n"
+                  "/tmp/moonwater bind init remove nothing-here 2>&-\n"
+                  "echo \"@@size two $(stat -c %s /run/moonwater/lock)\"\n"
+                  "/tmp/moonwater bind init add yyy >&-\n"
+                  "echo \"@@size three $(stat -c %s /run/moonwater/lock)\"\n"
+                  "echo \"@@kept $(/tmp/moonwater bind init | grep -c -e zzz -e yyy)\"\n")
+        lines, finished = session(script)
+        sizes = {line.split()[1]: line.split()[2] for line in lines if line.startswith("@@size ")}
+        check(finished and sizes == {"one": "0", "two": "0", "three": "0"} and "@@kept 2" in lines,
+              "a command with standard output or error closed says nothing into the machine's lock, and still does its work",
+              repr((sizes, lines[-3:])))
+
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 

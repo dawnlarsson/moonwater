@@ -24575,6 +24575,14 @@ static b32 host_main()
         bool ignored = false;
         b32 answer;
 
+        //      The three standard descriptors are open before anything else is: with
+        //      one closed, the first file this opens takes its number and what the
+        //      command says goes into it (standard output closed, `bind init add`
+        //      wrote its line into the machine's lock). A closed one is /dev/null.
+        for (positive descriptor = 0; descriptor < 3; descriptor++)
+                if (system_call_2(syscall(fcntl), descriptor, 1) < 0)
+                        (void)system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE);
+
         host_verb = count > 1 ? arguments[1] : null;
         memory_zero(plain_streams, sizeof(plain_streams));
         if (!host_verb)
