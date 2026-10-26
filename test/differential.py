@@ -44421,6 +44421,7 @@ def harness_moonwater_cli(argv):
     neither file is auto), and wipe empties /home and /root but what it
     promises to keep.
     """
+    import hashlib
     import platform
     import random
     import shutil
@@ -46270,6 +46271,21 @@ while True:
               "link says a records file that cannot be read is so, and not that nobody is linked",
               repr([line for line in status_out if "linked" in line or "read" in line]))
 
+        #       The records a group and a machine it paired are written by
+        #       hand, as the listener writes them: a group named lab (its key
+        #       and check are zero, which nothing here reads), and peer1 with
+        #       the group's mark, which is the first four bytes of the hash of
+        #       "waterlink mark " and the namespace, read little-endian.
+        mark = int.from_bytes(hashlib.sha256(b"waterlink mark lab").digest()[:4], "little") or 1
+        peer_record = (bytes([9]) + bytes(31) + b"peer1".ljust(32, b"\0") +
+                       (0).to_bytes(4, "little") + mark.to_bytes(4, "little") + bytes(16) +
+                       (22348).to_bytes(2, "little") + bytes(2) + (7).to_bytes(4, "little"))
+        group_record = b"lab".ljust(128, b"\0")
+
+        def printf_file(data, path):
+            escaped = "".join("\\0%03o" % byte for byte in data)
+            return f"printf '%b' '{escaped}' > {path}; chmod 600 {path}\n"
+
         # A pairing that asks for a name too long for one is refused as not a
         # name, and not paired under its first 31 characters.
         #       The listener a pairing that is not refused starts is switched off
@@ -46280,6 +46296,25 @@ while True:
               any("is not a machine name" in line for line in seen["link pair " + "a" * 40]["out"]),
               "link pair refuses a name of 32 characters or more, and does not pair under its first 31",
               repr(seen.get("link pair " + "a" * 40)))
+
+        # The machine script's secret: a secret that begins with the word
+        # allow is still a secret, and the status says the script holds it;
+        # a line of grants is not one.
+        lines, finished = session(
+            "rm -f /root/link.peers /root/link.groups /root/main.moonwater.sh\n" +
+            printf_file(group_record, "/root/link.groups") +
+            "printf 'moonwater link group lab allowance123\\n' > /root/main.moonwater.sh\n"
+            "echo '@@ secret'; /tmp/moonwater link 2>&1; echo \"@@status $?\"\n"
+            "printf 'moonwater link group lab allow run\\n' > /root/main.moonwater.sh\n"
+            "echo '@@ grants'; /tmp/moonwater link 2>&1; echo \"@@status $?\"\n"
+            "rm -f /root/link.groups /root/main.moonwater.sh\n")
+        seen = answers(lines)
+        check(finished and any("the machine script holds its secret" in line
+                               for line in seen.get("secret", {}).get("out", [])) and
+              not any("the machine script holds its secret" in line
+                      for line in seen.get("grants", {}).get("out", [])),
+              "a machine script's secret that begins with allow is told as a secret; grants are not",
+              repr({name: seen.get(name) for name in ("secret", "grants")})[:400])
 
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line

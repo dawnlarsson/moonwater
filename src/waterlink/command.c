@@ -103,8 +103,11 @@ static bool link_script_names_secret(string_address script,
                         continue;
                 word += length;
                 word += string_span_of_set(word, " ");
+                //      allow is the word, and not the start of a secret that
+                //      happens to begin with it.
                 if (*word && *word != '\n' && *word != ';' && *word != '#' &&
-                    !string_has_prefix(word, "allow") &&
+                    !(string_has_prefix(word, "allow") &&
+                      (!word[5] || string_first_of(" \n;#<", word[5]))) &&
                     !(*word == '-' && (!word[1] || string_first_of(" \n;#<", word[1]))))
                         return true;
         }
