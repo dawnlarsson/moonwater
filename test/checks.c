@@ -115944,6 +115944,94 @@ static void check_compositor_wheel(void)
     compositor_input_read(0);
     check("wheel: a notch with no window under the pointer is said to have gone nowhere, and a drop is counted",
           table->wheel_nowhere == 1 && table->wheel_row < 0 && table->input_dropped[0] == 1);
+
+    /*
+            A touchpad, as the kernel reports one: its finger's place in its units (40 to a millimetre here), BTN_TOUCH,
+            and a tool key that counts the fingers. It used to be taken as a tablet: the pointer jumped to where the
+            finger was, every touch was a press, and two fingers did nothing.
+    */
+    compositor.touchpad[0] = 1;
+    compositor.pad[0] = (struct compositor_pad){0};
+    compositor.pad[0].per_mm_x = compositor.pad[0].per_mm_y = 40;
+    compositor.flat = 1;
+    compositor.sensitivity = 100;
+    compositor.pointer_x = 60;
+    compositor.pointer_y = 40;
+    table->event_tail[1] = table->event_head[1];
+    {
+        unsigned int head = table->event_head[1], buttons = 0;
+        int moved_x;
+
+        wheel_feed(COMPOSITOR_EV_ABS, 0, 4000);
+        wheel_feed(COMPOSITOR_EV_ABS, 1, 2000);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOUCH, 1);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_FINGER, 1);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        for (unsigned int at = head; at != table->event_head[1]; at++)
+            buttons += table->event_type[1][at % WINDOWS_EVENTS] == WINDOW_EVENT_BUTTON;
+        check("pad: a finger put on a touchpad is no press, and the pointer stays where it was",
+              buttons == 0 && compositor.pointer_x == 60 && compositor.pointer_y == 40);
+        // Two millimetres to the right, a report at a time.
+        for (int step = 1; step <= 4; step++)
+        {
+            wheel_feed(COMPOSITOR_EV_ABS, 0, 4000 + step * 20);
+            wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        }
+        compositor_input_read(0);
+        moved_x = compositor.pointer_x - 60;
+        check("pad: a finger moved two millimetres moves the pointer on from where it was, forty counts at one to one",
+              moved_x == 40 && compositor.pointer_y == 40);
+        // A second finger, and the two six millimetres up: a notch of the wheel up, and no move of the pointer.
+        table->event_tail[1] = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_FINGER, 0);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_DOUBLETAP, 1);
+        wheel_feed(COMPOSITOR_EV_ABS, 1, 3000);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        for (int step = 1; step <= 6; step++)
+        {
+            wheel_feed(COMPOSITOR_EV_ABS, 1, 3000 - step * 40);
+            wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        }
+        compositor_input_read(0);
+        sum = wheel_unread(1, &events, &last);
+        check("pad: two fingers six millimetres up are a notch of the wheel up, and the pointer stays",
+              sum == 120 && compositor.pointer_x == 100 && compositor.pointer_y == 40);
+        table->event_tail[1] = table->event_head[1];
+        for (int step = 1; step <= 12; step++)
+        {
+            wheel_feed(COMPOSITOR_EV_ABS, 1, 2760 + step * 40);
+            wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        }
+        compositor_input_read(0);
+        sum = wheel_unread(1, &events, &last);
+        check("pad: and twelve millimetres down are two notches down", sum == -240);
+        // The pad pressed with two fingers on it is the right button, let go as the right.
+        table->event_tail[1] = table->event_head[1];
+        head = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_LEFT, 1);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_LEFT, 0);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        buttons = 0;
+        for (unsigned int at = head; at != table->event_head[1]; at++)
+            if (table->event_type[1][at % WINDOWS_EVENTS] == WINDOW_EVENT_BUTTON)
+                buttons = buttons << 16 | (unsigned int)table->event_a[1][at % WINDOWS_EVENTS];
+        check("pad: pressed with two fingers on it, it is the right button down and up", buttons == (0x111u << 16 | 0x111u));
+        compositor.grab = COMPOSITOR_NONE;
+        // Lifted, nothing moves or turns.
+        table->event_tail[1] = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOUCH, 0);
+        wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_DOUBLETAP, 0);
+        wheel_feed(COMPOSITOR_EV_ABS, 1, 500);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        sum = wheel_unread(1, &events, &last);
+        check("pad: lifted, the last place it says moves and turns nothing", events == 0 && compositor.pointer_x == 100 &&
+                                                                             compositor.pointer_y == 40);
+    }
+    compositor.touchpad[0] = 0;
     system_close(wheel_pipe[0]);
     system_close(wheel_pipe[1]);
     compositor.input_count = 0;

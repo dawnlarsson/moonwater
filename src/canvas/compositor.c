@@ -1944,7 +1944,38 @@ struct compositor_absinfo
 #define COMPOSITOR_EVIOCGPROP(bytes) (0x80000000u | (bytes) << 16 | 0x4509u)
 #define COMPOSITOR_SYN_DROPPED 3u
 #define COMPOSITOR_BTN_TOOL_FINGER 0x145u
+#define COMPOSITOR_BTN_TOOL_QUINTTAP 0x148u // five fingers
+#define COMPOSITOR_BTN_TOOL_DOUBLETAP 0x14du
+#define COMPOSITOR_BTN_TOOL_TRIPLETAP 0x14eu
+#define COMPOSITOR_BTN_TOOL_QUADTAP 0x14fu
 #define COMPOSITOR_ABS_MT_POSITION_X 0x35u
+
+/*
+        A touchpad. A finger on it is a mouse, read from where the finger is against where it was at the last
+        report, so the pointer goes on from where it was and not to the place on the screen the place on the
+        pad would be, as a tablet's does. Two fingers on it are the wheel: up as they move up, right as they
+        move right, as a mouse's notches go. A touch is no press, or every hand put on the pad would be a click:
+        the pad's own button is (a clickpad's is the whole pad, pressed down), and pressed with two fingers on
+        the pad it is the right button. The rates are of the hand, by the pad's resolution: a millimetre a
+        finger moves is COMPOSITOR_PAD_COUNTS of a mouse's counts (half of what a 1000 dpi mouse says), which
+        the pointer's curve and sensitivity then take as they take a mouse's, and a millimetre two fingers move
+        is COMPOSITOR_PAD_WHEEL 120ths of a notch, a notch to six millimetres. A pad that does not say its
+        resolution is taken as a hundred millimetres wide, its height in the same units.
+*/
+#define COMPOSITOR_PAD_COUNTS 20
+#define COMPOSITOR_PAD_WHEEL 20
+#define COMPOSITOR_PAD_WIDTH_MM 100
+
+struct compositor_pad
+{
+        int next_x, next_y;     // where the pad says the finger is, in its units, kept from report to report
+        int at_x, at_y;         // and where it was at the last report
+        int moving;             // at_x and at_y are a place this touch moves from: not at its first report
+        int fingers, touching;  // on the pad, as its tool keys say, and whether one touches it
+        int per_mm_x, per_mm_y; // its units to a millimetre
+        int left_x, left_y;     // what a move or a turn left under a whole count or 120th, times the units to a millimetre
+        unsigned int clicked;   // the button the pad's press went down as
+};
 
 #define COMPOSITOR_EV_KEY 1u
 #define COMPOSITOR_EV_REL 2u
@@ -2237,6 +2268,8 @@ static struct
         int tablet_x, tablet_y, tablet_have; // what a tablet has said since its last report
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
+        unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
+        struct compositor_pad pad[COMPOSITOR_INPUTS];
         // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
         unsigned int input_kinds[COMPOSITOR_INPUTS];
         unsigned short input_id[COMPOSITOR_INPUTS][4];
@@ -5841,14 +5874,18 @@ static void compositor_input_add(unsigned int number)
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
-        // What it is, for moonwater debug: a device that is not what this took it for says so there.
+        // What it is, for moonwater debug: a device that is not what this took it for says so there. A pad that
+        // counts the fingers on it and is no screen (INPUT_PROP_DIRECT is a screen's mark) is a touchpad.
         {
-                unsigned int properties = 0, kinds = (keyboard ? WINDOWS_INPUT_KEYBOARD : 0) |
-                                                     (mouse ? WINDOWS_INPUT_MOUSE : 0) |
-                                                     (tablet ? WINDOWS_INPUT_TABLET : 0) |
-                                                     (compositor.wakeonly[at] ? WINDOWS_INPUT_WAKES : 0);
+                unsigned int properties = 0, kinds;
 
                 system_control(handle, COMPOSITOR_EVIOCGPROP(4), address_of properties);
+                compositor.touchpad[at] = (unsigned char)(tablet && !(properties & 2) &&
+                                                          (keys[COMPOSITOR_BTN_TOOL_FINGER / 8] >> (COMPOSITOR_BTN_TOOL_FINGER % 8) & 1));
+                compositor.pad[at] = (struct compositor_pad){0};
+                kinds = (keyboard ? WINDOWS_INPUT_KEYBOARD : 0) | (mouse ? WINDOWS_INPUT_MOUSE : 0) |
+                        (tablet && !compositor.touchpad[at] ? WINDOWS_INPUT_TABLET : 0) |
+                        (compositor.wakeonly[at] ? WINDOWS_INPUT_WAKES : 0);
                 kinds |=(relative >> COMPOSITOR_REL_WHEEL & 1 ? WINDOWS_INPUT_WHEEL : 0) |
                          (relative >> COMPOSITOR_REL_WHEEL_HI & 1 ? WINDOWS_INPUT_WHEEL_HI : 0) |
                          (relative >> COMPOSITOR_REL_HWHEEL & 1 ? WINDOWS_INPUT_HWHEEL : 0) |
@@ -5881,6 +5918,14 @@ static void compositor_input_add(unsigned int number)
                 compositor.absolute_x[at][1] = x.maximum;
                 compositor.absolute_y[at][0] = y.minimum;
                 compositor.absolute_y[at][1] = y.maximum;
+                // A touchpad's units to a millimetre, which a finger's moves are measured in.
+                compositor.pad[at].per_mm_x = x.resolution > 0 ? x.resolution
+                                              : ((long)x.maximum - x.minimum) / COMPOSITOR_PAD_WIDTH_MM > 0
+                                                  ? (int)(((long)x.maximum - x.minimum) / COMPOSITOR_PAD_WIDTH_MM)
+                                                  : 1;
+                compositor.pad[at].per_mm_y = y.resolution > 0 ? y.resolution : compositor.pad[at].per_mm_x;
+                compositor.pad[at].next_x = compositor.pad[at].at_x = x.value;
+                compositor.pad[at].next_y = compositor.pad[at].at_y = y.value;
         }
 
         compositor.inputs[at] = (int)handle;
@@ -7806,6 +7851,61 @@ static void compositor_button(unsigned int code, int down)
         }
 }
 
+// Whether a key of a touchpad is one of its touch and tool keys, which say where fingers are and press nothing.
+static int compositor_pad_finger_key(unsigned int code)
+{
+        return code == COMPOSITOR_BTN_TOUCH || code == COMPOSITOR_BTN_TOOL_FINGER || code == COMPOSITOR_BTN_TOOL_DOUBLETAP ||
+               code == COMPOSITOR_BTN_TOOL_TRIPLETAP || code == COMPOSITOR_BTN_TOOL_QUADTAP || code == COMPOSITOR_BTN_TOOL_QUINTTAP;
+}
+
+// A touchpad's touch and tool keys: whether a finger touches it, and how many are on it. A finger more or less, or
+// none, starts the touch again: where one finger was is not where two are, and the pad says one place for them.
+static void compositor_pad_key(struct compositor_pad *pad, unsigned int code, int value)
+{
+        int count = code == COMPOSITOR_BTN_TOOL_FINGER      ? 1
+                    : code == COMPOSITOR_BTN_TOOL_DOUBLETAP ? 2
+                    : code == COMPOSITOR_BTN_TOOL_TRIPLETAP ? 3
+                    : code == COMPOSITOR_BTN_TOOL_QUADTAP   ? 4
+                                                            : 5;
+
+        if (code == COMPOSITOR_BTN_TOUCH)
+                pad->touching = value != 0;
+        else if (value)
+                pad->fingers = count;
+        else if (pad->fingers == count)
+                pad->fingers = 0;
+        pad->moving = 0;
+        pad->left_x = pad->left_y = 0;
+}
+
+/*
+        One report of a touchpad over: what its finger did since the last one, as a mouse's counts (x and y), or
+        with two fingers or more on it as the wheel in 120ths (x sideways, y up). Which it was: 1 a move, 2 the
+        wheel, and 0 neither, as the first report of a touch is, which says only where the finger is.
+*/
+static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
+{
+        long dx = (long)pad->next_x - pad->at_x, dy = (long)pad->next_y - pad->at_y;
+        int kind = pad->fingers >= 2 ? 2 : 1, per = kind == 2 ? COMPOSITOR_PAD_WHEEL : COMPOSITOR_PAD_COUNTS;
+        long left_x, left_y;
+
+        *x = *y = 0;
+        pad->at_x = pad->next_x;
+        pad->at_y = pad->next_y;
+        if (!pad->touching || !pad->fingers || !pad->moving)
+        {
+                pad->moving = pad->touching && pad->fingers;
+                return 0;
+        }
+        left_x = pad->left_x + dx * per;
+        left_y = pad->left_y + (kind == 2 ? -dy : dy) * per;
+        *x = (int)(left_x / pad->per_mm_x);
+        *y = (int)(left_y / pad->per_mm_y);
+        pad->left_x = (int)(left_x - (long)*x * pad->per_mm_x);
+        pad->left_y = (int)(left_y - (long)*y * pad->per_mm_y);
+        return *x || *y ? kind : 0;
+}
+
 /*
         One report of a device is over: a mouse's counts since the last one are
         one movement of the hand, with the gain of its speed, and a tablet's
@@ -7892,6 +7992,29 @@ static void compositor_wheel(int v120, int horizontal)
         compositor.table->wheel_y = row < 0 ? compositor.pointer_y : compositor.pointer_y - compositor.y[row];
 }
 
+// A touchpad's report over: its finger's move is a mouse's, and two fingers' are the wheel, counted for moonwater
+// debug as the device's wheel.
+static void compositor_pad_apply(unsigned int at, positive now)
+{
+        int x, y, kind = compositor_pad_report(&compositor.pad[at], &x, &y);
+
+        if (kind == 1)
+        {
+                compositor.raw_x += x;
+                compositor.raw_y += y;
+        }
+        else if (kind == 2)
+        {
+                compositor.table->input_wheel_read[at]++;
+                compositor.table->input_wheel_used[at]++;
+                compositor.table->input_wheel_last[at] = now;
+                if (y)
+                        compositor_wheel(y, 0);
+                if (x)
+                        compositor_wheel(x, 1);
+        }
+}
+
 static void compositor_input_read(unsigned int at)
 {
         struct compositor_input_event events[64];
@@ -7956,6 +8079,13 @@ static void compositor_input_read(unsigned int at)
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
                                 compositor.table->input_dropped[at]++;
+                        else if (event->type == COMPOSITOR_EV_ABS && event->code < 2 && compositor.touchpad[at])
+                        {
+                                if (event->code)
+                                        compositor.pad[at].next_y = event->value;
+                                else
+                                        compositor.pad[at].next_x = event->value;
+                        }
                         else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
                         {
                                 int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
@@ -7969,17 +8099,33 @@ static void compositor_input_read(unsigned int at)
                                 compositor.tablet_have |= event->code ? 2 : 1;
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
+                        {
+                                if (compositor.touchpad[at])
+                                        compositor_pad_apply(at, now);
                                 moved |= compositor_report(now);
+                        }
+                        else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
+                                 compositor_pad_finger_key(event->code))
+                                compositor_pad_key(&compositor.pad[at], event->code, event->value);
                         else if (event->type == COMPOSITOR_EV_KEY &&
                                  ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) ||
                                   event->code == COMPOSITOR_BTN_TOUCH))
                         {
-                                // A touch is the left button; the others are where they are.
+                                // A touch is the left button (a touchpad's is no press, above); the others are where
+                                // they are, but a touchpad's left pressed with two fingers on it, which is its right.
+                                unsigned int code = event->code == COMPOSITOR_BTN_TOUCH ? COMPOSITOR_BTN_LEFT : event->code;
+
+                                if (compositor.touchpad[at] && code == COMPOSITOR_BTN_LEFT)
+                                {
+                                        if (event->value)
+                                                compositor.pad[at].clicked = compositor.pad[at].fingers >= 2 ? COMPOSITOR_BTN_RIGHT
+                                                                                                             : COMPOSITOR_BTN_LEFT;
+                                        code = compositor.pad[at].clicked ? compositor.pad[at].clicked : code;
+                                }
                                 moved |= compositor_report(now);
                                 if (moved)
                                         compositor_motion(), moved = 0;
-                                compositor_button(event->code == COMPOSITOR_BTN_TOUCH ? COMPOSITOR_BTN_LEFT : event->code,
-                                                  event->value != 0);
+                                compositor_button(code, event->value != 0);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
                                 compositor_key(at, event->code, event->value, now);
