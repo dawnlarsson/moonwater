@@ -1965,6 +1965,10 @@ done:
         A file longer than the buffer is cut mid-line, and a cut
         "nameserver 10.0.0.12" reads as a complete "10.0.0.1": a server the
         file never named. So the last line of a full buffer is not a line.
+
+        The file is read as state is: only if it is a regular file, so a FIFO
+        at its name answers at once with no servers instead of holding
+        whatever asked (dns, status, time sync) for a writer that never comes.
 */
 static COLD positive dns_servers(string_address path, p32 address_to servers,
                                  positive room)
@@ -1977,7 +1981,7 @@ static COLD positive dns_servers(string_address path, p32 address_to servers,
         if (!room)
                 return 0;
 
-        got = file_slurp(path, text, sizeof text);
+        got = file_slurp_regular_at(AT_FDCWD, path, text, sizeof text, 0);
 
         if (got <= 0)
                 return 0;

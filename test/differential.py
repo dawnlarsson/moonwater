@@ -44987,6 +44987,20 @@ def harness_moonwater_cli(argv):
                 check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
                       f"{verb} is not held by a FIFO at /root/{word}", got)
 
+        #       The resolver's file is state the same way: dns, status and time sync
+        #       read it, and a FIFO at its name held every one of them for good.
+        script = "mv /etc/resolv.conf /tmp/resolv.kept 2>/dev/null; mkfifo /etc/resolv.conf\n"
+        for verb in ("dns", "status", "time sync"):
+            script += (f"timeout 5 /tmp/moonwater {verb} >/dev/null 2>&1; "
+                       f"echo \"@@fifo resolv.conf {verb}: $?\"\n")
+        script += "rm -f /etc/resolv.conf; mv /tmp/resolv.kept /etc/resolv.conf 2>/dev/null || :\n"
+        lines, finished = session(script)
+        check(finished, "the FIFO at resolv.conf session finished", "")
+        for verb in ("dns", "status", "time sync"):
+            got = [line for line in lines if line.startswith(f"@@fifo resolv.conf {verb}: ")]
+            check(got and got[0].rsplit(" ", 1)[1] in ("0", "1", "2"),
+                  f"{verb} is not held by a FIFO at /etc/resolv.conf", got)
+
         # A saved network on a machine with no wireless interface is not
         # waited for: boot and `wifi on` come back at once, where they once
         # held for eight seconds each.
