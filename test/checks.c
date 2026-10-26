@@ -88429,6 +88429,19 @@ static fn names_and_words(void)
         check("and is not one of the words link takes in its place",
               !link_name_good("run") && !link_name_good("on") &&
                       link_name_good("running"));
+        {
+                bool refused = !link_name_good("group") &&
+                               !link_name_good("leave") &&
+                               !link_name_good("help");
+
+                //      Every verb that takes a fixed number of words is a row
+                //      of link_shapes: a verb added there and not to
+                //      link_words is a machine nobody can reach by its name.
+                for (positive at = 0; at < array_count(link_shapes); at++)
+                        refused &= !link_name_good(link_shapes[at].word);
+                check("and none of the verbs link has, port among them",
+                      refused);
+        }
         check("a name of 31 is one and of 32 is not",
               link_name_good("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") &&
                       !link_name_good("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));

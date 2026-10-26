@@ -211,8 +211,9 @@ static bool link_key_parse(string_address text, p8 address_to key)
         name, which no machine or group may be called: link NAME is a
         terminal on the one, and link log is not. */
 static const string_address link_words[] = {
-    "on",    "off",  "key",  "serve", "pair", "add",  "remove", "allow",
-    "deny",  "group", "leave", "push", "pull", "log",  "shell", "run",  "help",
+    "on",   "off",   "key",   "serve", "port", "pair", "add",  "remove",
+    "allow", "deny",  "group", "leave", "push", "pull", "log",  "shell",
+    "run",  "help",
 };
 
 #define LINK_NAME_CHARACTERS                                                  \

@@ -75627,7 +75627,7 @@ def once_records(side):
             for at in range(0, len(data) - 127, 128)
             if structure.unpack_from("<I", data, at + 100)[0] & 1]
 
-for word in ("log", "leave", "pair", "run"):
+for word in ("log", "leave", "pair", "run", "port"):
     status, _, err = on("c", moon + " link add " + word + " " + keys["a"])
     say(status != 0 and b"is not a name" in err, "a machine cannot be called " + word)
 for word in ("abcdefg", "u0u0u0", "abc", "", "a-b-c-d-e-f-g", "whoami", "reboot", "abcdef"):
