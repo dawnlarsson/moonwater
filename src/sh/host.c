@@ -13800,7 +13800,7 @@ static fn tune_kernel_lines(p8 address_to text)
                 bool keep = false;
 
                 // Interrupted, or a record overwritten before it was read.
-                if (got == -4 || got == -32)
+                if (got == -EINTR || got == -EPIPE)
                         continue;
                 if (got <= 0)
                         break;
