@@ -11271,6 +11271,14 @@ static COLD bipolar radio_join_apart(p8 address_to ssid, positive ssid_length,
         return got == (bipolar)sizeof(status) ? (bipolar)status : WIFI_REFUSE_APART;
 }
 
+// One byte spelled \xNN, as a name that is shown spells what it does not show: four bytes, not ended.
+static positive radio_spell(p8 address_to into, p8 byte)
+{
+        into[0] = '\\';
+        into[1] = 'x';
+        return 2 + memory_into_hex(into + 2, address_of byte, 1);
+}
+
 /* A name made safe to print, and how many columns it takes. */
 static positive radio_display(p8 address_to into, positive room, p8 address_to name,
                               positive length)
@@ -11294,9 +11302,7 @@ static positive radio_display(p8 address_to into, positive room, p8 address_to n
                         continue;
                 }
                 //      What is not shown is spelled a byte at a time.
-                into[used++] = '\\';
-                into[used++] = 'x';
-                used += memory_into_hex(into + used, name + at, 1);
+                used += radio_spell(into + used, name[at]);
                 columns += 4;
                 at++;
         }
@@ -14136,10 +14142,21 @@ static p8 usb_kind(p32 class, p32 subclass, p32 protocol)
 
 static bipolar usb_kind_named(string_address name)
 {
-        for (positive at = 0; at < USB_KINDS; at++)
-                if (string_equals(name, usb_kinds[at]))
-                        return (bipolar)at;
-        return -1;
+        positive at = string_table_find(name, usb_kinds, sizeof(usb_kinds[0]), USB_KINDS);
+
+        return at < USB_KINDS ? (bipolar)at : -1;
+}
+
+// The kind length bytes of a policy's line name; -1 for none.
+static bipolar usb_kind_word(string_address text, positive length)
+{
+        p8 name[16];
+
+        if (!length || length >= sizeof(name))
+                return -1;
+        memory_copy(name, text, length);
+        name[length] = end;
+        return usb_kind_named((string_address)name);
 }
 
 typedef struct
@@ -14258,7 +14275,7 @@ static bool usb_key_typed(string_address text)
         {
                 positive digits = 0;
 
-                if (text[at] < 0x21 || text[at] > 0x7e)
+                if (!byte_is_graphic(text[at]))
                         return false;
                 if (text[at] != '\\')
                 {
@@ -14323,8 +14340,8 @@ static bool usb_id_parse(string_address text, usb_rule address_to rule)
         if (string_length(text) < 9 || text[4] != ':' || string_span_of_set(text, (string_address)hex) != 4 ||
             string_span_of_set(text + 5, (string_address)hex) != 4 || (text[9] && text[9] != '/'))
                 return false;
-        for (positive at = 0; at < 9; at++)
-                rule->id[at] = (p8)(text[at] >= 'A' && text[at] <= 'F' ? text[at] + 32 : text[at]);
+        memory_copy(rule->id, text, 9);
+        memory_to_lower_ascii(rule->id, 9);
         rule->id[9] = end;
         if (!text[9])
                 return true;
@@ -14371,19 +14388,12 @@ static fn usb_rule_text(p8 address_to into, positive room, usb_rule address_to r
 // The classes of a list a comma apart (storage,hid), as a rule keeps them; false for a word that is none.
 static bool usb_kinds_parse(string_address text, p8 address_to kinds)
 {
-        p8 name[16];
-
         *kinds = 0;
         while (*text)
         {
                 positive length = (positive)(string_first_of_or_end(text, ',') - text);
-                bipolar kind;
+                bipolar kind = usb_kind_word(text, length);
 
-                if (!length || length >= sizeof(name))
-                        return false;
-                memory_copy(name, text, length);
-                name[length] = end;
-                kind = usb_kind_named((string_address)name);
                 if (kind < 0)
                         return false;
                 *kinds |= (p8)(1u << kind);
@@ -14616,6 +14626,18 @@ static bool usb_shows(usb_census address_to census, usb_device address_to device
         every port it has fixed. So a device is fixed only when it says so
         and so does every hub between it and the root hub.
 */
+static b32 usb_device_order(address_any left, address_any right)
+{
+        return string_compare((string_address)((usb_device address_to)left)->port,
+                              (string_address)((usb_device address_to)right)->port);
+}
+
+static b32 usb_interface_order(address_any left, address_any right)
+{
+        return string_compare((string_address)((usb_interface address_to)left)->name,
+                              (string_address)((usb_interface address_to)right)->name);
+}
+
 static fn usb_census_take(usb_census address_to census)
 {
         census->count = 0;
@@ -14623,28 +14645,9 @@ static fn usb_census_take(usb_census address_to census)
         census->dropped = 0;
         host_each_entry(USB_DEVICES, usb_census_visit, census);
 
-        for (positive at = 1; at < census->count; at++)
-                for (positive back = at; back > 0 &&
-                                         string_compare((string_address)census->device[back - 1].port,
-                                                        (string_address)census->device[back].port) > 0;
-                     back--)
-                {
-                        usb_device swap = census->device[back];
-
-                        census->device[back] = census->device[back - 1];
-                        census->device[back - 1] = swap;
-                }
-        for (positive at = 1; at < census->interfaces; at++)
-                for (positive back = at; back > 0 &&
-                                         string_compare((string_address)census->interface[back - 1].name,
-                                                        (string_address)census->interface[back].name) > 0;
-                     back--)
-                {
-                        usb_interface swap = census->interface[back];
-
-                        census->interface[back] = census->interface[back - 1];
-                        census->interface[back - 1] = swap;
-                }
+        //      Names are unique, so the order is the one any sort gives.
+        qsort(census->device, census->count, sizeof(census->device[0]), usb_device_order);
+        qsort(census->interface, census->interfaces, sizeof(census->interface[0]), usb_interface_order);
 
         for (positive at = 0; at < census->count; at++)
         {
@@ -14787,17 +14790,13 @@ static fn usb_shown(p8 address_to into, positive room, p8 address_to text, posit
         into[0] = end;
         while (at < length && used + 8 < room)
         {
-                positive span = at;
+                positive span = at + memory_escape_index(text + at, length - at, HEX_QUOTE | HEX_SLASH);
 
-                while (span < length && text[span] != '"' && text[span] != '\\')
-                        span++;
                 radio_display(into + used, room - used - 5, text + at, span - at);
                 used += string_length((string_address)into + used);
                 if (span < length)
                 {
-                        into[used++] = '\\';
-                        into[used++] = 'x';
-                        used += memory_into_hex(into + used, text + span, 1);
+                        used += radio_spell(into + used, text[span]);
                         into[used] = end;
                         span++;
                 }
@@ -15084,15 +15083,9 @@ static bool usb_policy_line(usb_policy address_to policy, string_address line)
         }
         if (string_has_prefix(line, "class "))
         {
-                p8 name[16];
                 string_address word = string_first_of(line + 6, ' ');
-                bipolar kind;
+                bipolar kind = word ? usb_kind_word(line + 6, (positive)(word - line - 6)) : -1;
 
-                if (!word || (positive)(word - line - 6) >= sizeof(name))
-                        return false;
-                memory_copy(name, line + 6, (positive)(word - line - 6));
-                name[word - line - 6] = end;
-                kind = usb_kind_named((string_address)name);
                 if (kind < 0 || (!string_equals(word + 1, "allow") && !string_equals(word + 1, "deny")))
                         return false;
                 if (word[1] == 'a')
@@ -15933,7 +15926,6 @@ static b32 usb_log_show(positive asked)
         static p8 text[USB_LOG_MOST + USB_LOG_LINE * 2];
         bipolar got = host_read_state(USB_LOG, text, sizeof(text));
         positive at;
-        positive lines = 0;
 
         if (got == -ENOENT)
         {
@@ -15941,10 +15933,13 @@ static b32 usb_log_show(positive asked)
                 return 0;
         }
         return_if(got < 0, host_fail(USB_LOG, got));
-        //      Back from the end to the start of the asked-th line before it.
-        at = (positive)got;
-        while (at > 0 && !(text[at - 1] == '\n' && at < (positive)got && ++lines == asked))
-                at--;
+        //      The start of the asked-th line from the end: past the asked-th newline counted back, a
+        //      newline ending the last byte not counted.
+        {
+                positive2 nth = got > 1 ? memory_nth_last_of(text, '\n', (positive)got - 1, asked) : (positive2){0, 0};
+
+                at = nth.y == asked ? nth.x + 1 : 0;
+        }
         //      The log holds only what usb_tell spelled; it is shown as a name is
         //      all the same, so a line written by anything else cannot act.
         for (positive start = at; start < (positive)got;)
