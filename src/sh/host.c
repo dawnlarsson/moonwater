@@ -15477,7 +15477,8 @@ enum
         plugging included. So the settle keeps when each device (its port and
         identity) was first seen, and at the lock a device younger than the
         quiet time (USB_STILL_NS: first seen in the last two seconds of the
-        settle, or since) is given no rule and is held: a lock taken because
+        settle, or since, and seen to arrive: what the settle's first census
+        found is not young) is given no rule and is held: a lock taken because
         everything was quiet for two seconds has no such device, and one
         taken at the cap does not let in what was still coming and going.
         What it costs: a device the owner plugs in during those last two
@@ -16215,6 +16216,7 @@ static fn usb_first_lock(void)
         static p8 now[sizeof(seen)];
         p64 still = 0;
         p64 uptime = 0;
+        p64 began = 0;
         usb_policy policy;
         bipolar settling;
         bipolar lock;
@@ -16231,6 +16233,7 @@ static fn usb_first_lock(void)
         while (!carried)
         {
                 uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
+                began = began ? began : uptime;
                 usb_census_take(address_of census);
                 //      When each device was first seen, carried from census to census.
                 next.count = 0;
@@ -16259,7 +16262,9 @@ static fn usb_first_lock(void)
                         break;
                 host_pause(USB_POLL_NS);
         }
-        settle.cutoff = uptime > USB_STILL_NS ? uptime - USB_STILL_NS : 0;
+        //      Young is what was seen to arrive: what the first census found is not, so a lock taken long after
+        //      boot, whose settle ends at its first census, keeps everything plugged in.
+        settle.cutoff = uptime > began + USB_STILL_NS ? uptime - USB_STILL_NS : began;
         (void)host_write_text(USB_SETTLED_PATH, "1\n");
         lock = usb_lock_take(false);
         if (lock < 0)
