@@ -20594,6 +20594,8 @@ def pids(shell, name):
 def said(shell, row):
     if out and out[-1][1] != out[-1][2]:
         print("w1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -12; dmesg | tail -12", 15)[0].replace("\n", " / ")), file=sys.stderr)
+        #   What the compositor counted of the wheel: read from which device, dropped by the kernel, refused by a ring.
+        print("w1 %s debug: %s" % (row, shell.run("moonwater debug | sed -n '/^input/,$p'", 15)[0].replace("\n", " / ")), file=sys.stderr)
 
 def place(x, y):
     """The tablet puts the pointer at x, y of the output."""
