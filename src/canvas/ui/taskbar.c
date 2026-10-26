@@ -10,10 +10,10 @@
         its round corners show on the side towards the middle of the output. A
         bottom or top band runs left to right, with the tray at the right end and
         the tabs centred in what the tray leaves; a left or right band runs top to
-        bottom, with the tray at the bottom, its clock on two rows (hour, then
-        minute) and the battery above them. A band on a side writes its titles
-        turned a quarter, the tops of the letters toward the middle of its
-        output or toward the edge it is on, as `taskbar text` says.
+        bottom, with the tray at the bottom, the battery above the clock. A band
+        on a side writes its titles and its tray turned a quarter, the tops of
+        the letters toward the middle of its output or toward the edge it is
+        on, as `taskbar text` says.
 
         Every rectangle here is on the output and in device pixels. The painting
         works in the band's own coordinates (the pixels start at its top left) and
@@ -108,17 +108,9 @@ static int taskbar_text(int high, int characters)
         return wanted < high ? high : wanted;
 }
 
-static int taskbar_battery_rows(void)
+// The tray's length along the edge: the clock, and the battery before it, on a band of any side.
+static int taskbar_tray(int high)
 {
-        return !taskbar.battery_item ? 0 : taskbar.battery_charging ? 2 : 1;
-}
-
-// The tray's length along the edge: the clock and the battery beside it on a bottom or top band, the rows of
-// the battery and the two rows of the clock on a side one.
-static int taskbar_tray(int high, int vertical)
-{
-        if (vertical)
-                return high * (2 + taskbar_battery_rows());
         return taskbar_text(high, 5) * (taskbar.battery_item ? 2 : 1);
 }
 
@@ -143,7 +135,7 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->high = lay->thick - 3 * view->scale;
         lay->count = (int)view->count;
         lay->lengths = view->lengths;
-        lay->tray = taskbar_tray(lay->high, lay->vertical);
+        lay->tray = taskbar_tray(lay->high);
         room = lay->length - lay->tray - (lay->count + 2) * lay->gap;
         lay->most = lay->count && room > 0 ? room / lay->count : 0;
         lay->most = lay->most > 8 * lay->thick ? 8 * lay->thick : lay->most;
@@ -181,18 +173,12 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         else if (which == -2)
                 *along = lay->tray_at, *length = lay->tray;
         else if (which == -3)
-        {
-                if (lay->vertical)
-                        *along = lay->tray_at + taskbar_battery_rows() * lay->high, *length = 2 * lay->high;
-                else
-                        *along = lay->tray_at + (taskbar.battery_item ? text : 0), *length = text;
-        }
+                *along = lay->tray_at + (taskbar.battery_item ? text : 0), *length = text;
         else if (which == -4)
         {
                 if (!taskbar.battery_item)
                         return 0;
-                *along = lay->tray_at;
-                *length = lay->vertical ? taskbar_battery_rows() * lay->high : text;
+                *along = lay->tray_at, *length = text;
         }
         else
                 return 0;
@@ -399,8 +385,9 @@ static positive taskbar_fit(const struct taskbar_view *view, const font_face add
         One line of text in a slot of a band on a side, turned as taskbar_turn
         says: laid out as a bottom band lays a slot's text, along the slot's
         length and in the middle of its thickness, and turned onto it. What is
-        longer than the slot less the margin either end (the room above and
-        below a capital) is cut to fit.
+        longer than the slot, which a bottom band would cut off at its end, is
+        cut to fit the slot less the margin either end (the room above and
+        below a capital) with dots after it.
 */
 static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by, int bw, int x, int y, int width,
                                 int height, const char *text, unsigned int ink, unsigned int ground)
@@ -411,10 +398,17 @@ static void taskbar_text_turned(const struct taskbar_view *view, int bx, int by,
         font_target here = {view->pixels + (long)(y - by) * bw + (x - bx), (positive)bw, width, height};
         char fitted[WINDOWS_TITLE + 4];
         int capital = (int)((grid.cap_height + 32768) >> 16), pad;
-        positive length = taskbar_fit(view, faces, text, em, height - (width - capital), fitted, sizeof(fitted));
+        positive length = string_length((string_address)text);
+        int advance = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
 
-        pad = (height - (int)(font_extent(view->engine, faces, 1, (const p8 address_to)fitted, length, em, 0) >> 16)) / 2;
-        font_draw_turned(view->engine, faces, 1, (const p8 address_to)fitted, length, em, 0, taskbar_turn(view->position),
+        if (advance > height)
+        {
+                length = taskbar_fit(view, faces, text, em, height - (width - capital), fitted, sizeof(fitted));
+                text = fitted;
+                advance = (int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16);
+        }
+        pad = (height - advance) / 2;
+        font_draw_turned(view->engine, faces, 1, (const p8 address_to)text, length, em, 0, taskbar_turn(view->position),
                          &here, (b32)(pad > 0 ? pad : 0) << 16, (width - grid.cell_height) / 2 + grid.baseline, ink,
                          ground);
 }
@@ -572,44 +566,23 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                 ground = taskbar_glass_tab(view, rect[0], rect[1], gw, lay.bx, lay.by, lay.bw, x, y, width, height, -2, 0);
                 ink = window_contrast(ground);
-                // On a bottom or top band the clock has the tray's right slot, past the battery's when one is shown.
-                if (!lay.vertical)
+                // The clock has the tray's far slot, past the battery's when one is shown; a side band writes both
+                // turned, as its titles.
                 {
                         int cx, cy, cw, ch;
 
                         if (taskbar_slot(view, -3, &cx, &cy, &cw, &ch))
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
+                                (lay.vertical ? taskbar_text_turned : taskbar_text_line)(view, lay.bx, lay.by, lay.bw, cx, cy,
+                                                                                         cw, ch, clock, ink, ground);
                 }
                 if (taskbar.battery_item)
                 {
                         int ax, ay, aw, ah;
 
                         taskbar_battery_text(text, taskbar.battery_charging, taskbar.battery_percent);
-                        if (!lay.vertical && taskbar_slot(view, -4, &ax, &ay, &aw, &ah))
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay, aw, ah, text, ink, ground);
-                }
-                if (lay.vertical)
-                {
-                        int ax, ay, aw, ah, rows = 0;
-
-                        // The battery's rows above the clock's: the plus alone, then the figures; or the figures.
-                        if (taskbar.battery_item && taskbar_slot(view, -4, &ax, &ay, &aw, &ah))
-                        {
-                                if (taskbar.battery_charging)
-                                {
-                                        taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay, aw, lay.high, "+", ink, ground);
-                                        rows = 1;
-                                }
-                                taskbar_digits(text, taskbar.battery_percent);
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay + rows * lay.high, aw, lay.high, text, ink, ground);
-                        }
-                        if (taskbar_slot(view, -3, &ax, &ay, &aw, &ah))
-                        {
-                                char hour[3] = {clock[0], clock[1], 0}, minute[3] = {clock[3], clock[4], 0};
-
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay, aw, lay.high, hour, ink, ground);
-                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay + lay.high, aw, lay.high, minute, ink, ground);
-                        }
+                        if (taskbar_slot(view, -4, &ax, &ay, &aw, &ah))
+                                (lay.vertical ? taskbar_text_turned : taskbar_text_line)(view, lay.bx, lay.by, lay.bw, ax, ay,
+                                                                                         aw, ah, text, ink, ground);
                 }
         }
         return 1;

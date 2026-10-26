@@ -114949,7 +114949,7 @@ static void check_taskbar_text(string_address face_path)
     static const char *const cuts[4] = {"AVATAR To Wa: a title too long", "Settings \xe2\x80\x94 T\xc3\xa4st",
                                         "\xc3\xa5\xc3\xa4\xc3\xb6\xc3\xa5\xc3\xa4\xc3\xb6\xc3\xa5\xc3\xa4\xc3\xb6 W", "W"};
     bipolar got = face_path ? file_slurp_regular_at(AT_FDCWD, face_path, bytes, sizeof(bytes), 0) : -1;
-    int rect[4], turns = 1, inked = 1, inside = 1, tall = 1, tops = 1, fits = 1, sized = 1, flat[2] = {0, 0};
+    int rect[4], turns = 1, inked = 1, inside = 1, tall = 1, tops = 1, fits = 1, sized = 1, flat[6] = {0};
 
     if (got <= 0 || font_load(&band_face, bytes, (positive)got, 0) != 0)
     {
@@ -115033,14 +115033,12 @@ static void check_taskbar_text(string_address face_path)
                 inked &= right >= 0;
                 if (position == TASKBAR_BOTTOM)
                 {
-                    if (at == 1)
-                        flat[0] = right - left, flat[1] = bottom - top;
+                    flat[2 * at] = right - left, flat[2 * at + 1] = bottom - top;
                     continue;
                 }
                 tall &= bottom - top > right - left;
-                if (at == 1)
-                    sized &= bottom - top - flat[0] <= 1 && flat[0] - (bottom - top) <= 1 && right - left - flat[1] <= 1 &&
-                             flat[1] - (right - left) <= 1;
+                sized &= bottom - top - flat[2 * at] <= 1 && flat[2 * at] - (bottom - top) <= 1 &&
+                         right - left - flat[2 * at + 1] <= 1 && flat[2 * at + 1] - (right - left) <= 1;
                 for (int x = 1; x < slot[at][2]; x++)
                     most = column[x] > column[most] ? x : most;
                 if (!at)
@@ -115053,10 +115051,64 @@ static void check_taskbar_text(string_address face_path)
     check("taskbar text: every tab of a band on a side is written in, both sides, both ways", inked);
     check("taskbar text: and nothing is written outside its tabs", inside);
     check("taskbar text: a side tab's text is taller than it is wide", tall);
-    check("taskbar text: and it is the size of the bottom band's: as long as that is wide and as thick as that is high, to a pixel",
+    check("taskbar text: and each is the size of the bottom band's: as long as that is wide and as thick as that is high, to a pixel, so a title that fits its tab is not cut",
           sized && flat[0] > flat[1] && flat[1] > 4);
     check("taskbar text: the bars of a tab of capital Ts are on the side their tops face: right for a left band's center and a right band's edge", tops);
     check("taskbar text: a title is cut to fit its tab with dots after a whole character, the longest that fits, or whole when it fits", fits);
+
+    /* The tray of a band on a side is the bottom band's: the battery's slot and then the clock's, each as long along
+       the band as the bottom band's is wide, and both written turned, taller than wide and as long as the bottom
+       band's text is wide, to a pixel. The battery is set here, charging and full, its widest text. The ink is the
+       tray against its glass alone, made again over the same glass. */
+    {
+        int along[2][2] = {{0, 0}, {0, 0}}, lengths[3][2], laid = 1, written = 1, turned = 1;
+
+        for (unsigned int position = TASKBAR_BOTTOM; position <= TASKBAR_RIGHT; position += position == TASKBAR_BOTTOM ? 2 : 1)
+        {
+            static const char *const words[4] = {"bottom", "top", "left", "right"};
+            struct taskbar_view view;
+            int bx, by, bw, bh, slot[2][4], tray[4], vertical = position != TASKBAR_BOTTOM;
+
+            taskbar_settings_set(words[position], "primary", "battery none\n");
+            taskbar_text_set(0);
+            taskbar.battery_item = 1, taskbar.battery_percent = 100, taskbar.battery_charging = 1;
+            view = band_view(position, sides);
+            taskbar_band(&view, &bx, &by, &bw, &bh);
+            laid &= taskbar_draw(&view, 1ul << WINDOWS, band_glass, null, rect) == 1;
+            memory_copy(lit, band_pixels, sizeof(band_pixels));
+            laid &= taskbar_slot(&view, -2, &tray[0], &tray[1], &tray[2], &tray[3]);
+            band_glass(null, rect[0], rect[1], rect[2], rect[3]);
+            taskbar_glass_tab(&view, rect[0], rect[1], rect[2], bx, by, bw, tray[0], tray[1], tray[2], tray[3], -2, 0);
+            for (int at = 0; at < 2; at++)
+            {
+                int left = bw, right = -1, top = bh, bottom = -1;
+
+                laid &= taskbar_slot(&view, -3 - at, &slot[at][0], &slot[at][1], &slot[at][2], &slot[at][3]);
+                lengths[position == TASKBAR_BOTTOM ? 0 : position - 1][at] = vertical ? slot[at][3] : slot[at][2];
+                along[vertical][at] = vertical ? slot[at][1] : slot[at][0];
+                for (int y = slot[at][1] - by; y < slot[at][1] - by + slot[at][3]; y++)
+                    for (int x = slot[at][0] - bx; x < slot[at][0] - bx + slot[at][2]; x++)
+                        if (look_luma(lit[y * bw + x]) != look_luma(band_pixels[y * bw + x]))
+                        {
+                            left = x < left ? x : left, right = x > right ? x : right;
+                            top = y < top ? y : top, bottom = y > bottom ? y : bottom;
+                        }
+                written &= right >= 0;
+                if (!vertical)
+                    flat[2 * at] = right - left, flat[2 * at + 1] = bottom - top;
+                else
+                    turned &= bottom - top > right - left && bottom - top - flat[2 * at] <= 1 &&
+                              flat[2 * at] - (bottom - top) <= 1 && right - left - flat[2 * at + 1] <= 1 &&
+                              flat[2 * at + 1] - (right - left) <= 1;
+            }
+        }
+        laid &= along[0][1] < along[0][0] && along[1][1] < along[1][0];
+        for (int side = 1; side < 3; side++)
+            laid &= lengths[side][0] == lengths[0][0] && lengths[side][1] == lengths[0][1];
+        check("taskbar text: a side band's tray is the bottom band's, the battery before the clock and each as long", laid);
+        check("taskbar text: its clock and battery are written in", written);
+        check("taskbar text: turned, taller than wide and as long and thick as the bottom band's are wide and high, to a pixel", turned);
+    }
     taskbar_text_set(0);
     taskbar_settings_set("bottom", "primary", "battery none\n");
 }
