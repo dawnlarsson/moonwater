@@ -45070,6 +45070,36 @@ def harness_moonwater_cli(argv):
         check("@@ words\noff\noff" in joined, "airplane on turns the wifi and bluetooth words off", joined[-200:])
         check("@@ words2\non\non" in joined, "airplane off turns them back on", joined[-200:])
 
+        # Off until it is switched on. A radio with no word is off and its status says how to raise it; a name
+        # added to an off radio is only kept, and pins the word off; on, it is as before. A machine that used a
+        # radio before the default (a saved network, a remembered device, and no word) keeps it on.
+        got = tuned("rm -f /root/wifi /root/wifi.power /root/bluetooth /root/bluetooth.power\n" + say("wifi") + say("bluetooth") +
+                    say("wifi add dflt-a passpass1") + say("bluetooth add dflt-k") +
+                    "echo '@@ words'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n" +
+                    say("wifi on") + say("bluetooth on") +
+                    "echo '@@ words2'; cat /root/wifi.power /root/bluetooth.power; echo '@@end'\n")
+        seen = answers(got)
+        joined = "\n".join(got)
+        check(seen["wifi"]["out"][:1] == ["[Moonwater] wifi off"] and seen["bluetooth"]["out"][:1] == ["[Moonwater] bluetooth off"],
+              "wifi and bluetooth with no word kept are off", repr(seen["wifi"]) + repr(seen["bluetooth"]))
+        check(any("moonwater wifi on" in line for line in seen["wifi"]["out"]),
+              "and the wifi status says how to switch it on", repr(seen["wifi"]))
+        check(seen["wifi add dflt-a passpass1"]["status"] == 0 and
+              any("wifi is off, moonwater wifi on joins it" in line for line in seen["wifi add dflt-a passpass1"]["out"]),
+              "wifi add on an off radio saves the network and says the radio is off", repr(seen["wifi add dflt-a passpass1"]))
+        check(seen["bluetooth add dflt-k"]["status"] == 0 and
+              any("bluetooth is off" in line for line in seen["bluetooth add dflt-k"]["out"]),
+              "bluetooth add on an off radio keeps the name and says the radio is off", repr(seen["bluetooth add dflt-k"]))
+        check("@@ words\noff\noff" in joined, "and both words are pinned off by the adds", joined[-300:])
+        check("@@ words2\non\non" in joined, "wifi on and bluetooth on are what raise them", joined[-300:])
+        got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n"
+                    "printf 'old-a\\npasspass1\\n' > /root/wifi; printf 'old-k\\n' > /root/bluetooth\n" +
+                    say("wifi") + say("bluetooth"))
+        seen = answers(got)
+        check(seen["wifi"]["out"][:1] == ["[Moonwater] wifi on"] and seen["bluetooth"]["out"][:1] == ["[Moonwater] bluetooth on"],
+              "a machine with a saved network and a remembered device and no word keeps them on",
+              repr(seen["wifi"]) + repr(seen["bluetooth"]))
+
         # What a verb tells the radios, read from the sandbox's rfkill, which
         # is a plain file and so holds the last event written to it: eight
         # bytes, the index, the type (1 wifi, 2 bluetooth, 0 every radio), the
@@ -45486,9 +45516,8 @@ def harness_moonwater_cli(argv):
                     say("wifi") + say("bluetooth") + say("priority internet"))
         seen = answers(got)
         # A link to a word that says on is no word: the radios are off, as with nothing kept.
-        check("wifi on" not in " ".join(seen["wifi"]["out"]) and "wifi off" in " ".join(seen["wifi"]["out"]) and
-              "bluetooth on" not in " ".join(seen["bluetooth"]["out"]) and
-              "bluetooth off" in " ".join(seen["bluetooth"]["out"]) and
+        check(seen["wifi"]["out"][:1] == ["[Moonwater] wifi off"] and
+              seen["bluetooth"]["out"][:1] == ["[Moonwater] bluetooth off"] and
               "prefers wired" in " ".join(seen["priority internet"]["out"]),
               "a word that is a link is not followed", repr(seen))
 
@@ -47451,7 +47480,7 @@ def harness_moonwater_script(argv):
     walk = [
         ("wipe yes", 0), ("name keeper", 0), ("timezone Europe/Stockholm", 0), ("keyboard se", 0),
         ("dns 1.1.1.1 9.9.9.9", 0), ("ntp on", 0), ("ntp server time.example.net", 0), ("ntp sampling on", 0),
-        ("priority internet wired", 0), ("wired on", 0), ("wifi add scn-a passpass1", 1), ("wifi add scn-open", 1),
+        ("priority internet wired", 0), ("wired on", 0), ("wifi add scn-a passpass1", 0), ("wifi add scn-open", 0),
         ("wifi", 0), ("wifi on", 1), ("wifi off", 0), ("bluetooth add dev1", 0), ("bluetooth on", 0),
         ("bluetooth", 0), ("airplane on", 0), ("airplane off", 0), ("brightness 50%", 1), ("power balanced", 1),
         ("cpu smt on", 1), ("cpu online 1", 1), ("charge limit 80", 1), ("sleep", 1), ("hibernate", 1),
@@ -79664,7 +79693,9 @@ def harness_wifi_air(argv):
     prep.append("mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick")
     prep.append("L=\"/mnt/stick/lib/ld-linux-x86-64.so.2 --library-path /mnt/stick/lib\"")
     prep.append("W=\"$L /mnt/stick/wpa_supplicant\"")
-    prep.append("rm -f /root/wifi /root/wifi.power /run/moonwater/wifi.last")
+    prep.append("rm -f /root/wifi /run/moonwater/wifi.last")
+    # Off until it is switched on: the scenarios are of a radio that is on.
+    prep.append("printf 'on\\n' > /root/wifi.power")
     prep.append("printf 'wifi\\n' > /root/internet")
     # Every access point's radio made first, so each is wlanN by its place;
     # all but the WPA3-only one then go to the access points' namespace.
