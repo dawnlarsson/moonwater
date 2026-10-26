@@ -15695,6 +15695,11 @@ static b32 usb_watch_run(void)
         bool first = true;
         bool waiting = false;
 
+        //      Another watcher holds the lock of the watcher file (or the file cannot be had): one is enough, and
+        //      this one ends with 1 and says nothing, for it is the usual end of a second start that raced the
+        //      first (usb_watch_start checks for an owner, and two verbs can check at once). The verb says it
+        //      in words where a person asked (the dispatcher's watch); the log is the watcher's own, and a
+        //      watcher that is not running has nothing to add to it.
         if (held < 0)
                 return 1;
         events = netlink_open_protocol(USB_UEVENT, 1);
@@ -16735,6 +16740,9 @@ static b32 host_usb(string_address address_to arguments, positive count)
                 host_need_root();
                 return usb_apply_verb();
         }
+        //      usb watch is the watcher itself, which lock, apply, allow, deny and boot start in a process of
+        //      its own (usb_watch_start): not a verb for a person, so it is on neither the help page nor in
+        //      the README. By hand it runs in the foreground, and a second one is refused.
         if (count == 3 && string_equals(word, "watch"))
         {
                 b32 owner;
