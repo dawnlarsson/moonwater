@@ -312,6 +312,20 @@ attacker gets its invariants here once there is a lane that proves them.
   holds `/root`, `/home` and the bowls; a bowl's `sudo` and `su` need setuid.
   The locked tier mounts it `nosuid` as well, since it has no bowl and no one
   to run `su`. Whose disk boot takes without asking is the control (OUT-D1).
+- **OUT-D4, a word a disk's `/root` chose is spelled, not obeyed, when a root
+  verb prints it.** `moonwater keyboard`, `timezone`, `ntp` and `status` print
+  words read from `/root` (`/root/keyboard`, `/root/timezone` and its mode,
+  `/root/ntp.server` and `/root/ntp.nts.servers`). Those sinks spell each word
+  through `writer_terminal_name`, which escapes control bytes, tab and high
+  bytes to `\xNN` in the formatter, so a disk (attacker 6) whose word carries a
+  newline cannot forge a second `[Moonwater]` line and a bidi override cannot
+  reorder one; `plain_out` keeps a `%s` field's own newline and tab on purpose,
+  which is why the escape is per field and not in the stream. A legitimate code,
+  zone name or hostname is ASCII and is unchanged. The other verbs that print a
+  disk's or a device's word already route through an escaper (`radio_display`
+  for SSIDs, `usb_shown`/`usb_key` for USB strings, `link_name_good` for peer
+  names, `name_valid` for the machine name, `host_plain_line` for an image's
+  build). Found and fixed 2026-10-26 (MW-2026-030).
 - **OUT-D3, unprivileged user namespaces stay as the kernel has them:** bowls
   need them, no tool here creates one otherwise, and `user.max_user_namespaces`
   0 would take them from the test harnesses on the same kernel; a kiosk tier

@@ -18332,10 +18332,17 @@ static bool locale_zone_read(p8 address_to title, positive title_room,
 }
 
 //      The zone's title and how it came to be, on the line a verb opens with.
+//      Both are read from /root (the zone from /root/timezone, the country of
+//      an auto mode from /root/timezone.mode) and are a disk's to choose, so
+//      they are spelled through writer_terminal_name: a planted newline, tab,
+//      control or high byte reaches the terminal as \xNN, not as the line, the
+//      column or the bidi override it names. A legitimate zone is ASCII and is
+//      shown unchanged.
 static fn locale_zone_line(string_address title, string_address how)
 {
-        string_format(log, host_label "timezone %s " TERM_DIM "%s" TERM_RESET
-                                      "\n", title, how);
+        string_format(log, host_label "timezone %w " TERM_DIM "%w" TERM_RESET
+                                      "\n", writer_terminal_name, title,
+                      writer_terminal_name, how);
 }
 
 static b32 locale_zone_status(void)
@@ -19014,10 +19021,12 @@ static b32 locale_zone_auto(void)
         {
                 locale_auto_asked(null);
                 host_read_word(CLOCK_ZONE_PATH, zone, sizeof(zone));
+                //      The kept zone is a disk's to choose (/root/timezone):
+                //      spelled, so it cannot forge a line in this error.
                 host_say(log_error, host_label "timezone auto: Cloudflare "
-                                    "could not be asked (%s); keeping %s "
+                                    "could not be asked (%s); keeping %w "
                                     "until the network answers\n",
-                         locale_auto_reason(status),
+                         locale_auto_reason(status), writer_terminal_name,
                          zone[0] ? (string_address)zone
                                  : (string_address) "UTC");
                 return 1;
@@ -19138,25 +19147,28 @@ static b32 locale_time_sync(void)
         locale_ntp_moved_ns = 0;
         locale_ntp_answered[0] = end;
         failed = locale_ntp_apply(true);
+        //      locale_ntp_answered is the server that answered, named in
+        //      /root/ntp.server or /root/ntp.nts.servers, a disk's to choose:
+        //      spelled through writer_terminal_name so it cannot forge a line.
         if (failed == SNTP_BELOW_FLOOR)
-                string_format(log, host_label "time: %s answered earlier than "
+                string_format(log, host_label "time: %w answered earlier than "
                                    "this machine has already been (its build "
                                    "or the last time it was sure), so the "
                                    "clock was left alone; remove "
                                    "/root/clock.good if that is wrong\n",
-                              locale_ntp_answered);
+                              writer_terminal_name, locale_ntp_answered);
         else if (failed == SNTP_CONTRADICTS)
                 //      Before the generic answer below, which it would be
                 //      given too: the take names the server before it refuses.
-                string_format(log, host_label "time: %s answered, but it is "
+                string_format(log, host_label "time: %w answered, but it is "
                                    "further from the time NTS gave this boot "
                                    "than the clock can have drifted, so the "
                                    "clock was left alone\n",
-                              locale_ntp_answered);
+                              writer_terminal_name, locale_ntp_answered);
         else if (failed < 0 && locale_ntp_answered[0])
-                string_format(log, host_label "time: %s answered, but the "
+                string_format(log, host_label "time: %w answered, but the "
                                    "clock could not be set: %s\n",
-                              locale_ntp_answered,
+                              writer_terminal_name, locale_ntp_answered,
                               failed == SNTP_MALFORMED
                                   ? (string_address) "the time it gave is "
                                                      "outside the years this "
@@ -19191,10 +19203,10 @@ static b32 locale_time_sync(void)
                 positive_into_padded(fraction, whole / 1000000 % 1000, 3, '0');
                 fraction[3] = end;
                 //      Under a millisecond reads as +0.000, not -0.000.
-                string_format(log, host_label "time moved %s%p.%s s by %s\n",
+                string_format(log, host_label "time moved %s%p.%s s by %w\n",
                               moved < 0 && whole >= 1000000 ? "-" : "+",
                               whole / 1000000000,
-                              fraction, locale_ntp_answered);
+                              fraction, writer_terminal_name, locale_ntp_answered);
         }
         locale_zone_kernel_east = LOCALE_ZONE_NOT_APPLIED;
         log_flush();
@@ -20326,8 +20338,10 @@ static fn locale_nts_status(bool label)
         {
                 count = locale_nts_servers(servers, LOCALE_NTS_ENTRY_ROOM);
                 string_format(log, ", servers");
+                //      Each server is read from /root/ntp.nts.servers, a disk's
+                //      to choose: spelled so a planted byte cannot forge a line.
                 for (positive at = 0; at < count; at++)
-                        string_format(log, " %s",
+                        string_format(log, " %w", writer_terminal_name,
                                       (string_address)servers + at * LOCALE_NTS_ENTRY_ROOM);
         }
         host_read_word(LOCALE_NTP_LAST_PATH, last, sizeof(last));
@@ -20340,8 +20354,12 @@ static b32 locale_ntp_status(void)
 {
         p8 server[LOCALE_NTP_SERVER_ROOM];
 
-        host_say(log, host_label "ntp %s, %s, sampling %s, %s\n",
+        //      The server is the one named in /root/ntp.server, a disk's to
+        //      choose: spelled through writer_terminal_name so a planted byte
+        //      cannot forge a line. The rest are this program's own words.
+        host_say(log, host_label "ntp %s, %w, sampling %s, %s\n",
                  locale_switch_say(LOCALE_NTP_PATH),
+                 writer_terminal_name,
                  locale_ntp_server_say(server, sizeof(server)),
                  locale_switch_say(LOCALE_NTP_SAMPLING_PATH),
                  locale_clock_synced() ? "synchronised" : "waiting");
@@ -20558,7 +20576,7 @@ static b32 locale_keyboard_status(void)
 {
         p8 name[16];
 
-        host_say(log, host_label "keyboard %s\n",
+        host_say(log, host_label "keyboard %w\n", writer_terminal_name,
                  locale_keyboard_say(name, sizeof(name)));
         return 0;
 }
@@ -20570,14 +20588,20 @@ static fn locale_status_lines(void)
         p8 how[48];
         p8 keyboard[16];
 
+        //      title, how and keyboard are a disk's to choose (/root/timezone,
+        //      /root/timezone.mode, /root/keyboard): spelled through
+        //      writer_terminal_name so a planted control or high byte cannot
+        //      forge a status line. The switches are this program's own words.
         if (locale_zone_read(title, sizeof(title), how, sizeof(how)))
-                string_format(log, "  timezone %s %s\n", title, how);
+                string_format(log, "  timezone %w %w\n", writer_terminal_name,
+                              title, writer_terminal_name, how);
         else
                 string_format(log, "  timezone " LOCALE_NEEDS_ROOT "\n");
         string_format(log, "  ntp %s, sampling %s\n",
                       locale_switch_say(LOCALE_NTP_PATH),
                       locale_switch_say(LOCALE_NTP_SAMPLING_PATH));
-        string_format(log, "  keyboard %s\n",
+        string_format(log, "  keyboard %w\n",
+                      writer_terminal_name,
                       locale_keyboard_say(keyboard, sizeof(keyboard)));
 }
 

@@ -207,6 +207,85 @@ The eight key hashes were taken from Go's fix
 (`golang/go@7f86f957633e`) and from Jackson's `impacted-intermediates.json`;
 they agree, and the scalars above reproduce them.
 
+### MW-2026-030: locale status lines printed a disk's /root words raw
+
+| | |
+|---|---|
+| Status | Fixed on the worktree branch, 2026-10-26 (awaiting cherry-pick to main) |
+| Class | Terminal escape / line injection from attacker-controlled on-disk state printed by a root process |
+| Attacker | 6 (controls the data partition or the booted stick while the machine is off) and, today, a root-launched bowl program (case R), which can write `/root`. Not a genuinely unprivileged kernel uid (case U): `/root` is 0700 root-owned, so case U cannot plant these files. |
+| Fixed by | (worktree) `src/sh/host.c` locale sinks, `test/differential.py` rows |
+
+**What happened.** `moonwater keyboard`, `moonwater timezone`, `moonwater ntp`,
+`moonwater time sync` and `moonwater status` print words they read from `/root`
+with a bare `%s`: `/root/keyboard` (`locale_keyboard_say`), `/root/timezone`
+and `/root/timezone.mode` (`locale_zone_line`, `locale_status_lines`,
+`locale_zone_how`'s country of an auto mode, and the `timezone auto` error that
+names the kept zone when the network cannot be asked), `/root/ntp.server` and
+`/root/ntp.nts.servers` (`locale_ntp_status`, `locale_nts_status`), and the
+server that answered a time query (`locale_ntp_answered`, named in the
+`time:`/`time moved` lines of `moonwater time sync`). A `%s`
+argument is sent through `plain_out`/`plain_err` (src/sh/file.c), which escapes
+ESC and the C1 controls but by design keeps a newline, a tab and valid high
+UTF-8 ("a line or a tab is the text's own"). `host_read_word` strips only the
+trailing newline of a word, so an embedded one survives. A disk whose
+`/root/timezone` reads `Europe/Berlin\n[Moonwater] ...` makes `moonwater
+status` print a second line that looks like the machine's own; a word with a
+bidi override (U+202E) reorders the terminal line. The genuine writers
+(`locale_keyboard_set`, `locale_zone_set`, `locale_nts_servers`) validate
+against a table or a name grammar, so a word only becomes malformed when it is
+planted on disk, never through the CLI.
+
+**How it was reproduced.** In a booted guest (serial root shell), planting the
+word and reading the output raw with `od -c`:
+
+```
+printf 'us\n[Moonwater] INJECTED keyboard line' > /root/keyboard
+moonwater keyboard | od -c
+0000000   [   M   o   o   n   w   a   t   e   r   ]       k   e   y   b
+0000020   o   a   r   d       u   s  \n   [   M   o   o   n   w   a   t
+0000040   e   r   ]  \n
+```
+
+and the same with `/root/timezone` (~70 bytes of forged line) and
+`/root/ntp.server`. The word reaches the sink identically however it is
+planted, so the sandbox rows below plant it as the run's own root.
+
+**The fix.** Each sink spells the `/root` word through `writer_terminal_name`
+(`%w`) instead of `%s`. `writer_terminal_name` escapes control bytes, tab and
+high bytes to `\xNN` inside the formatter, before any writer, so the newline,
+the tab and the bidi override can no longer forge a line or reorder one. A
+legitimate keyboard code, zone name, country code or NTP hostname is ASCII and
+is shown unchanged, so no good input moves. Fixed at the sink, not the source,
+because the words are also read by other programs (the compositor watches
+`/root/keyboard`): the reader is left alone and each printer is made safe.
+
+**Tests that fail without the fix** (`--harness moonwater_cli`, lane `cli`):
+
+- `moonwater keyboard spells a newline in a /root word, not a forged line`
+- `moonwater timezone spells a newline in a /root word, not a forged line`
+- `moonwater ntp spells a newline in a /root word, not a forged line`
+- `moonwater timezone spells a bidi override in /root/timezone, not raw`
+- `moonwater timezone spells a newline in /root/timezone.mode, not a forged line`
+- `moonwater timezone auto spells the kept zone in its error, not a forged line`
+
+Each plants a hostile word under `/root` in the cli sandbox (no network), runs
+the verb, and reads the output raw. On the pre-fix `host.c` (the sinks reverted
+to `%s`) the newline rows see a bare `[Moonwater]`-shaped line and the bidi row
+sees the raw U+202E, and are RED; on the fixed tree the bytes are spelled
+`\xNN` on the verb's own line and the rows are GREEN. The `time:`/`time moved`
+server lines (`locale_ntp_answered`) are the same change but need a real NTP
+answer to fire, which the offline sandbox cannot give, so they are fixed as a
+one-line-per-sink hardening with no row of their own; the server name they
+print is the same `/root`-chosen word the `moonwater ntp` row covers.
+
+**Still open.** The fix covers the locale cluster. Other verbs that print a
+disk's or a device's word were audited and route through an escaper already:
+SSIDs through `radio_display`, USB product/serial through `usb_shown`/`usb_key`,
+link peer names through `link_name_good`, the machine name through `name_valid`,
+an image's build through `host_plain_line`, DNS servers as numeric addresses.
+A general-purpose high-byte escape of non-ASCII names (bidi in an SSID that may
+legitimately be non-ASCII) is a separate decision and is not changed here.
 ### MW-2026-040: a Waterlink group grant taken back left its members holding it
 
 | | |

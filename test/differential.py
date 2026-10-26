@@ -48409,6 +48409,55 @@ while True:
               "moonwater bind init reads no settings through a link at /run/moonwater/settings",
               repr(seen.get("bind init")))
 
+        #       A disk's /root is a disk's to choose (attacker 6), and the
+        #       words boot reads from it are printed back by root. A word with
+        #       a newline forges a labelled status line; a high byte (a bidi
+        #       override) reorders the terminal line. These are read through
+        #       plain_out, which escapes ESC and the C1 controls but keeps a
+        #       newline, a tab and valid high UTF-8, so a raw %s leaked them.
+        #       The keyboard, timezone, mode and ntp-server words are spelled
+        #       at the sink now (writer_terminal_name); a legitimate ASCII word
+        #       is unchanged. Raw, so the escaped bytes are read as they land.
+        bidi = "‮"
+        script = ("printf 'us\\nKBDINJECT' > /root/keyboard\n" + say("keyboard") +
+                  "printf 'Europe/Berlin\\nTZINJECT\\342\\200\\256\\tZ' > /root/timezone\n"
+                  "printf 'manual' > /root/timezone.mode\n" + say("timezone") +
+                  "printf 'pool.example\\nNTPINJECT' > /root/ntp.server\n" + say("ntp") +
+                  "rm -f /root/keyboard /root/timezone /root/timezone.mode /root/ntp.server\n")
+        lines, finished = session(script, raw=True)
+        seen = answers(lines)
+        forged = {"keyboard": "KBDINJECT", "timezone": "TZINJECT",
+                  "ntp": "NTPINJECT"}
+        for verb, mark in forged.items():
+            out = seen.get(verb, {"out": [], "status": None})
+            check(finished and not any(line.strip().startswith(mark) for line in out["out"]),
+                  "moonwater %s spells a newline in a /root word, not a forged line" % verb,
+                  repr(out["out"])[:240])
+        tz = seen.get("timezone", {"out": []})
+        check(all(bidi not in line for line in tz.get("out", [])),
+              "moonwater timezone spells a bidi override in /root/timezone, not raw",
+              repr(tz.get("out"))[:240])
+        #       The how-of-a-zone carries the country of an auto mode, read
+        #       from /root/timezone.mode: a newline there forged a line too.
+        script = ("printf 'Europe/Berlin' > /root/timezone\n"
+                  "printf 'auto country AA\\nMODEINJECT' > /root/timezone.mode\n" + say("timezone") +
+                  "rm -f /root/timezone /root/timezone.mode\n")
+        lines, finished = session(script, raw=True)
+        mode = answers(lines).get("timezone", {"out": []})
+        check(finished and not any(line.strip().startswith("MODEINJECT") for line in mode.get("out", [])),
+              "moonwater timezone spells a newline in /root/timezone.mode, not a forged line",
+              repr(mode.get("out"))[:240])
+        #       timezone auto with no network keeps the zone and names it in
+        #       the error on standard error: the kept zone is /root/timezone's.
+        script = ("printf 'Europe/Berlin\\nAUTOINJECT' > /root/timezone\n"
+                  "printf 'manual' > /root/timezone.mode\n" + say("timezone auto") +
+                  "rm -f /root/timezone /root/timezone.mode\n")
+        lines, finished = session(script, raw=True)
+        auto = answers(lines).get("timezone auto", {"out": []})
+        check(finished and not any(line.strip().startswith("AUTOINJECT") for line in auto.get("out", [])),
+              "moonwater timezone auto spells the kept zone in its error, not a forged line",
+              repr(auto.get("out"))[:240])
+
     return checks.verdict("moonwater cli", "moonwater-cli")
 
 
