@@ -8339,20 +8339,24 @@ static COLD bipolar file_publish_once(string_address path, address_any bytes,
         return file_staged_name_publish(address_of stage, sync);
 }
 
-/* A name that was not there when the stage was made is published only if it
-   still is not: a creator that came between is not written over unseen. For
-   a file that is kept, the later writer is the one that stands, so the one
-   that lost the race for the name writes again, now over a name that is
-   there. Two commands that first made /root/name, /root/dns or /root/internet
-   at once left one with "File exists" and its word unkept. */
+/* The name a stage is renamed onto is looked at again when it is: one that
+   was not there is published only if it still is not (a creator that came
+   between is not written over unseen, EEXIST), and one that was there only if
+   it is still the same file (a replacement that came between is not written
+   over unseen, EAGAIN). For a file that is kept, the later writer is the one
+   that stands, so the one that lost the race writes again, over what is there
+   now. Two commands at once that set one word -- name, dns, keyboard, ntp
+   server, canvas scale, mouse, link on, link port -- left the later of them
+   with "Resource temporarily unavailable" (and, when the word was not there
+   yet, "File exists") and its word unkept, one run in three. */
 static COLD bipolar file_publish_with(string_address path, address_any bytes,
                                       positive length, positive mode, bool sync,
                                       positive behavior)
 {
         bipolar result = file_publish_once(path, bytes, length, mode, sync, behavior);
 
-        for (positive attempt = 0; attempt < 3 && result == -ERROR_EXISTS &&
-                                   !(behavior & FILE_STAGED_NO_REPLACE);
+        for (positive attempt = 0; attempt < 16 && !(behavior & FILE_STAGED_NO_REPLACE) &&
+                                   (result == -ERROR_EXISTS || result == -ERROR_AGAIN);
              attempt++)
                 result = file_publish_once(path, bytes, length, mode, sync, behavior);
         return result;

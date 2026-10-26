@@ -44368,18 +44368,37 @@ def moonwater_sandbox(shell, top):
         made before the chroot (which one cannot be made from) with its caps kept
         for the chroot to use, and nothing mapped, so the effective user is not
         root and holds an owner's rights over what the namespace's root owns
-        and no more."""
+        and no more.
+
+        A listener or a watcher a verb starts outlives the verb by design, and
+        outlived the whole run too, with its root gone, for good (every lane
+        left one `link serve` on the box, holding a port in a network namespace
+        nobody could enter). When the script has ended whatever still has the
+        sandbox for its root is ended with it."""
         wrapper = (f"mount --rbind /usr {sandbox}/usr && {private_dev}"
                    f"mount --rbind /proc {sandbox}/proc && "
                    f"exec {'unshare -U --keep-caps ' if nobody else ''}chroot {sandbox} "
                    "/usr/bin/sh -c 'cd / && . /tmp/script'")
         (sandbox / "tmp/script").write_text(script)
+
+        def sweep():
+            import signal as signals
+            for entry in Path("/proc").iterdir():
+                if entry.name.isdigit():
+                    try:
+                        if os.readlink(entry / "root") == str(sandbox):
+                            os.kill(int(entry.name), signals.SIGKILL)
+                    except OSError:
+                        pass
+
         try:
             ran = subprocess.run(["unshare", "-Urmnu", "--fork", "sh", "-c", wrapper],
                                  stdin=subprocess.DEVNULL, capture_output=True,
                                  timeout=600, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
         except subprocess.TimeoutExpired:
+            sweep()
             return [], False
+        sweep()
         text = ran.stdout.decode(errors="replace")
         if not raw:
             text = re.sub(r"\x1b\[[0-9;]*m", "", text)
@@ -48716,13 +48735,39 @@ def zone_ok():
         return footer in open("/etc/localtime", "rb").read()
     except OSError:
         return False
+for path, text in {
+        "/sys/firmware/acpi/platform_profile": "balanced\\n",
+        "/sys/firmware/acpi/platform_profile_choices": "low-power balanced performance\\n",
+        "/sys/devices/system/cpu/cpufreq/boost": "1\\n",
+        "/sys/devices/system/cpu/smt/control": "on\\n",
+        "/sys/class/power_supply/BAT0/type": "Battery\\n",
+        "/sys/class/power_supply/BAT0/capacity": "80\\n",
+        "/sys/class/power_supply/BAT0/status": "Discharging\\n",
+        "/sys/class/power_supply/BAT0/charge_control_end_threshold": "100\\n"}.items():
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write(text)
+def tune_has(*lines):
+    return lambda: all(line in cat("/root/tune").split("\\n") for line in lines)
 PAIRS = [
+    ("tune power/cpu", "power performance", "cpu boost off", tune_has("power performance", "cpu.boost off")),
+    ("tune charge/smt", "charge limit 80", "cpu smt off", tune_has("charge.limit 80", "cpu.smt off")),
     ("name/name", "name aa-bb", "name cc-dd", lambda: cat("/root/name").strip() in ("aa-bb", "cc-dd") and cat("/etc/hostname").strip() == cat("/root/name").strip()),
     ("dns/dns", "dns 1.1.1.1", "dns 8.8.8.8", lambda: cat("/etc/resolv.conf").split()[-1] in cat("/root/dns")),
     ("internet/internet", "priority internet wifi", "priority internet wired", lambda: cat("/root/internet") == cat("/run/moonwater/internet") != ""),
     ("airplane/bluetooth", "airplane on", "bluetooth add dev1", lambda: "dev1" in cat("/root/bluetooth") and cat("/root/bluetooth.power") != ""),
     ("zone/zone", "timezone de", "timezone Asia/Tokyo", zone_ok),
     ("zone/name", "timezone de", "name aa-bb", lambda: zone_ok() and cat("/root/name").strip() == "aa-bb"),
+    #   The same words over files that are there already, which is a replacement
+    #   that can be overtaken as well (the fifth is what each round starts from).
+    ("name over", "name aa-bb", "name cc-dd", lambda: cat("/etc/hostname").strip() == cat("/root/name").strip() != "zz-top", ["name zz-top"]),
+    ("dns over", "dns 1.1.1.1", "dns 8.8.8.8", lambda: cat("/etc/resolv.conf").split()[-1] in cat("/root/dns"), ["dns 9.9.9.9"]),
+    ("keyboard over", "keyboard de", "keyboard se", lambda: cat("/root/keyboard").strip() in ("de", "se"), ["keyboard us"]),
+    ("ntp server over", "ntp server b.example", "ntp server c.example", lambda: cat("/root/ntp.server").strip() in ("b.example", "c.example"), ["ntp server a.example"]),
+    ("canvas over", "canvas scale 2", "canvas scale 3", lambda: cat("/root/canvas.scale").strip() in ("2", "3"), ["canvas scale 1"]),
+    ("mouse over", "mouse sensitivity 110", "mouse sensitivity 120", lambda: cat("/root/mouse.sensitivity").strip() in ("110", "120"), ["mouse sensitivity 90"]),
+    ("link on over", "link on", "link on", lambda: cat("/root/link").strip() == "on", ["link on", "link off"]),
+    ("link off over", "link off", "link off", lambda: cat("/root/link").strip() == "off", ["link on"]),
+    ("link port over", "link port 4001", "link port 4002", lambda: cat("/root/link.port").strip() in ("4001", "4002"), ["link port 4000"]),
     ("wifi add/add", "wifi add neta passpass1", "wifi add netb passpass2", lambda: "neta" in cat("/root/wifi") and "netb" in cat("/root/wifi")),
     ("wifi add/same", "wifi add neta passpass1", "wifi add neta passpass2", lambda: cat("/root/wifi").count("neta") == 1),
     ("bluetooth add/add", "bluetooth add dev1", "bluetooth add dev2", lambda: "dev1" in cat("/root/bluetooth") and "dev2" in cat("/root/bluetooth")),
@@ -48733,10 +48778,13 @@ PAIRS = [
     ("link group/add", "link group lab S3cretOne11 allow run", "link add peerb " + K2, lambda: says("link", "lab", "peerb")),
 ]
 JITTER = [0, 0.001, 0.003, 0.0005, 0.0015, 0.002, 0.004, 0.0002]
-for name, first, second, holds in PAIRS:
+for name, first, second, holds, *before in PAIRS:
     odd = []
     for round_ in range(40):
         clear()
+        for word in (before[0] if before else []):
+            sh(word)
+        reap()
         a, b = (second, first) if round_ % 2 else (first, second)
         pa = start(a)
         time.sleep(JITTER[round_ % 8])
@@ -48747,6 +48795,19 @@ for name, first, second, holds in PAIRS:
         if codes != (0, 0) or not holds():
             odd.append((round_, codes, (oa + ob).decode(errors="replace")[:160]))
     print("@@race %s %d" % (name.replace(" ", "_"), len(odd)), odd[:1])
+#   Four verbs that all keep a line of /root/tune, at once.
+odd = []
+for round_ in range(40):
+    clear()
+    running = []
+    for at, words in enumerate(["power performance", "cpu boost off", "cpu smt off", "charge limit 80"]):
+        running.append(start(words))
+        time.sleep(JITTER[(round_ + at) % 8] / 2)
+    outs = [p.communicate(timeout=60)[0] for p in running]
+    reap()
+    if [p.returncode for p in running] != [0, 0, 0, 0] or not tune_has("power performance", "cpu.boost off", "cpu.smt off", "charge.limit 80")():
+        odd.append((round_, [p.returncode for p in running], cat("/root/tune")))
+print("@@race tune_four %d" % len(odd), odd[:1])
 READERS = [
     ("wifi", "wifi add stable passpass1", ["wifi add churn passpass2", "wifi remove churn"], "wifi", "stable"),
     ("bluetooth", "bluetooth add stable", ["bluetooth add churn", "bluetooth remove churn"], "bluetooth", "stable"),
@@ -48785,7 +48846,7 @@ PYEOF
         lines, finished = session(script)
         races = [line.split(None, 3) for line in lines if line.startswith("@@race ")]
         reads = [line.split(None, 3) for line in lines if line.startswith("@@read ")]
-        check(finished and len(races) == 14 and len(reads) == 6,
+        check(finished and len(races) == 26 and len(reads) == 6,
               "every pair and every reader ran", (finished, len(races), len(reads), lines[-6:]))
         for found in races:
             check(len(found) > 2 and found[2] == "0",
@@ -72967,7 +73028,25 @@ def harness_state_cuts(argv):
         ("link port", ["link port 4000"], "link port 4001", None),
         ("link allow", ["link add peera " + key], "link allow peera run", None),
         ("setup live", [], "setup live", None),
+        #   The keys of /root/tune, with the kernel's files they go with standing
+        #   in a /sys of plain files (the machine here has no profile, no boost
+        #   switch and no battery).
+        ("power", ["power balanced"], "power performance", None),
+        ("cpu boost", ["cpu boost on"], "cpu boost off", None),
+        ("cpu smt", ["cpu smt on"], "cpu smt off", None),
+        ("charge", ["charge limit 90"], "charge limit 80", None),
     ]
+    for path, text in {
+            "/sys/firmware/acpi/platform_profile": "balanced\n",
+            "/sys/firmware/acpi/platform_profile_choices": "low-power balanced performance\n",
+            "/sys/devices/system/cpu/cpufreq/boost": "1\n",
+            "/sys/devices/system/cpu/smt/control": "on\n",
+            "/sys/class/power_supply/BAT0/type": "Battery\n",
+            "/sys/class/power_supply/BAT0/capacity": "80\n",
+            "/sys/class/power_supply/BAT0/status": "Discharging\n",
+            "/sys/class/power_supply/BAT0/charge_control_end_threshold": "100\n"}.items():
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text)
 
     etc_kept = ("hostname", "hosts", "resolv.conf", "localtime")
 
