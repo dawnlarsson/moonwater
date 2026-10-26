@@ -45249,6 +45249,21 @@ def harness_moonwater_cli(argv):
               "a FIFO at /etc/resolv.conf does not hold dns or status",
               repr((seen.get("dns"), seen.get("status"))))
 
+        # A usb policy saved with CR LF line ends is the policy: its lock is a
+        # lock and its rules are rules, and the next change keeps them. Read with
+        # the CR in every word, no line of it was a rule, the machine was
+        # unlocked, and the change wrote that.
+        lines, finished = session(
+            "printf 'mode lock\\r\\nclass storage allow\\r\\ndeny 0627:0001/S2\\r\\n' > /root/usb.policy\n" +
+            say("usb") + say("usb allow 0627:0001/S3") +
+            "echo '@@ policy'; cat /root/usb.policy; echo '@@end'\nrm -f /root/usb.policy\n")
+        seen = answers(lines)
+        check(finished and any("usb lock" in line for line in seen.get("usb", {}).get("out", [])) and
+              all(want in block("policy") for want in ("mode lock", "class storage allow", "deny 0627:0001/S2",
+                                                       "allow 0627:0001/S3")),
+              "a usb policy with CR LF line ends is read as the policy and kept by the next change",
+              repr((seen.get("usb"), block("policy"))))
+
         # A hosts file of a bowl that is larger than the room it is read into
         # is left as it is: the machine's line is not added by writing back
         # the first four kilobytes of it.
@@ -75729,7 +75744,7 @@ def harness_moonwater_state_fuzz(argv):
         return {line.rstrip(b"\r") for line in data.split(b"\n") if line.strip()}
 
     def plain(text, most):
-        return len(text) <= most and all(32 <= byte < 127 for byte in text)
+        return len(text) <= most and all(byte >= 32 for byte in text)
 
     def networks_of(data):
         """The saved networks of a wifi list the way its reader takes them: an ssid

@@ -15682,6 +15682,12 @@ static fn usb_policy_load(usb_policy address_to policy)
                 //      be a serial cut short: it is not read as a rule.
                 if (!length || (policy->cut && start + length >= (positive)got))
                         continue;
+                //      A policy saved by an editor that ends its lines with CR LF
+                //      is the same policy: read with the CR in every serial and
+                //      mode word, no line of it was a rule, the machine took it
+                //      for off with no rules, and the next change wrote that.
+                if (text[start + length - 1] == '\r' && !--length)
+                        continue;
                 if (length >= sizeof(line))
                 {
                         policy->skipped++;
