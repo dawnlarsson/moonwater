@@ -46,7 +46,7 @@ moonwater bind init add "command"      run a command at boot, once disks settle
 moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
-moonwater desktop start|stop           begin the chosen profile now, or end its session
+moonwater desktop start|stop           begin the chosen desktop now, or end its session
 moonwater settings                     the settings window, on the desktop of the compositor
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater debug                        what the desktop is doing and why: the card, the pointer, windows shown straight

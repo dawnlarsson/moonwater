@@ -22999,7 +22999,7 @@ static const host_row host_rows[] = {
     {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
-    {null, "desktop start|stop", "begin the chosen profile now, or end its session", 'b'},
+    {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
     {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why: the card, the pointer, windows shown straight", 'b'},
