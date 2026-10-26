@@ -43733,10 +43733,11 @@ def security_fuzz_seeds():
         "p256": entry(5, 1, anchor(1, 0, p256)),
         "p384": entry(5, 1, anchor(2, 0, p384)),
         "rsa": entry(5, 1, anchor(3, 65537, modulus)),
-        "switches": b"".join(entry(6, i, b"") for i in range(1, 6)),
+        #   1 to 5 are TLS's, 6 and 7 the bowl's packages and sudo (host.c).
+        "switches": b"".join(entry(6, i, b"") for i in range(1, 8)),
         "mixed": entry(4, 1, b"\x5a" * 32) + entry(6, 3, b"") + entry(5, 1, anchor(1, 0, p256)) +
                  entry(4, 1, b"\xa5" * 32),
-        "unknown switch": entry(6, 6, b""),
+        "unknown switch": entry(6, 8, b""),
         "short block": entry(4, 1, b"\1" * 31),
         "even exponent": entry(5, 1, anchor(3, 65536, modulus)),
     }
@@ -44452,6 +44453,9 @@ def harness_moonwater_cli(argv):
     import tempfile
     parser = argparse.ArgumentParser(prog="differential.py --harness moonwater_cli")
     parser.add_argument("--shell", required=True)
+    #       What builds the shell again at the bowl's tight tier, for the rows of
+    #       moonwater security packages and sudo there.
+    parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
     args = parser.parse_args(argv)
     if platform.system() != "Linux":
         print("moonwater cli: NOT RUN -- Linux namespaces")
@@ -44517,6 +44521,9 @@ def harness_moonwater_cli(argv):
                 "security block add nothex", "security block add abababababababababababababababababababababababababababababababab", "security block remove abababababababababababababababababababababababababababababababab",
                 "security block remove ab", "security trust add /etc/passwd",
                 "security trust remove nothex", "security block add a b",
+                "security packages", "security packages off", "security packages on",
+                "security packages maybe", "security packages on extra", "security sudo",
+                "security sudo on", "security sudo off", "security sudo maybe", "security sudo yes",
                 "keyboard", "keyboard xx", "keyboard a b", "name", "name random", "name x",
                 "name a b", "name random x", 'name ""', "name -x", "name x-", "name UPPER",
                 "name " + "x" * 64, "name ../x", "canvas", "canvas on", "canvas off",
@@ -44622,6 +44629,12 @@ def harness_moonwater_cli(argv):
             'security revocation soft',
             'security block add abababababababababababababababababababababababababababababababab',
             'security block remove abababababababababababababababababababababababababababababababab',
+            'security packages',
+            'security packages off',
+            'security packages on',
+            'security sudo',
+            'security sudo on',
+            'security sudo off',
             'keyboard',
             'canvas scale',
             'canvas scale 2',
@@ -44795,6 +44808,10 @@ def harness_moonwater_cli(argv):
             'security ct on extra',
             'security block add',
             'security block add a b',
+            'security packages maybe',
+            'security packages on extra',
+            'security sudo maybe',
+            'security sudo yes',
             'keyboard a b',
             'name a b',
             'name random x',
@@ -46466,6 +46483,183 @@ while True:
               seen.get("security block remove " + key, {}).get("status") == 0,
               "a security change whose published file cannot be written says so and answers 1",
               repr((switch, seen.get("security block add " + key), seen.get("security tls12 on"))))
+        #       moonwater security packages and sudo, the bowl's two switches, which
+        #       host.c's security_switch_on answers (their lines are its answer):
+        #       their defaults; each turned, kept in the settings and published as
+        #       an entry of the file every TLS client still reads; kept for a second
+        #       run; refused as nobody, who reads them as root does; a published
+        #       file that does not count is the default and never sudo on; and the
+        #       bowl's tight tier has packages off and sudo off whatever is kept and
+        #       refuses the word that would loosen either.
+        def ask(label, command, binary="/tmp/moonwater"):
+            return (f"echo '@@ {label}'; timeout 20 {binary} {command} 2>&1; "
+                    f"echo \"@@status $?\"\n")
+
+        def bowl_lines(got):
+            return [line.strip() for line in got.get("out", [])
+                    if line.startswith(("  packages ", "  sudo "))]
+
+        def said(got, text, status=None):
+            return (any(text in line for line in got.get("out", [])) and
+                    (status is None or got.get("status") == status))
+
+        def published_switches():
+            # The switch ids of the file the sandbox's root published, or None
+            # when it is no overlay file.
+            path = sandbox / "run/moonwater/security"
+            if not path.is_file():
+                return set()
+            data = path.read_bytes()
+            if data[:8] != b"MWSECURE" or int.from_bytes(data[8:12], "little") != len(data) - 16:
+                return None
+            ids, at = set(), 16
+            while at + 8 <= len(data):
+                text = int.from_bytes(data[at + 4:at + 6], "little")
+                if data[at] == 5 and data[at + 1] == 6 and not text:
+                    ids.add(int.from_bytes(data[at + 2:at + 4], "little"))
+                at += 8 + (text + 3) // 4 * 4
+            return ids
+
+        lines, finished = session(
+            "rm -f /run/moonwater/security\n" + ask("default list", "security") +
+            ask("default packages", "security packages") + ask("default sudo", "security sudo") +
+            ask("turn packages", "security packages off") + ask("turn sudo", "security sudo on") +
+            ask("turned list", "security"))
+        seen = answers(lines)
+        check(finished and seen.get("default list", {}).get("status") == 0 and
+              bowl_lines(seen.get("default list", {})) == ["packages on", "sudo off"],
+              "bare security lists packages on and sudo off by default, after the switches of TLS",
+              repr(seen.get("default list"))[-300:])
+        check(said(seen.get("default packages", {}), "security packages on", 0) and
+              said(seen.get("default sudo", {}), "security sudo off", 0),
+              "security packages says on and security sudo says off by default",
+              repr((seen.get("default packages"), seen.get("default sudo"))))
+        check(said(seen.get("turn packages", {}), "security packages off;", 0) and
+              said(seen.get("turn sudo", {}), "security sudo on;", 0),
+              "security packages off and security sudo on are kept, as root",
+              repr((seen.get("turn packages"), seen.get("turn sudo"))))
+        check(seen.get("turned list", {}).get("status") == 0 and
+              not said(seen.get("turned list", {}), "does not read") and
+              bowl_lines(seen.get("turned list", {})) == ["packages off", "sudo on"],
+              "bare security then lists packages off and sudo on, and the file still reads for TLS",
+              repr(seen.get("turned list"))[-300:])
+        ids = published_switches()
+        check(ids is not None and {6, 7} <= ids,
+              "the published file carries packages off and sudo on as switch entries 6 and 7",
+              repr(ids))
+        lines, finished = session(
+            ask("again packages", "security packages") + ask("again sudo", "security sudo") +
+            ask("again tls12", "security tls12"))
+        seen = answers(lines)
+        check(finished and said(seen.get("again packages", {}), "security packages off", 0) and
+              said(seen.get("again sudo", {}), "security sudo on", 0) and
+              said(seen.get("again tls12", {}), "security tls12 on", 0) and
+              not said(seen.get("again tls12", {}), "does not read"),
+              "a second run reads packages off and sudo on, and TLS reads the file beside them",
+              repr((seen.get("again packages"), seen.get("again sudo"), seen.get("again tls12"))))
+        #       Nobody: a change is root's, and the lines are anybody's, from a file
+        #       whose owner nobody sees as the overflow uid. The tight build is
+        #       called moonwater too, since the name it runs as is the command.
+        tight = sandbox / "tmp/tight/moonwater"
+        tight.parent.mkdir(parents=True, exist_ok=True)
+        built = build_run(spark_shell_command(args.cc, tight, defines=("MOONWATER_STRICT_BOWL=2",)),
+                          cwd=HARNESS_ROOT, capture_output=True, text=True)
+        check(built.returncode == 0 and tight.is_file(),
+              "the shell builds at the bowl's tight tier", built.stderr[-300:])
+        lines, finished = session(
+            ask("nobody packages on", "security packages on") + ask("nobody sudo off", "security sudo off") +
+            ask("nobody tight sudo on", "security sudo on", "/tmp/tight/moonwater") +
+            ask("nobody packages", "security packages") + ask("nobody sudo", "security sudo"),
+            nobody=True)
+        seen = answers(lines)
+        check(finished and said(seen.get("nobody packages on", {}), "needs root", 1) and
+              said(seen.get("nobody sudo off", {}), "needs root", 1) and
+              said(seen.get("nobody tight sudo on", {}), "needs root", 1),
+              "security packages and sudo refuse anybody but root, the tight build too",
+              repr((seen.get("nobody packages on"), seen.get("nobody sudo off"),
+                    seen.get("nobody tight sudo on"))))
+        check(said(seen.get("nobody packages", {}), "security packages off", 0) and
+              said(seen.get("nobody sudo", {}), "security sudo on", 0),
+              "nobody reads packages off and sudo on from the file root published",
+              repr((seen.get("nobody packages"), seen.get("nobody sudo"))))
+        #       Files that do not count, each put back after: the answer is the
+        #       default, packages on and sudo off.
+        kept = "/run/moonwater/security.kept"
+        shapes = [
+            ("a file a group may write", "chmod g+w /run/moonwater/security\n",
+             "chmod g-w /run/moonwater/security\n"),
+            ("a file others may write", "chmod o+w /run/moonwater/security\n",
+             "chmod o-w /run/moonwater/security\n"),
+            ("a link to a good file", f"mv /run/moonwater/security {kept}\n"
+             "ln -s security.kept /run/moonwater/security\n",
+             f"rm /run/moonwater/security\nmv {kept} /run/moonwater/security\n"),
+            ("garbage", f"cp -p /run/moonwater/security {kept}\nprintf garbage > /run/moonwater/security\n",
+             f"mv {kept} /run/moonwater/security\n"),
+            ("a file longer than the overlay", f"cp -p /run/moonwater/security {kept}\n"
+             "head -c 17000 /dev/zero >> /run/moonwater/security\n", f"mv {kept} /run/moonwater/security\n"),
+            ("a FIFO", f"mv /run/moonwater/security {kept}\nmkfifo /run/moonwater/security\n",
+             f"rm /run/moonwater/security\nmv {kept} /run/moonwater/security\n"),
+            ("a directory", f"mv /run/moonwater/security {kept}\nmkdir /run/moonwater/security\n",
+             f"rmdir /run/moonwater/security\nmv {kept} /run/moonwater/security\n"),
+            ("no file", f"mv /run/moonwater/security {kept}\n", f"mv {kept} /run/moonwater/security\n"),
+        ]
+        script = ""
+        for label, before, after in shapes:
+            script += (before + ask(label + " sudo", "security sudo") +
+                       ask(label + " packages", "security packages") + after)
+        lines, finished = session(script + ask("put back", "security"))
+        seen = answers(lines)
+        check(finished, "the session of files that do not count finished", "")
+        for label, _, _ in shapes:
+            check(said(seen.get(label + " sudo", {}), "security sudo off") and
+                  said(seen.get(label + " packages", {}), "security packages on"),
+                  f"with {label} at the published name sudo is off and packages on",
+                  repr((seen.get(label + " sudo"), seen.get(label + " packages"))))
+        check(bowl_lines(seen.get("put back", {})) == ["packages off", "sudo on"],
+              "and the file put back reads packages off and sudo on again",
+              repr(seen.get("put back"))[-300:])
+        #       The bowl's tight tier: over what the default build kept (sudo on,
+        #       packages off), then over nothing kept, where its refusals keep
+        #       nothing either; then the two words it takes.
+        lines, finished = session(
+            ask("tight list", "security", "/tmp/tight/moonwater") +
+            ask("clear sudo", "security sudo off") + ask("clear packages", "security packages on") +
+            ask("tight bare list", "security", "/tmp/tight/moonwater") +
+            ask("tight sudo on", "security sudo on", "/tmp/tight/moonwater") +
+            ask("tight packages on", "security packages on", "/tmp/tight/moonwater"))
+        seen = answers(lines)
+        ids = published_switches()
+        forced = ["packages off, as the tight tier has it", "sudo off, as the tight tier has it"]
+        check(finished and seen.get("tight list", {}).get("status") == 0 and
+              bowl_lines(seen.get("tight list", {})) == forced and
+              said(seen.get("clear sudo", {}), "security sudo off;", 0) and
+              said(seen.get("clear packages", {}), "security packages on;", 0) and
+              bowl_lines(seen.get("tight bare list", {})) == forced,
+              "the tight tier lists packages off and sudo off, with sudo kept on and with nothing kept",
+              repr((seen.get("tight list"), seen.get("tight bare list")))[-400:])
+        check(said(seen.get("tight sudo on", {}), "security sudo stays off: the tight tier has it so", 1) and
+              said(seen.get("tight packages on", {}), "security packages stays off: the tight tier has it so",
+                   1) and ids is not None and not ids & {6, 7},
+              "the tight tier refuses security sudo on and security packages on, and keeps neither",
+              repr((seen.get("tight sudo on"), seen.get("tight packages on"), ids)))
+        lines, finished = session(
+            ask("tight packages off", "security packages off", "/tmp/tight/moonwater") +
+            ask("tight sudo off", "security sudo off", "/tmp/tight/moonwater") +
+            ask("after tight packages", "security packages") + ask("back packages", "security packages on") +
+            ask("back list", "security"))
+        seen = answers(lines)
+        ids = published_switches()
+        check(finished and said(seen.get("tight packages off", {}), "security packages off;", 0) and
+              said(seen.get("tight sudo off", {}), "security sudo off", 0) and
+              said(seen.get("after tight packages", {}), "security packages off", 0),
+              "the tight tier keeps packages off and takes sudo off, and the default build reads what it kept",
+              repr((seen.get("tight packages off"), seen.get("tight sudo off"),
+                    seen.get("after tight packages"))))
+        check(said(seen.get("back packages", {}), "security packages on;", 0) and
+              bowl_lines(seen.get("back list", {})) == ["packages on", "sudo off"] and
+              ids is not None and not ids & {6, 7},
+              "packages on puts the default back, and the file carries neither switch",
+              repr((seen.get("back list"), ids)))
         #       A boot whose desktop cannot be started (no process can be made) says so,
         #       and takes its marker away so that the next boot asks again. The shell
         #       cannot fork under the limit, so the verb is the last thing it runs.

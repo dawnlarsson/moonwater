@@ -96350,6 +96350,161 @@ static fn secret_arguments(void)
 }
 #endif
 
+/* A file at path holding length bytes, its mode set after the write (which
+   the umask would cut): whether it was written. */
+static bool switches_file(string_address path, const p8 address_to bytes, positive length,
+                          positive mode)
+{
+        bipolar handle;
+        bool written;
+
+        system_remove_at(AT_FDCWD, path, 0);
+        handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | O_CLOEXEC, 0600);
+        if (handle < 0)
+                return false;
+        written = system_write_all((positive)handle, bytes, length) == length;
+        system_close(handle);
+        return written && system_change_mode_at(AT_FDCWD, path, mode) >= 0;
+}
+
+/*
+        moonwater security's switches as a program asks them (host.c's
+        security_switches_read_at, security_switch_turned and
+        security_switch_on). The published file counts only as a regular
+        file, never through a link, that a group and others may not write,
+        no longer than the overlay, owned by the owner asked or by the
+        overflow uid, and read whole by tls_overlay_read: anything else is
+        -1, which a caller takes as the tier's default. Then what each
+        switch is with nothing kept and with its entry kept, at this build's
+        tier: packages is on unless kept off, and off at the tight tier
+        whatever is kept; sudo is off unless kept on, and off at the tight
+        tier whatever is kept; TLS's are as they were.
+*/
+static fn switches_asked(void)
+{
+        static p8 file[TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM + 64];
+        string_address path = (string_address) "/tmp/moonwater-bowl-check-security";
+        string_address aside = (string_address) "/tmp/moonwater-bowl-check-security.kept";
+        p32 me = (p32)system_call(syscall(geteuid));
+        p32 both = (p32)1 << (SECURITY_SWITCH_PACKAGES_OFF - 1) |
+                   (p32)1 << (SECURITY_SWITCH_SUDO_ON - 1);
+        bool tight = MOONWATER_STRICT_BOWL >= STRICT_TIGHT;
+        positive used = TLS_OVERLAY_HEAD;
+        positive packages = array_count(security_switches);
+        positive sudo = array_count(security_switches);
+        positive tls12 = array_count(security_switches);
+        positive revocation = array_count(security_switches);
+        bool written;
+
+        //      The file moonwater security publishes with both turned.
+        for (p16 id = SECURITY_SWITCH_PACKAGES_OFF; id <= SECURITY_SWITCH_SUDO_ON; id++)
+        {
+                p8 entry[8] = {TLS_OVERLAY_LIST, TLS_OVERLAY_SWITCH, (p8)id, 0, 0, 0, 0, 0};
+
+                memory_copy(file + used, entry, 8);
+                used += 8;
+        }
+        memory_copy(file, TLS_OVERLAY_MAGIC, 8);
+        memory_zero(file + 8, 8);
+        file[8] = (p8)(used - TLS_OVERLAY_HEAD);
+
+        written = switches_file(path, file, used, 0644);
+        check("A published switch file owned by its owner and written by it alone reads",
+              written && security_switches_read_at(path, me) == (bipolar)both);
+        written &= system_change_mode_at(AT_FDCWD, path, 0600) >= 0;
+        check("and one only its owner may read reads too",
+              written && security_switches_read_at(path, me) == (bipolar)both);
+        written &= system_change_mode_at(AT_FDCWD, path, 0664) >= 0;
+        check("A switch file a group may write is not believed",
+              written && security_switches_read_at(path, me) == -1);
+        written &= system_change_mode_at(AT_FDCWD, path, 0646) >= 0;
+        check("nor one others may write",
+              written && security_switches_read_at(path, me) == -1);
+        written &= system_change_mode_at(AT_FDCWD, path, 0644) >= 0;
+        check("nor one owned by somebody else, who is not the overflow uid",
+              written && security_switches_read_at(path, me + 1) == -1 &&
+                  security_switches_read_at(path, me) == (bipolar)both);
+
+        //      A link to that good file, a FIFO, a directory: none is a file.
+        system_remove_at(AT_FDCWD, aside, 0);
+        written = system_rename_at(AT_FDCWD, path, AT_FDCWD, aside, 0) >= 0 &&
+                  system_symbolic_link_at(aside, AT_FDCWD, path) >= 0;
+        check("A switch file reached through a link is not believed",
+              written && security_switches_read_at(path, me) == -1 &&
+                  security_switches_read_at(aside, me) == (bipolar)both);
+        system_remove_at(AT_FDCWD, path, 0);
+        written = system_call_4(syscall(mknodat), (positive)(bipolar)AT_FDCWD, (positive)path,
+                                0010644, 0) >= 0;
+        check("A FIFO at its name answers at once and is not believed",
+              written && security_switches_read_at(path, me) == -1);
+        system_remove_at(AT_FDCWD, path, 0);
+        written = system_make_directory_at(AT_FDCWD, path, 0755) >= 0;
+        check("A directory at its name is not believed",
+              written && security_switches_read_at(path, me) == -1);
+        system_remove_at(AT_FDCWD, path, AT_REMOVEDIR);
+        system_remove_at(AT_FDCWD, aside, 0);
+        check("No file is -1, the default", security_switches_read_at(path, me) == -1);
+
+        //      Files that do not read whole.
+        file[0] ^= 0x20;
+        written = switches_file(path, file, used, 0644);
+        file[0] ^= 0x20;
+        check("A switch file whose magic is not the overlay's is not believed",
+              written && security_switches_read_at(path, me) == -1);
+        file[used] = 0;
+        written = switches_file(path, file, used + 1, 0644);
+        check("nor one with a byte after its entries",
+              written && security_switches_read_at(path, me) == -1);
+        file[TLS_OVERLAY_HEAD + 2] = TLS_SWITCHES + 1;
+        written = switches_file(path, file, used, 0644);
+        file[TLS_OVERLAY_HEAD + 2] = SECURITY_SWITCH_PACKAGES_OFF;
+        check("nor one with a switch id this build has no word for",
+              written && security_switches_read_at(path, me) == -1);
+        memory_zero(file + used, sizeof file - used);
+        written = switches_file(path, file, TLS_OVERLAY_HEAD + TLS_OVERLAY_ROOM + 1, 0644);
+        check("nor one longer than the overlay",
+              written && security_switches_read_at(path, me) == -1);
+        file[8] = 0;
+        written = switches_file(path, file, TLS_OVERLAY_HEAD, 0644);
+        check("A file of no entries reads, and turns nothing",
+              written && security_switches_read_at(path, me) == 0);
+        system_remove_at(AT_FDCWD, path, 0);
+
+        for (positive at = 0; at < array_count(security_switches); at++)
+        {
+                string_address word = security_switches[at].word;
+
+                packages = string_equals(word, "packages") ? at : packages;
+                sudo = string_equals(word, "sudo") ? at : sudo;
+                tls12 = string_equals(word, "tls12") ? at : tls12;
+                revocation = string_equals(word, "revocation") ? at : revocation;
+        }
+        check("The switches name packages and sudo, with their ids",
+              packages < array_count(security_switches) && sudo < array_count(security_switches) &&
+                  security_switches[packages].id == SECURITY_SWITCH_PACKAGES_OFF &&
+                  security_switches[sudo].id == SECURITY_SWITCH_SUDO_ON &&
+                  string_equals(security_switches[packages].standard, "on") &&
+                  string_equals(security_switches[sudo].standard, "off"));
+        if (packages == array_count(security_switches) || sudo == array_count(security_switches) ||
+            tls12 == array_count(security_switches) ||
+            revocation == array_count(security_switches))
+                return;
+        check("packages is on with nothing kept, and off at the tight tier",
+              security_switch_turned(packages, 0) == tight);
+        check("packages is off when kept off, at every tier",
+              security_switch_turned(packages, both));
+        check("sudo is off with nothing kept, at every tier", !security_switch_turned(sudo, 0));
+        check("sudo is on when kept on, and never at the tight tier",
+              security_switch_turned(sudo, both) == !tight);
+        check("A switch of TLS answers its own bit and no other",
+              !security_switch_turned(tls12, both) &&
+                  security_switch_turned(tls12, (p32)1 << (TLS_SWITCH_TLS12_OFF - 1)) &&
+                  security_switch_turned(revocation, 0) == (MOONWATER_STRICT_NET >= STRICT_TIGHT));
+        check("A name that is no switch, or a switch whose words are not on and off, is never on",
+              !security_switch_on("bogus") && !security_switch_on("") &&
+                  !security_switch_on("revocation"));
+}
+
 /*
         The disks boot takes on the install's word are the ones on a bus
         nothing is plugged into: the place sysfs gives a disk says USB or
@@ -96920,6 +97075,7 @@ b32 main(void)
 #if MOONWATER_STRICT >= STRICT_TIGHT
         secret_arguments();
 #endif
+        switches_asked();
         boot_links();
         wifi_plans();
         station_filter();
