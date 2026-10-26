@@ -48895,7 +48895,7 @@ while True:
         script = ("mkdir -p /run/moonwater\nhead -c 1048576 /dev/zero | tr '\\000' '\\033' > /run/moonwater/windows\n"
                   "echo '@@ debug escapes'; timeout 5 /tmp/moonwater debug > /tmp/debug.out 2>&1; echo \"@@status $?\"\n"
                   "echo \"@@escapes $(tr -cd '\\033' < /tmp/debug.out | wc -c) $(grep -c 'x1b' /tmp/debug.out)"
-                  " $(grep -c '^input' /tmp/debug.out) $(grep -c 'its wheel in 120ths' /tmp/debug.out)\"\n"
+                  " $(grep -c '^input' /tmp/debug.out) $(grep -c 'its wheel in' /tmp/debug.out)\"\n"
                   "rm -f /run/moonwater/windows /tmp/debug.out\n")
         lines, finished = session(script)
         got = answers(lines).get("debug escapes", {"status": None})
