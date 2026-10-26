@@ -13290,6 +13290,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         p8 was[24];
         bool kept = tune_kept("airplane", was, sizeof(was));
         bool on;
+        bool join = false;
         b32 failed;
         bipolar sent;
 
@@ -13339,7 +13340,7 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
                 if (wifi_back)
                 {
                         failed |= radio_switch(NET_WIFI_POWER, RADIO_RFKILL_WLAN, true, true);
-                        (void)radio_wifi_on(false);
+                        join = true;
                 }
                 //      A block that the kernel refuses is the first error said,
                 //      as the unblock above is, and not dropped.
@@ -13354,6 +13355,9 @@ static b32 tune_airplane(string_address address_to arguments, positive count)
         }
         failed |= sent < 0 ? host_fail("/dev/rfkill", sent) : 0;
         host_release();
+        //      The join takes what it takes, with the machine's lock let go of.
+        if (join)
+                (void)radio_wifi_on(false);
         return radio_done(failed, on ? "airplane on" : "airplane off");
 }
 
