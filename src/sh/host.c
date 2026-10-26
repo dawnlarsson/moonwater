@@ -9743,7 +9743,7 @@ static bipolar radio_kept(string_address path)
                 crypto_forget(networks, sizeof(networks));
         }
         else
-                used = host_read_state(NET_BLUETOOTH_LIST, text, 1) > 0;
+                used = host_read_state(NET_BLUETOOTH_LIST, text, 2) > 0;
 
         return used ? -1 : 0;
 }

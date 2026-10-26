@@ -45094,7 +45094,7 @@ def harness_moonwater_cli(argv):
         check("@@ words2\non\non" in joined, "wifi on and bluetooth on are what raise them", joined[-300:])
         got = tuned("rm -f /root/wifi.power /root/bluetooth.power\n"
                     "printf 'old-a\\npasspass1\\n' > /root/wifi; printf 'old-k\\n' > /root/bluetooth\n" +
-                    say("wifi") + say("bluetooth"))
+                    say("wifi") + say("bluetooth") + "rm -f /root/wifi /root/bluetooth\n")
         seen = answers(got)
         check(seen["wifi"]["out"][:1] == ["[Moonwater] wifi on"] and seen["bluetooth"]["out"][:1] == ["[Moonwater] bluetooth on"],
               "a machine with a saved network and a remembered device and no word keeps them on",
