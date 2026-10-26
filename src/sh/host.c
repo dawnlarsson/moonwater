@@ -21683,7 +21683,10 @@ static b32 desktop_launch(string_address name)
         return_if(child < 0, host_fail("desktop", child));
 
         positive_into_string(number, (positive)child);
-        host_write_text(DESKTOP_SESSION, number);
+        //      Started, and said that it is not recorded: desktop stop and off find
+        //      a session by this number, or by its KWin where there is one.
+        output = host_write_text(DESKTOP_SESSION, (string_address)number);
+        return_if(output < 0, host_fail(DESKTOP_SESSION, output));
         return 0;
 }
 
@@ -21706,7 +21709,13 @@ static b32 desktop_end(void)
         if (child)
         {
                 system_wait4_retry(child, address_of status, 0, null);
-                return wait_status_code(status) ? 1 : 0;
+                if (wait_status_code(status))
+                        return 1;
+                //      The session is gone, and its number with it: left in the
+                //      record it is the number of whatever is given it next, and
+                //      stop, off and the next profile would end that instead.
+                (void)system_remove_at(AT_FDCWD, DESKTOP_SESSION, 0);
+                return 0;
         }
 
         system_call(syscall(setsid));

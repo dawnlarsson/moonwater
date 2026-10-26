@@ -46984,6 +46984,34 @@ while True:
         check(finished and "@@ cut S" in lines and not any(line == "@@ whole S" for line in lines),
               "a number cut at the end of the list of a compositor's company is not a pid to end, a whole one is",
               repr(lines[-8:]))
+        #       The session a desktop was started as is recorded, and a record that
+        #       cannot be written is said (the session is running, unrecorded).
+        script = ("rm -rf /run/moonwater/desktop /root/desktop; mkdir -p /run/moonwater/desktop /bowls/bin\n"
+                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
+                  "chmod 755 /bowls/bin/desktop\n" + say("desktop desktop") +
+                  "rm -rf /run/moonwater/desktop /root/desktop /bowls/bin/desktop\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and seen.get("desktop desktop", {}).get("status") == 1 and
+              any("/run/moonwater/desktop" in line for line in seen["desktop desktop"]["out"]),
+              "a started desktop whose session cannot be recorded says so", repr(seen.get("desktop desktop")))
+        #       A session that has been ended leaves no record: its number would be
+        #       the number of whatever the machine gave it next, and stop would end
+        #       that. The session is a real one here (the event shell is /shell, a
+        #       link to the sandbox's sh), a profile that execs a sleep.
+        script = ("rm -rf /run/moonwater/desktop /root/desktop; mkdir -p /run/moonwater /bowls/bin; "
+                  "ln -sf /usr/bin/sh /shell\n"
+                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexec sleep 60\\n' > /bowls/bin/desktop; "
+                  "chmod 755 /bowls/bin/desktop\n" + say("desktop desktop") + "sleep 0.5\n"
+                  "echo \"@@ recorded $(cat /run/moonwater/desktop 2>&1)\"\n" + say("desktop") + say("desktop stop") +
+                  "[ -e /run/moonwater/desktop ] && echo '@@ record left' || echo '@@ record gone'\n"
+                  "rm -f /bowls/bin/desktop /root/desktop /shell\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        check(finished and any(re.fullmatch(r"@@ recorded \d+", line) for line in lines) and
+              any(line.endswith("running") for line in seen.get("desktop", {}).get("out", [])) and
+              seen.get("desktop stop", {}).get("status") == 0 and "@@ record gone" in lines,
+              "a session that was ended leaves no record of its number", repr(lines[-8:]))
         # moonwater usb against a sysfs of the sandbox's own: /sys is a
         # directory here, so every device, interface and default is a file the
         # verb reads and writes, and what it wrote is read back. The kernel's
