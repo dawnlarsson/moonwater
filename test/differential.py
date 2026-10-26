@@ -45237,6 +45237,35 @@ def harness_moonwater_cli(argv):
               "a FIFO at /etc/resolv.conf does not hold dns or status",
               repr((seen.get("dns"), seen.get("status"))))
 
+        # A bowl's files are read as the bowl names them. A guest whose
+        # /etc/hosts is a link to a file of the host (absolute, so the host
+        # resolves it) had that file read into the hosts it was given, and one
+        # whose /etc/hosts is a FIFO held the verb that configures it.
+        lines, finished = session(
+            "cp /tmp/moonwater /tmp/bowl; mkdir -p /bowls/x/etc /bowls/x/bin\n"
+            "echo secret-from-the-host > /root/hostsecret; ln -s /root/hostsecret /bowls/x/etc/hosts\n"
+            "timeout 20 /tmp/bowl --isolated /bowls/x /bin/true > /dev/null 2>&1\n"
+            "echo '@@ hosts'; cat /bowls/x/etc/hosts; echo '@@end'\n"
+            "rm -f /bowls/x/etc/hosts; mkfifo /bowls/x/etc/hosts\n"
+            "timeout 20 /tmp/bowl --isolated /bowls/x /bin/true > /dev/null 2>&1; echo \"@@ fifo $?\"\n"
+            "rm -rf /bowls/x /root/hostsecret /tmp/bowl\n")
+        check(finished and "secret-from-the-host" not in block("hosts") and
+              "127.0.0.1 localhost" in block("hosts") and "@@ fifo 124" not in lines and
+              any(line.startswith("@@ fifo ") for line in lines),
+              "a bowl whose /etc/hosts is a link to the host's file is not read through it, and a FIFO there does not hold the verb",
+              repr((block("hosts"), [line for line in lines if line.startswith("@@ fifo")])))
+
+        # A FIFO at /etc/localtime, or at a bowl's, is not the zone's file and
+        # is replaced by it: the read that asks whether the file already says
+        # the same does not wait for a writer, so timezone answers.
+        lines, finished = session(
+            "rm -f /etc/localtime /bowls/one/etc/localtime; mkfifo /etc/localtime /bowls/one/etc/localtime\n" +
+            say("timezone se") + "echo '@@ zone'; timeout 5 head -c 4 /etc/localtime; echo; echo '@@end'\n")
+        seen = answers(lines)
+        check(finished and seen.get("timezone se", {}).get("status") == 0 and block("zone") == ["TZif"],
+              "a FIFO at /etc/localtime does not hold timezone, and is replaced by the zone",
+              repr((seen.get("timezone se"), block("zone"))))
+
         # What a saved network carries beside its password, in
         # /root/wifi.rules: the wpa2 word an add says, until an add without
         # it; what a join learnt (pmf, sae), while the password stays; and

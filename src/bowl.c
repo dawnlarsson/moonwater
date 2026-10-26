@@ -343,6 +343,42 @@ static bipolar bowl_open_in_root(string_address root, string_address path,
 }
 
 /*
+        A file of the guest read as the guest names it: as though root were /,
+        a regular file only, and without waiting. The bowl's own conf files
+        (hosts, mirrorlist, pacman.conf, repositories, the Nix seed) are read
+        before they are written over, and a path joined onto the root and
+        handed to the host is resolved by the host: a guest that made its
+        /etc/hosts a link to /root/wifi had the host's file read into the
+        copy it was given, and one that made it a FIFO held the verb. The
+        capacity is file_slurp's: one byte of it is the terminator.
+*/
+static bipolar bowl_slurp_in_root(string_address root, string_address path,
+                                  p8 address_to into, positive capacity)
+{
+        system_path_identity facts;
+        bipolar handle;
+        bipolar got;
+
+        if (!capacity)
+                return -1;
+        into[0] = end;
+        handle = bowl_open_in_root(root, path, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        if (handle < 0)
+                return handle;
+        got = system_path_identity_at(handle, (string_address) "",
+                                      SYSTEM_PATH_AT_EMPTY_PATH,
+                                      SYSTEM_PATH_STATX_TYPE, address_of facts);
+        if (got >= 0 && (facts.mode & 0170000) != 0100000)
+                got = -22;
+        if (got >= 0)
+                got = system_read_retry((positive)handle, into, capacity - 1);
+        system_close(handle);
+        if (got >= 0)
+                into[got] = end;
+        return got;
+}
+
+/*
         Whether a guest program can be run, asked the way it will be run: as
         though root were /. A Nix profile is links to absolute /nix/store
         paths, which from the host name nothing, so asking the host path
@@ -2305,8 +2341,8 @@ static fn bowl_hosts_write_in(string_address root, string_address name,
                 return;
         if (keep)
         {
-                bipolar got = file_read_once_at(AT_FDCWD, hosts, text,
-                                                sizeof(text) - 100);
+                bipolar got = bowl_slurp_in_root(root, "/etc/hosts", text,
+                                                 sizeof(text) - 99);
 
                 used = got > 0 ? (positive)got : 0;
                 for (positive at = 0; at + length <= used && !have; at++)
@@ -3985,7 +4021,7 @@ static b32 bowl_write_mirror(string_address root)
         if (!bowl_root_path(path, sizeof(path), root, "/etc/pacman.d/mirrorlist"))
                 return bowl_refuse("bowl path is too long\n");
 
-        got = file_slurp(path, text, sizeof(text));
+        got = bowl_slurp_in_root(root, "/etc/pacman.d/mirrorlist", text, sizeof(text));
         return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
 
         return_if((positive)got >= sizeof(text) - 1, bowl_refuse("mirrorlist is too long\n"));
@@ -4093,7 +4129,7 @@ static b32 bowl_write_apk(string_address root)
         if (!bowl_root_path(path, sizeof(path), root, "/etc/apk/repositories"))
                 return bowl_refuse("bowl path is too long\n");
 
-        got = file_slurp(path, existing, sizeof(existing));
+        got = bowl_slurp_in_root(root, "/etc/apk/repositories", existing, sizeof(existing));
         if (got > 0 && (positive)got >= sizeof(existing))
                 got = (bipolar)(sizeof(existing) - 1);
         if (got > 0)
@@ -4149,7 +4185,7 @@ static b32 bowl_write_pacman(string_address root)
         if (!bowl_root_path(path, sizeof(path), root, "/etc/pacman.conf"))
                 return bowl_refuse("bowl path is too long\n");
 
-        got = file_slurp(path, text, sizeof(text));
+        got = bowl_slurp_in_root(root, "/etc/pacman.conf", text, sizeof(text));
         return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
 
         return_if((positive)got >= sizeof(text) - 1, bowl_refuse("pacman.conf is too long\n"));
@@ -5491,7 +5527,7 @@ static bool bowl_nix_read_seed(string_address root, p8 address_to nix,
 
         if (!bowl_root_path(path, sizeof(path), root, BOWL_NIX_SEED))
                 return false;
-        got = file_slurp(path, text, sizeof(text));
+        got = bowl_slurp_in_root(root, BOWL_NIX_SEED, text, sizeof(text));
         if (got <= 0 || (positive)got >= sizeof(text))
                 return false;
 
@@ -5528,7 +5564,7 @@ static b32 bowl_extract_nix(string_address archive, string_address root)
 
         if (!bowl_root_path(from, sizeof(from), root, "/install"))
                 return bowl_refuse("bowl path is too long\n");
-        got = file_slurp(from, script, sizeof(script));
+        got = bowl_slurp_in_root(root, "/install", script, sizeof(script));
         if (got <= 0 || (positive)got >= sizeof(script) ||
             !bowl_nix_assigned(script, (positive)got, "nix", nix) ||
             !bowl_nix_assigned(script, (positive)got, "cacert", cacert))
