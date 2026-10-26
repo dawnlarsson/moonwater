@@ -48039,6 +48039,21 @@ while True:
               "a boot whose security file cannot be published says so and still settles",
               repr((seen.get("boot"), lines[-2:])))
 
+        # A verdict that cannot be written is not a live session: `setup live`
+        # said so on standard error and then that the disks were left alone,
+        # and ended 0, so a script that asked for live went on as if it had it.
+        script = ("rm -rf /run/moonwater; mkdir -p /run/moonwater/verdict\n" + say("setup live") +
+                  "rmdir /run/moonwater/verdict\n" + say("setup live") +
+                  "echo \"@@verdict $(cat /run/moonwater/verdict)\"\n")
+        lines, finished = session(script)
+        refused = [line for line in lines if line.startswith("@@ setup live") or line.startswith("@@status")]
+        check(finished and len(refused) == 4 and refused[1] == "@@status 1" and refused[3] == "@@status 0" and
+              "@@verdict live" in lines,
+              "setup live whose verdict cannot be written fails, and says the disks are left alone only when it held",
+              repr(lines[-8:]))
+        check(sum(1 for line in lines if "the disks are left alone" in line) == 1,
+              "setup live that failed does not say the disks are left alone", repr(lines[-8:]))
+
         # A session that keeps a disk is not live until it powers off: the
         # disk's /root and /home stay bound, so `setup live` said live and
         # left the status saying nothing was kept, and a verdict that was
