@@ -294,21 +294,27 @@ static fn host_state_ready(void);
 
 #define HOST_VERDICT_EVENTS (0x040 | 0x080 | 0x100 | 0x200)
 
-static bipolar host_verdict_watch(void)
+/* An inotify watch of path for events, or -1 where none can be made. The
+   watch is nonblocking and closed on exec, and is read with host_watch_wait. */
+static bipolar host_watch_open(string_address path, unsigned int events)
 {
-        bipolar notify;
+        bipolar notify = system_call_1(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK);
 
-        host_state_ready();
-        notify = system_call_1(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK);
         if (notify < 0)
                 return -1;
         if (system_call_3(syscall(inotify_add_watch), (positive)notify,
-                          (positive)HOST_STATE, HOST_VERDICT_EVENTS) < 0)
+                          (positive)path, events) < 0)
         {
                 system_close((positive)notify);
                 return -1;
         }
         return notify;
+}
+
+static bipolar host_verdict_watch(void)
+{
+        host_state_ready();
+        return host_watch_open(HOST_STATE, HOST_VERDICT_EVENTS);
 }
 
 static fn host_verdict_unwatch(bipolar notify)
@@ -317,9 +323,22 @@ static fn host_verdict_unwatch(bipolar notify)
                 system_close((positive)notify);
 }
 
+/* Until something is queued on the watch, or limit runs out (null: for ever).
+   What is queued is read and dropped, so the next wait starts on the next
+   event. */
+static fn host_watch_wait(bipolar notify, timespec address_to limit)
+{
+        if (descriptor_wait_readable(notify, limit, null) > 0)
+        {
+                p8 drained[256];
+
+                while (system_read_once((positive)notify, drained, sizeof(drained)) > 0)
+                        ;
+        }
+}
+
 /* Until the directory is heard of, or the boot clock reads until (0: for
-   ever); fallback is the poll used where there is no watch. What is queued
-   is read and dropped, so the next wait starts on the next event. */
+   ever); fallback is the poll used where there is no watch. */
 static fn host_verdict_pause(bipolar notify, p64 until, p64 fallback)
 {
         p64 now = system_clock_ns(HOST_CLOCK_BOOTTIME);
@@ -340,13 +359,7 @@ static fn host_verdict_pause(bipolar notify, p64 until, p64 fallback)
                                   (until - now) % 1000000000};
                 limit = address_of span;
         }
-        if (descriptor_wait_readable(notify, limit, null) > 0)
-        {
-                p8 drained[256];
-
-                while (system_read_once((positive)notify, drained, sizeof(drained)) > 0)
-                        ;
-        }
+        host_watch_wait(notify, limit);
 }
 
 /* The bytes of a word a file held, its newline and the blanks after it taken off
@@ -508,10 +521,8 @@ static bipolar host_read_line(p8 address_to into, positive room)
                         cut = true;
         }
 
-        while (used && (into[used - 1] == '\r' || into[used - 1] == ' '))
-                used--;
-
-        into[used] = end;
+        //      The blanks a line ends with go as they go off a word.
+        used = (positive)host_word_end(into, (bipolar)used);
         return cut ? HOST_LINE_LONG : (bipolar)used;
 }
 
@@ -606,17 +617,22 @@ static fn host_verdict_set(string_address kind, string_address disk)
 #define RADIO_LOCK_NB 4
 #define RADIO_LOCK_UN 8
 
+/* A lock file, made if it is not there. Not through a link: the lock is made
+   where it is named. */
+static bipolar host_lock_open(string_address path)
+{
+        host_state_ready();
+        return system_open_at_mode(AT_FDCWD, path,
+                                   FILE_READ_WRITE | FILE_CREATE |
+                                       O_NOFOLLOW | O_CLOEXEC,
+                                   0600);
+}
+
 static bipolar host_lock(string_address path, bool wait)
 {
-        bipolar handle;
+        bipolar handle = host_lock_open(path);
         bipolar locked;
 
-        host_state_ready();
-        // Not through a link: the lock is made where it is named.
-        handle = system_open_at_mode(AT_FDCWD, path,
-                                     FILE_READ_WRITE | FILE_CREATE |
-                                         O_NOFOLLOW | O_CLOEXEC,
-                                     0600);
         if (handle < 0)
                 return handle;
 
@@ -665,15 +681,9 @@ static bipolar host_lock_file(string_address path, positive command,
                               b32 address_to owner)
 {
         host_record_lock lock = {.type = HOST_FILE_WRLCK};
-        bipolar handle;
+        bipolar handle = host_lock_open(path);
         bipolar asked;
 
-        host_state_ready();
-        // Not through a link: the lock is made where it is named.
-        handle = system_open_at_mode(AT_FDCWD, path,
-                                     FILE_READ_WRITE | FILE_CREATE | O_NOFOLLOW |
-                                         O_CLOEXEC,
-                                     0600);
         if (handle < 0)
                 return handle;
         do
@@ -811,17 +821,7 @@ static positive host_held_count;
 
 static bipolar host_lock_watch(void)
 {
-        bipolar notify = system_call_1(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK);
-
-        if (notify < 0)
-                return -1;
-        if (system_call_3(syscall(inotify_add_watch), (positive)notify,
-                          (positive)HOST_LOCK, HOST_LOCK_EVENTS) < 0)
-        {
-                system_close((positive)notify);
-                return -1;
-        }
-        return notify;
+        return host_watch_open(HOST_LOCK, HOST_LOCK_EVENTS);
 }
 
 static bool host_acquire(void)
@@ -837,13 +837,8 @@ static bool host_acquire(void)
                 return true;
         }
 
-        host_state_ready();
-        // Not through a link: the lock is made where it is named. A lock that
-        // cannot be opened at all has nobody to exclude, as it never had.
-        handle = system_open_at_mode(AT_FDCWD, HOST_LOCK,
-                                     FILE_READ_WRITE | FILE_CREATE |
-                                         O_NOFOLLOW | O_CLOEXEC,
-                                     0600);
+        // A lock that cannot be opened at all has nobody to exclude, as it never had.
+        handle = host_lock_open(HOST_LOCK);
         if (handle < 0)
         {
                 host_held = handle;
@@ -886,13 +881,7 @@ static bool host_acquire(void)
                 p64 left = HOST_LOCK_WAIT_NS - waited;
                 timespec span = {left / 1000000000, left % 1000000000};
 
-                if (descriptor_wait_readable(notify, address_of span, null) > 0)
-                {
-                        p8 drained[256];
-
-                        while (system_read_once((positive)notify, drained, sizeof(drained)) > 0)
-                                ;
-                }
+                host_watch_wait(notify, address_of span);
         }
 
         if (notify >= 0)
@@ -997,6 +986,17 @@ static bool host_parent(string_address name, p8 address_to into, positive room)
         return true;
 }
 
+/* The install a census holds for disk, if it holds one. */
+static host_install address_to host_census_find(host_census address_to census,
+                                                string_address disk)
+{
+        for (positive at = 0; at < census->count; at++)
+                if (string_equals(census->found[at].disk, disk))
+                        return census->found + at;
+
+        return null;
+}
+
 static bool host_census_visit(storage_identity address_to identity,
                               address_any opaque)
 {
@@ -1014,10 +1014,7 @@ static bool host_census_visit(storage_identity address_to identity,
             !host_parent(name, parent, sizeof(parent)))
                 return true;
 
-        for (positive at = 0; at < census->count; at++)
-                if (string_equals(census->found[at].disk, parent))
-                        install = census->found + at;
-
+        install = host_census_find(census, parent);
         if (!install)
         {
                 if (census->count == HOST_INSTALLS)
@@ -1063,16 +1060,6 @@ static fn host_census_said(host_census address_to census)
                 host_say(log_error, host_label "more than %p disks have Moonwater partitions; "
                                                "the rest are not looked at\n",
                          (positive)HOST_INSTALLS);
-}
-
-static host_install address_to host_census_find(host_census address_to census,
-                                                string_address disk)
-{
-        for (positive at = 0; at < census->count; at++)
-                if (string_equals(census->found[at].disk, disk))
-                        return census->found + at;
-
-        return null;
 }
 
 typedef struct
