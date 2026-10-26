@@ -45501,6 +45501,17 @@ def harness_moonwater_cli(argv):
         check(done and seen["cpu"]["status"] == 0 and not any("boost" in line for line in seen["cpu"]["out"]),
               "cpu says nothing of boost where its switch reads empty", repr(seen.get("cpu")))
 
+        # charge reads the battery's capacity. Where the kernel gives none,
+        # the reading said 0%, and the status after it a dangling comma.
+        sys_reset()
+        (fake / "class/power_supply/BAT0/capacity").unlink()
+        got, done = session("rm -f /root/tune\n" + say("charge"))
+        seen = answers(got)
+        check(done and seen["charge"]["status"] == 0 and
+              any("battery charge unknown, Discharging" in line for line in seen["charge"]["out"]) and
+              not any("battery 0%" in line or ", ;" in line for line in seen["charge"]["out"]),
+              "charge says the charge is unknown where the battery gives no capacity", repr(seen.get("charge")))
+
         # What a sleep reports and puts back is by name. The wakeup sources and
         # the backlights were paired with what they were before by their place
         # in the directory, so a source that went while the machine slept

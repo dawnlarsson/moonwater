@@ -13306,17 +13306,25 @@ static b32 tune_charge(string_address address_to arguments, positive count)
 
         if (count == 2)
         {
+                bool have_capacity;
+
                 have_limit = string_join(path, sizeof(path), TUNE_SYS_BATTERY "/",
                                          (string_address)name, "/charge_control_end_threshold") &&
                              tune_number(path, address_of limit);
-                if (string_join(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
-                                "/capacity"))
-                        (void)tune_number(path, address_of capacity);
+                have_capacity = string_join(path, sizeof(path), TUNE_SYS_BATTERY "/",
+                                            (string_address)name, "/capacity") &&
+                                tune_number(path, address_of capacity);
                 status[0] = end;
                 if (string_join(path, sizeof(path), TUNE_SYS_BATTERY "/", (string_address)name,
                                 "/status"))
                         (void)tune_word(path, status, sizeof(status));
-                string_format(log, host_label "battery %p%%, %s", capacity, (string_address)status);
+                //      A battery that gives no capacity says so, and does not say 0 percent.
+                if (have_capacity)
+                        string_format(log, host_label "battery %p%%", capacity);
+                else
+                        string_format(log, host_label "battery charge unknown");
+                if (status[0])
+                        string_format(log, ", %s", (string_address)status);
                 if (have_limit)
                         string_format(log, "; charging stops at %p%%\n", limit);
                 else
