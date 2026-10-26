@@ -55,6 +55,7 @@ moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [u
 moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
 moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
 moonwater timezone [ZONE|list]         IANA name, country, +1 or POSIX; manual
+moonwater timezone auto                from the network, one Cloudflare request per network joined [auto]
 moonwater canvas scale [N|auto]        device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]
 moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
 moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]

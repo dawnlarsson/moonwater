@@ -47170,6 +47170,15 @@ while True:
         check(("cpu online|offline N", "hotplug one processor") in in_readme,
               "the README shows the cpu online and offline rows the pages have",
               repr(sorted(command for command, _ in in_readme if command.startswith("cpu"))))
+        #       And the other way for the verbs of the clock, the zone, ntp,
+        #       the keyboard and the name: every row of their pages has its line
+        #       in the README, as `timezone auto` had not.
+        readme_commands = {command for command, _ in in_readme}
+        clock_rows = sorted(command for command, _ in on_pages
+                            if command.split()[0] in ("timezone", "ntp", "keyboard", "name", "time"))
+        check(clock_rows and all(command in readme_commands for command in clock_rows),
+              "the README has a line for every row of the time, timezone, ntp, keyboard and name pages",
+              [command for command in clock_rows if command not in readme_commands])
         #       The settings table (src/sh/registry.c) is where a setting is written once: its row of the
         #       pages and its line in the README are asked of it, each setting the window lists is a row
         #       of it and the window keeps no list of its own, and a verb it names has its marker on the
