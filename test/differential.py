@@ -46641,8 +46641,9 @@ while True:
         kept = out.get("kept", "").split("\n")
         check(finished and seen.get("usb lock", {}).get("status") == 0 and
               "allow 0627:0001/28754-tablet hid" in kept and "allow 0627:0001/68284-kbd hid" in kept and
-              "allow 46f4:0001/E\\x1b[31mVIL\\x07 storage" in kept and "allow abcd:1111/-@1-6.1 hid" in kept and
-              "allow cccc:0007/-@1-7 other" in kept and "allow 2109:2818/-@1-6 hub" in kept and
+              "allow 46f4:0001/E\\x1b[31mVIL\\x07 storage" in kept and
+              "allow abcd:1111/-@0000:00:03.0/0002/6.1 hid" in kept and
+              "allow cccc:0007/-@0000:00:03.0/0002/7 other" in kept and "allow 2109:2818/-@0000:00:03.0/0002/6 hub" in kept and
               not any("1234:5678" in line or "1234:9999" in line or "2109:2817" in line for line in kept) and
               "mode lock" in kept and "class storage deny" in kept and kept[-3:] == ["0", "0", "0"],
               "usb lock keeps every device plugged in as a rule with its classes, a serial too long to keep pinned to "
@@ -46747,6 +46748,34 @@ while True:
               "says why, and a verb that can write the file keeps it and lets /run go",
               repr((seen.get("usb lock"), out.get("unkept force"), out.get("usb", "")[-400:], out.get("unkept held"),
                     out.get("unkept kept"))))
+
+        # Places: a device with no serial is pinned by its controller (the root hub's
+        # serial), its root hub and its port path, which a boot that numbers the buses
+        # in another order does not move. A pin written before places (-@1-6.1) is read
+        # by the bus number's port as it was; usb lock writes it again by place; with
+        # the controller come up as usb2 the place still names it; and an id typed
+        # with a place is taken, replacing the device's allow rule.
+        script = (usb_tree + "dev 1-8 7777 0008 - 'No serial' 1 unknown; face 1-8:1.0 03 1\n"
+                  "printf 'mode lock\\nallow abcd:1111/-@1-6.1 hid\\nallow 7777:0008/-@1-8 hid\\n' > /root/usb.policy\n"
+                  "echo 0 > $d/1-6.1/authorized; echo 0 > $d/1-8/authorized\n" +
+                  say("usb apply") + usb_show("place old", "v $d/1-6.1/authorized $d/1-8/authorized") + say("usb lock") +
+                  usb_show("place kept", "grep -e '^allow abcd:1111/' -e '^allow 7777:0008/' /root/usb.policy") +
+                  "mv $d/usb1 $d/usb2; for x in $d/1-*; do mv \"$x\" \"$d/2-${x##*/1-}\"; done\n"
+                  "echo 0 > $d/2-6.1/authorized; echo 0 > $d/2-8/authorized\n" + say("usb apply") +
+                  usb_show("place moved", "v $d/2-6.1/authorized $d/2-8/authorized") +
+                  say("usb deny 7777:0008/-@0000:00:03.0/0002/8") +
+                  usb_show("place denied", "v $d/2-8/authorized; grep '7777:0008' /root/usb.policy") +
+                  "kill $(/tmp/moonwater usb | sed -n 's/.*watcher running, pid \\([0-9]*\\).*/\\1/p') 2> /dev/null || :\n")
+        lines, finished = session(script)
+        seen = answers(lines)
+        out = {key: "\n".join(value["out"]) for key, value in seen.items()}
+        check(finished and out.get("place old") == "1\n1" and
+              out.get("place kept") == "allow abcd:1111/-@0000:00:03.0/0002/6.1 hid\nallow 7777:0008/-@0000:00:03.0/0002/8 hid" and
+              out.get("place moved") == "1\n1" and seen.get("usb deny 7777:0008/-@0000:00:03.0/0002/8", {}).get("status") == 0 and
+              out.get("place denied") == "0\ndeny 7777:0008/-@0000:00:03.0/0002/8",
+              "a pin names the controller, root hub and port path: an old -@PORT pin is read as it was and written again "
+              "by place, the place survives the buses numbered in another order, and a typed place is taken",
+              repr((out.get("place old"), out.get("place kept"), out.get("place moved"), out.get("place denied"))))
 
         # The file: lines that are no rule are left out and counted, a policy
         # read at boot (apply) lets in the device it names, and the cap.

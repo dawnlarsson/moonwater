@@ -14051,8 +14051,11 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define USB_RULES_MOST 64
 #define USB_PORT_ROOM 32
 #define USB_KEY_ROOM 128
-// A rule as text: its id, its key, its port, and the classes an allow rule keeps.
-#define USB_RULE_ROOM (USB_KEY_ROOM + USB_PORT_ROOM + 80)
+// Where a device is by names that do not move between boots: its controller, its root hub, its port path.
+#define USB_PLACE_ROOM 64
+#define USB_CONTROLLER_SET "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._:-"
+// A rule as text: its id, its key, its place, and the classes an allow rule keeps.
+#define USB_RULE_ROOM (USB_KEY_ROOM + USB_PLACE_ROOM + 80)
 #define USB_SERIAL_ROOM 512
 #define USB_TEXT_ROOM 160
 // How much of what a device says of itself is shown, at most.
@@ -14142,6 +14145,7 @@ static bipolar usb_kind_named(string_address name)
 typedef struct
 {
         p8 port[USB_PORT_ROOM];    // its name in sysfs: 1-4.1, or usb1 for a root hub
+        p8 place[USB_PLACE_ROOM];  // 0000:00:14.0/0002/4.1 (a root hub's: 0000:00:14.0/0002), or empty
         p8 id[10];                 // vvvv:pppp
         p8 key[USB_KEY_ROOM];      // its serial as usb_key spells it, or -
         p8 product[USB_TEXT_ROOM]; // what it says it is, as it says it
@@ -14179,7 +14183,7 @@ typedef struct
         p8 kinds; // an allow rule's classes, a bit each: what the device was when it was allowed (0: all)
         p8 id[10];
         p8 key[USB_KEY_ROOM];
-        p8 port[USB_PORT_ROOM]; // for a key of -, the port the rule is pinned to
+        p8 port[USB_PLACE_ROOM]; // for a key of -, the place the rule is pinned to (or, written before places, the port)
 } usb_rule;
 
 typedef struct
@@ -14272,9 +14276,32 @@ static bool usb_port_valid(string_address text)
                string_span_of_set(text + bus + 1, "0123456789.") == length - bus - 1;
 }
 
-/* VID:PID, VID:PID/SERIAL or VID:PID/-@PORT, into a rule's id, key and port.
-   The key is empty when VID:PID was all there was, for the present devices
-   to say. */
+/*
+        A place: the controller a root hub belongs to, as the root hub's own
+        serial names it (its bus address: 0000:00:14.0 for a PCI one), the
+        root hub's product (0002 for USB 2, 0003 for USB 3: an xHCI has one of
+        each, behind the same address), and the port path below it, as the
+        device's sysfs name has it after the bus number: 0000:00:14.0/0002/4.1.
+        The bus number in 1-4.1 is the order controllers came up in, which a
+        machine whose controllers probe at once (EHCI does) can change between
+        boots, and a rule pinned to it then held the keyboard it was made for.
+*/
+static bool usb_place_valid(string_address text)
+{
+        positive length = string_length(text);
+        positive controller = string_span_of_set(text, USB_CONTROLLER_SET);
+        string_address path = text + controller + 6;
+
+        return controller && length < USB_PLACE_ROOM && text[controller] == '/' &&
+               string_span_of_set(text + controller + 1, "0123456789abcdef") == 4 && text[controller + 5] == '/' &&
+               byte_is_digit(path[0]) && text[length - 1] != '.' && !string_find(path, "..") &&
+               string_span_of_set(path, "0123456789.") == string_length(path);
+}
+
+/* VID:PID, VID:PID/SERIAL or VID:PID/-@PLACE, into a rule's id, key and
+   place; -@PORT, a port by bus number as rules were pinned before places,
+   is read as it was. The key is empty when VID:PID was all there was, for
+   the present devices to say. */
 static bool usb_id_parse(string_address text, usb_rule address_to rule)
 {
         static const p8 hex[] = "0123456789abcdefABCDEF";
@@ -14293,7 +14320,7 @@ static bool usb_id_parse(string_address text, usb_rule address_to rule)
         rest = text + 10;
         if (string_has_prefix(rest, "-@"))
         {
-                if (!usb_port_valid(rest + 2))
+                if (!usb_port_valid(rest + 2) && !usb_place_valid(rest + 2))
                         return false;
                 string_copy(rule->key, "-");
                 string_copy(rule->port, rest + 2);
@@ -14448,6 +14475,10 @@ static bool usb_census_visit(string_address directory, string_address name, addr
         device->root = host_starts(name, "usb");
         got = usb_read(name, "serial", word, sizeof(word));
         usb_key(device->key, word, got);
+        //      A root hub's serial is its controller's bus address, the kernel's to say: the start of a place.
+        if (device->root && got > 0 && string_span_of_set((string_address)word, USB_CONTROLLER_SET) == (positive)got &&
+            !string_join(device->place, sizeof(device->place), (string_address)word, "/", (string_address)product))
+                device->place[0] = end;
         got = usb_read(name, "product", device->product, sizeof(device->product));
         device->product_length = got > 0 ? (positive)got : 0;
         device->says_fixed = usb_says(name, "removable", "fixed");
@@ -14538,20 +14569,47 @@ static fn usb_census_take(usb_census address_to census)
                         device->fixed = above && above->says_fixed;
                 }
         }
+
+        //      A device's place is its root hub's and the path after the bus number (usb_place_valid).
+        for (positive at = 0; at < census->count; at++)
+        {
+                usb_device address_to device = census->device + at;
+                positive bus = string_span_of_set((string_address)device->port, "0123456789");
+                p8 hub[USB_PORT_ROOM];
+                usb_device address_to root;
+
+                if (device->root || !string_join(hub, sizeof(hub), "usb", (string_address)device->port))
+                        continue;
+                hub[3 + bus] = end;
+                root = usb_find(census, (string_address)hub);
+                if (root && root->place[0] &&
+                    !string_join(device->place, sizeof(device->place), (string_address)root->place, "/",
+                                 (string_address)device->port + bus + 1))
+                        device->place[0] = end;
+        }
+}
+
+/* Whether a rule names a device: its id, and its serial wherever it is; with
+   no serial (-), the place it is pinned to. A pin written before places
+   (usb_port_valid's 1-4) is read as it was, by the port its bus number
+   gives, until usb lock or usb allow writes it again by place. */
+static bool usb_rule_names(usb_rule address_to rule, usb_device address_to device)
+{
+        if (!string_equals((string_address)rule->id, (string_address)device->id) ||
+            !string_equals((string_address)rule->key, (string_address)device->key))
+                return false;
+        if (!string_equals((string_address)rule->key, "-"))
+                return true;
+        return usb_port_valid((string_address)rule->port)
+                   ? string_equals((string_address)rule->port, (string_address)device->port)
+                   : device->place[0] && string_equals((string_address)rule->port, (string_address)device->place);
 }
 
 static usb_rule address_to usb_rule_for(usb_policy address_to policy, usb_device address_to device)
 {
         for (positive at = 0; at < policy->count; at++)
-        {
-                usb_rule address_to rule = policy->rule + at;
-
-                if (string_equals((string_address)rule->id, (string_address)device->id) &&
-                    string_equals((string_address)rule->key, (string_address)device->key) &&
-                    (!string_equals((string_address)rule->key, "-") ||
-                     string_equals((string_address)rule->port, (string_address)device->port)))
-                        return rule;
-        }
+                if (usb_rule_names(policy->rule + at, device))
+                        return policy->rule + at;
         return null;
 }
 
@@ -15113,7 +15171,9 @@ static fn usb_rule_from(usb_rule address_to rule, p8 kind, usb_device address_to
                         rule->kinds |= (p8)(1u << census->interface[at].kind);
         string_copy(rule->id, (string_address)device->id);
         string_copy(rule->key, (string_address)device->key);
-        string_copy(rule->port, string_equals((string_address)device->key, "-") ? (string_address)device->port : (string_address) "");
+        string_copy(rule->port, !string_equals((string_address)device->key, "-") ? (string_address) ""
+                                : device->place[0]                              ? (string_address)device->place
+                                                                                : (string_address)device->port);
 }
 
 static bool usb_rule_same(usb_rule address_to one, usb_rule address_to other)
@@ -15123,14 +15183,16 @@ static bool usb_rule_same(usb_rule address_to one, usb_rule address_to other)
                string_equals((string_address)one->port, (string_address)other->port);
 }
 
-// The rules of the policy but those that name the same device as rule; how many went.
-static positive usb_rules_drop(usb_policy address_to policy, usb_rule address_to rule)
+/* The rules of the policy but those that name the same device as rule, and
+   any that names device (plugged in now, or null): a pin written before
+   places goes with the rule that replaces it. How many went. */
+static positive usb_rules_drop(usb_policy address_to policy, usb_rule address_to rule, usb_device address_to device)
 {
         positive kept = 0;
         positive count = policy->count;
 
         for (positive at = 0; at < count; at++)
-                if (!usb_rule_same(policy->rule + at, rule))
+                if (!usb_rule_same(policy->rule + at, rule) && !(device && usb_rule_names(policy->rule + at, device)))
                         policy->rule[kept++] = policy->rule[at];
         policy->count = kept;
         return count - kept;
@@ -15303,9 +15365,14 @@ static b32 usb_lock_held(bool say, p8 how)
         for (positive at = 0; at < census.count; at++)
         {
                 usb_device address_to device = census.device + at;
+                usb_rule address_to had = usb_rule_for(address_of policy, device);
                 usb_rule rule;
 
-                if (device->root || device->fixed || usb_rule_for(address_of policy, device))
+                //      A pin written before places is written again by the place of the device it names.
+                if (had && string_equals((string_address)had->key, "-") && usb_port_valid((string_address)had->port) &&
+                    device->place[0])
+                        string_copy(had->port, (string_address)device->place);
+                if (device->root || device->fixed || had)
                         continue;
                 usb_rule_from(address_of rule, USB_ALLOW, device, address_of census, false);
                 if (!rule.kinds && !stay)
@@ -15419,11 +15486,8 @@ static b32 usb_resolve(string_address word, usb_census address_to census, usb_ru
         {
                 usb_device address_to one = census->device + at;
 
-                if (one->root || !string_equals((string_address)one->id, (string_address)rule->id))
-                        continue;
-                if (rule->key[0] && (!string_equals((string_address)one->key, (string_address)rule->key) ||
-                                     (string_equals((string_address)rule->key, "-") &&
-                                      !string_equals((string_address)one->port, (string_address)rule->port))))
+                if (one->root || !string_equals((string_address)one->id, (string_address)rule->id) ||
+                    (rule->key[0] && !usb_rule_names(rule, one)))
                         continue;
                 count++;
                 *device = one;
@@ -15475,7 +15539,7 @@ static b32 usb_rule_verb(string_address word, p8 kind)
                 usb_rule_from(address_of rule, kind, device, address_of census, true);
         rule.kind = kind;
         if (!failed)
-                (void)usb_rules_drop(address_of policy, address_of rule);
+                (void)usb_rules_drop(address_of policy, address_of rule, device);
         if (!failed && policy.count == USB_RULES_MOST)
                 failed = host_refuse("the policy keeps %p rules at most; usb forget one first\n",
                                      (positive)USB_RULES_MOST);
@@ -15533,7 +15597,7 @@ static b32 usb_forget(string_address word)
                             matched++ == 0)
                                 rule = policy.rule[at];
         usb_rule_text(text, sizeof(text), address_of rule);
-        if (policy.cut || matched > 1 || !rule.key[0] || !usb_rules_drop(address_of policy, address_of rule))
+        if (policy.cut || matched > 1 || !rule.key[0] || !usb_rules_drop(address_of policy, address_of rule, device))
         {
                 radio_unlock(lock);
                 return policy.cut     ? host_refuse("%s is too long to change here\n", USB_POLICY)

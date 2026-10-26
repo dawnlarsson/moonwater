@@ -21633,8 +21633,10 @@ raw, _ = shell.run("moonwater usb > /tmp/usb.out 2>&1; tr -cd '\\001\\007\\033' 
 out.append(("U4 a serial of escapes reaches neither usb nor the log raw, and is shown spelled",
             " ".join(raw.split()) if not hostile else "plug: " + hostile, "0 0 1"))
 pinned = port_of(shell, "[ \"$s\" = \"$(printf '\\001%.0s' $(seq 40))\" ]")
-said, status = shell.run("moonwater usb allow %s; grep -c '^allow 0627:0001/-@%s hid' /root/usb.policy" % (pinned, pinned), 30)
-out.append(("U4 one too long to keep is allowed by its port, as the class it shows",
+#       Pinned by its place: the controller's address, the root hub's product, and the path after the bus number.
+said, status = shell.run("moonwater usb allow %s; grep -c '^allow 0627:0001/-@[^ /]*/000[23]/%s hid' /root/usb.policy"
+                         % (pinned, pinned.split("-", 1)[-1]), 30)
+out.append(("U4 one too long to keep is allowed by its place, as the class it shows",
             said.split()[-1] if pinned and said.split() else "no port: " + why(shell), "1"))
 unplug("m3")
 unplug("m4")
