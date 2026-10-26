@@ -48048,6 +48048,19 @@ while True:
               "setup live refuses a session that keeps a disk, and the verdict stays as it was",
               repr((seen.get("setup live"), lines[-3:])))
 
+        # A write that cannot get a descriptor leaves nothing behind. A state
+        # file is written beside its name in a private directory of its own
+        # (.moonwater-stage-PID-N), and a process with no descriptor to open
+        # that directory with, here one with four, failed the write and left
+        # the directory, one for each time it was asked.
+        script = ("cp -p /root/name /tmp/name.kept 2>/dev/null; rm -rf /root/.moonwater-stage-*\n"
+                  "(ulimit -n 4; /tmp/moonwater name stage-row 2>&1; echo \"@@status $?\")\n"
+                  "echo \"@@left $(ls -A /root | grep -c moonwater-stage)\"\n"
+                  "rm -rf /root/.moonwater-stage-*; mv /tmp/name.kept /root/name 2>/dev/null || :\n")
+        lines, finished = session(script)
+        check(finished and "@@left 0" in lines and any(line.startswith("@@status ") for line in lines),
+              "a state write that has no descriptor for its stage directory leaves no stage directory", repr(lines[-4:]))
+
         # The settings and lists are root's too: for anybody else the page said
         # `init mount is on` and nothing at boot of a machine it could not
         # read, as facts; it says nothing of them. (The zone, ntp and keyboard

@@ -1195,14 +1195,22 @@ static COLD bipolar system_make_directory_exact_at(
         bipolar handle = system_open_at(
             directory, path, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
 
+        //      A directory this could not give its exact mode is not one it made:
+        //      the caller is told it failed, so it is not left standing (a process
+        //      out of descriptors left one for every directory it was asked for).
         if (handle < 0)
+        {
+                (void)system_remove_at(directory, path, AT_REMOVEDIR);
                 return handle;
+        }
 
         bipolar set = system_call_4(
             syscall(fchmodat2), (positive)handle,
             (positive)(string_address)"", mode & 01777, AT_EMPTY_PATH);
 
         system_close(handle);
+        if (set < 0)
+                (void)system_remove_at(directory, path, AT_REMOVEDIR);
         return set < 0 ? set : made;
 }
 
@@ -1608,7 +1616,16 @@ static COLD bipolar system_path_private_directory_open_at(
                     directory, name,
                     O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (handle < 0)
+        {
+                /* Nothing is open to compare the name against, so only a parent
+                   that cleanup can trust has it taken away again: the directory
+                   is empty and ours, and a process out of descriptors (EMFILE)
+                   would otherwise leave one for every write it fails. */
+                if (system_path_parent_cleanup_safe(directory))
+                        (void)system_remove_at(directory, name,
+                                               SYSTEM_PATH_AT_REMOVEDIR);
                 return handle;
+        }
 
         bipolar valid = system_path_same_opened_at(handle, directory, name);
         system_path_identity opened;
