@@ -169,6 +169,27 @@
                 Draws the run with its pen starting at x on the baseline row,
                 and answers its advance.
 
+        b64 font_draw_turned(font_engine *engine, const font_face *const *faces,
+                             p32 count, const p8 *text, positive length,
+                             p32 size, p32 flags, p32 turn,
+                             const font_target *target, b32 x, b32 baseline,
+                             p32 colour, p32 background)
+                font_draw onto a target turned a quarter, for a band on the
+                side of a screen. The run is laid out as font_draw lays it
+                on a target target->height wide and target->width high, x
+                and baseline as there, and that picture is turned onto the
+                target: with FONT_TOPS_RIGHT a quarter clockwise, the run
+                reading down with its glyphs' tops to the right, and with
+                FONT_TOPS_LEFT a quarter the other way, reading up with the
+                tops to the left. Each byte of coverage is the upright
+                run's, at its turned place, from the same glyph cache.
+
+        b64 font_extent(font_engine *engine, const font_face *const *faces,
+                        p32 count, const p8 *text, positive length, p32 size,
+                        p32 flags)
+                The advance font_draw answers for the run, laid out and not
+                drawn: its length along its line, upright or turned.
+
         fn font_cell(font_engine *engine, const font_face *const *faces,
                      p32 count, p32 code, p32 cells, const font_metrics *grid,
                      p32 size, p32 flags, const font_target *target, b32 x,
@@ -219,6 +240,10 @@
 #define FONT_OBLIQUE 8
 #define FONT_EMBOLDEN 16
 #define FONT_UNDARKENED 32
+
+//      Which way font_draw_turned turns a run: the side its glyphs' tops face.
+#define FONT_TOPS_RIGHT 1
+#define FONT_TOPS_LEFT 2
 
 #define FONT_DRAWN 0xffff
 #define FONT_UNKNOWN 0xff000000u
@@ -4479,6 +4504,49 @@ static fn font_blend(font_engine address_to e, const font_target address_to targ
 }
 
 /*
+        A glyph at x, y of a run's own upright target (target->height wide
+        and target->width high) onto the target turned a quarter, as
+        font_draw_turned says. A column of the glyph's coverage is a row of
+        the turned glyph, byte for byte, so the turn moves bytes and makes
+        none: the rows are laid in the strip, as many as it holds at once,
+        and each band of them blended as an upright glyph is, over what is
+        on the target there. A glyph is turned as it is laid and not cached
+        turned: a run turned is the same glyphs as the run upright, and the
+        tabs' atlas is 128 pixels square.
+*/
+static fn font_blend_turned(font_engine address_to e, const font_target address_to target, p32 turn, b32 x, b32 y,
+                            font_bitmap glyph, p32 colour, p32 background, p32 strength)
+{
+        bool right = turn == FONT_TOPS_RIGHT;
+        b32 left = right ? target->width - y - glyph.height : y;
+        b32 most = (b32)(FONT_STRIP / (positive)(glyph.height > 0 ? glyph.height : 1));
+
+        if (!glyph.coverage || glyph.width <= 0 || glyph.height <= 0 || left >= target->width ||
+            left + glyph.height <= 0)
+                return;
+        for (b32 from = 0; from < glyph.width; from += most)
+        {
+                b32 rows = glyph.width - from < most ? glyph.width - from : most;
+                //      The band's first row on the target: the glyph's column from turned right, or the band's
+                //      last column turned left.
+                b32 top = right ? x + from : target->height - x - from - rows;
+
+                if (top >= target->height || top + rows <= 0)
+                        continue;
+                for (b32 k = 0; k < rows; k++)
+                {
+                        const p8 address_to column = glyph.coverage + (positive)(right ? from + k : from + rows - 1 - k);
+                        p8 address_to row = e->strip + (positive)k * (positive)glyph.height;
+
+                        for (b32 r = 0; r < glyph.height; r++)
+                                row[right ? glyph.height - 1 - r : r] = column[(positive)r * glyph.stride];
+                }
+                font_blend(e, target, left, top, (font_bitmap){e->strip, (positive)glyph.height, 0, 0, glyph.height, rows},
+                           colour, background, strength);
+        }
+}
+
+/*
         Layout. Each code point is looked for in the chain of faces in order,
         and the first that has it draws it; one none of them has is drawn as
         a cell if it is one, and as the first face's missing glyph if not.
@@ -4627,6 +4695,83 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
                                    background, strength);
                 }
                 pen += place.advance;
+                last = place;
+        }
+        return pen;
+}
+
+/*
+        font_draw's loop, each glyph laid turned. It is a loop of its own and
+        not font_draw's with the turn as an argument: that one loop inlined
+        into both moved gcc's registers in font_draw (the engine kept on the
+        stack and read again for every glyph), and font_draw is every line of
+        upright text there is.
+*/
+b64 font_draw_turned(font_engine address_to e, const font_face address_to const address_to faces,
+                     p32 count, const p8 address_to text, positive length, p32 size, p32 flags, p32 turn,
+                     const font_target address_to target, b32 x, b32 baseline, p32 colour, p32 background)
+{
+        positive at = 0;
+        b64 pen = 0;
+        font_place last = {0, FONT_DRAWN, 0, 0};
+
+        turn = turn == FONT_TOPS_LEFT ? FONT_TOPS_LEFT : FONT_TOPS_RIGHT;
+        flags = font_polarity(flags, colour, background);
+        p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
+
+        style |= style & 1 ? 4 : 0;
+        while (at < length && count)
+        {
+                font_place place;
+
+                at = font_decode(text, length, at, &place.glyph);
+                font_find(e, faces, count, place.glyph, &place.face, &place.glyph);
+                if (place.face != FONT_DRAWN && last.face == place.face && !(flags & FONT_UNKERNED))
+                        pen += font_kern(e, faces[place.face], last.glyph, place.glyph, size);
+
+                b32 eighth = font_eighths((b64)x + pen);
+                if (place.face == FONT_DRAWN)
+                {
+                        font_metrics cell = font_metrics_at(faces[0], size);
+                        font_bitmap box = font_cached(e, null, place.glyph,
+                                                      (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
+                        place.advance = cell.cell_width << 16;
+                        font_blend_turned(e, target, turn, eighth >> 3, baseline - cell.baseline, box, colour,
+                                          background, strength);
+                }
+                else
+                {
+                        font_bitmap box = font_cached(e, faces[place.face], place.glyph, size,
+                                                      (p32)eighth & 7, style, 0);
+                        place.advance = font_advance(faces[place.face], place.glyph, size);
+                        font_blend_turned(e, target, turn, (eighth >> 3) + box.left, baseline - box.top, box,
+                                          colour, background, strength);
+                }
+                pen += place.advance;
+                last = place;
+        }
+        return pen;
+}
+
+//      The pen's steps of font_draw, kerning and the cell a drawn code
+//      point takes included, without finding a bitmap.
+b64 font_extent(font_engine address_to e, const font_face address_to const address_to faces,
+                p32 count, const p8 address_to text, positive length, p32 size, p32 flags)
+{
+        positive at = 0;
+        b64 pen = 0;
+        font_place last = {0, FONT_DRAWN, 0, 0};
+
+        while (at < length && count)
+        {
+                font_place place;
+
+                at = font_decode(text, length, at, &place.glyph);
+                font_find(e, faces, count, place.glyph, &place.face, &place.glyph);
+                if (place.face != FONT_DRAWN && last.face == place.face && !(flags & FONT_UNKERNED))
+                        pen += font_kern(e, faces[place.face], last.glyph, place.glyph, size);
+                pen += place.face == FONT_DRAWN ? font_metrics_at(faces[0], size).cell_width << 16
+                                                : font_advance(faces[place.face], place.glyph, size);
                 last = place;
         }
         return pen;

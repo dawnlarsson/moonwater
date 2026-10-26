@@ -113699,6 +113699,98 @@ static fn check_upright(void)
 }
 
 /*
+        Turned text is upright text turned, pixel for pixel. Each run is drawn
+        upright on a width by height picture and turned on a height by width
+        one whose ground is the upright ground turned the same way; the turned
+        picture must be the upright one turned a quarter clockwise with its
+        tops right and anticlockwise with them left, every byte, and the two
+        advances and font_extent's one number. The lines above, a title cut
+        to fit with its dots, and each run also cut: begun left of the
+        picture and running off its end, its tops cut off, its descenders and
+        half its bodies cut off. Then one glyph so large that its turn takes
+        the strip more than once.
+*/
+static p32 turn_upright[LINE_W * LINE_H], turn_turned[LINE_W * LINE_H], turn_want[LINE_W * LINE_H];
+
+//      The picture width by height turned onto into (height by width): clockwise, or anticlockwise for left.
+static fn turn_picture(const p32 address_to from, b32 width, b32 height, p32 address_to into, bool left)
+{
+        for (b32 y = 0; y < width; y++)
+                for (b32 x = 0; x < height; x++)
+                        into[y * height + x] = left ? from[x * width + (width - 1 - y)] : from[(height - 1 - x) * width + y];
+}
+
+//      One run both ways on width by height; answers whether both turns are the upright run turned.
+static bool turn_run(font_engine address_to e, const font_face address_to const address_to faces, p32 count,
+                     string_address text, p32 size, b32 x, b32 baseline, p32 colour, p32 background, b32 width,
+                     b32 height, p32 address_to upright, p32 address_to turned, p32 address_to want)
+{
+        font_target flat = {upright, (positive)width, width, height}, stood = {turned, (positive)height, height, width};
+        positive length = string_length(text);
+        bool same = true;
+
+        line_ground(upright, width, height, background);
+        b64 advance = font_draw(e, faces, count, (const p8 address_to)text, length, size, 0, &flat, x, baseline, colour,
+                                background);
+        same = advance == font_extent(e, faces, count, (const p8 address_to)text, length, size, 0);
+        for (p32 way = 0; way < 2; way++)
+        {
+                line_ground(want, width, height, background);
+                turn_picture(want, width, height, turned, way);
+                same = same && font_draw_turned(e, faces, count, (const p8 address_to)text, length, size, 0,
+                                                way ? FONT_TOPS_LEFT : FONT_TOPS_RIGHT, &stood, x, baseline, colour,
+                                                background) == advance;
+                turn_picture(upright, width, height, want, way);
+                same = same && !memory_compare(turned, want, (positive)width * (positive)height * 4);
+        }
+        return same;
+}
+
+static fn check_turned(void)
+{
+        static font_engine e;
+        static p8 store[1024 * 1024];
+        static p32 big_upright[720 * 640], big_turned[720 * 640], big_want[720 * 640];
+        static const string_address cut = "Settings \xe2\x80\x94 Display and t...";
+        static const b32 cuts[4][2] = {{(b32)(3 << 16), LINE_BASELINE}, {-(b32)(5 << 16) - 0x4000, LINE_BASELINE},
+                                       {(b32)(3 << 16) + 0x2000, 6}, {(b32)(3 << 16) + 0x6000, LINE_H + 5}};
+        const font_face address_to faces[2] = {&line_faces[0], &line_faces[1]};
+        positive runs = 0, wrong = 0;
+        p32 face, glyph;
+
+        if (!line_faces[0].data || !line_faces[1].data)
+        {
+                check("turned: the faces this tree ships load", false);
+                return;
+        }
+        font_start(&e, store, 1024, 1024);
+        font_find(&e, faces, 1, 0x28ff, &face, &glyph);
+        check("turned: a drawn cell is among the lines (braille Inter has not)", face == FONT_DRAWN);
+        for (p32 chain = 1; chain <= 2; chain++)
+                for (p32 text = 0; text <= sizeof(line_texts) / sizeof(line_texts[0]); text++)
+                        for (p32 size = 0; size < sizeof(line_sizes) / sizeof(line_sizes[0]); size++)
+                                for (p32 ink = 0; ink < sizeof(line_inks) / sizeof(line_inks[0]); ink++)
+                                        for (p32 at = 0; at < 4; at++)
+                                        {
+                                                string_address run = text < sizeof(line_texts) / sizeof(line_texts[0])
+                                                                         ? line_texts[text] : cut;
+
+                                                runs++;
+                                                wrong += !turn_run(&e, faces, chain, run, line_sizes[size], cuts[at][0],
+                                                                   cuts[at][1], line_inks[ink][0], line_inks[ink][1],
+                                                                   LINE_W, LINE_H, turn_upright, turn_turned, turn_want);
+                                        }
+        if (wrong)
+                string_format(log, "  %p of %p turned runs are not the upright run turned\n", wrong, runs);
+        check("turned: every run, cut or whole, both ways, is the upright run turned, byte for byte", !wrong && runs > 0);
+        check("turned: a glyph past the strip, turned a band of rows at a time, both ways",
+              turn_run(&e, faces, 1, "W", 560 * 64, 8 << 16, 560, 0x101010, 0xf0f0f0, 720, 640, big_upright, big_turned,
+                       big_want) &&
+                  turn_run(&e, faces, 1, "W", 560 * 64, 8 << 16, 560, 0xffffff, FONT_UNKNOWN, 720, 640, big_upright,
+                           big_turned, big_want));
+}
+
+/*
         Hostile fonts. The bytes are copied so that the last one sits against
         a page that faults, and each cut and each mutation is loaded, every
         glyph drawn hinted and not at two sizes, every pair of the first
@@ -113924,6 +114016,7 @@ b32 main()
         check_polarity(&two);
         check_invariants();
         check_upright();
+        check_turned();
         check_cells(&small_engine, &two);
         check_translate();
         check_translate_planes();
