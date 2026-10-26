@@ -115090,6 +115090,229 @@ static void check_compositor_hover(void)
     check("hover: and nothing once the button is let go", table->event_head[1] == before + 2);
 }
 
+/*
+        Where a placed window goes (compositor_first_put and the rectangles under it). The room of a screen is the
+        screen less the taskbar on each of its four edges, and the whole screen with no band or a band elsewhere;
+        a window is kept on its screen whatever it asked, its top left on it when it is larger; centre is the
+        middle of the room at the size asked, up to the room's; maximized fills the room and follows the band when
+        it moves, and a double click gives it back the place it would have had; fullscreen is the whole screen; a
+        window that asked for nothing goes where it always went, a step down and across from one in its place.
+*/
+static b32 place_same(const int address_to rect, int x, int y, int width, int height)
+{
+        return rect[0] == x && rect[1] == y && rect[2] == width && rect[3] == height;
+}
+
+static fn place_paint(int row, unsigned int how, int x, int y, unsigned int width, unsigned int height,
+                      int program_x, int program_y, unsigned int picture_w, unsigned int picture_h)
+{
+        struct windows address_to table = compositor.table;
+
+        table->place[row] = how;
+        table->place_x[row] = x;
+        table->place_y[row] = y;
+        table->place_width[row] = width;
+        table->place_height[row] = height;
+        table->x[row] = program_x;
+        table->y[row] = program_y;
+        table->width[row] = picture_w;
+        table->height[row] = picture_h;
+        glass_paint(row, 0, 0, (int)picture_w, (int)picture_h, 0x203040u + (unsigned int)row, true);
+}
+
+static fn check_compositor_place(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        static const char address_to const sides[4] = {"bottom", "top", "left", "right"};
+        static const int rooms[4][4] = {{0, 0, 2560, 1416}, {0, 24, 2560, 1416}, {24, 0, 2536, 1440}, {0, 0, 2536, 1440}};
+        const int whole[4] = {0, 0, 2560, 1440}, none[4] = {0, 0, 0, 0}, elsewhere[4] = {2560, 1416, 1920, 24};
+        const int big[4] = {0, 0, 1000, 800}, low[4] = {0, 0, 1000, 776}, left[4] = {24, 0, 976, 800};
+        const int screens[3][4] = {{0, 0, 1000, 800}, {1000, 0, 800, 600}, {-1280, 100, 1280, 1024}};
+        struct window_place place;
+        struct windows address_to table;
+        int room[4], rect[4], x, y, sided = 1;
+
+        for (unsigned int side = 0; side < 4; side++)
+        {
+                struct taskbar_view view;
+                int band[4];
+
+                memory_zero(&compositor, sizeof(compositor));
+                compositor.width = 2560;
+                compositor.height = 1440;
+                compositor.scale = 1;
+                taskbar_settings_set(sides[side], "primary", "battery none\n");
+                view = compositor_taskbar_view();
+                taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
+                place_room(whole, band, view.position, room);
+                sided &= place_same(room, rooms[side][0], rooms[side][1], rooms[side][2], rooms[side][3]);
+                compositor_room(whole, rect);
+                sided &= place_same(rect, rooms[side][0], rooms[side][1], rooms[side][2], rooms[side][3]);
+        }
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        check("place: the room of a screen is the screen less the taskbar, on whichever of its four edges the band is", sided);
+        place_room(whole, none, TASKBAR_BOTTOM, room);
+        check("place: with no band the room is the whole screen", place_same(room, 0, 0, 2560, 1440));
+        place_room(whole, elsewhere, TASKBAR_BOTTOM, room);
+        check("place: and so it is with the band on another screen", place_same(room, 0, 0, 2560, 1440));
+        place_room(rooms[0], (const int[4]){0, 0, 2560, 1416}, TASKBAR_BOTTOM, room);
+        check("place: a band as large as the screen leaves it whole rather than nothing", place_same(room, 0, 0, 2560, 1416));
+
+        x = 900, y = 700;
+        place_clamp(big, 400, 300, 1, &x, &y);
+        check("place: a window past the right and the bottom is kept on its screen, its line too", x == 599 && y == 499);
+        x = -50, y = -9000;
+        place_clamp(big, 400, 300, 1, &x, &y);
+        check("place: and one at negative coordinates is moved in to the screen's top left", x == 1 && y == 1);
+        x = 500, y = 500;
+        place_clamp(big, 2000, 1500, 1, &x, &y);
+        check("place: one larger than its screen has its top left on it, where it is taken by", x == 1 && y == 1);
+        x = 5000, y = -5;
+        place_clamp(screens[2], 200, 100, 0, &x, &y);
+        check("place: on a screen left of the first, the clamp is that screen's", x == -200 && y == 100);
+
+        memory_zero(&place, sizeof(place));
+        place.how = WINDOW_PLACE_CENTER;
+        check("place: centre is the middle of the room, the taskbar's strip left out",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 300, 238, 400, 300));
+        check("place: and of a room the band takes the left of",
+              place_rect(&place, big, left, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 312, 250, 400, 300));
+        place.how = WINDOW_PLACE_CENTER | WINDOW_PLACE_SIZE;
+        place.width = 5000, place.height = 5000;
+        check("place: a size larger than the room is the room's, the line inside it",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 1, 1, 998, 774));
+        place.width = 10, place.height = 1;
+        check("place: and one under the least a window is made is the least",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 452, 364, 96, 48));
+        check("place: a picture of nothing is placed at the least as well",
+              (place.how = WINDOW_PLACE_CENTER, place_rect(&place, big, low, 5, 5, 0, 0, 1, 96, 48, rect)) ==
+                      COMPOSITOR_FLOATING &&
+                  place_same(rect, 452, 364, 96, 48));
+        place.how = WINDOW_PLACE_AT;
+        place.x = 250, place.y = 120;
+        check("place: at is the top left asked for, from the screen's own top left",
+              place_rect(&place, screens[1], screens[1], 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 1250, 120, 400, 300));
+        place.x = -400, place.y = -30;
+        check("place: at with negative coordinates is kept on the screen",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 1, 1, 400, 300));
+        place.x = 16384, place.y = 16384;
+        check("place: and at far off the screen is put back on it, a strip of nothing left beyond",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 599, 499, 400, 300));
+        place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SIZE;
+        place.x = 10, place.y = 10, place.width = 16384, place.height = 16384;
+        check("place: a size larger than the screen at a place is the screen's, at its top left",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 1, 1, 998, 798));
+        place.how = WINDOW_PLACE_MAXIMIZED;
+        check("place: maximized fills the room",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_ROOM && place_same(rect, 0, 0, 1000, 776));
+        place.how = WINDOW_PLACE_FULLSCREEN;
+        check("place: fullscreen fills the screen, under the taskbar too",
+              place_rect(&place, big, low, 5, 5, 400, 300, 1, 96, 48, rect) == COMPOSITOR_MAXIMIZED &&
+                  place_same(rect, 0, 0, 1000, 800));
+        place.how = WINDOW_PLACE_SIZE;
+        place.width = 300, place.height = 200;
+        check("place: a size with no mode is where the program asked, at the size",
+              place_rect(&place, big, low, 37, 41, 400, 300, 1, 96, 48, rect) == COMPOSITOR_FLOATING &&
+                  place_same(rect, 37, 41, 300, 200));
+
+        check("place: a point is on the screen it is in, the nearest when it is between, the first of none",
+              place_screen_at(1200, 300, screens, 3) == 1 && place_screen_at(-5, 300, screens, 3) == 2 &&
+                  place_screen_at(1500, 700, screens, 3) == 1 && place_screen_at(10, 10, screens, 3) == 0 &&
+                  place_screen_at(10, 10, screens, 0) == 0);
+
+        // In the compositor: a 256 by 256 output, its band 24 high along the bottom, so its room is 256 by 232.
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("place: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+
+        place_paint(1, WINDOW_PLACE_CENTER, 0, 0, 0, 0, 3, 3, 100, 60);
+        check("place: a window asked for the centre is in the middle of the room, the band's height left out",
+              compositor.x[1] == 78 && compositor.y[1] == 86 && table->x[1] == 78 && table->y[1] == 86 &&
+                  compositor.arranged[1] == COMPOSITOR_FLOATING);
+        place_paint(2, WINDOW_PLACE_AT, 10, 20, 0, 0, 3, 3, 100, 60);
+        check("place: one asked to be at 10,20 is there", compositor.x[2] == 10 && compositor.y[2] == 20);
+        place_paint(3, WINDOW_PLACE_MAXIMIZED, 0, 0, 0, 0, 30, 40, 100, 60);
+        check("place: maximized fills the room and is asked for its size",
+              compositor.arranged[3] == COMPOSITOR_ROOM && compositor.x[3] == 0 && compositor.y[3] == 0 &&
+                  compositor.w[3] == 256 && compositor.h[3] == 232 && table->want_width[3] == 256 &&
+                  table->want_height[3] == 232);
+        check("place: and keeps the place and size it would have had with none, to be given back",
+              compositor.saved_x[3] == 30 && compositor.saved_y[3] == 40 && compositor.saved_w[3] == 100 &&
+                  compositor.saved_h[3] == 60);
+        taskbar_settings_set("left", "primary", "battery none\n");
+        compositor_room_follow();
+        check("place: the band moved to the left, the maximized window fills the room it leaves",
+              compositor.arranged[3] == COMPOSITOR_ROOM && compositor.x[3] == 24 && compositor.y[3] == 0 &&
+                  compositor.w[3] == 232 && compositor.h[3] == 256 && table->want_width[3] == 232 &&
+                  table->want_height[3] == 256);
+        taskbar_settings_set("top", "primary", "battery none\n");
+        compositor_room_follow();
+        check("place: and moved to the top, the room under it",
+              compositor.x[3] == 0 && compositor.y[3] == 24 && compositor.w[3] == 256 && compositor.h[3] == 232);
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        compositor_room_follow();
+        check("place: a window that asked for nothing does not move with the band", compositor.x[1] == 78 && compositor.y[1] == 86);
+
+        place_paint(4, WINDOW_PLACE_CENTER | WINDOW_PLACE_SIZE, 0, 0, 120, 80, 3, 3, 100, 60);
+        check("place: a size asked with the centre is asked of the program, and centred at it",
+              compositor.x[4] == 68 && compositor.y[4] == 76 && table->want_width[4] == 120 && table->want_height[4] == 80 &&
+                  compositor.w[4] == 120 && compositor.h[4] == 80);
+        place_paint(5, WINDOW_PLACE_AUTO, 0, 0, 0, 0, 130, 140, 60, 40);
+        place_paint(6, WINDOW_PLACE_AUTO, 0, 0, 0, 0, 130, 140, 60, 40);
+        check("place: a window that asked for nothing is where its program put it, and a second there a step down and across",
+              compositor.x[5] == 130 && compositor.y[5] == 140 && compositor.x[6] == 150 && compositor.y[6] == 160 &&
+                  !table->want_width[5] && !table->want_width[6]);
+        place_paint(7, WINDOW_PLACE_FULLSCREEN, 0, 0, 0, 0, 3, 3, 100, 60);
+        check("place: fullscreen fills the output, as a double click does",
+              compositor.arranged[7] == COMPOSITOR_MAXIMIZED && compositor.x[7] == 0 && compositor.y[7] == 0 &&
+                  compositor.w[7] == 256 && compositor.h[7] == 256);
+        table->place_screen[8] = 5;
+        place_paint(8, WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN, 20, 30, 0, 0, 3, 3, 100, 60);
+        check("place: a screen that is not there is the first", compositor.x[8] == 20 && compositor.y[8] == 30);
+        place_paint(9, 7, 20, 30, 0, 0, 44, 55, 100, 60);
+        check("place: a mode the compositor does not know is no placement", compositor.x[9] == 44 && compositor.y[9] == 55);
+        place_paint(10, WINDOW_PLACE_AT, 999999, -999999, 0, 0, 64, 85, 100, 60);
+        check("place: nor is a place past WINDOW_PLACE_MOST, which a program writing its row itself could ask",
+              compositor.x[10] == 64 && compositor.y[10] == 85);
+
+        // Two presses on the top of the maximized window: it is given back where it would have been.
+        compositor_raise(3);
+        compositor_focus(3);
+        for (int press = 0; press < 2; press++)
+        {
+                compositor.pointer_x = 100;
+                compositor.pointer_y = 5;
+                compositor_button(COMPOSITOR_BTN_LEFT, 1);
+                compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        }
+        compositor.press = COMPOSITOR_NONE;
+        check("place: a double click on a window that fills its room gives it back the place it would have had",
+              compositor.arranged[3] == COMPOSITOR_FLOATING && compositor.x[3] == 30 && compositor.y[3] == 40 &&
+                  table->want_width[3] == 100 && table->want_height[3] == 60);
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
+                        0, 0);
+        memory_zero(&compositor, sizeof(compositor));
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
@@ -117828,6 +118051,7 @@ b32 main()
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_dismiss();
+        check_compositor_place();
 #if MOONWATER_UI_LAUNCHER
         check_launcher();
 #endif

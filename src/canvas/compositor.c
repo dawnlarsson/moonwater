@@ -558,11 +558,13 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
         return count;
 }
 
-// What a window fills: nothing, the output, or half of it.
+// What a window fills: nothing, the output, or half of it; or the room of its screen, the taskbar left out, which only
+// a placement asks for (WINDOW_PLACE_MAXIMIZED) and which follows the taskbar where it is moved.
 #define COMPOSITOR_FLOATING 0
 #define COMPOSITOR_MAXIMIZED 1
 #define COMPOSITOR_LEFT 2
 #define COMPOSITOR_RIGHT 3
+#define COMPOSITOR_ROOM 4
 #define COMPOSITOR_FRAMES (2 * WINDOWS + 2) // the windows, and a tab for each window and the tray
 
 /*
@@ -1787,6 +1789,7 @@ static struct
         int saved_x[WINDOWS], saved_y[WINDOWS]; // where it was floating, and how large
         unsigned int saved_w[WINDOWS], saved_h[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
+        char name[WINDOWS][WINDOWS_NAME]; // what it is remembered by, taken with its first picture; none for nothing
         unsigned char stack[WINDOWS];   // bottom first
         unsigned int stacked, next_made;
 
@@ -4700,8 +4703,10 @@ static void compositor_input_settings_set(const char *shake, const char *shake_d
 /*
         The taskbar's settings: its position, the display it is on and its battery, as the files in /root hold them.
         Read when the compositor starts and again when a file of them is written. A band that moves is damaged where it
-        was as well as where it is now.
+        was as well as where it is now, and a window that fills a screen's room fills the room the band leaves now.
 */
+static void compositor_room_follow(void);
+
 static void compositor_taskbar_settings_read(void)
 {
         char position[16], display[16], tune[512];
@@ -4716,7 +4721,10 @@ static void compositor_taskbar_settings_read(void)
         view = compositor_taskbar_view();
         taskbar_band(&view, &now[0], &now[1], &now[2], &now[3]);
         if (was[0] != now[0] || was[1] != now[1] || was[2] != now[2] || was[3] != now[3])
+        {
                 compositor_band_damage(was[0], was[1], was[2], was[3]);
+                compositor_room_follow();
+        }
         compositor_band_damage(now[0], now[1], now[2], now[3]);
         if (taskbar_display_all())
         {
@@ -5292,14 +5300,334 @@ static void compositor_first_place(int row, int *x, int *y)
         }
 }
 
+/*
+        Placement: where a window that asked to be put somewhere goes (window.c's WINDOW_PLACE_*), worked out from
+        rectangles alone -- x, y, width and height on the desktop -- so the checks can ask it everything. It runs
+        when a window first shows and when the taskbar moves, never for a frame.
+*/
+
+// The room of a screen: the screen less the taskbar's band where the band lies along the edge position names.
+// A band that is not on the screen, or that would leave nothing, takes nothing.
+static void place_room(const int *screen, const int *band, unsigned int position, int *room)
+{
+        int cut = 0, size;
+
+        memory_copy(room, screen, 4 * sizeof(int));
+        if (band[2] <= 0 || band[3] <= 0 || band[0] >= screen[0] + screen[2] || band[0] + band[2] <= screen[0] ||
+            band[1] >= screen[1] + screen[3] || band[1] + band[3] <= screen[1])
+                return;
+        if (position == TASKBAR_TOP || position == TASKBAR_BOTTOM)
+        {
+                cut = position == TASKBAR_TOP ? band[1] + band[3] - screen[1] : screen[1] + screen[3] - band[1];
+                size = screen[3] - cut;
+                if (size <= 0)
+                        return;
+                room[1] += position == TASKBAR_TOP ? cut : 0;
+                room[3] = size;
+                return;
+        }
+        cut = position == TASKBAR_LEFT ? band[0] + band[2] - screen[0] : screen[0] + screen[2] - band[0];
+        size = screen[2] - cut;
+        if (size <= 0)
+                return;
+        room[0] += position == TASKBAR_LEFT ? cut : 0;
+        room[2] = size;
+}
+
+// Kept on a screen as compositor_place keeps it on the output: all of it, its line too, when it fits; its top left
+// when it does not, so the top it is taken by is always there to take.
+static void place_clamp(const int *screen, int width, int height, int line, int *x, int *y)
+{
+        int high_x = screen[0] + screen[2] - width - line, high_y = screen[1] + screen[3] - height - line;
+
+        *x = *x > high_x ? high_x : *x;
+        *y = *y > high_y ? high_y : *y;
+        *x = *x < screen[0] + line ? screen[0] + line : *x;
+        *y = *y < screen[1] + line ? screen[1] + line : *y;
+}
+
+// A size as a window may have it in an area: what was asked, up to the area's and never under the least.
+static int place_size(unsigned int asked, int area, int least)
+{
+        int size = asked > (unsigned int)area ? area : (int)asked;
+
+        return size < least ? (least < area ? least : area) : size;
+}
+
+/*
+        Where a placement puts a window on its screen, whose room is room: what the window fills (COMPOSITOR_FLOATING,
+        COMPOSITOR_ROOM, COMPOSITOR_MAXIMIZED for the whole screen), and the rectangle. A floating one is the size
+        asked for, or the picture's, up to the room's when it is centred in it and the screen's when it is put at
+        a place, and kept on the screen. x and y are where the program asked, which a placement with no mode
+        keeps. line is the outline a floating window has round it, least the size no window is made smaller than.
+*/
+static unsigned int place_rect(const struct window_place *place, const int *screen, const int *room, int x, int y,
+                               unsigned int picture_w, unsigned int picture_h, int line, int least_w, int least_h,
+                               int *rect)
+{
+        unsigned int how = place->how & WINDOW_PLACE_HOW;
+        unsigned int asked_w = place->how & WINDOW_PLACE_SIZE ? place->width : picture_w;
+        unsigned int asked_h = place->how & WINDOW_PLACE_SIZE ? place->height : picture_h;
+        const int *area = how == WINDOW_PLACE_CENTER ? room : screen;
+
+        if (how == WINDOW_PLACE_MAXIMIZED || how == WINDOW_PLACE_FULLSCREEN)
+        {
+                memory_copy(rect, how == WINDOW_PLACE_MAXIMIZED ? room : screen, 4 * sizeof(int));
+                return how == WINDOW_PLACE_MAXIMIZED ? COMPOSITOR_ROOM : COMPOSITOR_MAXIMIZED;
+        }
+        rect[2] = place_size(asked_w, area[2] - 2 * line, least_w);
+        rect[3] = place_size(asked_h, area[3] - 2 * line, least_h);
+        rect[0] = how == WINDOW_PLACE_CENTER ? room[0] + (room[2] - rect[2]) / 2 : how == WINDOW_PLACE_AT ? screen[0] + place->x : x;
+        rect[1] = how == WINDOW_PLACE_CENTER ? room[1] + (room[3] - rect[3]) / 2 : how == WINDOW_PLACE_AT ? screen[1] + place->y : y;
+        if (how)
+                place_clamp(screen, rect[2], rect[3], line, &rect[0], &rect[1]);
+        return COMPOSITOR_FLOATING;
+}
+
+// The distance, squared, from a point to a rectangle: 0 inside it.
+static long place_distance(int x, int y, const int *rect)
+{
+        long dx = x < rect[0] ? rect[0] - x : x >= rect[0] + rect[2] ? x - (rect[0] + rect[2] - 1) : 0;
+        long dy = y < rect[1] ? rect[1] - y : y >= rect[1] + rect[3] ? y - (rect[1] + rect[3] - 1) : 0;
+
+        return dx * dx + dy * dy;
+}
+
+// The screen a point is on, or the nearest to it; the first of equals, and the first when there are none.
+static unsigned int place_screen_at(int x, int y, const int (*screens)[4], unsigned int count)
+{
+        unsigned int found = 0;
+        long best = -1;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                long distance = place_distance(x, y, screens[at]);
+
+                if (best < 0 || distance < best)
+                        best = distance, found = at;
+        }
+        return found;
+}
+
+/*
+        The screens, as placement asks for them: how many, each one's rectangle on the desktop and its connector's
+        name. One screen until there are more: the output the compositor draws on, at the desktop's top left,
+        named as Canvas names it (`moonwater canvas`), or "screen" where Canvas does not say.
+*/
+static unsigned int compositor_output_count(void)
+{
+        return 1;
+}
+
+static void compositor_output_rect(unsigned int at, int *rect)
+{
+        (void)at;
+        rect[0] = rect[1] = 0;
+        rect[2] = compositor.width;
+        rect[3] = compositor.height;
+}
+
+// A connector's name as placement keeps it: letters, digits and hyphens, one to fifteen.
+static int place_screen_name_valid(const char *name)
+{
+        unsigned int at = 0;
+
+        for (; name[at] && at < WINDOWS_NAME; at++)
+                if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
+                      (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
+                        return 0;
+        return at && at < WINDOWS_NAME;
+}
+
+static const char *compositor_output_name(unsigned int at)
+{
+        static char name[WINDOWS_NAME];
+        struct canvas_control control;
+        b32 spark;
+
+        (void)at;
+        if (name[0])
+                return name;
+        memory_copy(name, "screen", sizeof("screen"));
+        memory_zero(&control, sizeof(control));
+        spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
+        if (spark < 0)
+                return name;
+        if (system_control(spark, SPARK_IOCTL_CANVAS, address_of control) == 0 && control.output_count)
+        {
+                control.output[0].connector[sizeof(control.output[0].connector) - 1] = 0;
+                if (place_screen_name_valid(control.output[0].connector))
+                        memory_copy(name, control.output[0].connector, sizeof(name));
+        }
+        system_close(spark);
+        return name;
+}
+
+// The screens' rectangles, and how many there are.
+static unsigned int compositor_screens(int (*screens)[4])
+{
+        unsigned int count = compositor_output_count();
+
+        count = count < WINDOW_PLACE_SCREENS ? count : WINDOW_PLACE_SCREENS;
+        for (unsigned int at = 0; at < count; at++)
+                compositor_output_rect(at, screens[at]);
+        return count;
+}
+
+// The room of a screen, the taskbar's band where it is now taken out.
+static void compositor_room(const int *screen, int *room)
+{
+        struct taskbar_view view = compositor_taskbar_view();
+        int band[4];
+
+        taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
+        place_room(screen, band, view.position, room);
+}
+
+/*
+        Filling a rectangle, as compositor_arrange fills the output or half of it, for what a placement fills: the
+        room of a screen, or all of one. The rectangle it had floating is kept, as there.
+*/
+static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
+{
+        if (!compositor.showing[row])
+                return;
+
+        if (compositor.arranged[row] == COMPOSITOR_FLOATING)
+        {
+                compositor.saved_x[row] = compositor.x[row];
+                compositor.saved_y[row] = compositor.y[row];
+                compositor.saved_w[row] = compositor.w[row];
+                compositor.saved_h[row] = compositor.h[row];
+        }
+        compositor_damage_row(row);
+        compositor.arranged[row] = how;
+        compositor.edges[row] = 0;
+        compositor.far_x[row] = rect[0] + rect[2];
+        compositor_put(row, rect[0], rect[1]);
+        compositor_damage_row(row);
+        compositor_want(row, rect[2], rect[3]);
+}
+
+// The taskbar moved, or its screen changed: every window that fills the room of a screen fills it where it is now.
+static void compositor_room_follow(void)
+{
+        int screens[WINDOW_PLACE_SCREENS][4], room[4];
+        unsigned int count = compositor_screens(screens);
+
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                unsigned int on;
+
+                if (!compositor.showing[row] || compositor.arranged[row] != COMPOSITOR_ROOM)
+                        continue;
+                on = place_screen_at(compositor.x[row] + (int)compositor.w[row] / 2,
+                                     compositor.y[row] + (int)compositor.h[row] / 2, screens, count);
+                compositor_room(screens[on], room);
+                if (room[0] != compositor.x[row] || room[1] != compositor.y[row] || room[2] != (int)compositor.w[row] ||
+                    room[3] != (int)compositor.h[row])
+                        compositor_arrange_rect(row, COMPOSITOR_ROOM, room);
+        }
+}
+
+/*
+        A row's placement, read once into the compositor's own copy and clamped there: a mode it knows, a screen it
+        can name, numbers inside WINDOW_PLACE_MOST and a size of at least a pixel. Anything else is the mode or the
+        part left out, which is where the program asked, as a window always went. The name too, kept for what the
+        compositor remembers, and none when it is not one.
+*/
+static void compositor_place_read(int row, struct window_place *place)
+{
+        struct windows *table = compositor.table;
+        unsigned int how = __atomic_load_n(&table->place[row], __ATOMIC_ACQUIRE);
+        int x = table->place_x[row], y = table->place_y[row];
+        unsigned int width = table->place_width[row], height = table->place_height[row], screen = table->place_screen[row];
+
+        memory_zero(place, sizeof(*place));
+        if ((how & WINDOW_PLACE_HOW) <= WINDOW_PLACE_FULLSCREEN &&
+            ((how & WINDOW_PLACE_HOW) != WINDOW_PLACE_AT ||
+             (x >= -WINDOW_PLACE_MOST && x <= WINDOW_PLACE_MOST && y >= -WINDOW_PLACE_MOST && y <= WINDOW_PLACE_MOST)))
+        {
+                place->how = how & WINDOW_PLACE_HOW;
+                place->x = x;
+                place->y = y;
+        }
+        if ((how & WINDOW_PLACE_SCREEN) && screen < WINDOW_PLACE_SCREENS)
+        {
+                place->how |= WINDOW_PLACE_SCREEN;
+                place->screen = screen;
+        }
+        if ((how & WINDOW_PLACE_SIZE) && width && height && width <= WINDOW_PLACE_MOST && height <= WINDOW_PLACE_MOST)
+        {
+                place->how |= WINDOW_PLACE_SIZE;
+                place->width = width;
+                place->height = height;
+        }
+        for (unsigned int at = 0; at < WINDOWS_NAME; at++)
+                place->name[at] = ((volatile char *)table->name[row])[at];
+        place->name[WINDOWS_NAME - 1] = 0;
+        if (!window_name_valid(place->name))
+                memory_zero(place->name, sizeof(place->name));
+        memory_copy(compositor.name[row], place->name, WINDOWS_NAME);
+}
+
+/*
+        Where a window goes the first time it shows, from where its program asked (x, y) and the placement it was
+        given: none is where it asked, a step down and across from any window in that place (compositor_first_place),
+        as it always was; center and at are the rectangle place_rect works out, on the screen named or the first;
+        maximized and fullscreen are where it would have gone with none, filling the room or the screen from there,
+        so taking it out of that gives it back the place and size it would have had. A size is asked of the
+        program as the hand asks one, and the window is shown at it until a picture of it comes.
+*/
+static void compositor_first_put(int row, int x, int y)
+{
+        int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
+        unsigned int count = compositor_screens(screens), on, how, fills;
+        struct window_place place;
+
+        compositor_place_read(row, &place);
+        how = place.how & WINDOW_PLACE_HOW;
+        on = (place.how & WINDOW_PLACE_SCREEN) && place.screen < count ? place.screen : 0;
+        compositor_room(screens[on], room);
+
+        // Where it asked is the first screen's, and the same place on the screen named.
+        x += screens[on][0] - screens[0][0];
+        y += screens[on][1] - screens[0][1];
+        if (how == WINDOW_PLACE_AUTO || how == WINDOW_PLACE_MAXIMIZED || how == WINDOW_PLACE_FULLSCREEN)
+        {
+                if (place.how & WINDOW_PLACE_SIZE)
+                {
+                        compositor_put(row, x, y);
+                        compositor_want(row, place_size(place.width, screens[on][2], least_w),
+                                        place_size(place.height, screens[on][3], least_h));
+                }
+                compositor_first_place(row, &x, &y);
+                compositor_place(row, x, y);
+                if (how == WINDOW_PLACE_AUTO)
+                        return;
+        }
+        fills = place_rect(&place, screens[on], room, x, y, compositor.w[row], compositor.h[row], compositor_line(row),
+                           least_w, least_h, rect);
+        if (fills != COMPOSITOR_FLOATING)
+        {
+                compositor_arrange_rect(row, fills, rect);
+                return;
+        }
+        compositor_put(row, rect[0], rect[1]);
+        if (rect[2] != (int)compositor.w[row] || rect[3] != (int)compositor.h[row])
+                compositor_want(row, rect[2], rect[3]);
+}
+
 static void compositor_reveal(int row);
 
 /*
         A knock: what the row says now, read once into the compositor's own
         columns and clamped there. A new title goes to its tab. A new picture
         is damaged and said to be taken; the first puts the window on the
-        screen, where it asked to be and on the output, over the others and
-        with the keys unless it asked to be put away.
+        screen, where it asked to be or was placed (compositor_first_put) and
+        on the output, over the others and with the keys unless it asked to
+        be put away.
 */
 static void compositor_take(int row)
 {
@@ -5370,8 +5698,7 @@ static void compositor_take(int row)
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
-                compositor_first_place(row, &x, &y);
-                compositor_place(row, x, y);
+                compositor_first_put(row, x, y);
                 compositor_raise(row);
                 if (compositor_visible(row))
                         compositor_focus(row);
@@ -5476,6 +5803,7 @@ static void compositor_leave(int row)
         compositor.asks[row] = 0;
         compositor.arranged[row] = COMPOSITOR_FLOATING;
         compositor.title[row][0] = 0;
+        compositor.name[row][0] = 0;
         compositor_glass_drop(row);
         compositor.glass_side[row] = compositor.glass_told[row] = 0;
         // Shown straight: the screen is the compositor's again at the next frame, and the window's framebuffers
@@ -6164,7 +6492,9 @@ static void compositor_button(unsigned int code, int down)
                         if (again)
                         {
                                 compositor.press = COMPOSITOR_NONE;
-                                if (compositor.arranged[under] == COMPOSITOR_MAXIMIZED)
+                                // One placed filling its screen's room is given back as a maximized one is.
+                                if (compositor.arranged[under] == COMPOSITOR_MAXIMIZED ||
+                                    compositor.arranged[under] == COMPOSITOR_ROOM)
                                         compositor_float(under);
                                 else
                                         compositor_arrange(under, COMPOSITOR_MAXIMIZED);
