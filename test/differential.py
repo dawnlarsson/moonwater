@@ -46270,6 +46270,17 @@ while True:
               "link says a records file that cannot be read is so, and not that nobody is linked",
               repr([line for line in status_out if "linked" in line or "read" in line]))
 
+        # A pairing that asks for a name too long for one is refused as not a
+        # name, and not paired under its first 31 characters.
+        #       The listener a pairing that is not refused starts is switched off
+        #       after it, so a run that waited out its timeout leaves none.
+        lines, finished = session(say("link pair " + "a" * 40) + say("link off"))
+        seen = answers(lines)
+        check(finished and seen.get("link pair " + "a" * 40, {}).get("status") == 1 and
+              any("is not a machine name" in line for line in seen["link pair " + "a" * 40]["out"]),
+              "link pair refuses a name of 32 characters or more, and does not pair under its first 31",
+              repr(seen.get("link pair " + "a" * 40)))
+
         # A group's secret is read from standard input with "-", and never
         # taken for the word "-" itself; a password or a secret on the line
         # is told to a person at a terminal and not to a script, whose

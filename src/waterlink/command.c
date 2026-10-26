@@ -1222,7 +1222,12 @@ static b32 link_pair_here(string_address expect)
         p8 only[WATERLINK_NAME_MAX];
         link_before before;
 
-        //      Names are lowercase on both machines.
+        //      Names are lowercase on both machines. One too long for a name
+        //      is refused, and not cut to its first 31 characters and paired
+        //      as those: the code would then admit the machine with that
+        //      shorter name, which is not the one typed.
+        if (expect && string_length(expect) >= WATERLINK_NAME_MAX)
+                return host_refuse("%s is not a machine name\n", expect);
         if (expect)
         {
                 link_fold_name(expect, only);
