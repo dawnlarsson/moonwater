@@ -14036,6 +14036,9 @@ static b32 tune_hibernate_verb(string_address address_to arguments, positive cou
 #define USB_LOG "/root/usb.log"
 #define USB_LOCK_PATH HOST_STATE "/usb.lock"
 #define USB_WATCHER_PATH HOST_STATE "/usb.watcher"
+// Held by the one first lock that is waiting for USB to settle; there once a settle has ended this boot.
+#define USB_SETTLE_PATH HOST_STATE "/usb.settle"
+#define USB_SETTLED_PATH HOST_STATE "/usb.settled"
 #define USB_DEVICES "/sys/bus/usb/devices"
 #define USB_PROBE "/sys/bus/usb/drivers_probe"
 #define USB_MODULE_DEFAULT "/sys/module/usbcore/parameters/authorized_default"
@@ -15126,9 +15129,12 @@ static fn usb_watch_stop(void)
         the classes of the interfaces that work now; a device not configured
         (one usbcore.authorized_default=2 held at boot) shows none, and is
         kept whole. Locked already, the lock keeps only what the policy lets
-        work: a device it holds stays held.
+        work: a device it holds stays held. carried is the same for a lock
+        that another /root's policy put in force this boot (the session's,
+        before the disk was taken): what that lock holds was judged, and the
+        first lock of this /root does not let it in.
 */
-static b32 usb_lock_held(bool say)
+static b32 usb_lock_held(bool say, bool carried)
 {
         static usb_census census;
         usb_policy policy;
@@ -15147,7 +15153,8 @@ static b32 usb_lock_held(bool say)
                 if (device->root || device->fixed || usb_rule_for(address_of policy, device))
                         continue;
                 usb_rule_from(address_of rule, USB_ALLOW, device, address_of census, false);
-                if (policy.lock && (!device->authorized || (usb_shows(address_of census, device) && !rule.kinds)))
+                if ((policy.lock || carried) &&
+                    (!device->authorized || (usb_shows(address_of census, device) && !rule.kinds)))
                         continue;
                 if (policy.count == USB_RULES_MOST)
                         return host_refuse("more devices are plugged in than the %p rules a policy keeps; "
@@ -15180,7 +15187,7 @@ static b32 usb_lock_held(bool say)
 static b32 usb_lock_now(void)
 {
         bipolar lock = host_lock(USB_LOCK_PATH, true);
-        b32 failed = usb_lock_held(true);
+        b32 failed = usb_lock_held(true, false);
 
         radio_unlock(lock);
         if (!failed)
@@ -15613,6 +15620,15 @@ static b32 usb_apply_verb(void)
         usb_first_lock: what is plugged in then is what it trusts, so a
         desktop's own keyboard keeps working. The default tier changes nothing
         until the owner locks.
+
+        Whether a /root keeps a policy is what decides, and not whether a
+        watcher runs: an ask's session locks its own /root and its watcher
+        is running when the disk is taken, and a disk with no policy then
+        locked nothing, the watcher found no policy in the disk's /root and
+        ended, and the kernel was left holding every new device at the
+        session's defaults with usb saying unlock. On the default tier a
+        policy-less /root taken after another one's lock was in force puts
+        the kernel's own defaults back, which is what no policy means there.
 */
 static fn usb_first_lock(void);
 
@@ -15629,6 +15645,8 @@ static fn usb_restore(void)
                 before.count = 0;
                 usb_apply_all(address_of policy, first ? address_of before : null, null, false);
         }
+        else if (!first && policy.known && MOONWATER_STRICT_HOST < STRICT_TIGHT)
+                usb_apply_all(address_of policy, null, null, false);
         radio_unlock(lock);
         if (!policy.kept && MOONWATER_STRICT_HOST >= STRICT_TIGHT && policy.known)
                 usb_first_lock();
@@ -15664,6 +15682,17 @@ static fn usb_ports(usb_census address_to census, p8 address_to into, positive r
         the start by usbcore.authorized_default=2 where the command line says
         so). A machine first locked long after it booted (setup use of a disk
         with no policy) is locked at once.
+
+        One first lock settles at a time (USB_SETTLE_PATH): another asked for
+        meanwhile -- the take's restore and the machine process's both ask --
+        ends at once, since the one settling locks whichever /root is in
+        place when it is done. Once a settle has ended this boot
+        (USB_SETTLED_PATH), USB has settled and a later first lock -- the
+        disk's, taken after an ask's session locked its own /root -- locks
+        at once, carried: what the session's lock held stays held, and the
+        devices it let in are kept. The session's watcher, if it still runs,
+        reads the disk's policy at its next pass; this one ends when it
+        cannot be the watcher.
 */
 static fn usb_first_lock(void)
 {
@@ -15672,12 +15701,18 @@ static fn usb_first_lock(void)
         static p8 now[sizeof(seen)];
         p64 still = 0;
         usb_policy policy;
+        bipolar settling;
         bipolar lock;
+        bool carried;
 
-        if (host_lock_owner(USB_WATCHER_PATH) || !host_detach(descriptors_none, descriptors_none))
+        if (!host_detach(descriptors_none, descriptors_none))
                 return;
+        settling = host_lock_file(USB_SETTLE_PATH, HOST_FILE_SETLK, null);
+        if (settling < 0)
+                system_call_1(syscall(exit_group), 0);
+        carried = system_access_at(AT_FDCWD, USB_SETTLED_PATH, 0) >= 0;
         seen[0] = end;
-        for (;;)
+        while (!carried)
         {
                 p64 uptime = system_clock_ns(HOST_CLOCK_BOOTTIME);
 
@@ -15692,11 +15727,13 @@ static fn usb_first_lock(void)
                         break;
                 host_pause(USB_POLL_NS);
         }
+        (void)host_write_text(USB_SETTLED_PATH, "1\n");
         lock = host_lock(USB_LOCK_PATH, true);
         usb_policy_load(address_of policy);
         if (!policy.kept && policy.known)
-                (void)usb_lock_held(false);
+                (void)usb_lock_held(false, carried);
         radio_unlock(lock);
+        system_close(settling);
         (void)usb_watch_run();
         system_call_1(syscall(exit_group), 0);
 }
