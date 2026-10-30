@@ -24595,7 +24595,7 @@ fi
 
 while IFS='|' read -r name got want; do
         case $name in
-        NOTE) note "$got" ;;
+        NOTE) not_run_part "$got" ;;
         *) same "$name" "$want" "$got" ;;
         esac
 done < "$work/answers"
