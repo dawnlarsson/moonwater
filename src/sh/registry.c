@@ -94,6 +94,9 @@
 #define SETTING_TASKBAR_TRAY_PATH "/root/taskbar.tray"
 #define SETTING_TASKBAR_TRAY_STANDARD "{battery}  {time.24h.hour}:{time.24h.min}"
 #define SETTING_TRAY_MOST 96 // bytes of a format
+#define SETTING_THEME_PATH "/root/canvas.theme"
+#define SETTING_ACCENT_PATH "/root/canvas.theme.accent"
+#define SETTING_MOTION_PATH "/root/canvas.motion"
 
 struct settings_row
 {
@@ -175,6 +178,26 @@ static const struct settings_row settings_rows[] = {
                       .usage = "canvas background [COLOUR|default]", .help = "the desktop colour, rrggbb [1e1e1e]"),
     {null, "Background colour (rrggbb or default)", SETTINGS_FIELD, 0, 0, {"canvas", "background"}, "background ", null,
      {"canvas", "background"}, null, 0, null, .how = SETTING_ALIAS},
+    //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
+    //  fill with; the compositor puts them in the window table and every window turns to them at once.
+    SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_THEME_PATH, .standard = "light", .reset = "light",
+                      .need = "how Canvas draws", .refusal = "theme is light, dark or auto, not %s\n",
+                      .usage = "canvas theme [light|dark|auto]",
+                      .help = "the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [light]"),
+    SETTING_PLAIN_ROW(null, "Accent", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "theme", "accent"), "accent ",
+                      "amber blue green violet rose graphite",
+                      .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCENT_PATH, .standard = "#ff8800",
+                      .reset = "reset", .need = "how Canvas draws", .refusal = "accent is a colour like ff8800, or reset, not %s\n",
+                      .usage = "canvas theme accent [COLOUR|reset]",
+                      .help = "what the controls fill with, rrggbb; the text on it is picked to be read [ff8800]"),
+    {null, "Accent colour (rrggbb or reset)", SETTINGS_FIELD, 0, 0, {"canvas", "theme", "accent"}, "accent ", null,
+     {"canvas", "theme", "accent"}, null, 0, null, .how = SETTING_ALIAS},
+    SETTING_PLAIN_ROW(null, "Motion", SETTINGS_CHOICE, 0, ("canvas", "motion"), "motion ", "full reduced",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_MOTION_PATH, .standard = "full", .reset = "full",
+                      .need = "how Canvas draws", .refusal = "motion is full or reduced, not %s\n",
+                      .usage = "canvas motion [full|reduced]",
+                      .help = "reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",

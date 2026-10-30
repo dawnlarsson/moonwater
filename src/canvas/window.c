@@ -665,6 +665,14 @@ struct windows
         unsigned int wheel_sent, wheel_nowhere, wheel_full;
         int wheel_row, wheel_x, wheel_y;
 
+        /*
+                The compositor's: the theme Canvas's own windows draw in, as `moonwater canvas theme`, `canvas
+                theme accent` and `canvas motion` keep it -- theme 0 light or 1 dark (auto is worked out to one of
+                them by the clock), accent 0xrrggbb, motion 0 full or 1 reduced. themed counts up each time any
+                of them changes, and every window is knocked, so a window takes a new theme without a restart.
+        */
+        unsigned int theme, accent, motion, themed;
+
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
         int x[WINDOWS], y[WINDOWS];

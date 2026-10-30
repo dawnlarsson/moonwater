@@ -2446,6 +2446,9 @@ static struct
         unsigned long glass_cut[WINDOWS];
         int glass_made[WINDOWS][4], stale[WINDOWS][4], dirty[WINDOWS][4];
         unsigned int glass_side[WINDOWS], glass_told[WINDOWS], lifted[WINDOWS];
+        // The theme (`moonwater canvas theme`, its accent and motion): the word kept (0 light, 1 dark, 2 auto), and the
+        // side every glass window is tinted to, 1 light and 0 dark, which the theme chooses and what is under it does not.
+        unsigned int theme_word, theme_side;
         unsigned int *blur, *frost, *rise; // scratch: the tabs' small picture, a band of the scene halved, the levels risen
         unsigned long blur_bytes, frost_bytes, rise_bytes;
         positive blurred, recomposed; // pixels blurred again and composed again, all frames
@@ -3571,9 +3574,10 @@ static int compositor_glass_side(int row)
 
                 light = 2126u * r * r + 7152u * g * g + 722u * b * b;
         }
-        compositor.glass_side[row] = was == COMPOSITOR_GLASS_UNSIDED ? light > COMPOSITOR_GLASS_SIDE
-                                     : was                           ? light > COMPOSITOR_GLASS_SIDE / 3 * 2
-                                                                     : light > COMPOSITOR_GLASS_SIDE / 2 * 3;
+        // The side is the theme's: a light theme's windows are light glass over whatever is under them, and a dark
+        // one's dark, so the inks they draw in (the theme's) stand out from their ground everywhere.
+        (void)light;
+        compositor.glass_side[row] = compositor.theme_side;
         ground = compositor_glass_tint(mean, compositor.glass_side[row]);
 
         // Told when the side changes, and when it has moved far enough for an ink to be worth drawing again.
@@ -5980,6 +5984,75 @@ static void compositor_look_read(void)
 }
 
 /*
+        The theme of Canvas's own windows, as `moonwater canvas theme`, `canvas theme accent` and `canvas
+        motion` keep it, into the window table's header (theme, accent, motion), with themed counted up and
+        every window knocked when any of it changes; auto is light from 7 to 19 by the local clock, and is
+        worked out again each minute (compositor_theme_tick). Every glass window is tinted to the theme's
+        side from then on, its blur made again.
+*/
+static void compositor_theme_set(unsigned int theme, unsigned int accent, unsigned int motion)
+{
+        struct windows *table = compositor.table;
+
+        if (!table || (table->theme == theme && table->accent == accent && table->motion == motion && table->themed))
+                return;
+        table->theme = theme;
+        table->accent = accent;
+        table->motion = motion;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        if (compositor.theme_side != !theme)
+        {
+                compositor.theme_side = !theme;
+                for (int row = 0; row < WINDOWS; row++)
+                        if (compositor.glassy[row])
+                                compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
+                compositor_damage(0, 0, compositor.width, compositor.height);
+        }
+        for (int row = 0; row < WINDOWS; row++)
+                if (table->pid[row])
+                        compositor.woken |= 1u << row;
+}
+
+// Whether the local clock says day: 7 to 19.
+static unsigned int compositor_theme_day(void)
+{
+        timespec real = {0, 0};
+        tm broken;
+        time_t seconds;
+
+        clock_gettime(CLOCK_REALTIME, address_of real);
+        seconds = real.tv_sec;
+        if (!localtime_r(&seconds, &broken))
+                return 1;
+        return broken.tm_hour >= 7 && broken.tm_hour < 19;
+}
+
+static void compositor_theme_read(void)
+{
+        char word[16];
+        long accent = -1;
+        unsigned int motion;
+
+        compositor_word(SETTING_THEME_PATH, word, sizeof(word));
+        compositor.theme_word = string_equals((string_address)word, (string_address) "dark") ? 1
+                                : string_equals((string_address)word, (string_address) "auto") ? 2 : 0;
+        compositor_word(SETTING_ACCENT_PATH, word, sizeof(word));
+        if (word[0] && !string_equals((string_address)word, (string_address) "reset") && !string_equals((string_address)word, (string_address) "default"))
+                accent = window_colour_parse((string_address)word);
+        compositor_word(SETTING_MOTION_PATH, word, sizeof(word));
+        motion = string_equals((string_address)word, (string_address) "reduced");
+        compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
+                             accent < 0 ? 0xff8800u : (unsigned int)accent, motion);
+}
+
+// Auto, again by the clock: a minute's wake is enough.
+static void compositor_theme_tick(void)
+{
+        if (compositor.theme_word == 2 && compositor.table)
+                compositor_theme_set(!compositor_theme_day(), compositor.table->accent, compositor.table->motion);
+}
+
+/*
         What the settings table keeps for the compositor (live is SETTING_LIVE_COMPOSITOR): the file of a
         row, as the row says it. A value is the row's standard when nothing is kept, and kept says that
         something is.
@@ -6365,6 +6438,7 @@ static void compositor_inputs_watch(void)
                         if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME))
                         {
                                 compositor_look_read();
+                                compositor_theme_read();
                                 compositor_input_settings_read();
                                 // The arrangement: the screens laid again, which probes them, so only when it is the file written.
                                 if (string_equals((string_address)name,
@@ -9747,6 +9821,8 @@ static b32 compositor_main()
                         compositor_hand_back();
                 return 1;
         }
+        // The theme goes in the table it now has.
+        compositor_theme_read();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
                 compositor_input_publish(at);
 
@@ -9827,7 +9903,7 @@ static b32 compositor_main()
                         until = !until || frame < until ? frame : until;
                 }
 
-                if (compositor.band)
+                if (compositor.band || compositor.theme_word == 2)
                 {
                         timespec real = {0, 0};
                         positive minute;
@@ -9856,7 +9932,8 @@ static b32 compositor_main()
                 awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
                                           until ? (positive)wait : 0, 0, 0, 0);
 
-                // Whatever woke the loop, a sleep may be what it woke from.
+                // Whatever woke the loop, a sleep may be what it woke from; and auto's theme may have turned with the clock.
+                compositor_theme_tick();
                 compositor_wake_check(clock_monotonic_nanoseconds());
                 compositor_wake_pass(clock_monotonic_nanoseconds());
                 compositor_hold_drop(clock_monotonic_nanoseconds());

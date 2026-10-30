@@ -24061,7 +24061,7 @@ static const host_row host_rows[] = {
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
-    {null, "settings", "the settings window, on the desktop of the compositor", 'b'},
+    {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, the UI kit's every control", 'b'},
     {null, "window", "the windows on the desktop: name, pid, place, size, title", 'b'},
     {null, "window PLACE... COMMAND...", "run COMMAND, its first window put where PLACE says:", 'b'},
     {null, "", "center, at X,Y, maximized, fullscreen, screen N,", 'b'},
@@ -24773,8 +24773,8 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         positive pid = 0, length, at = 0, used = 0;
         bipolar handle, got = 0;
 
-        (void)arguments;
-        return_if(count != 2, host_usage());
+        // moonwater settings gallery: the same window on the kit's gallery, every control of it, to see them move.
+        return_if(count != 2 && (count != 3 || !string_equals(arguments[2], (string_address) "gallery")), host_usage());
 
         pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
         return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
@@ -24828,6 +24828,8 @@ static b32 host_settings_window(string_address address_to arguments, positive co
                 words[used++] = (string_address) "-b";
                 words[used++] = bold;
         }
+        if (count == 3)
+                words[used++] = (string_address) "-g";
         words[used] = null;
 
         if (!host_detach(descriptors_none, descriptors_none))

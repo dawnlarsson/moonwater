@@ -47,7 +47,7 @@ moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
 moonwater desktop start|stop           begin the chosen desktop now, or end its session
-moonwater settings                     the settings window, on the desktop of the compositor
+moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, the UI kit's every control
 moonwater window                       the windows on the desktop: name, pid, place, size, title
 moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says:
                                        center, at X,Y, maximized, fullscreen, screen N,
@@ -65,6 +65,9 @@ moonwater canvas scale [N|auto]        device pixels to a drawn pixel, 1 to 4, r
 moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
 moonwater canvas arrange [NAME[@X,Y|@off]...|default]  where each screen is: names left to right, the first the primary [default]
 moonwater canvas background [COLOUR|default]  the desktop colour, rrggbb [1e1e1e]
+moonwater canvas theme [light|dark|auto]  the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [light]
+moonwater canvas theme accent [COLOUR|reset]  what the controls fill with, rrggbb; the text on it is picked to be read [ff8800]
+moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]
 moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
@@ -232,6 +235,14 @@ in range (Wi-Fi), the devices kept (Bluetooth), the battery and the clock are as
 again every second or two, and joining a network asks for its passphrase in the
 window. Typing filters the rows of every group; a command that ends the session or
 throws away what is kept is run by a second Enter.
+
+Canvas's own windows are drawn with one UI kit (src/canvas/ui/ui.c), Dawning Native's
+controls and their motion to the number: a press springs, a drag squashes, a toggle
+stretches its row, a radio's pip flies, and so on. `moonwater canvas theme` picks light,
+dark or auto (light from 7 to 19), `canvas theme accent` the colour its controls fill
+with, and `canvas motion reduced` turns the motion off; every open window turns to a
+change at once. `moonwater settings gallery` opens the settings window on the kit's
+gallery: every control, as the kit's own demo page has them, to see and press.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away.
 

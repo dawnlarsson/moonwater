@@ -277,6 +277,23 @@ static const struct settings_ink settings_inks[] = {
     {"forest", "163a26"},  {"plum", "3b1f4a"},   {"light-grey", "d4d4d8"}, {"white", "ffffff"},
 };
 
+// The accents (canvas theme accent), named as the background's inks are: the kit's amber first, its standard.
+static const struct settings_ink settings_accents[] = {
+    {"amber", "ff8800"}, {"blue", "2563eb"}, {"green", "16a34a"}, {"violet", "7c3aed"}, {"rose", "e11d48"}, {"graphite", "52525b"},
+};
+
+// The named inks of a row of them: the accent's, or the background's.
+static const struct settings_ink address_to settings_ink_table(const struct settings_row address_to row, positive address_to count)
+{
+        if (row->path && string_equals((string_address)row->path, (string_address)SETTING_ACCENT_PATH))
+        {
+                *count = sizeof(settings_accents) / sizeof(settings_accents[0]);
+                return settings_accents;
+        }
+        *count = sizeof(settings_inks) / sizeof(settings_inks[0]);
+        return settings_inks;
+}
+
 _Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) < 64, "the rows to ask are a bit each of a word");
 
 /*
@@ -539,12 +556,17 @@ static unsigned int settings_read(const struct settings_row address_to row, cons
         state = settings_parse(row, said, length, value, room);
 
         if (state == SETTINGS_READ && (row->flags & SETTINGS_INK) && value[0] == '#')
-                for (positive at = 0; at < sizeof(settings_inks) / sizeof(settings_inks[0]); at++)
-                        if (string_equals((string_address)value + 1, (string_address)settings_inks[at].colour))
+        {
+                positive inks;
+                const struct settings_ink address_to table = settings_ink_table(row, &inks);
+
+                for (positive at = 0; at < inks; at++)
+                        if (string_equals((string_address)value + 1, (string_address)table[at].colour))
                         {
-                                string_copy_bounded((string_address)value, (string_address)settings_inks[at].name, room);
+                                string_copy_bounded((string_address)value, (string_address)table[at].name, room);
                                 break;
                         }
+        }
         return state == SETTINGS_ABSENT && failed && !length ? SETTINGS_FAILED : state;
 }
 
@@ -1429,9 +1451,14 @@ static positive settings_command(const struct settings_row address_to row, strin
                 words[count++] = (string_address)value;
                 // An ink is chosen by its name and set by its rrggbb.
                 if (row->flags & SETTINGS_INK)
-                        for (positive at = 0; at < sizeof(settings_inks) / sizeof(settings_inks[0]); at++)
-                                if (string_equals((string_address)value, (string_address)settings_inks[at].name))
-                                        words[count - 1] = (string_address)settings_inks[at].colour;
+                {
+                        positive inks;
+                        const struct settings_ink address_to table = settings_ink_table(row, &inks);
+
+                        for (positive at = 0; at < inks; at++)
+                                if (string_equals((string_address)value, (string_address)table[at].name))
+                                        words[count - 1] = (string_address)table[at].colour;
+                }
         }
         words[count] = null;
         return count;
@@ -3207,6 +3234,229 @@ static b32 settings_key(const struct window_event address_to event)
         return true;
 }
 
+/* ---- the gallery ---- */
+
+/*
+        The kit's gallery (moonwater settings gallery, -g): every control of
+        ui.c's kit, laid out as Dawning Native's own demo page lays them out in
+        Chrome at 1200 pixels (the provision dialog, the preferences, the tabs,
+        the build target's radios and checkboxes, the actions and the upgrades'
+        progress), and in the grid's empty cell the pieces its demo does not
+        show (badges, tags, keys, avatars, spinners, a callout and a code well).
+        The page is the theme's paper and not glass, so it is the web page's
+        picture to compare, and the wheel scrolls it. Nothing in it runs a
+        verb: it is there to be pressed.
+*/
+#define SETTINGS_GALLERY_W 1092
+#define SETTINGS_GALLERY_H 1538
+#define SETTINGS_GALLERY_MOST 72
+
+static struct
+{
+        b32 on;
+        struct ui_control control[SETTINGS_GALLERY_MOST];
+        int count, scroll, wheel;
+} settings_gallery;
+
+static struct ui_control address_to settings_gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
+{
+        struct ui_control address_to c = &settings_gallery.control[settings_gallery.count < SETTINGS_GALLERY_MOST - 1 ? settings_gallery.count++ : settings_gallery.count];
+
+        memory_zero(c, sizeof(*c));
+        c->kind = (unsigned char)kind, c->variant = (unsigned char)variant;
+        c->x = x, c->y = y, c->w = w, c->h = h;
+        c->label = label;
+        return c;
+}
+
+static fn settings_gallery_slider(struct ui_control address_to c, int low, int high, int step, int value)
+{
+        c->low = ui_q(low), c->high = ui_q(high), c->step = ui_q(step), c->value = ui_q(value);
+}
+
+// The page, from the demo's layout in Chrome (page pixels, the first card's top left at 24, 24).
+static fn settings_gallery_build(void)
+{
+        settings_gallery.count = 0;
+        settings_gallery_put(UI_WINDOW, 0, 24, 24, 332, 606, "Provision node");
+        settings_gallery_put(UI_CARD, 0, 380, 24, 332, 606, null);
+        settings_gallery_put(UI_CARD, 0, 736, 24, 332, 606, null);
+        settings_gallery_put(UI_CARD, 0, 24, 654, 332, 507, null);
+        settings_gallery_put(UI_CARD, 0, 380, 654, 332, 507, null);
+        settings_gallery_put(UI_CARD, 0, 24, 1185, 1044, 329, null);
+        settings_gallery_put(UI_RULE, 0, 48, 537, 284, 1, null);
+        settings_gallery_put(UI_RULE, 0, 405, 233, 282, 1, null);
+        settings_gallery_put(UI_RULE, 0, 49, 927, 282, 1, null);
+        settings_gallery_put(UI_RULE, 0, 49, 1420, 994, 1, null);
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 49, 282, 24, "System preferences")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 49, 282, 24, "Navigation")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 679, 282, 24, "Build target")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 679, 282, 24, "Actions")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 1210, 994, 24, "System upgrades")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, 20, "Firmware DB-9 patching in progress\xe2\x80\xa6")->role = UI_ON_SURFACE_VARIANT;
+        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, 20, "Node replication (80%)")->role = UI_ON_SURFACE_VARIANT;
+        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, 20, "3 nodes pending a kernel rebuild.")->role = UI_ON_SURFACE_VARIANT;
+        settings_gallery_put(UI_INPUT, 0, 48, 117, 284, 78, "Node name")->items[0] = "my-kernel";
+        settings_gallery_put(UI_INPUT, 0, 48, 203, 284, 78, "Region")->items[0] = "moon-1";
+        settings_gallery_slider(settings_gallery_put(UI_SLIDER, 0, 48, 289, 284, 88, "vCPU allocation"), 1, 64, 1, 8);
+        settings_gallery_slider(settings_gallery_put(UI_SLIDER, 0, 405, 266, 282, 88, "Log verbosity"), 0, 100, 1, 70);
+        settings_gallery_slider(settings_gallery_put(UI_SLIDER, UI_SLIDER_STEPS, 405, 370, 282, 88, "Replication limit"), 0, 100, 25, 50);
+        settings_gallery_put(UI_SWITCH, 0, 48, 393, 284, 48, "Pin to bare metal")->on = 1;
+        settings_gallery_put(UI_SWITCH, 0, 48, 457, 284, 48, "Auto-deploy on push")->on = 0;
+        settings_gallery_put(UI_SWITCH, 0, 405, 89, 282, 48, "Telemetry")->on = 1;
+        settings_gallery_put(UI_SWITCH, 0, 405, 153, 282, 48, "Offline cache")->on = 0;
+        settings_gallery_put(UI_CHECKBOX, 0, 49, 960, 282, 48, "Enable WASM target")->on = 1;
+        settings_gallery_put(UI_CHECKBOX, 0, 49, 1024, 282, 48, "Build as no_std")->on = 1;
+        settings_gallery_put(UI_CHECKBOX, 0, 49, 1088, 282, 48, "Strip symbols")->on = 0;
+        {
+                struct ui_control address_to radios = settings_gallery_put(UI_RADIOS, 0, 49, 719, 282, 48, null);
+
+                radios->items[0] = "x86-64";
+                radios->items[1] = "ARM64";
+                radios->items[2] = "RISC-V (experimental)";
+                radios->count = 3;
+                radios->at = 0;
+        }
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_TEXT, 48, 570, 67, 36, "Cancel")->disabled = 0;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 204, 570, 129, 36, "Provision node")->disabled = 0;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 405, 719, 75, 36, "Deploy")->disabled = 0;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_DEFAULT, 492, 719, 62, 36, "Build")->disabled = 0;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_OUTLINED, 566, 719, 63, 36, "Logs")->disabled = 0;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_TEXT, 405, 767, 67, 36, "Cancel")->disabled = 0;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_DEFAULT, 405, 819, 87, 36, "Disabled")->disabled = 1;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_OUTLINED, 504, 819, 87, 36, "Disabled")->disabled = 1;
+        settings_gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 916, 1453, 127, 36, "Verify updates")->disabled = 0;
+        {
+                struct ui_control address_to tabs = settings_gallery_put(UI_TABS, UI_TABS_SEGMENTED, 761, 89, 223, 32, null);
+
+                tabs->items[0] = "All";
+                tabs->items[1] = "Running";
+                tabs->items[2] = "Stopped";
+                tabs->count = 3;
+        }
+        settings_gallery_put(UI_PROGRESS, 0, 49, 1294, 994, 6, null)->value = -1;
+        settings_gallery_put(UI_PROGRESS, 0, 49, 1382, 994, 6, null)->value = UI_ONE / 100 * 80;
+        // The pieces, in the grid's cell the demo leaves empty: a heading, then rows that flow left to right (x -1).
+        settings_gallery_put(UI_CARD, 0, 736, 654, 332, 507, null);
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 679, 282, 24, "Pieces")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_BADGE, 1, 761, 719, 0, 22, "Accent")->role = UI_PRIMARY;
+        settings_gallery_put(UI_BADGE, 1, -1, 719, 0, 22, "Healthy")->role = UI_SUCCESS;
+        settings_gallery_put(UI_BADGE, 0, -1, 719, 0, 22, "Degraded")->role = UI_WARNING;
+        settings_gallery_put(UI_BADGE, 0, 761, 749, 0, 22, "Failed")->role = UI_ERROR;
+        settings_gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Info")->role = UI_INFO;
+        settings_gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Idle")->role = UI_SURFACE_HIGHEST;
+        settings_gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Draft")->role = -1;
+        settings_gallery_put(UI_TAG, 0, 761, 787, 0, 26, "riscv64");
+        settings_gallery_put(UI_TAG, 0, -1, 787, 0, 26, "kernel")->on = 1;
+        settings_gallery_put(UI_KBD, 0, -1, 790, 0, 20, "Ctrl");
+        settings_gallery_put(UI_KBD, 0, -1, 790, 0, 20, "K");
+        settings_gallery_put(UI_AVATAR, 0, 761, 829, 32, 32, "AL")->on = 1;
+        settings_gallery_put(UI_AVATAR, 0, 805, 833, 24, 24, "DL");
+        settings_gallery_put(UI_AVATAR, 1, 841, 829, 32, 32, "MW");
+        settings_gallery_put(UI_SPINNER, 0, 905, 838, 14, 14, null);
+        settings_gallery_put(UI_SPINNER, 0, 931, 835, 20, 20, null);
+        settings_gallery_put(UI_SPINNER, 0, 963, 831, 28, 28, null);
+        {
+                struct ui_control address_to callout = settings_gallery_put(UI_CALLOUT, 0, 761, 877, 282, 70, "Kernel rebuild pending");
+
+                callout->role = UI_WARNING;
+                string_copy_bounded((string_address)callout->text, (string_address) "Three nodes wait for it.", sizeof(callout->text));
+        }
+        {
+                struct ui_control address_to code = settings_gallery_put(UI_CODE_WELL, 0, 761, 963, 282, 172, "build.sh");
+
+                code->items[0] = "$ sh build.sh arch/x64";
+                code->items[1] = "  kernel   ok";
+                code->items[2] = "  shell    ok";
+                code->items[3] = "  canvas   ok";
+                code->count = 4;
+        }
+        for (int at = 0; at < settings_gallery.count; at++)
+                ui_control_start(&settings_gallery.control[at]);
+}
+
+// The page drawn into the rows of the band: the paper, then every control, the scroll taken off their places.
+static fn settings_gallery_draw(struct ui address_to ui)
+{
+        int right = 0, row_y = -1;
+
+        ui->top = 0;
+        ui->bottom = ui->height;
+        ui_fill(ui, 0, 0, ui->width, ui->height, ui_role(UI_SURFACE) | 0xff000000u);
+        for (int at = 0; at < settings_gallery.count; at++)
+        {
+                struct ui_control address_to c = &settings_gallery.control[at];
+                int y = c->y;
+
+                // A piece that flows: after the last on its row, 8 apart.
+                if (c->x < 0 || (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD))
+                {
+                        if (c->x < 0 && (row_y == c->y || row_y == c->y - 3 || row_y == c->y + 3))
+                                c->x = right + 8;
+                        else if (c->x < 0)
+                                c->x = 761;
+                }
+                c->y = y - settings_gallery.scroll;
+                if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height / ui->scale)
+                        ui_control_draw(ui, c);
+                c->y = y;
+                if (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD)
+                        right = c->x + c->w, row_y = c->y;
+        }
+}
+
+// The page scrolled to scroll logical pixels, inside it.
+static fn settings_gallery_scroll_to(int scroll)
+{
+        int most = SETTINGS_GALLERY_H - settings.height / settings.ui.scale;
+
+        scroll = scroll > most ? most : scroll;
+        scroll = scroll < 0 ? 0 : scroll;
+        if (scroll != settings_gallery.scroll)
+        {
+                settings_gallery.scroll = scroll;
+                settings_dirty();
+        }
+}
+
+// The pointer and the wheel on the page: the kit's controls take them, in page pixels.
+static b32 settings_gallery_event(const struct window_event address_to event)
+{
+        int offset = settings_gallery.scroll * settings.ui.scale;
+
+        if (event->type == WINDOW_EVENT_KEY)
+        {
+                if ((event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_KEY_ESCAPE)
+                        return false;
+                if ((event->flags & WINDOW_KEY_DOWN) && (event->a == SETTINGS_KEY_DOWN || event->a == SETTINGS_KEY_UP))
+                        settings_gallery_scroll_to(settings_gallery.scroll + (event->a == SETTINGS_KEY_DOWN ? 40 : -40));
+                return true;
+        }
+        if (event->type == WINDOW_EVENT_WHEEL)
+        {
+                if (!event->b)
+                        settings_gallery_scroll_to(settings_gallery.scroll - settings_wheel_take(2, event->a, 40) * 40 / 40);
+                return true;
+        }
+        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+        {
+                if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
+                        return true;
+                // The controls are drawn with the scroll taken off; the pointer is put on the page.
+                for (int at = 0; at < settings_gallery.count; at++)
+                        settings_gallery.control[at].y -= settings_gallery.scroll;
+                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, (int)event->type, event->a,
+                               event->type == WINDOW_EVENT_MOTION ? event->b : settings.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags);
+                for (int at = 0; at < settings_gallery.count; at++)
+                        settings_gallery.control[at].y += settings_gallery.scroll;
+                if (event->type == WINDOW_EVENT_MOTION)
+                        settings.pointer_x = event->a, settings.pointer_y = event->b;
+                (void)offset;
+                settings_dirty();
+        }
+        return true;
+}
+
 // The row under a point of the window, or -1.
 static int settings_hit(int x, int y)
 {
@@ -3364,6 +3614,8 @@ static fn settings_finger(const struct window_event address_to event)
 
 static b32 settings_event(const struct window_event address_to event)
 {
+        if (settings_gallery.on)
+                return settings_gallery_event(event);
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
@@ -3859,6 +4111,11 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         ui->bottom = settings.height;
         ui->band_top = band_bottom > band_top ? band_top : 0;
         ui->band_bottom = band_bottom > band_top ? band_bottom : 0;
+        if (settings_gallery.on)
+        {
+                settings_gallery_draw(ui);
+                return;
+        }
         ui_clear(ui);
         ui_title(ui, left + ui_px(&settings.ui, 6), ui_px(&settings.ui, 8), list_top - ui_px(&settings.ui, 8),
                  settings.view ? (string_address)settings.card_title : (string_address) "Settings");
@@ -3989,10 +4246,21 @@ static int settings_open(void)
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
 
-        if (ui_lift_other(&settings.own, (string_address) "settings", false))
+        if (!settings_gallery.on && ui_lift_other(&settings.own, (string_address) "settings", false))
                 return 0;
 
         settings_refilter();
+        if (settings_gallery.on)
+        {
+                int width = ui_px(&settings.ui, SETTINGS_GALLERY_W), height = ui_px(&settings.ui, SETTINGS_GALLERY_H);
+                int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
+
+                settings_gallery_build();
+                settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
+                ui_centre(table, row, settings.width, settings.height, 0);
+                settings_frame();
+                return -1;
+        }
         {
                 int width = ui_px(&settings.ui, SETTINGS_WIDTH), height = ui_px(&settings.ui, SETTINGS_HEIGHT);
                 int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
@@ -4065,6 +4333,15 @@ static fn settings_close(void)
         }
 }
 
+// The kit's controls moved this frame: their rows are drawn again at the next (the whole picture while the theme turns).
+static fn settings_moving(int top, int bottom, b32 all)
+{
+        if (all)
+                settings_dirty();
+        else if (bottom > top)
+                settings_changed(top, bottom);
+}
+
 static struct ui_app settings_app = {
         .own = &settings.own,
         .ui = &settings.ui,
@@ -4081,6 +4358,7 @@ static struct ui_app settings_app = {
         .frame = settings_frame,
         .event = settings_event,
         .changed = settings_dirty,
+        .moving = settings_moving,
         .size = settings_size,
         .tick = settings_tick,
         .ready = settings_ready,
@@ -4112,6 +4390,16 @@ static b32 settings_main()
                         continue;
                 at++;
         }
+        // -g: the kit's gallery, on its own paper and not glass, with the mono for its tags and code.
+        for (positive at = 1; at < (positive)program_argument_count(); at++)
+                if (string_equals(program_argument(at), (string_address) "-g"))
+                {
+                        settings_gallery.on = 1;
+                        settings_app.glass = 0;
+                        settings_app.mono = 1;
+                        settings_app.title = (string_address) "Gallery";
+                        settings_app.name = (string_address) "gallery";
+                }
 
         if (!settings_map())
         {
