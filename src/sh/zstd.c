@@ -4768,7 +4768,7 @@ static inline INLINE positive zstd_common(p8 address_to a, p8 address_to b, posi
         if (room >= 16)
         {
                 p32 equal = (p32)__builtin_ia32_pmovmskb128(
-                        __builtin_ia32_pcmpeqb128(*(zstd_v16 *)a, *(zstd_v16 *)b));
+                        (zstd_v16)(*(zstd_v16 *)a == *(zstd_v16 *)b));
                 positive n = bottom_bit_known(~equal | 0x10000u);
 
                 if (n < 16)
@@ -4966,7 +4966,7 @@ zstd_row_mask(p8 address_to tags, p8 tag, positive entries)
 
         for (positive at = 0; at < entries; at += 16)
                 mask |= (p64)(p32)__builtin_ia32_pmovmskb128(
-                                __builtin_ia32_pcmpeqb128(*(zstd_v16 address_to)(tags + at), pattern))
+                                (zstd_v16)(*(zstd_v16 address_to)(tags + at) == pattern))
                         << at;
         return mask;
 #else
