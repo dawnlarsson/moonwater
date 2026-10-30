@@ -190,12 +190,13 @@ static const struct settings_row settings_rows[] = {
                       .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas windows remember [on|off]",
                       .help = "a window opens where the hand last put it, kept across boots [on]"),
-    //  Off by default: a mark under every finger is for showing a screen to others (a recording, a projector) and for
-    //  finding where a screen reads a finger, not for every day; the compositor draws nothing for it while it is off.
+    //  On by default (the owner's call): a finger hides what it presses, and the mark says where the screen read it. It
+    //  is drawn for a touch screen's fingers alone, never for a mouse, a pad or a pen, and costs nothing with no finger
+    //  down or fading.
     SETTING_PLAIN_ROW(null, "Show touch area", SETTINGS_SWITCH, 0, ("canvas", "touch"), "touch ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "off", .need = "how Canvas draws",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas touch [on|off]",
-                      .help = "a circle under each finger on a touch screen, fading for a second after it lifts [off]"),
+                      .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
     SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,

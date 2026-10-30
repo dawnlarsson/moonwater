@@ -47238,8 +47238,8 @@ while True:
              "acceleration off", "acceleration on"),
             ("taskbar text", "taskbar.text", "edge", "edge", ["middle", "Center", "left", '""', "edge,center"],
              "text edge", "text center"),
-            ("canvas touch", "canvas.touch", "on", "on", ["maybe", "ON", "1", '""', "on,off"],
-             "touch on", "touch off"),
+            ("canvas touch", "canvas.touch", "off", "off", ["maybe", "OFF", "0", '""', "off,on"],
+             "touch off", "touch on"),
         ]
 
         def plain_step(label, command):

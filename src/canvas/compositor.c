@@ -8612,7 +8612,8 @@ static void compositor_spots_compose(const struct compositor_target *t, const st
         }
 }
 
-// `moonwater canvas touch`, read with the other settings the compositor takes at once: off takes every mark away.
+// `moonwater canvas touch`, read with the other settings the compositor takes at once: on (the row's standard, nothing
+// kept or a file that says default) or off, which takes every mark away.
 static void compositor_touch_settings_read(void)
 {
         char word[16];
@@ -8620,7 +8621,8 @@ static void compositor_touch_settings_read(void)
         int on;
 
         compositor_word(SETTING_TOUCH_PATH, word, sizeof(word));
-        on = compositor_setting_kept(SETTING_TOUCH_PATH, word, &value) && value == 0;
+        compositor_setting_kept(SETTING_TOUCH_PATH, word, &value);
+        on = value == 0;
         if (!on && compositor.spots_on)
                 compositor_spots_clear();
         compositor.spots_on = on;

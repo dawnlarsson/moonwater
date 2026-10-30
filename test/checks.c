@@ -116601,6 +116601,16 @@ static void check_compositor_touch(void)
           unchanged && touch_buttons(1, head1) == 0x1101110211111110ul);
 
     /* Its mark, `moonwater canvas touch on`: a disc and a ring round the finger over the windows, gone a second after. */
+    compositor.spots_on = 0;
+    compositor_touch_settings_read();
+    {
+        long value;
+
+        check("touch: with nothing kept the marks are on, the row's standard, and a file that says default or a word that is none is the same",
+              compositor.spots_on && !compositor_setting_kept(SETTING_TOUCH_PATH, "default", &value) && value == 0 &&
+                  !compositor_setting_kept(SETTING_TOUCH_PATH, "sideways", &value) && value == 0 &&
+                  compositor_setting_kept(SETTING_TOUCH_PATH, "off", &value) && value == 1);
+    }
     compositor.spots_on = 1;
     compositor_present();
     touch_one(100, 80, false);
