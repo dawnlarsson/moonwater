@@ -78908,7 +78908,7 @@ def harness_waterlink_link(argv):
 
 
 WATERLINK_LINK_INNER = r"""
-import os, pty, sys, time, select, fcntl, termios, struct, signal, subprocess, hashlib
+import os, pty, sys, time, select, fcntl, termios, struct, signal, subprocess, hashlib, base64
 
 top = sys.argv[1]
 moon = top + "/bin/moonwater"
@@ -79042,6 +79042,40 @@ say(status == 0 and b"/root/link.groups could not be read" in out and b"/root/li
 os.unlink(top + "/c/root/link.groups")
 os.unlink(top + "/c/root/link.peers")
 os.rename(top + "/c/root/link.peers.kept", top + "/c/root/link.peers")
+
+#       A damaged list of machines is not an empty one: cut short, or open to
+#       everybody, it is said to be unreadable and a change refuses it, where
+#       writing over it would forget every machine in it. A record whose name
+#       could not have been paired is left out of the page and the rest stay.
+whole = open(top + "/c/root/link.peers", "rb").read()
+fake_key = base64.b64encode(os.urandom(32)).decode()
+for label, damage, mode in (("cut in the middle of a record", whole + whole[:50], 0o600),
+                            ("open to everybody", whole, 0o644),
+                            ("a stray byte after the last record", whole + b"\0", 0o600),
+                            ("larger than a list can be", whole[:96] * 65, 0o600)):
+    with open(top + "/c/root/link.peers", "wb") as f:
+        f.write(damage)
+    os.chmod(top + "/c/root/link.peers", mode)
+    status, out, err = on("c", moon + " link", timeout=20)
+    said = status == 0 and b"/root/link.peers could not be read" in out and b"nobody linked yet" not in out
+    status, _, err = on("c", "%s link add fresh %s 10.77.0.50" % (moon, fake_key))
+    refused = status != 0 and b"could not be read" in err
+    status, _, err2 = on("c", moon + " link remove b")
+    refused = refused and status != 0 and b"could not be read" in err2
+    say(said and refused and open(top + "/c/root/link.peers", "rb").read() == damage,
+        "a list of machines %s is said to be unreadable, and an add and a remove leave it as it was (%r %r)" %
+        (label, said, (err[-70:], err2[-70:])))
+bad = bytearray(whole[:96])
+bad[32:32 + 31] = b"bad name with spaces\0".ljust(31, b"\0")
+with open(top + "/c/root/link.peers", "wb") as f:
+    f.write(bytes(bad) + whole)
+os.chmod(top + "/c/root/link.peers", 0o600)
+status, out, err = on("c", moon + " link", timeout=20)
+say(status == 0 and b"bad name" not in out and b"  b  " in out,
+    "a record whose name could not have been paired is left out and the machines after it stay (%r)" % (out[-300:],))
+with open(top + "/c/root/link.peers", "wb") as f:
+    f.write(whole)
+os.chmod(top + "/c/root/link.peers", 0o600)
 for text, want in ((b"22349\n", 22349), (b"99999", 22348), (b"abc", 22348), (b"-5", 22348),
                    (b"0", 22348), (b"", 22348), (b"22349 22350", 22348)):
     with open(top + "/c/root/link.port", "wb") as f:
@@ -79077,7 +79111,6 @@ say(status == 0 and open(top + "/c/root/link.port").read() == "22352\n",
     "a port with leading zeros is kept as its number")
 #       Keys of machines that do not exist: a key already linked under a name is
 #       not added under another, and removing it would take the real record.
-import base64
 fresh = [base64.b64encode(os.urandom(32)).decode() for _ in range(2)]
 on("c", moon + " link add porty %s 10.77.0.9" % fresh[0])
 on("c", moon + " link add porty2 %s 10.77.0.10:22360" % fresh[1])
@@ -79534,6 +79567,74 @@ holder.kill()
 holder.wait()
 say(status != 0 and b"did not start" in out + err and took < 1.0,
     "link on refused at once when the port is taken (%.0f ms)" % (took * 1000))
+#       The same for a holder of the IPv4 port alone, which the listener's
+#       dual-stack socket collides with as well, and on a port that was set.
+for family, bind_to, port, label in (("AF_INET", "0.0.0.0", 22348, "IPv4"), ("AF_INET", "10.77.0.2", 22348, "IPv4 on its address"),
+                                     ("AF_INET6", "::", 22391, "the port that link port set")):
+    if port != 22348:
+        on("b", "%s link port %d" % (moon, port))
+    holder = subprocess.Popen(argv_on("b", "python3 -c 'import socket,time; "
+                                      "s=socket.socket(socket.%s,socket.SOCK_DGRAM); "
+                                      "s.bind((\"%s\",%d)); print(1, flush=True); time.sleep(60)'" % (family, bind_to, port)),
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    holder.stdout.readline()
+    t0 = time.monotonic()
+    status, out, err = on("b", moon + " link on")
+    took = time.monotonic() - t0
+    holder.kill()
+    holder.communicate()
+    say(status != 0 and b"did not start" in out + err and took < 1.0,
+        "link on is refused at once when %s is taken (%.0f ms)" % (label, took * 1000))
+    on("b", moon + " link off")
+    if port != 22348:
+        on("b", moon + " link port auto")
+
+#       A listener that is killed leaves a switch that says on and nothing
+#       listening: the status says so, nothing answers, and link on starts
+#       another over the lock the kernel let go of. And link off ends a
+#       session that is open, where it is not left running on its own.
+def listeners_in(space):
+    found = []
+    for entry in os.listdir("/proc"):
+        try:
+            if entry.isdigit() and os.readlink("/proc/%s/ns/net" % entry) == os.readlink("/proc/%d/ns/net" % space.pid):
+                words = open("/proc/%s/cmdline" % entry, "rb").read().split(b"\0")
+                if b"link" in words and b"serve" in words:
+                    found.append(int(entry))
+        except OSError:
+            continue
+    return found
+status, out, err = on("b", moon + " link on")
+dying = listeners_in(far)
+for pid in dying:
+    os.kill(pid, signal.SIGKILL)
+end = time.time() + 10
+while time.time() < end and any(os.path.exists("/proc/%d" % pid) for pid in dying):
+    time.sleep(0.05)
+status, out, err = on("b", moon + " link")
+say(dying != [] and b"switched on but not running" in out,
+    "a listener that was killed is said to be switched on and not running (%r %r)" % (dying, out[:120]))
+status, out, err = on("a", moon + " link run b echo killed", timeout=30)
+say(status == 255 and out == b"", "and nothing answers (%r)" % (status,))
+status, out, err = on("b", moon + " link on")
+say(status == 0, "link on starts another over the lock that was let go (%r)" % (err[-80:],))
+status, out, err = on("a", moon + " link run b echo restarted", timeout=40)
+say(status == 0 and out == b"restarted\n", "and the paired machine runs on it again (%r %r)" % (out, err[-80:]))
+ticking = subprocess.Popen(argv_on("a", "%s link run b 'while :; do echo tick; sleep 0.1; done'" % moon),
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+first = b""
+if select.select([ticking.stdout], [], [], 30)[0]:
+    first = ticking.stdout.readline()
+on("b", moon + " link off")
+end = time.time() + 15
+while time.time() < end and ticking.poll() is None:
+    time.sleep(0.1)
+ended = ticking.poll()
+if ended is None:
+    ticking.kill()
+ticking.communicate()
+say(first == b"tick\n" and ended not in (None, 0),
+    "link off ends the session that is open, and the client says so (%r, %r)" % (first, ended))
 
 # Groups: a and b join the same one and pair by themselves; c joins it with
 # the wrong secret and is never paired, and learns nothing.
@@ -79886,6 +79987,24 @@ if len(names) == 2:
     on("b", "%s link allow %s run" % (moon, names["b"]))
     on("b", "%s link deny %s files" % (moon, names["b"]))
 
+    #       A new secret is the same group (a member's mark is its namespace's,
+    #       not its key's): the machines paired under the old one are still
+    #       its members, and what the group takes back reaches them.
+    status, out, err = on("b", "%s link group lab %s-rotated allow shell run" % (moon, secret))
+    a_line = lab_line(names["b"])
+    say(status == 0 and a_line and "in group lab" in a_line[0],
+        "a group given a new secret keeps the machines paired under the old one as members (%r %r %r)" %
+        (a_line, out[-200:], err[-100:]))
+    status, out, err = on("b", moon + " link group lab allow shell")
+    a_line = lab_line(names["b"])
+    say(status == 0 and a_line and "may shell, in group lab" in a_line[0],
+        "sec: and what the group takes back after that is taken from them too (%r)" % (a_line,))
+    status, out, err = on("b", "%s link group lab %s allow run shell" % (moon, secret))
+    a_line = lab_line(names["b"])
+    say(status == 0 and a_line and "in group lab" in a_line[0],
+        "and the old secret again is the same group again (%r)" % (a_line,))
+    on("b", "%s link allow %s run" % (moon, names["b"]))
+
 #       A handshake flood. Anyone who knows the listener's public key can make
 #       an initiation that passes mac1, and a listener that did the curve for
 #       each would be kept busy by a sender with a few thousand source ports.
@@ -80043,6 +80162,29 @@ status, out, err = on("a", moon + " link group leave lab forget")
 say(status == 0 and b"removed the 1 machines" in out, "leave with forget drops what the group paired")
 status, out, err = on("a", moon + " link")
 say(b"in group lab" not in out and b"group lab:" not in out, "and a is in no group")
+
+#       The listener is one dual-stack socket: a machine with no IPv4 address
+#       at all is run on over IPv6, from a record added at an IPv6 address,
+#       and the record is still at that address afterwards.
+for side, address, device in (("a", "fd77::1", "br0"), ("c", "fd77::3", "wc")):
+    on(side, "ip -6 addr add %s/64 dev %s nodad" % (address, device))
+on("c", "ip addr del 10.77.0.3/24 dev wc")
+on("a", "%s link add v6c %s [fd77::3]" % (moon, keys["c"]))
+on("c", "%s link add v6a %s [fd77::1]" % (moon, keys["a"]))
+on("c", moon + " link allow v6a run")
+on("c", moon + " link on")
+status, out, err = on("a", "%s link run v6c 'echo over-v6-$((20+22))'" % moon, timeout=40)
+say(status == 0 and out == b"over-v6-42\n", "a command runs on a machine that has only an IPv6 address (%r %r)" % (out, err[-100:]))
+record = None
+peers_now = open(top + "/a/root/link.peers", "rb").read()
+for at in range(0, len(peers_now) - 95, 96):
+    if peers_now[at + 32:at + 64].split(b"\0")[0] == b"v6c":
+        record = peers_now[at:at + 96]
+say(record is not None and record[72:88] == socket.inet_pton(socket.AF_INET6, "fd77::3") and
+    structure.unpack_from("<H", record, 88)[0] == 22348,
+    "and its record is at the IPv6 address and port it was added at (%r)" % (record and record[72:90].hex(),))
+on("a", moon + " link remove v6c")
+on("c", moon + " link remove v6a")
 for side in "abc":
     on(side, moon + " link off")
 
