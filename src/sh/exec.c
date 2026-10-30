@@ -10467,6 +10467,7 @@ bool shell_inline_substitution(string_address text, p8 mark, positive start)
         b32 status;
         bool failed;
         bool ran = true;
+        bool soft;
         string_address at = text;
 
         if (!exec_inline_screen(text, address_of command))
@@ -10482,7 +10483,13 @@ bool shell_inline_substitution(string_address text, p8 mark, positive start)
 
         //      The screen above proved the words are blank-separated, with
         //      every quote closed; each is copied out whole and expanded the
-        //      way the child would have expanded it.
+        //      way the child would have expanded it. An error in a word is
+        //      the child's own, which ends the child and not the shell that
+        //      asked (bash's failglob drops the rest of the line, dash's
+        //      errors are fatal), so it is taken soft here: said, flagged
+        //      and answered as an empty substitution with status 1.
+        soft = expand_errors_soft;
+        expand_errors_soft = true;
         failed = false;
         for (;;)
         {
@@ -10528,6 +10535,8 @@ bool shell_inline_substitution(string_address text, p8 mark, positive start)
                         break;
                 }
         }
+
+        expand_errors_soft = soft;
 
         if (!failed)
         {
