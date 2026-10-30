@@ -149161,6 +149161,15 @@ void __sanitizer_cov_trace_pc(void)
                 }
 #else
                 handle = coverage_system(2, (long)COVERAGE_PATH, 02 | 02000000, 0, 0, 0, 0);
+#ifdef COVERAGE_FALLBACK
+                /* A process in a chroot (the moonwater command's sandbox)
+                   cannot see the record's path; the sandbox binds the
+                   coverage directory at /moonwater-coverage instead, a place
+                   no verb it runs empties. */
+                if (handle < 0)
+                        handle = coverage_system(2, (long)COVERAGE_FALLBACK, 02 | 02000000, 0, 0,
+                                                 0, 0);
+#endif
 #endif
                 if (handle < 0)
                         return;

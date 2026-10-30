@@ -499,10 +499,15 @@ coverage_build()
         [ -n "${MOONWATER_COVERAGE:-}" ] && [ "$1" = x86_64 ] || return 0
         coverage_stem=$(mktemp "$MOONWATER_COVERAGE/$(basename "$2").XXXXXX") ||
                 return 1
-        truncate -s 64M "$coverage_stem.map" || return 1
+        #       Writable by all: the cli and script harnesses run the shell
+        #       in a chroot, some of it as nobody, and find the record at the
+        #       fallback name, where their sandbox binds this directory.
+        truncate -s 64M "$coverage_stem.map" && chmod 0666 "$coverage_stem.map" ||
+                return 1
         $compiler -O2 -c -march=x86-64 -fno-stack-protector -fno-builtin \
-                "-DCOVERAGE_PATH=\"$coverage_stem.map\"" -DCOVERAGE_hook \
-                test/checks.c -o "$coverage_stem.o" || return 1
+                "-DCOVERAGE_PATH=\"$coverage_stem.map\"" \
+                "-DCOVERAGE_FALLBACK=\"/moonwater-coverage/${coverage_stem##*/}.map\"" \
+                -DCOVERAGE_hook test/checks.c -o "$coverage_stem.o" || return 1
         coverage_args="-g -fsanitize-coverage=trace-pc $coverage_stem.o"
 }
 

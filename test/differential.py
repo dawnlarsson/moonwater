@@ -44556,6 +44556,18 @@ def moonwater_sandbox(shell, top):
                            for name in nodes) +
                    f": > {sandbox}/dev/rfkill && ln -s /proc/self/fd {sandbox}/dev/fd && ")
 
+    #       Under `sh test/run coverage DIR` the shell records into DIR, a path
+    #       the chroot does not have: DIR is bound at /moonwater-coverage, the
+    #       name the record's hook tries second (COVERAGE_FALLBACK), and not at
+    #       its own path, which is under /home on the box, and wipe empties
+    #       /home. Without it the cli and script lanes recorded nothing. Every
+    #       wrapper that enters the sandbox runs private_dev, so it goes there.
+    coverage = os.environ.get("MOONWATER_COVERAGE", "")
+    if coverage and os.path.isdir(coverage):
+        (sandbox / "moonwater-coverage").mkdir(exist_ok=True)
+        private_dev += (f"mount --bind {shlex.quote(str(Path(coverage).resolve()))} "
+                        f"{sandbox}/moonwater-coverage && ")
+
     def session(script, nobody=False, raw=False):
         """Run a script in the sandbox; its lines, and whether it finished.
         With nobody the script runs as nobody: a user namespace of its own,
