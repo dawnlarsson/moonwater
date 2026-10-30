@@ -14976,11 +14976,17 @@ says transcript 'the program started' 'ring0-start'
 #       so: glibc aborts when the kernel refuses a munmap, and a thread that
 #       could not be made is not joined. That it was over, and the machine
 #       with it, is what is asked then.
+#       Read whole (says_whole): the program's lines are cat to a console
+#       the kernel is still writing to, and the admin mode leaves a flood of
+#       Canvas and DRM lines behind it (1846 in one run) that can land inside
+#       one. 'ioctl ran to its end' was red in one of three plain runs on
+#       2026-10-30 (the run kept no transcript), and the other two had all
+#       three lines with 1846 kernel lines around them.
 for mode in ioctl exec admin; do
         if [ -n "$injecting" ] && [ "$injecting" != 0 ]; then
-                says transcript "$mode ended" "ring0-ended $mode "
+                says_whole transcript "$mode ended" "ring0-ended $mode "
         else
-                says transcript "$mode ran to its end" "FUZZ-DONE $mode "
+                says_whole transcript "$mode ran to its end" "FUZZ-DONE $mode "
         fi
 done
 says transcript 'the machine came back' 'ring0-finished'
