@@ -5,13 +5,19 @@
 # job runs at their strongest whether the part says it needs them or not. See
 # sec_cpu_hardened for the region.
 #
-# What it costs is the machine's second thread of every core (mitigations=
-# auto,nosmt: a sibling thread is the channel several of the attacks use, and
-# the mitigations that close it are partial), the kernel unmapped from every
-# user address space even on a part that is not vulnerable to Meltdown
-# (pti=on), and the buffer-clearing instructions on every return to user mode
-# on a part that has them. A kiosk is rarely at its core count.
+# What it costs is the machine's second thread of every core (a sibling
+# thread is the channel several of the attacks use, and the mitigations that
+# close it are partial), the kernel unmapped from every user address space
+# even on a part that is not vulnerable to Meltdown (pti=on), and the
+# buffer-clearing instructions on every return to user mode on a part that
+# has them. A kiosk is rarely at its core count.
+#
+# The sibling threads go with nosmt=force, for good until the next boot.
+# mitigations=auto,nosmt alone turns them off only on a part the kernel
+# counts as vulnerable to an attack that needs it (L1TF, MDS and their
+# kind), so a part it does not (a Zen 5, say) kept every second thread
+# running in the locked tier.
 #
 #> includes sec_cpu_hardened
 
-#> cmdline mitigations=auto,nosmt pti=on tsx=off
+#> cmdline mitigations=auto,nosmt nosmt=force pti=on tsx=off

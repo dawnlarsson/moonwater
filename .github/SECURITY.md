@@ -784,7 +784,7 @@ have only `sec_exec_hardened` and `sec_build_hardened`.
 | Region | Hardened | Locked adds |
 | --- | --- | --- |
 | `sec_mem` (kernel) | heap zeroed on allocation, locals zeroed, caches never merged, typed buckets, shuffled free lists, random stack offset per syscall, checked lists, W+X mappings warned about at boot | zeroed on free and every call-used register cleared at return, partitioned kmalloc caches, corruption and an oops panic (and reboot after 5 s), KFENCE |
-| `sec_cpu` (kernel) | indirect branch tracking, call depth tracking, straight-line speculation barriers, user shadow stacks, TSX off; arm64 memory tagging | `mitigations=auto,nosmt pti=on` |
+| `sec_cpu` (kernel) | indirect branch tracking, call depth tracking, straight-line speculation barriers, user shadow stacks, TSX off; arm64 memory tagging | `mitigations=auto,nosmt nosmt=force pti=on`: no second thread of a core on any processor |
 | `sec_surface` (kernel) | no ACPI table or SSDT replacement from userspace, no MSR/cpuid devices, no ioperm/iopl, no vsyscall | no 32-bit or x32 ABI, no LDT, no FUSE, no binfmt_misc, no watch queue, no POSIX message queues, no io_uring or file handle calls |
 | `sec_dma` (kernel) | VT-d, AMD-Vi and SMMU, strict translated DMA, no passthrough, firmware PCI DMA off | no PCI hotplug, USB4, FireWire or PC card |
 | `sec_lockdown` (kernel) | integrity lockdown from boot, signed modules only, Landlock | confidentiality lockdown |
