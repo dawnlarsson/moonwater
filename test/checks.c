@@ -117558,6 +117558,27 @@ static fn check_launcher(void)
         launcher.height = 0;
         launcher_changed();
         check("launcher: the picture's height follows the list", launcher.height == 2 * UI_PAD + LAUNCHER_FIELD + LAUNCHER_GAP + 3 * LAUNCHER_ROW);
+#ifdef UI_TARGET
+        // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
+        {
+                int row_y = launcher.ui.scale * (UI_PAD + LAUNCHER_FIELD + LAUNCHER_GAP) + launcher.ui.scale * LAUNCHER_ROW * 3 / 2;
+                struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, LAUNCHER_WIDTH * launcher.ui.scale / 2, row_y};
+
+                launcher.width = LAUNCHER_WIDTH * launcher.ui.scale;
+                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, LAUNCHER_BUTTON_LEFT, 0};
+                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, LAUNCHER_BUTTON_LEFT, 0};
+                b32 pressed;
+
+                launcher_event(&finger);
+                launcher_event(&land);
+                pressed = ui_pressed(&launcher.press, 1) && launcher.highlight == 1;
+                finger.b += 3 * LAUNCHER_ROW * launcher.ui.scale;
+                launcher_event(&finger);
+                check("launcher: a finger shows the row it lands on pressed, and run nothing as it slides off",
+                      pressed && !ui_pressed(&launcher.press, 1) && launcher_event(&lift) && !launcher.press.down);
+                check("launcher: a row is a finger's least height", LAUNCHER_ROW >= 40);
+        }
+#endif
 
         // PATH read from real directories: a program of any name length, once, and nothing that is not one.
         {

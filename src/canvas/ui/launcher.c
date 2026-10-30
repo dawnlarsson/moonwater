@@ -54,7 +54,7 @@
 
 #define LAUNCHER_WIDTH 560 // logical pixels, times the scale
 #define LAUNCHER_FIELD 44  // the field's height
-#define LAUNCHER_ROW 36    // a row's
+#define LAUNCHER_ROW 40    // a row's: the least a finger's target is, as a settings row
 #define LAUNCHER_GAP 8     // between the field and the list
 #define LAUNCHER_ROWS 7    // rows the list shows at most
 #define LAUNCHER_TEXT_SIZE 17        // the field's text, a little larger than a row's
@@ -146,6 +146,7 @@ static struct
         unsigned int ground;
         int pointer_x, pointer_y;
         b32 focused, had_focus, dirty;
+        struct ui_press press; // a finger's press on a row: shown pressed as it lands, run as it lifts there
 } launcher;
 
 /* ---- the model: what a text names, and what a row starts ---- */
@@ -685,9 +686,33 @@ static b32 launcher_event(const struct window_event address_to event)
                 }
                 launcher.pointer_x = event->a;
                 launcher.pointer_y = event->b;
+                // A finger moved off the slop is no press of the row it landed on.
+                if ((event->flags & WINDOW_KEY_TOUCH) && launcher.press.down && !launcher.press.dragged &&
+                    ui_press_move(&launcher.ui, &launcher.press, event->a, event->b))
+                        launcher.dirty = true;
                 break;
         }
         case WINDOW_EVENT_BUTTON:
+                // A finger: the row it lands on is shown pressed, and run as the finger lifts there, so a finger that
+                // lands on the wrong row and slides off runs nothing.
+                if ((event->flags & WINDOW_KEY_TOUCH) && event->a == LAUNCHER_BUTTON_LEFT)
+                {
+                        int row;
+
+                        if (event->flags & WINDOW_KEY_DOWN)
+                        {
+                                row = launcher_hit(launcher.pointer_x, launcher.pointer_y);
+                                ui_press_begin(&launcher.press, launcher.pointer_x, launcher.pointer_y, row, true);
+                                launcher.highlight = row >= 0 ? row : launcher.highlight;
+                                launcher.dirty = true;
+                                break;
+                        }
+                        row = ui_press_end(&launcher.press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                        launcher.dirty = true;
+                        if (row >= 0 && row == launcher_hit(launcher.pointer_x, launcher.pointer_y))
+                                return !launcher_run(row);
+                        break;
+                }
                 if ((event->flags & WINDOW_KEY_DOWN) && event->a == LAUNCHER_BUTTON_LEFT)
                 {
                         int row = launcher_hit(launcher.pointer_x, launcher.pointer_y);
@@ -760,6 +785,8 @@ static fn launcher_draw(unsigned int address_to pixels)
                 note_width = ui_measure(ui, (string_address)note, UI_SMALL, false);
                 if ((int)at == launcher.highlight)
                         ui_focus(ui, pad, y, width, row, false);
+                if (ui_pressed(&launcher.press, (int)at))
+                        ui_press_fill(ui, pad, y, width, row);
                 ui_run(ui, pad + inset, baseline, (string_address)label, UI_TEXT, false, ui->ink, 255, pad + inset,
                        right - note_width - inset);
                 ui_text(ui, right - note_width, ui_baseline(ui, y, row, UI_SMALL), (string_address)note, UI_SMALL, false,
