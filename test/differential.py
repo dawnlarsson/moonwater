@@ -20925,9 +20925,12 @@ def shell_terminal_emulators(farm):
     import select
     import struct
     import termios
-    shell = Path(farm).resolve() / "sh"
+    #   The farm has the shell under bash and under its utilities' names and
+    #   none called sh; the candidate is started as sh by its argv[0], which
+    #   is what makes it dash's prompt and the PS1 given below.
+    shell = Path(farm).resolve() / "bash"
     if not shell.exists():
-        return 0, 1, ["terminal emulators need the candidate's sh"]
+        return 0, 1, ["terminal emulators need the candidate's shell"]
 
     def rows(text):
         return [text[at:at + 80] for at in range(0, max(len(text), 1), 80)]
@@ -20960,8 +20963,8 @@ def shell_terminal_emulators(farm):
 
     env = {"PATH": str(Path(farm).resolve()), "HOME": "/", "TERM": "xterm-256color", "HISTFILE": "",
            "PS1": "$ ", "LC_ALL": "C.UTF-8"}
-    process = subprocess.Popen([str(shell)], stdin=slave, stdout=slave, stderr=slave, close_fds=True,
-                               preexec_fn=leader, env=env)
+    process = subprocess.Popen(["sh"], executable=str(shell), stdin=slave, stdout=slave, stderr=slave,
+                               close_fds=True, preexec_fn=leader, env=env)
     os.close(slave)
     screen = shell_ReferenceScreen()
 
