@@ -13131,14 +13131,23 @@ group redraw
 #       A row is drawn only when its bytes changed, so a stream of keystrokes
 #       drawn a key at a time has to leave the screen a repaint of every row
 #       draws of the same buffer: a row skipped wrongly, or a scroll the
-#       editor did not know the terminal made, is a row that differs. Streams
-#       of forty keys from a seed (MINSTD, the same on every machine): typing,
-#       wide and combining characters, motion, selection, the clipboard, undo
-#       and redo, carets, the prompt.
+#       editor did not know the terminal made, is a row that differs, and
+#       a stream that kills the editor is one too. A thousand streams of
+#       forty keys from a seed (MINSTD, the same on every machine), at five
+#       window sizes from 9x3 to 80x24 in turn: typing, wide and combining
+#       characters, motion, selection, the clipboard, undo and redo, lines
+#       moved, carets, the prompt.
 redraw_text='alpha beta\ngamma\n\tdelta epsilon zeta eta theta iota\nkappa\nlambda mu\nnu\nxi omicron\npi'
 redraw_bad=0
 redraw_first=
-for redraw_seed in $(seq 1 200); do
+for redraw_seed in $(seq 1 1000); do
+        case $((redraw_seed % 5)) in
+        0) redraw_columns=20 redraw_rows=6 ;;
+        1) redraw_columns=9 redraw_rows=3 ;;
+        2) redraw_columns=40 redraw_rows=10 ;;
+        3) redraw_columns=80 redraw_rows=24 ;;
+        *) redraw_columns=12 redraw_rows=4 ;;
+        esac
         redraw_args=$(awk -v seed="$redraw_seed" 'BEGIN {
                 n = split("a b c x y z 0 1 \\n \\n <bs> <bs> <del> <left> <right> <up> <down> <home> <end> " \
                           "<pgup> <pgdn> <tab> <s-left> <s-right> <s-up> <s-down> <c-left> <c-right> <c-home> " \
@@ -13150,21 +13159,22 @@ for redraw_seed in $(seq 1 200); do
                 }
         }')
         # shellcheck disable=SC2086
-        redraw_out=$(${TEST_RUNNER:-} "$work/edit" 20 6 text "$redraw_text" $redraw_args dump full dump 2>&1)
+        redraw_out=$(${TEST_RUNNER:-} "$work/edit" "$redraw_columns" "$redraw_rows" text "$redraw_text" \
+                $redraw_args dump full dump 2>&1)
         redraw_status=$?
-        redraw_drawn=$(printf '%s\n' "$redraw_out" | sed -n '1,6p' | tr '\n' '|')
-        redraw_whole=$(printf '%s\n' "$redraw_out" | sed -n '7,12p' | tr '\n' '|')
+        redraw_drawn=$(printf '%s\n' "$redraw_out" | sed -n "1,${redraw_rows}p" | tr '\n' '|')
+        redraw_whole=$(printf '%s\n' "$redraw_out" | sed -n "$((redraw_rows + 1)),$((redraw_rows * 2))p" | tr '\n' '|')
         if [ "$redraw_status" != 0 ] || [ "$redraw_drawn" != "$redraw_whole" ] ||
-           [ "$(printf '%s\n' "$redraw_out" | wc -l)" -lt 12 ]; then
+           [ "$(printf '%s\n' "$redraw_out" | wc -l)" -lt $((redraw_rows * 2)) ]; then
                 redraw_bad=$((redraw_bad + 1))
                 [ -n "$redraw_first" ] ||
-                        redraw_first="seed $redraw_seed status $redraw_status: drawn $redraw_drawn repainted $redraw_whole keys $redraw_args"
+                        redraw_first="seed $redraw_seed at ${redraw_columns}x$redraw_rows status $redraw_status: drawn $redraw_drawn repainted $redraw_whole keys $redraw_args"
         fi
 done
 if [ "$redraw_bad" = 0 ]; then
         won
 else
-        lost "drawn a key at a time" "$redraw_bad of 200 differ from a repaint; $redraw_first"
+        lost "drawn a key at a time" "$redraw_bad of 1000 differ from a repaint or died; $redraw_first"
 fi
 
 #
