@@ -777,6 +777,37 @@ directory for a link between the two; the write's parent is opened without
 following, so the swap can only send a write to a different name inside the
 tree it already owns.
 
+### MW-2026-043: `bowl profile desktop remove` could delete a host file through a link a guest made
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-10-30 (f889784b); the FIFO half in 64cb4690 |
+| Class | Link following: a path inside a guest tree resolved by the host, here for removal and append |
+| Attacker | A guest: whatever runs as root inside a bowl, or a bowl archive that plants a link at a profile's marker |
+| Reachable | `bowl profile desktop remove` and the install of a profile (`bowl_profile_*` in src/bowl.c), run by root on the host |
+
+**What happened.** A bowl profile keeps a marker in the guest's tree (the
+desktop profile's `/root/desktop`). The marker's path was joined onto the
+bowl's root and handed to the host's open, read and remove, so the host
+resolved it. A guest that made `ROOT/root/desktop` an absolute link to the
+host's `/root/desktop` (the file that says the desktop is on) had `bowl
+profile desktop remove` delete the host's file; an install appended to it. The
+same class had two blocking opens of guest files (`/etc/passwd`, the bus
+service files): a FIFO there held `bowl bus run` and `bowl bus` for ever
+(64cb4690).
+
+**The fix.** The marker is opened, read and removed inside the bowl's root
+(`bowl_open_in_root`: absolute links resolve inside the guest, nothing climbs
+above it), nonblocking, and a FIFO or any file that is not regular is not a
+marker. The guest's links stay in the guest.
+
+**Tests that fail without the fix.** The cli lane's bowl rows: with the link in
+place the parent shell deletes the host's `/root/desktop` and the fixed shell
+keeps it `on`; the unit rows (bowl 1506/1506, tight 1508/1508); the FIFO rows
+ended at their limit (124) on the parent and return at once after.
+
+**Related.** MW-2026-042 is the same class on the guest's configuration reads.
+
 ### MW-2026-070: a Waterlink member paired in the half second after its group was taken back
 
 | | |
