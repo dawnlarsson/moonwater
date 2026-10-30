@@ -741,7 +741,13 @@ class Shell:
     def run(self, command, seconds=30, booting=False):
         self.tag += 1
         mark = self.tag
-        self.sock.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+        #   One line, the command inside eval. The console echoes what it is sent (the image's stty sets size and
+        #   nothing else, so ready's -echo never took), and through the serial port the bytes arrive as slowly as
+        #   the guest takes them: a command and its END on two lines had the END line still arriving, and echoed
+        #   into the middle of the command's output, while the command wrote it ("echo END\"BEG3\r\n3\":$?"). A
+        #   line is read whole before it runs, so its echo is over before the output starts.
+        self.sock.sendall(("\necho BEG\"%d\"; eval '%s'; echo END\"%d\":$?\n" %
+                           (mark, command.replace("'", "'\\''"), mark)).encode())
         seen = b""
         stop = time.time() + seconds
         done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
@@ -778,7 +784,7 @@ class Shell:
         for _ in range(40):
             if self.run("echo up", 5, booting=True)[1] == 0:
                 break
-        self.run("PS1=; PS2=; stty -echo", 5)
+        self.run("PS1=; PS2=", 5)
 
     def number(self, command, seconds=10):
         found = re.findall(r"^(\d+)\s*$", self.run(command, seconds)[0], re.M)
@@ -23255,7 +23261,10 @@ def run(command, seconds=60):
     """One line on the guest's serial shell: what it printed, and its status."""
     tags[0] += 1
     mark = tags[0]
-    shell.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+    # One line, the command inside eval: the console echoes, and an END line still arriving was echoed into the
+    # middle of the output (qmp_guest's Shell.run says how).
+    shell.sendall(("\necho BEG\"%d\"; eval '%s'; echo END\"%d\":$?\n" %
+                   (mark, command.replace("'", "'\\''"), mark)).encode())
     seen = b""
     stop = time.time() + seconds
     done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
@@ -23601,7 +23610,10 @@ def run(command, seconds=60):
     """One line on the guest's serial shell: what it printed, and its status."""
     tags[0] += 1
     mark = tags[0]
-    shell.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
+    # One line, the command inside eval: the console echoes, and an END line still arriving was echoed into the
+    # middle of the output (qmp_guest's Shell.run says how).
+    shell.sendall(("\necho BEG\"%d\"; eval '%s'; echo END\"%d\":$?\n" %
+                   (mark, command.replace("'", "'\\''"), mark)).encode())
     seen = b""
     stop = time.time() + seconds
     done = re.compile(rb"BEG%d\r?\n(.*?)END%d:(\d+)" % (mark, mark), re.S)
