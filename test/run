@@ -18,14 +18,19 @@
 #
 #       The gate is what to run before landing on main, and what broke main
 #       when it was not run: the shell and CHECK_terminal built by gcc, the
-#       arm64 and riscv64 shells built by their cross compilers, the audit
-#       seal, lib.c against its inventory, the engine's self-test, the
-#       host_writes harness, and the moonwater command's pages, README and
-#       settings table held to each other with its refusals to somebody who
-#       is not root (moonwater_cli --smoke). The builds run side by side and
-#       the build cache answers the ones a change did not touch; it is under
-#       five minutes on the shared box at a load of 40 (its own line says how
-#       long). It is one lane, gate, in the engine seam's apart list, so
+#       arm64 and riscv64 shells built by their cross compilers, the shell
+#       built by clang (which lib.c and the shared code must also build
+#       with), the audit seal, lib.c against its inventory, the engine's
+#       self-test, the host_writes harness, and the moonwater command's
+#       pages, README and settings table held to each other with its
+#       refusals to somebody who is not root (moonwater_cli --smoke). The
+#       builds run side by side and the build cache answers the ones a change
+#       did not touch. Measured on the shared box (2026-10-30): 25 seconds
+#       when no source changed; when one did, four whole-shell compiles of
+#       one and a half to two minutes of processor each, 115 seconds of wall
+#       at a load of 20 and 685 at a load of 100, where the box has no
+#       processor to give them (its last line says how long it took).
+#       It is one lane, gate, in the engine seam's apart list, so
 #       `sh test/run gate` is the same run.
 #
 #       --watch polls `git -C REPO rev-parse main` (MOONWATER_GATE_BRANCH for
@@ -222,7 +227,7 @@ describe()
         stack)    echo "what each function puts on the stack, and what a deep walk costs" ;;
         differential_oracle) echo "the differential engine's own checks: comparison, covering arrays, ledger and shrinking" ;;
         clang)    echo "the shell built by clang for three machines and run, as gcc builds it: lib.c and the code the programs share take only what both compilers take (NOT RUN without clang, a cross ld or qemu-user)" ;;
-        gate)     echo "the pre-land gate: the gcc, arm64 and riscv64 shells and CHECK_terminal built, the audit seal, the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
+        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
         text)     echo "the text utilities against GNU coreutils, every option combination the grammar reaches, and tr's threaded pieces on one processor and on all" ;;
         files)    echo "the file utilities against coreutils, by output and by effect on the directory" ;;
         misc)     echo "the utilities that are neither text nor files -- dd, diff, ps, the checksums, the process wrappers -- against the system's own" ;;
@@ -284,7 +289,7 @@ seams="lib compress net link shell tools machine desktop image engine"
 seam_lanes()
 {
         case $1 in
-        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix train ranged" ;;
+        lib) echo "standard declare fold allocator reserve utf8 hex codec fixed error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known slurp wait writer native probe stack tensor matrix train ranged clang" ;;
         compress) echo "tar zstd gzip xz compression_floor compression" ;;
         net) echo "socket netem net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http" ;;
         link) echo "waterlink link" ;;
@@ -293,7 +298,7 @@ seam_lanes()
         machine) echo "machine cli script bowl storage_io storage_format" ;;
         desktop) echo "term edit font canvas sleep" ;;
         image) echo "kit switches boot install" ;;
-        engine) echo "differential_oracle clang" ;;
+        engine) echo "differential_oracle" ;;
         *) return 1 ;;
         esac
 }
@@ -6253,7 +6258,8 @@ lane_clang()
 }
 
 #       The pre-land gate (the header says what is in it and why). A row
-#       counted once: the command's status, and its last lines when it failed.
+#       counted once: the command's status, and its last lines when it failed;
+#       2 is a row that could not run here, said and not counted.
 gate_row()
 {
         gate_name=$1
@@ -6262,6 +6268,8 @@ gate_row()
         gate_status=$?
         if [ "$gate_status" = 0 ]; then
                 tally "gate-$gate_name" 1 1
+        elif [ "$gate_status" = 2 ]; then
+                note "gate $gate_name: NOT RUN -- $(tail -n 1 "$work/gate.$gate_name.out")"
         else
                 tally "gate-$gate_name" 0 1
                 note "gate $gate_name: status $gate_status"
@@ -6275,6 +6283,12 @@ gate_cross()
         target_tools "$1" || return 1
         build_label="programs/shell.c for $1"
         target_build freestanding programs/shell.c "$work/gate-shell.$1" "$1"
+}
+
+gate_clang()
+{
+        command -v clang > /dev/null 2>&1 || { echo "no clang here"; return 2; }
+        clang_one x86_64
 }
 
 gate_terminal()
@@ -6303,6 +6317,7 @@ lane_gate()
         job hard gate_row shell-x86_64 need_shell
         job hard gate_row shell-arm64 gate_cross arm64
         job hard gate_row shell-riscv64 gate_cross riscv64
+        job maybe gate_row shell-clang gate_clang
         job hard gate_row terminal gate_terminal
         job hard gate_row seal python3 test/function_audit.py --check
         job hard gate_row inventory gate_inventory
@@ -6336,7 +6351,7 @@ gate_commit()
                 gate_status=1
         fi
         gate_seconds=$(($(date +%s) - gate_started))
-        gate_red=$(awk '$(NF-1) == "of" && $(NF-2) != $NF && $1 ~ /^gate-/ { printf " %s", $1 }' \
+        gate_red=$(awk 'NF == 4 && $3 == "of" && $2 != $4 && $1 ~ /^gate-/ { printf " %s", $1 }' \
                 "$gate_tree.log")
         if [ "$gate_status" = 0 ]; then
                 printf '%s PASS %4ss %s\n' "$gate_short" "$gate_seconds" "$gate_subject"
