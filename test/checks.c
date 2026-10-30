@@ -124334,6 +124334,32 @@ static fn check_kit_place(void)
                 check("kit place: a control the layout moves (a resize) is drawn where it is with its pip, nothing animating from its old place",
                       moved_still);
         }
+
+        // A press on a row ripples across the whole row, edge to edge, and not past it: a switch whose box is its pill
+        // alone, in a row 580 wide (a settings row across its pane), pressed near the pill.
+        {
+                struct ui_control sw;
+                unsigned int paper = 0xff111113u;
+                b32 reached, kept;
+
+                memory_zero(&sw, sizeof(sw));
+                sw.kind = UI_SWITCH, sw.x = 520, sw.y = 220, sw.w = 52, sw.h = 48, sw.label = "";
+                sw.row_x = 10, sw.row_y = 220, sw.row_w = 580, sw.row_h = 48;
+                ui_control_start(&sw);
+                ui_kit.now += 1000000000ll;
+                ui_control_draw(&ui, &sw);
+                ui_kit_pointer(&ui, &sw, 1, WINDOW_EVENT_BUTTON, 560, 244, true, 0);
+                // Held half a second: the ripple has grown (225 ms) and travelled to the row's middle (425 ms).
+                for (int frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 0, 210, 600, 70, paper);
+                        ui_control_draw(&ui, &sw);
+                }
+                reached = pixels[244 * 600 + 14] != paper && pixels[222 * 600 + 300] != paper;
+                kept = pixels[244 * 600 + 5] == paper && pixels[214 * 600 + 300] == paper;
+                check("kit row: a press ripples across the whole row, edge to edge, and not past it", reached && kept);
+        }
 }
 #endif
 

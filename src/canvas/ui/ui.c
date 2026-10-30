@@ -2374,6 +2374,7 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_WINDOW 17
 #define UI_HEADING 18 // a line of text in a role (a heading, a status line)
 #define UI_RULE 19   // the hairline <hr>
+#define UI_LIST_ROW 20 // a row of a list with no control of the kit's: its hover layer and its press ripple, edge to edge
 
 // A button's variant; a slider's; tabs'; a badge's and a callout's (as roles: UI_SUCCESS...).
 #define UI_BUTTON_DEFAULT 0
@@ -2430,7 +2431,21 @@ struct ui_control
         b64 out_at;                        // the pointer left: hovering ends 200 ms after
         b64 last_frame;
         b64 placed;                        // the kit's epoch it was last placed in; 0 before its first frame
+        // The row the control is in, logical pixels: what its press ripples across and its hover lights, edge to edge.
+        // None (row_w 0) is the kit's own: the box and the card's padding round it (24 across, 8 down, ui.css's ripple-clip).
+        int row_x, row_y, row_w, row_h;
 };
+
+// The row a control's ripple and hover cover, in logical pixels.
+static fn ui_control_row(const struct ui_control address_to c, int address_to x, int address_to y, int address_to w, int address_to h)
+{
+        if (c->row_w > 0)
+        {
+                *x = c->row_x, *y = c->row_y, *w = c->row_w, *h = c->row_h;
+                return;
+        }
+        *x = c->x - 24, *y = c->y - 8, *w = c->w + 48, *h = c->h + 16;
+}
 
 // A control to be placed at its next frame, as if it had just appeared: a page shown again, a list rebuilt, a row scrolled in.
 static inline fn ui_control_forget(struct ui_control address_to c)
@@ -2685,9 +2700,14 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         rest = ui_box_transform(rest, ui_qmul(UI_ONE + squish, scale), scale, origin_x, oy, 0, 0);
         fill = ui_box_transform(fill, sx, sy, ox, oy, tx, ty);
         rest = ui_box_transform(rest, sx, sy, ox, oy, tx, ty);
-        // The row's ripple, in the accent: its clip runs to the card's edges (24 past the row) and 8 above and below.
-        clip = ui_box_transform((struct ui_box){rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), rx + rw + ui_q8(ui, 24), ry + rh + ui_q8(ui, 8), 0, 0},
-                                sx, sy, ox, oy, tx, ty);
+        // The row's ripple, in the accent: its clip is the whole row, edge to edge (by default to the card's edges).
+        {
+                int cx, cy, cw, ch;
+
+                ui_control_row(c, &cx, &cy, &cw, &ch);
+                clip = ui_box_transform((struct ui_box){ui_q8(ui, cx), ui_q8(ui, cy), ui_q8(ui, cx + cw), ui_q8(ui, cy + ch), 0, 0},
+                                        sx, sy, ox, oy, tx, ty);
+        }
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, ui_role(UI_CONTROL_OFF), null);
         if (fill_w > 0)
@@ -2710,8 +2730,10 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         // The ripple, in the accent, over the row: its clip is the label's last child, so it lies over the bars and the text.
         {
                 struct ui_place place = {sx, sy, ox, oy, tx, ty};
+                int cx, cy, cw, ch;
 
-                ui_kit_ripples(ui, c, rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), &place, &clip, ui_role(UI_PRIMARY));
+                ui_control_row(c, &cx, &cy, &cw, &ch);
+                ui_kit_ripples(ui, c, ui_q8(ui, cx), ui_q8(ui, cy), &place, &clip, ui_role(UI_PRIMARY));
         }
 }
 
@@ -3638,12 +3660,42 @@ static fn ui_control_place(struct ui_control address_to c)
         c->placed = ui_kit.epoch;
 }
 
+/*
+        A list's row with no control of the kit's in it (a choice, a field's row, a command): the kit's hover state layer
+        (the ink at .06, .2s) and its press ripple in the accent, across the whole row, edge to edge.
+*/
+static fn ui_list_row_draw(struct ui address_to ui, struct ui_control address_to c)
+{
+        int x, y, w, h;
+        struct ui_box row;
+        struct ui_place place = {UI_ONE, UI_ONE, 0, 0, 0, 0};
+        unsigned int layer;
+
+        ui_control_row(c, &x, &y, &w, &h);
+        row = (struct ui_box){ui_q8(ui, x), ui_q8(ui, y), ui_q8(ui, x + w), ui_q8(ui, y + h), 0, 0};
+        ui_kit_number_to(&c->layer, c->hover && !c->disabled ? UI_Q2(6) : 0, 200, &ui_ease);
+        layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
+        if (layer)
+                ui_kit_fill(ui, &row, ui_mix(ui_role(UI_ON_SURFACE), layer, 0), null);
+        ui_kit_ripples(ui, c, row.x0, row.y0, &place, &row, ui_role(UI_PRIMARY));
+}
+
+// A press on a list row: its ripple from the press, across the row (device pixels).
+static fn ui_list_row_press(const struct ui address_to ui, struct ui_control address_to c, int px, int py)
+{
+        int x, y, w, h;
+
+        ui_control_row(c, &x, &y, &w, &h);
+        ui_kit_ripple_start(ui, c, px, py, ui_dev(ui, x), ui_dev(ui, y), ui_dev(ui, w), ui_dev(ui, h), 0);
+}
+
 static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address_to c)
 {
         if (c->placed != ui_kit.epoch)
                 ui_control_place(c);
         switch (c->kind)
         {
+        case UI_LIST_ROW: ui_list_row_draw(ui, c); break;
         case UI_BUTTON: ui_button_draw(ui, c); break;
         case UI_SWITCH:
         case UI_CHECKBOX: ui_toggle_draw(ui, c); break;
@@ -3858,10 +3910,10 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         else if (c->kind == UI_TABS)
                                 ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y), ui_dev(ui, ui_tab_width(ui, c, hit)),
                                                     ui_dev(ui, c->variant ? 32 : 40), 8);
-                        else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
+                        else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_LIST_ROW)
                         {
                                 ui_spring_stop(&c->held_squish);
-                                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x - 24), ui_dev(ui, c->y - 8), ui_dev(ui, c->w + 48), ui_dev(ui, c->h + 16), 0);
+                                ui_list_row_press(ui, c, x, y);
                         }
                         else if (c->kind == UI_RADIOS)
                                 ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x - 24), ui_dev(ui, ui_radio_row_y(c, hit) - 8), ui_dev(ui, c->w + 48),

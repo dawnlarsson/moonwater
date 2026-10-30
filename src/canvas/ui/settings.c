@@ -3881,14 +3881,11 @@ static fn settings_press_at(void)
                                 return;
                         }
                 }
-                if (settings_rows[row].kind == SETTINGS_SWITCH && settings_kit[row].kind == UI_SWITCH)
+                // Any row's press ripples across it from the press, edge to edge (the kit's row).
+                if (settings_kit[row].kind == UI_SWITCH || settings_kit[row].kind == UI_LIST_ROW)
                 {
-                        struct ui_control address_to c = &settings_kit[row];
-
                         settings_kit_down = row;
-                        ui_kit_ripple_start(&settings.ui, c, settings.pointer_x, settings.pointer_y, settings_pane_left(),
-                                            ui_dev(&settings.ui, c->y) + ui_dev(&settings.ui, 24) - ui_px(&settings.ui, UI_ROW) / 2,
-                                            settings_pane_right() - settings_pane_left(), ui_px(&settings.ui, UI_ROW), 0);
+                        ui_list_row_press(&settings.ui, &settings_kit[row], settings.pointer_x, settings.pointer_y);
                 }
         }
         if (row != settings.focus)
@@ -4005,6 +4002,22 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         string_address shown = row ? (string_address)settings.value[at] : (string_address) "";
         int wide;
 
+        // The kit's row under the row's content: its hover layer and its press ripple, across the pane, edge to edge.
+        if (row && row->kind != SETTINGS_SWITCH)
+        {
+                struct ui_control address_to kit = &settings_kit[at];
+
+                if (kit->kind != UI_LIST_ROW)
+                {
+                        memory_zero(kit, sizeof(*kit));
+                        kit->kind = UI_LIST_ROW;
+                }
+                kit->row_x = left / ui->scale, kit->row_y = y / ui->scale, kit->row_w = (right - left) / ui->scale, kit->row_h = height / ui->scale;
+                kit->x = kit->row_x, kit->y = kit->row_y, kit->w = kit->row_w, kit->h = kit->row_h;
+                kit->hover = settings.pointer_x >= left && settings.pointer_x < right && settings.pointer_y >= y && settings.pointer_y < y + height;
+                ui_control_draw(ui, kit);
+        }
+
         if (at == settings.focus && (settings.pane || settings.filter_length))
                 ui_focus(ui, left + ui_px(&settings.ui, 3), y + ui_px(&settings.ui, 2), right - left - ui_px(&settings.ui, 6), height - ui_px(&settings.ui, 4),
                          settings.focused && settings.pane);
@@ -4100,6 +4113,8 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
                 c->w = 52;
                 c->y = (y + height / 2) / ui->scale - 24;
                 c->h = 48;
+                // Its row is the pane's, edge to edge: what its press ripples across.
+                c->row_x = left / ui->scale, c->row_y = y / ui->scale, c->row_w = (right - left) / ui->scale, c->row_h = height / ui->scale;
                 c->hover = settings.pointer_x >= right - inset - ui_px(ui, 52) && settings.pointer_x < right - inset &&
                            settings.pointer_y >= y && settings.pointer_y < y + height;
                 c->down = settings_kit_down == at;
