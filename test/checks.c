@@ -286,6 +286,12 @@
         wide word would be narrowed to its low byte on the way into a call --
         and a non-null pointer whose low byte happens to be zero would come
         out false. Written as a macro, !(condition) is the C the author meant.
+
+        A failure is flushed where it is said: left in the buffer, it went
+        into every child forked after it, and each child that wrote and
+        flushed anything printed the parent's FAIL again -- one failed row of
+        storage_io's ARP probe came out 227 times, as many as the forks after
+        it that said a word.
 */
 
 static positive checks;
@@ -297,6 +303,7 @@ static positive failures;
                 if (!(condition)) {                                     \
                         failures++;                                     \
                         string_format(log, "  FAIL " name "\n");        \
+                        log_flush();                                    \
                 }                                                       \
         } while (0)
 
