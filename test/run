@@ -11162,11 +11162,13 @@ else
         for target in $render_ran; do
                 sed -n "s/^ *\(.*NOT RUN.*\)/$target: \1/p" "$work/terminal-check.$target.out" |
                         while IFS= read -r render_line; do note "$render_line"; done
-                if [ "$(cat "$work/terminal-check.$target.status")" = 0 ]; then
+                render_status=$(cat "$work/terminal-check.$target.status")
+                if [ "$render_status" = 0 ]; then
                         won
                 else
+                        #       A check that died (a sanitizer's trap, a fault) printed no verdict: its status says how.
                         lost "terminal frames ($target) against a full draw" \
-                                "$(grep 'FAIL\|first pixel\|checks,' "$work/terminal-check.$target.out" | head -3 | tr '\n' ' ')"
+                                "$(grep 'FAIL\|first pixel\|checks,' "$work/terminal-check.$target.out" | head -3 | tr '\n' ' ')status $render_status$([ "$render_status" -gt 128 ] && echo " (signal $((render_status - 128)))")"
                 fi
         done
 fi
