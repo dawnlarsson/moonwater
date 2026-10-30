@@ -228,9 +228,9 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
-    //  The clipboard, an OS service of the compositor's (SECURITY.md): off empties both selections and the history and
-    //  refuses every copy; the history is copies kept in the compositor's memory and never on a disk, none by default,
-    //  since a clipboard that remembers is a clipboard that leaks what was copied an hour ago.
+    //  The clipboard, an OS service of the compositor's (.github/SECURITY.md): off empties both selections and the
+    //  history and refuses every copy; the history is copies kept in the compositor's memory and never on a disk, none
+    //  by default, since a clipboard that remembers is a clipboard that leaks what was copied an hour ago.
     SETTING_PLAIN_ROW(null, "Clipboard", SETTINGS_SWITCH, 0, ("canvas", "clipboard"), "clipboard ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),

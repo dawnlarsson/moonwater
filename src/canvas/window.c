@@ -723,9 +723,9 @@ struct windows
         int event_a[WINDOWS][WINDOWS_EVENTS], event_b[WINDOWS][WINDOWS_EVENTS];
 
         /*
-                The clipboard, an OS service the compositor holds (SECURITY.md says what it guards). Two selections,
-                CLIPBOARD (copy and paste) and PRIMARY (what was last selected, pasted with the middle button), each
-                text/plain;charset=utf-8: valid UTF-8, no NUL, at most clip_limit bytes. A copy is a sealed memfd
+                The clipboard, an OS service the compositor holds (.github/SECURITY.md says what it guards). Two
+                selections, CLIPBOARD (copy and paste) and PRIMARY (what was last selected, pasted with the middle
+                button), each text/plain;charset=utf-8: valid UTF-8, no NUL, at most clip_limit bytes. A copy is a sealed memfd
                 the copying program makes and names in its row (clip_offer_*), which the compositor opens through
                 /proc/PID/fd and keeps -- no byte is copied, the copy outlives the window, and nothing the program
                 does after can change it -- and a paste is that memfd opened again by the program the compositor
