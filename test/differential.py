@@ -14057,7 +14057,10 @@ MISC_UTILITIES = (
                    # to count is forever, not a mistake.
                    ("1e-10000", "sleep", "2"), ("1e400", "true"), ("99999999999999999999", "true"),
                    ("-k", "1e400", ".1", "true"), ("1e-10000s", "true"), ("0x1p-4", "sleep", "1"),
-                   (".2", "sleep", "inf"), (".2", "sleep", "INFINITY"))),
+                   (".2", "sleep", "inf"), (".2", "sleep", "INFINITY"),
+                   # A command that is stopped (here by itself; at a terminal by TTIN, read from the background)
+                   # is continued after the signal, so it ends at the deadline and does not stay stopped for good.
+                   (".2", "sh", "-c", "kill -STOP $$"))),
     #       timeout between the command and signals from outside: an ALRM
     #       is the timeout come early and answers 124, the others are sent
     #       on, and none of them may end timeout and leave the command

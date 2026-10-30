@@ -1501,6 +1501,12 @@ static fn process_timeout_signal(b32 child, bipolar pidfd, b32 signal,
         system_call_2(syscall(kill),
                       (positive)(foreground ? child : -child),
                       (positive)signal);
+        /* A stopped command hears nothing until it runs again: one of the
+           group that read the terminal from the background was stopped by
+           TTIN and outlived its deadline for good. coreutils continues the
+           group after the signal (CONT, 18 on every machine), as this does. */
+        if (!foreground && signal && signal != SIGKILL && signal != 18)
+                system_call_2(syscall(kill), (positive)-child, 18);
 }
 
 /* GNU's duration: a float with an optional s/m/h/d, where strtod also
