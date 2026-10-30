@@ -117090,6 +117090,15 @@ static void check_compositor_wheel(void)
         moved_x = compositor.pointer_x - 60;
         check("pad: a finger moved two millimetres moves the pointer on from where it was, forty counts at one to one",
               moved_x == 40 && compositor.pointer_y == 40);
+        // The kernel dropped what it could not hand over in time, a lift and a touch twenty millimetres away among it:
+        // the next report is where the finger is now, and no move of the pointer.
+        wheel_feed(COMPOSITOR_EV_SYN, COMPOSITOR_SYN_DROPPED, 0);
+        wheel_feed(COMPOSITOR_EV_ABS, 0, 4080 + 800);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        check("pad: after the kernel dropped reports, the finger's next place is no jump of the pointer",
+              compositor.pointer_x == 100 && compositor.pointer_y == 40);
+        compositor.pointer_x = compositor.kept_x = 100;
         // A second finger, and the two six millimetres up: a notch of the wheel up, and no move of the pointer.
         table->event_tail[1] = table->event_head[1];
         wheel_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOOL_FINGER, 0);

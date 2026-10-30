@@ -9204,7 +9204,16 @@ static void compositor_input_read(unsigned int at)
                                 }
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
+                        {
                                 compositor.table->input_dropped[at]++;
+                                // What the kernel dropped may be a lift and a touch somewhere else: the touchpad's
+                                // next report says where the finger is, and is no move from where it was before.
+                                if (compositor.touchpad[at])
+                                {
+                                        compositor.pad[at].moving = 0;
+                                        compositor.pad[at].left_x = compositor.pad[at].left_y = 0;
+                                }
+                        }
                         else if (event->type == COMPOSITOR_EV_ABS && event->code < 2 && compositor.touchpad[at])
                         {
                                 if (event->code)
