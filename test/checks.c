@@ -124109,6 +124109,123 @@ static fn check_kit_motion(void)
         check("kit: the slider's click slides and lands as its handler does", counted[13] && !over[13] && !over[14]);
         check("kit: the pull of a drag is C() and BB()", counted[15] && !over[15] && !over[16] && !over[17] && !over[18] && !over[19]);
 }
+
+/*
+        The kit's theme: the light palette as Dawning writes it, CSS color-mix as Chrome computes it, every
+        on-role 4.5:1 or more on its role for light and dark and 4096 accents, a theme change turned over .2s
+        and at once with reduced motion; and the kit's clock: a control at rest asks for no frame, a press
+        asks for frames, and with nothing moving again they stop.
+*/
+static fn check_kit_theme(void)
+{
+        static const int pairs[][2] = {
+            {UI_ON_PRIMARY, UI_PRIMARY}, {UI_ON_PRIMARY_CONTAINER, UI_PRIMARY_CONTAINER}, {UI_ON_SECONDARY_CONTAINER, UI_SECONDARY_CONTAINER},
+            {UI_ON_SURFACE, UI_SURFACE}, {UI_ON_SURFACE, UI_SURFACE_HIGH}, {UI_ON_SURFACE_VARIANT, UI_SURFACE_HIGH},
+            {UI_ON_SURFACE_VARIANT, UI_SURFACE}, {UI_ON_ERROR, UI_ERROR}, {UI_ON_ERROR_CONTAINER, UI_ERROR_CONTAINER},
+            {UI_ON_SUCCESS_CONTAINER, UI_SUCCESS_CONTAINER}, {UI_ON_WARNING_CONTAINER, UI_WARNING_CONTAINER},
+            {UI_ON_INFO_CONTAINER, UI_INFO_CONTAINER}};
+        struct ui_theme theme;
+        positive weakest = 100000, failed = 0;
+        b32 live = 0;
+
+        ui_theme_make(&theme, 0, UI_ACCENT_DAWN);
+        check("kit theme: light with ff8800 is Dawning's palette, to the value",
+              !memory_compare(&theme, &ui_theme_dawning, sizeof(theme)) && theme.role[UI_PRIMARY] == 0xffff8800u &&
+                  theme.role[UI_ON_PRIMARY] == 0xff18181bu && theme.role[UI_SURFACE] == 0xfff7f7f8u && theme.role[UI_OUTLINE_VARIANT] == 0xffe4e4e7u);
+        check("kit theme: color-mix(in srgb, dawn-400 14%, white) is the control-off Chrome computes, 255 242 226",
+              ui_mix(0xffff9f33u, 14, 0xffffffffu) == 0xfffff2e2u && theme.role[UI_CONTROL_OFF] == 0xfffff2e2u);
+        check("kit theme: a mix with transparent keeps the colour at the share of its alpha",
+              ui_mix(0xffff9f33u, 28, 0) == 0x47ff9f33u && ui_mix(0xff101014u, 11, 0) == 0x1c101014u);
+        check("kit theme: ink on the amber is 7.40:1 and white 2.39:1 (WCAG), so the ink is the amber's",
+              ui_contrast(0xff18181bu, 0xffff8800u) == 740 && ui_contrast(0xffffffffu, 0xffff8800u) == 239 &&
+                  ui_ink_on(0xffff8800u) == UI_INK);
+        for (unsigned int dark = 0; dark < 2; dark++)
+                for (unsigned int accent = 0; accent < 4096; accent++)
+                {
+                        unsigned int rgb = (accent >> 8 & 15) * 17 << 16 | (accent >> 4 & 15) * 17 << 8 | (accent & 15) * 17;
+
+                        ui_theme_make(&theme, dark, rgb);
+                        for (positive k = 0; k < sizeof(pairs) / sizeof(pairs[0]); k++)
+                        {
+                                unsigned int ratio = ui_contrast(theme.role[pairs[k][0]], theme.role[pairs[k][1]]);
+
+                                weakest = ratio < weakest ? ratio : weakest;
+                                failed += ratio < 450;
+                        }
+                }
+        string_format(log, "  kit theme: every on-role over 8192 themes, the weakest %p hundredths\n", weakest);
+        check("kit theme: every on-role is 4.5:1 or more on its role, light and dark, for 4096 accents", !failed);
+
+        // A turn: light to dark over .2s --ease from the first frame, the roles between the two halfway.
+        memory_zero(&ui_kit, sizeof(ui_kit));
+        ui_kit.now = 1000000000ll;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 0);
+        ui_kit_turn();
+        live = ui_kit.busy;
+        ui_kit.now += 100000000ll;
+        ui_kit.busy = 0;
+        ui_kit_turn();
+        {
+                unsigned int halfway = ui_role(UI_SURFACE);
+
+                ui_kit.now += 100000000ll;
+                ui_kit.busy = 0;
+                ui_kit_turn();
+                check("kit theme: a change of theme turns every role over .2s and then rests on the new",
+                      live && halfway != ui_theme_dawning.role[UI_SURFACE] && halfway != ui_theme_night.role[UI_SURFACE] &&
+                          ui_role(UI_SURFACE) == ui_theme_night.role[UI_SURFACE] && !ui_kit.busy);
+        }
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+        check("kit theme: with reduced motion it is the new theme at once", ui_role(UI_SURFACE) == ui_theme_dawning.role[UI_SURFACE] &&
+                                                                             ui_tween_still(&ui_kit.turn));
+
+        // The clock: a switch at rest draws and asks for nothing; pressed it moves; let go, it settles and stops.
+        {
+                static unsigned int pixels[400 * 80], scratch[400 * UI_SCRATCH_ROWS];
+                struct ui ui = terminal.ui;
+                struct ui_control row;
+                b32 rested, pressed, settled;
+
+                ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 80, ui.top = 0, ui.bottom = 80, ui.scale = 1;
+                ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0;
+                ui.mono = null;
+                // The face the settings draw in: the image's Inter, the third font the check is given (else the first).
+                {
+                        static font_face face;
+                        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+
+                        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+                        {
+                                check("kit clock: the face loads", false);
+                                return;
+                        }
+                        ui.regular = ui.bold = &face;
+                }
+                memory_zero(&row, sizeof(row));
+                row.kind = UI_SWITCH, row.x = 20, row.y = 16, row.w = 300, row.h = 48, row.label = "Telemetry";
+                ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+                ui_control_start(&row);
+                ui_kit.now = 2000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &row);
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                ui_control_draw(&ui, &row);
+                rested = !ui_kit.busy;
+                ui_kit_pointer(&ui, &row, 1, WINDOW_EVENT_BUTTON, 300, 40, true, 0);
+                ui_kit_pointer(&ui, &row, 1, WINDOW_EVENT_BUTTON, 300, 40, false, 0);
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                ui_control_draw(&ui, &row);
+                pressed = ui_kit.busy && row.on;
+                for (int frame = 0; frame < 60; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_control_draw(&ui, &row);
+                }
+                settled = !ui_kit.busy;
+                check("kit clock: a control at rest asks for no frame, a toggle asks for frames, and a second later none",
+                      rested && pressed && settled);
+        }
+}
 #endif
 
 static p32 address_to render_frame(void)
@@ -124529,6 +124646,7 @@ b32 main()
         check_taskbar_tray();
 #if MOONWATER_UI_ANY
         check_kit_motion();
+        check_kit_theme();
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
