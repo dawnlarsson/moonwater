@@ -116021,9 +116021,17 @@ static void check_compositor_wheel(void)
     check("wheel: eight eighths are eight turns that are a notch", sum == 120 && events == 8);
     table->event_tail[1] = table->event_head[1];
 
-    /* A swipe at a window that is not reading: 150 notches, faster than it reads any of them. */
+    /*
+            A swipe at a window that is not reading: 150 notches, faster than it reads any of them. The compositor reads
+            its device every 40 notches: a pipe of a user over the kernel's soft limit of pipe pages holds two pages
+            (341 events), and on a box running many lanes the rest of the swipe was refused at the write.
+    */
     for (int notch = 0; notch < 150; notch++)
+    {
         wheel_notch(-1);
+        if (notch % 40 == 39)
+            compositor_input_read(0);
+    }
     compositor_input_read(0);
     sum = wheel_unread(1, &events, &last);
     check("wheel: a swipe of 150 notches at a window that is not reading is all there when it reads",
@@ -116032,7 +116040,11 @@ static void check_compositor_wheel(void)
 
     /* Turned back in the middle of one, the way back is not added to the way there. */
     for (int notch = 0; notch < 80; notch++)
+    {
         wheel_notch(notch < 40 ? 1 : -1);
+        if (notch % 40 == 39)
+            compositor_input_read(0);
+    }
     compositor_input_read(0);
     sum = wheel_unread(1, &events, &last);
     check("wheel: and a swipe turned back half way comes to nothing, ending the way it was turned last", sum == 0 && last < 0);
