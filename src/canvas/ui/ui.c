@@ -4669,6 +4669,12 @@ static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row a
         if (windows_take(&p->own) < 0)
                 return false;
         table = p->own.table;
+        // A popup opens in the theme as it is now. One changed while its window slept is taken here (the window's
+        // own loop still turns to it after, as ever), and a turn under way is taken to its end: the terminal's menu
+        // opened in the old theme, its loop reading the new one only after the press that opened it.
+        if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
+                ui_kit_theme(table->theme, table->accent, table->motion);
+        ui_kit.shown = ui_kit.to;
         p->ui = *parent_ui;
         p->shown = -1;
         p->menu.touch = touch;
