@@ -31179,7 +31179,7 @@ static p8 address_to target(positive allowed)
                 into[i] = (p8)0xc3;
 
         for (positive i = 1; i <= GUARD; i++)
-                into[0 - i] = (p8)(0x5a ^ (i * 7));
+                into[-(bipolar)i] = (p8)(0x5a ^ (i * 7));
 
         return into;
 }
@@ -31187,7 +31187,7 @@ static p8 address_to target(positive allowed)
 static fn keep(p8 address_to into, positive allowed, p8 address_to where)
 {
         for (positive i = 0; i < GUARD; i++)
-                where[i] = into[0 - GUARD + i];
+                where[i] = into[(bipolar)i - GUARD];
 
         for (positive i = 0; i < allowed; i++)
                 where[GUARD + i] = into[i];
