@@ -18669,7 +18669,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, u1, f1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, u1, f1, c1, e1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -22982,6 +22982,591 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/f1-answers"
+fi
+fi
+
+#       Copy and paste on a plain boot's desktop (CANVAS_ONLY=c1), the compositor's clipboard and the terminal's
+#       selection and context menu, driven as a person drives them: QMP keys and buttons, read back through the
+#       guest's files and `moonwater clipboard`. A double click selects a word (PRIMARY on the release, drawn on the
+#       selection colour) and Ctrl+Shift+C copies it; the middle button pastes PRIMARY into the line typed; a pasted
+#       script waits for Enter; a paste of ESC, a C1 control and BEL reaches the shell without them; `edit`, which
+#       asks for bracketed paste, gets an ESC [ 201 ~ inside the paste as text and not as the paste's end. The right
+#       button opens the menu below and right of the pointer with its labels drawn, a mnemonic chooses (P pastes),
+#       Up, Down and Enter choose Select All, Escape and a press outside dismiss it, and next to the screen's corner
+#       it opens up and to the left. The light theme turns it. MOONWATER_TEXT_PICTURES names a directory the
+#       pictures are kept in, as PNGs (the selection, the menus).
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = c1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/c1-answers" 2>"$work/c1-why" <<'PY'
+import atexit, base64, os, re, subprocess, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/c1"
+os.makedirs(work, exist_ok=True)
+keep = os.environ.get("MOONWATER_TEXT_PICTURES", "")
+out = []
+ser = work + "/ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+atexit.register(lambda: guest.poll() is None and guest.kill())
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def pids(name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+#   Typing as a US keyboard types: a shifted character is Shift and its key.
+PLAIN = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", "\n": "ret", ",": "comma", ";": "semicolon", "'": "apostrophe",
+         "=": "equal", "[": "bracket_left", "]": "bracket_right", "\\": "backslash", "`": "grave_accent"}
+SHIFTED = {'"': "apostrophe", ">": "dot", "<": "comma", "|": "backslash", "$": "4", "_": "minus", ":": "semicolon",
+           "~": "grave_accent", "?": "slash", "&": "7", "*": "8", "(": "9", ")": "0", "!": "1", "@": "2", "#": "3",
+           "%": "5", "^": "6", "+": "equal", "{": "bracket_left", "}": "bracket_right"}
+
+def type_all(text):
+    for c in text:
+        if c in SHIFTED or c.isupper():
+            k = SHIFTED.get(c, c.lower())
+            send([press("shift", True), press(k, True), press(k, False), press("shift", False)])
+            time.sleep(0.03)
+        else:
+            key(PLAIN.get(c, c))
+    time.sleep(0.2)
+
+def btn(name, down):
+    send([{"type": "btn", "data": {"down": down, "button": name}}])
+
+def click(x, y, name="left", times=1):
+    moveto(x, y)
+    for _ in range(times):
+        btn(name, True)
+        time.sleep(0.03)
+        btn(name, False)
+        time.sleep(0.06)
+    time.sleep(0.3)
+
+def picture(name, box=None):
+    """The screen as (width, height, rgb bytes); kept as name.png (cut to box) where pictures are kept."""
+    shot(name, 1)
+    if keep:
+        os.makedirs(keep, exist_ok=True)
+        crop = ["-crop", "%dx%d+%d+%d" % (box[2], box[3], box[0], box[1]), "+repage"] if box else []
+        subprocess.run(["convert", "%s/%s.ppm" % (work, name)] + crop + ["%s/%s.png" % (keep, name)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return load(name)
+
+def changed_box(one, two, box):
+    """Where two pictures differ inside box (x, y, w, h): x0, y0, x1, y1, or None."""
+    width, _, first = one
+    second = two[2]
+    x0 = y0 = 1 << 30
+    x1 = y1 = -1
+    for y in range(box[1], box[1] + box[3]):
+        row = y * width * 3
+        for x in range(box[0], box[0] + box[2], 2):
+            at = row + x * 3
+            if first[at:at + 3] != second[at:at + 3]:
+                x0, y0, x1, y1 = min(x0, x), min(y0, y), max(x1, x), max(y1, y)
+    return (x0, y0, x1, y1) if x1 >= 0 else None
+
+def light_pixels(shotted, box):
+    width, _, data = shotted
+    return sum(1 for y in range(box[1], box[3]) for x in range(box[0], box[2])
+               if sum(data[(y * width + x) * 3:(y * width + x) * 3 + 3]) > 3 * 150)
+
+def windows():
+    """What `moonwater window` lists: name -> (pid, x, y, width, height)."""
+    return {m.group(1): tuple(int(v) for v in m.groups()[1:])
+            for m in re.finditer(r"(\S+), pid (\d+), at (-?\d+),(-?\d+), (\d+) by (\d+)", shell.run("moonwater window", 10)[0])}
+
+def guest_bytes(path):
+    """A file of the guest's, its bytes, or None when it cannot be read."""
+    text, status = shell.run("od -An -v -tx1 %s" % path, 15)
+    return None if status else bytes(int(h, 16) for h in text.split())
+
+def clip_set(data):
+    """The clipboard set to data from the command line, as a script would."""
+    return shell.run("echo %s | base64 -d | moonwater clipboard set" % base64.b64encode(data).decode(), 15)[0]
+
+def said(row):
+    if out and out[-1][1] != out[-1][2]:
+        print("c1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -8; dmesg | tail -8", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+def tidy(text):
+    return repr(text).replace("|", "!")[:160]
+
+until(lambda: len(pids("terminal")) == 1, 60)
+time.sleep(3)
+listed = windows()
+cell = re.findall(r"terminal pid \d+ text size \d+ px, cell (\d+) by (\d+) px", shell.run("dmesg | grep 'text size' | tail -3", 10)[0])
+cw, ch = (int(cell[-1][0]), int(cell[-1][1])) if cell else (8, 19)
+tpid, tx, ty, tw, th = listed.get("terminal", (0, 1126, 151, 1324, 658))
+pad = ch // 3 or 1
+rows = (th - 2 * pad) // ch
+pad_y = pad + max(0, (th - rows * ch - 2 * pad) // 2)
+
+def cell_at(column, row):
+    return tx + pad + column * cw + cw // 2, ty + pad_y + row * ch + ch // 2
+
+def open_menu(x, y, far):
+    """The right button at x, y, and the pointer put back far away, where it was for the picture before: the pointer
+    is drawn into the picture (no cursor plane), and the menu is what differs."""
+    click(x, y, name="right")
+    time.sleep(0.4)
+    moveto(*far)
+    time.sleep(0.4)
+
+#   The screen cleared and the token on its fourth row (a double click on the window's top is the compositor's, and
+#   maximizes it): a double click on it, then Ctrl+Shift+C.
+type_all("printf '\\033[H\\033[2J\\n\\n\\n'; echo cliptoken42 tail\n")
+time.sleep(1.5)
+click(*cell_at(3, 3), times=2)
+chord("ctrl", "shift", "c")
+time.sleep(0.5)
+selected = picture("c1-terminal-selection", (tx, ty, min(tw, 700), 6 * ch))
+copied = shell.run("moonwater clipboard get > /tmp/c1clip; cat /tmp/c1clip; echo; moonwater clipboard get primary", 15)[0].split()
+out.append(("C1.1 a double click in the terminal selects a word, PRIMARY on the release, and Ctrl+Shift+C copies it",
+            " ".join(copied[:2]) if copied else "nothing", "cliptoken42 cliptoken42"))
+said("C1.1")
+#   A selected cell lies on the selection colour: the paper in the token's cells is not the paper past it.
+width = selected[0]
+def paper(column, row):
+    x, y = tx + pad + column * cw + 1, ty + pad_y + row * ch + 1
+    return selected[2][(y * width + x) * 3:(y * width + x) * 3 + 3]
+out.append(("C1.2 the selected cells are drawn on the selection colour, the rest of the row on the paper",
+            "yes" if paper(2, 3) == paper(8, 3) and paper(2, 3) != paper(30, 3) and paper(30, 3) == paper(30, 5)
+            else "%r %r %r" % (bytes(paper(2, 3)), bytes(paper(8, 3)), bytes(paper(30, 3))), "yes"))
+#   The middle button pastes PRIMARY into the line being typed.
+shell.run("rm -f /tmp/c1primary", 10)
+type_all("echo ")
+click(*cell_at(20, 8), name="middle")
+type_all(" > /tmp/c1primary\n")
+time.sleep(1)
+out.append(("C1.3 the middle button pastes PRIMARY into the line typed", tidy(guest_bytes("/tmp/c1primary")), tidy(b"cliptoken42\n")))
+said("C1.3")
+#   A pasted script waits for Enter: nothing runs at the paste.
+shell.run("rm -f /tmp/c1a /tmp/c1b", 10)
+clip_set(b"echo one > /tmp/c1a\necho two > /tmp/c1b")
+chord("ctrl", "shift", "v")
+time.sleep(1.5)
+before = guest_bytes("/tmp/c1a")
+key("ret")
+time.sleep(1.5)
+out.append(("C1.4 a pasted script waits for Enter: nothing ran at the paste, both lines at Enter",
+            "%s %s" % ("waited" if before is None else "ran at the paste",
+                       "ran" if guest_bytes("/tmp/c1a") == b"one\n" and guest_bytes("/tmp/c1b") == b"two\n" else "not run"),
+            "waited ran"))
+said("C1.4")
+#   A paste carries no control to the shell: ESC, C1's CSI and BEL are taken out, what is around them stays.
+shell.run("rm -f /tmp/c1pd", 10)
+clip_set(b'echo "A\x1b[31mB\xc2\x9bC\x07D" > /tmp/c1pd')
+chord("ctrl", "shift", "v")
+time.sleep(0.5)
+key("ret")
+time.sleep(1.5)
+out.append(("C1.5 a paste reaches the shell with no ESC, C1 control or BEL in it", tidy(guest_bytes("/tmp/c1pd")), tidy(b"A[31mBCD\n")))
+said("C1.5")
+#   A program that asked for bracketed paste (edit) gets the paste between the markers, and an ESC [ 201 ~ in what was
+#   copied is text, not the paste's end: a terminal that let it through ended the paste there and typed the rest.
+shell.run("rm -f /tmp/c1bp.txt", 10)
+clip_set(b"A\x1b[201~B\nC\xc2\x9bD")
+type_all("edit /tmp/c1bp.txt\n")
+time.sleep(2)
+chord("ctrl", "shift", "v")
+time.sleep(0.8)
+chord("ctrl", "s")
+time.sleep(0.8)
+chord("ctrl", "q")
+time.sleep(1.5)
+bracketed = guest_bytes("/tmp/c1bp.txt")
+out.append(("C1.6 under bracketed paste an end marker inside the paste is text: edit keeps A[201~B, with no ESC",
+            "kept" if bracketed and b"A[201~B" in bracketed and b"CD" in bracketed and b"\x1b" not in bracketed else tidy(bracketed),
+            "kept"))
+said("C1.6")
+#   The context menu: below and right of the pointer, its labels drawn; P is Paste's mnemonic.
+shell.run("rm -f /tmp/c1menu", 10)
+clip_set(b"echo menu > /tmp/c1menu")
+type_all("printf '\\033[H\\033[2J'\n")
+time.sleep(1)
+px, py = cell_at(50, 6)
+far = (px + 500, py + 330)
+moveto(*far)
+time.sleep(0.3)
+base = picture("c1-menu-base")
+open_menu(px, py, far)
+menu = picture("c1-menu-dark", (px - 20, py - 20, 420, 320))
+box = changed_box(base, menu, (px - 60, py - 60, 520, 400))
+ink = light_pixels(menu, (box[0] + 4, box[1] + 4, box[2] - 4, box[3] - 4)) if box and box[2] - box[0] > 20 else 0
+out.append(("C1.7 the right button opens a menu below and right of the pointer, its labels drawn",
+            "yes" if box and box[0] >= px - 4 and box[1] >= py - 4 and ink > 150 else "box %r, %d light pixels" % (box, ink), "yes"))
+said("C1.7")
+key("p")
+time.sleep(0.8)
+gone = changed_box(base, picture("c1-menu-chosen"), (box[0], box[1], box[2] - box[0], box[3] - box[1]) if box else (px, py, 200, 200))
+key("ret")
+time.sleep(1.5)
+out.append(("C1.8 a mnemonic chooses: P pastes into the line, which runs at Enter, and the menu goes",
+            "%s %s" % ("pasted" if guest_bytes("/tmp/c1menu") == b"menu\n" else "not pasted",
+                       "gone" if not gone or gone[3] - gone[1] < 3 * ch else "still there"), "pasted gone"))
+said("C1.8")
+#   Down, Down and Enter: the first can be chosen is Paste (nothing is selected, so Copy cannot be), then Select All,
+#   which puts what the ring holds in PRIMARY.
+type_all("echo ringtoken77\n")
+time.sleep(1)
+open_menu(px, py, far)
+key("down")
+key("down")
+time.sleep(0.3)
+picture("c1-menu-keys", (px - 20, py - 20, 420, 320))
+key("ret")
+time.sleep(0.8)
+primary = shell.run("moonwater clipboard get primary | grep -c ringtoken77", 15)[0].split()
+out.append(("C1.9 Up and Down move over what can be chosen and Enter chooses: Select All puts the ring in PRIMARY",
+            "yes" if primary and primary[-1] != "0" else "PRIMARY has no ringtoken77", "yes"))
+said("C1.9")
+#   Escape and a press outside put it away.
+type_all("printf '\\033[H\\033[2J'\n")
+time.sleep(1)
+base = picture("c1-menu-base-again")
+open_menu(px, py, far)
+opened = changed_box(base, picture("c1-menu-open-again"), (px, py, 400, 300))
+key("esc")
+time.sleep(0.8)
+escaped = changed_box(base, picture("c1-menu-escaped"), (px, py, 400, 300))
+open_menu(px, py, far)
+click(tx + tw // 4, ty + th // 4)
+moveto(*far)
+time.sleep(0.8)
+outside = changed_box(base, picture("c1-menu-outside"), (px, py, 400, 300))
+out.append(("C1.10 Escape puts the menu away, and so does a press outside it",
+            "%s %s %s" % ("opened" if opened else "no menu", "escaped" if not escaped else "kept %r" % (escaped,),
+                          "dismissed" if not outside else "kept %r" % (outside,)), "opened escaped dismissed"))
+said("C1.10")
+#   At the screen's corner the menu opens up and to the left of the pointer, inside the screen.
+shell.run("moonwater window move terminal maximized", 10)
+time.sleep(1.5)
+cx, cy = W - 30, H - 70
+corner = (cx - 900, cy - 600)
+moveto(*corner)
+time.sleep(0.3)
+edge_base = picture("c1-edge-base")
+open_menu(cx, cy, corner)
+edge = picture("c1-menu-edge", (cx - 420, cy - 320, 450, 340))
+flipped = changed_box(edge_base, edge, (cx - 700, cy - 500, 700 + 29, 500 + 30))
+out.append(("C1.11 next to the screen's corner the menu opens up and to the left of the pointer",
+            "yes" if flipped and flipped[2] <= cx + 4 and flipped[3] <= cy + 4 and flipped[0] < cx - 60 and flipped[1] < cy - 60
+            else "box %r at %d,%d" % (flipped, cx, cy), "yes"))
+said("C1.11")
+key("esc")
+time.sleep(0.5)
+#   The light theme turns the menu.
+shell.run("moonwater canvas theme light", 10)
+time.sleep(1.5)
+open_menu(px, py, far)
+lit = picture("c1-menu-light", (px - 20, py - 20, 420, 320))
+bright = light_pixels(lit, (px + 10, py + 10, px + 100, py + 60))
+out.append(("C1.12 in the light theme the menu is light", "yes" if bright > 90 * 50 * 3 // 4 else "%d light of %d" % (bright, 90 * 50), "yes"))
+key("esc")
+shell.run("moonwater canvas theme default", 10)
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/c1-answers" ]; then
+        same "the clipboard boot answered" "yes" "no"
+        sed 's/^/    /' "$work/c1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/c1-answers"
+        sed -n 's/^c1 /  canvas       /p' "$work/c1-why"
+fi
+fi
+
+#       Text in the kit's widgets (CANVAS_ONLY=e1): the settings window's filter and the editor, typed into and
+#       pointed at. In the filter Shift+Left selects what was typed and Backspace takes it, and a double click
+#       selects a word that typing replaces: the filter then finds the any row, which runs a name typed in it. The
+#       editor (src/canvas/ui/editor.c) opens a file through a link; three carets type at once, Ctrl+S saves the
+#       link's file by a rename (a new inode, the mode kept, the link a link), Ctrl+Z takes the three back as one,
+#       Ctrl+D adds the next match; a file changed on disk is said when the window gets the keys again and Ctrl+R
+#       reads it. A copy in the editor pastes in the terminal and one in the terminal pastes in the editor.
+#       MOONWATER_TEXT_PICTURES keeps the pictures (the filter's selection, the carets and the gutter).
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = e1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/e1-answers" 2>"$work/e1-why" <<'PY'
+import atexit, os, re, subprocess, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/e1"
+os.makedirs(work, exist_ok=True)
+keep = os.environ.get("MOONWATER_TEXT_PICTURES", "")
+out = []
+ser = work + "/ser"
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+atexit.register(lambda: guest.poll() is None and guest.kill())
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def pids(name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+PLAIN = {" ": "spc", ".": "dot", "/": "slash", "-": "minus", "\n": "ret", ",": "comma", ";": "semicolon", "'": "apostrophe",
+         "=": "equal", "[": "bracket_left", "]": "bracket_right", "\\": "backslash", "`": "grave_accent"}
+SHIFTED = {'"': "apostrophe", ">": "dot", "<": "comma", "|": "backslash", "$": "4", "_": "minus", ":": "semicolon",
+           "~": "grave_accent", "?": "slash", "&": "7", "*": "8", "(": "9", ")": "0", "!": "1", "@": "2", "#": "3",
+           "%": "5", "^": "6", "+": "equal", "{": "bracket_left", "}": "bracket_right"}
+
+def type_all(text):
+    for c in text:
+        if c in SHIFTED or c.isupper():
+            k = SHIFTED.get(c, c.lower())
+            send([press("shift", True), press(k, True), press(k, False), press("shift", False)])
+            time.sleep(0.03)
+        else:
+            key(PLAIN.get(c, c))
+    time.sleep(0.2)
+
+def shifted(k):
+    send([press("shift", True), press(k, True), press(k, False), press("shift", False)])
+    time.sleep(0.1)
+
+def btn(name, down):
+    send([{"type": "btn", "data": {"down": down, "button": name}}])
+
+def click(x, y, name="left", times=1):
+    moveto(x, y)
+    for _ in range(times):
+        btn(name, True)
+        time.sleep(0.03)
+        btn(name, False)
+        time.sleep(0.06)
+    time.sleep(0.3)
+
+def picture(name, box=None):
+    shot(name, 1)
+    if keep:
+        os.makedirs(keep, exist_ok=True)
+        crop = ["-crop", "%dx%d+%d+%d" % (box[2], box[3], box[0], box[1]), "+repage"] if box else []
+        subprocess.run(["convert", "%s/%s.ppm" % (work, name)] + crop + ["%s/%s.png" % (keep, name)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return load(name)
+
+def changed_box(one, two, box):
+    width, _, first = one
+    second = two[2]
+    x0 = y0 = 1 << 30
+    x1 = y1 = -1
+    for y in range(box[1], box[1] + box[3]):
+        row = y * width * 3
+        for x in range(box[0], box[0] + box[2]):
+            at = row + x * 3
+            if first[at:at + 3] != second[at:at + 3]:
+                x0, y0, x1, y1 = min(x0, x), min(y0, y), max(x1, x), max(y1, y)
+    return (x0, y0, x1, y1) if x1 >= 0 else None
+
+def windows():
+    return {m.group(1): tuple(int(v) for v in m.groups()[1:])
+            for m in re.finditer(r"(\S+), pid (\d+), at (-?\d+),(-?\d+), (\d+) by (\d+)", shell.run("moonwater window", 10)[0])}
+
+def guest_bytes(path):
+    text, status = shell.run("od -An -v -tx1 %s" % path, 15)
+    return None if status else bytes(int(h, 16) for h in text.split())
+
+def name_now():
+    return shell.run("moonwater name", 10)[0].strip()
+
+def said(row):
+    if out and out[-1][1] != out[-1][2]:
+        print("e1 %s: %s" % (row, shell.run("ps | grep -v kworker | tail -8; dmesg | tail -8", 15)[0].replace("\n", " / ")), file=sys.stderr)
+
+def tidy(text):
+    return repr(text).replace("|", "!")[:160]
+
+until(lambda: len(pids("terminal")) == 1, 60)
+time.sleep(3)
+had_name = name_now()
+
+#   The filter by the keys: what is typed, two letters of it selected by Shift+Left and taken by Backspace.
+shell.run("moonwater settings", 15)
+until(lambda: len(pids("settings")) == 1, 15)
+time.sleep(2)
+type_all("anythingqq")
+shifted("left")
+shifted("left")
+key("backspace")
+time.sleep(0.5)
+key("ret")
+type_all("name lane-keys")
+key("ret")
+by_keys, _ = until(lambda: name_now() == "lane-keys", 10)
+out.append(("E1.1 in the settings filter Shift+Left selects what was typed and Backspace takes it: the filter finds the any row",
+            "renamed" if by_keys else "not renamed (%s)" % name_now(), "renamed"))
+said("E1.1")
+shell.run("moonwater name %s" % had_name, 10)
+key("esc")
+time.sleep(0.8)
+#   By the hand: a double click on the filter's word selects it, and what is typed replaces it.
+settings = windows().get("settings", (0, 930, 268, 700, 520))
+sx, sy, sw, sh = settings[1:]
+band = (sx, sy, sw, 70)
+#   Where the field's text ends: what two more letters change in the window's title band.
+type_all("zzzz")
+time.sleep(0.6)
+four = picture("e1-filter-four")
+type_all("zz")
+time.sleep(0.6)
+word = changed_box(four, picture("e1-filter-six"), band)
+if word:
+    click(word[0] - 6, (word[1] + word[3]) // 2, times=2)
+    time.sleep(0.4)
+    picture("e1-settings-field", (word[0] - 40, word[1] - 20, word[2] - word[0] + 120, word[3] - word[1] + 40))
+    type_all("anything")
+    time.sleep(0.4)
+    key("ret")
+    type_all("name lane-mouse")
+    key("ret")
+by_hand, _ = until(lambda: name_now() == "lane-mouse", 10)
+out.append(("E1.2 a double click on the filter's word selects it and typing replaces it: the filter finds the any row",
+            "renamed" if by_hand else "not renamed (%s), word at %r" % (name_now(), word), "renamed"))
+said("E1.2")
+shell.run("moonwater name %s" % had_name, 10)
+key("esc")
+time.sleep(0.5)
+key("esc")
+until(lambda: not pids("settings"), 10)
+
+#   The editor, on a file through a link: three carets, a save, the undo.
+shell.run("rm -f /tmp/e1.txt /tmp/e1link /tmp/.e1.txt.editing; printf 'alpha one\\nbeta one\\ngamma one\\n' > /tmp/e1.txt; "
+          "chmod 640 /tmp/e1.txt; ln -s e1.txt /tmp/e1link", 10)
+inode = shell.run("stat -c %i /tmp/e1.txt", 10)[0].strip()
+shell.run("(/editor /tmp/e1link > /tmp/e1.out 2>&1 &)", 10)
+until(lambda: len(pids("editor")) == 1, 15)
+time.sleep(2)
+chord("ctrl", "shift", "down")
+chord("ctrl", "shift", "down")
+type_all("x")
+chord("ctrl", "s")
+time.sleep(1)
+facts = shell.run("stat -c '%i %a' /tmp/e1.txt; readlink /tmp/e1link", 10)[0].split()
+out.append(("E1.3 three carets type at once and Ctrl+S saves the link's file by a rename, its mode kept and the link a link",
+            "%s %s %s %s" % (tidy(guest_bytes("/tmp/e1.txt")), "renamed" if facts[:1] and facts[0] != inode else "same inode",
+                             facts[1] if len(facts) > 1 else "?", facts[2] if len(facts) > 2 else "no link"),
+            "%s renamed 640 e1.txt" % tidy(b"xalpha one\nxbeta one\nxgamma one\n")))
+said("E1.3")
+typed_three = guest_bytes("/tmp/e1.txt") == b"xalpha one\nxbeta one\nxgamma one\n"
+chord("ctrl", "z")
+chord("ctrl", "s")
+time.sleep(1)
+out.append(("E1.4 Ctrl+Z takes the three back as one",
+            tidy(guest_bytes("/tmp/e1.txt")) if typed_three else "nothing typed to take back", tidy(b"alpha one\nbeta one\ngamma one\n")))
+#   Ctrl+D: the word at the caret, then the next match of it, and the next.
+chord("ctrl", "home")
+key("end")
+chord("ctrl", "left")
+chord("ctrl", "d")
+chord("ctrl", "d")
+chord("ctrl", "d")
+time.sleep(0.5)
+editor = windows().get("editor", (0, 512, 135, 1536, 810))
+ex, ey, ew, eh = editor[1:]
+picture("e1-editor-carets", (ex, ey, min(ew, 700), 140))
+type_all("two")
+chord("ctrl", "s")
+time.sleep(1)
+out.append(("E1.5 Ctrl+D selects the word and each next match, and typing replaces them all",
+            tidy(guest_bytes("/tmp/e1.txt")), tidy(b"alpha two\nbeta two\ngamma two\n")))
+said("E1.5")
+#   Changed on disk: said when the editor has the keys again (a window opened over it and gone), read by Ctrl+R.
+shell.run("printf 'external\\n' > /tmp/e1.txt", 10)
+shell.run("(/surface -x 60 -y 60 -w 200 -h 120 -c 336699 -T away -s 2 > /dev/null 2>&1 &)", 10)
+time.sleep(4)
+status = picture("e1-editor-disk", (ex, ey + eh - 40, ew, 40))
+width = status[0]
+warm = sum(1 for y in range(ey + eh - 30, ey + eh) for x in range(ex + ew // 2, ex + ew)
+           if status[2][(y * width + x) * 3] > 180 and status[2][(y * width + x) * 3 + 2] < 120)
+chord("ctrl", "r")
+time.sleep(0.5)
+chord("ctrl", "home")
+type_all("y")
+chord("ctrl", "s")
+time.sleep(1)
+out.append(("E1.6 a file changed on disk is said when the editor gets the keys again, and Ctrl+R reads it",
+            "%s %s" % ("said" if warm > 40 else "not said (%d)" % warm, tidy(guest_bytes("/tmp/e1.txt"))), "said " + tidy(b"yexternal\n")))
+said("E1.6")
+#   The editor's copy, pasted in the terminal; the terminal's, pasted in the editor.
+chord("ctrl", "a")
+type_all("echo fromeditor > /tmp/e1paste")
+chord("ctrl", "a")
+chord("ctrl", "c")
+listed = windows()
+tpid, tx, ty, tw, th = listed.get("terminal", (0, 1126, 151, 1324, 658))
+spot = next(((x, y) for x in range(tx + tw - 40, tx, -40) for y in range(ty + 60, ty + th - 20, 60)
+             if not (ex <= x < ex + ew and ey <= y < ey + eh)), (tx + tw - 20, ty + th // 2))
+shell.run("rm -f /tmp/e1paste", 10)
+click(*spot)
+time.sleep(0.5)
+chord("ctrl", "shift", "v")
+time.sleep(0.5)
+key("ret")
+time.sleep(1.5)
+out.append(("E1.7 a copy in the editor pastes in the terminal", tidy(guest_bytes("/tmp/e1paste")), tidy(b"fromeditor\n")))
+said("E1.7")
+cell = re.findall(r"terminal pid \d+ text size \d+ px, cell (\d+) by (\d+) px", shell.run("dmesg | grep 'text size' | tail -3", 10)[0])
+cw, ch = (int(cell[-1][0]), int(cell[-1][1])) if cell else (8, 19)
+pad = ch // 3 or 1
+rows = (th - 2 * pad) // ch
+pad_y = pad + max(0, (th - rows * ch - 2 * pad) // 2)
+type_all("printf '\\033[H\\033[2J\\n\\n\\n'; echo tokenback\n")
+time.sleep(1.5)
+click(tx + pad + 3 * cw + cw // 2, ty + pad_y + 3 * ch + ch // 2, times=2)
+chord("ctrl", "shift", "c")
+time.sleep(0.3)
+listed = windows()
+ex, ey, ew, eh = listed.get("editor", (0, ex, ey, ew, eh))[1:]
+spot = next(((x, y) for x in range(ex + 40, ex + ew, 40) for y in range(ey + eh // 2, ey + eh - 60, 60)
+             if not (tx <= x < tx + tw and ty <= y < ty + th)), (ex + 40, ey + eh // 2))
+click(*spot)
+time.sleep(0.5)
+chord("ctrl", "a")
+chord("ctrl", "v")
+time.sleep(0.5)
+chord("ctrl", "s")
+time.sleep(1)
+out.append(("E1.8 a copy in the terminal pastes in the editor", tidy(guest_bytes("/tmp/e1.txt")), tidy(b"tokenback")))
+said("E1.8")
+shell.run("moonwater name %s" % had_name, 10)
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/e1-answers" ]; then
+        same "the text widgets boot answered" "yes" "no"
+        sed 's/^/    /' "$work/e1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/e1-answers"
+        sed -n 's/^e1 /  canvas       /p' "$work/e1-why"
 fi
 fi
 
