@@ -10958,6 +10958,13 @@ pub fn parallel_lines_ordered(parallel_lines address_to run, parallel_lines_emit
 //      1,024 directories stays on one thread, and one of 2,000 directories
 //      still goes wide.
 #define PARALLEL_TREE_INLINE_NODES 1024
+//      A tree of fewer directories than that can still be wide in its
+//      entries: a thousand directories of a hundred files each are a hundred
+//      thousand stats, and 74 ms on one thread where eight do them in 12. So
+//      the pool is woken too by a walk that has gone on this long on the
+//      caller alone, which a tree of a few hundred small directories (a
+//      millisecond or two, less than waking eight threads costs) never does.
+#define PARALLEL_TREE_INLINE_NANOSECONDS 1000000
 #define PARALLEL_TREE_HELD_NODES 4096
 #define PARALLEL_TREE_HELD_BYTES (64ull << 20)
 #define PARALLEL_TREE_SHARE_EVERY 1024
@@ -11037,6 +11044,8 @@ typedef struct
         positive held_bytes;
         positive held_nodes_limit;
         positive entered;
+        positive started;
+        positive checked;
         b32 seats;
         b32 complete;
         b32 progress_waiters;
@@ -11511,12 +11520,30 @@ static fn parallel_tree_work(address_any argument)
 //      entered its parent takes itself, and every other thread woken for it
 //      goes back to sleep: 500 levels were 4,640 futex calls and 13 ms where
 //      the walk by one thread is 2.
+static positive clock_monotonic_nanoseconds();
+
+//      Whether the caller has walked long enough alone for the pool to pay:
+//      asked every eighth directory entered, the clock being a call.
+static bool parallel_tree_long(parallel_tree_run address_to run)
+{
+        positive entered = atomic_load(address_of run->entered);
+
+        if (entered < 8 || (entered & 7) || entered == run->checked)
+                return false;
+
+        run->checked = entered;
+
+        return clock_monotonic_nanoseconds() - run->started >=
+               PARALLEL_TREE_INLINE_NANOSECONDS;
+}
+
 static fn parallel_tree_publish_maybe(parallel_tree_run address_to run,
                                       bool address_to published, bool caller_only)
 {
         if (address_to published || caller_only ||
-            atomic_load(address_of run->entered) < PARALLEL_TREE_INLINE_NODES ||
-            atomic_load(address_of run->pending_count) < 2)
+            atomic_load(address_of run->pending_count) < 2 ||
+            (atomic_load(address_of run->entered) < PARALLEL_TREE_INLINE_NODES &&
+             !parallel_tree_long(run)))
                 return;
 
         address_to published = true;
@@ -11761,6 +11788,7 @@ pub bool parallel_tree(parallel_node_job enter, parallel_node_job leave,
         run.context = context;
         run.root_directory = root_directory;
         run.open_flags = open_flags;
+        run.started = clock_monotonic_nanoseconds();
 
         system_call_4(syscall(prlimit64), 0, 7, 0, (positive)limits);
         run.cap = limits[0] / 2;
