@@ -31323,6 +31323,27 @@ static b32 tools_stderr_status(string_address name, b32 answered)
         return answered;
 }
 
+/*
+        A tool that wrote and was never told its output was refused answers
+        for it here: coreutils' close_stdout says "NAME: write error: REASON"
+        and leaves with the tool's failure status, and the util-linux tools
+        say the same and leave with 1. The tool had returned 0 with the
+        writer's failure byte set, which the dispatcher turned into 1 and no
+        word; the byte is the errno the refused write left, so the reason is
+        the kernel's.
+*/
+static b32 tools_write_told(string_address name)
+{
+        string_format(log_error, "%s: write error: %s\n", name,
+                      file_reason(-(bipolar)log_failed()));
+
+        for (const tools_meta_rule address_to rule = tools_meta_rules;
+             rule->name; rule++)
+                if (string_equals(name, rule->name))
+                        return rule->failure;
+        return 1;
+}
+
 // Whether any word before a -- could be one of the two: most starts carry
 // neither, and this is a byte or three per operand.
 static HOT bool tools_meta_asked(string_address address_to arguments, positive count)

@@ -406,18 +406,19 @@ static b32 text_operand_trouble(string_address what, string_address word,
         return 1;
 }
 
-// The tools this file stands for that say "write error" and the reason
-// whichever stdio call it was, checked against GNU one by one.
+// The tools this file stands for that say anything but "write error" and the
+// reason whichever stdio call it was: cmp and dd word their own, and awk, tee
+// and Moonwater's own have no reference to follow. Every other coreutils and
+// util-linux program ends through close_stdout, which words it so; the farm
+// was checked against GNU on /dev/full and a closed descriptor.
 static bool text_write_error_worded()
 {
         static const char address_to const names[] = {
-            "tr", "cut", "paste", "nl", "fold", "expand", "unexpand", "od",
-            "base64", "base32", "basenc", "uniq", "comm", "join", "tac", "wc",
-            "pr", "fmt", "ptx", "sum",
+            "cmp", "dd", "awk", "tee", "monitor", "bits", "line", "look",
         };
 
-        return array_any(i, sizeof(names) / sizeof(names[0]),
-                         string_equals(text_name, (string_address)names[i]));
+        return !array_any(i, sizeof(names) / sizeof(names[0]),
+                          string_equals(text_name, (string_address)names[i]));
 }
 
 static HOT b32 text_done(b32 code)
@@ -473,6 +474,18 @@ static HOT b32 text_done(b32 code)
                         return 4;
                 }
 
+                // diffutils names the stream and ends with its trouble
+                // status.
+                if (string_equals(text_name, "cmp") ||
+                    string_equals(text_name, "diff"))
+                {
+                        if (standard)
+                                string_diagnostic(&text_diagnostic, 0,
+                                                  (string_address) "standard output",
+                                                  file_reason(reason));
+                        return 2;
+                }
+
                 // util-linux rev says nothing of a standard output it could
                 // not write at all, closed or reopened for reading, and exits
                 // as though it had (measured both ways).
@@ -509,7 +522,7 @@ static HOT b32 text_done(b32 code)
                                           (string_address) "write error",
                                           file_reason(reason));
 
-                return 1;
+                return string_equals(text_name, "expr") ? 3 : 1;
         }
 
         //      A diagnostic the kernel would not take ends a GNU tool with

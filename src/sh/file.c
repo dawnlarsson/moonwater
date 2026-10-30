@@ -43658,15 +43658,13 @@ static b32 file_tty()
         if (length == -ENOTTY)
         {
                 file_line((string_address) "not a tty");
-                log_flush();
-                return log_failed() ? 3 : 1;
+                return file_output_told((string_address) "tty") ? 1 : 3;
         }
 
         refuse_if(length < 0, 4, "tty: ttyname error: %s\n", file_reason(length));
 
         file_line(path);
-        log_flush();
-        return log_failed() ? 3 : 0;
+        return file_output_told((string_address) "tty") ? 0 : 3;
 }
 
 // seq ------------------------------------------------------------

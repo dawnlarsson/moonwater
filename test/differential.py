@@ -11994,11 +11994,23 @@ def files_write_error_stdout(farm):
     error and exit with the same status as the reference."""
     def setup(root):
         (root / "a.txt").write_text("a\n")
+        (root / "b.txt").write_text("b\n")
+        (root / "pair").write_text("a b\n")
         (root / "ln").symlink_to("a.txt")
 
+    #       The second row is every tool that used to leave on /dev/full with
+    #       status 1 and not a word (coreutils' close_stdout says "write
+    #       error" and the reason, and expr, nice, tty and the diffutils end
+    #       with a status of their own).
     cases = (("stat", ["-c", "%s", "a.txt"]), ("basename", ["a.txt"]),
              ("dirname", ["x/a.txt"]), ("realpath", ["a.txt"]), ("df", ["."]),
-             ("mkdir", ["-v", "d"]), ("readlink", ["ln"]))
+             ("mkdir", ["-v", "d"]), ("readlink", ["ln"]),
+             ("hostid", []), ("expr", ["1", "+", "1"]), ("tsort", ["pair"]),
+             ("tty", []), ("nice", []), ("dircolors", []),
+             ("cmp", ["a.txt", "b.txt"]), ("diff", ["a.txt", "b.txt"]),
+             ("rm", ["-v", "b.txt"]), ("cp", ["-v", "a.txt", "c.txt"]),
+             ("ln", ["-v", "a.txt", "h.txt"]), ("mv", ["-v", "a.txt", "c.txt"]),
+             ("chmod", ["-v", "600", "a.txt"]), ("install", ["-v", "a.txt", "c.txt"]))
     passed = total = 0
     notes = []
     for name, args in cases:

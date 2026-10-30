@@ -20574,7 +20574,7 @@ static HOT b32 shell_tool_call_decided(positive which,
         log_flush();
 
         if (log_failed() && !answered)
-                answered = 1;
+                answered = tools_write_told(shell_tools[which].name);
 
         return tools_stderr_status(shell_tools[which].name, answered);
 }
