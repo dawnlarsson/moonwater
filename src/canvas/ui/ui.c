@@ -7031,9 +7031,53 @@ static b32 ui_text_selected(const struct ui_text address_to t, p64 offset)
         return false;
 }
 
+// A role a range's data names, for a line's ground, a highlight and a gutter's mark: 0 the accent, 1 an error, 2 a
+// warning, 3 news.
+static unsigned int ui_text_range_role(p32 data)
+{
+        return ui_role(data == 1 ? UI_ERROR : data == 2 ? UI_WARNING : data == 3 ? UI_INFO : UI_PRIMARY);
+}
+
+// The paper under an offset of a code view's line: the line's own, a highlight's over it, the selection's over both.
+static unsigned int ui_text_paper(const struct ui_text address_to t, p64 offset, unsigned int ground)
+{
+        unsigned int selection = ui_role(UI_SELECTION);
+
+        for (positive r = 0; r < t->doc.range_count; r++)
+                if (t->doc.ranges[r].kind == DOC_RANGE_HIGHLIGHT && offset >= t->doc.ranges[r].start && offset < t->doc.ranges[r].finish)
+                {
+                        ground = window_mix(ground, ui_text_range_role(t->doc.ranges[r].data) & 0xffffffu, 64);
+                        break;
+                }
+        return ui_text_selected(t, offset) ? window_mix(ground, selection & 0xffffffu, (selection >> 24) * 256 / 255) : ground;
+}
+
+// The columns a line's indent reaches: its leading blanks, a tab to its next stop; a blank line takes the indent of the
+// next line that is not blank (a screen's worth on at most), so the guides go on through it.
+static p64 ui_text_indent(const struct ui_text address_to t, p64 line)
+{
+        p64 lines = doc_line_count(&t->doc);
+
+        for (p64 probe = line; probe < lines && probe < line + 64; probe++)
+        {
+                p64 at = doc_line_start(&t->doc, probe), stop = doc_line_end(&t->doc, probe), column = 0;
+                p8 bytes[256];
+                positive got = doc_read(&t->doc, at, bytes, stop - at < sizeof(bytes) ? (positive)(stop - at) : sizeof(bytes));
+                positive k = 0;
+
+                while (k < got && (bytes[k] == ' ' || bytes[k] == '\t'))
+                        column = bytes[k++] == '\t' ? (column / t->doc.tab_size + 1) * t->doc.tab_size : column + 1;
+                if (k < got || got == sizeof(bytes))
+                        return column;
+        }
+        return 0;
+}
+
 /*
         One laid line on the picture at its baseline: the selection behind it, then the text, then each caret on it.
-        Proportional: the kit's text, cut to the box. The code view: whole cells, a run of one colour at a time.
+        Proportional: the kit's text, cut to the box. The code view: whole cells, a run of one colour at a time, on the
+        paper of its line (ground: the current line's, a line range's) and a highlight's; then the indent's guides,
+        a selection's blanks (a dot a space, a line a tab) and the squiggles.
 */
 static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, const struct ui_text_layout address_to l, p64 line,
                             int y, int baseline, unsigned int ground)
@@ -7043,6 +7087,17 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
         static struct doc_token tokens[512];
         positive token_count = t->mode == UI_TEXT_CODE ? doc_tokens(&t->doc, line, tokens, 512) : 0;
 
+        // A highlight (a match found, a word's other places) under the text, as the code view's cells are told their
+        // paper is (ui_text_paper).
+        for (positive r = 0; r < t->doc.range_count; r++)
+        {
+                const struct doc_range address_to range = &t->doc.ranges[r];
+
+                if (range->kind != DOC_RANGE_HIGHLIGHT || range->finish <= l->offset[0] || range->start >= l->offset[l->count])
+                        continue;
+                ui_fill(ui, origin + ui_text_x_of(l, range->start), y, ui_text_x_of(l, range->finish) - ui_text_x_of(l, range->start),
+                        t->line_height, 0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
+        }
         // The selection: one rectangle a run of selected clusters, and a sliver past the end of a line the selection
         // goes on from.
         for (p32 k = 0; k < l->count;)
@@ -7095,7 +7150,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                         look++;
                                 if (look < token_count && tokens[look].start <= here)
                                         ink_here = ui_text_role(tokens[look].role);
-                                if (ink_here != ink || (k > start && ui_text_selected(t, l->offset[k]) != ui_text_selected(t, l->offset[start])))
+                                if (ink_here != ink || (k > start && ui_text_paper(t, l->offset[k], ground) != ui_text_paper(t, l->offset[start], ground)))
                                         break;
                                 if (doc_decode(l->shown + l->shown_at[k], size, &code) != size || l->x[k + 1] - l->x[k] != t->cell)
                                 {
@@ -7113,14 +7168,39 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         }
                         if (run && origin + l->x[start] < t->right && origin + l->x[k] > t->left - t->cell)
                         {
-                                unsigned int paper = ui_text_selected(t, l->offset[start])
-                                                         ? window_mix(ground, selection & 0xffffffu, (selection >> 24) * 256 / 255)
-                                                         : ground;
+                                unsigned int paper = ui_text_paper(t, l->offset[start], ground);
 
                                 font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, origin + l->x[start],
                                            y + (t->line_height - grid.cell_height) / 2, ink & 0xffffffu, paper);
                         }
                 next:;
+                }
+        }
+        if (t->mode == UI_TEXT_CODE && t->doc.tab_size)
+        {
+                // The indent's guides: a line a pixel wide at each tab stop inside the indent, at the left of its cell.
+                p64 indent = ui_text_indent(t, line);
+                unsigned int guide = ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 36), blank = ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 140);
+
+                for (p64 column = t->doc.tab_size; column < indent; column += t->doc.tab_size)
+                {
+                        int at = origin + (int)column * t->cell;
+
+                        if (at >= t->left && at < t->right)
+                                ui_fill(ui, at, y, ui->scale, t->line_height, guide);
+                }
+                // A selection's blanks, seen: a dot in a space's cell, a line along a tab's.
+                for (p32 k = 0; k < l->count; k++)
+                {
+                        p8 c = l->shown[l->shown_at[k]];
+                        int x0 = origin + l->x[k], x1 = origin + l->x[k + 1], mid = y + t->line_height / 2;
+
+                        if ((c != ' ' && c != '\t') || !ui_text_selected(t, l->offset[k]) || x1 <= t->left || x0 >= t->right)
+                                continue;
+                        if (c == ' ')
+                                ui_fill(ui, (x0 + x1) / 2 - ui->scale / 2, mid - ui->scale / 2, ui->scale, ui->scale, blank);
+                        else
+                                ui_fill(ui, x0 + t->cell / 4, mid, x1 - x0 - t->cell / 2, ui->scale, blank);
                 }
         }
         // Squiggles under what a diagnostic marks: a wave in the error's or the warning's colour.
@@ -7177,6 +7257,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         p64 lines = doc_line_count(&t->doc), line = t->mode == UI_TEXT_FIELD ? 0 : t->top_line;
         font_metrics m;
         int row_y;
+        unsigned int line_ground;
 
         ui_text_metrics(ui, t);
         m = font_metrics_at(ui_text_face(ui, t), ui_text_em(ui, t));
@@ -7207,10 +7288,25 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 if (doc_hidden(&t->doc, line))
                         continue;
                 ui_text_layout_line(ui, t, line, &l);
-                // The current line, lit faintly, in a code view with one caret.
+                // The line's paper: a line range's ground, and the current line lit faintly in a code view with one
+                // caret; filled under the line, and the paper the code view's glyphs are laid on.
+                line_ground = ground;
+                for (positive r = 0; r < t->doc.range_count; r++)
+                {
+                        const struct doc_range address_to range = &t->doc.ranges[r];
+
+                        if (range->kind == DOC_RANGE_LINE && range->start <= doc_line_end(&t->doc, line) &&
+                            range->finish >= doc_line_start(&t->doc, line))
+                                line_ground = window_mix(line_ground, ui_text_range_role(range->data) & 0xffffffu, 40);
+                        if (range->kind == DOC_RANGE_MARK && t->gutter && doc_line_of(&t->doc, range->start) == line)
+                                ui_round(ui, x + t->cell / 4, row_y + (t->line_height - t->cell / 2) / 2, t->cell / 2, t->cell / 2, t->cell / 4,
+                                         ui_tone(ui_text_range_role(range->data) & 0xffffffu, 255));
+                }
                 if (t->mode == UI_TEXT_CODE && t->focused && t->doc.selection_count == 1 &&
                     doc_line_of(&t->doc, t->doc.selections[0].active) == line && !doc_any_selected(&t->doc))
-                        ui_fill(ui, t->left, row_y, t->right - t->left, t->line_height, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 10));
+                        line_ground = window_mix(line_ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
+                if (line_ground != ground)
+                        ui_fill(ui, t->left, row_y, t->right - t->left, t->line_height, 0xff000000u | line_ground);
                 if (t->numbers)
                 {
                         char number[24];
@@ -7226,7 +7322,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 }
                 if (!t->wrap || t->mode == UI_TEXT_FIELD)
                 {
-                        ui_text_draw_line(ui, t, &l, line, row_y, baseline, ground);
+                        ui_text_draw_line(ui, t, &l, line, row_y, baseline, line_ground);
                         row_y += t->line_height;
                         continue;
                 }
@@ -7265,7 +7361,8 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                                 part.shown_length = l.shown_at[to] - l.shown_at[from];
                                 memory_copy(part.shown, l.shown + l.shown_at[from], part.shown_length);
                                 part.shown[part.shown_length] = 0;
-                                ui_text_draw_line(ui, t, &part, line, row_y, row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, ground);
+                                ui_text_draw_line(ui, t, &part, line, row_y, row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline,
+                                                  line_ground);
                                 row_y += t->line_height;
                                 from = to;
                         } while (from < l.count && row_y + t->line_height <= t->bottom);

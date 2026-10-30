@@ -125833,6 +125833,62 @@ static fn text_widget_check(string_address inter, string_address mono)
                 ui_text_event(&wui, &view, &release, x, y);
                 check("text widget: a triple click takes the line", doc_sel_start(&view.doc.selections[0]) == 0 && doc_sel_end(&view.doc.selections[0]) == 7);
         }
+        ui_text_close(&view);
+
+        /*
+                The code view's decorations, read off the picture: the current line's tint is under its cells as past
+                its text, a line range's ground and a highlight are under the cells they cover, a mark is drawn in the
+                gutter, the indent has a guide at each tab stop inside it (a blank line's taken from the line after it),
+                and a selection's spaces show a dot.
+        */
+        {
+                const unsigned int address_to picture = (const unsigned int address_to)pixels;
+                const unsigned int ground = 0x111113;
+                p64 two, four;
+
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+                ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "alpha one\n        beta two\n\n        gamma\nzz  zz\n", 45, ui_text_keymap());
+                view.doc.tab_size = 4;
+                view.focused = true;
+                view.caret_off = true;
+                doc_select_set(&view.doc, 0, 0);
+                two = doc_line_start(&view.doc, 1);
+                four = doc_line_start(&view.doc, 4);
+                doc_range_add(&view.doc, two, doc_line_end(&view.doc, 1), DOC_RANGE_LINE, 1);
+                doc_range_add(&view.doc, 6, 9, DOC_RANGE_HIGHLIGHT, 0);
+                doc_range_add(&view.doc, doc_line_start(&view.doc, 3), doc_line_start(&view.doc, 3), DOC_RANGE_MARK, 2);
+                ui_text_draw(&wui, &view, 50, 50, 600, 400, ground);
+                {
+                        // A cell's top left corner pixel: paper, never a glyph's ink.
+                        int row1 = view.top, row2 = view.top + view.line_height, row3 = view.top + 2 * view.line_height;
+                        unsigned int caret_cell = picture[(positive)(row1 + 1) * 800 + (positive)(view.left + 1)] & 0xffffffu;
+                        unsigned int past = picture[(positive)(row1 + 1) * 800 + (positive)(view.left + 40 * view.cell)] & 0xffffffu;
+                        unsigned int found = picture[(positive)(row1 + 1) * 800 + (positive)(view.left + 7 * view.cell + 1)] & 0xffffffu;
+                        unsigned int ranged = picture[(positive)(row2 + 1) * 800 + (positive)(view.left + 9 * view.cell + 1)] & 0xffffffu;
+                        unsigned int plain = picture[(positive)(row2 + 1) * 800 + (positive)(view.left + 40 * view.cell)] & 0xffffffu;
+                        unsigned int guide = picture[(positive)(row3 + view.line_height / 2) * 800 + (positive)(view.left + 4 * view.cell)] & 0xffffffu;
+                        unsigned int beside = picture[(positive)(row3 + view.line_height / 2) * 800 + (positive)(view.left + 4 * view.cell + 2)] & 0xffffffu;
+                        unsigned int mark = picture[(positive)(view.top + 3 * view.line_height + view.line_height / 2) * 800 + (positive)(50 + view.cell / 2)] & 0xffffffu;
+
+                        check("text widget: the current line's tint is the paper of its cells, as past its text", caret_cell == past && caret_cell != ground);
+                        check("text widget: a highlight is the paper of the cells it covers", found != caret_cell);
+                        check("text widget: a line range's ground is its cells' paper and the rest of the line", ranged == plain && ranged != ground);
+                        check("text widget: a blank line inside an indent has its guide, a pixel wide", guide != ground && guide != beside);
+                        check("text widget: a mark is drawn in the gutter at its line", mark != ground);
+                }
+                // A selection over the line with two spaces: a dot in the middle of each, on the selection's paper.
+                doc_select_set(&view.doc, four, four + 6);
+                ui_text_draw(&wui, &view, 50, 50, 600, 400, ground);
+                {
+                        int row5 = view.top + 4 * view.line_height, mid = row5 + view.line_height / 2;
+                        unsigned int corner = picture[(positive)(row5 + 1) * 800 + (positive)(view.left + 2 * view.cell + 1)] & 0xffffffu;
+                        unsigned int dot = picture[(positive)(mid - wui.scale / 2) * 800 + (positive)(view.left + 2 * view.cell + view.cell / 2 - wui.scale / 2)] & 0xffffffu;
+
+                        check("text widget: a selected space shows a dot on the selection's paper", corner != ground && dot != corner);
+                }
+                ui_text_close(&view);
+        }
+
         // Nothing is drawn outside the box: the picture's edges are as they were cleared.
         {
                 b32 clean = true;
@@ -125842,7 +125898,6 @@ static fn text_widget_check(string_address inter, string_address mono)
                         clean &= !picture[x] && !picture[599 * 800 + x];
                 check("text widget: nothing is drawn outside its box", clean);
         }
-        ui_text_close(&view);
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
         menu_check(&wui);
         editor_check(&wui);
