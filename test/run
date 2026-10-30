@@ -13645,42 +13645,54 @@ counted
 
 lane_kit()
 (
-kit_failed=0
-python3 test/differential.py --harness core_state || kit_failed=1
-python3 test/differential.py --harness canvas_lifetime || kit_failed=1
-python3 test/differential.py --harness audit_shell_functions || kit_failed=1
-python3 test/differential.py --harness spark_entry || kit_failed=1
-python3 test/differential.py --harness objtool_shape || kit_failed=1
-python3 test/differential.py --harness terminfo_install || kit_failed=1
-python3 test/differential.py --harness host_writes || kit_failed=1
-python3 test/differential.py --harness net_sysctl || kit_failed=1
-python3 test/differential.py --harness pure_stores || kit_failed=1
-python3 test/differential.py --harness kernel_dirhash || kit_failed=1
-python3 test/differential.py --harness kernel_ports || kit_failed=1
-python3 test/differential.py --harness sort_spill_names || kit_failed=1
-python3 test/differential.py --harness dhcp_packets || kit_failed=1
-python3 test/differential.py --harness inventory_mutations || kit_failed=1
-python3 test/differential.py --harness machine_reap || kit_failed=1
-python3 test/differential.py --harness machine_scan || kit_failed=1
-if [ "$(uname -s)" = Darwin ]; then
-        python3 test/differential.py --harness macos_read_retry || kit_failed=1
-fi
-python3 test/function_audit.py --check || kit_failed=1
-build_tool switches check || kit_failed=1
-python3 test/differential.py --harness floodlight || kit_failed=1
-python3 test/differential.py --harness surface_coreutils_gap || kit_failed=1
-python3 test/differential.py --harness image_nodes || kit_failed=1
-python3 test/differential.py --harness canvas_seam || kit_failed=1
-python3 test/differential.py --harness canvas_scale || kit_failed=1
-python3 test/differential.py --harness bowl_session || kit_failed=1
-python3 test/differential.py --harness bowl_roots || kit_failed=1
-python3 test/differential.py --harness riscv_builtins || kit_failed=1
-[ "$kit_failed" = 0 ] || exit 1
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting kit 10 24
+
+#       Each harness is a row of the lane's own count. A harness that failed
+#       used to end the lane there, before the rows below had run and before
+#       the lane had a tally at all: one red harness hid every check after it
+#       and left the summary with no kit line to be red in.
+group harness
+kit_harness()
+{
+        if "$@"; then
+                won
+        else
+                lost "$(printf '%s' "$*" | sed 's/^.*--harness //; s/^python3 //')" \
+                        'failed, its own lines are above'
+        fi
+}
+kit_harness python3 test/differential.py --harness core_state
+kit_harness python3 test/differential.py --harness canvas_lifetime
+kit_harness python3 test/differential.py --harness audit_shell_functions
+kit_harness python3 test/differential.py --harness spark_entry
+kit_harness python3 test/differential.py --harness objtool_shape
+kit_harness python3 test/differential.py --harness terminfo_install
+kit_harness python3 test/differential.py --harness host_writes
+kit_harness python3 test/differential.py --harness net_sysctl
+kit_harness python3 test/differential.py --harness pure_stores
+kit_harness python3 test/differential.py --harness kernel_dirhash
+kit_harness python3 test/differential.py --harness kernel_ports
+kit_harness python3 test/differential.py --harness sort_spill_names
+kit_harness python3 test/differential.py --harness dhcp_packets
+kit_harness python3 test/differential.py --harness inventory_mutations
+kit_harness python3 test/differential.py --harness machine_reap
+kit_harness python3 test/differential.py --harness machine_scan
+if [ "$(uname -s)" = Darwin ]; then
+        kit_harness python3 test/differential.py --harness macos_read_retry
+fi
+kit_harness python3 test/function_audit.py --check
+kit_harness build_tool switches check
+kit_harness python3 test/differential.py --harness floodlight
+kit_harness python3 test/differential.py --harness surface_coreutils_gap
+kit_harness python3 test/differential.py --harness image_nodes
+kit_harness python3 test/differential.py --harness canvas_seam
+kit_harness python3 test/differential.py --harness canvas_scale
+kit_harness python3 test/differential.py --harness bowl_session
+kit_harness python3 test/differential.py --harness bowl_roots
+kit_harness python3 test/differential.py --harness riscv_builtins
 
 # The remote copy must not recursively ship agent worktrees. Stub the two
 # remote tools and fail the copy deliberately, before any build can start.
