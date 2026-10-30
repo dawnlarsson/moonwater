@@ -32,6 +32,10 @@ static struct taskbar_state
         int battery_item;                       // the battery is shown: its row is not none and a battery was read
         int battery_percent, battery_charging;  // what it read
         int edge;                               // a side band's letters have their tops toward its edge, not the middle
+        int tray_custom;                        // the tray is a format of the person's (`taskbar tray`), drawn as one text
+        char tray_format[SETTING_TRAY_MOST + 1]; // that format
+        char tray_text[SETTING_TRAY_MOST * 4];  // what it says this minute
+        int tray_chars;                         // characters in tray_text
 } taskbar = {1, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
@@ -114,6 +118,8 @@ static int taskbar_text(int high, int characters)
 // The tray's length along the edge: the clock, and the battery before it, on a band of any side.
 static int taskbar_tray(int high)
 {
+        if (taskbar.tray_custom)
+                return taskbar_text(high, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
         return taskbar_text(high, 5) * (taskbar.battery_item ? 2 : 1);
 }
 
@@ -139,6 +145,9 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->count = (int)view->count;
         lay->lengths = view->lengths;
         lay->tray = taskbar_tray(lay->high);
+        // A format of the person's may be long, but the tabs keep half of the band.
+        if (taskbar.tray_custom && lay->tray > lay->length / 2)
+                lay->tray = lay->length / 2;
         room = lay->length - lay->tray - (lay->count + 2) * lay->gap;
         lay->most = lay->count && room > 0 ? room / lay->count : 0;
         lay->most = lay->most > 8 * lay->thick ? 8 * lay->thick : lay->most;
@@ -176,10 +185,14 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         else if (which == -2)
                 *along = lay->tray_at, *length = lay->tray;
         else if (which == -3)
+        {
+                if (taskbar.tray_custom)
+                        return 0;
                 *along = lay->tray_at + (taskbar.battery_item ? text : 0), *length = text;
+        }
         else if (which == -4)
         {
-                if (!taskbar.battery_item)
+                if (!taskbar.battery_item || taskbar.tray_custom)
                         return 0;
                 *along = lay->tray_at, *length = text;
         }
@@ -491,6 +504,248 @@ static void taskbar_battery_text(char *into, int charging, int percent)
         into[at] = 0;
 }
 
+/*
+        The tray's format, made into the text it says now. A {name} is filled in from the clock, the battery the band
+        has read, or a file of /proc or /sys read for it; one whose reading is not there is empty. The names are
+        setting_tray_names (src/sh/registry.c), in the order of the cases below.
+*/
+static void taskbar_tray_put(char *into, int *at, int room, const char *text)
+{
+        for (int each = 0; text[each] && *at + 1 < room; each++)
+                into[(*at)++] = text[each];
+        into[*at] = 0;
+}
+
+static void taskbar_tray_two(char *into, int *at, int room, int value)
+{
+        char two[3] = {(char)('0' + value / 10 % 10), (char)('0' + value % 10), 0};
+
+        taskbar_tray_put(into, at, room, two);
+}
+
+// The first line of a file, at most room - 1 bytes of it; empty when it can not be read.
+static void taskbar_tray_file(const char *path, char *into, int room)
+{
+        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address)path, (p8 address_to)into, (positive)room - 1);
+        int at = 0;
+
+        if (got < 0)
+                got = 0;
+        while (at < got && into[at] != '\n' && (unsigned char)into[at] >= 0x20)
+                at++;
+        into[at] = 0;
+}
+
+// A whole number at the start of text, 0 with none.
+static long taskbar_tray_number(const char *text)
+{
+        long value = 0;
+
+        while (*text == ' ')
+                text++;
+        while (*text >= '0' && *text <= '9' && value < 1000000000000L)
+                value = value * 10 + (*text++ - '0');
+        return value;
+}
+
+// The value of a /proc/meminfo key in kB, 0 when it is not there.
+static long taskbar_tray_meminfo(const char *text, const char *key)
+{
+        int size = 0;
+
+        while (key[size])
+                size++;
+        for (int at = 0; text[at]; at++)
+        {
+                int same = 1;
+
+                if (at && text[at - 1] != '\n')
+                        continue;
+                for (int column = 0; column < size && same; column++)
+                        same = text[at + column] == key[column];
+                if (same)
+                        return taskbar_tray_number(text + at + size);
+        }
+        return 0;
+}
+
+static void taskbar_tray_one(char *into, int *at, int room, int which, const tm *broken)
+{
+        char word[64];
+
+        word[0] = 0;
+        switch (which)
+        {
+        case 0: // battery
+                if (taskbar.battery_item)
+                        taskbar_battery_text(word, taskbar.battery_charging, taskbar.battery_percent);
+                break;
+        case 1: // battery.percent
+                if (taskbar.battery_item)
+                        taskbar_digits(word, taskbar.battery_percent);
+                break;
+        case 2: // battery.state
+                if (taskbar.battery_item)
+                        taskbar_tray_put(word, &(int){0}, (int)sizeof(word), taskbar.battery_charging ? "charging" : "discharging");
+                break;
+        case 3:
+                taskbar_tray_two(into, at, room, broken->tm_hour);
+                return;
+        case 4:
+                taskbar_tray_two(into, at, room, broken->tm_min);
+                return;
+        case 5:
+                taskbar_digits(word, broken->tm_hour % 12 ? broken->tm_hour % 12 : 12);
+                break;
+        case 6:
+                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), broken->tm_hour < 12 ? "AM" : "PM");
+                break;
+        case 7:
+        {
+                int year = broken->tm_year + 1900;
+
+                word[0] = (char)('0' + year / 1000 % 10), word[1] = (char)('0' + year / 100 % 10);
+                word[2] = (char)('0' + year / 10 % 10), word[3] = (char)('0' + year % 10), word[4] = 0;
+                break;
+        }
+        case 8:
+                taskbar_tray_two(into, at, room, broken->tm_mon + 1);
+                return;
+        case 9:
+                taskbar_tray_two(into, at, room, broken->tm_mday);
+                return;
+        case 10:
+        {
+                static const char *const days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+
+                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), days[(unsigned)broken->tm_wday % 7]);
+                break;
+        }
+        case 11:
+        {
+                static const char *const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), months[(unsigned)broken->tm_mon % 12]);
+                break;
+        }
+        case 12: // cpu.load: the first word of /proc/loadavg
+        {
+                taskbar_tray_file("/proc/loadavg", word, (int)sizeof(word));
+                for (int each = 0; word[each]; each++)
+                        if (word[each] == ' ')
+                                word[each] = 0;
+                break;
+        }
+        case 13: // mem.used, in percent
+        {
+                char info[1024];
+                long total, free;
+                bipolar got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/meminfo", (p8 address_to)info, sizeof(info) - 1);
+
+                info[got > 0 ? got : 0] = 0;
+                total = taskbar_tray_meminfo(info, "MemTotal:");
+                free = taskbar_tray_meminfo(info, "MemAvailable:");
+                if (total > 0 && free <= total)
+                        taskbar_digits(word, (int)((total - free) * 100 / total));
+                break;
+        }
+        case 14: // temp: the hottest thermal zone, in degrees
+        {
+                long hottest = 0;
+
+                for (int zone = 0; zone < 8; zone++)
+                {
+                        char path[64], reading[24];
+                        int length = 0;
+                        long milli;
+
+                        taskbar_tray_put(path, &length, (int)sizeof(path), "/sys/class/thermal/thermal_zone");
+                        path[length++] = (char)('0' + zone);
+                        path[length] = 0;
+                        taskbar_tray_put(path, &length, (int)sizeof(path), "/temp");
+                        taskbar_tray_file(path, reading, (int)sizeof(reading));
+                        milli = taskbar_tray_number(reading);
+                        if (milli > hottest)
+                                hottest = milli;
+                }
+                if (hottest > 0 && hottest < 1000000)
+                        taskbar_digits(word, (int)(hottest / 1000));
+                break;
+        }
+        case 15: // host
+                taskbar_tray_file("/proc/sys/kernel/hostname", word, 33);
+                break;
+        default:
+                break;
+        }
+        taskbar_tray_put(into, at, room, word);
+}
+
+static void taskbar_tray_render(void)
+{
+        const char *format = taskbar.tray_format;
+        char *into = taskbar.tray_text;
+        int room = (int)sizeof(taskbar.tray_text), at = 0;
+        timespec now = {0, 0};
+        time_t seconds;
+        tm broken;
+
+        into[0] = 0;
+        taskbar.tray_chars = 0;
+        if (!taskbar.tray_custom)
+                return;
+        clock_gettime(CLOCK_REALTIME, address_of now);
+        seconds = now.tv_sec;
+        if (!localtime_r(&seconds, &broken))
+                return;
+        for (int each = 0; format[each];)
+        {
+                if (format[each] == '{' && format[each + 1] == '{')
+                        into[at++] = '{', into[at] = 0, each += 2;
+                else if (format[each] == '}' && format[each + 1] == '}')
+                        into[at++] = '}', into[at] = 0, each += 2;
+                else if (format[each] == '{')
+                {
+                        int close = each + 1;
+
+                        while (format[close] && format[close] != '}')
+                                close++;
+                        taskbar_tray_one(into, &at, room, setting_tray_name(format + each + 1, (positive)(close - each - 1)), &broken);
+                        each = format[close] ? close + 1 : close;
+                }
+                else
+                {
+                        if (at + 1 < room)
+                                into[at++] = format[each];
+                        into[at] = 0;
+                        each++;
+                }
+        }
+        for (int each = 0; into[each]; each++)
+                if (((unsigned char)into[each] & 0xc0) != 0x80)
+                        taskbar.tray_chars++;
+}
+
+// `taskbar tray`: the format the file keeps ("" or default is the standard, which is drawn as the tray always was).
+static void taskbar_tray_set(const char *text)
+{
+        char format[SETTING_TRAY_MOST + 1];
+        int at = 0;
+
+        while (text[at] && text[at] != '\n' && text[at] != '\r' && at < SETTING_TRAY_MOST)
+                format[at] = text[at], at++;
+        format[at] = 0;
+        taskbar.tray_custom = format[0] && !string_equals((string_address)format, (string_address) "default") &&
+                              !string_equals((string_address)format, (string_address)SETTING_TASKBAR_TRAY_STANDARD) &&
+                              setting_tray_valid(format, null);
+        for (at = 0; format[at] && taskbar.tray_custom; at++)
+                taskbar.tray_format[at] = format[at];
+        taskbar.tray_format[taskbar.tray_custom ? at : 0] = 0;
+        taskbar_tray_render();
+        taskbar.stale = 1;
+}
+
 // The battery the settings name, read again each minute: its percentage and whether it is charging. The name "none"
 // shows nothing; an empty name or "auto" is the first battery the machine has. A battery that is missing, or that
 // gives no reading, is not drawn.
@@ -589,8 +844,17 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                 ground = taskbar_glass_tab(view, rect[0], rect[1], gw, lay.bx, lay.by, lay.bw, x, y, width, height, -2, 0);
                 ink = window_contrast(ground);
+                // A format of the person's is one text over the whole tray.
+                if (taskbar.tray_custom)
+                {
+                        if (lay.vertical)
+                                taskbar_text_turned(view, lay.bx, lay.by, lay.bw, x, y, width, height, taskbar.tray_text, ink, ground);
+                        else
+                                taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, taskbar.tray_text, ink, ground);
+                }
                 // The clock has the tray's far slot, past the battery's when one is shown; a side band writes both
                 // turned, as its titles.
+                else
                 {
                         int cx, cy, cw, ch;
 
@@ -602,7 +866,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                         taskbar_text_line(view, lay.bx, lay.by, lay.bw, cx, cy, cw, ch, clock, ink, ground);
                         }
                 }
-                if (taskbar.battery_item)
+                if (taskbar.battery_item && !taskbar.tray_custom)
                 {
                         int ax, ay, aw, ah;
 
@@ -632,6 +896,7 @@ static int taskbar_tick(void)
                 return 0;
         taskbar.minute = now;
         taskbar_battery_refresh();
+        taskbar_tray_render();
         return 1;
 }
 

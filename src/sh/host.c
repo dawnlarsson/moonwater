@@ -21176,6 +21176,77 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         return locale_canvas_arrange_status();
 }
 
+/*
+        moonwater taskbar tray [FORMAT|default]: what the tray at the end of the taskbar shows, as text with {names}
+        in it ({battery}, {time.24h.hour}, {date.day}, {cpu.load}, ...: the help page lists them). Several words are
+        joined by single blanks; a format with blanks to keep is one quoted word. It is judged whole before root is
+        asked for (setting_tray_valid) and kept in /root as a line, and the compositor, which watches /root, draws it
+        at once and again each minute. Bare it says what is kept, the standard when nothing is.
+*/
+static b32 locale_taskbar_tray_status(void)
+{
+        p8 text[SETTING_TRAY_MOST + 16];
+        bipolar got = host_read_state(SETTING_TASKBAR_TRAY_PATH, text, sizeof(text) - 1);
+
+        text[got > 0 ? got : 0] = end;
+        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r'))
+                text[--got] = end;
+        if (got < 0 && got != -ENOENT && !bowl_is_root())
+        {
+                host_say(log, host_label "tray " LOCALE_NEEDS_ROOT "\n");
+                return 0;
+        }
+        host_say(log, host_label "tray %s\n",
+                 text[0] && !string_equals((string_address)text, "default") && setting_tray_valid((const char *)text, null)
+                     ? (string_address)text
+                     : (string_address)SETTING_TASKBAR_TRAY_STANDARD);
+        return 0;
+}
+
+static b32 locale_taskbar_tray(string_address address_to arguments, positive count)
+{
+        p8 text[SETTING_TRAY_MOST + 16];
+        positive at = 0, bad;
+        bipolar failed;
+
+        if (count == 3)
+                return locale_taskbar_tray_status();
+        for (positive word = 3; word < count; word++)
+        {
+                positive length = string_length(arguments[word]);
+
+                if (at + length + 2 > sizeof(text))
+                        return host_refuse("tray is at most %p bytes of text\n", (positive)SETTING_TRAY_MOST);
+                if (word > 3)
+                        text[at++] = ' ';
+                memory_copy(text + at, arguments[word], length);
+                at += length;
+        }
+        text[at] = end;
+        if (!string_equals((string_address)text, "default") && !setting_tray_valid((const char *)text, &bad))
+                return host_refuse("tray is text of at most %p bytes in which {name} is one of battery, battery.percent, "
+                                   "battery.state, time.24h.hour, time.24h.min, time.12h.hour, time.ampm, date.year, "
+                                   "date.month, date.day, date.weekday, date.monthname, cpu.load, mem.used, temp or host "
+                                   "and {{ }} are the braces; it goes wrong at byte %p\n",
+                                   (positive)SETTING_TRAY_MOST, bad);
+        if (!bowl_is_root())
+                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
+        text[at++] = '\n';
+        failed = host_write_file(SETTING_TASKBAR_TRAY_PATH, text, at, 0644, true);
+        if (failed < 0)
+                return host_fail("taskbar tray", failed);
+        return locale_taskbar_tray_status();
+}
+
+// moonwater taskbar: the plain rows (position, display, text), and tray, which is a line of text.
+static b32 host_setting_verb(string_address address_to arguments, positive count);
+static b32 host_taskbar(string_address address_to arguments, positive count)
+{
+        if (count >= 3 && string_equals(arguments[2], "tray"))
+                return locale_taskbar_tray(arguments, count);
+        return host_setting_verb(arguments, count);
+}
+
 //      moonwater canvas cursor: bare it says the size and the look in one line, then the rows that are
 //      the shake's; any other word is a usage page (the rows have words of their own, found before this).
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count)
@@ -25009,7 +25080,7 @@ static b32 host_main()
             {"ntp", host_ntp, false, true},
             {"keyboard", host_keyboard, false, true},
             {"mouse", host_setting_verb, false, true},
-            {"taskbar", host_setting_verb, false, true},
+            {"taskbar", host_taskbar, false, true},
             {"time", host_time, false, true},
             {"name", host_name, true},
             {"dns", host_dns, false, true},

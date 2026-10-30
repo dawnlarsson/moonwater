@@ -115572,6 +115572,69 @@ static int look_luma(unsigned int colour)
         return (int)((299 * (colour >> 16 & 255) + 587 * (colour >> 8 & 255) + 114 * (colour & 255)) / 1000);
 }
 
+/* The tray's format (`taskbar tray`): what setting_tray_valid takes and refuses, what the tray says for a format (a {name}
+   filled in, the braces doubled, UTF-8 whole), that a format of the person's is one text over the whole tray (no clock
+   or battery cell of its own), that the standard and default are the tray as it always was, and that a long one leaves
+   the tabs half of the band. */
+static void check_taskbar_tray(void)
+{
+    static const char *const good[] = {SETTING_TASKBAR_TRAY_STANDARD, "{time.24h.hour}:{time.24h.min}", "{{x}} {host}",
+                                       "{date.weekday} {date.day} {date.monthname}  {cpu.load}  {mem.used}%  {temp}C", "no names at all",
+                                       "\xe6\x97\xa5\xe6\x9c\xac {battery.percent}", "", null};
+    static const char *const bad[] = {"{nope}", "{battery", "}", "a}b", "{}", "{ battery}", "tab\there", "\xff", "\xe6\x97",
+                                      "{time.24h.hour}{", null};
+    char long_format[SETTING_TRAY_MOST + 8];
+    struct taskbar_view view;
+    int x, y, w, h, bx, by, bw, bh, cx, cy, cw, ch;
+    positive where = 99;
+
+    for (int at = 0; good[at]; at++)
+        check("tray format: a format that names what there is and is whole text is taken", setting_tray_valid(good[at], null));
+    for (int at = 0; bad[at]; at++)
+        check("tray format: one that names what is not there, is not paired, or is not printable text is refused", !setting_tray_valid(bad[at], &where));
+    setting_tray_valid("ab{nope}", &where);
+    check("tray format: a refusal says where it goes wrong", where == 2);
+    for (unsigned int at = 0; at < sizeof(long_format) - 1; at++)
+        long_format[at] = 'a';
+    long_format[SETTING_TRAY_MOST] = 0;
+    check("tray format: the most bytes is taken", setting_tray_valid(long_format, null));
+    long_format[SETTING_TRAY_MOST] = 'a';
+    long_format[SETTING_TRAY_MOST + 1] = 0;
+    check("tray format: and one more is not", !setting_tray_valid(long_format, null));
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.width = 2560;
+    compositor.height = 1440;
+    compositor.scale = 1;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+    check("tray format: the standard is the tray as it always was", !taskbar.tray_custom);
+    taskbar_tray_set("default");
+    check("tray format: and so is default", !taskbar.tray_custom);
+    taskbar_tray_set("T{{{time.24h.hour}:{time.24h.min}}}!\n");
+    check("tray format: a format of the person's is drawn as a text of its own", taskbar.tray_custom &&
+          taskbar.tray_text[0] == 'T' && taskbar.tray_text[1] == '{' && taskbar.tray_text[4] == ':' && taskbar.tray_text[7] == '}' &&
+          taskbar.tray_text[8] == '!' && !taskbar.tray_text[9] && taskbar.tray_chars == 9);
+    check("tray format: the hour and the minute are two digits", taskbar.tray_text[2] >= '0' && taskbar.tray_text[2] <= '2' &&
+          taskbar.tray_text[3] >= '0' && taskbar.tray_text[3] <= '9' && taskbar.tray_text[5] >= '0' && taskbar.tray_text[5] <= '5' &&
+          taskbar.tray_text[6] >= '0' && taskbar.tray_text[6] <= '9');
+    view = compositor_taskbar_view();
+    check("tray format: the tray is one slot, with no clock or battery cell inside it", taskbar_slot(&view, -2, &x, &y, &w, &h) &&
+          !taskbar_slot(&view, -3, &cx, &cy, &cw, &ch) && !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
+    taskbar_tray_set("\xe6\x97\xa5\xe6\x9c\xac {host}");
+    check("tray format: a character is counted once, not by its bytes", taskbar.tray_custom && taskbar.tray_chars >= 3);
+    taskbar_tray_set("{nope} is refused where it is kept, and if the file is edited by hand it is the standard");
+    check("tray format: a file that holds what is refused is the standard", !taskbar.tray_custom);
+    for (unsigned int at = 0; at < sizeof(long_format) - 1; at++)
+        long_format[at] = 'W';
+    long_format[SETTING_TRAY_MOST] = 0;
+    taskbar_tray_set(long_format);
+    view = compositor_taskbar_view();
+    taskbar_band(&view, &bx, &by, &bw, &bh);
+    check("tray format: a long one leaves the tabs half of the band", taskbar_slot(&view, -2, &x, &y, &w, &h) && w <= bw / 2);
+    taskbar_tray_set("");
+}
+
 /* The taskbar's geometry with no card and no font: where the band sits for each position, that the tray is at the far end
    of it, that a point in the tray is the tray and a point off the band is none, and that the battery's cell sits left of
    the clock (or above it on a side band) when a battery is shown, and that none is shown when there is none to show. */
@@ -120298,6 +120361,7 @@ b32 main()
 #endif
         check_compositor_look();
         check_taskbar_geometry();
+        check_taskbar_tray();
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
 #endif

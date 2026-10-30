@@ -6089,7 +6089,7 @@ static void compositor_bands_where(int (*rects)[4])
 
 static void compositor_taskbar_settings_read(void)
 {
-        char position[16], display[16], tune[512], text[16];
+        char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8];
         int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4];
         long edge;
 
@@ -6098,10 +6098,12 @@ static void compositor_taskbar_settings_read(void)
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
+        compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
         compositor_bands_where(was);
         compositor_tabs_changed();
         taskbar_settings_set(position, display, tune);
         taskbar_text_set(edge == 1);
+        taskbar_tray_set(tray);
         compositor_band_room();
         compositor_tabs_changed();
         compositor_bands_where(now);

@@ -89,6 +89,11 @@
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
 #define SETTING_CANVAS_ARRANGE_PATH "/root/canvas.arrange"
+// The tray's format (`taskbar tray`): text with {names} in it, and what it is when nothing is kept. The tray with the
+// standard format is drawn as the tray always was: the battery's cell, then the clock's.
+#define SETTING_TASKBAR_TRAY_PATH "/root/taskbar.tray"
+#define SETTING_TASKBAR_TRAY_STANDARD "{battery}  {time.24h.hour}:{time.24h.min}"
+#define SETTING_TRAY_MOST 96 // bytes of a format
 
 struct settings_row
 {
@@ -220,6 +225,12 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "taskbar text is center or edge, not %s\n",
                       .usage = "taskbar text [center|edge]",
                       .help = "on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]"),
+    //  A special row (host.c locale_taskbar_tray) whose file the compositor watches: the whole line is the format.
+    {null, "Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)", SETTINGS_FIELD, 0,
+     SETTINGS_LINE, {"taskbar", "tray"}, "tray ", null, {"taskbar", "tray"}, null, 0, null,
+     .usage = "taskbar tray [FORMAT|default]",
+     .help = "what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]",
+     .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_TRAY_PATH},
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
@@ -499,6 +510,92 @@ static string_address setting_shown(const struct settings_row address_to row, st
                 string_copy_bounded(into + length + 1, (string_address)row->unit, room - length - 1);
         }
         return into;
+}
+
+
+/*
+        The tray's format: what it may say. A name between braces is one of these (the tray fills it in each minute),
+        {{ and }} are the braces themselves, and everything else is shown as it is. A format is text of printable
+        characters, whole UTF-8 sequences, at most SETTING_TRAY_MOST bytes; one that is none of that, or names what is
+        not here, is refused where it is set.
+*/
+static const char *const setting_tray_names[] = {
+    "battery", "battery.percent", "battery.state", "time.24h.hour", "time.24h.min", "time.12h.hour", "time.ampm",
+    "date.year", "date.month", "date.day", "date.weekday", "date.monthname", "cpu.load", "mem.used", "temp", "host", null};
+
+// A name's number among the tray's, -1 when it is none.
+static int setting_tray_name(const char *name, positive length)
+{
+        for (int at = 0; setting_tray_names[at]; at++)
+        {
+                positive same = 0;
+
+                while (same < length && setting_tray_names[at][same] == name[same])
+                        same++;
+                if (same == length && !setting_tray_names[at][same])
+                        return at;
+        }
+        return -1;
+}
+
+// Whether text is a format the tray takes. When it is not and bad is given, bad is where the fault starts.
+static bool setting_tray_valid(const char *text, positive *bad)
+{
+        positive at = 0, length = 0;
+
+        while (text[length])
+                length++;
+        if (bad)
+                *bad = 0;
+        if (length > SETTING_TRAY_MOST)
+                return bad ? (*bad = SETTING_TRAY_MOST, false) : false;
+        while (text[at])
+        {
+                unsigned char byte = (unsigned char)text[at];
+                positive follow = 0;
+
+                if (byte < 0x20 || byte == 0x7f)
+                        goto wrong;
+                if (byte >= 0xc2 && byte < 0xe0)
+                        follow = 1;
+                else if (byte >= 0xe0 && byte < 0xf0)
+                        follow = 2;
+                else if (byte >= 0xf0 && byte < 0xf5)
+                        follow = 3;
+                else if (byte >= 0x80)
+                        goto wrong;
+                if (follow)
+                {
+                        for (positive more = 1; more <= follow; more++)
+                                if (((unsigned char)text[at + more] & 0xc0) != 0x80)
+                                        goto wrong;
+                        at += follow + 1;
+                        continue;
+                }
+                if (byte == '{' && text[at + 1] == '{')
+                        at += 2;
+                else if (byte == '}' && text[at + 1] == '}')
+                        at += 2;
+                else if (byte == '{')
+                {
+                        positive close = at + 1;
+
+                        while (text[close] && text[close] != '}')
+                                close++;
+                        if (!text[close] || setting_tray_name(text + at + 1, close - at - 1) < 0)
+                                goto wrong;
+                        at = close + 1;
+                }
+                else if (byte == '}')
+                        goto wrong;
+                else
+                        at++;
+        }
+        return true;
+wrong:
+        if (bad)
+                *bad = at;
+        return false;
 }
 
 #endif // MOONWATER_SETTINGS_REGISTRY

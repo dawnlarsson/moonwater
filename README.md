@@ -76,6 +76,7 @@ moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is o
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]
+moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater time [sync]                  the clock; sync sets it and the zone now
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
