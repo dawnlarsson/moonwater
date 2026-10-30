@@ -5931,7 +5931,13 @@ static COLD fn expand_arithmetic_error()
                 return;
         }
 
-        expand_fatal_status(expand_nounset_status(false));
+        //      bash --posix leaves 127 for an arithmetic error at the top of
+        //      -c whether or not errexit is on; only nounset's answer is 1
+        //      under -e.
+        expand_fatal_status(shell_bash_compat && string_is(shell_option_flags, 'c') &&
+                                    !shell_subshell_depth
+                                ? 127
+                                : expand_nounset_status(false));
 }
 
 static HOT string_address expand_arithmetic_finish(string_address ready,
