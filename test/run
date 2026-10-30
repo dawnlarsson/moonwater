@@ -10449,6 +10449,13 @@ same 'privacy message' '[XY]'                    20 3 in '\e^anything\e\\XY' row
 #       way and say nothing to it.
 same 'osc names the window' '[a title]'          20 3 in '\e]0;a title\a' title
 same 'dcs does not'   '[]'                       20 3 in '\eP+q544e\e\\' title
+#       A control in a string is no part of it, as xterm and tmux read one: a
+#       line feed or a tab in a title went into the tabs and every list of the
+#       windows, and a NUL ended the title where it stood.
+same 'no line feed in a title' '[abcd]'          20 3 in '\e]0;ab\ncd\a' title
+same 'no tab in a title' '[tabhere]'             20 3 in '\e]2;tab\there\a' title
+same 'no NUL in a title' '[ab]'                  20 3 in '\e]2;a\x00b\a' title
+same 'no DEL in a title' '[ab]'                  20 3 in '\e]2;a\x7fb\e\\' title
 
 group private
 same 'bracketed paste' '[AB]'                    20 3 in '\e[?2004hA\e[?2004lB' row 0

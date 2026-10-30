@@ -2095,7 +2095,10 @@ static fn consume(unsigned int c)
                                 osc_finish(true);
                                 in_string = in_escape = false;
                         }
-                        else if (osc_length < WINDOW_TITLE_MAX)
+                        // Another control, NUL or DEL is no part of the string, as xterm and tmux read one: a line
+                        // feed or a tab kept in a title was drawn in its tab and printed in every list of the
+                        // windows, and a NUL cut the title where it stood.
+                        else if (c >= ' ' && c != 127 && osc_length < WINDOW_TITLE_MAX)
                                 osc_bytes[osc_length++] = (p8)c;
 
                         return;
