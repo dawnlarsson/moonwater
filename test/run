@@ -18127,7 +18127,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, u1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, u1, f1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -22127,6 +22127,287 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/u1-answers"
+fi
+fi
+
+#       Fingers on the desktop (CANVAS_ONLY=f1): the plain boot's desktop with QEMU's touch screen
+#       (virtio-multitouch-pci) beside the tablet, its fingers put down, moved and lifted by QMP's mtt events as a
+#       multitouch driver reports them (a finger's slot and id, then its place), and read back from what the windows
+#       say and from the screen. moonwater debug lists the device as a touch screen; a tap presses where it lands, as a
+#       finger's; the mark of canvas touch (on by default) is drawn round a finger held down and is gone a second after
+#       it lifts; a window taken by its top follows the finger with all of its line lit; a finger 12 px outside a
+#       window's left edge takes the edge, which is lit while held; a finger held still is the right button; two moved
+#       down together are the wheel up. MOONWATER_TOUCH_PICTURES names a directory the pictures are kept in, as PNGs.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = f1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/f1-answers" 2>"$work/f1-why" <<'PY'
+import os, re, shutil, subprocess, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/f1"
+os.makedirs(work, exist_ok=True)
+keep = os.environ.get("MOONWATER_TOUCH_PICTURES", "")
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + ["-device", "virtio-multitouch-pci",
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+#   A run that fails part way leaves no guest behind it.
+import atexit
+atexit.register(lambda: guest.poll() is None and guest.kill())
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def pids(name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+until(lambda: len(pids("terminal")) == 1, 60)
+time.sleep(2)
+said_scale = re.findall(r"\(scale (\d+)\)", shell.run("dmesg | grep 'compositor:' | tail -5", 10)[0])
+scale = int(said_scale[-1]) if said_scale else 1
+
+def picture(name, box=None):
+    """The screen as rgb(x, y); kept as name.png (cut to box, x, y, w, h) where pictures are kept."""
+    shot(name, 1)
+    width, height, data = load(name)
+    if keep:
+        os.makedirs(keep, exist_ok=True)
+        crop = ["-crop", "%dx%d+%d+%d" % (box[2], box[3], box[0], box[1]), "+repage"] if box else []
+        subprocess.run(["convert", "%s/%s.ppm" % (work, name)] + crop + ["%s/%s.png" % (keep, name)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    def rgb(x, y):
+        o = (y * width + x) * 3
+        return tuple(data[o:o + 3])
+    return rgb
+
+def units(value, size):
+    """A pixel of the screen as QEMU's touch units, 0 to 32767 across it: the compositor's value times (size - 1)."""
+    return (value * 32767 + size - 2) // (size - 1)
+
+def mtt(kind, slot, tid, axis="x", value=0):
+    return {"type": "mtt", "data": {"type": kind, "slot": slot, "tracking-id": tid, "axis": axis, "value": value}}
+
+def finger(x, y, slot=0, tid=1, kind="begin"):
+    return [mtt(kind, slot, tid), mtt("data", slot, tid, "x", units(x, W)), mtt("data", slot, tid, "y", units(y, H))]
+
+def down(x, y, slot=0, tid=1):
+    send(finger(x, y, slot, tid, "begin"))
+    time.sleep(0.05)
+
+def move(x, y, slot=0, tid=1):
+    send(finger(x, y, slot, tid, "update"))
+    time.sleep(0.03)
+
+def up(slot=0):
+    send([mtt("end", slot, -1)])
+    time.sleep(0.05)
+
+def slide(x0, y0, x1, y1, steps=12, slot=0, tid=1):
+    for step in range(1, steps + 1):
+        move(x0 + (x1 - x0) * step // steps, y0 + (y1 - y0) * step // steps, slot, tid)
+
+def mouse(x, y):
+    send([{"type": "abs", "data": {"axis": "x", "value": (x * 32767 + W - 1) // W}},
+          {"type": "abs", "data": {"axis": "y", "value": (y * 32767 + H - 1) // H}}])
+    time.sleep(0.1)
+
+def button(press):
+    send([{"type": "btn", "data": {"down": press, "button": "left"}}])
+    time.sleep(0.1)
+
+def surface(x, y, w, h, colour, title):
+    shell.run("/surface -x %d -y %d -w %d -h %d -c %s -T %s -p -R -s 600 > /tmp/%s.out 2>&1 & echo $! > /tmp/%s.pid" %
+              (x, y, w, h, colour, title, title, title), 10)
+    time.sleep(1.5)
+    said = re.findall(r"\d+", shell.run("cat /tmp/%s.pid" % title, 10)[0])
+    return said[-1] if said else "none"
+
+def told(title):
+    return shell.run("cat /tmp/%s.out" % title, 10)[0]
+
+def place(pid):
+    found = re.search(r"pid %s, at (-?\d+),(-?\d+), (\d+) by (\d+)" % re.escape(pid), shell.run("moonwater window", 10)[0])
+    return tuple(int(v) for v in found.groups()) if found else None
+
+LIT = (0xe4, 0xe4, 0xe4)
+debug = shell.run("moonwater debug", 15)[0]
+kinds = re.search(r"(?i)multitouch[^\n]*\n\s*([^\n]*)", debug)
+out.append(("F1.1 moonwater debug lists QEMU's multitouch device as a touch screen, not a tablet",
+            kinds.group(1).strip() if kinds else "not listed", "a touch screen"))
+
+a = surface(1300, 300, 600, 400, "336699", "ua")
+b = surface(2000, 300, 450, 400, "996633", "ub")
+at_a, at_b = place(a), place(b)
+ax, ay = at_a[:2] if at_a else (1300, 300)
+bx, by = at_b[:2] if at_b else (2000, 300)
+picture("f1-desktop")
+
+#   A tap, a finger's press where it landed.
+shell.run(": > /tmp/ua.out", 10)
+down(ax + 300, ay + 200)
+up()
+time.sleep(0.5)
+heard = told("ua")
+motions = re.findall(r"surface: motion (-?\d+) (-?\d+)", heard)
+buttons = re.findall(r"surface: button (\d+) (\d+)", heard)
+out.append(("F1.2 a finger tapped on a window presses it where it landed, as a finger's press, and lets go there",
+            "%s %s" % (motions[-1] if motions else "no motion", " ".join("%s/%s" % b for b in buttons)),
+            "('300', '200') 272/513 272/512"))
+
+#   The mark: held, round the finger; a second after it lifts, gone.
+down(ax + 300, ay + 200)
+time.sleep(0.4)
+rgb = picture("touch-circle-down", (ax + 300 - 120, ay + 200 - 120, 240, 240))
+held = rgb(ax + 300, ay + 200)
+ring = max((rgb(ax + 300 - 22 * scale + d, ay + 200) for d in range(3)), key=sum)
+outside = rgb(ax + 300 - 22 * scale - 3, ay + 200)
+up()
+time.sleep(0.45)
+picture("touch-circle-fading", (ax + 300 - 120, ay + 200 - 120, 240, 240))
+time.sleep(1.2)
+rgb = picture("touch-circle-gone", (ax + 300 - 120, ay + 200 - 120, 240, 240))
+gone = rgb(ax + 300, ay + 200)
+out.append(("F1.3 a finger held down has its mark round it: a faint disc over the window, a brighter ring, nothing outside",
+            "yes" if held != (0x33, 0x66, 0x99) and sum(held) > sum((0x33, 0x66, 0x99)) and sum(ring) > sum(held) and
+            outside == (0x33, 0x66, 0x99) else "no: middle %s ring %s outside %s" % (held, ring, outside), "yes"))
+out.append(("F1.4 a second after the finger lifts the mark is gone, the window as it was", str(gone), str((0x33, 0x66, 0x99))))
+
+#   A window taken by its top with a finger: it follows, all of its line lit while held.
+down(ax + 100, ay + 8 * scale)
+slide(ax + 100, ay + 8 * scale, ax + 100, ay + 8 * scale + 200)
+time.sleep(0.3)
+rgb = picture("move-touch", (ax - 60, ay + 200 - 60, 720, 520))
+line = rgb(ax - 1, ay + 200 + 150)
+up()
+time.sleep(0.6)
+moved = place(a)
+out.append(("F1.5 a window taken by its top with a finger follows it, held where it was taken",
+            str(moved[:2] if moved else None), str((ax, ay + 200))))
+out.append(("F1.6 and while it is held all of its line is lit in the held ink", str(line), str(LIT)))
+ay += 200
+
+#   A finger 12 px outside the left edge takes the edge, which is lit while held, and the window is wider.
+down(bx - 12 * scale, by + 200)
+slide(bx - 12 * scale, by + 200, bx - 12 * scale - 100, by + 200)
+time.sleep(0.3)
+rgb = picture("resize-left-touch", (bx - 160, by - 60, 720, 520))
+edge = rgb(bx - 100 - 1, by + 200)
+top = rgb(bx + 200, by - 1)
+up()
+time.sleep(0.6)
+sized = place(b)
+out.append(("F1.7 a finger 12 px outside a window's left edge takes the edge: the window is 100 px wider to the left",
+            str(sized), str((bx - 100, by, 550, 400))))
+out.append(("F1.8 the edge it holds is lit in the held ink, the top is not", "%s %s" % (edge, top != LIT), "%s True" % (LIT,)))
+bx -= 100
+
+#   Held still, a finger is the right button; two moved down together are the wheel up.
+shell.run(": > /tmp/ub.out", 10)
+down(bx + 300, by + 200)
+time.sleep(0.9)
+up()
+time.sleep(0.4)
+heard = told("ub")
+out.append(("F1.9 a finger held still is the right button, its left press taken back",
+            " ".join("%s/%s" % b for b in re.findall(r"surface: button (\d+) (\d+)", heard)),
+            "272/513 272/1536 273/513 273/512"))
+shell.run(": > /tmp/ub.out", 10)
+down(bx + 200, by + 100, 0, 5)
+down(bx + 300, by + 100, 1, 6)
+for step in range(1, 13):
+    move(bx + 200, by + 100 + step * 8 * scale, 0, 5)
+    move(bx + 300, by + 100 + step * 8 * scale, 1, 6)
+up(0)
+up(1)
+time.sleep(0.5)
+turns = sum(int(v) for v in re.findall(r"surface: wheel (-?\d+) 0", told("ub")))
+out.append(("F1.10 two fingers moved 96 px down together are two notches of the wheel up", str(turns), "240"))
+
+#   The handles for the pictures: each edge and corner held by the mouse and by a finger.
+if keep:
+    x0, y0, w0, h0 = place(b) or (bx, by, 550, 400)
+    handles = {"left": (x0 - 3, y0 + h0 // 2), "right": (x0 + w0 + 2, y0 + h0 // 2), "top": (x0 + w0 // 2, y0 - 3),
+               "bottom": (x0 + w0 // 2, y0 + h0 + 2), "topleft": (x0 - 2, y0 - 2), "topright": (x0 + w0 + 1, y0 - 2),
+               "bottomleft": (x0 - 2, y0 + h0 + 1), "bottomright": (x0 + w0 + 1, y0 + h0 + 1)}
+    box = (x0 - 80, y0 - 80, w0 + 160, h0 + 160)
+    mouse(x0 + w0 // 2, y0 + h0 // 2)
+    for name, (hx, hy) in handles.items():
+        mouse(hx, hy)
+        picture("hover-%s-mouse" % name, box)
+        button(True)
+        picture("resize-%s-mouse" % name, box)
+        button(False)
+    mouse(50, 50)
+    for name, (hx, hy) in handles.items():
+        fx = hx + (-8 if "left" in name else 8 if "right" in name else 0) * scale
+        fy = hy + (-8 if "top" in name else 8 if "bottom" in name else 0) * scale
+        down(fx, fy)
+        time.sleep(0.3)
+        picture("resize-%s-touch" % name, box)
+        up()
+        time.sleep(1.2)
+
+    #   The settings for a finger: its rows, a row pressed under a finger, the list a finger opens, and the rows dragged.
+    shell.run("moonwater settings", 15)
+    time.sleep(3)
+    listed = shell.run("moonwater window", 10)[0]
+    found = re.search(r"settings, pid \d+, at (-?\d+),(-?\d+), (\d+) by (\d+)", listed)
+    sx, sy, sw, sh = tuple(int(v) for v in found.groups()) if found else (0, 0, W, H)
+    sbox = (sx - 20, sy - 20, sw + 40, sh + 40)
+    picture("settings", sbox)
+    #   A picture takes a second, so a finger held for one is a long press (the right button), which does
+    #   nothing here: the row is then tapped, quickly, to open its list.
+    keyboard = (sx + sw * 2 // 3, sy + 60 * scale + 34 * scale + 40 * scale + 20 * scale)
+    down(*keyboard)
+    time.sleep(0.2)
+    picture("settings-pressed-touch", sbox)
+    up()
+    time.sleep(1.2)
+    down(*keyboard)
+    up()
+    time.sleep(1.5)
+    picture("settings-choice-touch", sbox)
+    key("esc")
+    time.sleep(0.5)
+    canvas = (sx + 40 * scale, sy + 60 * scale + 40 * scale + 20 * scale)
+    down(*canvas)
+    time.sleep(0.2)
+    picture("settings-group-pressed-touch", sbox)
+    up()
+    time.sleep(1.2)
+    down(*canvas)
+    up()
+    time.sleep(1.2)
+    picture("settings-canvas-touch", sbox)
+    down(sx + sw * 2 // 3, sy + sh - 80 * scale)
+    slide(sx + sw * 2 // 3, sy + sh - 80 * scale, sx + sw * 2 // 3, sy + sh - 80 * scale - 160 * scale, 10)
+    up()
+    time.sleep(1.5)
+    picture("settings-dragged-touch", sbox)
+    key("esc")
+    time.sleep(1)
+    picture("taskbar", (0, H - 60 * scale, W, 60 * scale))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/f1-answers" ]; then
+        same "the touch screen boot answered" "yes" "no"
+        sed 's/^/    /' "$work/f1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/f1-answers"
 fi
 fi
 
