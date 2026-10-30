@@ -11538,45 +11538,6 @@ def files_tar_utf8_names(farm):
     return won, total, notes
 
 
-def files_find_write_error(farm):
-    """find whose output cannot be written says why, and answers 1.
-
-    The reference prints "find: write error" after the reason it had for the
-    failed write; a find that stays silent exits 1 with nothing said, and the
-    word "write error" is what must be there.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-
-    reference = shutil.which("find", path=os.defpath)
-    candidate = Path(farm) / "find"
-    if not reference or not candidate.exists() or not Path("/dev/full").exists():
-        return 0, 1, ["find write-error check needs find on both sides and /dev/full"]
-
-    won = total = 0
-    notes = []
-    with tempfile.TemporaryDirectory(prefix="find-full-") as work:
-        Path(work, "entry").write_bytes(b"")
-        for label, extra in (("plain", []), ("-ls", ["-ls"]), ("-printf", ["-printf", "%p\\n"])):
-            results = []
-            for program in (reference, str(candidate)):
-                with open("/dev/full", "wb") as full:
-                    results.append(subprocess.run([program, work, "-maxdepth", "1"] + extra,
-                                                  stdout=full, stderr=subprocess.PIPE,
-                                                  timeout=60))
-            want, got = results
-            total += 1
-            if got.returncode == want.returncode and \
-                    ("write error" in got.stderr.decode()) == ("write error" in want.stderr.decode()):
-                won += 1
-            else:
-                notes.append(f"find {label} > /dev/full: reference {want.returncode} "
-                             f"{want.stderr.decode()[:60]!r}, candidate {got.returncode} "
-                             f"{got.stderr.decode()[:60]!r}")
-    return won, total, notes
-
-
 def files_ls_address_cap(farm):
     """ls -R under a 16 MB address-space cap does not call a memory limit a count.
 
@@ -12030,15 +11991,31 @@ def files_write_error_stdout(farm):
 
 
 def files_find_write_error(farm):
-    """find's own output files (-fprint, -fprint0, -fprintf) on a full device:
-    the reference reports the write and exits 1."""
+    """find whose output cannot be written says why and answers 1, in both
+    places its output goes. Standard output (plain, -ls, -printf) on a full
+    device: the reference prints "find: write error" after the reason it had
+    for the failed write, so the words "write error" are what must be there on
+    both sides (a find that stays silent exits 1 with nothing said). Its own
+    output files (-fprint, -fprint0, -fprintf) on a full device: the reference
+    reports the write and exits 1, and the message is compared whole."""
     def setup(root):
         (root / "a.txt").write_text("a\n")
 
-    cases = (["-fprint", "/dev/full"], ["-fprint0", "/dev/full"],
-             ["-fprintf", "/dev/full", "%p\\n"])
+    if not Path("/dev/full").exists():
+        return 0, 1, ["find write-error check needs /dev/full"]
     passed = total = 0
     notes = []
+    for extra in ([], ["-ls"], ["-printf", "%p\\n"]):
+        answers = files_pair(farm, "find", [".", "-maxdepth", "1", *extra], setup, full=True)
+        said = ["write error" in answer[2] for answer in answers]
+        total += 1
+        if answers[0][0] == answers[1][0] and said[0] == said[1] and answers[1][0] != 0:
+            passed += 1
+        else:
+            notes.append(f"find . -maxdepth 1 {' '.join(extra)} > /dev/full: reference {answers[0][0]} "
+                         f"{answers[0][2][:60]!r} ours {answers[1][0]} {answers[1][2][:60]!r}")
+    cases = (["-fprint", "/dev/full"], ["-fprint0", "/dev/full"],
+             ["-fprintf", "/dev/full", "%p\\n"])
     for extra in cases:
         answers = files_pair(farm, "find", [".", *extra], setup)
         total += 1
@@ -12216,7 +12193,7 @@ FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, fi
                 files_address_cap, files_kill_bash_word, files_tar_short_archive, files_tar_utf8_names, files_find_write_error, files_ls_address_cap,
                 files_floor_address_cap, files_daystart_zones, files_statfs_names,
                 files_deep_walks, files_parents_deep, files_write_error_stdout,
-                files_find_write_error, files_exec_refusals, files_regex_switch,
+                files_exec_refusals, files_regex_switch,
                 files_codec_operands, files_mode_words, files_chmod_unreadable_report,
                 files_whereis_directories_option, files_du_long_name_list)
 
