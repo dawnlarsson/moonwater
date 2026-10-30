@@ -16375,8 +16375,15 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 
+#       MOONWATER_INSTALL_KEEP=DIRECTORY keeps every boot's transcript and the
+#       host's verdicts on its disks there when the lane ends, for a row that
+#       went red once in five runs (MOONWATER_CUT_SHOW is the power cuts'
+#       own). The disks and the image copies are left behind.
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+trap '[ -z "${MOONWATER_INSTALL_KEEP:-}" ] ||
+        find "$work" -maxdepth 1 -type f ! -name "*.img" ! -name "*.keep" ! -name "*.fd" ! -name "*.efi" \
+                -exec cp {} "$MOONWATER_INSTALL_KEEP"/ \; 2> /dev/null
+        rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 counting install 12 30
 
