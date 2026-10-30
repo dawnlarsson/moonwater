@@ -3306,14 +3306,20 @@ static b32 host_install_locked(string_address asked, bool removable, bool said_y
                 failed = system_call_1(syscall(fsync), (positive)handle);
 
         //      Written part way, the disk is not left holding half of an install,
-        //      and when the table cannot be taken off, that is said as well as
-        //      the write's own failure.
+        //      and what became of it is said as well as the write's own
+        //      failure, in host_install_abandon's words: the table taken off,
+        //      or that it could not be. Only the second used to be said, so a
+        //      disk the install had erased and cleared again was reported as
+        //      an I/O error and nothing about the disk.
         if (failed)
         {
                 if (!host_install_clear(handle))
                         host_say(log_error, host_label "%s could not be cleared: the install "
                                                        "did not finish, and its partitions are "
                                                        "not to be trusted\n", name);
+                else
+                        host_say(log_error, host_label "%s is left without a partition table: "
+                                                       "the install did not finish\n", name);
         }
         else
                 failed = host_rescan(handle);
