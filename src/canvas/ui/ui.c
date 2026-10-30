@@ -1715,6 +1715,28 @@ static fn ui_box_radii(const struct ui_box address_to box, b32 address_to rx, b3
         }
 }
 
+/*
+        A corner's half-width at a line, as the unit circle's: the root of 2^32 less u squared (u below 65536, the
+        line's height in the corner over its radius, 16.16). The same shapes are drawn frame after frame, so each root
+        is kept where its u falls in a small table and the bit loop runs once for it.
+*/
+static struct
+{
+        unsigned int u, root; // u + 1 (0 is a slot never filled)
+} ui_arcs[1024];
+
+static p64 ui_arc(p64 u)
+{
+        unsigned int slot = (unsigned int)(u * 2654435761u) >> 22 & 1023u;
+
+        if (ui_arcs[slot].u != u + 1)
+        {
+                ui_arcs[slot].u = (unsigned int)u + 1;
+                ui_arcs[slot].root = (unsigned int)ui_isqrt((1ull << 32) - u * u);
+        }
+        return ui_arcs[slot].root;
+}
+
 // One line's span of a box, at y (256ths): false when the line misses it.
 static b32 ui_box_span(const struct ui_box address_to box, b32 y, b32 address_to left, b32 address_to right)
 {
@@ -1730,7 +1752,7 @@ static b32 ui_box_span(const struct ui_box address_to box, b32 y, b32 address_to
         if (dy > 0 && ry > 0 && rx > 0)
         {
                 p64 u = ((p64)dy << 16) / (p64)ry;
-                b32 dx = u >= 65536 ? 0 : (b32)(((p64)rx * ui_isqrt((1ull << 32) - u * u)) >> 16);
+                b32 dx = u >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(u)) >> 16);
 
                 *left = box->x0 + rx - dx;
                 *right = box->x1 - rx + dx;
