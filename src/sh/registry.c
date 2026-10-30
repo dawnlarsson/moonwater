@@ -85,6 +85,9 @@
 #define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
+#define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
+#define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
+#define SETTING_CLIPBOARD_LIMIT_PATH "/root/canvas.clipboard.limit"
 // Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
@@ -225,6 +228,22 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas touch [on|off]",
                       .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
+    //  The clipboard, an OS service of the compositor's (SECURITY.md): off empties both selections and the history and
+    //  refuses every copy; the history is copies kept in the compositor's memory and never on a disk, none by default,
+    //  since a clipboard that remembers is a clipboard that leaks what was copied an hour ago.
+    SETTING_PLAIN_ROW(null, "Clipboard", SETTINGS_SWITCH, 0, ("canvas", "clipboard"), "clipboard ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),
+    SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_FIELD, 0, ("canvas", "clipboard", "history"), "history ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_HISTORY_PATH,
+                      .standard = "0", .unit = "copies", .low = 0, .high = 32, .need = "how Canvas draws",
+                      .usage = "canvas clipboard history [N|default]",
+                      .help = "copies the compositor keeps in memory, never on a disk, 0 to 32 [0]"),
+    SETTING_PLAIN_ROW(null, "Clipboard limit (MiB)", SETTINGS_FIELD, 0, ("canvas", "clipboard", "limit"), "limit ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_LIMIT_PATH,
+                      .standard = "16", .unit = "MiB", .low = 1, .high = 16, .need = "how Canvas draws",
+                      .usage = "canvas clipboard limit [MIB|default]",
+                      .help = "the most one copy may be, 1 to 16 MiB [16]"),
     SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,

@@ -24104,6 +24104,11 @@ static const host_row host_rows[] = {
     {null, "", "center, at X,Y, maximized, fullscreen, screen N,", 'b'},
     {null, "", "size WxH, name NAME (what it is remembered by)", 'b'},
     {null, "window move PID|NAME PLACE...", "put the windows of a program, or of a name, where PLACE says", 'b'},
+    {null, "clipboard [primary]", "what the clipboard holds and who copied it, never the text (root)", 'b'},
+    {null, "clipboard get [primary]", "the copied text: exact to a file or a pipe, escaped to a terminal (root)", 'b'},
+    {null, "clipboard set [primary] [TEXT]", "copy TEXT, or standard input (root)", 'b'},
+    {null, "clipboard clear", "empty both selections and the history (root)", 'b'},
+    {null, "clipboard watch [primary]", "a line each time something is copied, the text escaped (root)", 'b'},
     {null, "latency [reset]", "what the input handlers cost a report, and who has the display", 'b'},
     {null, "debug", "what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel", 'b'},
     {null, "@airplane", null, 'r'},
@@ -25061,6 +25066,287 @@ static b32 host_window(string_address address_to arguments, positive count)
 }
 
 /*
+        moonwater clipboard [get|set|clear|watch|history] [primary] [TEXT]: the compositor's clipboard from the command
+        line, root's alone -- a script's door to what a person copied is a door to their passwords, and the table it
+        goes through is root's. Alone it says what each selection holds (its length and who copied it, never the text);
+        get writes the text (exactly, to a file or a pipe; to a terminal with its controls escaped); set copies TEXT, or
+        standard input, as a sealed memfd the compositor takes; clear empties both and the history; watch says a line
+        each time something is copied; history lists what the compositor keeps (canvas clipboard history N). What is
+        printed to a terminal is escaped: C0 and C1 controls, DEL and the bidirectional overrides are \xNN or \u{N}, so
+        copied text cannot move the cursor, retitle the window or reorder the line it is read on, and a line of watch is
+        at most CLIP_LINE characters.
+*/
+#define HOST_CLIP_LINE 120
+#define HOST_CLIP_WAIT_MS 2000
+
+// Text into the log as a terminal may be shown it: whole lines kept (lines false: a line end is \n too), at most most bytes.
+static fn host_clip_escaped(const p8 address_to bytes, positive length, b32 lines, positive most)
+{
+        static const char digits[] = "0123456789abcdef";
+        positive at = 0;
+
+        while (at < length && at < most)
+        {
+                p8 out[16];
+                positive put = 0, size = 1;
+                p32 lead = bytes[at], code = lead;
+
+                if (lead >= 0x80)
+                {
+                        // A UTF-8 sequence: a C1 control or a bidirectional control is spelled; the rest is shown.
+                        size = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2;
+                        size = at + size > length ? length - at : size;
+                        code = lead & (0x7fu >> size);
+                        for (positive k = 1; k < size; k++)
+                                code = code << 6 | (bytes[at + k] & 0x3f);
+                }
+                if (lead == '\n' && lines)
+                        out[put++] = '\n';
+                else if (lead == '\n' || lead == '\t')
+                        out[put++] = '\\', out[put++] = lead == '\n' ? 'n' : 't';
+                else if (lead < 0x20 || lead == 0x7f)
+                        out[put++] = '\\', out[put++] = 'x', out[put++] = (p8)digits[lead >> 4], out[put++] = (p8)digits[lead & 15];
+                else if ((code >= 0x80 && code < 0xa0) || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069) ||
+                         code == 0x200e || code == 0x200f || code == 0x061c)
+                {
+                        out[put++] = '\\', out[put++] = 'u', out[put++] = '{';
+                        for (int shift = 12; shift >= 0; shift -= 4)
+                                if ((code >> shift) || !shift)
+                                        out[put++] = (p8)digits[code >> shift & 15];
+                        out[put++] = '}';
+                }
+                else
+                        for (positive k = 0; k < size; k++)
+                                out[put++] = bytes[at + k];
+                log((address_any)out, put);
+                at += size;
+        }
+        if (length > most)
+                log((address_any)"...", 3);
+}
+
+// A knock on the clipboard's door, and a wait for the compositor to answer: until done says so, or the wait is up.
+static b32 host_clip_knock(const struct windows address_to table, b32 (*done)(const struct windows address_to, unsigned int),
+                           unsigned int want)
+{
+        bipolar door = system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+
+        if (door < 0)
+                return false;
+        system_write_once((b32)door, "", 1);
+        system_close(door);
+        for (positive waited = 0; waited < HOST_CLIP_WAIT_MS; waited += 10)
+        {
+                timespec nap = {0, 10000000};
+
+                if (done(table, want))
+                        return true;
+                system_call_2(syscall(nanosleep), (positive)address_of nap, 0);
+        }
+        return done(table, want);
+}
+
+static b32 host_clip_answered(const struct windows address_to table, unsigned int serial)
+{
+        return (__atomic_load_n(&table->cli_answer, __ATOMIC_ACQUIRE) & ~WINDOWS_CLIP_NO) == serial;
+}
+
+static b32 host_clip_cleared(const struct windows address_to table, unsigned int ignored)
+{
+        (void)ignored;
+        return !__atomic_load_n(&table->cli_clear, __ATOMIC_ACQUIRE);
+}
+
+// Who copied a selection: a window's title, the command line, or nobody now.
+static fn host_clip_owner(const struct windows address_to table, unsigned int which)
+{
+        int owner = table->clip_owner[which];
+        char title[WINDOWS_TITLE];
+
+        if (owner == -2)
+        {
+                string_format(log, "the command line");
+                return;
+        }
+        if (owner < 0 || owner >= WINDOWS || !table->pid[owner])
+        {
+                string_format(log, "a window that has gone");
+                return;
+        }
+        memory_copy(title, table->title[owner], sizeof(title));
+        title[sizeof(title) - 1] = 0;
+        host_clip_escaped((const p8 address_to)title, string_length((string_address)title), false, WINDOWS_TITLE);
+}
+
+static b32 host_clipboard(string_address address_to arguments, positive count)
+{
+        static const char address_to const names[2] = {"clipboard", "primary"};
+        struct windows address_to table;
+        string_address verb = count > 2 ? arguments[2] : (string_address) "";
+        positive at = 3;
+        unsigned int which = WINDOWS_CLIP_CLIPBOARD;
+        long mapped;
+        b32 status = 0;
+
+        if (!string_equals(verb, "get") && !string_equals(verb, "set") && !string_equals(verb, "clear") &&
+            !string_equals(verb, "watch") && !string_equals(verb, "history") && count > 2)
+        {
+                if (!string_equals(verb, "primary"))
+                        return host_usage();
+                verb = (string_address) "", at = 2;
+        }
+        if (at < count && string_equals(arguments[at], "primary"))
+                which = WINDOWS_CLIP_PRIMARY, at++;
+        return_if(at < count && !string_equals(verb, "set"), host_usage());
+        host_need_root();
+        mapped = host_windows_map(true);
+        return_if(mapped < 0 && mapped > -4096,
+                  host_refuse("the compositor's desktop is not up, so there is no clipboard: moonwater desktop on starts it\n"));
+        table = (struct windows address_to)mapped;
+        if (!table->clip_pid)
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
+                return host_refuse("this compositor keeps no clipboard\n");
+        }
+
+        if (!verb[0])
+        {
+                for (unsigned int each = 0; each < 2; each++)
+                {
+                        string_format(log, "  %s: ", (string_address)names[each]);
+                        if (!table->clip_length[each])
+                                string_format(log, "empty\n");
+                        else
+                        {
+                                string_format(log, "%p bytes, copied by ", (positive)table->clip_length[each]);
+                                host_clip_owner(table, each);
+                                string_format(log, "\n");
+                        }
+                }
+                host_say(log, "  service %s, limit %p MiB\n", table->clip_on ? (string_address) "on" : (string_address) "off",
+                         (positive)(table->clip_limit >> 20));
+        }
+        else if (string_equals(verb, "get"))
+        {
+                p8 address_to bytes;
+                positive length;
+                long got = windows_clip_fetch(table->clip_pid, which, table->clip_length[which], &bytes, (unsigned long address_to)&length);
+
+                if (got < 0)
+                        status = host_refuse("the %s is empty\n", names[which]);
+                else
+                {
+                        // A terminal is shown the text escaped; a file or a pipe is given it exactly, as copied.
+                        if (isatty(1))
+                        {
+                                host_clip_escaped(bytes, length, true, length);
+                                host_say(log, "\n");
+                        }
+                        else
+                                system_write_all(1, bytes, length);
+                        windows_clip_free(bytes, length);
+                }
+        }
+        else if (string_equals(verb, "set"))
+        {
+                static p8 input[WINDOWS_CLIP_LIMIT + 1];
+                positive length = 0;
+                long fd;
+                unsigned int serial;
+
+                if (at < count)
+                        for (positive word = at; word < count; word++)
+                        {
+                                positive size = string_length(arguments[word]);
+
+                                if (length + size + 1 > table->clip_limit)
+                                        break;
+                                if (word > at)
+                                        input[length++] = ' ';
+                                memory_copy(input + length, arguments[word], size);
+                                length += size;
+                        }
+                else
+                {
+                        bipolar got;
+
+                        while (length <= table->clip_limit && (got = system_read_once(0, input + length, sizeof(input) - length)) > 0)
+                                length += (positive)got;
+                }
+                if (!length)
+                        status = host_refuse("nothing to copy\n");
+                else if (length > table->clip_limit)
+                        status = host_refuse("more than the clipboard's limit of %p MiB\n", (positive)(table->clip_limit >> 20));
+                else if (!windows_clip_text(input, length))
+                        status = host_refuse("not text a clipboard holds: UTF-8 with no NUL\n");
+                else if ((fd = windows_clip_memfd(input, length)) < 0)
+                        status = host_refuse("no memory for the copy\n");
+                else
+                {
+                        table->cli_pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
+                        table->cli_fd = (unsigned int)fd;
+                        table->cli_which = which;
+                        serial = __atomic_add_fetch(&table->cli_serial, 1, __ATOMIC_RELEASE);
+                        if (!host_clip_knock(table, host_clip_answered, serial))
+                                status = host_refuse("the compositor did not answer\n");
+                        else if (table->cli_answer & WINDOWS_CLIP_NO)
+                                status = host_refuse("the compositor refused it: the clipboard is off (moonwater canvas clipboard)\n");
+                        else
+                                host_say(log, host_label "%p bytes copied to the %s\n", length, names[which]);
+                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                }
+        }
+        else if (string_equals(verb, "clear"))
+        {
+                __atomic_store_n(&table->cli_clear, 1u, __ATOMIC_RELEASE);
+                if (!host_clip_knock(table, host_clip_cleared, 0))
+                        status = host_refuse("the compositor did not answer\n");
+                else
+                        host_say(log, host_label "the clipboard is empty\n");
+        }
+        else if (string_equals(verb, "watch"))
+        {
+                unsigned int seen = table->clip_serial[which];
+
+                // A line a copy, until the line cannot be written (the reader went) or the desktop goes.
+                for (;;)
+                {
+                        timespec nap = {0, 100000000};
+                        unsigned int now = __atomic_load_n(&table->clip_serial[which], __ATOMIC_ACQUIRE);
+
+                        if (now != seen)
+                        {
+                                p8 address_to bytes;
+                                positive length;
+
+                                seen = now;
+                                if (windows_clip_fetch(table->clip_pid, which, table->clip_length[which], &bytes,
+                                                       (unsigned long address_to)&length) < 0)
+                                        string_format(log, "%s emptied", (string_address)names[which]);
+                                else
+                                {
+                                        string_format(log, "%s: %p bytes from ", (string_address)names[which], length);
+                                        host_clip_owner(table, which);
+                                        string_format(log, ": ");
+                                        host_clip_escaped(bytes, length, false, HOST_CLIP_LINE);
+                                        windows_clip_free(bytes, length);
+                                }
+                                string_format(log, "\n");
+                                log_flush();
+                        }
+                        if (!__atomic_load_n(&table->clip_pid, __ATOMIC_ACQUIRE))
+                                break;
+                        system_call_2(syscall(nanosleep), (positive)address_of nap, 0);
+                }
+        }
+        else
+                host_say(log, "  the history is kept in the compositor's memory: %s\n",
+                         (string_address) "moonwater canvas clipboard history says how many");
+        window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
+        return status;
+}
+
+/*
         Every word the command answers to, and who answers. A verb that says
         what it does and nothing else (quiet) has its output set aside from
         its answer: standard output closed or full or a pipe whose reader has
@@ -25099,6 +25385,7 @@ static b32 host_main()
             {"desktop", host_desktop, false},
             {"settings", host_settings_window, false},
             {"window", host_window, false},
+            {"clipboard", host_clipboard, false},
             {"latency", host_latency, false},
             {"debug", host_debug, true},
             {"bios", host_bios, false},

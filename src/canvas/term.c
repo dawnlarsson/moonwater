@@ -66,6 +66,8 @@ static b32 synchronized_output;
 static unsigned int mouse_mode;
 static b32 mouse_sgr;
 static b32 focus_events;
+// DECSET 2004: the program wants a paste bracketed (ESC [ 200 ~ before it, ESC [ 201 ~ after), so it can tell typing from it.
+static b32 bracketed_paste;
 static b32 origin_mode;
 
 // Whether the alternate screen is up, and the head that hands the primary one
@@ -1436,6 +1438,7 @@ static unsigned int mode(unsigned int p, b32 change, b32 on)
             {7, true, address_of autowrap},
             {25, true, address_of cursor_visible},
             {1004, true, address_of focus_events},
+            {2004, true, address_of bracketed_paste},
             {1006, true, address_of mouse_sgr},
             {2026, true, address_of synchronized_output},
         };
@@ -1514,6 +1517,7 @@ static fn attributes_reset()
         mouse_mode = 0;
         mouse_sgr = false;
         focus_events = false;
+        bracketed_paste = false;
         origin_mode = false;
         charset_g0 = CHARSET_ASCII;
         charset_g1 = CHARSET_ASCII;
@@ -3867,6 +3871,72 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
 
         emit_bytes((address_any)sequence,
                    string_length((string_address)sequence));
+}
+
+/*
+        A paste, which is not typing and must not be mistaken for it. Copied text is anybody's: a web page, a file, a
+        chat can put an escape sequence in it that, typed into a terminal, ends the bracket a shell trusts, runs a
+        command, or retitles and redraws the window. So what is pasted is filtered whatever the program asked: ESC,
+        the other C0 controls but tab and the line ends, DEL and the C1 controls (U+0080 to U+009F, which some
+        programs read as CSI) are taken out, so no paste can carry ESC [ 201 ~ or any other sequence; a line end is a
+        CR, as a key's is. A program that set DECSET 2004 gets the rest between ESC [ 200 ~ and ESC [ 201 ~; with the
+        emulator's own line editor on (the shell's prompt here), the text goes into the line being typed, its line
+        ends with it, and nothing reaches the shell until Enter; a program in raw mode without 2004 gets it as keys,
+        which is the only way it can take text at all.
+*/
+static positive term_paste_filter(const p8 address_to text, positive length, p8 address_to into)
+{
+        positive out = 0;
+
+        for (positive at = 0; at < length; at++)
+        {
+                p8 byte = text[at];
+
+                if (byte == '\r' && at + 1 < length && text[at + 1] == '\n')
+                        continue;
+                if (byte == '\n' || byte == '\r')
+                {
+                        into[out++] = '\r';
+                        continue;
+                }
+                if ((byte < ' ' && byte != '\t') || byte == 0x7f)
+                        continue;
+                // U+0080 to U+009F are C2 80 to C2 9F in UTF-8.
+                if (byte == 0xc2 && at + 1 < length && text[at + 1] >= 0x80 && text[at + 1] <= 0x9f)
+                {
+                        at++;
+                        continue;
+                }
+                into[out++] = byte;
+        }
+        return out;
+}
+
+static fn SPARE term_paste(const p8 address_to text, positive length)
+{
+        static p8 address_to filtered;
+        static positive filtered_room;
+        positive size;
+
+        if (!length || !array_store_reserve(filtered, filtered_room, 0, length, 4096))
+                return;
+        size = term_paste_filter(text, length, filtered);
+        if (line_editing)
+        {
+                memory_utf8_state state = {0, 0, 0};
+
+                // A line end goes into the line, which Enter sends whole: a pasted script runs only when asked.
+                for (positive at = 0; at < size; at++)
+                        if (memory_utf8_feed(address_of state, filtered[at]) > 0)
+                                line_insert(state.value == '\r' ? '\n' : state.value);
+                line_show();
+                return;
+        }
+        if (bracketed_paste)
+                emit_literal("\x1b[200~");
+        emit_bytes(filtered, size);
+        if (bracketed_paste)
+                emit_literal("\x1b[201~");
 }
 
 // The test fixture and any caller without compositor modifiers use the

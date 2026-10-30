@@ -201,6 +201,15 @@ static struct
         positive oom_kills, sync_since, stalled_since, last_frame, settle_since, idle_since;
         b32 sync_held;
         long hold_timeout;
+
+        // The selection (terminal_select_*): its two ends in the ring, where the press was, its kind, and the clicks.
+        unsigned int select_anchor_line, select_anchor_column, select_active_line, select_active_column;
+        unsigned int select_press_line, select_press_column;
+        int select_kind;
+        b32 selecting, select_dragging, select_box;
+        positive click_at;
+        unsigned int click_row, click_column;
+        int clicks;
 } terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1};
 
 static unsigned int terminal_colour[256];
@@ -493,6 +502,8 @@ static b32 terminal_bar_move(int y)
         return terminal_view_set(span ? (unsigned int)((unsigned long)top * (total - shown) / span) : 0);
 }
 
+static void terminal_select_mark(struct window_cell address_to out, unsigned int line, unsigned int from);
+
 /* ---- the frame: what is on the screen, as cells ---- */
 
 /*
@@ -529,6 +540,7 @@ static void terminal_build(struct window_cell address_to into)
                         if (block >= cells + from && block < cells + from + used)
                                 terminal.cursor_at = row * COLUMNS + (unsigned int)(block - (cells + from));
                         memory_fill_u64_aligned(out + used, COLUMNS - used, BLANK_CELL_WORD);
+                        terminal_select_mark(out, line, from);
                 }
 
                 skip = 0;
@@ -704,6 +716,14 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 const struct window_cell address_to cell = now + at;
                 unsigned int ink = terminal_colour[cell->ink];
                 unsigned int paper = terminal_colour[cell->paper];
+
+                // A selected cell lies on the theme's selection colour, which is a tint over its own paper.
+                if (cell->flags & WINDOW_CELL_SELECTED)
+                {
+                        unsigned int tint = ui_role(UI_SELECTION);
+
+                        paper = window_mix(paper, tint & 0xffffffu, (tint >> 24) * 256 / 255);
+                }
                 // A wide character is both its cells; one cut by the edge of a row, or whose
                 // other half is on another row of a folded line, is blank here.
                 b32 pair = (cell->flags & WINDOW_CELL_WIDE) && at + 1 < COLUMNS &&
@@ -1844,6 +1864,354 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         return sent && term_input(master, &key);
 }
 
+/* ---- the selection: what the hand marked, and the clipboard ---- */
+
+/*
+        A selection is two places in the ring, each a line (as the ring counts them, which only grows) and a column in
+        that line as it is stored: a folded line is one line, so a selection keeps its place when the window is made
+        narrower or wider, and when the view scrolls. A drag marks characters, a double click words and a triple click
+        lines, extending by its kind as it goes; Alt makes it a rectangle of columns; Shift with a click extends what
+        there is. While a program has asked for the pointer, Shift is what selects (as in xterm). Lines that scroll off
+        the ring's end take the selection with them. The marked cells are drawn on the theme's selection colour; what
+        a release leaves marked is the PRIMARY selection, Ctrl+Shift+C (or Ctrl+Insert) copies it, and Ctrl+Shift+V,
+        Shift+Insert and the middle button paste, through term_paste.
+*/
+#define TERMINAL_SELECT_CHARS 0
+#define TERMINAL_SELECT_WORDS 1
+#define TERMINAL_SELECT_LINES 2
+#define TERMINAL_CLICKS_NS 400000000ull
+
+// The line and column of the ring under a cell of the grid (row and column on the screen), as terminal_build lays them.
+static b32 terminal_place_at(unsigned int row, unsigned int column, unsigned int address_to line_out, unsigned int address_to column_out)
+{
+        unsigned int skip, line = terminal_top(terminal.view, &skip), at = 0;
+
+        while (line != window->head)
+        {
+                unsigned int slot = line % window->history, length = window_lengths(window)[slot];
+                unsigned int folds = length ? ((length < window->stride ? length : window->stride) + COLUMNS - 1) / COLUMNS : 1;
+
+                for (unsigned int fold = skip; fold < folds; fold++, at++)
+                        if (at == row)
+                        {
+                                *line_out = line;
+                                *column_out = fold * COLUMNS + column;
+                                return true;
+                        }
+                skip = 0;
+                line++;
+        }
+        // Below the newest line: the end of it.
+        *line_out = window->head - 1;
+        *column_out = window_lengths(window)[(window->head - 1) % window->history];
+        return false;
+}
+
+// Where the selection starts and stops in reading order: line, column; the stop is past the last cell.
+static void terminal_select_span(unsigned int address_to first_line, unsigned int address_to first_column,
+                                 unsigned int address_to last_line, unsigned int address_to last_column)
+{
+        b32 forward = terminal.select_anchor_line < terminal.select_active_line ||
+                      (terminal.select_anchor_line == terminal.select_active_line &&
+                       terminal.select_anchor_column <= terminal.select_active_column);
+
+        *first_line = forward ? terminal.select_anchor_line : terminal.select_active_line;
+        *first_column = forward ? terminal.select_anchor_column : terminal.select_active_column;
+        *last_line = forward ? terminal.select_active_line : terminal.select_anchor_line;
+        *last_column = forward ? terminal.select_active_column : terminal.select_anchor_column;
+}
+
+// Whether a ring line is still in the ring.
+static b32 terminal_line_kept(unsigned int line)
+{
+        return window->head - line <= window->history && window->head - line > 0;
+}
+
+// The cell of a line at column as a word's: letters, digits and the shell's word characters.
+static b32 terminal_word_cell(unsigned int line, unsigned int column)
+{
+        unsigned int slot = line % window->history, length = window_lengths(window)[slot];
+        unsigned int c;
+
+        if (column >= length || column >= window->stride)
+                return false;
+        c = window_cells(window)[(unsigned long)slot * window->stride + column].character;
+        return c > 127 || byte_is_alpha((b8)c) || byte_is_digit((b8)c) || (c && memory_first_of((address_any) "_-./~:@%+=", (b8)c, 10));
+}
+
+// The selection's ends snapped to its kind: a word's edges, or a whole line, about the place the hand is at.
+static void terminal_select_snap(void)
+{
+        unsigned int anchor = terminal.select_press_column, active = terminal.select_active_column;
+
+        if (terminal.select_kind == TERMINAL_SELECT_LINES)
+        {
+                b32 forward = terminal.select_press_line <= terminal.select_active_line;
+
+                terminal.select_anchor_line = terminal.select_press_line;
+                terminal.select_anchor_column = forward ? 0 : window->stride;
+                terminal.select_active_column = forward ? window->stride : 0;
+                return;
+        }
+        if (terminal.select_kind == TERMINAL_SELECT_WORDS)
+        {
+                b32 forward = terminal.select_press_line < terminal.select_active_line ||
+                              (terminal.select_press_line == terminal.select_active_line && anchor <= active);
+                unsigned int from = forward ? anchor : active, line = forward ? terminal.select_press_line : terminal.select_active_line;
+
+                while (from && terminal_word_cell(line, from - 1) && terminal_word_cell(line, from))
+                        from--;
+                if (forward)
+                        terminal.select_anchor_column = from;
+                else
+                        terminal.select_active_column = from;
+                line = forward ? terminal.select_active_line : terminal.select_press_line;
+                {
+                        unsigned int to = forward ? active : anchor;
+
+                        while (terminal_word_cell(line, to))
+                                to++;
+                        to += to == (forward ? active : anchor);
+                        if (forward)
+                                terminal.select_active_column = to;
+                        else
+                                terminal.select_anchor_column = to;
+                }
+                terminal.select_anchor_line = terminal.select_press_line;
+                return;
+        }
+        terminal.select_anchor_line = terminal.select_press_line;
+        terminal.select_anchor_column = anchor;
+}
+
+// The marked cells of a row of the frame: the part of line from column from (used of it written) the selection covers.
+static void terminal_select_mark(struct window_cell address_to out, unsigned int line, unsigned int from)
+{
+        unsigned int first_line, first_column, last_line, last_column, start, stop;
+
+        if (!terminal.selecting)
+                return;
+        terminal_select_span(&first_line, &first_column, &last_line, &last_column);
+        if (line - first_line > last_line - first_line)
+                return;
+        if (terminal.select_box)
+        {
+                unsigned int left = terminal.select_anchor_column < terminal.select_active_column ? terminal.select_anchor_column
+                                                                                                 : terminal.select_active_column;
+                unsigned int right = terminal.select_anchor_column < terminal.select_active_column ? terminal.select_active_column
+                                                                                                  : terminal.select_anchor_column;
+
+                start = left, stop = right + 1;
+        }
+        else
+        {
+                start = line == first_line ? first_column : 0;
+                stop = line == last_line ? last_column : ~0u;
+        }
+        for (unsigned int column = start > from ? start - from : 0; column < COLUMNS && from + column < stop; column++)
+                out[column].flags |= WINDOW_CELL_SELECTED;
+}
+
+// The selected text, a line end between lines and each line's trailing blanks left off, into a buffer the caller frees.
+static positive terminal_select_text(p8 address_to address_to into, positive address_to room)
+{
+        unsigned int first_line, first_column, last_line, last_column;
+        positive length = 0;
+
+        *into = null, *room = 0;
+        if (!terminal.selecting)
+                return 0;
+        terminal_select_span(&first_line, &first_column, &last_line, &last_column);
+        for (unsigned int line = first_line;; line++)
+        {
+                unsigned int slot = line % window->history, stored = window_lengths(window)[slot], start, stop, finish;
+                const struct window_cell address_to cells = window_cells(window) + (unsigned long)slot * window->stride;
+
+                stored = stored < window->stride ? stored : window->stride;
+                if (terminal.select_box)
+                {
+                        start = terminal.select_anchor_column < terminal.select_active_column ? terminal.select_anchor_column : terminal.select_active_column;
+                        stop = (terminal.select_anchor_column < terminal.select_active_column ? terminal.select_active_column : terminal.select_anchor_column) + 1;
+                }
+                else
+                {
+                        start = line == first_line ? first_column : 0;
+                        stop = line == last_line ? last_column : stored;
+                }
+                finish = stop < stored ? stop : stored;
+                while (finish > start && (cells[finish - 1].character == ' ' || !cells[finish - 1].character))
+                        finish--;
+                if (terminal_line_kept(line) && array_store_reserve(*into, *room, length, length + (positive)(finish > start ? finish - start : 0) * 4 + 2, 4096))
+                        for (unsigned int column = start; column < finish; column++)
+                        {
+                                unsigned int c = cells[column].character;
+
+                                if (cells[column].flags & WINDOW_CELL_WIDE_RIGHT)
+                                        continue;
+                                length += memory_utf8_encode(*into + length, 4, c ? c : ' ');
+                        }
+                if (line == last_line)
+                        break;
+                if (*room > length)
+                        (*into)[length++] = '\n';
+        }
+        return length;
+}
+
+// What is selected copied to a selection, the compositor told.
+static void terminal_copy(unsigned int which)
+{
+        p8 address_to text;
+        positive room, length = terminal_select_text(&text, &room);
+
+        if (length)
+                windows_clip_offer(&terminal.own, which, text, length);
+        array_store_release(text, room, length);
+}
+
+/*
+        A button or a motion the selection takes: true when it was the selection's (the program does not get it).
+        A program that asked for the pointer has it unless Shift is held.
+*/
+static b32 terminal_select_event(const struct window_event address_to event, b32 address_to dirty)
+{
+        b32 shift = (terminal.modifiers & WINDOW_KEY_SHIFT) != 0, alt = (terminal.modifiers & WINDOW_KEY_ALT) != 0;
+        unsigned int row, column, line, at;
+
+        if (mouse_mode && !shift && !terminal.select_dragging)
+                return false;
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x112 && (event->flags & WINDOW_KEY_DOWN))
+        {
+                windows_clip_ask(&terminal.own, WINDOWS_CLIP_PRIMARY);
+                return true;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x110)
+        {
+                if (!(event->flags & WINDOW_KEY_DOWN))
+                {
+                        if (!terminal.select_dragging)
+                                return false;
+                        terminal.select_dragging = false;
+                        if (terminal.selecting && (terminal.select_anchor_line != terminal.select_active_line ||
+                                                   terminal.select_anchor_column != terminal.select_active_column))
+                                terminal_copy(WINDOWS_CLIP_PRIMARY);
+                        else
+                                terminal.selecting = false, address_to dirty = true;
+                        return true;
+                }
+                if (terminal.pointer_x < 0 || terminal.pointer_y < 0)
+                        return false;
+                row = (unsigned int)terminal.pointer_y / terminal.cell_h;
+                column = (unsigned int)terminal.pointer_x / terminal.cell_w;
+                if (row >= ROWS || column >= COLUMNS)
+                        return false;
+                terminal_place_at(row, column, &line, &at);
+                {
+                        positive now = clock_monotonic_nanoseconds();
+                        b32 again = now - terminal.click_at < TERMINAL_CLICKS_NS && terminal.click_row == row &&
+                                    (terminal.click_column > column ? terminal.click_column - column : column - terminal.click_column) <= 1;
+
+                        terminal.clicks = again ? terminal.clicks % 3 + 1 : 1;
+                        terminal.click_at = now, terminal.click_row = row, terminal.click_column = column;
+                }
+                if (shift && terminal.selecting && terminal.clicks == 1)
+                {
+                        terminal.select_active_line = line, terminal.select_active_column = at;
+                        terminal_select_snap();
+                }
+                else
+                {
+                        terminal.select_kind = terminal.clicks == 3 ? TERMINAL_SELECT_LINES : terminal.clicks == 2 ? TERMINAL_SELECT_WORDS
+                                                                                                                     : TERMINAL_SELECT_CHARS;
+                        terminal.select_box = alt && terminal.clicks == 1;
+                        terminal.select_press_line = terminal.select_active_line = line;
+                        terminal.select_press_column = terminal.select_active_column = at;
+                        terminal_select_snap();
+                        terminal.selecting = terminal.select_kind != TERMINAL_SELECT_CHARS;
+                }
+                terminal.select_dragging = true;
+                address_to dirty = true;
+                return true;
+        }
+        if (event->type == WINDOW_EVENT_MOTION && terminal.select_dragging)
+        {
+                int y = terminal.pointer_y < 0 ? 0 : terminal.pointer_y, x = terminal.pointer_x < 0 ? 0 : terminal.pointer_x;
+
+                row = (unsigned int)y / terminal.cell_h;
+                column = (unsigned int)x / terminal.cell_w;
+                row = row < ROWS ? row : ROWS - 1;
+                column = column < COLUMNS ? column : COLUMNS;
+                terminal_place_at(row, column, &line, &at);
+                if (line != terminal.select_active_line || at != terminal.select_active_column)
+                {
+                        terminal.select_active_line = line, terminal.select_active_column = at;
+                        terminal_select_snap();
+                        terminal.selecting = true;
+                        address_to dirty = true;
+                }
+                return true;
+        }
+        return false;
+}
+
+/*
+        The clipboard's keys: Ctrl+Shift+C and Ctrl+Insert copy, Ctrl+Shift+V and Shift+Insert paste. True when the key
+        was one of them (the program does not get it); typing anything else lets go of the selection.
+*/
+static b32 terminal_select_key(const struct window_event address_to event, b32 address_to dirty)
+{
+        unsigned int flags = event->flags, chord = flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
+        unsigned int letter = (unsigned int)event->b < 32 && event->b ? ((unsigned int)event->b | 0x60) : (unsigned int)event->b | 0x20;
+
+        if (event->type != WINDOW_EVENT_KEY)
+                return false;
+        if (chord == (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL) && (letter == 'c' || letter == 'v'))
+        {
+                if ((flags & WINDOW_KEY_DOWN) && letter == 'c')
+                        terminal_copy(WINDOWS_CLIP_CLIPBOARD);
+                if ((flags & WINDOW_KEY_DOWN) && letter == 'v')
+                        windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
+                return true;
+        }
+        if (event->a == 110 && (chord == WINDOW_KEY_CONTROL || chord == WINDOW_KEY_SHIFT))
+        {
+                if (flags & WINDOW_KEY_DOWN)
+                {
+                        if (chord == WINDOW_KEY_CONTROL)
+                                terminal_copy(WINDOWS_CLIP_CLIPBOARD);
+                        else
+                                windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
+                }
+                return true;
+        }
+        if ((flags & WINDOW_KEY_DOWN) && terminal.selecting && !terminal_modifier_key(event->a))
+        {
+                terminal.selecting = false;
+                address_to dirty = true;
+        }
+        return false;
+}
+
+// The clipboard's answer: a paste that may be read is pasted; a copy taken lets its memfd go.
+static b32 terminal_clip_event(b32 master, const struct window_event address_to event)
+{
+        if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
+                windows_clip_done((unsigned int)event->a);
+        if (event->b == WINDOWS_CLIP_READY)
+        {
+                p8 address_to bytes;
+                unsigned long length;
+
+                if (windows_clip_read(&terminal.own, (unsigned int)event->a, &bytes, &length) > 0)
+                {
+                        term_paste(bytes, length);
+                        windows_clip_free(bytes, length);
+                        return term_send(master);
+                }
+        }
+        return true;
+}
+
 /*
         One event from the compositor. Answers whether the pty will still take
         what the shell is owed; dirty is set when what is drawn has to be made
@@ -1873,6 +2241,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         {
         case WINDOW_EVENT_KEY:
                 terminal.modifiers = event->flags;
+                if (terminal_select_key(event, dirty))
+                        return true;
                 if (!terminal.modes_fresh)
                         terminal_modes_read(master, clock_monotonic_nanoseconds());
                 terminal_key(event, &key);
@@ -1891,6 +2261,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 terminal.pointer_x = event->a - (int)terminal.pad;
                 terminal.pointer_y = event->b - (int)terminal.pad_y;
 
+                if (terminal.bar_grab < 0 && terminal_select_event(event, dirty))
+                        return true;
                 if (!mouse_mode && terminal.bar_grab < 0)
                         return true;
 
@@ -1933,11 +2305,16 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         terminal.bar_grab = -1;
                         return true;
                 }
+                if (terminal_select_event(event, dirty))
+                        return true;
 
                 terminal.pressed = down;
                 terminal_pointer_key(button, down ? WINDOW_KEY_DOWN : 0, &key);
                 return term_input(master, &key);
         }
+
+        case WINDOW_EVENT_CLIP:
+                return terminal_clip_event(master, event);
 
         case WINDOW_EVENT_WHEEL:
         {

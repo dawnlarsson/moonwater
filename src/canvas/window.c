@@ -310,6 +310,10 @@ static inline unsigned int window_cell_colour(unsigned int index)
    has asked for a bar rather than a block. */
 #define WINDOW_CELL_BAR 512u
 
+/* A cell the hand has selected: drawn on the theme's selection colour. Only a frame's copy of the cells has it;
+   the ring never does. */
+#define WINDOW_CELL_SELECTED 1024u
+
 /* The program writes this; the compositor reads it. A terminal that has
    asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and
    the wheel reach its key ring instead of only moving the desktop. */
@@ -544,6 +548,14 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_EVENT_MOTION 2u
 #define WINDOW_EVENT_BUTTON 3u
 #define WINDOW_EVENT_WHEEL 4u
+/*
+        The clipboard's news, a the selection (WINDOWS_CLIP_CLIPBOARD or WINDOWS_CLIP_PRIMARY) and b what happened: another
+        window copied (CHANGED: a window that asked to watch hears it, and is told no text), the paste this window asked
+        for may be read now (READY: windows_clip_read) or may not (REFUSED: it has not the keys, the person did nothing
+        that asks for a paste, there is nothing, or the service is off), the copy it offered was taken (TAKEN: its
+        memfd may be closed) or not (DECLINED: too large, not UTF-8, a NUL in it, not sealed, or the service is off).
+*/
+#define WINDOW_EVENT_CLIP 5u
 
 /*
         Where a program asks its window to be put, and the name the window is known by.
@@ -709,7 +721,62 @@ struct windows
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
         int event_a[WINDOWS][WINDOWS_EVENTS], event_b[WINDOWS][WINDOWS_EVENTS];
+
+        /*
+                The clipboard, an OS service the compositor holds (SECURITY.md says what it guards). Two selections,
+                CLIPBOARD (copy and paste) and PRIMARY (what was last selected, pasted with the middle button), each
+                text/plain;charset=utf-8: valid UTF-8, no NUL, at most clip_limit bytes. A copy is a sealed memfd
+                the copying program makes and names in its row (clip_offer_*), which the compositor opens through
+                /proc/PID/fd and keeps -- no byte is copied, the copy outlives the window, and nothing the program
+                does after can change it -- and a paste is that memfd opened again by the program the compositor
+                lets read it: the window with the keys, right after a key or a button press of its own, and nothing
+                else. The compositor's are clip_*: its pid, whether the service is on, each selection's count of
+                changes, length and the row that copied it (-1 for none, or the command line), and the limit.
+        */
+        unsigned int clip_pid, clip_on, clip_limit;
+        unsigned int clip_serial[2], clip_length[2];
+        int clip_owner[2];
+        // `moonwater clipboard set` (root): its pid and memfd, the selection, a count up, and the compositor's answer.
+        unsigned int cli_pid, cli_fd, cli_which, cli_serial, cli_answer, cli_clear;
+        // The program's: it wants to hear of copies; it offers a memfd for a selection; it asks to paste one.
+        unsigned int clip_watch[WINDOWS];
+        int clip_offer_fd[WINDOWS];
+        unsigned int clip_offer_which[WINDOWS], clip_offer_serial[WINDOWS];
+        unsigned int clip_ask_which[WINDOWS], clip_ask_serial[WINDOWS];
+        // The compositor's answers: the offer it took (or refused, the serial with WINDOWS_CLIP_NO), the paste it gave.
+        unsigned int clip_offer_answer[WINDOWS], clip_given_serial[WINDOWS], clip_given_length[WINDOWS];
+
+        /*
+                A popup: a menu or a list a window opens, which is a row of its own (so it may reach past its window's
+                edges) placed by the compositor against an anchor in its parent and drawn over every window. The
+                program writes popup_parent (the parent's row + 1; 0 is a window), the anchor (a rectangle in the
+                parent's pixels, width and height 0 for a point) and popup_flags before the first picture; the
+                compositor puts it below or right of the anchor, flipped to the other side where the screen holding
+                the anchor ends, gives it the keys while it is open and still shows its parent as the one with them,
+                and asks it to go (WINDOW_CLOSING) at a press outside every popup of the chain, its parent losing the
+                keys or being moved, or its parent going.
+        */
+        unsigned int popup_parent[WINDOWS];
+        int popup_x[WINDOWS], popup_y[WINDOWS], popup_w[WINDOWS], popup_h[WINDOWS];
+        unsigned int popup_flags[WINDOWS];
 };
+
+#define WINDOWS_CLIP_CLIPBOARD 0u
+#define WINDOWS_CLIP_PRIMARY 1u
+#define WINDOWS_CLIP_CHANGED 1
+#define WINDOWS_CLIP_READY 2
+#define WINDOWS_CLIP_REFUSED 3
+#define WINDOWS_CLIP_TAKEN 4
+#define WINDOWS_CLIP_DECLINED 5
+#define WINDOWS_CLIP_NO 0x80000000u
+// The compositor keeps each selection's memfd at this descriptor and the next: numbers nothing else is given.
+#define WINDOWS_CLIP_FD 900
+#define WINDOWS_CLIP_LIMIT (16u << 20)
+#define WINDOWS_CLIP_DOOR "/run/moonwater/clip"
+// popup_flags: the anchor is a point a context menu opens at (else a rectangle a menu drops from: below it, or to its
+// right for a submenu).
+#define WINDOW_POPUP_POINT 1u
+#define WINDOW_POPUP_RIGHT 2u
 
 // Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
 // constant here and not the header's pixels field, which any mapper of the table may write.
@@ -988,6 +1055,8 @@ _Static_assert(__builtin_offsetof(struct window_cell, flags) == 6, "window cell 
 #define WINDOW_SYS_LSEEK 8
 #define WINDOW_SYS_GETPID 39
 #define WINDOW_SYS_MADVISE 28
+#define WINDOW_SYS_MEMFD 319
+#define WINDOW_SYS_FCNTL 72
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -1001,6 +1070,8 @@ _Static_assert(__builtin_offsetof(struct window_cell, flags) == 6, "window cell 
 #define WINDOW_SYS_LSEEK 62
 #define WINDOW_SYS_GETPID 172
 #define WINDOW_SYS_MADVISE 233
+#define WINDOW_SYS_MEMFD 279
+#define WINDOW_SYS_FCNTL 25
 #endif
 
 /*
@@ -1984,6 +2055,208 @@ static void windows_leave(struct window_row *own)
         window_call(WINDOW_SYS_CLOSE, own->wake, 0, 0, 0, 0, 0);
         window_call(WINDOW_SYS_MUNMAP, (long)own->table, (long)own->bytes, 0, 0, 0, 0);
         own->table = 0;
+}
+
+/*
+        The clipboard from a program's side. A copy: the text into a memfd sealed against any change, named in the row,
+        and a knock; the memfd is held until the compositor says it took it (windows_clip_done) or the next copy of the
+        selection. A paste: asked for with a knock, and read once the compositor says READY, from its own memfd through
+        /proc/PID/fd -- the length it said, at most the limit, and refused unless it is UTF-8 with no NUL, whatever the
+        compositor checked before.
+*/
+#define WINDOWS_MFD_CLOEXEC 1u
+#define WINDOWS_MFD_SEALING 2u
+#define WINDOWS_F_ADD_SEALS 1033
+#define WINDOWS_F_GET_SEALS 1034
+#define WINDOWS_SEALS 15 // SEAL, SHRINK, GROW and WRITE
+
+static long windows_clip_held[2] = {-1, -1};
+
+// A memfd holding bytes, sealed so neither its size nor its bytes can change again: the descriptor, or a negative errno.
+static long windows_clip_memfd(const void *bytes, unsigned long length)
+{
+        long fd = window_call(WINDOW_SYS_MEMFD, (long)"moonwater-copy", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
+        unsigned long done = 0;
+
+        if (fd < 0)
+                return fd;
+        while (done < length)
+        {
+                long wrote = window_call(WINDOW_SYS_WRITE, fd, (long)((const char *)bytes + done), (long)(length - done), 0, 0, 0);
+
+                if (wrote <= 0)
+                {
+                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                        return wrote < 0 ? wrote : -5;
+                }
+                done += (unsigned long)wrote;
+        }
+        if (window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_ADD_SEALS, WINDOWS_SEALS, 0, 0, 0) < 0)
+        {
+                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                return -1;
+        }
+        return fd;
+}
+
+static long windows_clip_offer(const struct window_row *own, unsigned int which, const void *bytes, unsigned long length)
+{
+        struct windows *table = own->table;
+        long fd;
+
+        which &= 1u;
+        if (!length || length > WINDOWS_CLIP_LIMIT)
+                return -22;
+        fd = windows_clip_memfd(bytes, length);
+        if (fd < 0)
+                return fd;
+        if (windows_clip_held[which] >= 0)
+                window_call(WINDOW_SYS_CLOSE, windows_clip_held[which], 0, 0, 0, 0, 0);
+        windows_clip_held[which] = fd;
+        table->clip_offer_fd[own->row] = (int)fd;
+        table->clip_offer_which[own->row] = which;
+        __atomic_add_fetch(&table->clip_offer_serial[own->row], 1, __ATOMIC_RELEASE);
+        windows_knock(own);
+        return 0;
+}
+
+// The copy of which the compositor answered for: the memfd it opened for itself is let go here.
+static void windows_clip_done(unsigned int which)
+{
+        which &= 1u;
+        if (windows_clip_held[which] >= 0)
+                window_call(WINDOW_SYS_CLOSE, windows_clip_held[which], 0, 0, 0, 0, 0);
+        windows_clip_held[which] = -1;
+}
+
+static void windows_clip_ask(const struct window_row *own, unsigned int which)
+{
+        own->table->clip_ask_which[own->row] = which & 1u;
+        __atomic_add_fetch(&own->table->clip_ask_serial[own->row], 1, __ATOMIC_RELEASE);
+        windows_knock(own);
+}
+
+static void windows_clip_watch(const struct window_row *own, unsigned int wanted)
+{
+        __atomic_store_n(&own->table->clip_watch[own->row], wanted ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+// Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.
+static int windows_clip_text(const unsigned char *bytes, unsigned long length)
+{
+        for (unsigned long at = 0; at < length;)
+        {
+                unsigned int lead = bytes[at], size, value;
+
+                if (!lead)
+                        return 0;
+                if (lead < 0x80)
+                {
+                        at++;
+                        continue;
+                }
+                if (lead < 0xc2 || lead > 0xf4)
+                        return 0;
+                size = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+                if (length - at < size)
+                        return 0;
+                value = lead & (0x7fu >> size);
+                for (unsigned int k = 1; k < size; k++)
+                {
+                        if ((bytes[at + k] & 0xc0) != 0x80)
+                                return 0;
+                        value = value << 6 | (bytes[at + k] & 0x3f);
+                }
+                if ((size == 3 && (value < 0x800 || (value >= 0xd800 && value <= 0xdfff))) ||
+                    (size == 4 && (value < 0x10000 || value > 0x10ffff)))
+                        return 0;
+                at += size;
+        }
+        return 1;
+}
+
+// "/proc/PID/fd/NUMBER" into path (48 bytes).
+static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
+{
+        unsigned int at = 0, values[2] = {pid, number};
+        const char *parts[3] = {"/proc/", "/fd/", ""};
+
+        for (unsigned int part = 0; part < 3; part++)
+        {
+                char digits[12];
+                unsigned int count = 0;
+
+                for (const char *from = parts[part]; *from; from++)
+                        path[at++] = *from;
+                if (part == 2)
+                        break;
+                do
+                        digits[count++] = (char)('0' + values[part] % 10);
+                while ((values[part] /= 10));
+                while (count)
+                        path[at++] = digits[--count];
+        }
+        path[at] = 0;
+}
+
+/*
+        A selection's text read from the compositor's memfd of it: into a mapping of its own (unmapped with munmap of
+        *length + 1), the length it says checked against the file's, at most the limit, UTF-8 with no NUL. The length,
+        or a negative errno. want is what the compositor said the length is.
+*/
+static long windows_clip_fetch(unsigned int pid, unsigned int which, unsigned long want, unsigned char **bytes,
+                               unsigned long *length)
+{
+        char path[48];
+        unsigned long got = 0;
+        long fd, mapped, size;
+
+        *bytes = 0;
+        *length = 0;
+        if (!pid || !want || want > WINDOWS_CLIP_LIMIT)
+                return -2;
+        windows_proc_fd(path, pid, WINDOWS_CLIP_FD + (which & 1u));
+        fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0); // O_RDONLY | O_CLOEXEC
+        if (fd < 0)
+                return fd;
+        size = window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0);
+        window_call(WINDOW_SYS_LSEEK, fd, 0, 0, 0, 0, 0);
+        mapped = size == (long)want ? window_call(WINDOW_SYS_MMAP, 0, (long)want + 1, 3, 0x22, -1, 0) : -22;
+        if (mapped < 0 && mapped > -4096)
+        {
+                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                return mapped;
+        }
+        while (got < want)
+        {
+                long read = window_call(WINDOW_SYS_READ, fd, mapped + (long)got, (long)(want - got), 0, 0, 0);
+
+                if (read <= 0)
+                        break;
+                got += (unsigned long)read;
+        }
+        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+        if (got != want || !windows_clip_text((const unsigned char *)mapped, got))
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, (long)want + 1, 0, 0, 0, 0);
+                return -74; // EBADMSG
+        }
+        *bytes = (unsigned char *)mapped;
+        *length = got;
+        return (long)got;
+}
+
+// The paste the compositor said is READY for this window.
+static long windows_clip_read(const struct window_row *own, unsigned int which, unsigned char **bytes, unsigned long *length)
+{
+        return windows_clip_fetch(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), which,
+                                  __atomic_load_n(&own->table->clip_given_length[own->row], __ATOMIC_ACQUIRE), bytes, length);
+}
+
+static void windows_clip_free(unsigned char *bytes, unsigned long length)
+{
+        if (bytes)
+                window_call(WINDOW_SYS_MUNMAP, (long)bytes, (long)length + 1, 0, 0, 0, 0);
 }
 
 /*

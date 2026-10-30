@@ -6160,6 +6160,8 @@ static bool compositor_setting_kept(const char *path, const char *word, long *va
         return row && setting_kept(row, (string_address)word, value);
 }
 
+static void compositor_clip_settings(void);
+
 // Whether a name in /root is the file of a row the compositor takes at once.
 static bool compositor_setting_file(const char *name)
 {
@@ -6532,6 +6534,7 @@ static void compositor_inputs_watch(void)
 
                         if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME))
                         {
+                                compositor_clip_settings();
                                 compositor_look_read();
                                 compositor_theme_read();
                                 compositor_input_settings_read();
@@ -6582,6 +6585,8 @@ static void compositor_inputs_watch(void)
         most COMPOSITOR_WHEEL_JOIN, since a program bounds what one event may
         do (a terminal scrolls a screen at most).
 */
+static void compositor_clip_gesture(int row);
+
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
         struct windows *table = compositor.table;
@@ -6589,6 +6594,9 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
 
         if (row < 0)
                 return 0;
+        // A key pressed or a button pressed or let go is the person's: the clipboard lets the row copy and paste for a while.
+        if ((type == WINDOW_EVENT_KEY && (flags & WINDOW_KEY_DOWN) && !(flags & WINDOW_KEY_REPEAT)) || type == WINDOW_EVENT_BUTTON)
+                compositor_clip_gesture(row);
 
         // What a finger did says so: a program may scroll what a finger drags where a mouse would select.
         if (compositor.touching && type != WINDOW_EVENT_KEY)
@@ -7800,6 +7808,275 @@ static void compositor_close(int row)
 }
 
 // A door knocked on or closed: the row read, and a closed one let go of and opened again for the next program.
+/* ---- the clipboard ---- */
+
+/*
+        The two selections are the compositor's, held as the memfds programs made them in: a copy is a sealed memfd a
+        window names in its row, opened here through /proc/PID/fd (the compositor is root, as every window is), checked
+        -- sealed against growing, shrinking and writing, at most the limit, UTF-8 with no NUL -- and kept at the
+        descriptor WINDOWS_CLIP_FD + which, a number nothing else is given. A paste is that descriptor opened again by
+        the window the compositor answers READY to, which is only the window with the keys (or a popup of it), and only
+        within COMPOSITOR_CLIP_GESTURE_NS of a key or a button of the person's on it: a window in the background, or
+        one that asks with nobody at the keys, is answered REFUSED and learns nothing. A copy is a gesture too: a
+        window cannot fill the clipboard on its own. The command line (`moonwater clipboard`, root) offers and clears
+        through the header and knocks on WINDOWS_CLIP_DOOR. Nothing is written to a disk: the history, when it is kept
+        (`moonwater canvas clipboard history N`), is memfds in this process, and off empties it all.
+*/
+#define COMPOSITOR_CLIP_GESTURE_NS 1500000000ull
+#define COMPOSITOR_CLIP_HISTORY 32
+#define COMPOSITOR_F_GET_SEALS 1034
+#define COMPOSITOR_F_DUPFD_CLOEXEC 1030
+#define COMPOSITOR_CLIP_SEALS 14 // SHRINK, GROW and WRITE: the bytes and the size are what they were when it was taken
+
+static struct
+{
+        int door;
+        int fd[2];
+        unsigned int offer_seen[WINDOWS], ask_seen[WINDOWS], cli_seen;
+        positive gesture[WINDOWS];
+        unsigned int history_most, history_count;
+        int history[COMPOSITOR_CLIP_HISTORY];
+} compositor_clip = {.door = -1, .fd = {-1, -1}};
+
+// The window a row belongs to: itself, or the window at the root of its popups.
+static int compositor_clip_root(int row)
+{
+        for (int hops = 0; hops < WINDOWS && row >= 0 && compositor.table->popup_parent[row]; hops++)
+        {
+                unsigned int parent = compositor.table->popup_parent[row];
+
+                row = parent >= 1 && parent <= WINDOWS ? (int)parent - 1 : -1;
+        }
+        return row;
+}
+
+// A key or a button the person pressed on a row: the row and the window it belongs to may paste for a while.
+static void compositor_clip_gesture(int row)
+{
+        positive now = clock_monotonic_nanoseconds();
+        int root = compositor_clip_root(row);
+
+        if (row >= 0)
+                compositor_clip.gesture[row] = now;
+        if (root >= 0)
+                compositor_clip.gesture[root] = now;
+}
+
+static void compositor_clip_tell(int row, unsigned int which, int what)
+{
+        if (row >= 0 && row < WINDOWS && compositor.table->pid[row])
+                compositor_post(row, WINDOW_EVENT_CLIP, 0, (int)which, what);
+}
+
+// Every selection and the history let go: the service turned off, or `moonwater clipboard clear`.
+static void compositor_clip_wipe(void)
+{
+        for (unsigned int which = 0; which < 2; which++)
+        {
+                if (compositor_clip.fd[which] >= 0)
+                        system_close(compositor_clip.fd[which]);
+                compositor_clip.fd[which] = -1;
+                compositor.table->clip_length[which] = 0;
+                compositor.table->clip_owner[which] = -1;
+                __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
+                for (int row = 0; row < WINDOWS; row++)
+                        if (compositor.table->clip_watch[row])
+                                compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
+        }
+        for (unsigned int at = 0; at < compositor_clip.history_count; at++)
+                system_close(compositor_clip.history[at]);
+        compositor_clip.history_count = 0;
+}
+
+// The settings: on or off, how many copies the history keeps (none by default), the limit in MiB (16 by default).
+static void compositor_clip_settings(void)
+{
+        char word[16];
+        long value;
+
+        if (!compositor.table)
+                return;
+        compositor_word(SETTING_CLIPBOARD_PATH, word, sizeof(word));
+        compositor.table->clip_on = !string_equals((string_address)word, "off");
+        compositor_word(SETTING_CLIPBOARD_HISTORY_PATH, word, sizeof(word));
+        compositor_clip.history_most = compositor_setting_kept(SETTING_CLIPBOARD_HISTORY_PATH, word, &value) && value >= 0 &&
+                                               value <= COMPOSITOR_CLIP_HISTORY
+                                           ? (unsigned int)value
+                                           : 0;
+        compositor_word(SETTING_CLIPBOARD_LIMIT_PATH, word, sizeof(word));
+        compositor.table->clip_limit = compositor_setting_kept(SETTING_CLIPBOARD_LIMIT_PATH, word, &value) && value >= 1 && value <= 16
+                                           ? (unsigned int)value << 20
+                                           : WINDOWS_CLIP_LIMIT;
+        if (!compositor.table->clip_on)
+                compositor_clip_wipe();
+        while (compositor_clip.history_count > compositor_clip.history_most)
+                system_close(compositor_clip.history[--compositor_clip.history_count]);
+}
+
+/*
+        A memfd another process holds, opened and checked: its descriptor here and its length, or -1. Sealed against
+        every change of its bytes and size, no longer than the limit, and text a selection may hold.
+*/
+static int compositor_clip_open(unsigned int pid, int fd, unsigned int address_to length)
+{
+        char path[48];
+        long opened, size, seals, mapped;
+        int text;
+
+        if (!pid || fd < 0)
+                return -1;
+        windows_proc_fd(path, pid, (unsigned int)fd);
+        opened = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        if (opened < 0)
+                return -1;
+        seals = compositor_call(syscall(fcntl), (positive)opened, COMPOSITOR_F_GET_SEALS, 0, 0, 0, 0);
+        size = compositor_call(syscall(lseek), (positive)opened, 0, 2, 0, 0, 0);
+        if (seals < 0 || (seals & COMPOSITOR_CLIP_SEALS) != COMPOSITOR_CLIP_SEALS || size <= 0 ||
+            (unsigned long)size > compositor.table->clip_limit)
+        {
+                system_close((bipolar)opened);
+                return -1;
+        }
+        mapped = compositor_call(syscall(mmap), 0, (positive)size, 1, 2, (positive)opened, 0);
+        text = !(mapped < 0 && mapped > -4096) && windows_clip_text((const unsigned char *)mapped, (unsigned long)size);
+        if (!(mapped < 0 && mapped > -4096))
+                compositor_call(syscall(munmap), (positive)mapped, (positive)size, 0, 0, 0, 0);
+        if (!text)
+        {
+                system_close((bipolar)opened);
+                return -1;
+        }
+        *length = (unsigned int)size;
+        return (int)opened;
+}
+
+// A checked memfd made selection which, owned by owner (a row, or -2 for the command line); watchers are told.
+static void compositor_clip_keep(unsigned int which, int opened, unsigned int length, int owner)
+{
+        // The copy before it goes to the history, when one is kept: a descriptor of its own, newest first.
+        if (which == WINDOWS_CLIP_CLIPBOARD && compositor_clip.fd[which] >= 0 && compositor_clip.history_most)
+        {
+                long kept = compositor_call(syscall(fcntl), (positive)compositor_clip.fd[which], COMPOSITOR_F_DUPFD_CLOEXEC,
+                                            WINDOWS_CLIP_FD + 8, 0, 0, 0);
+
+                if (kept >= 0)
+                {
+                        if (compositor_clip.history_count == compositor_clip.history_most)
+                                system_close(compositor_clip.history[--compositor_clip.history_count]);
+                        memory_copy(compositor_clip.history + 1, compositor_clip.history,
+                                    compositor_clip.history_count * sizeof(compositor_clip.history[0]));
+                        compositor_clip.history[0] = (int)kept;
+                        compositor_clip.history_count++;
+                }
+        }
+        // dup3 puts it at the selection's number, letting go of what was there in the same call.
+        compositor_call(syscall(dup3), (positive)opened, WINDOWS_CLIP_FD + which, O_CLOEXEC, 0, 0, 0);
+        system_close(opened);
+        compositor_clip.fd[which] = WINDOWS_CLIP_FD + (int)which;
+        compositor.table->clip_length[which] = length;
+        compositor.table->clip_owner[which] = owner;
+        __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor.table->clip_watch[row] && row != owner)
+                        compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
+}
+
+// What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for.
+static void compositor_clip_door(int row)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int offer = __atomic_load_n(&table->clip_offer_serial[row], __ATOMIC_ACQUIRE);
+        unsigned int ask = __atomic_load_n(&table->clip_ask_serial[row], __ATOMIC_ACQUIRE);
+        positive now;
+
+        if (offer == compositor_clip.offer_seen[row] && ask == compositor_clip.ask_seen[row])
+                return;
+        now = clock_monotonic_nanoseconds();
+        if (offer != compositor_clip.offer_seen[row])
+        {
+                unsigned int which = table->clip_offer_which[row] & 1u, length = 0;
+                int opened = -1;
+
+                compositor_clip.offer_seen[row] = offer;
+                // A copy is the person's: a window copies after a key or a button of theirs on it, not on its own.
+                if (table->clip_on && now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS)
+                        opened = compositor_clip_open(table->pid[row], table->clip_offer_fd[row], &length);
+                if (opened >= 0)
+                        compositor_clip_keep(which, opened, length, row);
+                __atomic_store_n(&table->clip_offer_answer[row], opened >= 0 ? offer : offer | WINDOWS_CLIP_NO, __ATOMIC_RELEASE);
+                compositor_clip_tell(row, which, opened >= 0 ? WINDOWS_CLIP_TAKEN : WINDOWS_CLIP_DECLINED);
+        }
+        if (ask != compositor_clip.ask_seen[row])
+        {
+                unsigned int which = table->clip_ask_which[row] & 1u;
+                int root = compositor_clip_root(row);
+                b32 may = table->clip_on && compositor_clip.fd[which] >= 0 && root >= 0 && root == compositor.focus &&
+                          now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
+
+                compositor_clip.ask_seen[row] = ask;
+                if (may)
+                {
+                        table->clip_given_length[row] = table->clip_length[which];
+                        __atomic_store_n(&table->clip_given_serial[row], ask, __ATOMIC_RELEASE);
+                }
+                compositor_clip_tell(row, which, may ? WINDOWS_CLIP_READY : WINDOWS_CLIP_REFUSED);
+        }
+}
+
+// A knock on the clipboard's own door: the command line offered, cleared, or changed the settings.
+static void compositor_clip_cli(void)
+{
+        struct windows address_to table = compositor.table;
+        char bytes[64];
+        unsigned int serial;
+
+        for (int reads = 0; reads < 64 && system_read_once(compositor_clip.door, bytes, sizeof(bytes)) > 0; reads++)
+                ;
+        if (table->cli_clear)
+        {
+                if (table->cli_clear == 2)
+                        compositor_clip_settings();
+                else
+                        compositor_clip_wipe();
+                __atomic_store_n(&table->cli_clear, 0u, __ATOMIC_RELEASE);
+        }
+        serial = __atomic_load_n(&table->cli_serial, __ATOMIC_ACQUIRE);
+        if (serial != compositor_clip.cli_seen)
+        {
+                unsigned int length = 0;
+                int opened = table->clip_on ? compositor_clip_open(table->cli_pid, (int)table->cli_fd, &length) : -1;
+
+                compositor_clip.cli_seen = serial;
+                if (opened >= 0)
+                        compositor_clip_keep(table->cli_which & 1u, opened, length, -2);
+                __atomic_store_n(&table->cli_answer, opened >= 0 ? serial : serial | WINDOWS_CLIP_NO, __ATOMIC_RELEASE);
+        }
+}
+
+// The door made with the table's, and the service's numbers in the header.
+static int compositor_clip_start(void)
+{
+        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0, 0, 0, 0);
+        compositor_call(syscall(mknodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0010000 | WINDOWS_MODE, 0, 0, 0);
+        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, WINDOWS_MODE, 0, 0, 0);
+        compositor_clip.door = (int)system_open_at(AT_FDCWD, (string_address)WINDOWS_CLIP_DOOR, FILE_READ_WRITE | O_NONBLOCK | O_CLOEXEC);
+        compositor.table->clip_pid = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        compositor.table->clip_owner[0] = compositor.table->clip_owner[1] = -1;
+        compositor_clip_settings();
+        return compositor_clip.door;
+}
+
+// A row gone: its copies stay (they are this process's now), and are owned by nobody.
+static void compositor_clip_leave(int row)
+{
+        for (unsigned int which = 0; which < 2; which++)
+                if (compositor.table->clip_owner[which] == row)
+                        compositor.table->clip_owner[which] = -1;
+        compositor_clip.gesture[row] = 0;
+        compositor_clip.offer_seen[row] = compositor.table->clip_offer_serial[row];
+        compositor_clip.ask_seen[row] = compositor.table->clip_ask_serial[row];
+}
+
 static void compositor_door(int row, int returned)
 {
         char bytes[64];
@@ -7811,12 +8088,14 @@ static void compositor_door(int row, int returned)
                 ;
 
         compositor_take(row);
+        compositor_clip_door(row);
         if (!(returned & COMPOSITOR_POLLHUP))
                 return;
 
         windows_door_name((char *)name, (unsigned int)row, 0);
         system_close(compositor.door[row]);
         compositor.door[row] = (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        compositor_clip_leave(row);
         compositor_leave(row);
 }
 
@@ -9475,6 +9754,8 @@ static int compositor_table(void)
                         else
                                 compositor.door[row] = (int)handle;
                 }
+        if (compositor_clip_start() < 0)
+                return -1;
 
         return 0;
 }
@@ -9491,6 +9772,7 @@ static void compositor_table_drop(void)
                 compositor.table_giver = 0;
         }
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
+        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_CLIP_DOOR, 0, 0, 0, 0);
         for (unsigned int row = 0; row < WINDOWS; row++)
                 for (int wake = 0; wake < 2; wake++)
                 {
@@ -9957,8 +10239,8 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll wanted[4 + COMPOSITOR_INPUTS + WINDOWS];
-                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0;
+                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS];
+                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
 
@@ -9980,6 +10262,11 @@ static b32 compositor_main()
                 {
                         uevents_at = count;
                         wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
+                }
+                if (compositor_clip.door >= 0)
+                {
+                        clip_at = count;
+                        wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
                 }
 
                 // With nothing to show or time the wait is for ever. With
@@ -10077,6 +10364,8 @@ static b32 compositor_main()
 
                 if (card_at && wanted[card_at].returned)
                         compositor_card_read();
+                if (clip_at && wanted[clip_at].returned)
+                        compositor_clip_cli();
 
                 // A screen came or went, or the screens are taken now that a flip that held them back has landed.
                 if (uevents_at && wanted[uevents_at].returned)

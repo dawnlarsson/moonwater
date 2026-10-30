@@ -130563,6 +130563,265 @@ static fn te_tokens(positive rounds)
         }
 }
 
+/* ---- the clipboard service and the paste filter ---- */
+
+/*
+        The compositor's clipboard (compositor_clip_*) driven through a table in memory, the rows this process: a
+        sealed memfd offered after a gesture is taken; one offered without, unsealed, with a NUL, not UTF-8 or past the
+        limit is declined; a paste is READY only for the row with the keys within the gesture's time and REFUSED for
+        every other; what a READY row reads is what was copied. Then a random stream of offers, asks, focus changes,
+        gestures, rows leaving and the service turned off, with those rules held at every step. And the terminal's
+        paste filter against a model of it: no ESC, no C1, no other control but a tab, a line end a CR, and in a
+        bracketed paste one end marker, the last bytes.
+*/
+static struct windows te_clip_table;
+
+// The next clipboard event of a row, or 0: its what.
+static int te_clip_event(unsigned int row, unsigned int address_to which)
+{
+        struct window_row own = {&te_clip_table, row, -1, -1, 0, 0, 0, 0, 0};
+        struct window_event event;
+        int found = 0;
+
+        while (windows_event(&own, &event))
+                if (event.type == WINDOW_EVENT_CLIP)
+                        found = event.b, *which = (unsigned int)event.a;
+        return found;
+}
+
+// Whether a row had a gesture the compositor still counts.
+static b32 te_clip_recent(unsigned int row)
+{
+        return compositor_clip.gesture[row] && clock_monotonic_nanoseconds() - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
+}
+
+static fn te_clip_offer(unsigned int row, unsigned int which, long fd)
+{
+        te_clip_table.clip_offer_fd[row] = (int)fd;
+        te_clip_table.clip_offer_which[row] = which;
+        te_clip_table.clip_offer_serial[row]++;
+        compositor_clip_door((int)row);
+}
+
+static fn te_clip_ask(unsigned int row, unsigned int which)
+{
+        te_clip_table.clip_ask_which[row] = which;
+        te_clip_table.clip_ask_serial[row]++;
+        compositor_clip_door((int)row);
+}
+
+// A memfd with bytes in it, sealed or not.
+static long te_clip_memfd(const p8 address_to bytes, positive length, b32 sealed)
+{
+        long fd;
+
+        if (sealed)
+                return windows_clip_memfd(bytes, length);
+        fd = window_call(WINDOW_SYS_MEMFD, (long)"unsealed", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
+        window_call(WINDOW_SYS_WRITE, fd, (long)bytes, (long)length, 0, 0, 0);
+        return fd;
+}
+
+// The paste filter's model: what term_paste_filter must make of text.
+static positive te_paste_model(const p8 address_to text, positive length, p8 address_to into)
+{
+        positive out = 0;
+
+        for (positive at = 0; at < length; at++)
+        {
+                if (text[at] == '\r' && at + 1 < length && text[at + 1] == '\n')
+                        continue;
+                if (text[at] == '\r' || text[at] == '\n')
+                        into[out++] = '\r';
+                else if (text[at] == 0xc2 && at + 1 < length && text[at + 1] >= 0x80 && text[at + 1] < 0xa0)
+                        at++;
+                else if (text[at] >= ' ' && text[at] != 0x7f)
+                        into[out++] = text[at];
+                else if (text[at] == '\t')
+                        into[out++] = '\t';
+        }
+        return out;
+}
+
+static fn te_clipboard(positive rounds)
+{
+        unsigned int me = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0), which;
+        static const p8 hello[] = "hello, clipboard \xe2\x9c\x93";
+        p8 address_to bytes;
+        unsigned long length;
+        long fd;
+
+        compositor.table = &te_clip_table;
+        te_clip_table.clip_pid = me;
+        te_clip_table.clip_on = 1;
+        te_clip_table.clip_limit = 4096;
+        te_clip_table.clip_owner[0] = te_clip_table.clip_owner[1] = -1;
+        for (unsigned int row = 0; row < 4; row++)
+                te_clip_table.pid[row] = me;
+        compositor.focus = 1;
+
+        // Taken after a gesture, read back by the row with the keys.
+        compositor_clip_gesture(0);
+        te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_memfd(hello, sizeof(hello) - 1));
+        te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN && te_clip_table.clip_length[0] == sizeof(hello) - 1 &&
+                     te_clip_table.clip_owner[0] == 0,
+                 "a copy after a gesture is taken", te_clip_table.clip_length[0]);
+        compositor_clip_gesture(1);
+        te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
+        te_check(te_clip_event(1, &which) == WINDOWS_CLIP_READY, "a paste by the window with the keys", 0);
+        {
+                struct window_row own = {&te_clip_table, 1, -1, -1, 0, 0, 0, 0, 0};
+
+                te_check(windows_clip_read(&own, WINDOWS_CLIP_CLIPBOARD, &bytes, &length) == sizeof(hello) - 1 &&
+                             !memory_compare(bytes, hello, length),
+                         "the paste is what was copied", length);
+                windows_clip_free(bytes, length);
+        }
+        // Refused: a window without the keys; with them but nobody at them.
+        compositor_clip_gesture(2);
+        te_clip_ask(2, WINDOWS_CLIP_CLIPBOARD);
+        te_check(te_clip_event(2, &which) == WINDOWS_CLIP_REFUSED, "a window without the keys is refused", 0);
+        compositor_clip.gesture[1] = 0;
+        te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
+        te_check(te_clip_event(1, &which) == WINDOWS_CLIP_REFUSED, "a paste with nobody at the keys is refused", 0);
+        // Declined copies.
+        {
+                static const p8 nul[] = "a\0b", bad[] = "a\xff", overlong[] = "a\xc0\xaf";
+                static p8 large[5000];
+                struct
+                {
+                        const p8 address_to bytes;
+                        positive length;
+                        b32 sealed, gesture;
+                        const char address_to what;
+                } cases[] = {
+                    {hello, 5, false, true, "an unsealed memfd is declined"},  {nul, 3, true, true, "a NUL is declined"},
+                    {bad, 2, true, true, "a byte that is not UTF-8 is declined"}, {overlong, 3, true, true, "an overlong form is declined"},
+                    {large, sizeof(large), true, true, "past the limit is declined"}, {hello, 5, true, false, "a copy with no gesture is declined"},
+                };
+
+                memory_fill(large, 'x', sizeof(large));
+                for (p32 c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
+                {
+                        unsigned int before = te_clip_table.clip_serial[0];
+
+                        compositor_clip.gesture[3] = 0;
+                        if (cases[c].gesture)
+                                compositor_clip_gesture(3);
+                        fd = te_clip_memfd(cases[c].bytes, cases[c].length, cases[c].sealed);
+                        te_clip_offer(3, WINDOWS_CLIP_CLIPBOARD, fd);
+                        te_check(te_clip_event(3, &which) == WINDOWS_CLIP_DECLINED && te_clip_table.clip_serial[0] == before,
+                                 cases[c].what, c);
+                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                }
+        }
+        // A window gone leaves its copy, owned by nobody; off empties everything and refuses.
+        compositor_clip_leave(0);
+        te_check(te_clip_table.clip_owner[0] == -1 && te_clip_table.clip_length[0] == sizeof(hello) - 1, "a copy outlives its window", 0);
+        te_clip_table.clip_on = 0;
+        compositor_clip_wipe();
+        compositor_clip_gesture(1);
+        te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
+        te_check(te_clip_event(1, &which) == WINDOWS_CLIP_REFUSED && !te_clip_table.clip_length[0], "off empties and refuses", 0);
+        te_clip_table.clip_on = 1;
+
+        // A random stream with the rules held at every step.
+        {
+                p8 last[2][64];
+                positive last_length[2] = {0, 0};
+                b32 has[2] = {false, false};
+
+                for (positive step = 0; step < rounds; step++)
+                {
+                        unsigned int row = te_next(4), kind = te_next(7), pick = te_next(2);
+                        int what;
+
+                        if (kind == 0)
+                                compositor_clip_gesture((int)row);
+                        else if (kind == 1)
+                                compositor.focus = (int)te_next(4);
+                        else if (kind == 2)
+                        {
+                                p8 text[64];
+                                positive size = 1 + te_next(40);
+                                b32 good = te_next(4) != 0, recent = te_clip_recent(row);
+
+                                for (positive i = 0; i < size; i++)
+                                        text[i] = (p8)('a' + te_next(26));
+                                if (!good)
+                                        text[te_next((p32)size)] = te_next(2) ? 0 : 0xff;
+                                fd = windows_clip_memfd(text, size);
+                                te_clip_offer(row, pick, fd);
+                                what = te_clip_event(row, &which);
+                                te_check(what == (good && recent ? WINDOWS_CLIP_TAKEN : WINDOWS_CLIP_DECLINED), "a copy in the stream", step);
+                                if (what == WINDOWS_CLIP_TAKEN)
+                                {
+                                        memory_copy(last[pick], text, size);
+                                        last_length[pick] = size;
+                                        has[pick] = true;
+                                }
+                                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                        }
+                        else if (kind == 3 || kind == 4)
+                        {
+                                b32 may = has[pick] && (int)row == compositor.focus && te_clip_recent(row);
+
+                                te_clip_ask(row, pick);
+                                what = te_clip_event(row, &which);
+                                te_check(what == (may ? WINDOWS_CLIP_READY : WINDOWS_CLIP_REFUSED), "a paste in the stream", step * 10 + (positive)may);
+                                if (what == WINDOWS_CLIP_READY)
+                                {
+                                        struct window_row own = {&te_clip_table, row, -1, -1, 0, 0, 0, 0, 0};
+
+                                        te_check(windows_clip_read(&own, pick, &bytes, &length) == (long)last_length[pick] &&
+                                                     !memory_compare(bytes, last[pick], length),
+                                                 "a paste in the stream is the last copy", step);
+                                        windows_clip_free(bytes, length);
+                                }
+                        }
+                        else if (kind == 5)
+                                compositor_clip_leave((int)row);
+                        else if (te_next(16) == 0)
+                        {
+                                compositor_clip_wipe();
+                                has[0] = has[1] = false;
+                        }
+                }
+        }
+
+        // The paste filter against its model, and what a bracketed paste sends.
+        for (positive round = 0; round < rounds; round++)
+        {
+                static const p8 alphabet[] = {'a', ' ', '\t', '\n', '\r', 0x1b, '[', '2', '0', '1', '~', 0x7f, 0, 7, 0xc2, 0x9b, 0x85, 0xa9, 0xe2, 0x80};
+                p8 text[64], got[64], want[64];
+                positive size = te_next(64), got_length, want_length;
+
+                for (positive i = 0; i < size; i++)
+                        text[i] = alphabet[te_next(sizeof(alphabet))];
+                got_length = term_paste_filter(text, size, got);
+                want_length = te_paste_model(text, size, want);
+                te_check(got_length == want_length && !memory_compare(got, want, got_length), "the paste filter", round);
+                te_check(!memory_first_of(got, 0x1b, got_length), "no ESC is pasted", round);
+        }
+        {
+                static const p8 attack[] = "safe\x1b[201~rm -rf ~\n\xc2\x9b" "31m";
+                static const p8 sent[] = "\x1b[200~safe[201~rm -rf ~\r31m\x1b[201~";
+
+                to_shell_length = 0;
+                line_editing = false;
+                bracketed_paste = true;
+                term_paste(attack, sizeof(attack) - 1);
+                te_check(to_shell_length == sizeof(sent) - 1 && !memory_compare(to_shell, sent, to_shell_length),
+                         "a bracketed paste cannot end its bracket early", to_shell_length);
+                to_shell_length = 0;
+                bracketed_paste = false;
+                term_paste(attack, sizeof(attack) - 1);
+                te_check(to_shell_length == sizeof(sent) - 1 - 12 && !memory_first_of(to_shell, 0x1b, to_shell_length),
+                         "a plain paste carries no escape", to_shell_length);
+                to_shell_length = 0;
+        }
+}
+
 /* ---- what it costs ---- */
 
 static fn te_bench(void)
@@ -130739,6 +130998,7 @@ b32 main(void)
                 TE_SECTION("keymap", te_keymap())
                 TE_SECTION("tokens", te_tokens(30))
                 TE_SECTION("sparse", te_sparse())
+                TE_SECTION("clipboard", te_clipboard(3000))
 #undef TE_SECTION
         }
         string_format(log, "text engine: %p checks, %p failures\n", te_checks, te_failures);
