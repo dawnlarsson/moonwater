@@ -59344,64 +59344,109 @@ static fn userspace_source_progress(void)
         socket_close(pair[1]);
 }
 
-/* Root can exercise the exact NETLINK_ROUTE path without touching the host:
-   unshare changes only this test process, and this is the final network test.
-   Restricted containers and ordinary users retain the unprivileged fixture
-   above and say explicitly why this additional check did not run. */
-static fn userspace_route_source_in_namespace(void)
+static bool net_test_enter_namespaces(positive uid, positive gid);
+
+/* A body that needs root over a network namespace of its own, run where
+   anyone can have one: in a child that enters a user and a network namespace
+   with the caller mapped to root (net_test_enter_namespaces), the body's
+   answer coming back as the child's one byte, so what it changes never
+   reaches the checks after it. 0x80 is a namespace the child could not make
+   or a child that could not be made. */
+static p8 net_in_namespaces(p8 (*body)(void))
+{
+        b32 ends[2];
+        bipolar child;
+        p8 said = 0x80;
+        positive raw = 0;
+
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return said;
+        child = system_fork();
+        if (!child)
+        {
+                p8 answer = 0x80;
+
+                if (net_test_enter_namespaces((positive)system_call(syscall(getuid)),
+                                              (positive)system_call(syscall(getgid))))
+                        answer = body();
+                system_write_all((positive)ends[1], address_of answer, 1);
+                system_call_1(syscall(exit_group), 0);
+        }
+        system_close(ends[1]);
+        if (child > 0)
+        {
+                if (system_read_retry((positive)ends[0], address_of said, 1) != 1)
+                        said = 0x80;
+                (void)system_wait4_retry(child, address_of raw, 0, null);
+        }
+        system_close(ends[0]);
+        return said;
+}
+
+/* The exact NETLINK_ROUTE path without touching the host, in namespaces of
+   the check's own: 0 held, 1 did not, 2 the injection was refused. */
+static p8 userspace_route_source_body(void)
 {
         netlink_buffer message = {0};
         netlink_header packet = {.length = sizeof packet};
         socket_address_netlink receiver_address = {.family = AF_NETLINK};
         socket_address_netlink sender_address = {.family = AF_NETLINK};
         p32 address_length = sizeof receiver_address;
-        bipolar receiver;
-        bipolar sender;
-        bipolar received;
+        bipolar receiver = socket_new(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+        bipolar sender = socket_new(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+        p8 answer = 2;
 
-        if (system_call(syscall(geteuid)) != 0)
-        {
-                log_direct(str("net: isolated NETLINK_ROUTE source regression NOT RUN -- needs root\n"));
-                return;
-        }
-        if (system_call_1(syscall(unshare), CLONE_NEWNET) < 0)
-        {
-                log_direct(str("net: isolated NETLINK_ROUTE source regression NOT RUN -- network namespaces unavailable\n"));
-                return;
-        }
-
-        receiver = socket_new(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
-        sender = socket_new(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
-        if (receiver < 0 || sender < 0 ||
+        if (receiver >= 0 && sender >= 0 &&
             socket_bind((b32)receiver, address_of receiver_address,
-                        sizeof receiver_address) < 0 ||
+                        sizeof receiver_address) >= 0 &&
             socket_bind((b32)sender, address_of sender_address,
-                        sizeof sender_address) < 0 ||
+                        sizeof sender_address) >= 0 &&
             socket_name((b32)receiver, address_of receiver_address,
-                        address_of address_length) < 0 ||
-            address_length < sizeof receiver_address ||
+                        address_of address_length) >= 0 &&
+            address_length >= sizeof receiver_address &&
             socket_send((b32)sender, address_of packet, sizeof packet, 0,
                         address_of receiver_address,
-                        sizeof receiver_address) != sizeof packet ||
-            !net_room(address_of message, 64))
+                        sizeof receiver_address) == sizeof packet &&
+            net_room(address_of message, 64))
         {
-                log_direct(str("net: isolated NETLINK_ROUTE source regression NOT RUN -- userspace route injection refused\n"));
-                goto done;
+                message.used = 1;
+                answer = netlink_receive((b32)receiver, address_of message, null) == 0 &&
+                                 message.used == 0 &&
+                                 socket_receive((b32)receiver, null, 0, MSG_DONTWAIT,
+                                                null, null) < 0
+                             ? 0 : 1;
         }
-
-        message.used = 1;
-        received = netlink_receive((b32)receiver, address_of message, null);
-        check("an isolated userspace route datagram cannot strand receive",
-              received == 0 && message.used == 0 &&
-                  socket_receive((b32)receiver, null, 0, MSG_DONTWAIT,
-                                 null, null) < 0);
-
-done:
         netlink_forget(address_of message);
         if (sender >= 0)
                 socket_close((b32)sender);
         if (receiver >= 0)
                 socket_close((b32)receiver);
+        return answer;
+}
+
+/* Run in a child that is root over namespaces of its own, so an ordinary user
+   has it too; said NOT RUN, and why, where the kernel will not give them. */
+static fn userspace_route_source_in_namespace(void)
+{
+        p8 said;
+
+        if (net_as_emulated())
+        {
+                log_direct(str("net: isolated NETLINK_ROUTE source regression NOT RUN -- under emulation\n"));
+                return;
+        }
+        said = net_in_namespaces(userspace_route_source_body);
+        if (said == 0x80)
+        {
+                log_direct(str("net: isolated NETLINK_ROUTE source regression NOT RUN -- user or network namespaces unavailable\n"));
+                return;
+        }
+        if (said == 2)
+        {
+                log_direct(str("net: isolated NETLINK_ROUTE source regression NOT RUN -- userspace route injection refused\n"));
+                return;
+        }
+        check("an isolated userspace route datagram cannot strand receive", said == 0);
 }
 
 static bool netlink_stop_after_first(netlink_header address_to header,
@@ -66480,6 +66525,48 @@ setup_failed:
         return DNS_NO_SERVER;
 }
 
+/* The REQUEST a renewing client sends from a socket bound to lo, refused with
+   ENOSPC: 0 it fails closed, 1 lo cannot be bound to, 2 it did not. Run by
+   net_in_namespaces. */
+static p8 dhcp_mid_path_send_body(void)
+{
+        p8 lo_hardware[6] = {2, 0, 0, 0, 0, 9};
+        dhcp_lease held = {
+            .address = 0x0a00020f,
+            .mask = 0xffffff00,
+            .router = 0x0a000202,
+            .nameserver = 0x01010101,
+            .server = 0x0a000202,
+            .seconds = 60,
+            .renewal = 30,
+            .rebinding = 52,
+        };
+        bipolar route = netlink_open_groups(0);
+        bipolar probe;
+        bipolar status;
+        p8 answer;
+
+        //      The lease's address is on lo, as it is on the interface a client
+        //      renews on: the socket is bound to it.
+        if (route >= 0)
+        {
+                (void)netlink_link_up((b32)route, 1);
+                (void)netlink_address_add((b32)route, 1, held.address, 32);
+                socket_close((b32)route);
+        }
+        probe = dhcp_open((string_address)"lo", held.address, false);
+        if (probe < 0)
+                return 1;
+        socket_close((b32)probe);
+        net_send_error = -ENOSPC;
+        status = dhcp_reacquire((string_address)"lo", lo_hardware, address_of held,
+                                false, 1);
+        answer = status == DHCP_NO_SOCKET && net_send_error_hit && !net_send_error
+                     ? 0 : 2;
+        net_io_faults_clear();
+        return answer;
+}
+
 /*
         Mid-path DNS/DHCP send/recv faults after the client socket exists.
         Distinct from open-time EMFILE in dns_dhcp_netlink_resource_exhaustion
@@ -66795,36 +66882,16 @@ static fn dns_dhcp_midpath_faults(void)
         }
 
         /* DHCP send mid-path: reacquire after a bound socket would send.
-           BINDTODEVICE needs a real device; prove the REQUEST send refuse
-           when open succeeds on lo, else honest NOT RUN. */
+           BINDTODEVICE needs a real device and the right to bind to it, so
+           the body runs over the loopback of a namespace of its own, where
+           anyone is root; else honest NOT RUN. */
         {
-                p8 lo_hardware[6] = {2, 0, 0, 0, 0, 9};
-                dhcp_lease held = {
-                    .address = 0x0a00020f,
-                    .mask = 0xffffff00,
-                    .router = 0x0a000202,
-                    .nameserver = 0x01010101,
-                    .server = 0x7f000001,
-                    .seconds = 60,
-                    .renewal = 30,
-                    .rebinding = 52,
-                };
-                bipolar probe = dhcp_open((string_address)"lo", held.address,
-                                          false);
+                p8 said = net_in_namespaces(dhcp_mid_path_send_body);
 
-                if (probe < 0)
+                if (said == 0x80 || said == 1)
                         log_direct(str("net: DHCP mid-path send ENOSPC NOT RUN -- BINDTODEVICE lo unavailable\n"));
                 else
-                {
-                        socket_close((b32)probe);
-                        net_send_error = -ENOSPC;
-                        status = dhcp_reacquire((string_address)"lo", lo_hardware,
-                                                address_of held, false, 1);
-                        check("DHCP reacquire send ENOSPC fails closed mid-path",
-                              status == DHCP_NO_SOCKET && net_send_error_hit &&
-                                  !net_send_error);
-                        net_io_faults_clear();
-                }
+                        check("DHCP reacquire send ENOSPC fails closed mid-path", said == 0);
         }
 
         socket_close((b32)receiver);
