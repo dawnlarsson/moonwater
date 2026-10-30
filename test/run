@@ -15109,12 +15109,34 @@ printf 'pti-%s-end\n' "$(has 'page tables isolation: enabled')" | tr a-z A-Z
 poweroff
 COMMANDS
 
+#       The commands go in once the shell's prompt is on the line, through a
+#       FIFO, as the install lane's do. Piped in at power on they arrived
+#       while the kernel was still writing its log to the same UART and the
+#       receive FIFO overran: often more than the first line was lost, and
+#       when it was the second, the has() every log row asks through was
+#       never defined and those five rows were red (the locked tier 10 of 16
+#       on 2026-10-30 for that and its SMT row, while a boot of the same
+#       image with the commands sent later found all five lines in its log).
 set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
+rm -f "$work/serial.in"
+mkfifo "$work/serial.in" || exit 1
 timeout 300 qemu-system-x86_64 -m 2G -smp 2,sockets=1,cores=1,threads=2 "$@" -kernel "$image" \
         -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
         -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none" \
-        < "$work/commands" > "$work/transcript" 2>&1 || true
+        < "$work/serial.in" > "$work/transcript" 2>&1 &
+booting=$!
+exec 9> "$work/serial.in"
+waited=0
+until grep -q -F ' $ ' "$work/transcript" 2> /dev/null; do
+        kill -0 "$booting" 2> /dev/null || break
+        [ "$waited" -lt 180 ] || break
+        sleep 1
+        waited=$((waited + 1))
+done
+cat "$work/commands" >&9
+exec 9>&-
+wait "$booting" 2> /dev/null || true
 tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
 mv "$work/said" "$work/transcript"
 
