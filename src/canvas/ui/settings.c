@@ -821,6 +821,8 @@ static void settings_rows_add(int address_to top, int address_to bottom, int fro
         *bottom = to > *bottom ? to : *bottom;
 }
 
+static fn settings_kit_forget(void);
+
 // The picture may have changed anywhere: the next one is drawn whole.
 static fn settings_dirty(void)
 {
@@ -1219,6 +1221,8 @@ static fn settings_scroll_to(int scroll)
         int most = settings_extent() - (settings_list_bottom() - settings_list_top());
         int address_to now = settings.view ? &settings.card_scroll : &settings.scroll;
 
+        settings_kit_forget(); // the rows scrolled in are placed, not moved
+
         most = most < 0 ? 0 : most;
         scroll = scroll > most ? most : scroll;
         scroll = scroll < 0 ? 0 : scroll;
@@ -1257,6 +1261,7 @@ static fn settings_reveal(void)
 */
 static fn settings_rebuild(void)
 {
+        settings_kit_forget(); // the rows of another group or filter are placed, not moved
         positive count = 0;
 
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
@@ -3248,6 +3253,13 @@ static b32 settings_key(const struct window_event address_to event)
 */
 static struct ui_control settings_kit[SETTINGS_ROWS];
 static int settings_kit_down = -1; // the row a press went down on, whose ripple goes out at the release
+
+// The rows shown changed (a group, the filter, a scroll, a size): each row's control is placed at its next frame, not moved.
+static fn settings_kit_forget(void)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                ui_control_forget(&settings_kit[at]);
+}
 
 static b32 settings_row_is(int at, const char address_to path)
 {

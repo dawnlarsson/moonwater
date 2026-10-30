@@ -124240,6 +124240,85 @@ static fn check_kit_theme(void)
                       rested && pressed && settled);
         }
 }
+
+/*
+        A control appears settled: a switch made off and then given its value on (as a settings row is, when the verb
+        answers), tabs and radios given their chosen item, are drawn there at their first frame with nothing moving;
+        one forgotten (its page shown again) and changed while unseen is placed again; a change after its first frame
+        moves; and the kit settled (a resize) puts a moving control at its end at once.
+*/
+static fn check_kit_place(void)
+{
+        static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = terminal.ui;
+        struct ui_control row, tabs, radios;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        b32 first_still, first_on, tabs_still, radios_still, forgot_still, change_moves, settled;
+        b32 live = 0;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit place: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 5000000000ll;
+
+        memory_zero(&row, sizeof(row));
+        row.kind = UI_SWITCH, row.x = 20, row.y = 10, row.w = 300, row.h = 48, row.label = "Telemetry";
+        ui_control_start(&row);
+        row.on = 1; // the verb answered after the row was made
+        ui_kit.busy = 0;
+        ui_control_draw(&ui, &row);
+        first_still = !ui_kit.busy;
+        first_on = ui_tween_at(&row.extent, ui_kit.now, &live) == UI_ONE;
+
+        memory_zero(&tabs, sizeof(tabs));
+        tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED, tabs.x = 20, tabs.y = 80, tabs.count = 3;
+        tabs.items[0] = "All", tabs.items[1] = "Running", tabs.items[2] = "Stopped";
+        ui_control_start(&tabs);
+        tabs.at = 2;
+        ui_kit.busy = 0;
+        ui_control_draw(&ui, &tabs);
+        tabs_still = !ui_kit.busy && ui_tween_at(&tabs.pip_x, ui_kit.now, &live) == ui_q(ui_tab_left(&ui, &tabs, 2));
+
+        memory_zero(&radios, sizeof(radios));
+        radios.kind = UI_RADIOS, radios.x = 20, radios.y = 120, radios.w = 300, radios.h = 48, radios.count = 3;
+        radios.items[0] = "x86-64", radios.items[1] = "ARM64", radios.items[2] = "RISC-V";
+        ui_control_start(&radios);
+        radios.at = 2;
+        ui_kit.busy = 0;
+        ui_control_draw(&ui, &radios);
+        radios_still = !ui_kit.busy;
+
+        // Its page left and shown again, the value changed while it was not seen: placed, not moved.
+        ui_control_forget(&row);
+        row.on = 0;
+        ui_kit.now += 500000000ll, ui_kit.busy = 0;
+        ui_control_draw(&ui, &row);
+        forgot_still = !ui_kit.busy && ui_tween_at(&row.extent, ui_kit.now, &live) == 0;
+
+        // A change after its first frame is drawn moving; the kit settled under it (a resize), it is at its end at once.
+        ui_kit.now += 16666667, ui_kit.busy = 0;
+        row.on = 1;
+        ui_control_draw(&ui, &row);
+        ui_kit.now += 16666667, ui_kit.busy = 0;
+        ui_control_draw(&ui, &row);
+        change_moves = ui_kit.busy;
+        ui_kit_settle();
+        ui_kit.now += 16666667, ui_kit.busy = 0;
+        ui_control_draw(&ui, &row);
+        settled = !ui_kit.busy && ui_tween_at(&row.extent, ui_kit.now, &live) == UI_ONE;
+
+        check("kit place: a switch given its value after it was made is drawn at it on its first frame, nothing moving", first_still && first_on);
+        check("kit place: tabs and radios given their chosen item start with the pip on it", tabs_still && radios_still);
+        check("kit place: a control shown again after a change it did not see is placed, not moved", forgot_still);
+        check("kit place: a change after the first frame moves, and the kit settled (a resize) puts it at its end at once", change_moves && settled);
+}
 #endif
 
 static p32 address_to render_frame(void)
@@ -124765,6 +124844,7 @@ b32 main()
 #if MOONWATER_UI_ANY
         check_kit_motion();
         check_kit_theme();
+        check_kit_place();
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);

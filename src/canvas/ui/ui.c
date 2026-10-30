@@ -1808,7 +1808,18 @@ static struct ui_kit
         b32 busy;                          // something moved: another frame is due
         b32 made;
         int damage_top, damage_bottom;     // the rows (device pixels) the moving controls drew this frame
+        b64 epoch;                         // counted up when every control is to be placed again (ui_kit_settle)
 } ui_kit;
+
+/*
+        Everything is placed again, not moved: the window was resized, the
+        theme or the scale changed. A control drawn after this is drawn at its
+        state, its transitions and springs put at their ends (ui_control_place).
+*/
+static fn ui_kit_settle(void)
+{
+        ui_kit.epoch++;
+}
 
 // The colour of a role this frame.
 static inline unsigned int ui_role(int role)
@@ -1824,6 +1835,7 @@ static fn ui_kit_theme(unsigned int mode, unsigned int accent, unsigned int moti
                 return;
         ui_kit.mode = mode;
         ui_kit.accent = accent & 0xffffffu;
+        ui_kit.epoch += 1 + !ui_kit.epoch; // the controls are placed in the new colours; only the theme's own turn moves
         ui_kit.from = ui_kit.shown;
         ui_theme_make(&ui_kit.to, mode == UI_THEME_DARK, ui_kit.accent);
         if (!ui_kit.made || motion)
@@ -2417,7 +2429,14 @@ struct ui_control
         b64 spot_gone;
         b64 out_at;                        // the pointer left: hovering ends 200 ms after
         b64 last_frame;
+        b64 placed;                        // the kit's epoch it was last placed in; 0 before its first frame
 };
+
+// A control to be placed at its next frame, as if it had just appeared: a page shown again, a list rebuilt, a row scrolled in.
+static inline fn ui_control_forget(struct ui_control address_to c)
+{
+        c->placed = 0;
+}
 
 // The pieces a control needs in device pixels.
 static inline b32 ui_dev(const struct ui address_to ui, int logical) { return logical * ui->scale; }
@@ -3575,8 +3594,52 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
         ui_kit.busy |= was;
 }
 
+/*
+        A control placed: what it shows is its state now, with nothing moving.
+        A control is placed at its first frame, so a value set when it is made,
+        or any time before it is first drawn (the settings' values come from
+        the verbs after the row is made), is where it starts and not a change;
+        and again whenever the kit settles (a resize, a theme, a scale) or its
+        app forgets it. Only a change after that is drawn moving.
+*/
+static fn ui_control_place(struct ui_control address_to c)
+{
+        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale, &c->pip_x, &c->pip_w, &c->pip_y};
+
+        for (positive k = 0; k < sizeof(unplaced) / sizeof(unplaced[0]); k++)
+                unplaced[k]->placed = 0;
+        for (int k = 0; k < UI_ITEMS; k++)
+        {
+                c->item_ink[k].placed = 0;
+                ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
+                c->item_dom[k].at = 0;
+        }
+        ui_tween_put(&c->extent, c->kind == UI_PROGRESS ? (c->value < 0 ? 0 : c->value) : c->kind == UI_SLIDER ? 0 : c->on ? UI_ONE : 0,
+                     UI_TWEEN_NUMBER);
+        ui_tween_put(&c->spot, 0, UI_TWEEN_NUMBER);
+        for (int k = 0; k < 3; k++)
+                c->ripple[k].live = 0;
+        ui_spring_stop(&c->squish.x);
+        ui_spring_stop(&c->squish.y);
+        memory_zero(&c->squish.shown, sizeof(c->squish.shown));
+        c->squish.holding = c->squish.pulled = 0;
+        ui_spring_stop(&c->held_squish);
+        memory_zero(&c->drawn, sizeof(c->drawn));
+        c->dom.at = 0;
+        c->pip_squash = c->pip_press = 0;
+        c->sliding = 0;
+        c->slide.landed = 0;
+        c->bend = c->bend_target = 0;
+        c->moved = 0;
+        c->shadow_to[0][4] = 0; // a field's shadows are put at its state
+        c->field_start = 0;
+        c->placed = ui_kit.epoch;
+}
+
 static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address_to c)
 {
+        if (c->placed != ui_kit.epoch)
+                ui_control_place(c);
         switch (c->kind)
         {
         case UI_BUTTON: ui_button_draw(ui, c); break;
@@ -4138,6 +4201,7 @@ static int ui_app_run(struct ui_app address_to app)
                 {
                         app->asked_w = table->want_width[row];
                         app->asked_h = table->want_height[row];
+                        ui_kit_settle();
                         app->size(app->asked_w, app->asked_h);
                 }
 
