@@ -52558,11 +52558,44 @@ static bool checked_write_errors(void)
         return correct;
 }
 
-/* Native strace injects every write; no trace output can mask a failure. */
+/*
+        Every write from here on fails the way the lane asked: seccomp answers
+        the write call with errno EXPECTED (0 is a write that returns 0), as
+        strace's inject=write:error=...:when=1+ did, and with no tracer in
+        the way, so the lane runs where strace is not installed. -1 when this
+        kernel cannot install a filter.
+*/
+typedef struct
+{
+        p16 code;
+        p8 yes;
+        p8 no;
+        p32 value;
+} write_stop_step;
+
+static bipolar write_stop_install(b32 expected)
+{
+        write_stop_step steps[] = {
+            {0x20, 0, 0, 0},
+            {0x15, 0, 1, (p32)syscall(write)},
+            {0x06, 0, 0, 0x00050000u | (p32)expected},
+            {0x06, 0, 0, 0x7fff0000u}};
+        struct
+        {
+                p16 count;
+                write_stop_step address_to steps;
+        } filter = {array_count(steps), steps};
+
+        if (system_call_5(syscall(prctl), 38, 1, 0, 0, 0) < 0)
+                return -1;
+        return system_call_3(syscall(seccomp), 1, 0, (positive)address_of filter);
+}
+
 static b32 injected_write_stop(b32 expected)
 {
         b32 sink = open("/dev/null", O_WRONLY, 0);
         if (sink < 0) return 1;
+        if (write_stop_install(expected) < 0) return 2;
         system_write_result result = system_write_all_checked(sink, "x", 1);
         bool correct = !result.bytes && result.error == -expected &&
                        system_write_all(sink, "x", 1) == 0;

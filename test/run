@@ -4546,19 +4546,19 @@ stream_one()
                 else
                         lost "$target allocation failure" 'fdopen lost descriptor or ENOMEM'
                 fi
-                if command -v strace > /dev/null 2>&1; then
-                        for stop in retval=0:0 error=ENOSPC:28 error=EINTR:4; do
-                                if timeout 10 strace -qq -o "$work/write-stop.trace" \
-                                        -e "inject=write:${stop%:*}:when=1+" \
-                                        "$work/t.$target" --write-stop "${stop#*:}"; then
-                                        won
-                                else
-                                        lost "$target write stop $stop" 'checked result, errno or spool descriptor leak'
-                                fi
-                        done
-                else
-                        printf '  %-10s %s\n' stream 'no strace, write-stop injections skipped'
-                fi
+                #       The binary fails its own writes with a seccomp filter
+                #       (write_stop_install in checks.c): 0 is a write that
+                #       returns 0, 28 ENOSPC, 4 EINTR. It answers 2 when this
+                #       kernel takes no filter, and that is said, not passed.
+                for stop in retval=0:0 error=ENOSPC:28 error=EINTR:4; do
+                        timeout 10 "$work/t.$target" --write-stop "${stop#*:}"
+                        stop_status=$?
+                        case $stop_status in
+                        0) won ;;
+                        2) printf '  %-10s %s\n' stream "write stop $stop NOT RUN -- no seccomp filter here" ;;
+                        *) lost "$target write stop $stop" 'checked result, errno or spool descriptor leak' ;;
+                        esac
+                done
         fi
 
         if ! target_build freestanding_check stream_standard "$work/s.$target" "$target"; then
