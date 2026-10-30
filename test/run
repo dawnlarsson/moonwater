@@ -19445,7 +19445,9 @@ out.append(("M1.12 the compositor's exit leaves Canvas's own picture on screen, 
 #   it is told to go to the line Canvas prints when the card is its own again and the ground is drawn.
 #   M1.12 records the latency and does not pass on it (canvas spec 05 3.2);
 #   the frame target of 1.4 is what the number is compared against.
-kernel_log = shell.run("dmesg", 20)[0]
+#   Only the lines looked for cross the serial line: the whole log is a hundred kilobytes, and on a loaded host it
+#   did not cross in the time a command is given.
+kernel_log = shell.run("dmesg | grep -e m1-mark -e 'the card is Canvas'", 20)[0]
 marks = [float(m.group(1)) for m in re.finditer(r"\[\s*(\d+\.\d+)\][^\n]*m1-mark$", kernel_log, re.M)]
 cards = [float(m.group(1)) for m in re.finditer(r"\[\s*(\d+\.\d+)\][^\n]*the card is Canvas's again", kernel_log, re.M)]
 handed = [c for c in cards if marks and c >= marks[-1]]
@@ -20452,7 +20454,8 @@ for _ in range(2):
     if again:
         restart.append(time.monotonic() - killed)
     time.sleep(1.5)
-    log = shell.run("dmesg")[0]
+    # From the first mark on, not the whole log: on a loaded host all of it did not cross the serial line in time.
+    log = shell.run("dmesg | sed -n '/r1-mark/,$p'")[0]
     marks = stamps(log, r"r1-mark$")
     cards = stamps(log, r"the card is Canvas's again")
     if not (marks and cards and cards[-1] >= marks[-1]):
@@ -20570,7 +20573,8 @@ out.append(("R1.2j an idle kernel log window wakes no time in five seconds", "ye
 #   its own size, the file /root/terminal/size keeps the step the last zoom left, a terminal started later
 #   reads it, and a file that names no step is the default.
 def text_size(pid):
-    found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid, shell.run("dmesg", 20)[0])
+    found = re.findall(r"terminal pid %s text size (\d+) px, cell (\d+) by (\d+) px" % pid,
+                       shell.run("dmesg | grep 'terminal pid %s text size'" % pid, 20)[0])
     return found[-1] if found else None
 
 # Rows and columns of the pty the terminal's shell is on: the shell is the terminal's child (the fourth field
@@ -20608,7 +20612,8 @@ reset, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 10)
 out.append(("R1.2n Control-Shift-= grows it too, and Control-0 goes back to the default",
             "%s" % ("yes" if shifted and reset else "no (%s, %s)" % (shifted, reset)), "yes"))
 out.append(("and a zoom writes nothing to the machine's log", "nothing" if text_size(main_terminal) == at_start and
-            len(re.findall(r"terminal pid %s text size" % main_terminal, shell.run("dmesg", 20)[0])) == 1 else "said", "nothing"))
+            len(re.findall(r"terminal pid %s text size" % main_terminal,
+                           shell.run("dmesg | grep 'terminal pid %s text size'" % main_terminal, 20)[0])) == 1 else "said", "nothing"))
 
 #   Each terminal is its own size: a second terminal, which has the keys as a new window does, grows with
 #   Control-= and the first stays as it was; the file keeps the step the zoom left, and a terminal started
