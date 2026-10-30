@@ -7138,7 +7138,8 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         ui_fill(ui, x, baseline + 2 * ui->scale + ((x / (2 * ui->scale)) & 1) * ui->scale, 1, ui->scale, ui_tone(colour & 0xffffffu, 255));
         }
         // The carets on this line, in the accent, unless it is the blink's off half; a composition's text after the
-        // primary, underlined.
+        // primary, underlined. A bar caret stands on the edge between two characters, half in each one's bearing: drawn
+        // from the edge rightwards it covered the next letter's stem (a caret before "beta" read "peta").
         if (t->focused && !t->caret_off)
                 for (positive s = 0; s < t->doc.selection_count; s++)
                 {
@@ -7146,7 +7147,8 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
 
                         if (caret < l->offset[0] || caret > l->offset[l->count])
                                 continue;
-                        ui_fill(ui, origin + ui_text_x_of(l, caret), y + ui->scale, t->doc.overwrite ? t->cell : 2 * ui->scale,
+                        ui_fill(ui, origin + ui_text_x_of(l, caret) - (t->doc.overwrite ? 0 : ui->scale), y + ui->scale,
+                                t->doc.overwrite ? t->cell : 2 * ui->scale,
                                 t->line_height - 2 * ui->scale, ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 : 255));
                 }
         if (t->preedit_length && t->focused)
