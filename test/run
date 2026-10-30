@@ -17617,7 +17617,10 @@ fi
 #       to end with the disk erased and a machine that boots from what is
 #       left. Its own disks: the first, blank, is where an install is let
 #       through; the 2 GiB one, the smallest an install takes, is where it
-#       must not; and a zoned one, which has no partitions to hold.
+#       must not; a zoned one, which has no partitions to hold; and one whose
+#       writes fail with EIO from the start of the data partition on (QEMU's
+#       blkdebug), where an install stops after the table and the system
+#       partition are on it and must take the table off again.
 #
 cat > "$work/hostile.commands" <<'COMMANDS'
 this line is eaten by the console
@@ -17644,6 +17647,12 @@ rm -f /root/big
 printf '%s%62s\n' "$disk" junk | moonwater setup install $disk > /tmp/long 2>&1
 printf 'long-refused-%s\n' $(( $? + 40 ))
 printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${disk}p") + 30 ))
+eio=$(nvme_of moonwater5)
+moonwater setup install $eio yes > /tmp/eio 2>&1
+printf 'eio-refused-%s\n' $(( $? + 40 ))
+printf 'eio-said-%s\n' $(( $(grep -c "$eio is left without a partition table" /tmp/eio) * 7 ))
+printf 'eio-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${eio}p") + 30 ))
+printf 'eio-live-%s\n' $(( $(grep -c ' /root ' /proc/self/mounts) + 30 ))
 moonwater setup install $disk yes > /tmp/first 2>&1
 printf 'first-%s\n' $(( $? + 40 ))
 moonwater setup install $small yes > /tmp/second 2>&1
@@ -17694,16 +17703,25 @@ poweroff
 COMMANDS
 
 mv "$work/disk.img" "$work/disk.keep" && truncate -s 4G "$work/disk.img" &&
-        truncate -s 2G "$work/small.img" && truncate -s 3G "$work/zoned.img" || exit 1
+        truncate -s 2G "$work/small.img" && truncate -s 3G "$work/zoned.img" &&
+        truncate -s 3G "$work/eio.img" || exit 1
+#       The data partition of a 3 GiB disk starts at 513 MiB, sector 1050624:
+#       its first sectors, which the install clears before the ext4 goes on,
+#       answer a write with EIO, and every other sector takes it.
+printf '%s\n' '[inject-error]' 'event = "write_aio"' 'errno = "5"' 'sector = "1050626"' \
+        > "$work/eio.conf"
 install_memory=6G
 # shellcheck disable=SC2086
 install_boot hostile $stick -drive if=none,id=small,format=raw,file="$work/small.img" \
         -device nvme,serial=moonwater3,drive=small \
         -drive if=none,id=zoned,format=raw,file="$work/zoned.img" \
         -device nvme,id=zoned-controller,serial=moonwater4 \
-        -device nvme-ns,drive=zoned,bus=zoned-controller,zoned=true
+        -device nvme-ns,drive=zoned,bus=zoned-controller,zoned=true \
+        -drive if=none,id=eio,format=raw,file.driver=blkdebug,file.config="$work/eio.conf",file.image.driver=file,file.image.filename="$work/eio.img" \
+        -device nvme,serial=moonwater5,drive=eio
 install_memory=""
-rm -f "$work/disk.img" "$work/small.img" "$work/zoned.img"
+eio_table=$(sfdisk -d "$work/eio.img" 2> /dev/null | grep -c 'name=')
+rm -f "$work/disk.img" "$work/small.img" "$work/zoned.img" "$work/eio.img"
 mv "$work/disk.keep" "$work/disk.img"
 says hostile 'its disks are found by their serials' 'htob-deman'
 says hostile 'six binds at once keep all six'     'lock-42'
@@ -17717,6 +17735,11 @@ says hostile 'and the refusal says how much'       'small-said-7'
 says hostile 'and the disk is left as it was'      'small-parts-30'
 says hostile 'a confirmation that runs past the line is not the name' 'long-refused-41'
 says hostile 'and nothing was erased for it'       'long-parts-30'
+says hostile 'an install onto a disk whose writes fail stops' 'eio-refused-41'
+says hostile 'and says the table is taken off'     'eio-said-7'
+says hostile 'and the kernel sees no partition on it' 'eio-parts-30'
+says hostile 'and the session is still live'       'eio-live-30'
+same 'the disk that failed has no table on it' 0 "${eio_table:-unread}"
 says hostile 'a disk that fits is installed'       'first-40'
 says hostile 'a session that keeps a disk refuses a second' 'keeps-refused-41'
 says hostile 'and says which'                      'keeps-said-7'
