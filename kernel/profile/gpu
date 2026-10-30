@@ -137,6 +137,10 @@ CONFIG_DRM_VIRTIO_GPU=y
 CONFIG_VIRTIO=y
 CONFIG_VIRTIO_PCI=y
 CONFIG_VIRTIO_MENU=y
+# A virtual machine's tablet, keyboard and touch screen (QEMU's virtio-tablet,
+# virtio-keyboard and virtio-multitouch-pci; arm64 had it already). The touch
+# screen is how the canvas lane puts fingers on the desktop: QEMU has no USB one.
+CONFIG_VIRTIO_INPUT=y
 CONFIG_DRM_BOCHS=y
 CONFIG_DRM_QXL=y
 
