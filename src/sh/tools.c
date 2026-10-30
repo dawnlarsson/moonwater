@@ -3327,7 +3327,12 @@ static fn login_last_line(string_address user, string_address line,
                                            : login_last.time_format ==
                                                      LOGIN_LAST_TIME_FULL
                                                  ? 53 : 55;
-                positive used = start_length + suffix;
+                //      util-linux writes a space and the length right-aligned in
+                //      eight columns: "(00:00)" is seven and sits at the
+                //      column, "(1+00:00)" and the longer day counts are
+                //      wider than the field and start a column before it.
+                positive used = start_length + suffix +
+                                (duration_length > 7 ? 1 : 0);
                 if (used < duration_at)
                         writer_fill_bulk(text_put, duration_at - used, ' ');
                 text_put(duration, duration_length);
@@ -3347,7 +3352,8 @@ static fn login_last_line(string_address user, string_address line,
         if (!login_last.no_host && login_last.host_last && host_tail)
         {
                 // The closing word sits in a twelve-wide column.
-                positive word = ended ? 1 + duration_length
+                positive word = ended ? 1 + duration_length -
+                                            (duration_length > 7 ? 1 : 0)
                                 : end_kind == LOGIN_LAST_END_STILL ? 7
                                 : end_kind == LOGIN_LAST_END_LOGGED ? 9
                                                                      : 11;

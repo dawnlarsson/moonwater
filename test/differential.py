@@ -13072,6 +13072,51 @@ def misc_last_normalize(channel, data):
     return re.sub(rb"( begins )(.+)$", recent, data)
 
 
+def misc_last_long_logins(farm):
+    """last writes the length of a login in a space and eight columns, right
+    aligned: (00:00) sits where it always did and (1+00:00), (10+01:00) and
+    every count of days, being wider than the field, start a column before it.
+    The ordinary fixture holds no login longer than a day, so these are
+    made here: logins of half an hour, a day, ten days and a hundred, one cut
+    short by a shutdown, and one still on."""
+    rows = (
+        (2, 0, "~", "reboot", "6.1.0", 1690000000, 0, 0, b"", "~~"),
+        (7, misc_DEAD + 1, "pts/0", "alice", "h1", 1690000600),
+        (8, misc_DEAD + 1, "pts/0", "", "", 1690000600 + 1800),
+        (7, misc_DEAD + 2, "pts/1", "bob", "h2", 1690003000),
+        (8, misc_DEAD + 2, "pts/1", "", "", 1690003000 + 90000),
+        (7, misc_DEAD + 3, "pts/2", "carol", "h3", 1690100000),
+        (8, misc_DEAD + 3, "pts/2", "", "", 1690100000 + 900000),
+        (7, misc_DEAD + 4, "pts/3", "dave", "h4", 1691000000),
+        (8, misc_DEAD + 4, "pts/3", "", "", 1691000000 + 8640000),
+        (7, misc_DEAD + 5, "tty1", "erin", "", 1699000000),
+        (1, ord("0") + ord("3") * 256, "~", "shutdown", "6.1.0", 1699200000, 0, 0, b"", "~~"),
+        (2, 0, "~", "reboot", "6.2.0", 1699200100, 0, 0, b"", "~~"),
+        (7, misc_DEAD + 6, "pts/4", "fay", "h6", 1699200200),
+        (8, misc_DEAD + 6, "pts/4", "", "", 1699200200 + 60),
+    )
+    data = b"".join(misc_utmp_record(*row) for row in rows)
+
+    def setup(root):
+        (root / "wtmp").write_bytes(data)
+
+    env = dict(os.environ, TZ="UTC0")
+    passed = total = 0
+    notes = []
+    for flags in ([], ["-F"], ["-w"], ["-R"], ["-a"], ["-i"], ["-x"], ["--time-format=full"]):
+        args = ["-f", "wtmp", *flags]
+        answers = files_pair(farm, "last", args, setup, env=env)
+        total += 1
+        if answers[0][:3] == answers[1][:3]:
+            passed += 1
+        else:
+            notes.append(f"last {' '.join(args)}: reference {answers[0][1]!r} ours {answers[1][1]!r}")
+    return passed, total, notes
+
+
+MISC_CHECKS = (misc_last_long_logins,)
+
+
 # ----------------------------------------------------------------------------
 #       Shell-wrapped ps: header overrides are invocation-local, and two ps
 #       runs through one multicall shell once spun for three days.
