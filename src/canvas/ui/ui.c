@@ -2263,6 +2263,9 @@ static fn ui_squish_press(struct ui_squish address_to q)
 
 static fn ui_squish_move(struct ui_squish address_to q, struct ui_squash pull)
 {
+        // Reduced motion: no squash, and so nothing to spring home.
+        if (ui_kit.motion)
+                memory_zero(&pull, sizeof(pull));
         q->pull = q->shown = pull;
         q->pulled = 1;
 }
@@ -2645,7 +2648,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         extent = ui_kit_tween(&c->extent);
         scale = ui_kit_tween(&c->scale);
         // --sw-squish: held while dragged, else the spring that let it go.
-        squish = c->moved ? c->bend : (ui_kit.busy |= ui_spring_at(&c->held_squish, ui_kit.now), c->held_squish.value[0]);
+        squish = c->moved ? (ui_kit.motion ? 0 : c->bend) : (ui_kit.busy |= ui_spring_at(&c->held_squish, ui_kit.now), c->held_squish.value[0]);
         dom = ui_stretch_at(&c->dom, ui_kit.now, &live);
         ui_kit.busy |= live;
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
@@ -2892,7 +2895,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 if (dt % 16666667)
                         k = ui_qmul(k, UI_ONE - ui_qmul(UI_Q2(30), ui_progress(dt % 16666667, 16666667)));
                 c->bend += ui_qmul(c->bend_target - c->bend, UI_ONE - k);
-                squish = c->bend > 3221225 ? c->bend : 0; // > 0.003
+                squish = c->bend > 3221225 && !ui_kit.motion ? c->bend : 0; // > 0.003
                 ui_kit.busy = 1;
         }
         else if (c->held_squish.live)
