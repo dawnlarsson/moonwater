@@ -87926,6 +87926,17 @@ static bipolar link_groups_save(link_groups address_to groups)
         memcpy(&wl_groups_file, groups, sizeof *groups);
         return 0;
 }
+//      What a greeting may become is the file's (link_group_held).
+static bipolar link_groups_read(link_groups address_to groups,
+                                positive address_to old)
+{
+        memset(groups, 0, sizeof *groups);
+        *old = 0;
+        if (wl_groups_unreadable)
+                return -EIO;
+        memcpy(groups, &wl_groups_file, sizeof *groups);
+        return 0;
+}
 '''
 
     parts = [
@@ -88429,6 +88440,10 @@ static void wl_step(bool server)
                                                                        WATERLINK_NAME_MAX)
                                                      : 0x1badc0deu;
                         wl_groups_file = link_nearby.groups;
+                        //      Left, or taken back, since the listener read
+                        //      the file: its copy still has the group.
+                        if (mode & 64)
+                                wl_groups_file.count = 0;
                 }
                 //      This place was greeted a moment ago, as an announcement of
                 //      it would have had this machine do.
@@ -88464,6 +88479,9 @@ static void wl_step(bool server)
                         wl_check(wl_file.count <= peers_before,
                                  "a code that is closed, run out or for another "
                                  "name let a machine in");
+                if (server && group && (mode & 64))
+                        wl_check(wl_file.count <= peers_before,
+                                 "a group the file no longer holds let a machine in");
                 //      A one-use code that took its machine is closed at once and
                 //      kept its half minute; one that stays is not touched.
                 if (server && group && (mode & 1) && !(mode & 2) &&
@@ -88984,6 +89002,11 @@ def waterlink_pre_seeds():
         "code_closes_and_runs_out.bin": b"\x02" + greet(32768, 1, 0x3200) +
         head(4) + (40000).to_bytes(2, "big") + b"\x01" + greet(32768, 5, 0x3300) +
         head(4) + (400).to_bytes(2, "big") + b"\x01",
+        #   A group left and a code taken back since the listener read the
+        #   file (mode 64): neither lets anybody in, and the group as the file
+        #   still holds it then does.
+        "groups_taken_back_since_read.bin": b"\x02" + greet(32768, 64, 0x3400) +
+        greet(32768, 65, 0x3500) + greet(32768, 0, 0x3600),
         "raw.bin": b"\x00" + head(0) + (64).to_bytes(2, "big") + bytes(range(64)),
         "flood_then_cookie.bin": b"\x00" + head(9) + bytes([40, 0]) + b"".join(
             (i + 1).to_bytes(2, "big") + bytes([i & 3]) + (0x100 + i).to_bytes(4, "big")

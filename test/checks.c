@@ -90173,6 +90173,21 @@ static fn wls_group(void)
         string_copy((string_address)link_nearby.name, "machine");
 }
 
+//      A group the greeted machine has, in memory and as the file: one that
+//      stays (flags and expect zero) or a one-use code. A greeting is kept
+//      by the group as the file holds it (link_group_held), so every check
+//      that pairs a member writes the file as well as the listener's copy.
+static fn wls_group_file(p32 flags, p64 expires, p32 expect)
+{
+        wls_group();
+        link_nearby.groups.record[0].flags = flags;
+        link_nearby.groups.record[0].expires = expires;
+        link_nearby.groups.record[0].expect = expect;
+        (void)wls_write(LINK_GROUPS_PATH,
+                        address_of link_nearby.groups.record[0],
+                        sizeof(struct link_group_record), 0600);
+}
+
 //      A greeting from one identity to a group, stamped seconds past now.
 static fn wls_greeting(struct waterlink_identity address_to from,
                        struct waterlink_group_keys address_to to,
@@ -90206,7 +90221,7 @@ static fn greetings(bipolar listener, p16 port)
         link_peers peers;
 
         link_self.me = wls_b;
-        wls_group();
+        wls_group_file(0, 0, 0);
         wls_drain(listener);
         memory_zero(address_of link_self.admission, sizeof link_self.admission);
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
@@ -90332,7 +90347,7 @@ static fn greetings(bipolar listener, p16 port)
                       peers.peer[0].port != port + 2);
 
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
-        wls_group();
+        wls_group_file(0, 0, 0);
         wls_drain(listener);
         entropy_down = true;
         wls_greeting(address_of wls_client, address_of wls_office, "machine-a",
@@ -90346,6 +90361,7 @@ static fn greetings(bipolar listener, p16 port)
                       !link_greeted_recent(wls_loopback, wls_office.mark, port,
                                            true, 1700001));
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
 
 /*
@@ -90754,19 +90770,6 @@ static fn mdns_names_one(void)
               entropy_draws - before == 1);
 }
 
-//      A group the greeted machine has, in memory and as the file: one that
-//      stays (flags and expect zero) or a one-use code.
-static fn wls_group_file(p32 flags, p64 expires, p32 expect)
-{
-        wls_group();
-        link_nearby.groups.record[0].flags = flags;
-        link_nearby.groups.record[0].expires = expires;
-        link_nearby.groups.record[0].expect = expect;
-        (void)wls_write(LINK_GROUPS_PATH,
-                        address_of link_nearby.groups.record[0],
-                        sizeof(struct link_group_record), 0600);
-}
-
 //      A greeting that arrives, from this machine's loopback: the peers file
 //      as it leaves it is the answer.
 static fn wls_greeted(struct waterlink_identity address_to from,
@@ -90948,6 +90951,104 @@ static fn pairing_codes(bipolar listener, p16 port)
         check("and what has not, is kept", groups.count == 1 &&
                                                link_nearby.groups.count == 1);
         link_nearby_close();
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
+}
+
+/*
+        What a greeting may make of its sender is the group as the groups
+        file holds it, under the lock each change to the file is made under,
+        and not as the listener last read it: the listener reads the file
+        again at most twice a second, and a command that changed it has
+        returned by then. Each row changes the file the way a command does
+        and greets before the listener has looked again (MW-2026-070).
+*/
+static fn group_revocations(bipolar listener, p16 port)
+{
+        struct link_group_record changed;
+        link_peers peers;
+        p8 back[WATERLINK_DATAGRAM + 16];
+
+        link_self.me = wls_b;
+
+        //      `link group leave office forget`: the member it paired is
+        //      removed, and greets again at once, as one being put out would.
+        wls_group_file(0, 0, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "machine-a", 30, port, 9000000);
+        wls_drain(listener);
+        check("a member of a group is kept", wls_peers_count() == 1);
+        (void)link_group_leave("office", true);
+        check("and is removed when the group is left with forget, while the "
+              "listener has not read the groups file since",
+              wls_peers_count() == 0 && link_nearby.groups.count == 1);
+        wls_greeted(address_of wls_client, "machine-a", 31, port, 9100000);
+        check("sec: a group left with its machines forgotten takes none of "
+              "them back before the listener reads the file again",
+              wls_peers_count() == 0 && wls_heard(listener, back) <= 0);
+
+        //      `link group office allow shell`, where it gave run and shell:
+        //      a member new since gets what the group gives now.
+        wls_group_file(0, 0, 0);
+        changed = link_nearby.groups.record[0];
+        changed.may = WATERLINK_MAY_SHELL;
+        link_nearby.groups.record[0].may = WATERLINK_MAY_RUN | WATERLINK_MAY_SHELL;
+        (void)wls_write(LINK_GROUPS_PATH, address_of changed, sizeof changed,
+                        0600);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "machine-a", 32, port, 9200000);
+        link_peers_load(address_of peers);
+        check("sec: a member new to a group narrowed since the listener read "
+              "it is given what the group gives now, not what it took back",
+              peers.count == 1 && peers.peer[0].may == WATERLINK_MAY_SHELL);
+
+        //      `link group office NEWSECRET`: the old secret opens nothing.
+        wls_group_file(0, 0, 0);
+        changed = link_nearby.groups.record[0];
+        waterlink_group_derive("office", (p8 address_to) "another-sesame", 14,
+                               1000, changed.key);
+        (void)wls_write(LINK_GROUPS_PATH, address_of changed, sizeof changed,
+                        0600);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_drain(listener);
+        wls_greeted(address_of wls_client, "machine-a", 33, port, 9300000);
+        check("sec: a group given another secret is opened by the old one no "
+              "more, before the listener reads the file again",
+              wls_peers_count() == 0 && wls_heard(listener, back) <= 0);
+
+        //      A code the waiting machine took back (link_pair_close).
+        wls_group_file(LINK_GROUP_ONCE, link_boot_seconds() + 300, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        link_pair_close(wls_office.mark);
+        wls_greeted(address_of wls_client, "machine-a", 34, port, 9400000);
+        check("sec: a code taken back lets nobody in, before the listener "
+              "reads the file again",
+              wls_peers_count() == 0 && wls_heard(listener, back) <= 0);
+
+        //      A groups file that is not root's private file is no groups,
+        //      as the listener's next look will say.
+        wls_group_file(0, 0, 0);
+        (void)system_call_4(syscall(fchmodat), (positive)(bipolar)AT_FDCWD,
+                            (positive)LINK_GROUPS_PATH, 0644, 0);
+        (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", 35, port, 9500000);
+        check("sec: a groups file that cannot be read pairs nobody",
+              wls_peers_count() == 0 && wls_heard(listener, back) <= 0);
+
+        wls_group_file(0, 0, 0);
+        link_self.stamps = 0;
+        wls_greeted(address_of wls_client, "machine-a", 36, port, 9600000);
+        check("and the group the file still holds pairs as before",
+              wls_peers_count() == 1 &&
+                      wls_heard(listener, back) == WATERLINK_DATAGRAM);
+        wls_drain(listener);
         (void)system_remove_at(AT_FDCWD, LINK_PEERS_PATH, 0);
         (void)system_remove_at(AT_FDCWD, LINK_GROUPS_PATH, 0);
 }
@@ -94442,6 +94543,7 @@ b32 main(void)
         mdns_names_one();
         mdns_hop_limit();
         pairing_codes(listener, port);
+        group_revocations(listener, port);
         nearby_reload();
         nearby_address();
         nearby_tick();

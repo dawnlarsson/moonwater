@@ -418,6 +418,41 @@ static fn link_groups_expire(void)
 }
 
 /*
+        The group a greeting opened, as the groups file holds it now: the
+        record with the key and the namespace of the listener's copy, read
+        under the lock every change to the file is made under. The copy is
+        read again at most twice a second (link_nearby_reload), so a group
+        left, narrowed or given another secret, or a code taken back, stays
+        in it for that long after the command that did it has returned; and
+        `link group leave NAME forget` forgets the members before then. Kept
+        by the copy, a member greeting in between was written back with the
+        grants the group no longer gives, for good. So the copy only says
+        which keys a greeting may open; what it may become is the file's.
+        False when the file cannot be read or no longer holds the group.
+*/
+static bool link_group_held(positive group,
+                            struct link_group_record address_to held)
+{
+        struct link_group_record address_to copy =
+                link_nearby.groups.record + group;
+        link_groups groups;
+        positive old;
+        bool found = false;
+
+        if (link_groups_read(address_of groups, address_of old) >= 0)
+                for (positive at = 0; at < groups.count && !found; at++)
+                        if (crypto_same(groups.record[at].key, copy->key, 32) &&
+                            string_equals((string_address)groups.record[at].namespace,
+                                          (string_address)copy->namespace))
+                        {
+                                address_to held = groups.record[at];
+                                found = true;
+                        }
+        crypto_forget(address_of groups, sizeof groups);
+        return found;
+}
+
+/*
         Keeping a member whose greeting opened: new, with the group's grants,
         or moved, when the record is the group's own. A record paired by hand
         or by another group is never replaced or widened. True when the
@@ -436,29 +471,36 @@ static bool link_pair_keep(positive group, p8 address_to key,
         struct waterlink_group_keys address_to keys = link_nearby.keys + group;
         link_peers peers;
         struct waterlink_peer address_to peer;
+        struct link_group_record held;
         bipolar lock = link_peers_lock();
         bool changed = false;
         bool new = false;
 
         struct link_group_record address_to record =
                 link_nearby.groups.record + group;
-        bool once = (record->flags & LINK_GROUP_ONCE) != 0;
-        bool open = !once ||
-                    (!(record->flags & LINK_GROUP_DONE) &&
-                     !link_group_spent(record, link_boot_seconds()) &&
-                     (!record->expect ||
-                      record->expect == link_name_check((string_address)offered,
-                                                        WATERLINK_NAME_MAX)));
+        bool once;
+        bool open;
 
         address_to accepted = false;
 
         //      A member is kept only under the lock: without it the greeting
-        //      is as if it had not come, and the next one is asked again.
-        if (lock < 0 || !link_peers_for_change(address_of peers))
+        //      is as if it had not come, and the next one is asked again. And
+        //      only as the group is in the file under that lock, not as the
+        //      listener last read it (link_group_held).
+        if (lock < 0 || !link_peers_for_change(address_of peers) ||
+            !link_group_held(group, address_of held))
         {
                 link_peers_unlock(lock);
                 return false;
         }
+        //      Closed here is closed, whether or not the file could be told.
+        once = (held.flags & LINK_GROUP_ONCE) != 0;
+        open = !once ||
+               (!((held.flags | record->flags) & LINK_GROUP_DONE) &&
+                !link_group_spent(address_of held, link_boot_seconds()) &&
+                (!held.expect ||
+                 held.expect == link_name_check((string_address)offered,
+                                                WATERLINK_NAME_MAX)));
         peer = link_peer_keyed(address_of peers, key);
         if (!peer && open && peers.count < LINK_PEERS_MAX &&
             !crypto_same(key, link_self.me.public, 32))
@@ -471,7 +513,7 @@ static bool link_pair_keep(positive group, p8 address_to key,
                 memory_zero(peer, sizeof(address_to peer));
                 memory_copy(peer->key, key, 32);
                 memory_copy(peer->name, name, WATERLINK_NAME_MAX);
-                peer->may = record->may;
+                peer->may = held.may;
                 peer->group = keys->mark;
                 new = changed = true;
         }
@@ -496,6 +538,7 @@ static bool link_pair_keep(positive group, p8 address_to key,
         }
         address_to accepted = peer != null;
         link_peers_unlock(lock);
+        crypto_forget(address_of held, sizeof held);
         link_self.state_dirty = true;
         if (once && peer && !(record->flags & LINK_GROUP_DONE))
                 link_group_close(group);
