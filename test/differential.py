@@ -65952,6 +65952,17 @@ static bipolar file_slurp(string_address path, p8 *into, positive capacity)
         into[length] = 0;
         return (bipolar)length;
 }
+/* dns_servers reads resolv.conf as a state file, through the library's
+   regular-file read: the fuzz file is a regular file. */
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+static bipolar file_slurp_regular_at(bipolar directory, string_address path,
+                                     p8 *into, positive capacity, positive flags)
+{
+        (void)directory, (void)flags;
+        return file_slurp(path, into, capacity);
+}
 """
 
 
@@ -83434,6 +83445,12 @@ static bipolar file_read_once_at(b32 directory, const void *path, address_any in
                 return -2;
         memcpy(into, air_avoid_file, air_avoid_size < room ? air_avoid_size : room);
         return (bipolar)(air_avoid_size < room ? air_avoid_size : room);
+}
+/* The state file as host.c reads it: the avoid list is the one state this
+   lift reads. */
+static bipolar host_read_state(string_address path, p8 *into, positive room)
+{
+        return file_read_once_at(AT_FDCWD, path, into, room);
 }
 static void host_state_ready(void) {}
 static bipolar host_write_file(const void *path, const p8 *bytes, positive length,
