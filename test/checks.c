@@ -114844,6 +114844,48 @@ static fn check_pointer(void)
         mouse_mode = 0;
         mouse_sgr = false;
         to_shell_length = 0;
+
+#ifdef UI_TARGET
+        /*
+                A finger on a terminal no program asked the pointer of: it starts no selection and sends nothing as it
+                lands, past the slop it drags the scrollback with it a line for each cell's height (down is back, what
+                is under the finger following it), let go moving it throws the view, and a tap is a click there.
+        */
+        {
+                struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y};
+                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+                unsigned int first, shown, total, before;
+                b32 quiet;
+
+                for (int line = 0; line < 3 * (int)ROWS; line++)
+                        term_bytes("scrollback\r\n", 12);
+                terminal_view_live();
+                terminal_extent(&before, &shown, &total);
+                terminal_receive(-1, &finger, &dirty);
+                terminal_receive(-1, &land, &dirty);
+                quiet = !to_shell_length;
+                for (int step = 1; step <= 4; step++)
+                {
+                        finger.b = y + step * (int)terminal.cell_h;
+                        terminal_receive(-1, &finger, &dirty);
+                }
+                terminal_extent(&first, &shown, &total);
+                check("pointer: a finger dragged four cells down the paper takes the scrollback four lines back, and sends nothing",
+                      quiet && !to_shell_length && first + 4 == before);
+                terminal_receive(-1, &lift, &dirty);
+                check("pointer: let go moving, the view is thrown", terminal.fling.flying);
+                ui_drag_stop(&terminal.fling);
+                terminal_view_live();
+                finger.b = y;
+                terminal_receive(-1, &finger, &dirty);
+                terminal_receive(-1, &land, &dirty);
+                terminal_receive(-1, &lift, &dirty);
+                check("pointer: a finger's tap is a click where it landed, the press and the release",
+                      to_shell_length == 0 && !terminal.finger && !terminal.finger_moved);
+                to_shell_length = 0;
+        }
+#endif
 }
 
 /*

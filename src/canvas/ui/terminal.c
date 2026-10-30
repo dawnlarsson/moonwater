@@ -168,6 +168,14 @@ static struct
         b32 pressed;
         int wheel_remainder;
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
+        /*
+                A finger on the paper (WINDOW_KEY_TOUCH) with no program that asked for the pointer: where it went down,
+                whether it went past the slop, and then the view it drags, line by line as its pixels make lines
+                (finger_left, what is under a line), thrown when it lifts moving.
+        */
+        b32 finger, finger_moved;
+        int finger_x, finger_y, finger_left;
+        struct ui_drag fling;
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
@@ -1745,6 +1753,98 @@ static void terminal_modes_read(b32 master, positive now)
 }
 
 /*
+        A finger's pixels as the view's lines: what is under a line is kept for the next move. Down is back in the
+        scrollback (what is under the finger follows it), as the wheel turned up is; on the alternate screen, where a
+        pager or an editor has no scrollback here, they are its arrows, as the wheel's are. Answers whether the pty still
+        takes what it is owed; false in moved when the view went nowhere (an end of the scrollback).
+*/
+static b32 terminal_finger_scroll(b32 master, int pixels, b32 address_to dirty, b32 address_to moved)
+{
+        long total = (long)terminal.finger_left + pixels;
+        int lines = terminal.cell_h ? (int)(total / (long)terminal.cell_h) : 0;
+
+        *moved = true;
+        terminal.finger_left = (int)(total - (long)lines * (long)terminal.cell_h);
+        lines = lines > (int)ROWS ? (int)ROWS : lines < -(int)ROWS ? -(int)ROWS : lines;
+        if (!lines)
+                return true;
+        if (alternate)
+        {
+                string_address arrow = lines > 0 ? (application_keys ? "\033OA" : "\033[A") : (application_keys ? "\033OB" : "\033[B");
+
+                for (int at = lines < 0 ? -lines : lines; at > 0; at--)
+                        emit_bytes((address_any)arrow, string_length(arrow));
+                return term_send(master);
+        }
+        *moved = terminal_view_scroll(lines);
+        if (*moved)
+                *dirty = true;
+        return true;
+}
+
+/*
+        A finger with no program that asked for the pointer: down, nothing yet (no selection starts under a finger); past
+        the slop it drags the view; up unmoved it is a click, the press and the release where it went down; up moving it
+        throws the view (terminal_tick steps it); taken back (WINDOW_KEY_CANCEL) it is nothing. Answers as
+        terminal_receive does; handled is false for what is not a finger's to take here.
+*/
+static b32 terminal_finger(b32 master, const struct window_event address_to event, b32 address_to dirty, b32 address_to handled)
+{
+        struct window_key key;
+        b32 moved, sent;
+
+        *handled = false;
+        if (!(event->flags & WINDOW_KEY_TOUCH) || mouse_mode || terminal.bar_grab >= 0)
+                return true;
+        if (event->type == WINDOW_EVENT_MOTION && terminal.finger)
+        {
+                long dx = (long)terminal.pointer_x - terminal.finger_x, dy = (long)terminal.pointer_y - terminal.finger_y;
+                long slop = (long)UI_SLOP * (terminal.ui.scale > 0 ? terminal.ui.scale : 1);
+
+                *handled = true;
+                if (!terminal.finger_moved && dx * dx + dy * dy >= slop * slop)
+                {
+                        terminal.finger_moved = true;
+                        ui_drag_start(&terminal.fling, terminal.finger_y, clock_monotonic_nanoseconds());
+                }
+                if (!terminal.finger_moved)
+                        return true;
+                return terminal_finger_scroll(master, ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()),
+                                              dirty, &moved);
+        }
+        if (event->type != WINDOW_EVENT_BUTTON || event->a != 0x110)
+                return true;
+        // The gutter is the bar's, for a finger as for the mouse.
+        if ((event->flags & WINDOW_KEY_DOWN) && terminal.bar_level && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
+                return true;
+        *handled = true;
+        if (event->flags & WINDOW_KEY_DOWN)
+        {
+                ui_drag_stop(&terminal.fling);
+                terminal.finger = true;
+                terminal.finger_moved = false;
+                terminal.finger_x = terminal.pointer_x;
+                terminal.finger_y = terminal.pointer_y;
+                terminal.finger_left = 0;
+                return true;
+        }
+        if (!terminal.finger)
+                return true;
+        terminal.finger = false;
+        if (terminal.finger_moved)
+        {
+                ui_drag_let_go(&terminal.fling, clock_monotonic_nanoseconds());
+                return true;
+        }
+        if (event->flags & WINDOW_KEY_CANCEL)
+                return true;
+        terminal_pointer_key(0, WINDOW_KEY_DOWN, &key);
+        sent = term_input(master, &key);
+        terminal_pointer_key(0, 0, &key);
+        return sent && term_input(master, &key);
+}
+
+/*
         One event from the compositor. Answers whether the pty will still take
         what the shell is owed; dirty is set when what is drawn has to be made
         again, whether or not the cells changed.
@@ -1752,6 +1852,22 @@ static void terminal_modes_read(b32 master, positive now)
 static b32 terminal_receive(b32 master, const struct window_event address_to event, b32 address_to dirty)
 {
         struct window_key key;
+
+        // A finger drags the view where the mouse would select; a program that asked for the pointer has it as a mouse.
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                terminal.pointer_x = event->a - (int)terminal.pad;
+                terminal.pointer_y = event->b - (int)terminal.pad_y;
+        }
+        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+        {
+                b32 handled, sent = terminal_finger(master, event, dirty, &handled);
+
+                if (handled)
+                        return sent;
+        }
+        if (event->type == WINDOW_EVENT_KEY || event->type == WINDOW_EVENT_WHEEL)
+                ui_drag_stop(&terminal.fling);
 
         switch (event->type)
         {
@@ -2316,6 +2432,20 @@ static long terminal_tick(long timeout, long address_to other)
 
         if (hold >= 0 && (timeout < 0 || hold < timeout))
                 timeout = hold;
+
+        // The view a finger threw goes on a frame at a time, slowing, until it is still or at an end of the scrollback.
+        if (terminal.fling.flying)
+        {
+                b32 moved = true;
+
+                if (!terminal_finger_scroll(terminal.master, ui_drag_step(&terminal.fling, clock_monotonic_nanoseconds()),
+                                            &terminal.dirty, &moved))
+                        terminal.gone = true;
+                if (!moved)
+                        ui_drag_stop(&terminal.fling);
+                if (terminal.fling.flying)
+                        timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;
+        }
 
         if (terminal.title_owed)
         {
