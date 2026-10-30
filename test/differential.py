@@ -73535,6 +73535,14 @@ NET_MUTATION_EQUIVALENT = {
         "A sixth digit is refused by digits > 4 as the fifth was.",
     ("net_ipv6_literal", "gap = gap < count ? gap : count;", "<", 1):
         "At gap == count both arms are the same value.",
+    ("tls_overlay_refuses", "for (positive i = 0; i < overlay->blocks && i < TLS_OVERLAY_BLOCKS; i++)", "<", 2):
+        "blocks is never above TLS_OVERLAY_BLOCKS (tls_overlay_entries refuses the sixty-fifth), so i < blocks already ends the loop before this one is asked.",
+    ("tls_overlay_anchor_read", "if (!zero || !name || !key || !byte_reader_end(text) ||", "||", 2):
+        "A name is taken before the key and the key takes all that is left: a reader that failed on the name has failed for the key as well, so !name and !key are true together.",
+    ("tls_overlay_anchor_read", "if (!zero || !name || !key || !byte_reader_end(text) ||", "||", 3):
+        "The key takes all that is left, so the reader is at its end unless it failed, and a failed reader gives no key: !key is true whenever !byte_reader_end is.",
+    ("tls_overlay_settle", "for (positive i = 0; overlay->blocks && i < array_count(tls_anchors); i++)", "<", 1):
+        "The refused bit of index array_count(tls_anchors) is one nobody asks: tls_anchor_refused is asked for the table's own indexes.",
     ("tls_host_match", "if (!name_length || name[0] != '*' || name_length < 3 || name[1] != '.')", "<", 1):
         "A wildcard of three bytes, \"*.x\", leaves one label beneath its star, and the next test refuses that (dot + 1 >= rest) as this one does.",
     ("tls_suffix_in", "for (positive at = 0; at < size && list[at];)", "<", 1):
