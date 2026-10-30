@@ -11130,20 +11130,38 @@ fi
 #       random between, and holds the screen and the buffer to a full draw
 #       of the grid after every frame. The fonts are the repository's own
 #       (fonts/, the four files the image ships): IBM Plex Mono and its bold
-#       draw the grid, and all four have to load.
+#       draw the grid, and all four have to load. The compositor's own rows
+#       ride in the same check, so it runs on all three machines, the foreign
+#       two under qemu-user at once beside the host's.
 group render
 render_font=fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf
 render_fonts="fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf fonts/inter/Inter-Bold.ttf"
-if [ -n "${TEST_RUNNER:-}" ]; then
-        :
-elif [ ! -f "$render_font" ]; then
+if [ ! -f "$render_font" ]; then
         note "terminal frames: NOT RUN, the repository's fonts are not here"
-elif ! freestanding_check terminal "$work/terminal-check"; then
-        lost 'terminal frames: the check did not build' ''
-elif "$work/terminal-check" "$render_font" $render_fonts > "$work/terminal-check.out" 2>&1; then
-        won
 else
-        lost 'terminal frames against a full draw' "$(grep 'FAIL\|first pixel' "$work/terminal-check.out" | head -3 | tr '\n' ' ')"
+        render_ran=
+        for target in x86_64 arm64 riscv64; do
+                target_tools "$target" || continue
+                if ! target_build freestanding_check terminal "$work/terminal-check.$target" "$target"; then
+                        lost "terminal frames ($target): the check did not build" ''
+                        continue
+                fi
+                { $target_runner "$work/terminal-check.$target" "$render_font" $render_fonts \
+                        > "$work/terminal-check.$target.out" 2>&1
+                  echo $? > "$work/terminal-check.$target.status"; } &
+                render_ran="$render_ran $target"
+        done
+        wait
+        for target in $render_ran; do
+                sed -n "s/^ *\(.*NOT RUN.*\)/$target: \1/p" "$work/terminal-check.$target.out" |
+                        while IFS= read -r render_line; do note "$render_line"; done
+                if [ "$(cat "$work/terminal-check.$target.status")" = 0 ]; then
+                        won
+                else
+                        lost "terminal frames ($target) against a full draw" \
+                                "$(grep 'FAIL\|first pixel\|checks,' "$work/terminal-check.$target.out" | head -3 | tr '\n' ' ')"
+                fi
+        done
 fi
 
 #       And the same emulator under libFuzzer with ASan/UBSan: what no grammar

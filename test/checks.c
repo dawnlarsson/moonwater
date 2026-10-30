@@ -120572,6 +120572,25 @@ static fn check_frames_refused(void)
         limit.maximum = was.maximum;
         system_call_4(syscall(prlimit64), 0, 9, (positive)&limit, 0);
 
+        //      qemu-user keeps RLIMIT_AS for itself: it takes the call and sets
+        //      nothing, and the statm it answers is its own. Read back, a
+        //      limit that is not the one set is said, and the refusal is not
+        //      tried against a limit nobody keeps.
+        {
+                struct { unsigned long current, maximum; } now = {0, 0};
+
+                system_call_4(syscall(prlimit64), 0, 9, 0, (positive)&now);
+                if (now.current != limit.current)
+                {
+                        system_call_4(syscall(prlimit64), 0, 9, (positive)&was, 0);
+                        string_format(log, "  frames: a frame whose pictures cannot be mapped NOT RUN -- the "
+                                           "address-space limit did not take (qemu-user keeps RLIMIT_AS for itself)\n");
+                        check("frames: and the next frame, with the address space back, is drawn",
+                              terminal_frames() && terminal_frame());
+                        return;
+                }
+        }
+
         // The old mapping goes, and the new one cannot be made.
         refused = !terminal_frames();
         cursor_hide();
