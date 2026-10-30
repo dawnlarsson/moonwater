@@ -116810,11 +116810,17 @@ static void check_compositor_hover(void)
 */
 static int wheel_pipe[2] = {-1, -1};
 
+/*
+        An event as the device writes one. A pipe made while its user holds more than pipe-user-pages-soft is two
+        pages, not sixteen, which a swipe of 150 notches does not fit in, and the events that did not fit were lost:
+        what does not fit is read by the compositor first, as a device's events are read while it reports more.
+*/
 static fn wheel_feed(unsigned short type, unsigned short code, int value)
 {
         struct compositor_input_event event = {0, 0, type, code, value};
 
-        system_write_once(wheel_pipe[1], &event, sizeof(event));
+        while (system_write_once(wheel_pipe[1], &event, sizeof(event)) == -COMPOSITOR_EAGAIN)
+                compositor_input_read(0);
 }
 
 // A notch as the kernel says one of a wheel that reports in 120ths: the notch, the 120ths, the end of the report.
