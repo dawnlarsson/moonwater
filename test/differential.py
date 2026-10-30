@@ -57878,8 +57878,8 @@ def harness_dns_tls(argv):
                 "ip addr add 10.0.0.1/32 dev lo && "
                 "mount -t tmpfs none /run && mkdir -p /run/moonwater && %s"
                 "mount --bind %s /etc/resolv.conf && "
-                "python3 %s %s %s 53 %s %s > /dev/null 2>&1 & S=$!; "
-                "sleep 1; %s %s; echo rc=$?; kill $S" % (
+                "{ python3 %s %s %s 53 %s %s > /dev/null 2>&1 & S=$!; "
+                "sleep 1; %s %s; echo rc=$?; kill $S; wait $S 2>/dev/null; }" % (
                     word, work / "resolv.conf", work / "server.py",
                     work / certificate, work / "leaf.key", tls_port, log,
                     work / shell / "host", name))
