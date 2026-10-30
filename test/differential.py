@@ -73934,7 +73934,11 @@ def harness_net_mutation(argv):
                         continue
                     for harness in harnesses:
                         words = harness.split()
-                        environment = dict(os.environ, MOONWATER_FUZZ_RUNS="20000",
+                        #   A mutant's harness fails on purpose: its rows
+                        #   are not the lane's, whose tally is net_mutation's.
+                        environment = {name: value for name, value in os.environ.items()
+                                       if name != "TEST_TALLY"}
+                        environment.update(MOONWATER_FUZZ_RUNS="20000",
                                            MOONWATER_FUZZ_SECONDS="3")
                         ran = subprocess.run([sys.executable, str(tree / "test/differential.py"),
                                               "--harness"] + words, cwd=tree, env=environment,
