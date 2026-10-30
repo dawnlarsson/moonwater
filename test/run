@@ -17696,6 +17696,12 @@ printf 'eio-refused-%s\n' $(( $? + 40 ))
 printf 'eio-said-%s\n' $(( $(grep -c "$eio is left without a partition table" /tmp/eio) * 7 ))
 printf 'eio-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${eio}p") + 30 ))
 printf 'eio-live-%s\n' $(( $(grep -c ' /root ' /proc/self/mounts) + 30 ))
+mv /bin/cp /tmp/cp.kept
+moonwater setup install $small yes > /tmp/gone 2>&1
+printf 'gone-refused-%s\n' $(( $? + 40 ))
+printf 'gone-said-%s\n' $(( $(grep -c 'is left without a partition table' /tmp/gone) * 7 ))
+printf 'gone-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${small}p") + 30 ))
+mv /tmp/cp.kept /bin/cp
 moonwater setup install $disk yes > /tmp/first 2>&1
 printf 'first-%s\n' $(( $? + 40 ))
 moonwater setup install $small yes > /tmp/second 2>&1
@@ -17712,10 +17718,6 @@ mount -t ext4 /dev/${disk}p2 /mnt
 rm -rf /mnt/home
 ln -s /etc /mnt/home
 umount /mnt
-moonwater setup live > /dev/null 2>&1
-moonwater setup use $disk > /tmp/plant 2>&1
-printf 'plant-refused-%s\n' $(( $? + 40 ))
-printf 'plant-home-%s\n' $(( $(grep -c ' /home ' /proc/self/mounts) + 30 ))
 mount -t vfat /dev/${disk}p1 /mnt
 f=/mnt/EFI/BOOT/BOOTX64.EFI
 pe=$(od -An -tu4 -j60 -N4 $f | tr -d ' ')
@@ -17736,12 +17738,6 @@ printf 'full-kept-%s\n' $(( $? + 30 ))
 printf 'leftover-%s\n' $(( $(ls /mnt/EFI/BOOT /mnt/EFI/moonwater | grep -c -i '\.new$') + 30 ))
 rm -f /mnt/fill
 umount /mnt
-rm -f /bin/cp
-moonwater setup live > /dev/null 2>&1
-moonwater setup install $small yes > /tmp/gone 2>&1
-printf 'gone-refused-%s\n' $(( $? + 40 ))
-printf 'gone-said-%s\n' $(( $(grep -c 'is left without a partition table' /tmp/gone) * 7 ))
-printf 'gone-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${small}p") + 30 ))
 poweroff
 COMMANDS
 
@@ -17764,7 +17760,8 @@ install_boot hostile $stick -drive if=none,id=small,format=raw,file="$work/small
         -device nvme,serial=moonwater5,drive=eio
 install_memory=""
 eio_table=$(sfdisk -d "$work/eio.img" 2> /dev/null | grep -c 'name=')
-rm -f "$work/disk.img" "$work/small.img" "$work/zoned.img" "$work/eio.img"
+mv "$work/disk.img" "$work/plant.img"
+rm -f "$work/small.img" "$work/zoned.img" "$work/eio.img"
 mv "$work/disk.keep" "$work/disk.img"
 says hostile 'its disks are found by their serials' 'htob-deman'
 says hostile 'six binds at once keep all six'     'lock-42'
@@ -17785,14 +17782,36 @@ says hostile 'a disk that fits is installed'       'first-40'
 says hostile 'a session that keeps a disk refuses a second' 'keeps-refused-41'
 says hostile 'and says which'                      'keeps-said-7'
 says hostile 'before the second is erased'         'keeps-parts-30'
-says hostile 'a data directory that is a link is not bound' 'plant-refused-41'
-says hostile 'and /home is not /etc'               'plant-home-30'
 says hostile 'an update says when it starts the settings over' 'damaged-7'
 says hostile 'and one that stops leaves nothing beside the images' 'leftover-30'
 says hostile 'a full partition keeps the loader it had'  'full-kept-30'
 says hostile 'a copy that cannot start is refused' 'gone-refused-41'
 says hostile 'and the disk says it has no install' 'gone-said-7'
 says hostile 'and has no partitions to be one'     'gone-parts-30'
+
+#       The data partition whose home the hostile boot made a link to /etc,
+#       started from alone, in a session of its own: since dba1a5dc a session
+#       that keeps a disk is not live again until it powers off (the hostile
+#       boot kept it, and its moonwater setup live was refused, so its use of
+#       the planted disk was 'already kept' and the two rows that asked were
+#       red on every run since 2026-10-26). Boot finds this build there and
+#       does not bind it, and use, asked again, refuses: /home is never /etc.
+cat > "$work/plant.commands" <<'COMMANDS'
+this line is eaten by the console
+moonwater setup use nvme0n1 > /tmp/plant 2>&1
+printf 'plant-refused-%s\n' $(( $? + 40 ))
+cat /tmp/plant
+printf 'plant-home-%s\n' $(( $(grep -c ' /home ' /proc/self/mounts) + 30 ))
+printf 'plant-etc-%s\n' $(( $(stat -c %i /home) == $(stat -c %i /etc) ? 1 : 0 ))
+poweroff
+COMMANDS
+install_disk=$work/plant.img
+install_boot plant
+install_disk=""
+rm -f "$work/plant.img"
+says plant 'a data directory that is a link is not bound' 'plant-refused-41'
+says plant 'and /home is not /etc'               'plant-home-30'
+says plant 'nor the /etc it names'               'plant-etc-0'
 
 cat > "$work/update.commands" <<'COMMANDS'
 this line is eaten by the console
