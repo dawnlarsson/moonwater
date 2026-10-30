@@ -8008,7 +8008,13 @@ static void ns_decimal(void)
         if (ns_below(3) == 0)
                 power = -(long long)ns_below((ns_u64)count + 1);
         else
-                power = (long long)ns_below(671) - 350 - (ns_below(2) ? count : 0);
+        {
+                //      One draw at a time: two in an expression are drawn in
+                //      whichever order the compiler picks, and gcc plain and
+                //      gcc with the undefined-behaviour checks picked two.
+                power = (long long)ns_below(671) - 350;
+                power -= ns_below(2) ? count : 0;
+        }
 
         ns_front();
         ns_render(power);
@@ -8026,13 +8032,19 @@ static void ns_window(void)
         if (pick == 0)
                 value = 9007199254740992ULL - 4 + ns_below(9);
         else if (pick == 1)
-                value = ns_next() >> (11 + ns_below(53));
+        {
+                value = ns_next();
+                value >>= 11 + ns_below(53);
+        }
         else if (pick == 2)
                 value = ns_below(1000000);
         else if (pick == 3)
                 value = 999999999999999ULL + ns_below(3);
         else
-                value = ns_next() >> ns_below(64);
+        {
+                value = ns_next();
+                value >>= ns_below(64);
+        }
 
         do
         {
@@ -8050,7 +8062,12 @@ static void ns_window(void)
                         ns_digit[ns_count++] = '0';
 
         ns_front();
-        ns_render((long long)ns_below(51) - 25 - (ns_below(2) ? ns_count : 0));
+        {
+                long long power = (long long)ns_below(51) - 25;
+
+                power -= ns_below(2) ? ns_count : 0;
+                ns_render(power);
+        }
         ns_back();
 }
 
