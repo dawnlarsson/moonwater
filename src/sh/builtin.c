@@ -14747,6 +14747,14 @@ static string_address read_field(positive address_to cursor, bool remainder)
 
 static fn trap_wait_restarting(bool restart);
 
+//      The name read could not bind, said the way a refused operand is.
+static COLD b32 read_name_bad(positive name)
+{
+        shell_name_refused("read", shell_argv[name], string_length(shell_argv[name]));
+
+        return 1;
+}
+
 COLD fn shell_read(writer write)
 {
         bool raw = false;
@@ -14878,6 +14886,7 @@ COLD fn shell_read(writer write)
         }
 
         names = index;
+        positive read_bad = positive_max;
 
         // A malformed operand is not a variable assignment and can be
         // rejected before input is touched. A readonly name is different:
@@ -14903,6 +14912,16 @@ COLD fn shell_read(writer write)
                         //      failure to Bash, which answers 1.
                         if (!shell_reference_valid(shell_argv[name], length))
                         {
+                                //      Bash reads the line and then binds the
+                                //      names in order, so those in front of the
+                                //      one that is no name keep their fields.
+                                if (shell_bash_compat && !array_name)
+                                {
+                                        if (read_bad == positive_max)
+                                                read_bad = name;
+                                        continue;
+                                }
+
                                 shell_name_refused("read", shell_argv[name],
                                                    length);
 
@@ -15182,6 +15201,9 @@ COLD fn shell_read(writer write)
         */
         if (exact)
         {
+                if (!array_name && names == read_bad)
+                        return shell_answer(read_name_bad(names));
+
                 if (!array_name && !(env_assign_name(shell_argv[names], read_line)
                     || shell_read_refused(shell_argv[names])))
                         return shell_answer(
@@ -15202,7 +15224,9 @@ COLD fn shell_read(writer write)
                 else
                         for (positive name = names + 1; name < shell_argc;
                              name++)
-                                if (!(env_assign_name(shell_argv[name], "")
+                                if (name == read_bad)
+                                        return shell_answer(read_name_bad(name));
+                                else if (!(env_assign_name(shell_argv[name], "")
                                     || shell_read_refused(shell_argv[name])))
                                         return shell_answer(
                                             (shell_bash_compat && env_readonly(shell_argv[name]) ? 1 : 2));
@@ -15249,8 +15273,12 @@ COLD fn shell_read(writer write)
         else
                 while (names < shell_argc)
                 {
-                        string_address field = read_field(address_of at,
-                                                           names + 1 == shell_argc);
+                        string_address field;
+
+                        if (names == read_bad)
+                                return shell_answer(read_name_bad(names));
+
+                        field = read_field(address_of at, names + 1 == shell_argc);
                         if (!(env_assign_name(shell_argv[names], field ? field : (string_address)"")
                             || shell_read_refused(shell_argv[names])))
                                 return shell_answer((shell_bash_compat && env_readonly(shell_argv[names]) ? 1 : 2));
