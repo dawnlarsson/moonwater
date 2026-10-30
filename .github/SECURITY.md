@@ -229,6 +229,19 @@ attacker gets its invariants here once there is a lane that proves them.
   snapshot that revocation did not reach, so a machine the operator had taken
   `run` from kept running commands as root. A machine is never called by a
   word `link` uses, the `port` verb included (MW-2026-041).
+- **A greeting pairs by the groups file as it is, not as the listener last
+  read it** (`link_group_held`, MW-2026-070). The listener keeps a copy of
+  `/root/link.groups` that it reads again at most twice a second, and that
+  copy only says which keys a greeting may open. What the greeting may become
+  -- whether the group is still joined under that secret, whether a code is
+  still open, the grants a new member is given -- is read from the file under
+  the peers lock, the lock every command that changes the file holds. Before
+  the fix a member greeting in the half second after `link group leave NAME
+  forget` was written back with the group's grants, for good, after the
+  command had said it removed the group's machines; the same window let a
+  narrowed group give a new member what it took back, an old secret open a
+  re-keyed group and a code that was taken back pair. What a command does to
+  the groups file now holds from the moment it returns.
 - **OUT-D1, boot takes an install without asking** only when it is the disk
   the session started from (the settings an image boots with and the image on
   the disk carry the same random medium), or the only disk with this build and

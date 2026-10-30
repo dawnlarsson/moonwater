@@ -777,6 +777,107 @@ directory for a link between the two; the write's parent is opened without
 following, so the swap can only send a write to a different name inside the
 tree it already owns.
 
+### MW-2026-070: a Waterlink member paired in the half second after its group was taken back
+
+| | |
+|---|---|
+| Status | Fixed on the worktree branch, 2026-10-30; awaiting cherry-pick to main |
+| Class | Use after revocation through a race (CWE-362): the listener acted on its cached copy of a group after the authoritative record was removed or changed, with nothing holding the change back until the copy was read again |
+| Attacker | (8) a machine that was paired through a group and is being put out of it, or anyone who holds the group's old secret or a code taken back |
+| Reachable | src/waterlink/nearby.c `link_pair_keep`, from `link_server_initiation` for every member's greeting |
+| Moonwater exposure window | 2026-09-23 15:17 +02:00 (`a4d6fb80`, group pairing) to 2026-10-30 12:55 +01:00 (`082c7023`): 36 days 22 hours 38 minutes |
+| Fixed by | `082c7023` |
+
+**How it was found.** The class review for CVE-2026-98432 (Linux IPv4 TCP:
+a connection request's IP options buffer handed to the accepted socket by
+pointer and freed while another CPU answering a retransmitted SYN still read
+it). This is not that bug: it is the class's general form in Moonwater's own
+code, an object one side frees while another side still acts on its own
+reference to it, with no grace period between them. No upstream timeline
+applies.
+
+**What happened.** The listener keeps a copy of `/root/link.groups` in
+`link_nearby` and reads the file again at most twice a second
+(`link_nearby_reload`). `link_pair_keep` decided from that copy whether the
+group a greeting opened was still open, and gave a new member the copy's
+grants. Every command that changes the groups file (`link group`, `link group
+leave`, `link pair` and its code taken back) does it under the peers lock and
+returns at once. So for up to half a second after a command returned, the
+listener paired by what the command had just taken away:
+
+- `link group leave NAME forget` removes the group, then removes every machine
+  it paired, and prints how many. A member greeting in the window (a member
+  being put out greets as fast as it likes; each greeting needs only a newer
+  stamp) was written back to `/root/link.peers` with the group's grants. The
+  record stays after the listener reads the file again, since nothing removes
+  a member of a group that is gone: `forget` silently did not forget.
+- `link group NAME SECRET allow GRANT...` that drops a grant (MW-2026-040)
+  takes it from the members, but a member new in the window was given the
+  copy's wider grants, for good.
+- `link group NAME NEWSECRET` (a secret that leaked, rotated) still let the
+  old secret pair a new member in the window.
+- A pairing code the waiting machine took back (`link_pair_close`, after
+  "stopped, and the code no longer works") still paired a machine in the
+  window.
+
+**Reproduced.** CHECK_waterlink_service drives the real command and listener
+functions: it pairs a member, runs `link_group_leave("office", true)`, and
+delivers the member's next greeting to `link_server_initiation` before the
+listener reads the file again; likewise a narrowed record, a re-keyed record,
+`link_pair_close` on a code and a groups file at 0644. On the parent nearby.c
+the member is back in the peers file and greeted back each time. A concurrent
+stress (scratch copy of the check, not committed) ran the command side in a
+forked process -- join, wait 0.7 s, `link_group_leave(..., true)`, wait 1.2 s
+past the listener's next look, count members left -- against this process
+running the real `link_nearby_reload` and greeting as the member as fast as it
+could, in its own user, mount and network namespace, built with
+`MW_UBSAN=1 MW_HARDEN=1` flags, 180 s each: the parent nearby.c kept a
+forgotten member after 95 of 95 cycles (344,377 greetings); the fix after 0 of
+95 (350,048 greetings), with no sanitizer trap in either.
+
+**The fix.** The copy now only says which keys a greeting may open.
+`link_group_held` reads the record with the copy's key and namespace from the
+groups file, under the peers lock `link_pair_keep` already holds, and the open
+check (code flags, expiry, expected name) and the new member's grants come
+from that record; `DONE` in either the file or the copy closes a code, since
+the copy is set first and the file write may fail. A group the file no longer
+holds, or a file that cannot be read (as the listener's next look would also
+treat it), pairs nobody and moves nobody. The cost is one read of a file of at
+most 1 KiB per greeting that reaches pairing, after its handshake.
+
+**Tests that fail without the fix.** `CHECK_waterlink_service`
+(`sh test/run waterlink`, the service half), `group_revocations`:
+- `sec: a group left with its machines forgotten takes none of them back
+  before the listener reads the file again`
+- `sec: a member new to a group narrowed since the listener read it is given
+  what the group gives now, not what it took back`
+- `sec: a group given another secret is opened by the old one no more, before
+  the listener reads the file again`
+- `sec: a code taken back lets nobody in, before the listener reads the file
+  again`
+- `sec: a groups file that cannot be read pairs nobody`
+
+Box run (`/home/dawn/handoff-red`, `/home/dawn/handoff-fix`, x86_64): parent
+nearby.c with the new checks 1000 checks, 5 failures (the five above); the fix
+1000 of 1000, and 1000 of 1000 again built with the `MW_UBSAN` + `MW_HARDEN`
+flags and with `MW_UBSAN` + `-ftrivial-auto-var-init=pattern`. The `greetings`
+check now writes its group to the file as the code and freshness checks did.
+
+`waterlink_pre_fuzz` (`python3 test/differential.py --harness
+waterlink_pre_fuzz`, in the waterlink lane): its lift reads the groups file
+through a `link_groups_read` stand-in over the driver's own copy, and a
+greeting's mode 64 takes the group out of that copy after the listener's was
+set. The invariant `a group the file no longer holds let a machine in` aborts
+the parent nearby.c on the new seed `groups_taken_back_since_read.bin`; with
+the fix, 21 seeds under libFuzzer ASan/UBSan are clean.
+
+**Still open.** The listener still greets other members from its copy for up
+to half a second after `link group leave` (`link_pair_begin`): that offers
+this machine to them, which they accept by their own groups, and gives them
+nothing here. A session already open when a member is forgotten ends within a
+second (`link_sessions_granted`), as for a peer removed by name. The mutation
+lane has not been run on `link_group_held`.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was
@@ -804,6 +905,7 @@ promise about later code.
 | Hostile server: redirect loops, huge or many headers, lengths past 2^64, slow drip | Bounded | 20 redirections, then exit 8. The head is capped at 16 KiB (`HTTP_HEAD_MAX`): a 64 MiB header line and 2 million headers were refused in under a second at 13 to 14 MB resident. `Content-Length: 99999999999999999999` and a chunk size of 2^64-1 are refused. A one-byte-per-half-second drip is held for as long as the read timeout resets, as GNU wget does |
 | Unsigned bootstrap downloads | Not exposed | Every bowl row is a compiled-in SHA-256 or a pinned OpenPGP key; a row that pins nothing is refused (`src/bowl.c`) |
 | SSH (Terrapin, regreSSHion) | Not applicable | No SSH implementation in the tree; OpenSSH inside a bowl is the distribution's package |
+| An object handed to a longer-lived owner by pointer and freed while another reader still holds it (CVE-2026-98432, Linux TCP request IP options, Oct 2026; reviewed 2026-10-30) | One exposure, MW-2026-070 | The network stack is single-threaded per process, so the class was read as: a callback or nested call freeing what its caller holds, a pointer kept across a buffer that moves, a cached copy acted on after its record changed, and lengths read twice. Waterlink sessions are unmapped only from the turn, never from a frame's sink, and apply reloads the link after every sink call; TLS lends spans only while nothing receives; the overlay refresh copies anchor keys and never runs mid-verification; the CRL cache's slots are not held across calls; netlink restarts restore plain-value state; DNS clamps a MSG_TRUNC length; every confined child's answer is read whole, then checked and used on the parent's own copy; the pool's ordered ring frees nothing before every worker has left. The group-pairing copy was the exposure |
 
 ## CVE-2026-98432 dynamic proof (deferred)
 
