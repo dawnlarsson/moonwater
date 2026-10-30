@@ -2415,12 +2415,17 @@ static PURE b32 expand_nounset_status(b32 indirect);
 //      set -u met an unset name. A command string that dies of it leaves 127,
 //      the same status the other unset-parameter path gives; only the two
 //      spellings differ.
+//      Set while a bare $1 to $9 is read: bash names it with its dollar
+//      ($2: unbound variable) and ${2} without one.
+static bool expand_bare_digit;
+
 static COLD fn expand_unbound(expand_reference reference, b32 indirect)
 {
         expand_where();
         string_format(writer_stderr_once,
-                      shell_bash_compat ? "%s: unbound variable\n"
-                                        : "%s: parameter not set\n",
+                      !shell_bash_compat ? "%s: parameter not set\n"
+                      : expand_bare_digit ? "$%s: unbound variable\n"
+                                          : "%s: unbound variable\n",
                       expand_reference_text(reference));
         expand_fatal_status(expand_nounset_status(indirect));
 }
@@ -9958,7 +9963,9 @@ static HOT string_address expand_simple(string_address step, bool quoted)
 
                 special[0] = seen;
                 special[1] = end;
+                expand_bare_digit = byte_is_digit(seen);
                 expand_push_parameter((expand_reference){.name = special}, quoted);
+                expand_bare_digit = false;
 
                 return step + 1;
         }

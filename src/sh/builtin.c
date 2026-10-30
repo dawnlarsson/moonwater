@@ -9368,11 +9368,13 @@ fn shell_shift(writer write)
                 {
                         if (shell_shopt_on(SHIFT_VERBOSE))
                         {
-                                shell_told(
-                                    "shift: %s: shift count out of range\n",
-                                    shell_argc > first
-                                        ? shell_argv[first]
-                                        : (string_address)"1");
+                                //      Without a count there is no word to
+                                //      name, and bash does not make one up.
+                                if (shell_argc > first)
+                                        shell_told("shift: %s: shift count out of range\n",
+                                                   shell_argv[first]);
+                                else
+                                        shell_told("shift: shift count out of range\n");
                         }
                         return shell_answer(1);
                 }
@@ -14249,7 +14251,16 @@ fn shell_printf(writer write)
 
         positive first = walk.index;
 
-        return_if(shell_argc <= first, shell_answer(2));
+        //      Nothing to print is a usage error both shells say so of:
+        //      bash with the line alone, dash after the script and line.
+        if (shell_argc <= first)
+        {
+                if (shell_bash_compat)
+                        return shell_usage_answered(
+                            2, "printf: usage: printf [-v var] format [arguments]\n");
+
+                return shell_refuse(2, "printf: usage: printf format [arg ...]\n");
+        }
 
         format = shell_argv[first];
         printf_argument = first + 1;
