@@ -2051,13 +2051,53 @@ static inline unsigned int ui_premultiplied(unsigned int argb, unsigned int cove
         return a << 24 | window_mix(0, argb & 0xffffffu, a + (a >> 7));
 }
 
+// Whether the row y is in the straight middle of a box (its radii as drawn, ry): every line of it is the one span.
+static inline b32 ui_box_straight(const struct ui_box address_to box, b32 ry, b32 y)
+{
+        b32 top = y * 256, bottom = top + 256;
+
+        return top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
+}
+
+static inline b32 ui_box_ry(const struct ui_box address_to box)
+{
+        b32 rx = box->rx, ry = box->ry;
+
+        ui_box_radii(box, &rx, &ry);
+        return ry;
+}
+
+/*
+        A span of a straight row, left to right (256ths, from pixel first), clamped to width pixels, as the line its
+        cover would make: the pixels it starts and ends in by their share, those between it wholly. Answers its first and
+        last pixel and their covers (UI_FULL a pixel wholly in it), or false when it covers none.
+*/
+static inline b32 ui_span_ends(b32 first, b32 width, b32 left, b32 right, b32 address_to p0, b32 address_to p1, unsigned int address_to c0,
+                               unsigned int address_to c1)
+{
+        left -= first * 256, right -= first * 256;
+        left = left < 0 ? 0 : left;
+        right = right > width * 256 ? width * 256 : right;
+        if (right <= left)
+                return false;
+        *p0 = left >> 8, *p1 = (right - 1) >> 8;
+        if (*p0 == *p1)
+                *c0 = *c1 = (unsigned int)(right - left) * UI_SUB;
+        else
+                *c0 = (unsigned int)(256 - (left & 255)) * UI_SUB, *c1 = (unsigned int)(right - *p1 * 256) * UI_SUB;
+        return true;
+}
+
 /*
         A box filled with a colour, cut to clip when there is one (a ripple to its
-        button): over the picture, in the rows the ui may write.
+        button): over the picture, in the rows the ui may write. A row in the box's
+        straight middle is its one span, laid on without the cover line: the same
+        pixels, without a pass over them for each.
 */
 static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip)
 {
-        b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8;
+        b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8, ry = ui_box_ry(box);
+        unsigned int whole = argb >> 24 == 255 ? argb | 0xff000000u : ui_premultiplied(argb, UI_FULL);
 
         if (!(argb >> 24))
                 return;
@@ -2079,6 +2119,27 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
 
                 if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
                         continue;
+                if (!clip && ui_box_straight(box, ry, y))
+                {
+                        b32 p0, p1;
+                        unsigned int c0, c1;
+
+                        if (!ui_span_ends(first, width, box->x0, box->x1, &p0, &p1, &c0, &c1))
+                                continue;
+                        row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
+                        for (b32 x = p0; x <= p1; x++)
+                        {
+                                unsigned int cover = x == p0 ? c0 : x == p1 ? c1 : UI_FULL;
+
+                                if (cover >= UI_FULL && argb >> 24 == 255)
+                                        row[x] = whole;
+                                else if (cover >= UI_FULL)
+                                        row[x] = ui_over(whole, row[x]);
+                                else if (cover)
+                                        row[x] = ui_over(ui_premultiplied(argb, cover), row[x]);
+                        }
+                        continue;
+                }
                 if (!ui_box_row(box, y, ui_kit_line, first, width))
                         continue;
                 if (clip && !ui_box_row(clip, y, ui_kit_clip, first, width))
@@ -2113,9 +2174,12 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
         struct ui_box inner = *box;
         b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8;
 
+        b32 ry, inner_ry;
+
         inner.x0 += thickness, inner.y0 += thickness, inner.x1 -= thickness, inner.y1 -= thickness;
         inner.rx = inner.rx > thickness ? inner.rx - thickness : 0;
         inner.ry = inner.ry > thickness ? inner.ry - thickness : 0;
+        ry = ui_box_ry(box), inner_ry = ui_box_ry(&inner);
         first = first < 0 ? 0 : first;
         last = last > ui->width ? ui->width : last;
         if (last - first > UI_KIT_LINE)
@@ -2127,6 +2191,31 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
 
                 if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
                         continue;
+                // A row straight in the box, past the inner box or straight in it too, its two bands apart: their spans alone.
+                if (ui_box_straight(box, ry, y))
+                {
+                        b32 above = (y + 1) * 256 <= inner.y0 || y * 256 >= inner.y1 || inner.x1 <= inner.x0;
+                        b32 spans[2][2] = {{box->x0, inner.x0}, {inner.x1, box->x1}};
+                        int count = above ? 1 : 2;
+
+                        if (above)
+                                spans[0][1] = box->x1;
+                        if (above || (ui_box_straight(&inner, inner_ry, y) && (inner.x0 - 1) >> 8 < inner.x1 >> 8))
+                        {
+                                row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
+                                for (int k = 0; k < count; k++)
+                                {
+                                        b32 p0, p1;
+                                        unsigned int c0, c1;
+
+                                        if (!ui_span_ends(first, width, spans[k][0], spans[k][1], &p0, &p1, &c0, &c1))
+                                                continue;
+                                        for (b32 x = p0; x <= p1; x++)
+                                                row[x] = ui_over(ui_premultiplied(argb, x == p0 ? c0 : x == p1 ? c1 : UI_FULL), row[x]);
+                                }
+                                continue;
+                        }
+                }
                 if (!ui_box_row(box, y, ui_kit_line, first, width))
                         continue;
                 ui_box_row(&inner, y, ui_kit_clip, first, width);
@@ -2190,6 +2279,13 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
         last = last > ui->width ? ui->width : last;
         if (last - first > UI_KIT_LINE)
                 last = first + UI_KIT_LINE;
+        // The horizontal blur is the same on every row: worked out once, into the clip line, and given back zeroed.
+        for (b32 x = 0; x < last - first; x++)
+        {
+                b32 cx = (first + x) * 256 + 128;
+
+                ui_kit_clip[x] = (unsigned short)(sigma > 0 ? ui_blurred(cx, s.x0, s.x1, sigma) : (cx >= s.x0 && cx < s.x1 ? 65535 : 0));
+        }
         for (b32 y = top; y < bottom && last > first; y++)
         {
                 unsigned int address_to row;
@@ -2199,14 +2295,14 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
                 if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
                         continue;
                 vertical = sigma > 0 ? ui_blurred(cy, s.y0, s.y1, sigma) : (cy >= s.y0 && cy < s.y1 ? 65535 : 0);
+                if (!vertical)
+                        continue;
                 // The box itself is not shadowed: its cover is taken out of the shadow's.
                 ui_box_row(box, y, ui_kit_line, first, width);
                 row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
                 for (b32 x = 0; x < width; x++)
                 {
-                        b32 cx = (first + x) * 256 + 128;
-                        unsigned int horizontal = sigma > 0 ? ui_blurred(cx, s.x0, s.x1, sigma) : (cx >= s.x0 && cx < s.x1 ? 65535 : 0);
-                        unsigned int cover = (unsigned int)(((p64)horizontal * vertical) >> 20); // to UI_FULL (4096)
+                        unsigned int cover = (unsigned int)(((p64)ui_kit_clip[x] * vertical) >> 20); // to UI_FULL (4096)
                         unsigned int inside = ui_kit_line[x];
 
                         ui_kit_line[x] = 0;
@@ -2215,6 +2311,7 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
                                 row[x] = ui_over(ui_premultiplied(argb, cover), row[x]);
                 }
         }
+        memory_zero(ui_kit_clip, (positive)(last > first ? last - first : 0) * sizeof(ui_kit_clip[0]));
 }
 
 /* ---- end of the kit's shapes ---- */
