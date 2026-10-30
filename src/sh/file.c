@@ -22827,18 +22827,33 @@ static fn chmod_tree(string_address path)
         file_facts facts;
         bool looked = file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts);
         bool here = looked && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
+        positive follow = O_NOFOLLOW;
 
         file_change_user = system_effective_user();
         file_change_descended = false;
         file_change_trusted = false;
         chmod_one(AT_FDCWD, path, path, looked ? address_of facts : null);
 
+        //      A link to a directory named on the command line is walked
+        //      unless -P said not to: the reference's walk starts from
+        //      FTS_COMFOLLOW, so chmod -R g+w link changes what link names
+        //      and everything in it, -h only keeping the link itself from
+        //      being changed. The links found under it are not followed.
+        if (looked && !here && (facts.mode & MODE_FORMAT) == MODE_LINK &&
+            chmod_selected.traverse != 'P' &&
+            file_look(AT_FDCWD, path, 0, address_of facts) &&
+            (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                here = true;
+                follow = 0;
+        }
+
         if (!here)
                 return;
 
         file_facts opened;
         bipolar handle = file_open_same_facts(AT_FDCWD, path, address_of facts,
-                                              FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+                                              FILE_READ | O_DIRECTORY | O_CLOEXEC | follow,
                                               address_of opened);
 
         if (handle < 0)
@@ -22912,9 +22927,10 @@ static b32 file_chmod()
         chmod_selected = (chmod_selection){};
 
         //      -H, -L and -P say which symbolic links a -R walk goes
-        //      through. This walk goes through none of them, which is what
-        //      -H (the default) and -P both ask for; -L is taken and does
-        //      not change the walk, and the ledger records that.
+        //      through. A link named on the command line is walked unless
+        //      -P says not to (-H is the default); the links found under it
+        //      are never followed, so -L is taken and walks as -H does, and
+        //      the ledger records that.
         //      The operands are collected wherever they stand, as getopt
         //      permutes them: chmod u+w -R dir is a recursive change.
         file_taking taking = {

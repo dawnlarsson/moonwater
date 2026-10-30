@@ -11988,6 +11988,42 @@ def files_parents_deep(farm):
     return (1 if ok else 0), 1, ([] if ok else [f"reference {answers[0][0]} ours {answers[1][0]}"])
 
 
+def files_chmod_link_operand(farm):
+    """chmod -R given a link to a directory: the reference starts its walk
+    from FTS_COMFOLLOW, so the default, -H, -L and -h walk the directory the
+    link names and change everything in it (-h only keeps the link itself from
+    being changed), and only -P leaves the link and what is under it alone.
+    The links found under it are told apart from the files and not changed.
+    Modes, statuses and what -v says are compared with the reference's."""
+    def setup(root):
+        (root / "real" / "inner").mkdir(parents=True)
+        (root / "real" / "f").write_text("f\n")
+        (root / "real" / "inner" / "g").write_text("g\n")
+        (root / "link").symlink_to("real")
+        (root / "real" / "up").symlink_to("f")
+
+    passed = total = 0
+    notes = []
+    for flags in ([], ["-H"], ["-P"], ["-h"], ["-L"]):
+        for mode in ("u+x", "o-r"):
+            args = ["-R", "-v", *flags, mode, "link"]
+            answers = files_pair(farm, "chmod", args, setup, collect=files_tree_modes)
+            total += 1
+            #       -L also follows the links under the walk, which this does
+            #       not, so it is held to the walk of the directory it names.
+            if "-L" in flags:
+                theirs = [row for row in answers[0][1] if "up" not in row]
+                ours = [row for row in answers[1][1] if "up" not in row]
+                same = answers[0][0] == answers[1][0] and answers[0][3] == answers[1][3] and theirs == ours
+            else:
+                same = answers[0] == answers[1]
+            if same:
+                passed += 1
+            else:
+                notes.append(f"chmod {' '.join(args)}: reference {answers[0][0]} {answers[0][1]} {answers[0][3]} ours {answers[1][0]} {answers[1][1]} {answers[1][3]}")
+    return passed, total, notes
+
+
 def files_write_error_stdout(farm):
     """A write error on standard output: the reference says what failed and
     exits 1. Each tool here writes to /dev/full and must say so on standard
@@ -12225,7 +12261,7 @@ FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, fi
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap, files_kill_bash_word, files_tar_short_archive, files_tar_utf8_names, files_find_write_error, files_ls_address_cap,
                 files_floor_address_cap, files_daystart_zones, files_statfs_names,
-                files_deep_walks, files_parents_deep, files_write_error_stdout,
+                files_deep_walks, files_parents_deep, files_chmod_link_operand, files_write_error_stdout,
                 files_exec_refusals, files_regex_switch,
                 files_codec_operands, files_mode_words, files_chmod_unreadable_report,
                 files_whereis_directories_option, files_du_long_name_list)
