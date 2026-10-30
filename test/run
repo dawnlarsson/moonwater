@@ -15059,12 +15059,21 @@ fi
 #       the sysctls, so it reads the kernel's own; the locked tier has no
 #       io_uring system call, so there is no leaf to read and the field is
 #       empty.
+#
+#       And what the memory and processor regions put on the command line,
+#       as the kernel took it: init: memory zeroed when it is handed out and
+#       when it is given back (the boot's "mem auto-init" line); shuf: the
+#       page allocator's shuffle, a parameter only a kernel built with it
+#       has (empty without); smt: whether the second thread of a core runs,
+#       which the machine below has (two threads on one core) so that the
+#       answer is the tier's and not the topology's. The locked tier also
+#       asks for page table isolation whatever the processor says.
 case $tier in
-reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 ;;
-default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 ;;
-workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 ;;
-hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 ;;
-locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 ;;
+reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on ;;
+default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on ;;
+workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on ;;
+hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on ;;
+locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff ;;
 esac
 
 work=$(mktemp -d)
@@ -15085,12 +15094,16 @@ printf 'lock-%s-end\n' "$(has 'Kernel is locked down')" | tr a-z A-Z
 printf 'wx-%s-end\n' "$(has 'Checked W+X mappings: passed')" | tr a-z A-Z
 printf 'iommu-%s-end\n' "$(has 'strict mode (set via kernel command line)')" | tr a-z A-Z
 printf 'dev-%s-%s-end\n' "$(stat -c %a /dev/spark)" "$(stat -c %a /dev/kmsg)" | tr a-z A-Z
+printf 'init-%s-%s-end\n' "$(has 'heap alloc:on')" "$(has 'heap free:on')" | tr a-z A-Z
+printf 'shuf-%s-end\n' "$(cat /sys/module/page_alloc/parameters/shuffle 2> /dev/null)" | tr a-z A-Z
+printf 'smt-%s-end\n' "$(cat /sys/devices/system/cpu/smt/control 2> /dev/null)" | tr a-z A-Z
+printf 'pti-%s-end\n' "$(has 'page tables isolation: enabled')" | tr a-z A-Z
 poweroff
 COMMANDS
 
 set -- -cpu Nehalem
 [ -w /dev/kvm ] && set -- -enable-kvm -cpu host
-timeout 300 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
+timeout 300 qemu-system-x86_64 -m 2G -smp 2,sockets=1,cores=1,threads=2 "$@" -kernel "$image" \
         -no-reboot -display none -device VGA,xres=1600,yres=1200 -serial stdio -nic none \
         -append "console=ttyS0 drm_client_lib.active= moonwater.desktop=none" \
         < "$work/commands" > "$work/transcript" 2>&1 || true
@@ -15112,6 +15125,10 @@ says transcript "$tier: lockdown"                  "$(rv "lock-$want_lock-end")"
 says transcript "$tier: W+X check"                 "$(rv "wx-$want_wx-end")"
 says transcript "$tier: strict IOMMU"              "$(rv "iommu-$want_iommu-end")"
 says transcript "$tier: /dev/spark and /dev/kmsg modes" "$(rv "dev-666-644-end")"
+says transcript "$tier: memory zeroed on alloc and free" "$(rv "init-$want_init-end")"
+says transcript "$tier: the page allocator's shuffle" "$(rv "shuf-$want_shuf-end")"
+says transcript "$tier: the second thread of a core" "$(rv "smt-$want_smt-end")"
+[ "$tier" != locked ] || says transcript "$tier: page table isolation on any processor" "$(rv "pti-1-end")"
 never transcript "$tier: no kernel panic" 'Kernel panic'
 never transcript "$tier: nothing warned" 'cut here'
 
