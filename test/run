@@ -13639,7 +13639,11 @@ if switch_header "$work/switch-locked.config" "$work/switch-locked.h" &&
                 "$(switch_status "$switch_bin" 'f() { return 7; }; trap : EXIT; f; exit $?')"
         if build_tool surface "$work/switch-locked.config" \
                 > "$work/switch-locked.surface" 2>&1; then
-                same 'linked in locked' 'bin/cat bin/ls cat init ls moonwater term' \
+                #       init and moonwater, which have no switch: the kernel
+                #       and init run them by path (build_tool_fixed). term was
+                #       the third until its applet left the shell (61d8f9e6,
+                #       ee6dd6ca); it is asked for here so that it stays gone.
+                same 'linked in locked' 'bin/cat bin/ls cat init ls moonwater' \
                         "$(grep -x -e cat -e bin/cat -e ls -e bin/ls -e init \
                                 -e term -e moonwater "$work/switch-locked.surface" |
                                 sort | tr '\n' ' ' | sed 's/ $//')"
@@ -13650,7 +13654,7 @@ if switch_header "$work/switch-locked.config" "$work/switch-locked.h" &&
                 same 'links in locked' "$(grep -c '^CONFIG_MOONWATER_TOOL_.*=y$' \
                                 kernel/profile/sec_locked)" \
                         "$(grep -c -v / "$work/switch-locked.surface" |
-                                awk '{ print $1 - 3 }')"
+                                awk '{ print $1 - 2 }')"
         else
                 lost 'locked surface' "$(head -3 "$work/switch-locked.surface")"
         fi

@@ -33,8 +33,8 @@
 #                      pushd and popd, alias, help, enable, builtin, source,
 #                      declare, let, mapfile, shopt
 #
-# /init, /term and /moonwater stay whatever this says: the kernel and init
-# run them by path. POSIX's special builtins with cd, true and false have no
+# /init and /moonwater stay whatever this says: the kernel and init run
+# them by path. POSIX's special builtins with cd, true and false have no
 # switch either; the shell is not a shell without them.
 #
 
