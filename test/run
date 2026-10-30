@@ -14557,7 +14557,12 @@ counted
 #           tar xzf hostapd-2.11.tar.gz && cd hostapd-2.11/hostapd
 #           cp defconfig .config
 #           printf 'CONFIG_LIBNL32=y\nCONFIG_TESTING_OPTIONS=y\nCONFIG_DEBUG_FILE=y\n' >> .config
+#           printf 'CONFIG_SAE=y\nCONFIG_IEEE80211R=y\n' >> .config
 #           make -j8    # then MOONWATER_HOSTAPD=$PWD/hostapd
+#
+#       The last line is not optional: defconfig leaves SAE and 802.11r out,
+#       and a hostapd without them cannot serve the sae family's WPA3 or the
+#       class family's FT-PSK, so both fail (14 of 16).
 #
 #       MOONWATER_WIFI_TRANSCRIPT keeps the guest's transcript.
 #
