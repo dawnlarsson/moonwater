@@ -112543,7 +112543,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
 
                 snap_load(stem, 4, turned);
-                font_snap(&engine, &face, size, snap_standard(1229), 0, null);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
                 bool snapped = true;
                 for (p32 i = 0; i < 4; i++)
                         snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
@@ -112564,7 +112564,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(1485), 0, null);
+                font_snap(&engine, &face, size, snap_standard(1485), 0, null, null, 0);
                 check("snap: a 1.45 px stem is the whole pixel nearest its centre",
                       engine.points[0].x == 2048 && engine.points[2].x == 3072);
         }
@@ -112576,7 +112576,7 @@ static fn check_snap()
                                        2560, 9216, 2560, 1024, 4000, 1024, 4000, 0};
 
                 snap_load(bracket, 8, false);
-                font_snap(&engine, &face, size, snap_standard(1229), 0, null);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
                 check("snap: a bracket's stem snaps and its arms' ends stay",
                       engine.points[0].x == 1024 && engine.points[4].x == 2048 && engine.points[2].x == 4000 &&
                           engine.points[7].x == 4000);
@@ -112594,7 +112594,7 @@ static fn check_snap()
                 engine.contour[1].last = 7;
                 for (p32 i = 0; i < 8; i++)
                         engine.points[i] = (font_point){two[2 * i], two[2 * i + 1], 1};
-                font_snap(&engine, &face, size, snap_standard(1229), 0, null);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
                 check("snap: a counter half a pixel wide is not shut",
                       engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
                           engine.points[0].x < engine.points[2].x);
@@ -112606,14 +112606,14 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2150, 10240, 2150, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(819), 0, null);
+                font_snap(&engine, &face, size, snap_standard(819), 0, null, null, 0);
                 check("snap: a 0.8 px stem is a whole pixel", engine.points[0].x == 1024 && engine.points[2].x == 2048);
         }
         {
                 const b32 stem[] = {1331, 0, 1331, 10240, 1945, 10240, 1945, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(614), 0, null);
+                font_snap(&engine, &face, size, snap_standard(614), 0, null, null, 0);
                 check("snap: a 0.6 px stem keeps its width with an edge on a pixel",
                       engine.points[0].x == 1434 && engine.points[2].x == 2048);
         }
@@ -112910,10 +112910,10 @@ static fn check_invariants(void)
         //      Flat edges off the grid, counters lost, glyphs out of their cell: a face's dark cells, light
         //      cells and drawn text.
         static const p32 ceiling[4][3][3] = {
-            {{116, 26, 11}, {78, 22, 4}, {76, 24, 0}},
-            {{155, 28, 0}, {167, 25, 0}, {158, 28, 0}},
+            {{116, 24, 11}, {78, 21, 4}, {76, 24, 0}},
+            {{158, 29, 0}, {172, 23, 0}, {158, 26, 0}},
             {{82, 10, 0}, {78, 14, 0}, {89, 13, 0}},
-            {{126, 27, 0}, {107, 16, 0}, {111, 17, 0}},
+            {{126, 27, 0}, {109, 16, 0}, {112, 17, 0}},
         };
         static const string_address paths[3] = {"dark cells", "light cells", "drawn text"};
         static p8 file[1 << 20];
@@ -112995,7 +112995,15 @@ static fn check_invariants(void)
                      column on the side the pen's eighth rounded it to;
           umlauts    the two dots of a diaeresis are two runs of columns at
                      half ink or more, not one: rounded each about its own
-                     middle, they met in a bar.
+                     middle, they met in a bar;
+          the zero   Plex Mono's dot in its zero is whole pixels, in the middle
+                     of the counter across with at least a pixel of air on
+                     every side, or not drawn, and 0 is no more than a pixel
+                     wider than O, whose outline it shares (the pixel a dot
+                     may need, at 8 and 10 px bold), and in its cell: the dot
+                     was snapped as a stem, a bar across the counter at 10 px,
+                     and the zero two pixels wider than O there and at 18 and
+                     25 px, the fat oval it was taken for.
 */
 static font_engine dots_engine;
 static p8 dots_bitmap[256 * 256];
@@ -113037,13 +113045,65 @@ static b64 dots_middle(const font_bitmap address_to box, b32 from, b32 to)
         return mass ? moment * 256 / mass : -1;
 }
 
+//      The box of contour c of the last glyph shaped.
+static fn dots_contour(p32 c, b64 address_to box)
+{
+        p32 first = c ? dots_engine.contour[c - 1].last + 1u : 0;
+
+        box[0] = box[1] = (b64)1 << 62, box[2] = box[3] = -((b64)1 << 62);
+        for (p32 i = first; i <= dots_engine.contour[c].last; i++)
+        {
+                box[0] = dots_engine.points[i].x < box[0] ? dots_engine.points[i].x : box[0];
+                box[1] = dots_engine.points[i].y < box[1] ? dots_engine.points[i].y : box[1];
+                box[2] = dots_engine.points[i].x > box[2] ? dots_engine.points[i].x : box[2];
+                box[3] = dots_engine.points[i].y > box[3] ? dots_engine.points[i].y : box[3];
+        }
+}
+
+//      Whether the dot of the zero just shaped sits in its counter as the engine sets it: the smallest contour, whole
+//      pixels, a pixel or more of air across either side alike and up and down; or drawn as nothing.
+static bool dots_zero_dot(void)
+{
+        p32 dot = 0, counter = dots_engine.contour_count;
+        b64 box[4], best = (b64)1 << 62, room[4];
+
+        for (p32 c = 0; c < dots_engine.contour_count; c++)
+        {
+                dots_contour(c, box);
+                if ((box[2] - box[0]) * (box[3] - box[1]) < best)
+                        best = (box[2] - box[0]) * (box[3] - box[1]), dot = c;
+        }
+        dots_contour(dot, box);
+        if (box[2] == box[0] || box[3] == box[1])
+                return true;
+        best = (b64)1 << 62;
+        for (p32 c = 0; c < dots_engine.contour_count; c++)
+        {
+                dots_contour(c, room);
+                if (c != dot && room[0] <= box[0] && room[2] >= box[2] && room[1] <= box[1] && room[3] >= box[3] &&
+                    (room[2] - room[0]) * (room[3] - room[1]) < best)
+                        best = (room[2] - room[0]) * (room[3] - room[1]), counter = c;
+        }
+        if (counter == dots_engine.contour_count)
+                return false;
+        dots_contour(counter, room);
+        b64 left = (room[0] + FONT_ONE - 1) & ~(b64)(FONT_ONE - 1), right = room[2] & ~(b64)(FONT_ONE - 1);
+        b64 bottom = (room[1] + FONT_ONE - 1) & ~(b64)(FONT_ONE - 1), top = room[3] & ~(b64)(FONT_ONE - 1);
+        bool whole = true;
+
+        for (p32 k = 0; k < 4; k++)
+                whole = whole && font_on_grid(box[k]);
+        return whole && box[0] - left == right - box[2] && box[0] - left >= FONT_ONE && box[1] - bottom >= FONT_ONE &&
+               top - box[3] >= FONT_ONE;
+}
+
 static fn check_dots(void)
 {
         static const string_address faces[4] = {"fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf",
                                                  "fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf",
                                                  "fonts/inter/Inter-Regular.ttf", "fonts/inter/Inter-Bold.ttf"};
         static const p32 umlauts[] = {0xe4, 0xf6, 0xfc, 0xeb, 0xef, 0xff, 0xc4, 0xd6, 0xdc};
-        positive stems = 0, off = 0, pairs = 0, fused = 0;
+        positive stems = 0, off = 0, pairs = 0, fused = 0, zeros = 0, loose = 0, wider = 0;
 
         font_start(&dots_engine, null, 0, 0);
         for (p32 f = 0; f < 4; f++)
@@ -113103,14 +113163,33 @@ static fn check_dots(void)
                                         pairs++;
                                         fused += runs < 2;
                                 }
+
+                                //      Plex Mono's zero is dotted, and shares O's outline.
+                                if (f < 2 && way >= 16)
+                                {
+                                        b32 eighth = font_eighths(((grid.cell_width << 16) -
+                                                                   font_advance(&face, font_glyph(&face, '0'), size)) / 2);
+                                        font_bitmap round;
+
+                                        if (!dots_draw(&face, 'O', size, (p32)eighth & 7, style, &round) ||
+                                            !dots_draw(&face, '0', size, (p32)eighth & 7, style, &box))
+                                                continue;
+                                        zeros++;
+                                        loose += !dots_zero_dot();
+                                        wider += box.width > round.width + 1 || (eighth >> 3) + box.left < 0 ||
+                                                 (eighth >> 3) + box.left + box.width > grid.cell_width;
+                                }
                         }
                 }
         }
-        if (off || fused)
-                string_format(log, "  dots: %p of %p i and j off their stem or on it, %p of %p umlauts one blot\n", off, stems,
-                              fused, pairs);
+        if (off || fused || loose || wider)
+                string_format(log, "  dots: %p of %p i and j off their stem or on it, %p of %p umlauts one blot, %p of %p "
+                                   "zeros with their dot off the middle of the counter, %p wider than O by more than a pixel or out of the cell\n",
+                              off, stems, fused, pairs, loose, zeros, wider);
         check("dots: the dot of i and j is over the middle of its stem and clear of it, at every eighth and in cells", stems && !off);
         check("dots: the two dots of an umlaut stay two", pairs && !fused);
+        check("dots: the dot of a dotted zero is whole and in the middle of its counter, with air round it", zeros && !loose);
+        check("dots: a dotted zero is no more than a pixel wider than O, and in its cell", zeros && !wider);
 }
 
 /*
@@ -114145,9 +114224,10 @@ static p64 line_hash(p64 hash, const p32 address_to pixels, positive count)
         Upright text is the bytes it was before text could be turned: every
         line above, hashed, against the hash the engine made then, the same
         on all three machines; made again when dots were set on the
-        stems under them (i, j, the umlauts of the lines, the colon).
+        stems under them, and again when a counter between two stems on a tie
+        was held to within three quarters of a pixel of the font's.
 */
-#define LINE_UPRIGHT 8196395136233378904ull
+#define LINE_UPRIGHT 3148764226013648621ull
 
 static fn check_upright(void)
 {
