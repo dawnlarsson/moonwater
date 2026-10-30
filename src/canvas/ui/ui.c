@@ -701,6 +701,163 @@ static int ui_px(const struct ui address_to ui, int logical)
         return logical * ui->scale;
 }
 
+/*
+        A finger, and a press. A finger on a touch screen (WINDOW_KEY_TOUCH on what the compositor sends) is wider than
+        a pointer and shakes as it lands, so what it can press is at least UI_TARGET logical pixels each way however
+        small it is drawn, the drawn shape in the middle of that (ui_hit); a press held moves nothing until it is
+        UI_SLOP from where it went down, and past that it is a drag (the list follows the finger, ui_drag) and no
+        click; and a press the compositor takes back (WINDOW_KEY_CANCEL: a second finger, or one held for the right
+        button) is no click either. What is under a press is shown pressed the moment it goes down, not when it comes
+        up, for a mouse's press as for a finger's; the app numbers what can be pressed as it likes (a row, a button):
+
+            ui_press_begin(press, x, y, target, touch)  a button or a finger went down on target (-1 for nothing)
+            ui_press_move(ui, press, x, y)              true once the press is a drag: target is pressed no more
+            ui_press_end(press, cancelled)              what was clicked as the press comes up, or -1
+            ui_pressed(press, target)                   whether target is shown pressed now
+            ui_press_fill(ui, x, y, width, height)      how pressed looks: a faint fill of the ink, over what is drawn
+*/
+#define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
+#define UI_SLOP 8    // how far a press moves before it is a drag, as the compositor's finger (COMPOSITOR_TOUCH_SLOP)
+
+struct ui_press
+{
+        int x, y, target;        // where it went down and on what (-1 nothing)
+        b32 down, touch, dragged;
+};
+
+static fn ui_press_begin(struct ui_press address_to press, int x, int y, int target, b32 touch)
+{
+        press->x = x, press->y = y, press->target = target;
+        press->down = true, press->touch = touch, press->dragged = false;
+}
+
+static b32 ui_press_move(const struct ui address_to ui, struct ui_press address_to press, int x, int y)
+{
+        long dx = (long)x - press->x, dy = (long)y - press->y, slop = UI_SLOP * (long)ui->scale;
+
+        if (press->down && !press->dragged && dx * dx + dy * dy >= slop * slop)
+                press->dragged = true;
+        return press->down && press->dragged;
+}
+
+static int ui_press_end(struct ui_press address_to press, b32 cancelled)
+{
+        int clicked = press->down && !press->dragged && !cancelled ? press->target : -1;
+
+        press->down = false;
+        press->target = -1;
+        return clicked;
+}
+
+static b32 ui_pressed(const struct ui_press address_to press, int target)
+{
+        return press->down && !press->dragged && target >= 0 && press->target == target;
+}
+
+static fn ui_press_fill(struct ui address_to ui, int x, int y, int width, int height)
+{
+        ui_round(ui, x, y, width, height, (UI_RADIUS - 2) * ui->scale, ui_tone(ui->ink, 40));
+}
+
+// Whether px, py hits a shape x, y, width by height: a finger's reach is the shape grown to UI_TARGET each way where it is smaller.
+static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int x, int y, int width, int height)
+{
+        int least = touch ? UI_TARGET * ui->scale : 0;
+
+        if (width < least)
+                x -= (least - width) / 2, width = least;
+        if (height < least)
+                y -= (least - height) / 2, height = least;
+        return px >= x && px < x + width && py >= y && py < y + height;
+}
+
+/*
+        A list dragged by a finger follows it, and let go while moving it goes on, slowing as a thing thrown does,
+        until it stops. Speeds are pixels a second, times are the monotonic clock's nanoseconds, all whole numbers.
+
+            ui_drag_start(drag, at, now)   the finger took the list at at (a y, or an x)
+            ui_drag_follow(drag, at, now)  the finger is at at: how far the list moves, the finger's move since the last
+            ui_drag_let_go(drag, now)      the finger lifted: whether the list is thrown (ui_drag_step moves it then)
+            ui_drag_step(drag, now)        a throw's move since the last step, and 0 once it stopped (flying is false);
+                                           the app steps it again UI_DRAG_FRAME_NS later while it flies
+            ui_drag_stop(drag)             it stops at once: a press, a key, the end of the list
+*/
+#define UI_DRAG_FRAME_NS 16000000l
+#define UI_DRAG_THROW 300   // the least speed a finger lets go at that throws the list
+#define UI_DRAG_STILL 20    // the speed a throw stops at
+#define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, near enough: a fifth of it every 65 ms
+
+struct ui_drag
+{
+        int last;          // where the finger was at the last move
+        long speed;        // pixels a second, signed
+        long owed;         // a throw's move not yet given, in pixel-nanoseconds
+        positive at;       // when the last move or step was
+        b32 flying;
+};
+
+static fn ui_drag_start(struct ui_drag address_to drag, int at, positive now)
+{
+        drag->last = at, drag->speed = 0, drag->owed = 0, drag->at = now, drag->flying = false;
+}
+
+static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
+{
+        int moved = at - drag->last;
+        long gap = now > drag->at ? (long)(now - drag->at) : 0;
+
+        // The speed is the moves of the last few reports, the newest weighed most.
+        if (gap > 0)
+        {
+                long seen = (long)moved * 1000000000l / (gap < 4000000l ? 4000000l : gap);
+
+                drag->speed = gap > 100000000l ? seen : (drag->speed * 2 + seen * 3) / 5;
+        }
+        drag->last = at;
+        drag->at = now;
+        return moved;
+}
+
+static b32 ui_drag_let_go(struct ui_drag address_to drag, positive now)
+{
+        // A finger that stopped before it lifted throws nothing.
+        if (now > drag->at && now - drag->at > 80000000ul)
+                drag->speed = 0;
+        drag->flying = drag->speed >= UI_DRAG_THROW || drag->speed <= -UI_DRAG_THROW;
+        drag->owed = 0;
+        drag->at = now;
+        return drag->flying;
+}
+
+static int ui_drag_step(struct ui_drag address_to drag, positive now)
+{
+        long gap = now > drag->at ? (long)(now - drag->at) : 0, whole;
+
+        if (!drag->flying)
+                return 0;
+        gap = gap > 100000000l ? 100000000l : gap;
+        drag->owed += drag->speed * gap;
+        whole = drag->owed / 1000000000l;
+        drag->owed -= whole * 1000000000l;
+        // Slower by its share of the time, and by a pixel a second at least, so a slow throw ends too.
+        {
+                long slow = drag->speed * gap / UI_DRAG_SLOW_NS;
+
+                drag->speed -= slow ? slow : drag->speed > 0 ? 1 : -1;
+        }
+        drag->at = now;
+        if (drag->speed < UI_DRAG_STILL && drag->speed > -UI_DRAG_STILL)
+                drag->flying = false;
+        return (int)whole;
+}
+
+static fn ui_drag_stop(struct ui_drag address_to drag)
+{
+        drag->flying = false;
+        drag->speed = 0;
+        drag->owed = 0;
+}
+
 // Anonymous memory for an app's own state, or a negative errno.
 static long ui_map(positive size)
 {

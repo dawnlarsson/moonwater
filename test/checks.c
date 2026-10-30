@@ -117239,6 +117239,52 @@ static positive settings_lit(const unsigned int address_to pixels, positive coun
 #endif
 
 /*
+        The press and the drag of the system's own look (ui.c): what is pressed shows it from the moment it goes down;
+        a press that moves past the slop is a drag and no click; one taken back is no click; a finger reaches a small
+        shape from UI_TARGET away; a list thrown goes on, slower and slower, and stops, and one let go still goes
+        nowhere.
+*/
+#if MOONWATER_UI_ANY && defined(UI_TARGET)
+static void check_ui_press(void)
+{
+        struct ui ui = {0};
+        struct ui_press press = {0, 0, -1, false, false, false};
+        struct ui_drag drag;
+        int clicked, total = 0, steps = 0, moved = 0;
+        positive now = 1000000000ull;
+
+        ui.scale = 1;
+        ui_press_begin(&press, 10, 10, 3, true);
+        check("ui press: what a press went down on is pressed at once", ui_pressed(&press, 3) && !ui_pressed(&press, 4));
+        check("ui press: a finger that shakes under the slop is still the press",
+              !ui_press_move(&ui, &press, 14, 13) && ui_pressed(&press, 3));
+        check("ui press: past the slop it is a drag, pressed no more, and no click when it comes up",
+              ui_press_move(&ui, &press, 10, 19) && !ui_pressed(&press, 3) && ui_press_end(&press, false) == -1);
+        ui_press_begin(&press, 10, 10, 3, false);
+        clicked = ui_press_end(&press, false);
+        ui_press_begin(&press, 10, 10, 3, true);
+        check("ui press: up where it went down it is a click, and taken back it is none",
+              clicked == 3 && ui_press_end(&press, true) == -1 && !ui_pressed(&press, 3));
+        check("ui press: a finger reaches a 20 pixel shape from 10 pixels off it, a pointer does not",
+              ui_hit(&ui, true, 90, 95, 100, 100, 20, 20) && !ui_hit(&ui, false, 90, 95, 100, 100, 20, 20) &&
+                  ui_hit(&ui, false, 105, 105, 100, 100, 20, 20) && !ui_hit(&ui, true, 85, 95, 100, 100, 20, 20));
+
+        ui_drag_start(&drag, 0, now);
+        for (int step = 1; step <= 5; step++)
+                moved += ui_drag_follow(&drag, step * 10, now += 10000000ull);
+        check("ui press: a dragged list follows the finger pixel for pixel", moved == 50);
+        check("ui press: let go moving, it is thrown", ui_drag_let_go(&drag, now));
+        while (drag.flying && steps < 1000)
+                total += ui_drag_step(&drag, now += UI_DRAG_FRAME_NS), steps++;
+        check("ui press: and it goes on the way it went, slowing, and stops", total > 200 && total < 450 && steps < 200);
+        ui_drag_start(&drag, 0, now);
+        ui_drag_follow(&drag, 30, now += 10000000ull);
+        check("ui press: a finger that stopped before it lifted throws nothing",
+              !ui_drag_let_go(&drag, now += 200000000ull) && ui_drag_step(&drag, now += UI_DRAG_FRAME_NS) == 0);
+}
+#endif
+
+/*
         The launcher's model: what a text names, in what order, and what a row
         starts. The names of PATH are a fixture here, so the list is a plain
         function of them; no key that would start a program is pressed.
@@ -119786,6 +119832,9 @@ b32 main()
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
+#endif
+#if MOONWATER_UI_ANY && defined(UI_TARGET)
+        check_ui_press();
 #endif
         check_compositor_dismiss();
         check_compositor_place();
