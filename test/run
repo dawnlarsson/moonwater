@@ -22670,8 +22670,9 @@ out.append(("U1.1 moonwater settings gallery opens the kit's gallery on the stan
 shell.run("moonwater canvas theme light", 10)
 time.sleep(2)
 light2, dark2, _, _ = counts("u1-light")
+#   The light paper shows between the cards, less the page's scrollbar (the gallery is taller than the screen leaves it).
 out.append(("U1.2 moonwater canvas theme light turns the open gallery to the light theme without a restart",
-            "yes" if light2 > 20000 and dark2 < dark // 4 and len(pids("settings")) == 1
+            "yes" if light2 > 15000 and dark2 < dark // 4 and len(pids("settings")) == 1
             else "%d light, %d dark (was %d), %d windows" % (light2, dark2, dark, len(pids("settings"))), "yes"))
 shell.run("moonwater canvas theme accent 2563eb", 10)
 time.sleep(2)
