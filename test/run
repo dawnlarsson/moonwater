@@ -22006,22 +22006,37 @@ width, height, glass = load("r1-settings")
 left_red, left_own = reds(glass, width, W // 2 - 220, W // 2 - 40, ys)
 right_red, _ = reds(glass, width, W // 2 + 40, W // 2 + 220, ys)
 total = len(range(W // 2 - 220, W // 2 - 40, 3)) * len(ys)
-out.append(("S1.2 the window is glass: over the red window it is red, tinted and not the red itself, and beside it not",
-            "yes" if left_red > total * 6 // 10 and left_own < total // 20 and right_red < total // 20
-            else "%d red and %d its own of %d, %d red beside" % (left_red, left_own, total, right_red), "yes"))
+#   The window is the kit's surface, opaque (the owner asked that the settings be the kit through and through, and
+#   the kit's windows are its theme's surface, not glass): over the red window it is the theme's surface and no red,
+#   across the red window's edge it is the one surface, and with the red gone it is the same.
+def surface_share(data, width, x0, x1, ys):
+    """The share of the pixels from x0 to x1 on the rows ys that are the most common one, and that pixel."""
+    seen = {}
+    for y in ys:
+        for x in range(x0, x1, 3):
+            pixel = data[(y * width + x) * 3:(y * width + x) * 3 + 3]
+            seen[pixel] = seen.get(pixel, 0) + 1
+    pixel = max(seen, key=seen.get)
+    return seen[pixel], pixel
+
+paper, paper_pixel = surface_share(glass, width, W // 2 - 220, W // 2 - 40, ys)
+out.append(("S1.2 the window is the theme's surface, opaque: over the red window no red shows in it",
+            "yes" if left_red < total // 20 and right_red < total // 20 and paper > total // 3
+            else "%d red over it, %d beside, its surface %d of %d" % (left_red, right_red, paper, total), "yes"))
 levels = set()
 for x in range(W // 2 - 28, W // 2 + 28, 4):
     column = sorted(glass[(y * width + x) * 3] for y in ys)
     levels.add(column[len(column) // 2] // 12)
-out.append(("S1.3 across the red window's edge the glass shows a blur, in steps, and not one step",
-            "yes" if len(levels) >= 4 else "%d levels" % len(levels), "yes"))
+out.append(("S1.3 across the red window's edge it is the one surface, no blur and no step",
+            "yes" if len(levels) == 1 else "%d levels" % len(levels), "yes"))
 shell.run("kill $(grep -l '^surface$' /proc/[0-9]*/comm | cut -d/ -f3) 2> /dev/null", 10)
 time.sleep(1.5)
 shot("r1-settings-gone", 1)
 width, height, gone = load("r1-settings-gone")
 now_red, _ = reds(gone, width, W // 2 - 220, W // 2 - 40, ys)
-out.append(("S1.4 the red window gone from under it, the glass is frosted again and shows no red",
-            "yes" if now_red < total // 20 else "%d red of %d" % (now_red, total), "yes"))
+gone_paper, gone_pixel = surface_share(gone, width, W // 2 - 220, W // 2 - 40, ys)
+out.append(("S1.4 the red window gone from under it, it is the same surface",
+            "yes" if now_red < total // 20 and gone_pixel == paper_pixel else "%d red of %d, %r was %r" % (now_red, total, gone_pixel, paper_pixel), "yes"))
 
 def rename(old, new):
     key("ret")

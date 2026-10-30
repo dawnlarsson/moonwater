@@ -63,6 +63,7 @@ struct ui
         font_face faces[2];             // the regular and the bold, loaded by the runner
         const font_face address_to mono; // the kit's mono (a tag, a code well, a key), or none: then the regular
         font_face face_mono;
+        b32 opaque;                     // a window of the kit's surface, not glass: cleared to the theme's surface
 };
 
 /*
@@ -154,7 +155,9 @@ static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
         address_to at = ui_over(tone, address_to at);
 }
 
-// The whole picture clear: the glass alone; within a repaint's band, the glass of its rows.
+static unsigned int ui_role_surface(void);
+
+// The whole picture clear: the glass alone (the kit's surface for an opaque window); within a repaint's band, its rows.
 static fn ui_clear(struct ui address_to ui)
 {
         int top = 0, bottom = ui->height;
@@ -166,7 +169,7 @@ static fn ui_clear(struct ui address_to ui)
         }
         if (bottom > top)
                 memory_fill_u32_rect(ui->pixels + (unsigned long)top * ui->pitch, (positive)ui->pitch, (positive)ui->width,
-                                     (positive)(bottom - top), 0);
+                                     (positive)(bottom - top), ui->opaque ? ui_role_surface() : 0);
 }
 
 // The picture of a whole window, width by height, its rows pitch pixels apart, cleared to the glass.
@@ -1773,6 +1776,9 @@ static fn ui_theme_make(struct ui_theme address_to theme, unsigned int dark, uns
         *theme = dark ? ui_theme_night : ui_theme_dawning;
         if (!dark && (accent & 0xffffffu) == UI_ACCENT_DAWN)
                 return; // the palette as written, to the value
+        // An accent that does not stand out from the surfaces (white on the light theme) fills with the theme's ink.
+        if (ui_contrast(fill, theme->role[UI_SURFACE_HIGH]) < 150)
+                fill = theme->role[UI_ON_SURFACE];
         bright = (accent & 0xffffffu) == UI_ACCENT_DAWN ? 0xffff9f33u : ui_mix(fill, 80, 0xffffffffu);
         theme->role[UI_PRIMARY] = fill;
         theme->role[UI_ON_PRIMARY] = ui_ink_on(fill);
@@ -1826,6 +1832,19 @@ static fn ui_kit_settle(void)
 static inline unsigned int ui_role(int role)
 {
         return ui_kit.shown.role[role];
+}
+
+// The window's surface, opaque: what a kit window is cleared to.
+static unsigned int ui_role_surface(void)
+{
+        return ui_kit.shown.role[UI_SURFACE] | 0xff000000u;
+}
+
+// A kit window's inks: those that stand out from its surface (the rows' text, a header, the focus).
+static fn ui_kit_inks(struct ui address_to ui)
+{
+        if (ui->opaque)
+                ui_inks(ui, ui_kit.to.role[UI_SURFACE] & 0xffffffu);
 }
 
 // The theme to turn to: at once the first time, and over .2s --ease after (at once with reduced motion).
@@ -4395,6 +4414,9 @@ static int ui_app_run(struct ui_app address_to app)
         table->glass[row] = app->glass;
         *app->ground = table->ground[row];
         ui_inks(app->ui, *app->ground ? *app->ground : 0x101012u);
+        // A window that is not glass is the kit's surface, and its inks are the surface's.
+        app->ui->opaque = !(app->glass & WINDOW_GLASS);
+        ui_kit_inks(app->ui);
         *app->focused = false;
         status = app->open();
         if (status >= 0)
@@ -4440,6 +4462,7 @@ static int ui_app_run(struct ui_app address_to app)
                 {
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         ui_kit_theme(table->theme, table->accent, table->motion);
+                        ui_kit_inks(app->ui);
                         ui_app_changed(app);
                 }
                 if (table->want_width[row] && table->want_height[row] &&

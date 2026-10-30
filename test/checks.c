@@ -124888,6 +124888,9 @@ static fn check_kit_theme(void)
                           string_equals((string_address)accent_row->standard, (string_address) "#ffffff") &&
                           theme.role[UI_PRIMARY] == 0xffffffffu && theme.role[UI_ON_PRIMARY] == UI_INK && theme.role[UI_SURFACE] == 0xff111113u &&
                           ui_contrast(theme.role[UI_ON_PRIMARY], theme.role[UI_PRIMARY]) >= 450);
+                ui_theme_make(&theme, 0, UI_ACCENT_STANDARD);
+                check("kit theme: an accent that does not stand out from the surfaces (white on light) fills with the theme's ink",
+                      theme.role[UI_PRIMARY] == 0xff18181bu && theme.role[UI_ON_PRIMARY] == 0xffffffffu);
         }
 
         // A turn: light to dark over .2s --ease from the first frame, the roles between the two halfway.
@@ -125461,6 +125464,12 @@ b32 main()
         frames_at(5000000000ll);
         frames_at(5016666667ll);
         frames_write((string_address) "gallery", 0, 0, 0, SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+        // And on the standard theme, dark with white fills.
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        settings_gallery_build();
+        frames_at(6000000000ll);
+        frames_at(6016666667ll);
+        frames_write((string_address) "gallery-standard", 0, 0, 0, SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
 
         // The settings window's Canvas group, light and dark, over the glass a light or a dark theme gives it: the kit's
         // switches, the theme's and the motion's segmented tabs and the accent's swatches in the rows.
@@ -125494,8 +125503,10 @@ b32 main()
                         settings_refilter();
                         settings_layout();
                         settings_group_choose(1); // Canvas
-                        ui_inks(&settings.ui, glass);
-                        ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+                        (void)glass;
+                        settings.ui.opaque = 1;
+                        ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_STANDARD, 1);
+                        ui_kit_inks(&settings.ui);
                         ui_kit.now = 6000000000ll;
                         settings_draw_rows(frames_pixels, 0, 0);
                         // The picture is premultiplied over the glass: laid on the glass's colour to be seen.
