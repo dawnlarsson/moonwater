@@ -957,25 +957,47 @@ static b32 settings_has(const char address_to text, const char address_to wanted
         return length >= size && (memory_search_ascii_case)((address_any)text, length, (address_any)wanted, size) != null;
 }
 
-static b32 settings_matches(int row)
+static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
-        positive size = settings.filter_length;
-
-        if (!size)
-                return true;
         if (row >= (int)SETTINGS_LIST)
-                return settings_has(settings_label(row), settings.filter, size) || settings_has(settings_section(row), settings.filter, size);
+                return settings_has(settings_label(row), word, size) || settings_has(settings_section(row), word, size);
         if (row < SETTINGS_ANY)
         {
                 const struct settings_row address_to which = &settings_rows[row];
 
                 for (positive at = 0; at < SETTING_WORDS; at++)
-                        if (settings_has(which->read[at], settings.filter, size) || settings_has(which->set[at], settings.filter, size))
+                        if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
                                 return true;
-                return settings_has(which->label, settings.filter, size) || settings_has(settings_section(row), settings.filter, size);
+                return settings_has(which->label, word, size) || settings_has(settings_section(row), word, size);
         }
-        return settings_has(settings_label(row), settings.filter, size) || settings_has(settings_text(row), settings.filter, size) ||
-               (row == SETTINGS_ANY && settings_has("anything", settings.filter, size));
+        return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) ||
+               (row == SETTINGS_ANY && settings_has("anything", word, size));
+}
+
+/*
+        Whether a row has every word typed in the filter: the words are split at blanks, in any order, and each
+        is found in the row's label, its section, its verb or its value, whatever the case.
+*/
+static b32 settings_matches(int row)
+{
+        const char address_to text = settings.filter;
+        positive at = 0, length = settings.filter_length;
+
+        if (!length)
+                return true;
+        while (at < length)
+        {
+                positive start;
+
+                while (at < length && text[at] == ' ')
+                        at++;
+                start = at;
+                while (at < length && text[at] != ' ')
+                        at++;
+                if (at > start && !settings_matches_word(row, text + start, at - start))
+                        return false;
+        }
+        return true;
 }
 
 static fn settings_describe(int id, struct ui_row address_to row);
@@ -2711,8 +2733,9 @@ static fn settings_filter_key(const struct window_event address_to event)
 {
         struct ui_text address_to field = settings_filter_field();
 
-        // A blank is no letter of the filter, as it never was: rows are matched by words that have none.
-        if (event->b == ' ' && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
+        // A blank is typed like any letter once there is something before it (the words of the filter are matched
+        // each on its own); as the first character it is nothing, as in the launcher's field.
+        if (event->b == ' ' && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) && !settings.filter_length)
                 return;
         field->focused = true;
         ui_text_key(&settings.ui, field, event);
@@ -2836,9 +2859,16 @@ static b32 settings_key(const struct window_event address_to event)
                 else
                         settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.group));
                 break;
+        case SETTINGS_KEY_SPACE:
+                // With something typed in the filter a blank is typed; with nothing, it works the row as Enter does.
+                if (settings.filter_length)
+                {
+                        settings_filter_key(event);
+                        break;
+                }
+                // fall through
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
-        case SETTINGS_KEY_SPACE:
                 if (!settings.pane)
                         settings_rows_enter();
                 else if (settings_pos(settings.list.focus) >= 0)
