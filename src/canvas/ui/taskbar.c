@@ -18,6 +18,9 @@
         Every rectangle here is on the output and in device pixels. The painting
         works in the band's own coordinates (the pixels start at its top left) and
         the glass in the rectangle the compositor blurred for the span.
+
+        Its own look, kept: the compositor paints it into its scene (glass, no kit window and no kit frame clock, so no
+        ripple), in the kit theme's tints (compositor_tab_target), with a finger's reach (taskbar_hit_reach).
 */
 
 // The taskbar's own state: what the settings say, the minute the tray shows, and the battery it has read.

@@ -5697,6 +5697,11 @@ struct ui_page
         struct ui_scroll column_scroll;
         char names[UI_ITEMS][UI_MENU_WORD];
         int pointer_x, pointer_y;
+        // The app's: what scrolls in the body (its list's region, or a page of text's), the menu a row opened, and where
+        // a change is drawn again (rows of the window, device pixels).
+        struct ui_scroll address_to body;
+        struct ui_menu address_to menu;
+        fn (*damaged)(int top, int bottom);
 };
 
 static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_to p, int width, int height)
@@ -5797,6 +5802,80 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
         ui_control_draw(ui, c);
         ui_scroll_draw(ui, &p->column_scroll);
+}
+
+/*
+        The page's regions: the open menu (which has the wheel, and nothing else does while it is open), the column at
+        the left of the gutter's middle, and the body. A region that moved is drawn again: the menu keeps the keys'
+        choice in view as it goes, and is drawn whole; the column and the body are the body's band.
+*/
+static struct ui_scroll address_to ui_page_region(const struct ui address_to ui, struct ui_page address_to p, int x, int y)
+{
+        struct ui_menu address_to m = p->menu;
+
+        if (m && m->owner >= 0 && x >= m->x && x < m->x + m->w && y >= m->y && y < m->y + m->h)
+                return &m->scroll;
+        if (p->column_on && x < p->left - ui_dev(ui, UI_COLUMN_GUTTER) / 2)
+                return &p->column_scroll;
+        return p->body;
+}
+
+static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to p, const struct ui_scroll address_to region)
+{
+        struct ui_menu address_to m = p->menu;
+
+        if (!p->damaged || !region)
+                return;
+        if (m && region == &m->scroll)
+        {
+                int top = ui_menu_top(ui, m);
+
+                m->at = m->at < top ? top : m->at >= top + m->shown ? top + m->shown - 1 : m->at;
+                p->damaged(0, p->height);
+        }
+        else
+                p->damaged(p->top, p->bottom);
+}
+
+// The wheel on the page: it turns the region under the pointer.
+static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to p, int delta)
+{
+        struct ui_scroll address_to region = p->menu && p->menu->owner >= 0 ? &p->menu->scroll : ui_page_region(ui, p, p->pointer_x, p->pointer_y);
+
+        if (region && ui_scroll_wheel(ui, region, delta))
+                ui_page_moved(ui, p, region);
+}
+
+/*
+        A mouse's motion, press or release on the page's scrollbars (the menu's while it is open, else the body's and
+        the column's): the thumb lights under the pointer, is dragged, and a press on the track pages. True when it
+        was a bar's.
+*/
+static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to p, int type, b32 down)
+{
+        struct ui_scroll address_to bars[3] = {p->menu && p->menu->owner >= 0 ? &p->menu->scroll : null,
+                                               p->menu && p->menu->owner >= 0 ? null : p->body,
+                                               p->menu && p->menu->owner >= 0 || !p->column_on ? null : &p->column_scroll};
+        b32 taken = false;
+
+        for (int k = 0; k < 3; k++)
+        {
+                b32 lit;
+                int scroll;
+
+                if (!bars[k])
+                        continue;
+                lit = bars[k]->hover;
+                scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down);
+                if (scroll >= 0)
+                {
+                        taken = true;
+                        ui_scroll_set(bars[k], scroll);
+                }
+                if (scroll >= 0 || lit != bars[k]->hover)
+                        ui_page_moved(ui, p, bars[k]);
+        }
+        return taken;
 }
 
 // A press on the column's group: its ripple, from the press.

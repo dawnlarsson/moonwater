@@ -1000,7 +1000,11 @@ static fn settings_layout(void)
                         string_append_bounded((string_address)settings.accents, (string_address)settings_accents[k].colour, sizeof(settings.accents));
                 }
         }
-        settings.page.column_on = true;
+        // The page's column shows with the rows and not with a card, which has the body and the whole width.
+        settings.page.column_on = !settings.view;
+        settings.page.body = settings.view ? &settings.card : &settings.list.scroll;
+        settings.page.menu = &settings.menu;
+        settings.page.damaged = settings_changed;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
         ui_list_place(ui, &settings.list, settings.page.left, settings.page.top, settings.page.right - settings.page.left,
@@ -1463,6 +1467,7 @@ static fn settings_card_leave(void)
 {
         settings.view = false;
         settings.status[0] = 0;
+        settings_layout();
         settings_dirty();
 }
 
@@ -3204,56 +3209,6 @@ static int settings_press_target(int x, int y)
         return ui_list_hit(&settings.ui, &settings.list, x, y);
 }
 
-// The region under a point, which the wheel turns and a finger drags: the open menu, the card, the column, or the rows.
-static struct ui_scroll address_to settings_region(int x, int y)
-{
-        const struct ui_menu address_to m = &settings.menu;
-
-        if (m->owner >= 0 && x >= m->x && x < m->x + m->w && y >= m->y && y < m->y + m->h)
-                return &settings.menu.scroll;
-        if (settings.view)
-                return &settings.card;
-        return x < settings.page.left - ui_px(&settings.ui, UI_COLUMN_GUTTER) / 2 ? &settings.page.column_scroll : &settings.list.scroll;
-}
-
-// A region moved: drawn again (the menu keeps the keys' choice in view as it goes).
-static fn settings_region_moved(const struct ui_scroll address_to region)
-{
-        if (region == &settings.menu.scroll)
-        {
-                settings_menu_place();
-                settings_dirty();
-        }
-        else
-                settings_changed(settings.page.top, settings.page.bottom);
-}
-
-// A mouse's motion, press or release on a scrollbar (the menu's, the rows' or the card's, the column's): true when it was a bar's.
-static b32 settings_bars(const struct window_event address_to event)
-{
-        struct ui_scroll address_to bars[3] = {&settings.menu.scroll, settings.view ? &settings.card : &settings.list.scroll,
-                                               &settings.page.column_scroll};
-        b32 taken = false;
-
-        if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
-                return false;
-        for (int k = settings.menu.owner >= 0 ? 0 : 1; k < (settings.menu.owner >= 0 ? 1 : settings.view ? 2 : 3); k++)
-        {
-                b32 lit = bars[k]->hover;
-                int scroll = ui_scroll_pointer(&settings.ui, bars[k], (int)event->type, settings.page.pointer_x, settings.page.pointer_y,
-                                               (event->flags & WINDOW_KEY_DOWN) != 0);
-
-                if (lit != bars[k]->hover)
-                        settings_region_moved(bars[k]);
-                if (scroll < 0)
-                        continue;
-                taken = true;
-                ui_scroll_set(bars[k], scroll);
-                settings_region_moved(bars[k]);
-        }
-        return taken;
-}
-
 static fn settings_press_at(void);
 
 /*
@@ -3276,7 +3231,7 @@ static fn settings_finger(const struct window_event address_to event)
                                 ui_list_let_go(&settings.ui, &settings.list);
                                 settings.menu.pressed = -1;
                         }
-                        settings_region_moved(settings.finger.region);
+                        ui_page_moved(&settings.ui, &settings.page, settings.finger.region);
                 }
                 return;
         }
@@ -3286,7 +3241,7 @@ static fn settings_finger(const struct window_event address_to event)
         {
                 int target = settings_press_target(x, y);
 
-                ui_finger_down(&settings.finger, x, y, target, settings_region(x, y));
+                ui_finger_down(&settings.finger, x, y, target, ui_page_region(&settings.ui, &settings.page, x, y));
                 // What it is on shows pressed at once: a row, a choice of the menu.
                 if (target >= 0 && target < SETTINGS_PRESS_GROUP)
                         settings.list.down = target;
@@ -3324,7 +3279,8 @@ static b32 settings_event(const struct window_event address_to event)
                 settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
         // The scrollbars take a mouse's motion, press and release on them (a finger drags the region itself).
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH) &&
-            settings_bars(event))
+            (event->type != WINDOW_EVENT_BUTTON || event->a == SETTINGS_BUTTON_LEFT) &&
+            ui_page_bars(&settings.ui, &settings.page, (int)event->type, (event->flags & WINDOW_KEY_DOWN) != 0))
                 return true;
         // The filter's field takes a press, a drag and a release over it (a selection by the hand), and the clipboard's answers.
         if (!settings.view && settings.filter_open &&
@@ -3396,16 +3352,11 @@ static b32 settings_event(const struct window_event address_to event)
                 }
                 break;
         case WINDOW_EVENT_WHEEL:
-        {
                 // The menu turns under the wheel, and nothing else does while it is open; else what is under the pointer.
-                struct ui_scroll address_to region = settings.menu.owner >= 0 ? &settings.menu.scroll
-                                                                               : settings_region(settings.page.pointer_x, settings.page.pointer_y);
-
                 ui_drag_stop(&settings.finger.drag);
-                if (!event->b && ui_scroll_wheel(&settings.ui, region, event->a))
-                        settings_region_moved(region);
+                if (!event->b)
+                        ui_page_wheel(&settings.ui, &settings.page, event->a);
                 break;
-        }
         }
         return true;
 }
@@ -3668,7 +3619,7 @@ static long settings_tick(long timeout, long address_to other)
                 long thrown = ui_finger_throw(&settings.finger, &moved);
 
                 if (moved)
-                        settings_region_moved(settings.finger.region);
+                        ui_page_moved(&settings.ui, &settings.page, settings.finger.region);
                 if (thrown >= 0 && (timeout < 0 || thrown < timeout))
                         timeout = thrown;
         }

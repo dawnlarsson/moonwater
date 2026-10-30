@@ -912,6 +912,9 @@ static unsigned int terminal_bar_inside(int column, int row, int across, int alo
         mixed with that ground, which is known: nothing is read back. No
         track, and no pill when everything fits or the view is at the live end
         and the bar has faded: it is seen only while the view is scrolled back.
+
+        Not the kit's scrollbar (ui_scroll), on purpose: its paper is what the program paints, row by row, so its ink
+        is window_contrast of each row's ground and not a theme role, and it is drawn inside the grid's row bands.
 */
 static void terminal_bar(unsigned int address_to whole, const struct window_cell address_to frame, unsigned int first,
                          unsigned int shown, unsigned int total)
