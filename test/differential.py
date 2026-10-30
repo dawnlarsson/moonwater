@@ -51635,11 +51635,101 @@ def build_claim(entry):
         time.sleep(0.5)
 
 
+BUILD_DEFERS = {}
+
+
+def build_for_compiler(command):
+    """command, with -fdefer-ts when its compiler is a clang that takes it.
+
+    clang has no nested functions, and scope_exit (src/lib.util.c) is its
+    defer statement there, which it takes only when asked. A clang too old
+    for it is left as it is, and builds whatever uses no scope_exit."""
+    if isinstance(command, (str, bytes)):
+        return command
+    words = [str(word) for word in command]
+    if not words or "-fdefer-ts" in words or any(
+            word.endswith((".cc", ".cpp", ".cxx")) or word in ("c++", "-xc++") for word in words):
+        return command
+    program = words[0]
+    if program not in BUILD_DEFERS:
+        BUILD_DEFERS[program] = False
+        if "clang" in build_cache_tool(program, linked=False):
+            try:
+                BUILD_DEFERS[program] = subprocess.run(
+                    [program, "-fdefer-ts", "-E", "-x", "c", "/dev/null"],
+                    capture_output=True).returncode == 0
+            except OSError:
+                pass
+    if not BUILD_DEFERS[program]:
+        return command
+    return [command[0], "-fdefer-ts", *command[1:]]
+
+
+BUILD_MISSING = (
+    (r"implicit declaration of function [`'‘](\w+)", "function"),
+    (r"call to undeclared (?:library )?function [`'‘](\w+)", "function"),
+    (r"[`'‘](\w+)['’] undeclared", "name"),
+    (r"use of undeclared identifier [`'‘](\w+)", "name"),
+    (r"unknown type name [`'‘](\w+)", "type"),
+    (r"(?:has no member named|no member named) [`'‘](\w+)", "member"),
+    (r"(?:invalid use of undefined type|incomplete (?:definition of )?type) [`'‘](?:struct )?(\w+)", "type"),
+    (r"undefined reference to [`'‘](\w+)", "definition"),
+    (r"undefined symbol: (\w+)", "definition"),
+)
+
+
+def build_needs(said):
+    """What a failed compile could not find, as one line, or "".
+
+    Most harnesses cut functions out of production sources by anchor and
+    build them stand-alone over a shim of their own; when the production
+    code gains a call, a macro or a type the shim does not have, the build
+    fails with a page of errors and the harness said only that it did not
+    build. This names what is missing, once each, at the end of the
+    compiler's words where a harness's tail of them still shows it."""
+    if isinstance(said, bytes):
+        said = said.decode(errors="replace")
+    seen = []
+    for pattern, kind in BUILD_MISSING:
+        for name in re.findall(pattern, said or ""):
+            if (kind, name) not in seen:
+                seen.append((kind, name))
+    if not seen:
+        return ""
+    return ("\nshim needs %s: what was compiled uses them and nothing it was given "
+            "declares them; a harness that cuts functions out of a source needs each "
+            "added to its shim, or its cut widened\n" % ", ".join(
+                "%s %s" % (kind, name) for kind, name in seen[:12]))
+
+
+def build_explained(done):
+    """done, with build_needs added to what the compiler said when it failed."""
+    if done.returncode == 0:
+        return done
+    needs = build_needs(done.stderr) or (build_needs(done.stdout) if isinstance(
+        done.stdout, (str, bytes)) else "")
+    if not needs:
+        return done
+    if isinstance(done.stderr, bytes):
+        done.stderr += needs.encode()
+    elif isinstance(done.stderr, str):
+        done.stderr += needs
+    elif isinstance(done.stdout, bytes):
+        done.stdout += needs.encode()
+    elif isinstance(done.stdout, str):
+        done.stdout += needs
+    else:
+        sys.stderr.write(needs)
+    return done
+
+
 def build_run(command, **options):
     """subprocess.run for a compiler line, from the build cache when it can be.
 
     What it returns is what run would: the cached compiler's words stand for
-    a build that said them, and a build that failed is never kept."""
+    a build that said them, and a build that failed is never kept. A build
+    that failed for a name it could not find says which (build_needs)."""
+    command = build_for_compiler(command)
     root, verify = build_cache_setting()
     began = time.monotonic()
     keyed = None
@@ -51650,7 +51740,7 @@ def build_run(command, **options):
             keyed = None
     name = "build " + Path(str(command[-1])).name
     if keyed is None:
-        done = subprocess.run(command, **options)
+        done = build_explained(subprocess.run(command, **options))
         record_time(name, time.monotonic() - began)
         return done
     key, output = keyed
@@ -51678,7 +51768,7 @@ def build_run(command, **options):
     if not claimed:
         return served()
     try:
-        done = subprocess.run(command, **options)
+        done = build_explained(subprocess.run(command, **options))
         record_time(name, time.monotonic() - began)
         if done.returncode == 0 and target.is_file():
             said = done.stderr if isinstance(done.stderr, bytes) else (done.stderr or "").encode()
