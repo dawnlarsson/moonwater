@@ -16989,15 +16989,26 @@ open(sys.argv[2], 'wb').write(d[:len(d) * 3 // 4])
 d[d.index(b'.mwset\0\0', 0, 4096) + 5] = ord('x')
 open(sys.argv[3], 'wb').write(d)
 PY
+        #       Two NVMe controllers, named in the order they finished
+        #       probing: nvme-pci probes asynchronously, so which of them is
+        #       nvme0 differs from boot to boot. Named nvme0n1 and nvme1n1
+        #       here, the two came up the other way round now and then: the
+        #       update was asked of the blank disk, the install of the
+        #       installed one, and the partitions counted as the blank's were
+        #       the installed disk's two (blank-32, every other row green).
+        #       Each disk is found by the serial it was given.
         cat > "$work/short.commands" <<'COMMANDS'
 this line is eaten by the console
-moonwater setup update nvme0n1 > /tmp/update 2>&1
+nvme_of() { for d in /sys/block/nvme*; do [ "$(tr -d ' ' < $d/device/serial 2> /dev/null)" = "$1" ] && echo ${d##*/}; done; }
+held=$(nvme_of moonwater); blank=$(nvme_of moonwater2)
+[ -n "$held" ] && [ -n "$blank" ] && [ "$held" != "$blank" ] && printf 'named-%s\n' both | rev
+moonwater setup update $held > /tmp/update 2>&1
 printf 'update-refused-%s\n' $(( $? + 40 ))
 cat /tmp/update
-moonwater setup install nvme1n1 yes > /tmp/install 2>&1
+moonwater setup install $blank yes > /tmp/install 2>&1
 printf 'install-refused-%s\n' $(( $? + 40 ))
 cat /tmp/install
-printf 'blank-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+printf 'blank-%s\n' $(( $(ls /sys/class/block | grep -c "^${blank}p") + 30 ))
 poweroff
 COMMANDS
         truncate -s 4G "$work/blank.img" || exit 1
@@ -17010,6 +17021,7 @@ COMMANDS
         install_disk=""
         python3 "$work/fatjudge.py" judge "$work/cutbase.img" "$install_short" "$old_sha" \
                 "$loader_sha" >> "$work/short" 2>&1
+        says short 'both disks are found by their serials'       'htob-deman'
         says short 'an update from an image cut short is refused'  'update-refused-41'
         says short 'and says it is cut short'                      'is cut short'
         says short 'and the disk keeps the loader it had'          'image-old'
@@ -17449,6 +17461,9 @@ fi
 #
 cat > "$work/hostile.commands" <<'COMMANDS'
 this line is eaten by the console
+nvme_of() { for d in /sys/block/nvme*; do [ "$(tr -d ' ' < $d/device/serial 2> /dev/null)" = "$1" ] && echo ${d##*/}; done; }
+disk=$(nvme_of moonwater); small=$(nvme_of moonwater3)
+[ -n "$disk" ] && [ -n "$small" ] && [ "$disk" != "$small" ] && printf 'named-%s\n' both | rev
 for n in 1 2 3 4 5 6; do moonwater bind init add "echo lock$n" > /dev/null 2>&1 & done
 wait
 printf 'lock-%s\n' $(( $(moonwater bind init | grep -c 'echo lock') * 7 ))
@@ -17461,36 +17476,35 @@ printf 'zoned-said-%s\n' $(( $(grep -c 'cannot hold partitions' /tmp/zoned) * 7 
 printf 'zoned-clean-%s\n' $(( $(dd if=/dev/$z bs=1024 count=1 2> /dev/null | tr -d '\000' | wc -c) + 30 ))
 dd if=/dev/zero of=/root/big bs=1M count=1700 2> /dev/null
 printf 'big-%s\n' $(( $(wc -c < /root/big) / 1048576 ))
-moonwater setup install nvme1n1 yes > /tmp/small 2>&1
+moonwater setup install $small yes > /tmp/small 2>&1
 printf 'small-refused-%s\n' $(( $? + 40 ))
-printf 'small-said-%s\n' $(( $(grep -c 'nvme1n1 would hold' /tmp/small) * 7 ))
-printf 'small-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+printf 'small-said-%s\n' $(( $(grep -c "$small would hold" /tmp/small) * 7 ))
+printf 'small-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${small}p") + 30 ))
 rm -f /root/big
-moonwater setup install nvme0n1 > /tmp/long 2>&1
-nvme0n1                                                          junk
+printf '%s%62s\n' "$disk" junk | moonwater setup install $disk > /tmp/long 2>&1
 printf 'long-refused-%s\n' $(( $? + 40 ))
-printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme0n1p') + 30 ))
-moonwater setup install nvme0n1 yes > /tmp/first 2>&1
+printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${disk}p") + 30 ))
+moonwater setup install $disk yes > /tmp/first 2>&1
 printf 'first-%s\n' $(( $? + 40 ))
-moonwater setup install nvme1n1 yes > /tmp/second 2>&1
+moonwater setup install $small yes > /tmp/second 2>&1
 printf 'keeps-refused-%s\n' $(( $? + 40 ))
-printf 'keeps-said-%s\n' $(( $(grep -c 'already keeps nvme0n1' /tmp/second) * 7 ))
-printf 'keeps-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+printf 'keeps-said-%s\n' $(( $(grep -c "already keeps $disk" /tmp/second) * 7 ))
+printf 'keeps-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${small}p") + 30 ))
 cd /
 while umount /home 2> /dev/null; do :; done
 while umount /root 2> /dev/null; do :; done
 while umount /bowls 2> /dev/null; do :; done
 while umount /run/moonwater/data 2> /dev/null; do :; done
 mkdir -p /mnt
-mount -t ext4 /dev/nvme0n1p2 /mnt
+mount -t ext4 /dev/${disk}p2 /mnt
 rm -rf /mnt/home
 ln -s /etc /mnt/home
 umount /mnt
 moonwater setup live > /dev/null 2>&1
-moonwater setup use nvme0n1 > /tmp/plant 2>&1
+moonwater setup use $disk > /tmp/plant 2>&1
 printf 'plant-refused-%s\n' $(( $? + 40 ))
 printf 'plant-home-%s\n' $(( $(grep -c ' /home ' /proc/self/mounts) + 30 ))
-mount -t vfat /dev/nvme0n1p1 /mnt
+mount -t vfat /dev/${disk}p1 /mnt
 f=/mnt/EFI/BOOT/BOOTX64.EFI
 pe=$(od -An -tu4 -j60 -N4 $f | tr -d ' ')
 sections=$(od -An -tu2 -j$((pe + 6)) -N2 $f | tr -d ' ')
@@ -17502,9 +17516,9 @@ printf '\377\377\377\377' | dd of=$f bs=1 seek=$((raw + 16384 + 44)) conv=notrun
 cp $f /tmp/before
 dd if=/dev/zero of=/mnt/fill bs=1M 2> /dev/null
 umount /mnt
-moonwater setup update nvme0n1 > /tmp/upd 2>&1
-printf 'damaged-%s\n' $(( $(grep -c 'settings slots on nvme0n1 are damaged' /tmp/upd) * 7 ))
-mount -t vfat /dev/nvme0n1p1 /mnt
+moonwater setup update $disk > /tmp/upd 2>&1
+printf 'damaged-%s\n' $(( $(grep -c "settings slots on $disk are damaged" /tmp/upd) * 7 ))
+mount -t vfat /dev/${disk}p1 /mnt
 cmp $f /tmp/before > /dev/null 2>&1
 printf 'full-kept-%s\n' $(( $? + 30 ))
 printf 'leftover-%s\n' $(( $(ls /mnt/EFI/BOOT /mnt/EFI/moonwater | grep -c -i '\.new$') + 30 ))
@@ -17512,10 +17526,10 @@ rm -f /mnt/fill
 umount /mnt
 rm -f /bin/cp
 moonwater setup live > /dev/null 2>&1
-moonwater setup install nvme1n1 yes > /tmp/gone 2>&1
+moonwater setup install $small yes > /tmp/gone 2>&1
 printf 'gone-refused-%s\n' $(( $? + 40 ))
 printf 'gone-said-%s\n' $(( $(grep -c 'is left without a partition table' /tmp/gone) * 7 ))
-printf 'gone-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme1n1p') + 30 ))
+printf 'gone-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${small}p") + 30 ))
 poweroff
 COMMANDS
 
@@ -17531,6 +17545,7 @@ install_boot hostile $stick -drive if=none,id=small,format=raw,file="$work/small
 install_memory=""
 rm -f "$work/disk.img" "$work/small.img" "$work/zoned.img"
 mv "$work/disk.keep" "$work/disk.img"
+says hostile 'its disks are found by their serials' 'htob-deman'
 says hostile 'six binds at once keep all six'     'lock-42'
 says hostile 'a program of the image needs no warning' 'note-30'
 says hostile 'a disk with no partitions is refused' 'zoned-refused-41'
