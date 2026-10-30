@@ -12024,6 +12024,34 @@ def files_chmod_link_operand(farm):
     return passed, total, notes
 
 
+def files_mktemp_t_environment(farm):
+    """mktemp -t means the environment's directory: when TMPDIR names one it
+    is where the name goes, over the DIR that -p or --tmpdir=DIR gave (which
+    is only for when TMPDIR is empty or not set), and a --tmpdir=DIR with no -t
+    keeps its DIR. -u makes nothing, so the directory need not be there; the
+    names are random, so the directory they sit in is what is compared."""
+    def setup(root):
+        (root / "named").mkdir()
+
+    passed = total = 0
+    notes = []
+    for tmpdir in ("/nonexistent-differential-tmp", "", None):
+        env = {k: v for k, v in os.environ.items() if k != "TMPDIR"}
+        if tmpdir is not None:
+            env["TMPDIR"] = tmpdir
+        for args in (["-u", "-t", "-p", "named", "run.XXXXXX"], ["-u", "-p", "named", "-t", "run.XXXXXX"],
+                     ["-u", "-t", "--tmpdir=named", "run.XXXXXX"], ["-u", "--tmpdir=named", "run.XXXXXX"],
+                     ["-u", "-t", "-p", "named"], ["-u", "-t", "run.XXXXXX"], ["-u", "--tmpdir", "run.XXXXXX"]):
+            answers = files_pair(farm, "mktemp", args, setup, env=env)
+            total += 1
+            seen = [(a[0], [os.path.dirname(line) for line in a[1]], a[2]) for a in answers]
+            if seen[0] == seen[1]:
+                passed += 1
+            else:
+                notes.append(f"TMPDIR={tmpdir!r} mktemp {' '.join(args)}: reference {answers[0][:3]} ours {answers[1][:3]}")
+    return passed, total, notes
+
+
 def files_cp_skip_before_open(farm):
     """cp weighs the destination before it opens the source: -n, -u and
     --update=none skip a name that is there without ever touching the source,
@@ -12294,7 +12322,7 @@ FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, fi
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap, files_kill_bash_word, files_tar_short_archive, files_tar_utf8_names, files_find_write_error, files_ls_address_cap,
                 files_floor_address_cap, files_daystart_zones, files_statfs_names,
-                files_deep_walks, files_parents_deep, files_chmod_link_operand, files_cp_skip_before_open, files_write_error_stdout,
+                files_deep_walks, files_parents_deep, files_chmod_link_operand, files_mktemp_t_environment, files_cp_skip_before_open, files_write_error_stdout,
                 files_exec_refusals, files_regex_switch,
                 files_codec_operands, files_mode_words, files_chmod_unreadable_report,
                 files_whereis_directories_option, files_du_long_name_list)

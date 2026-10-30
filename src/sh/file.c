@@ -48555,6 +48555,14 @@ static b32 file_mktemp()
                                              "mktemp: invalid template, '%w', contains directory separator\n",
                                              writer_terminal_quoted_name, whole);
 
+                //      The environment's directory, when it has one, is the
+                //      one -t means, over the DIR -p or --tmpdir gave; the
+                //      DIR is only for when the environment has none.
+                string_address environment = file_environment("TMPDIR");
+
+                if (environment && string_get(environment))
+                        base = environment;
+
                 named_where = true;
         }
         else if (named_where && string_is(whole, '/'))
