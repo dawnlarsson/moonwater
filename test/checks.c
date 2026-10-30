@@ -113825,7 +113825,7 @@ static fn check_drawing(const font_face address_to one, const font_face address_
         for (p32 k = 0; k < 4; k++)
         {
                 ground(canvas);
-                font_draw(&engine, chain, 2, text, sizeof(text) - 1, 30 * 64, 0, &target, corners[k][0] << 16,
+                font_draw(&engine, chain, 2, text, sizeof(text) - 1, 30 * 64, 0, &target, corners[k][0] * (1 << 16),
                           corners[k][1], 0xffffff, k & 1 ? FONT_UNKNOWN : 0x101820);
                 bool clipped = true;
                 for (p32 i = 0; i < 96 * 96; i++)

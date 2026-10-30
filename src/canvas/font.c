@@ -254,6 +254,9 @@
 #define FONT_EXACT 14
 #define FONT_ONE 1024
 #define FONT_SHIFT 10
+//      Grid steps, possibly below zero, back to a position: the shift is on the unsigned word and the result is read as
+//      two's complement, which is what the position means and is defined where a left shift of a negative is not.
+#define FONT_STEPS_UP(steps) ((b64)((p64)(steps) << FONT_SHIFT))
 #define FONT_STRAIGHT 4
 #define FONT_FLAT 16
 #define FONT_REACH 6000
@@ -1860,7 +1863,7 @@ static p32 font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 w
                 else
                 {
                         b64 from = 2 * left + width - snapped;
-                        from = ((from + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                        from = FONT_STEPS_UP((from + FONT_ONE) >> (FONT_SHIFT + 1));
                         to[2 * s] = from;
                         to[2 * s + 1] = from + snapped;
                 }
@@ -2396,7 +2399,7 @@ static fn font_dot_in(const font_engine address_to e, p32 counter, b64 across, b
                 return;
         }
         place[4] = l + FONT_ONE + (room - across) / 2;
-        place[5] = b + FONT_ONE + (((high - up + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT);
+        place[5] = b + FONT_ONE + FONT_STEPS_UP((high - up + FONT_ONE) >> (FONT_SHIFT + 1));
         place[6] = across;
         place[7] = up;
 }
@@ -2447,8 +2450,8 @@ static fn font_dots(font_engine address_to e, const b64 address_to sizes, const 
                         top = e->points[i].y > top ? e->points[i].y : top;
                 }
 
-                b64 x = ((left + right - across + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
-                b64 y = ((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                b64 x = FONT_STEPS_UP((left + right - across + FONT_ONE) >> (FONT_SHIFT + 1));
+                b64 y = FONT_STEPS_UP((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1));
 
                 if (inner[c])
                 {
@@ -2501,13 +2504,13 @@ static fn font_dots(font_engine address_to e, const b64 address_to sizes, const 
                                                     : font_round((b64)((f64)sizes[2 * c + 1] * (f64)(stem + 2 * more) /
                                                                        (f64)sizes[2 * c] + 0.5));
                                         up = up < FONT_ONE ? FONT_ONE : up;
-                                        y = ((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                                        y = FONT_STEPS_UP((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1));
                                 }
                                 across = stem + 2 * more;
                                 x = low - more;
                         }
                         else
-                                x = ((low + high - across + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                                x = FONT_STEPS_UP((low + high - across + FONT_ONE) >> (FONT_SHIFT + 1));
                 }
 
                 //      A dot clear of a fitted line under it -- i's and j's
@@ -2562,12 +2565,11 @@ static fn font_dots(font_engine address_to e, const b64 address_to sizes, const 
 
                                 if (box[other][6] != box[big][6] || box[other][7] != box[big][7])
                                 {
-                                        box[other][4] = ((box[other][0] + box[other][2] - box[big][6] + FONT_ONE) >> (FONT_SHIFT + 1))
-                                                        << FONT_SHIFT;
-                                        box[other][5] = box[big][5] + (((box[other][1] + box[other][3] - box[big][1] -
-                                                                         box[big][3] + FONT_ONE) >>
-                                                                        (FONT_SHIFT + 1))
-                                                                       << FONT_SHIFT);
+                                        box[other][4] = FONT_STEPS_UP((box[other][0] + box[other][2] - box[big][6] + FONT_ONE) >>
+                                                                      (FONT_SHIFT + 1));
+                                        box[other][5] = box[big][5] + FONT_STEPS_UP((box[other][1] + box[other][3] - box[big][1] -
+                                                                                     box[big][3] + FONT_ONE) >>
+                                                                                    (FONT_SHIFT + 1));
                                         box[other][6] = box[big][6];
                                         box[other][7] = box[big][7];
                                 }
