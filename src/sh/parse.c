@@ -3322,7 +3322,17 @@ static HOT b32 parse_pipeline(bool inverted)
                 parse_alias_command();
 
                 // The grammar has one optional Bang, not a repeatable list.
-                // dash rejects a second one rather than cancelling the first.
+                // dash rejects a second one rather than cancelling the first;
+                // bash reads any number of them and each turns the answer
+                // over, so `! ! false` fails.
+                while (shell_bash_compat && parse_word_is(0, "!"))
+                {
+                        inverted = !inverted;
+                        parse_position++;
+                        parse_skip_newlines();
+                        parse_alias_command();
+                }
+
                 if (parse_word_is(0, "!"))
                 {
                         parse_state = PARSE_SYNTAX;
@@ -3332,7 +3342,7 @@ static HOT b32 parse_pipeline(bool inverted)
                 // A time behind the bang is a whole pipeline of its own, and
                 // what the bang inverts is the answer it gives.
                 if (parse_time_reserved())
-                        return parse_time(true);
+                        return parse_time(inverted);
         }
 
         b32 head = parse_command();

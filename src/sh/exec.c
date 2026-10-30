@@ -17860,9 +17860,13 @@ static b32 exec_background(b32 index)
 
                         if (trap_debug_here)
                                 exec_debug_stages(parse_nodes[body].left);
+                        //      bash leaves a bang off a command it starts in
+                        //      the background: `! false &` is false.
                         return exec_pipe(parse_nodes[body].left, count, true,
                                          shell_pipefail(),
-                                         parse_nodes[body].flags);
+                                         shell_bash_compat
+                                             ? false
+                                             : parse_nodes[body].flags);
                 }
 
                 index = body;
