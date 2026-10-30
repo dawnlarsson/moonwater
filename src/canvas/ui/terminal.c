@@ -2106,10 +2106,18 @@ static fn terminal_menu_open(int x, int y, b32 touch)
         ui_popmenu_add(m, "Zoom &In", "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
         ui_popmenu_add(m, "Zoom &Out", "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
         ui_popmenu_add(m, "&Reset Zoom", "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
-        // The menu's text in the terminal's own face when it has no other, and the kit's scratch line it is drawn
-        // through, which the terminal's own painter never needed: without one every label was measured and none drawn.
+        // The menu's text in the kit's face, as every menu's, mapped the first time a menu opens (the terminal's own
+        // face when it is not there), and the kit's scratch line it is drawn through, which the terminal's own painter
+        // never needed: without one every label was measured and none drawn.
+        static font_face menu_face;
+        static int menu_face_state;
+
         if (!menu_ui.regular)
-                menu_ui.regular = menu_ui.bold = terminal.plain[0];
+        {
+                if (!menu_face_state)
+                        menu_face_state = ui_face_load(&menu_face, (string_address)UI_FONT_REGULAR) ? 1 : -1;
+                menu_ui.regular = menu_ui.bold = menu_face_state > 0 ? &menu_face : terminal.plain[0];
+        }
         ui_scratch_fit(&terminal.ui, 640u * (unsigned int)(terminal.ui.scale > 0 ? terminal.ui.scale : 1));
         menu_ui.scratch = terminal.ui.scratch, menu_ui.scratch_width = terminal.ui.scratch_width;
         ui_popup_open(&terminal_menu, &terminal.own, &menu_ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
