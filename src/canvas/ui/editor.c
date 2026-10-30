@@ -186,7 +186,8 @@ static b32 editor_save(struct editor_tab address_to tab)
         ok &= system_call_1(syscall(fsync), (positive)handle) == 0;
         system_call_2(syscall(fchmod), (positive)handle, tab->mode ? tab->mode : 0644);
         system_close(handle);
-        if (!ok || system_call_4(syscall(renameat), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)tab->path) < 0)
+        // renameat2 with no flags: riscv64 never had renameat, and its number there is nothing (a save that always failed).
+        if (!ok || system_call_5(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)tab->path, 0) < 0)
         {
                 system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0);
                 string_copy_bounded((string_address)editor.status, (string_address) "the save failed: the file is as it was", sizeof(editor.status));

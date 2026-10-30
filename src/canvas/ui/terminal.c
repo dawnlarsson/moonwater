@@ -1605,7 +1605,8 @@ static b32 terminal_size_write(unsigned int size)
         wrote = system_write_all((positive)handle, text, length) == length;
         system_close(handle);
 
-        return wrote && compositor_call(syscall(renameat), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_TEMP,
+        // renameat2 with no flags, as riscv64 has no renameat.
+        return wrote && compositor_call(syscall(renameat2), (positive)AT_FDCWD, (positive)TERMINAL_SIZE_TEMP,
                                         (positive)AT_FDCWD, (positive)TERMINAL_SIZE_FILE, 0, 0) >= 0;
 }
 

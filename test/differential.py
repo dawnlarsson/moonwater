@@ -2898,6 +2898,17 @@ def self_test():
             self.assertEqual(unowned, [],
                              "files in no seam: give each one in seam_of_path in test/run")
 
+        def test_no_rename_by_a_number_riscv64_lacks(self):
+            """riscv64 never had renameat: syscall(renameat) there is arm64's
+            38, which is nothing on riscv64, so the editor's save and the
+            terminal's size file failed every time on that machine alone (the
+            editor rows of CHECK_terminal under qemu-riscv64). renameat2 with
+            no flags is the same call on all three."""
+            root = Path(__file__).resolve().parent.parent / "src"
+            found = sorted(str(path.relative_to(root.parent)) for path in root.rglob("*.c")
+                           if "syscall(renameat)" in path.read_text(errors="replace"))
+            self.assertEqual(found, [], "syscall(renameat) is no call on riscv64: use renameat2 with no flags")
+
         def test_no_definition_in_this_file_shadows_another(self):
             """The same hazard from the other side. Assembling modules into
             one file lets a name arrive twice, and the later one wins in
