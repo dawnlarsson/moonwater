@@ -16612,13 +16612,15 @@ disk_checks()
 #       of the write; the cuts come at fractions of it (MOONWATER_CUT_PERCENT,
 #       MOONWATER_CUT_INSTALL_PERCENT), each when the count, polled over QMP,
 #       reaches its share. The grid used to be milliseconds after the trigger,
-#       0 to 70, and the update's write is seconds long and as long as the
-#       host is loaded: the new loader is read off a USB stick before it is
-#       renamed into place, so no cut ever landed after it, and the row saying
-#       so was red on every run. Rows still say that some cut landed with the
-#       copy begun and the old loader still the loader, and some after the
-#       new one was in place, so a grid that missed the write does not pass
-#       for one that held.
+#       0 to 70, and the update's write runs past that: the old loader copied
+#       to previous, the new one read off the stick and renamed into place
+#       took about 100 ms from the trigger to the command's last line on an
+#       idle box and longer on a loaded one, so no cut landed after the new
+#       loader and the row saying so was red on nearly every run (282 of 283
+#       on 2026-10-30, the cuts at 0 to 70 ms all short of it). Rows still
+#       say that some cut landed with the copy begun and the old loader still
+#       the loader, and some after the new one was in place, so a grid that
+#       missed the write does not pass for one that held.
 #
 cat > "$work/fatjudge.py" <<'PY'
 import hashlib, re, struct, sys
@@ -16924,6 +16926,13 @@ if p.poll() is None:
     p.kill()
 p.wait()
 thread.join(5)
+#       Let go of the QMP socket here, or the file object is flushed into a
+#       closed socket when Python finalises it and says so in the verdicts.
+if control:
+    try:
+        control.close()
+    except OSError:
+        pass
 print('fired-%s' % ('yes' if state['fired'] else 'no'))
 print('killed-%s' % ('yes' if cut else 'no'))
 print('pulled-%s' % ('yes' if pulled else 'no'))
