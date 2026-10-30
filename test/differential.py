@@ -21589,6 +21589,93 @@ def shell_regress_inline_substitution_bash(rng):
     return "regress-inline-substitution-bash", shell_BASH, shell_program(*lines[:rng.randint(3, len(lines))])
 
 
+def shell_regress_inline_substitution_failglob(rng):
+    """An error in a word of an inline $( ) belongs to the child it would have
+    had: bash's failglob there ends the substitution, which is empty and
+    answers 1, and not the command or the line of the shell that asked."""
+    lines = [
+        "x='nomatch*'; v=$(echo a$x); echo \"[$v] $?\"; echo after",
+        "x='nomatch*'; echo \"[$(printf '%s' $x)]\" $?; echo after $?",
+        "x='nomatch*'; echo $(echo b$x) c; echo end",
+        "x='nomatch*'; for i in $(echo $x) d; do echo \"<$i>\"; done",
+        "x='nomatch*'; set -- $(basename $x); echo \"$# $?\"",
+        "x='nomatch*'; y=$(echo $x) z=$(echo ok); echo \"[$y][$z]\"",
+    ]
+    rng.shuffle(lines)
+    return ("regress-inline-substitution-failglob", shell_BASH,
+            shell_program("shopt -s failglob", *lines[:rng.randint(2, len(lines))]))
+
+
+def shell_regress_condition_traps(rng):
+    """ERR, DEBUG and RETURN written inside a function, a subshell or a
+    sourced file belong to it and fire there; one written outside reaches in
+    only under errtrace and functrace."""
+    lines = [
+        "( trap 'echo err1' ERR; false; echo b )",
+        "f() { trap 'echo err2' ERR; false; echo d; }; f",
+        "( trap 'echo err3' ERR; set -e; false; echo no ); echo st=$?",
+        "f() { trap 'echo dbg' DEBUG; echo x; echo y; }; f; trap - DEBUG",
+        "( trap 'echo dbg2' DEBUG; echo x2 )",
+        "g() { trap 'echo ret' RETURN; echo x3; }; g; echo after3; trap - RETURN",
+        "trap 'echo outer' ERR; h() { false; echo in_h; }; h; ( false; echo in_sub ); trap - ERR",
+        "k() { false; echo k; }; m() { trap 'echo inner' ERR; k; false; echo m; }; m; trap - ERR",
+        "( eval \"trap 'echo err4' ERR; false; echo g\" )",
+        "( trap 'echo err5' ERR; (false; echo nested) ); echo st=$?",
+    ]
+    rng.shuffle(lines)
+    return ("regress-condition-traps", shell_BASH,
+            shell_program(*lines[:rng.randint(2, len(lines))]))
+
+
+def shell_regress_sweep_messages(rng):
+    """Words bash says that this said differently or not at all: printf with
+    nothing to print, a bare $2 under set -u, shift with no count under
+    shift_verbose, and a read name that is no name after valid ones."""
+    lines = [
+        "printf; echo st=$?",
+        "printf -v x; echo st=$?",
+        "set -u; ( echo $2 ); ( echo ${2} ); ( echo \"$3\" )",
+        "shopt -s shift_verbose; set --; shift; echo st=$?; shift 2; echo st=$?",
+        "printf 'abcdef:gh\\n' > feed; a=old; b=old; read -r a -E b < feed; echo \"st=$? [$a][$b]\"",
+        "printf 'p q r\\n' > feed; a=old; b=old; c=old; read -r a b 1c c < feed; echo \"st=$? [$a][$b][$c]\"",
+    ]
+    rng.shuffle(lines)
+    return ("regress-sweep-messages", shell_BASH,
+            shell_program(*lines[:rng.randint(2, len(lines))]))
+
+
+def shell_regress_posix_arithmetic_errexit(rng):
+    """An arithmetic error in an expansion ends a bash --posix -c string with
+    127 whether or not errexit is on."""
+    form = rng.choice(("set -e\necho $((1/0)); echo after",
+                       "set -e\nx=$((1/0)); echo after",
+                       "set -e; :\ncase 1 in 1) echo $((1/0));; esac; echo after",
+                       "echo $((1/0)); echo after"))
+    return "regress-posix-arithmetic-errexit", ("posix",), shell_program(form)
+
+
+def shell_regress_bash_bang_continue(rng):
+    """Three places bash reads a line differently from dash: any number of
+    bangs, each turning the answer over; a continue in a loop's condition,
+    which is the condition's own answer of 0; and a bang on a command started
+    in the background, which bash leaves off."""
+    lines = [
+        "! ! false; echo st=$?",
+        "! ! true; echo st=$?",
+        "! ! ! true; echo st=$?",
+        "until continue; do echo u; break; done; echo st=$?",
+        "n=0; while continue; do n=$((n+1)); [ $n -ge 3 ] && break; done; echo n=$n",
+        "n=0; until continue; do n=$((n+1)); done; echo n=$n",
+        "f() { false; true; }; ! f & wait $!; echo st=$?",
+        "! false & wait $!; echo st=$?",
+        "! true | false & wait $!; echo st=$?",
+        "set -o pipefail; ! false | true & wait $!; echo st=$?",
+    ]
+    rng.shuffle(lines)
+    return ("regress-bash-bang-continue", shell_BASH,
+            shell_program(*lines[:rng.randint(2, len(lines))]))
+
+
 def shell_regress_array_comment(rng):
     """A comment inside a=( ) may hold a quote, a parenthesis or an operator."""
     text = rng.choice(("it's", 'say "hi"', "a;b", "(x", "a|b", "a)b"))
@@ -21901,6 +21988,11 @@ SHELL_FAMILIES = (
     shell_regress_pipe_failure,
     shell_regress_inline_substitution,
     shell_regress_inline_substitution_bash,
+    shell_regress_inline_substitution_failglob,
+    shell_regress_condition_traps,
+    shell_regress_sweep_messages,
+    shell_regress_posix_arithmetic_errexit,
+    shell_regress_bash_bang_continue,
     shell_regress_array_comment,
     shell_lang_fc_default_editor,
     shell_lang_jobs_x_words,
