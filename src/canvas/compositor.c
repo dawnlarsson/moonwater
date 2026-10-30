@@ -2432,6 +2432,7 @@ static struct
         unsigned int *band_more[WINDOWS_OUTPUTS];
         unsigned long band_more_bytes[WINDOWS_OUTPUTS];
         unsigned char band_marks[WINDOWS_OUTPUTS][WINDOWS];
+        unsigned char banded[WINDOWS]; // with a band on every screen, the screen each window's tab was last drawn on, + 1
         unsigned long band_bytes; // how much memory the band has
         unsigned int *glass; // what is under the tabs, blurred: as wide as the band and its margins, as high
         unsigned long glass_bytes;
@@ -3096,6 +3097,28 @@ static void compositor_tabs_changed(void)
                 compositor.damage_by = 0;
         }
         compositor.band_at = 0;
+}
+
+/*
+        With a band on every screen, a window whose screen changed -- dragged, snapped, moved, carried -- has its tab
+        on another band, and nothing of the move need reach either band: both are listed and drawn again, or one goes
+        on showing the tab it lost, and a press there (which lists the band anew) raises or closes another window.
+*/
+static void compositor_bands_follow(void)
+{
+        int changed = 0;
+
+        if (compositor_bands() < 2)
+                return;
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                unsigned char screen = (unsigned char)(compositor.showing[row] ? compositor_screen_of(row) + 1 : 0);
+
+                changed |= compositor.banded[row] != screen;
+                compositor.banded[row] = screen;
+        }
+        if (changed)
+                compositor_tabs_changed();
 }
 
 // How far the blur reaches, at the scale: a power of two, which the passes' steps add up to less one.
@@ -4784,6 +4807,7 @@ static void compositor_present(void)
 
         if (!compositor.damages)
                 return;
+        compositor_bands_follow();
 
         // What moonwater debug says of the card, once there is a table to say it in.
         if (compositor.table)

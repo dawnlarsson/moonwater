@@ -115962,6 +115962,36 @@ static void check_compositor_screens(void)
           band.x == SCREENS_A_W && band.width == SCREENS_B_W && band.y + band.height == SCREENS_H && compositor.listing == 2);
     compositor_band_frame(&band);
     check("screens: and the primary's lists none of them", band.x == 0 && compositor.listing == 0);
+    //  Dragged from B to A nowhere near either band, a window's tab is drawn on A's band, which nothing of the drag
+    //  reached: a band left as it was shows a tab it lost, and a press on it is another window's.
+    {
+        static unsigned int kept[SCREENS_A_W * 64];
+        unsigned int changed = 0;
+        int top, high;
+
+        compositor_raise(2);
+        compositor_focus(2);
+        compositor_damage(0, 0, SCREENS_W, SCREENS_H);
+        compositor_present();
+        compositor_band_frame(&band);
+        top = band.y, high = band.height < 64 ? band.height : 64;
+        for (int line = 0; line < high; line++)
+            memory_copy(kept + line * SCREENS_A_W, scanout + (top + line) * SCREENS_W, SCREENS_A_W * 4);
+        compositor.press = COMPOSITOR_NONE;
+        screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
+        screens_hand(200, 60, 0);
+        screens_hand(60, 60, 0);
+        screens_hand(60, 60, -1);
+        compositor_present();
+        for (int line = 0; line < high; line++)
+            changed += memory_compare(kept + line * SCREENS_A_W, scanout + (top + line) * SCREENS_W, SCREENS_A_W * 4) != 0;
+        compositor.band_at = 0;
+        compositor_band_frame(&band);
+        check("screens: a window dragged from the second screen to the primary, far from both bands, is drawn on the primary's band",
+              compositor_screen_of(2) == 0 && compositor.listing == 1 && compositor.y[2] + (int)compositor.h[2] < top &&
+                  changed > 0);
+        compositor_arrange_on(2, COMPOSITOR_RIGHT, 1);
+    }
     taskbar_settings_set("bottom", "primary", "");
 #else
     (void)band;
