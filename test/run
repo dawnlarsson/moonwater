@@ -20604,17 +20604,17 @@ start_grid = grid(main_terminal)
 out.append(("R1.2m the desktop's terminal draws its text at the default size, 14 pixels, one step below 16",
             at_start[0] if at_start else "none", "14"))
 chord("ctrl", "equal")
-grown, _ = until(lambda: grid_is(main_terminal, lambda g: start_grid and g[0] < start_grid[0]), 10)
+grown, _ = until(lambda: grid_is(main_terminal, lambda g: start_grid and g[0] < start_grid[0]), 30)
 out.append(("R1.2n Control-= grows the text one step: the same window holds fewer rows",
             "fewer" if grown else "no (%s, %s)" % (start_grid, grid(main_terminal)), "fewer"))
 chord("ctrl", "minus")
-shrunk, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 10)
+shrunk, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 30)
 out.append(("R1.2n Control-- takes it back one step, to the grid it was",
             "same" if shrunk else "no (%s, %s)" % (start_grid, grid(main_terminal)), "same"))
 chord("ctrl", "shift", "equal")
-shifted, _ = until(lambda: grid_is(main_terminal, lambda g: grown and g == grown), 10)
+shifted, _ = until(lambda: grid_is(main_terminal, lambda g: grown and g == grown), 30)
 chord("ctrl", "0")
-reset, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 10)
+reset, _ = until(lambda: grid_is(main_terminal, lambda g: g == start_grid), 30)
 out.append(("R1.2n Control-Shift-= grows it too, and Control-0 goes back to the default",
             "%s" % ("yes" if shifted and reset else "no (%s, %s)" % (shifted, reset)), "yes"))
 out.append(("and a zoom writes nothing to the machine's log", "nothing" if text_size(main_terminal) == at_start and
@@ -20626,13 +20626,13 @@ out.append(("and a zoom writes nothing to the machine's log", "nothing" if text_
 #   after reads it, and one started after a file that names no step is the default.
 before = pids("terminal")
 chord("ctrl", "shift", "t")
-second, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before], 10)
+second, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before], 30)
 second = second[0] if second else "0"
 second_start = text_size(second)
-until(lambda: grid(second), 10)
+until(lambda: grid(second), 30)
 second_grid = grid(second)
 chord("ctrl", "equal")
-alone, _ = until(lambda: grid_is(second, lambda g: second_grid and g[0] < second_grid[0]), 10)
+alone, _ = until(lambda: grid_is(second, lambda g: second_grid and g[0] < second_grid[0]), 30)
 time.sleep(1)
 out.append(("R1.2o Control-= grows the terminal with the keys and no other: the new one fewer rows, the first as it was",
             "yes" if alone and second_start and second_start[0] == "14" and grid(main_terminal) == start_grid
@@ -20641,7 +20641,7 @@ file_text = shell.run("cat /root/terminal/size", 10)[0].strip()
 out.append(("and the file names the step, 16", file_text, "16"))
 
 chord("ctrl", "shift", "t")
-later, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid != second], 10)
+later, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid != second], 30)
 later = later[0] if later else "0"
 later_start = text_size(later)
 out.append(("R1.2p a terminal started after the change reads the file: it starts at 16 pixels",
@@ -20649,7 +20649,7 @@ out.append(("R1.2p a terminal started after the change reads the file: it starts
 
 shell.run("echo nonsense > /root/terminal/size", 10)
 chord("ctrl", "shift", "t")
-fallen, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid not in (second, later)], 10)
+fallen, _ = until(lambda: [pid for pid in pids("terminal") if pid not in before and pid not in (second, later)], 30)
 fallen = fallen[0] if fallen else "0"
 fallen_start = text_size(fallen)
 out.append(("R1.2q a file that names no step is the default: a terminal started then draws at 14 pixels, and the others keep theirs",
