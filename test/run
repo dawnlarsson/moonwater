@@ -22158,7 +22158,10 @@ def near(got, want, slack=0):
 def surface(words, name, colour, size=(200, 100), program=(7, 7)):
     """A /surface started through `moonwater window WORDS` (none: started bare), drawing the size it is asked for:
     its pid, and where it says it was put."""
-    command = ("moonwater window %s " % words if words else "") + \
+    #   The file of the last window of the name goes first: the redirect is the background child's, made after the
+    #   pid is printed, and a read before it found the last window's "at" line (P2.5 read where P2.3 had put its
+    #   window, P2.6 where P2.5 had, while moonwater window had each new one where it should be).
+    command = "rm -f /tmp/%s.out; " % name + ("moonwater window %s " % words if words else "") + \
         "/surface -R -x %d -y %d -w %d -h %d -c %s -s 900 %s> /tmp/%s.out 2>&1 & echo pid $!" % (
             program[0], program[1], size[0], size[1], colour, "-N %s " % name if name.startswith("n-") else "", name)
     pid = re.search(r"pid (\d+)", shell.run(command, 10)[0])
