@@ -125928,16 +125928,21 @@ static fn menu_check(struct ui address_to wui)
 */
 static fn editor_check(struct ui address_to wui)
 {
-        static const char dir[] = "editor-check.tmp";
-        char path[96], link_path[96], fifo[96];
+        // A directory of this process's own: the three machines' checks run at once in one directory, and a file
+        // another one truncated under this one's mapping was a SIGBUS (arm64 under qemu-user), its save a refusal.
+        char dir[48], path[96], link_path[96], fifo[96], big[96];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-check."));
         bipolar handle;
         error_stat facts;
         positive started;
 
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
         system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
-        string_copy((string_address)path, (string_address) "editor-check.tmp/file.c");
-        string_copy((string_address)link_path, (string_address) "editor-check.tmp/link.c");
-        string_copy((string_address)fifo, (string_address) "editor-check.tmp/fifo");
+        string_copy(string_copy((string_address)path, (string_address)dir) + string_length((string_address)dir), (string_address) "/file.c");
+        string_copy(string_copy((string_address)link_path, (string_address)dir) + string_length((string_address)dir), (string_address) "/link.c");
+        string_copy(string_copy((string_address)fifo, (string_address)dir) + string_length((string_address)dir), (string_address) "/fifo");
+        string_copy(string_copy((string_address)big, (string_address)dir) + string_length((string_address)dir), (string_address) "/big.c");
         handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
         system_write_all((b32)handle, "\xef\xbb\xbfint x;\r\n", 11);
         system_close(handle);
@@ -125970,7 +125975,6 @@ static fn editor_check(struct ui address_to wui)
         editor_close_tab();
         // A hundred megabytes: open and the first screen drawn.
         {
-                static const char big[] = "editor-check.tmp/big.c";
                 static char line[] = "        if (value > limit) return compute(value, limit) + offset; // note\n";
                 static p8 chunk[1 << 20];
                 long pixels = ui_map(1600 * 1000 * 4);
