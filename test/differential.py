@@ -13099,22 +13099,52 @@ def misc_last_long_logins(farm):
 
     def setup(root):
         (root / "wtmp").write_bytes(data)
+        (root / "dir").mkdir()
 
     env = dict(os.environ, TZ="UTC0")
     passed = total = 0
     notes = []
-    for flags in ([], ["-F"], ["-w"], ["-R"], ["-a"], ["-i"], ["-x"], ["--time-format=full"]):
-        args = ["-f", "wtmp", *flags]
+    #       A directory is an empty database that last says it cannot read,
+    #       and ends 0.
+    cases =[["-f", "wtmp", *flags] for flags in ([], ["-F"], ["-w"], ["-R"], ["-a"], ["-i"], ["-x"], ["--time-format=full"])]
+    cases += [["-f", "dir"], ["-R", "-f", "dir"]]
+    for args in cases:
         answers = files_pair(farm, "last", args, setup, env=env)
         total += 1
-        if answers[0][:3] == answers[1][:3]:
+        #       A database with no records begins now, in each run's own second.
+        both = [(a[0], [re.sub(r" begins .*", " begins", line) for line in a[1]], a[2]) for a in answers]
+        if both[0] == both[1]:
             passed += 1
         else:
             notes.append(f"last {' '.join(args)}: reference {answers[0][1]!r} ours {answers[1][1]!r}")
     return passed, total, notes
 
 
-MISC_CHECKS = (misc_last_long_logins,)
+def misc_dmesg_nul_lines(farm):
+    """dmesg -F writes a later line that begins with a NUL as it stands, with
+    no clock and no padding before it (a line that begins with anything else
+    and has no priority is a continuation, padded to the clock's width); a
+    NUL at the start of the input is dropped. Compared with the reference's
+    output for a line of NULs, of NULs and text, and after a priority."""
+    texts = (b"[1.5] a\n\0b\n", b"[1.5] a\nx\n\0b\n", b"[1.5] a\n<6>[2.5] c\n\0\0b\n",
+             b"[1.5] a\n<6>[2.5] c\n\0\n", b"[1.5] a\n<6>[2.5] c\n\0<6>[3.5] d\n",
+             b"[1.5] a\n\0\0\0\nq\n", b"[1.5] a\n\n\0b\n", b"\0\0[1.5] a\nz\n")
+    passed = total = 0
+    notes = []
+    for text in texts:
+        def setup(root, text=text):
+            (root / "k.log").write_bytes(text)
+
+        answers = files_pair(farm, "dmesg", ["-F", "k.log"], setup)
+        total += 1
+        if answers[0][:3] == answers[1][:3]:
+            passed += 1
+        else:
+            notes.append(f"dmesg -F {text!r}: reference {answers[0][1]!r} ours {answers[1][1]!r}")
+    return passed, total, notes
+
+
+MISC_CHECKS = (misc_last_long_logins, misc_dmesg_nul_lines)
 
 
 # ----------------------------------------------------------------------------

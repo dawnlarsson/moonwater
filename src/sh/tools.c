@@ -3497,13 +3497,22 @@ static b32 tools_last()
         if (loaded < 0)
                 return text_done(string_diagnostic(&text_diagnostic, 1, path, file_reason(loaded)));
 
-        // A directory is read as an empty database, and the reference says
-        // nothing about it: it goes on to say when that database begins.
+        // A directory is read as an empty database. The reference (2.42)
+        // counts records from the file's size and reads the first of them:
+        // a directory the size of one record or more (ext4's) fails that
+        // read, which it says and ends 0 all the same, and one smaller
+        // (tmpfs's) has no record to read and says nothing. Either way it
+        // goes on to say when that database begins.
         file_facts kind;
         if (file_look(reader.handle, (string_address)"", AT_EMPTY_PATH,
                       address_of kind) &&
             (kind.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                if (reader.records)
+                        string_format(log_error, "last: cannot read %s: %s\n",
+                                      path, file_reason(-ERROR_IS_DIRECTORY));
                 reader.records = 0;
+        }
 
         login_record record;
         for (positive at = reader.records; at; at--)
@@ -16749,6 +16758,9 @@ typedef struct
         bool time_known;
         bool timestamp_present;
         bool continuation;
+        //      A later line that begins with a NUL: the reference writes it
+        //      as it stands, with no clock and no padding in front.
+        bool bare;
 } tools_dmesg_record;
 
 typedef struct
@@ -16875,6 +16887,8 @@ static bool tools_dmesg_legacy_record(p8 address_to bytes, positive length,
                 record->priority = (p32)priority;
                 record->priority_known = true;
         }
+        else if (!first && at < stop && !*at)
+                record->bare = true;
         else if (!first)
                 record->continuation = true;
 
@@ -17172,6 +17186,15 @@ static fn tools_dmesg_emit(tools_dmesg_state address_to state,
                 if (record->timestamp_present)
                         tools_dmesg_timestamp(record->microseconds, false,
                                               false);
+                tools_dmesg_message(record->message, record->message_length,
+                                    state->noescape);
+                text_put_character('\n');
+                state->rows++;
+                return;
+        }
+
+        if (record->bare)
+        {
                 tools_dmesg_message(record->message, record->message_length,
                                     state->noescape);
                 text_put_character('\n');
