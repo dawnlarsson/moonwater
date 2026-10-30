@@ -3241,6 +3241,22 @@ target_tools()
                 target_tool_list="${CLANG:-clang} ld.lld $target_runner"
         fi
 
+        #       MW_X86_CPU=NAME runs the x86_64 checks under qemu-x86_64 as
+        #       that processor, so the library's own cpuid reads pick the
+        #       tier and a machine without AVX2 or AVX-512 is a machine the
+        #       lane has seen, not one it forces by clearing a flag:
+        #
+        #           MW_X86_CPU=Nehalem sh test/run train utf8 hex
+        #
+        #       The floor is x86-64-v2 (Nehalem); qemu64 is below it, and
+        #       qemu's translator has no AVX-512, and takes a masked vector
+        #       load across a page edge for a fault, so tensor, train and
+        #       matrix die on Haswell and above.
+        if [ "$target" = x86_64 ] && [ -n "${MW_X86_CPU:-}" ]; then
+                target_runner="qemu-x86_64 -cpu $MW_X86_CPU"
+                target_tool_list="$target_tool_list qemu-x86_64"
+        fi
+
         #       A target whose tools are not here did not run, and says so.
         for tool in $target_tool_list; do
                 command -v "$tool" > /dev/null 2>&1 ||
