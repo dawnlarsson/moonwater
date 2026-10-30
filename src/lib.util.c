@@ -6447,6 +6447,17 @@ SEARCH_KNOWN(search_case_known, memory_first_of_ascii_case)
 
 #if KNOWN_BOUND_WORDS
 /*
+        The two loads below read past the end of a short string on purpose: a
+        word that starts inside "lo" and reaches into whatever follows it, on
+        a page the bound_load_fits_page test has shown is the same. Built to
+        trap, the sanitizer sizes the object by the literal the call site
+        proves and calls the word an access past it, which the page test
+        already answered. Both compilers take the attribute, and it changes
+        no instruction in a build that is not sanitizing.
+*/
+#define BOUND_WORD_READ __attribute__((no_sanitize("object-size")))
+
+/*
         A word from wherever the pointer is, and which of its bytes is the
         terminator. Both loads are unaligned and stay inside one 4096-byte
         page. A bounded string may end before its bound at the last readable
@@ -6457,12 +6468,12 @@ SEARCH_KNOWN(search_case_known, memory_first_of_ascii_case)
         Only x86_64 and arm64 get here, so the count of trailing zeros is one
         instruction and there is no libgcc call hiding in it.
 */
-static inline INLINE p64 bound_word_at(const_string where)
+static inline INLINE BOUND_WORD_READ p64 bound_word_at(const_string where)
 {
         return memory_load_unaligned(p64, where);
 }
 
-static inline INLINE p32 bound_narrow_at(const_string where)
+static inline INLINE BOUND_WORD_READ p32 bound_narrow_at(const_string where)
 {
         return memory_load_unaligned(p32, where);
 }
