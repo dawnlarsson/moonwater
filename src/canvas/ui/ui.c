@@ -4344,6 +4344,397 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
         ui->scratch_width = (int)scratch;
 }
 
+/* ---- menus: a popup surface and the list in it ---- */
+
+/*
+        A menu is a popup row of its own (window.c's popup columns), so it reaches past its window's edges and the
+        compositor places it, flipping it where the screen ends. Its items are labels with an optional accelerator's
+        text, a mnemonic marked with & (the letter typed chooses it), check and radio marks, separators, section
+        headers and disabled items; a submenu item is answered UI_MENU_OPEN, for the app to open another popup against
+        the item with WINDOW_POPUP_RIGHT (the hover delay and the pointer's safe triangle toward it are not built yet).
+        The keys while it is open: Up and Down (Home and End) move over what can be chosen, Enter and Space choose,
+        Right answers a submenu's item and Left closes, Escape closes, letters jump to the first item they
+        start (a mnemonic chooses). Rows are 28 logical pixels, 44 when a finger opened it; a menu taller than its
+        screen scrolls with the wheel and the keys. Colours are the kit's: the surface container, the selection's
+        layer for the item under the hand, the outline between groups.
+*/
+#define UI_MENU_ITEMS 40
+#define UI_MENU_SEPARATOR 1u
+#define UI_MENU_DISABLED 2u
+#define UI_MENU_CHECK 4u   // a check mark when UI_MENU_ON
+#define UI_MENU_RADIO 8u   // a dot when UI_MENU_ON
+#define UI_MENU_ON 16u
+#define UI_MENU_HEADER 32u
+#define UI_MENU_SUBMENU 64u // id names the submenu the app opens for it
+#define UI_MENU_ROW 28
+#define UI_MENU_TOUCH_ROW 44
+#define UI_MENU_PAD 6
+#define UI_MENU_HOVER_NS 300000000ull
+
+struct ui_menu_item
+{
+        const char address_to label, address_to keys;
+        p32 flags;
+        int id;
+};
+
+struct ui_popmenu
+{
+        struct ui_menu_item items[UI_MENU_ITEMS];
+        int count, hot, top, rows_shown;
+        b32 touch, pressed;
+        int width, height;
+        char typed[16];
+        int typed_length;
+        positive typed_at;
+};
+
+static fn ui_popmenu_add(struct ui_popmenu address_to m, const char address_to label, const char address_to keys, p32 flags, int id)
+{
+        if (m->count < UI_MENU_ITEMS)
+                m->items[m->count++] = (struct ui_menu_item){label, keys, flags, id};
+}
+
+static b32 ui_popmenu_choosable(const struct ui_popmenu address_to m, int at)
+{
+        return at >= 0 && at < m->count && !(m->items[at].flags & (UI_MENU_SEPARATOR | UI_MENU_DISABLED | UI_MENU_HEADER));
+}
+
+static int ui_popmenu_row(const struct ui address_to ui, const struct ui_popmenu address_to m)
+{
+        return (m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW) * ui->scale;
+}
+
+// A label as drawn: its & left out (and && one &).
+static positive ui_popmenu_shown(const char address_to label, p8 address_to into, positive room, p32 address_to mnemonic)
+{
+        positive out = 0;
+
+        *mnemonic = 0;
+        for (positive at = 0; label && label[at] && out + 1 < room; at++)
+        {
+                if (label[at] == '&' && label[at + 1] && label[at + 1] != '&')
+                {
+                        *mnemonic = (p32)byte_to_lower((b8)label[at + 1]);
+                        continue;
+                }
+                if (label[at] == '&')
+                        at++;
+                into[out++] = (p8)label[at];
+        }
+        into[out] = 0;
+        return out;
+}
+
+// How big the menu is drawn (device pixels), and how many rows show in at most limit pixels of height.
+static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to m, int limit)
+{
+        int widest = 0, height = 2 * UI_MENU_PAD * ui->scale;
+
+        for (int at = 0; at < m->count; at++)
+        {
+                p8 shown[96];
+                p32 mnemonic;
+                int wide;
+
+                if (m->items[at].flags & UI_MENU_SEPARATOR)
+                {
+                        height += (2 * UI_MENU_PAD + 1) * ui->scale;
+                        continue;
+                }
+                ui_popmenu_shown(m->items[at].label, shown, sizeof(shown), &mnemonic);
+                wide = ui_kit_measure(ui, shown, UI_BODY_MEDIUM) + (m->items[at].keys ? ui_kit_measure(ui, (string_address)m->items[at].keys, UI_BODY_MEDIUM) + 32 * ui->scale : 0);
+                widest = wide > widest ? wide : widest;
+                height += ui_popmenu_row(ui, m);
+        }
+        m->width = widest + 2 * (UI_MENU_PAD + 30) * ui->scale;
+        m->height = limit > 0 && height > limit ? limit : height;
+        m->rows_shown = (m->height - 2 * UI_MENU_PAD * ui->scale) / ui_popmenu_row(ui, m);
+}
+
+// The item at y (device pixels from the menu's top), or -1.
+static int ui_popmenu_at(const struct ui address_to ui, const struct ui_popmenu address_to m, int y)
+{
+        int top = UI_MENU_PAD * ui->scale;
+
+        for (int at = m->top; at < m->count; at++)
+        {
+                int tall = m->items[at].flags & UI_MENU_SEPARATOR ? (2 * UI_MENU_PAD + 1) * ui->scale : ui_popmenu_row(ui, m);
+
+                if (y >= top && y < top + tall)
+                        return m->items[at].flags & UI_MENU_SEPARATOR ? -1 : at;
+                top += tall;
+        }
+        return -1;
+}
+
+static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
+{
+        struct ui_box face = ui_box_of(ui, 0, 0, ui_q(m->width / ui->scale), ui_q(m->height / ui->scale), ui_q(8));
+        int y = UI_MENU_PAD * ui->scale, row = ui_popmenu_row(ui, m);
+
+        ui_kit_fill(ui, &face, ui_role(UI_SURFACE_CONTAINER), null);
+        ui_kit_ring(ui, &face, ui->scale, ui_role(UI_OUTLINE_VARIANT));
+        for (int at = m->top; at < m->count && y < m->height - UI_MENU_PAD * ui->scale; at++)
+        {
+                const struct ui_menu_item address_to item = &m->items[at];
+                unsigned int ink = ui_role(UI_ON_SURFACE);
+                p8 shown[96];
+                p32 mnemonic;
+                int baseline = y + (row - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
+                unsigned int alpha = item->flags & UI_MENU_DISABLED ? 97 : 255;
+
+                if (item->flags & UI_MENU_SEPARATOR)
+                {
+                        ui_fill(ui, UI_MENU_PAD * ui->scale, y + UI_MENU_PAD * ui->scale, m->width - 2 * UI_MENU_PAD * ui->scale, ui->scale,
+                                ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 255));
+                        y += (2 * UI_MENU_PAD + 1) * ui->scale;
+                        continue;
+                }
+                if (at == m->hot && ui_popmenu_choosable(m, at))
+                {
+                        struct ui_box lit = ui_box_of(ui, ui_q(UI_MENU_PAD), ui_q(y / ui->scale), ui_q((m->width - 2 * UI_MENU_PAD * ui->scale) / ui->scale),
+                                                      ui_q(row / ui->scale), ui_q(6));
+
+                        ui_kit_fill(ui, &lit, ui_role(UI_SELECTION), null);
+                }
+                ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
+                if (item->flags & UI_MENU_HEADER)
+                        ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale, baseline, shown, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                else
+                        ui_kit_text(ui, (UI_MENU_PAD + 30) * ui->scale, baseline, shown, UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
+                if ((item->flags & (UI_MENU_CHECK | UI_MENU_RADIO)) && (item->flags & UI_MENU_ON))
+                {
+                        int cx = (UI_MENU_PAD + 15) * ui->scale, cy = y + row / 2;
+
+                        if (item->flags & UI_MENU_RADIO)
+                                ui_round(ui, cx - 3 * ui->scale, cy - 3 * ui->scale, 6 * ui->scale, 6 * ui->scale, 3 * ui->scale, ui_tone(ink & 0xffffffu, alpha));
+                        else
+                                ui_kit_text(ui, cx - 5 * ui->scale, baseline, (string_address) "\xe2\x9c\x93", UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
+                }
+                if (item->keys)
+                        ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale - ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), baseline,
+                                    (string_address)item->keys, UI_BODY_MEDIUM, (alpha * 6 / 10) << 24 | (ink & 0xffffffu), 0);
+                if (item->flags & UI_MENU_SUBMENU)
+                        ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
+                                    (alpha << 24) | (ink & 0xffffffu), 0);
+                y += row;
+        }
+}
+
+// The hot item moved by step over what can be chosen (wrapping), the view following it.
+static fn ui_popmenu_step(struct ui_popmenu address_to m, int step)
+{
+        for (int tries = 0, at = m->hot; tries < m->count; tries++)
+        {
+                at = (at + step + m->count) % m->count;
+                if (ui_popmenu_choosable(m, at))
+                {
+                        m->hot = at;
+                        break;
+                }
+        }
+        if (m->hot < m->top)
+                m->top = m->hot;
+        if (m->rows_shown > 0 && m->hot >= m->top + m->rows_shown)
+                m->top = m->hot - m->rows_shown + 1;
+}
+
+/*
+        An event of the menu's row: the id of the item chosen, UI_MENU_NOTHING, UI_MENU_GONE (Escape, Left at the top,
+        the compositor asking it to go), or UI_MENU_OPEN for a submenu's item (its id in hot's item). x and y are the
+        menu's own device pixels.
+*/
+#define UI_MENU_NOTHING (-1)
+#define UI_MENU_GONE (-2)
+#define UI_MENU_OPEN (-3)
+
+static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_to m, const struct window_event address_to event, int x, int y)
+{
+        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
+        {
+                p32 c = (p32)event->b;
+
+                switch (event->a)
+                {
+                case 103: ui_popmenu_step(m, -1); return UI_MENU_NOTHING;
+                case 108: ui_popmenu_step(m, 1); return UI_MENU_NOTHING;
+                case 102: m->hot = m->count - 1; ui_popmenu_step(m, 1); return UI_MENU_NOTHING;
+                case 107: m->hot = 0; ui_popmenu_step(m, -1); return UI_MENU_NOTHING;
+                case 1: case 105: return UI_MENU_GONE;
+                case 106:
+                        return ui_popmenu_choosable(m, m->hot) && (m->items[m->hot].flags & UI_MENU_SUBMENU) ? UI_MENU_OPEN : UI_MENU_NOTHING;
+                case 28: case 96: case 57:
+                        if (!ui_popmenu_choosable(m, m->hot))
+                                return UI_MENU_NOTHING;
+                        return m->items[m->hot].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[m->hot].id;
+                }
+                if (c > ' ' && c < 127)
+                {
+                        positive now = clock_monotonic_nanoseconds();
+                        p8 shown[96];
+                        p32 mnemonic;
+
+                        if (now - m->typed_at > 1000000000ull || m->typed_length >= (int)sizeof(m->typed) - 1)
+                                m->typed_length = 0;
+                        m->typed[m->typed_length++] = (char)byte_to_lower((b8)c);
+                        m->typed_at = now;
+                        // A mnemonic chooses at once; else the first item the letters typed start.
+                        for (int at = 0; at < m->count; at++)
+                        {
+                                ui_popmenu_shown(m->items[at].label, shown, sizeof(shown), &mnemonic);
+                                if (ui_popmenu_choosable(m, at) && mnemonic == byte_to_lower((b8)c) && m->typed_length == 1)
+                                {
+                                        m->hot = at;
+                                        return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
+                                }
+                        }
+                        for (int at = 0; at < m->count; at++)
+                        {
+                                positive k = 0;
+
+                                ui_popmenu_shown(m->items[at].label, shown, sizeof(shown), &mnemonic);
+                                while (k < (positive)m->typed_length && shown[k] && byte_to_lower((b8)shown[k]) == m->typed[k])
+                                        k++;
+                                if (ui_popmenu_choosable(m, at) && k == (positive)m->typed_length)
+                                {
+                                        m->hot = at;
+                                        break;
+                                }
+                        }
+                }
+                return UI_MENU_NOTHING;
+        }
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1;
+
+                m->hot = at;
+                return UI_MENU_NOTHING;
+        }
+        if (event->type == WINDOW_EVENT_WHEEL && !event->b)
+        {
+                m->top += event->a < 0 ? 1 : -1;
+                m->top = m->top < 0 ? 0 : m->top > m->count - m->rows_shown ? (m->count - m->rows_shown > 0 ? m->count - m->rows_shown : 0) : m->top;
+                return UI_MENU_NOTHING;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
+        {
+                int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1;
+
+                m->touch |= (event->flags & WINDOW_KEY_TOUCH) != 0;
+                if (event->flags & WINDOW_KEY_DOWN)
+                {
+                        m->pressed = true;
+                        m->hot = at;
+                        return UI_MENU_NOTHING;
+                }
+                // A release on an item chooses it: after a press on it, or at the end of a drag from the button that
+                // opened the menu (press, drag, release).
+                if (event->flags & WINDOW_KEY_CANCEL)
+                        return UI_MENU_NOTHING;
+                if (ui_popmenu_choosable(m, at))
+                        return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
+        }
+        return UI_MENU_NOTHING;
+}
+
+/*
+        A popup an app opens: its own row of the table, a picture of its own drawn with the app's engine and faces, and
+        its menu. ui_popup_open takes the row (as a popup of the app's window, at an anchor in the window's pixels),
+        ui_popup_pump reads its events and answers what was chosen, and ui_popup_close leaves the row. The app's runner
+        waits on its wake too while it is open (ui_app.popup).
+*/
+struct ui_popup
+{
+        struct window_row own;
+        struct ui ui;
+        struct ui_popmenu menu;
+        b32 open;
+        int shown, x, y;
+};
+
+static fn ui_popup_present(struct ui_popup address_to p)
+{
+        struct windows address_to table = p->own.table;
+        unsigned int row = p->own.row;
+        int slot = p->shown < 0 ? 0 : 1 - p->shown;
+
+        if (p->shown >= 0 && !windows_ready(&p->own))
+                return;
+        ui_begin(&p->ui, windows_pixels(&p->own, (unsigned int)slot), p->own.stride, p->menu.width, p->menu.height);
+        ui_popmenu_draw(&p->ui, &p->menu);
+        table->width[row] = (unsigned int)p->menu.width;
+        table->height[row] = (unsigned int)p->menu.height;
+        table->damage_width[row] = 0;
+        windows_show(&p->own, (unsigned int)slot);
+        p->shown = slot;
+}
+
+static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
+                         int x, int y, int width, int height, unsigned int flags, b32 touch)
+{
+        struct windows address_to table;
+        int screen_x, screen_y, screen_w, screen_h;
+
+        if (p->open)
+                windows_leave(&p->own);
+        p->open = false;
+        if (windows_take(&p->own) < 0)
+                return false;
+        table = p->own.table;
+        p->ui = *parent_ui;
+        p->shown = -1;
+        p->menu.touch = touch;
+        p->menu.hot = -1;
+        p->menu.top = 0;
+        windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
+        ui_popmenu_size(&p->ui, &p->menu, screen_h);
+        table->popup_parent[p->own.row] = parent->row + 1;
+        table->popup_x[p->own.row] = x, table->popup_y[p->own.row] = y;
+        table->popup_w[p->own.row] = width, table->popup_h[p->own.row] = height;
+        table->popup_flags[p->own.row] = flags;
+        table->glass[p->own.row] = WINDOW_NO_CLOSE;
+        string_copy_bounded((string_address)table->title[p->own.row], (string_address) "menu", WINDOWS_TITLE);
+        p->open = true;
+        ui_popup_present(p);
+        return true;
+}
+
+static fn ui_popup_close(struct ui_popup address_to p)
+{
+        if (p->open)
+                windows_leave(&p->own);
+        p->open = false;
+}
+
+// The popup's events: the id chosen (the popup closed), UI_MENU_GONE when it went, UI_MENU_NOTHING otherwise.
+static int ui_popup_pump(struct ui_popup address_to p)
+{
+        struct window_event event;
+        int answer = UI_MENU_NOTHING;
+
+        if (!p->open)
+                return UI_MENU_NOTHING;
+        while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
+        {
+                int hot = p->menu.hot;
+
+                if (event.type == WINDOW_EVENT_MOTION)
+                        p->x = event.a, p->y = event.b;
+                answer = ui_popmenu_event(&p->ui, &p->menu, &event, p->x, p->y);
+                if (answer == UI_MENU_OPEN)
+                        answer = UI_MENU_NOTHING;
+                if (p->menu.hot != hot)
+                        ui_popup_present(p);
+        }
+        if (p->own.table->state[p->own.row] & WINDOW_CLOSING)
+                answer = UI_MENU_GONE;
+        if (answer != UI_MENU_NOTHING)
+                ui_popup_close(p);
+        return answer;
+}
+
 /*
         One app's window and loop. The runner claims the standard descriptors,
         takes the window, sets its title, name, glass, scale and ground, and calls
@@ -4384,6 +4775,9 @@ struct ui_app
         // The kit: its controls moved this frame, in rows top to bottom (all of it while the theme turns); the app
         // marks them to be drawn again, as the next frame comes a display period on.
         void (*moving)(int top, int bottom, b32 all);
+        // A menu the app has open (ui_popup), whose wake the loop waits on too, and what it chose.
+        struct ui_popup address_to popup;
+        void (*chose)(int id);
         b32 mono;                       // the kit's mono face is loaded too (a tag, a code well, a key)
 };
 
@@ -4454,6 +4848,13 @@ static int ui_app_run(struct ui_app address_to app)
                 while (running && windows_event(app->own, &event))
                         if (!app->event(&event))
                                 running = false;
+                if (app->popup && app->popup->open)
+                {
+                        int chosen = ui_popup_pump(app->popup);
+
+                        if (chosen != UI_MENU_NOTHING && app->chose)
+                                app->chose(chosen);
+                }
 
                 if (table->state[row] & WINDOW_CLOSING)
                 {
@@ -4535,7 +4936,7 @@ static int ui_app_run(struct ui_app address_to app)
                 if (app->done && app->done())
                         break;
 
-                ready = windows_wait(app->own, other, timeout);
+                ready = windows_wait_also(app->own, app->popup && app->popup->open ? app->popup->own.wake : -1, other, timeout);
                 if (ready < 0)
                         break;
                 if (other >= 0)

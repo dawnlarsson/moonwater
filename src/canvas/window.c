@@ -2018,6 +2018,32 @@ static long windows_wait(const struct window_row *own, long other, long nanoseco
 }
 
 /*
+        windows_wait with one more wake: a popup's row of the same program (-1 for none), which a menu's events knock on.
+*/
+static long windows_wait_also(const struct window_row *own, long also, long other, long nanoseconds)
+{
+        struct window_poll wanted[3];
+        long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000}, ready;
+        unsigned int count = 0, also_at = 3;
+
+        wanted[count++] = (struct window_poll){(int)own->wake, 1, 0};
+        if (also >= 0)
+                also_at = count, wanted[count++] = (struct window_poll){(int)also, 1, 0};
+        if (other >= 0)
+                wanted[count++] = (struct window_poll){(int)other, 1, 0};
+        ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, count, nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
+        if (ready > 0 && wanted[0].returned)
+        {
+                windows_drain(own->wake);
+                if (wanted[0].returned & 16) // POLLHUP
+                        return -1;
+        }
+        if (ready > 0 && also_at < 3 && wanted[also_at].returned)
+                windows_drain(also);
+        return ready;
+}
+
+/*
         What of buffer which the compositor wrote over since the program last drew into it: false when nothing,
         and the rectangle cleared once read. The program draws it again, as it would cells that changed.
 */

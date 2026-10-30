@@ -125554,6 +125554,8 @@ b32 main()
         pasted line end is a blank), the keys reach the engine through the keymap, the hand selects a word and a line,
         and every mode draws inside its box and nothing outside it.
 */
+static fn menu_check(struct ui address_to wui);
+
 static fn text_widget_check(string_address inter, string_address mono)
 {
         static struct ui wui;
@@ -125574,6 +125576,9 @@ static fn text_widget_check(string_address inter, string_address mono)
         wui.bold = &regular;
         wui.mono = &code;
         wui.scale = 1;
+        // A scratch line of its own: the terminal's is the terminal's.
+        wui.scratch = null;
+        wui.scratch_width = 0;
         pixels = ui_map(800 * 600 * 4);
         ui_scratch_fit(&wui, 800);
         ui_begin(&wui, (unsigned int address_to)pixels, 800, 800, 600);
@@ -125660,6 +125665,85 @@ static fn text_widget_check(string_address inter, string_address mono)
         }
         ui_text_close(&view);
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
+        menu_check(&wui);
+}
+
+
+/*
+        The menu (ui_popmenu_*) under a random stream of keys, motion, wheel and buttons with the repository's faces:
+        what it answers chosen is always an item that can be chosen, the keys never leave the hot item on a separator,
+        a header or a disabled item, Escape and Left close it, a mnemonic chooses its item, and it draws inside its size.
+*/
+// The menu's own random stream: the frames check's is the frames check's.
+static p64 menu_state = 0x6a09e667f3bcc909ull;
+
+static p32 menu_next(p32 below)
+{
+        XORSHIFT64(menu_state);
+        return below ? (p32)((menu_state >> 11) % below) : 0;
+}
+
+static fn menu_check(struct ui address_to wui)
+{
+        static struct ui_popmenu m;
+        long pixels = ui_map(600 * 900 * 4);
+        b32 chosen_ok = true, hot_ok = true;
+
+        m.count = 0;
+        ui_popmenu_add(&m, "Section", null, UI_MENU_HEADER, 0);
+        ui_popmenu_add(&m, "&Undo", "Ctrl+Z", 0, 1);
+        ui_popmenu_add(&m, "&Redo", "Ctrl+Y", UI_MENU_DISABLED, 2);
+        ui_popmenu_add(&m, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(&m, "Cu&t", "Ctrl+X", 0, 3);
+        ui_popmenu_add(&m, "&Copy", "Ctrl+C", 0, 4);
+        ui_popmenu_add(&m, "&Paste", "Ctrl+V", 0, 5);
+        ui_popmenu_add(&m, "Word wrap", null, UI_MENU_CHECK | UI_MENU_ON, 6);
+        ui_popmenu_add(&m, "More", null, UI_MENU_SUBMENU, 7);
+        ui_popmenu_size(wui, &m, 900);
+        ui_begin(wui, (unsigned int address_to)pixels, 600, 600, 900);
+        ui_popmenu_draw(wui, &m);
+        check("menu: a menu has a size", m.width > 0 && m.height > 0 && m.width < 600 && m.height < 900);
+        {
+                struct window_event escape = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 1, 27}, mnemonic = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 46, 'c'};
+
+                check("menu: Escape closes it", ui_popmenu_event(wui, &m, &escape, 0, 0) == UI_MENU_GONE);
+                check("menu: a mnemonic chooses its item", ui_popmenu_event(wui, &m, &mnemonic, 0, 0) == 4);
+        }
+        for (positive round = 0; round < 20000; round++)
+        {
+                static const unsigned int keys[] = {103, 108, 102, 107, 28, 106, 30, 22, 19};
+                struct window_event event = {0, 0, 0, 0};
+                int answer, x = (int)menu_next((p32)m.width + 40) - 20, y = (int)menu_next((p32)m.height + 40) - 20;
+
+                switch (menu_next(4))
+                {
+                case 0:
+                        event = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, (int)keys[menu_next(9)], (int)("\0\0\0\0\r\0auy"[menu_next(9)])};
+                        break;
+                case 1:
+                        event = (struct window_event){WINDOW_EVENT_MOTION, 0, x, y};
+                        break;
+                case 2:
+                        event = (struct window_event){WINDOW_EVENT_BUTTON, menu_next(2) ? WINDOW_KEY_DOWN : 0, 0x110, 0};
+                        break;
+                default:
+                        event = (struct window_event){WINDOW_EVENT_WHEEL, 0, menu_next(2) ? 120 : -120, 0};
+                }
+                answer = ui_popmenu_event(wui, &m, &event, x, y);
+                if (answer >= 0)
+                {
+                        b32 found = false;
+
+                        for (int at = 0; at < m.count; at++)
+                                found |= m.items[at].id == answer && ui_popmenu_choosable(&m, at) && !(m.items[at].flags & UI_MENU_SUBMENU);
+                        chosen_ok &= found;
+                }
+                if (event.type == WINDOW_EVENT_KEY && (event.a == 103 || event.a == 108 || event.a == 102 || event.a == 107))
+                        hot_ok &= ui_popmenu_choosable(&m, m.hot);
+        }
+        check("menu: only an item that can be chosen is ever chosen", chosen_ok);
+        check("menu: the keys keep the hot item on one that can be chosen", hot_ok);
+        compositor_call(syscall(munmap), (positive)pixels, 600 * 900 * 4, 0, 0, 0, 0);
 }
 
 /*
@@ -130991,6 +131075,46 @@ static fn te_clipboard(positive rounds)
         }
 }
 
+
+/*
+        Where the compositor puts a popup (compositor_popup_place): below and right of a point, flipped left and up
+        where the screen ends; a rectangle's menu below it, a submenu right of it and flipped left; always inside the
+        screen, a second screen's own edges included, and a menu taller than the screen at its top.
+*/
+static fn te_popups(positive rounds)
+{
+        static const int screens[2][4] = {{0, 0, 1920, 1080}, {1920, -200, 1280, 1024}};
+        int x, y;
+
+        compositor_popup_place(100, 100, 0, 0, 200, 300, WINDOW_POPUP_POINT, screens[0], &x, &y);
+        te_check(x == 100 && y == 100, "a context menu opens below and right of the point", (positive)x);
+        compositor_popup_place(1850, 100, 0, 0, 200, 300, WINDOW_POPUP_POINT, screens[0], &x, &y);
+        te_check(x == 1650 && y == 100, "past the right edge it opens to the left of the point", (positive)x);
+        compositor_popup_place(100, 1000, 0, 0, 200, 300, WINDOW_POPUP_POINT, screens[0], &x, &y);
+        te_check(x == 100 && y == 700, "past the bottom it opens above the point", (positive)y);
+        compositor_popup_place(400, 100, 80, 24, 200, 300, 0, screens[0], &x, &y);
+        te_check(x == 400 && y == 124, "a menu drops below its rectangle", (positive)y);
+        compositor_popup_place(400, 900, 80, 24, 200, 300, 0, screens[0], &x, &y);
+        te_check(y == 600, "a menu with no room below opens above its rectangle", (positive)y);
+        compositor_popup_place(1700, 100, 200, 24, 200, 300, WINDOW_POPUP_RIGHT, screens[0], &x, &y);
+        te_check(x == 1500, "a submenu with no room on the right opens on the left", (positive)x);
+        compositor_popup_place(2500, -150, 0, 0, 200, 2000, WINDOW_POPUP_POINT, screens[1], &x, &y);
+        te_check(y == -200 && x == 2500, "a menu taller than its screen starts at the screen's top", (positive)y);
+        compositor_popup_place(3150, 700, 0, 0, 200, 300, WINDOW_POPUP_POINT, screens[1], &x, &y);
+        te_check(x == 2950 && y == 400, "on the second screen it flips at that screen's edges", (positive)x);
+        for (positive round = 0; round < rounds; round++)
+        {
+                const int address_to s = screens[te_next(2)];
+                int width = 20 + (int)te_next(600), height = 20 + (int)te_next(1400);
+                int ax = s[0] + (int)te_next((p32)s[2]), ay = s[1] + (int)te_next((p32)s[3]);
+                unsigned int flags = te_next(3) == 0 ? WINDOW_POPUP_POINT : te_next(2) ? WINDOW_POPUP_RIGHT : 0;
+
+                compositor_popup_place(ax, ay, (int)te_next(100), (int)te_next(40), width, height, flags, s, &x, &y);
+                te_check(x >= s[0] && (width > s[2] || x + width <= s[0] + s[2]) && y >= s[1] && (height > s[3] || y + height <= s[1] + s[3]),
+                         "a popup is inside its screen", round);
+        }
+}
+
 /* ---- what it costs ---- */
 
 static fn te_bench(void)
@@ -131168,6 +131292,7 @@ b32 main(void)
                 TE_SECTION("tokens", te_tokens(30))
                 TE_SECTION("sparse", te_sparse())
                 TE_SECTION("clipboard", te_clipboard(3000))
+                TE_SECTION("popups", te_popups(5000))
 #undef TE_SECTION
         }
         string_format(log, "text engine: %p checks, %p failures\n", te_checks, te_failures);

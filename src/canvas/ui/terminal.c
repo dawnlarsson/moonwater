@@ -2070,6 +2070,59 @@ static void terminal_copy(unsigned int which)
 }
 
 /*
+        The terminal's context menu, at the pointer on the right button (with Shift while a program has the pointer):
+        copy what is selected, paste, select everything the ring holds, and the zoom.
+*/
+#define TERMINAL_MENU_COPY 1
+#define TERMINAL_MENU_PASTE 2
+#define TERMINAL_MENU_ALL 3
+#define TERMINAL_MENU_ZOOM_IN 4
+#define TERMINAL_MENU_ZOOM_OUT 5
+#define TERMINAL_MENU_ZOOM_RESET 6
+
+static struct ui_popup terminal_menu;
+
+static fn terminal_menu_open(int x, int y, b32 touch)
+{
+        struct ui_popmenu address_to m = &terminal_menu.menu;
+        struct ui menu_ui = terminal.ui;
+
+        m->count = 0;
+        ui_popmenu_add(m, "&Copy", "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_COPY);
+        ui_popmenu_add(m, "&Paste", "Ctrl+Shift+V", 0, TERMINAL_MENU_PASTE);
+        ui_popmenu_add(m, "Select &All", null, 0, TERMINAL_MENU_ALL);
+        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(m, "Zoom &In", "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
+        ui_popmenu_add(m, "Zoom &Out", "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
+        ui_popmenu_add(m, "&Reset Zoom", "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
+        // The menu's text in the terminal's own face when it has no other.
+        if (!menu_ui.regular)
+                menu_ui.regular = menu_ui.bold = terminal.plain[0];
+        ui_popup_open(&terminal_menu, &terminal.own, &menu_ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
+}
+
+static fn terminal_chose(int id)
+{
+        if (id == TERMINAL_MENU_COPY)
+                terminal_copy(WINDOWS_CLIP_CLIPBOARD);
+        else if (id == TERMINAL_MENU_PASTE)
+                windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
+        else if (id == TERMINAL_MENU_ALL)
+        {
+                terminal.select_box = false;
+                terminal.select_anchor_line = terminal.select_press_line = terminal_oldest();
+                terminal.select_anchor_column = terminal.select_press_column = 0;
+                terminal.select_active_line = window->head - 1;
+                terminal.select_active_column = window->stride;
+                terminal.selecting = true;
+                terminal_copy(WINDOWS_CLIP_PRIMARY);
+        }
+        else if (id >= TERMINAL_MENU_ZOOM_IN && id <= TERMINAL_MENU_ZOOM_RESET)
+                terminal_zoom(terminal.master, id == TERMINAL_MENU_ZOOM_IN ? 1 : id == TERMINAL_MENU_ZOOM_OUT ? -1 : 2);
+        terminal.dirty = true;
+}
+
+/*
         A button or a motion the selection takes: true when it was the selection's (the program does not get it).
         A program that asked for the pointer has it unless Shift is held.
 */
@@ -2078,11 +2131,23 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         b32 shift = (terminal.modifiers & WINDOW_KEY_SHIFT) != 0, alt = (terminal.modifiers & WINDOW_KEY_ALT) != 0;
         unsigned int row, column, line, at;
 
-        if (mouse_mode && !shift && !terminal.select_dragging)
+        // A program that asked for the pointer has its presses; one comes in while a selection is dragged, the drag ends.
+        if (mouse_mode && !shift && (event->type == WINDOW_EVENT_BUTTON ? (event->flags & WINDOW_KEY_DOWN) || !terminal.select_dragging
+                                                                        : !terminal.select_dragging))
+        {
+                terminal.select_dragging = false;
                 return false;
+        }
         if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x112 && (event->flags & WINDOW_KEY_DOWN))
         {
                 windows_clip_ask(&terminal.own, WINDOWS_CLIP_PRIMARY);
+                return true;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x111)
+        {
+                if (event->flags & WINDOW_KEY_DOWN)
+                        terminal_menu_open(terminal.pointer_x + (int)terminal.pad, terminal.pointer_y + (int)terminal.pad_y,
+                                           (event->flags & WINDOW_KEY_TOUCH) != 0);
                 return true;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x110)
@@ -3001,6 +3066,8 @@ static struct ui_app terminal_app = {
         .pass = terminal_on_pass,
         .closing = terminal_on_closing,
         .done = terminal_done,
+        .popup = &terminal_menu,
+        .chose = terminal_chose,
 };
 
 /*

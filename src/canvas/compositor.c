@@ -3003,6 +3003,12 @@ static int compositor_bands(void)
 
 // The windows that have a tab, in the order they first showed, and what each tab shows: every window on the one band,
 // and on each of several, the windows whose screen it is on (compositor_screen_of).
+static int compositor_popup_parent[WINDOWS];
+static int compositor_popup_top(int root);
+static void compositor_popups_close(int root, int keep);
+static b32 compositor_popup_first(int row);
+static void compositor_popup_leave(int row);
+
 static unsigned int compositor_windows(void)
 {
         unsigned int count = 0;
@@ -3012,7 +3018,9 @@ static unsigned int compositor_windows(void)
         {
                 unsigned int place = count;
 
-                if (!compositor.showing[row] || (bands > 1 && compositor_screen_of(row) != compositor.band_at))
+                // A popup has no tab: it is its window's.
+                if (!compositor.showing[row] || compositor_popup_parent[row] >= 0 ||
+                    (bands > 1 && compositor_screen_of(row) != compositor.band_at))
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
                         place--;
@@ -6704,8 +6712,11 @@ static void compositor_focus(int row)
 {
         int was = compositor.focus;
 
-        if (was == row)
+        // A popup never takes the keys from its window; the window that loses them loses its popups.
+        if (was == row || (row >= 0 && compositor_popup_parent[row] >= 0))
                 return;
+        if (was >= 0)
+                compositor_popups_close(was, -1);
 
         compositor.focus = row;
         compositor.table->focus = row < 0 ? WINDOWS : (unsigned int)row;
@@ -6731,7 +6742,7 @@ static void compositor_refocus(void)
         int next = COMPOSITOR_NONE;
 
         for (unsigned int at = compositor.stacked; at-- && next < 0;)
-                if (compositor_visible(compositor.stack[at]))
+                if (compositor_visible(compositor.stack[at]) && compositor_popup_parent[compositor.stack[at]] < 0)
                         next = compositor.stack[at];
 
         compositor_focus(next);
@@ -7579,6 +7590,8 @@ static void compositor_take(int row)
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
+                if (compositor_popup_first(row))
+                        return;
                 compositor_first_put(row, x, y);
                 compositor_raise(row);
                 if (compositor_visible(row))
@@ -8077,6 +8090,131 @@ static void compositor_clip_leave(int row)
         compositor_clip.ask_seen[row] = compositor.table->clip_ask_serial[row];
 }
 
+/* ---- popups: menus a window opens, placed and dismissed here ---- */
+
+/*
+        A popup is a row whose program named a parent row (popup_parent) and an anchor in the parent's pixels before
+        its first picture. It is put against the anchor on the screen that holds the anchor -- a point's menu below
+        and right of it, a rectangle's below it, a submenu's right of it -- and flipped to the other side where that
+        screen ends, then held inside the screen. It has no tab, never takes the keys from its window (the window is
+        still the one shown with them), but the keys go to the topmost popup of the window that has them while one is
+        open. It is asked to go (WINDOW_CLOSING) by a press outside every popup, its window losing the keys, its
+        window being taken hold of to move, or its window going.
+*/
+static int compositor_popup_parent[WINDOWS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                                               -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
+/*
+        Where a popup width by height goes against an anchor (ax, ay, aw, ah in the desktop's space) on a screen (sx,
+        sy, sw, sh): the pure rule, which the check holds to every edge. flags are WINDOW_POPUP_*.
+*/
+static void compositor_popup_place(int ax, int ay, int aw, int ah, int width, int height, unsigned int flags, const int *screen,
+                                   int *x, int *y)
+{
+        int left = screen[0], top = screen[1], right = screen[0] + screen[2], bottom = screen[1] + screen[3];
+
+        if (flags & WINDOW_POPUP_RIGHT)
+        {
+                *x = ax + aw, *y = ay;
+                if (*x + width > right)
+                        *x = ax - width;
+                if (*y + height > bottom)
+                        *y = bottom - height;
+        }
+        else
+        {
+                *x = ax;
+                *y = flags & WINDOW_POPUP_POINT ? ay : ay + ah;
+                if (*x + width > right)
+                        *x = flags & WINDOW_POPUP_POINT ? ax - width : right - width;
+                if (*y + height > bottom)
+                        *y = ay - height;
+        }
+        *x = *x + width > right ? right - width : *x;
+        *y = *y + height > bottom ? bottom - height : *y;
+        *x = *x < left ? left : *x;
+        *y = *y < top ? top : *y;
+}
+
+// The window a popup belongs to at the root of its chain, or the row itself.
+static int compositor_popup_root(int row)
+{
+        for (int hops = 0; hops < WINDOWS && row >= 0 && compositor_popup_parent[row] >= 0; hops++)
+                row = compositor_popup_parent[row];
+        return row;
+}
+
+// The topmost popup of a window, which the keys go to while it is open, or the window itself.
+static int compositor_popup_top(int root)
+{
+        if (root < 0)
+                return root;
+        for (unsigned int at = compositor.stacked; at--;)
+        {
+                int row = compositor.stack[at];
+
+                if (compositor_popup_parent[row] >= 0 && compositor.showing[row] && compositor_popup_root(row) == root)
+                        return row;
+        }
+        return root;
+}
+
+// Every popup asked to go: of one window (root), or of every window (-1); one in keep's chain stays.
+static void compositor_popups_close(int root, int keep)
+{
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                b32 kept = false;
+
+                if (compositor_popup_parent[row] < 0 || !compositor.showing[row])
+                        continue;
+                if (root >= 0 && compositor_popup_root(row) != root)
+                        continue;
+                for (int link = keep, hops = 0; link >= 0 && hops < WINDOWS; link = compositor_popup_parent[link], hops++)
+                        kept |= link == row;
+                if (!kept)
+                        compositor_close(row);
+        }
+}
+
+/*
+        A first picture that is a popup's: its parent remembered, its place worked out against the anchor and the screen
+        the anchor is on, and raised over everything without the keys. False for a window, which is placed as ever.
+*/
+static b32 compositor_popup_first(int row)
+{
+        struct windows *table = compositor.table;
+        unsigned int named = table->popup_parent[row];
+        int parent = named >= 1 && named <= WINDOWS ? (int)named - 1 : -1;
+        unsigned int count;
+        const int (*screens)[4];
+        int ax, ay, aw, ah, x, y, at;
+
+        if (parent < 0 || parent == row || !compositor.showing[parent])
+                return false;
+        compositor_popup_parent[row] = parent;
+        ax = compositor.x[parent] + compositor_fit(table->popup_x[row], -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST);
+        ay = compositor.y[parent] + compositor_fit(table->popup_y[row], -WINDOW_PLACE_MOST, WINDOW_PLACE_MOST);
+        aw = compositor_fit(table->popup_w[row], 0, WINDOW_PLACE_MOST);
+        ah = compositor_fit(table->popup_h[row], 0, WINDOW_PLACE_MOST);
+        screens = compositor_screens(&count);
+        at = compositor_screen_at(screens, count, ax, ay);
+        at = at < 0 ? compositor_screen_of(parent) : at;
+        at = at < 0 ? 0 : at;
+        compositor_popup_place(ax, ay, aw, ah, (int)compositor.w[row], (int)compositor.h[row], table->popup_flags[row], screens[at], &x, &y);
+        compositor_put(row, x, y);
+        compositor_raise(row);
+        compositor_damage_row(row);
+        return true;
+}
+
+// A row gone: it is no popup any more, and the popups of it go too.
+static void compositor_popup_leave(int row)
+{
+        compositor_popup_parent[row] = -1;
+        compositor_popups_close(row, -1);
+}
+
 static void compositor_door(int row, int returned)
 {
         char bytes[64];
@@ -8096,6 +8234,7 @@ static void compositor_door(int row, int returned)
         system_close(compositor.door[row]);
         compositor.door[row] = (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC);
         compositor_clip_leave(row);
+        compositor_popup_leave(row);
         compositor_leave(row);
 }
 
@@ -8357,7 +8496,7 @@ static unsigned int compositor_modifiers(void)
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
-        int count;
+        int count, target;
 
         if (bit)
         {
@@ -8425,16 +8564,18 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
 
         // A press goes to the window that has the keys and is held there; a repeat or a
         // release of a key whose press went elsewhere (or nowhere) is nobody's to hear.
+        // While the window has a popup open, the topmost popup is where its keys go.
+        target = compositor_popup_top(compositor.focus);
         if (code < 128)
         {
                 unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[code >> 3];
 
                 if (value == 1)
                 {
-                        if (compositor.keys_to != compositor.focus)
+                        if (compositor.keys_to != target)
                                 compositor_keys_release();
                         *down |= mask;
-                        compositor.keys_to = compositor.focus;
+                        compositor.keys_to = target;
                 }
                 else if (!(*down & mask))
                         return;
@@ -8444,7 +8585,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
 
         flags = modifiers | (value ? WINDOW_KEY_DOWN : 0) | (value == 2 ? WINDOW_KEY_REPEAT : 0);
         for (int each = 0; each < (count ? count : 1); each++)
-                compositor_post(compositor.focus, WINDOW_EVENT_KEY, flags, (int)code, (int)characters[each]);
+                compositor_post(target, WINDOW_EVENT_KEY, flags, (int)code, (int)characters[each]);
         if (value == 1)
                 compositor_latency(2, reported, clock_monotonic_nanoseconds());
 }
@@ -8653,6 +8794,21 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
+        if (under >= 0 && compositor_popup_parent[under] >= 0)
+        {
+                compositor_popups_close(-1, under);
+                compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
+                compositor_pointer_to(under);
+                compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)code, 0);
+                if (code - COMPOSITOR_BTN_LEFT < 8)
+                {
+                        compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
+                        compositor.button_row[code - COMPOSITOR_BTN_LEFT] = under;
+                }
+                return;
+        }
+        compositor_popups_close(-1, -1);
+
         // A window that asked to be put away by a press anywhere but on it (WINDOW_DISMISS) is asked to go by one on
         // the desktop, a tab, another window or the tray alike; the press then goes on as it would have.
         if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
@@ -8774,6 +8930,7 @@ static void compositor_button(unsigned int code, int down)
                                         compositor_arrange(under, COMPOSITOR_MAXIMIZED);
                                 return;
                         }
+                        compositor_popups_close(under, -1);
                         compositor.drag = under;
                         compositor.drag_moved = 0;
                         compositor.drag_x = compositor.pointer_x - compositor.x[under];
