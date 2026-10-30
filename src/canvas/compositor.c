@@ -5331,6 +5331,20 @@ static void compositor_table_outputs(void);
 static void compositor_band_room(void);
 
 /*
+        The card is to show the compositor's own scanout on every crtc: no window straight, none on the overlay, and
+        no flip whose row a picture held back waits on (compositor_flip_done lets go of every held picture once the
+        crtcs are set; flip_row would have kept back the one a direct window's newest buffer was taken into, and with
+        two screens nothing flips again).
+*/
+static void compositor_scanout_own(void)
+{
+        compositor_overlay_off();
+        compositor.direct_row = compositor.plane_row = compositor.flip_row = -1;
+        compositor.plane_fb = 0;
+        compositor.on_screen = compositor.fb;
+}
+
+/*
         The screens taken: what the card has connected, laid by the
         arrangement, one scanout as large as the space they make, and each
         crtc showing its screen's rectangle of it. A screen the card will not
@@ -5351,6 +5365,7 @@ static b32 compositor_space_take(int first)
         unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
         unsigned char order[WINDOWS_OUTPUTS];
         b32 status = compositor_connected_read(&found);
+        int carried = 0;
 
         if (status < 0 || !found.count)
                 return status < 0 ? status : -COMPOSITOR_EINVAL;
@@ -5486,11 +5501,8 @@ static b32 compositor_space_take(int first)
                         compositor.output[at].fb = at ? compositor_screen_fb() : compositor.fb;
                 if (!first)
                 {
-                        // The card shows the compositor's own scanout from here on, on every crtc.
-                        compositor_overlay_off();
-                        compositor.direct_row = compositor.plane_row = -1;
-                        compositor.plane_fb = 0;
-                        compositor.on_screen = compositor.fb;
+                        carried = 1;
+                        compositor_scanout_own();
                         compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])was_names, was_count);
                         compositor_band_room();
                         compositor_tabs_changed();
@@ -5548,6 +5560,9 @@ static b32 compositor_space_take(int first)
                 first = 0;
         }
 
+        // The crtcs show the compositor's scanout now, and no window's buffer: what a flip would have let go of is.
+        if (carried)
+                compositor_flip_done();
         compositor.layout++;
         compositor_table_outputs();
         for (unsigned int at = 0; at < compositor.outputs; at++)

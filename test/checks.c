@@ -116012,6 +116012,25 @@ static void check_compositor_screens(void)
     compositor_float(1);
     check("screens: and the place it floated at before is carried too", compositor.x[1] + 60 <= SCREENS_A_W &&
                                                                             compositor.y[1] + 40 <= SCREENS_A_H);
+    //  A window the card shows straight has its newest picture taken into its other buffer and held for the flip
+    //  that lets go of the one shown (flip_row its row). The screens taken again before that flip show the
+    //  compositor's scanout (compositor_scanout_own, then the crtcs set and compositor_flip_done), and with two
+    //  screens nothing flips again: the held picture is said taken then, or its program waits on it for good.
+    {
+        unsigned int held;
+
+        compositor.direct_row = compositor.flip_row = 1;
+        compositor.flip_buffer = 0;
+        compositor.front[1] = 0;
+        table->buffer_index[1] = 1;
+        table->frame[1]++;
+        compositor_take(1);
+        held = compositor.held_rows >> 1 & 1;
+        compositor_scanout_own();
+        compositor_flip_done();
+        check("screens: a picture held for a direct window's flip is said taken once the screens are taken again",
+              held && table->shown[1] == table->frame[1] && !compositor.held_rows && compositor.direct_row < 0);
+    }
     compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
     memory_zero(&compositor, sizeof(compositor));
 
