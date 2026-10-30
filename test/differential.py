@@ -79710,6 +79710,36 @@ say(out.strip() == b"off", "a code nobody used leaves the switch as it was (%r)"
 status, out, err = on("b", moon + " link")
 say(b"link off" in out, "and the listener stopped again")
 
+#       A pair that is killed cannot take its code back or put the switch as
+#       it was; a process it left behind does it for it, and waits for the
+#       state it is asked about and not for a time.
+def pair_killed(side, want_switch):
+    waiter = waiting(side, "pair", 90)
+    code, said = code_said(waiter, "box-" + side)
+    _, word, _ = on(side, "cat /root/link")
+    taken = code is not None and once_records(side) != [] and word.strip() == b"on"
+    waiter.kill()
+    waiter.communicate()
+    end = time.time() + 20
+    while time.time() < end and once_records(side) != []:
+        time.sleep(0.1)
+    while time.time() < end and on(side, "cat /root/link")[1].strip() != want_switch:
+        time.sleep(0.1)
+    _, word, _ = on(side, "cat /root/link")
+    _, shown, _ = on(side, moon + " link")
+    return taken, once_records(side), word.strip(), shown
+
+taken, left, word, shown = pair_killed("b", b"off")
+say(taken, "a pair that was killed had turned the listener on and made a code")
+say(left == [] and word == b"off" and b"link off" in shown,
+    "SIGKILL of a pair after it printed its code: the code is gone, the switch and the listener are as they were (%r %r)" %
+    (left, word))
+on("b", moon + " link on")
+taken, left, word, shown = pair_killed("b", b"on")
+say(left == [] and word == b"on" and b"link on" in shown,
+    "and where the listener was on before, it still is, with no code (%r %r)" % (left, word))
+on("b", moon + " link off")
+
 #       The code, a wrong code, a wrong name, then the code as someone would
 #       copy it off a screen.
 waiter = waiting("a", "pair", 90)

@@ -1184,6 +1184,46 @@ static fn link_before_restore(link_before address_to before)
                 (void)system_remove_at(AT_FDCWD, LINK_SWITCH_PATH, 0);
 }
 
+/*      A pair that is killed (SIGKILL, the OOM killer) cannot take its code
+        back or put the listener as it was: the switch stayed on for good and
+        the code lasted its five minutes with nobody waiting for it. So a
+        process of its own, in a session of its own, holds the read end of a
+        pipe the waiting command holds the write end of; the command writes a
+        byte when it has done what it does, and an end without one is a
+        command that did not, which the process then does for it. */
+static bipolar link_pair_leash = -1;
+
+static fn link_pair_guard(p32 mark, link_before address_to before)
+{
+        b32 ends[2];
+        p8 done;
+
+        if (system_pipe(ends, O_CLOEXEC) < 0)
+                return;
+        if (host_detach((p32)ends[0], descriptors_none))
+        {
+                if (system_read_retry((positive)ends[0], address_of done, 1) != 1)
+                {
+                        link_pair_close(mark);
+                        link_before_restore(before);
+                }
+                system_call_1(syscall(exit_group), 0);
+        }
+        system_close((bipolar)ends[0]);
+        link_pair_leash = (bipolar)ends[1];
+}
+
+static fn link_pair_release(void)
+{
+        p8 done = 1;
+
+        if (link_pair_leash < 0)
+                return;
+        system_write_all((positive)link_pair_leash, address_of done, 1);
+        system_close(link_pair_leash);
+        link_pair_leash = -1;
+}
+
 //      Whether the listener has closed this namespace's code on a machine.
 static bool link_pair_closed(string_address namespace)
 {
@@ -1215,6 +1255,7 @@ static b32 link_pair_wait(p32 mark, string_address namespace,
         bool closed = false;
 
         scope_exit(if (signals >= 0) system_close(signals));
+        scope_exit(link_pair_release());
 
         for (;;)
         {
@@ -1274,7 +1315,10 @@ static b32 link_pair_start(string_address namespace, p8 address_to code,
                 return host_refuse("%s could not be written\n", LINK_GROUPS_PATH);
         link_before_take(before);
         if (!link_switch(true, false))
+        {
+                link_pair_guard(address_to mark, before);
                 return 0;
+        }
         link_pair_close(address_to mark);
         link_before_restore(before);
         return 1;
