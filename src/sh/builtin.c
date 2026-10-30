@@ -426,6 +426,9 @@ static fn shell_special_answer(b32 status)
         shell_answer(status);
 }
 static bool exec_child_process();
+static b32 exec_context_now();
+static b32 exec_context_enter();
+static fn exec_context_leave(b32 held);
 static bool exec_asynchronous;
 static fn shell_child_default(b32 number);
 static bool job_any_stopped();
@@ -16203,6 +16206,10 @@ typedef struct
         positive number;
         string_address action;
         positive action_room;
+        //      The function, subshell or sourced file the action was written
+        //      in: ERR, DEBUG and RETURN belong to the code that set them and
+        //      reach into another only under errtrace and functrace.
+        b32 context;
 } shell_trap_entry;
 
 static shell_trap_entry address_to trap_table;
@@ -16503,8 +16510,18 @@ static bool trap_record(positive number, string_address action)
         trap_table[trap_count].number = number;
         trap_table[trap_count].action = kept;
         trap_table[trap_count].action_room = length + 1;
+        trap_table[trap_count].context = exec_context_now();
         trap_count++;
         return true;
+}
+
+//      Whether the action of a condition was set by the code now running.
+bool trap_condition_owned(positive number)
+{
+        positive index = trap_index(number);
+
+        return index < trap_count && trap_table[index].action &&
+               trap_table[index].context == exec_context_now();
 }
 
 PURE string_address trap_action(positive number)
@@ -21287,10 +21304,12 @@ COLD fn shell_dot(writer write)
                         shell_syntax_command = named;
 
                 shell_dot_depth++;
+                b32 held_context = exec_context_enter();
                 bool framed = exec_frames_source_enter(named);
                 syntax = shell_source_execute(source_text, filled, false);
                 if (framed)
                         exec_frames_source_leave();
+                exec_context_leave(held_context);
                 shell_dot_depth--;
 
                 shell_syntax_file = saved_file;

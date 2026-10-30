@@ -49,6 +49,28 @@ static PURE p8 exec_special_kind(string_address name);
 
 static bool exec_tested HOT_STATE;
 static bool exec_forked HOT_STATE;
+//      Which function, subshell or sourced file is running: a number made
+//      anew each time one begins, so a trap can say where it was set.
+static b32 exec_context HOT_STATE;
+static b32 exec_context_count HOT_STATE;
+
+static b32 exec_context_now()
+{
+        return exec_context;
+}
+
+static b32 exec_context_enter()
+{
+        b32 held = exec_context;
+
+        exec_context = ++exec_context_count;
+        return held;
+}
+
+static fn exec_context_leave(b32 held)
+{
+        exec_context = held;
+}
 static bool exec_asynchronous HOT_STATE;
 static bool exec_pipe_status_pending HOT_STATE;
 static b32 exec_pipe_status_value HOT_STATE;
@@ -159,6 +181,7 @@ static fn exec_saves_child_drop();
 fn exec_child_began()
 {
         exec_forked = true;
+        exec_context_enter();
         //      A child does not inherit the right to become its parent's
         //      final command: a substitution forked while a pipeline stage
         //      expands its one command's words ran `env true; echo b` as
@@ -426,10 +449,10 @@ static COLD fn exec_trap_condition(positive number)
         ERR trap belongs to the shell that set it, so "( false )" raises it
         once in the parent and not again in the child.
 */
-static PURE bool exec_condition_reaches(positive option)
+static PURE bool exec_condition_reaches(positive option, positive condition)
 {
         return (!exec_function_depth && !exec_forked) ||
-               shell_extra_on(option);
+               shell_extra_on(option) || trap_condition_owned(condition);
 }
 
 /*
@@ -441,7 +464,8 @@ static PURE bool exec_condition_reaches(positive option)
 static PURE bool exec_debug_reaches()
 {
         return (!exec_function_depth && !exec_forked && !shell_dot_depth) ||
-               shell_extra_on(SHELL_EXTRA_FUNCTRACE);
+               shell_extra_on(SHELL_EXTRA_FUNCTRACE) ||
+               trap_condition_owned(TRAP_DEBUG);
 }
 
 /*
@@ -626,7 +650,7 @@ static fn exec_debug_stages(b32 stage)
 
 static COLD fn exec_source_return_trap()
 {
-        if (trap_return_here && exec_condition_reaches(SHELL_EXTRA_FUNCTRACE))
+        if (trap_return_here && exec_condition_reaches(SHELL_EXTRA_FUNCTRACE, TRAP_RETURN))
                 exec_trap_condition(TRAP_RETURN);
 }
 
@@ -638,7 +662,7 @@ static HOT fn exec_errexit(b32 status)
         // Where errexit would leave is where the ERR trap runs, whether or
         // not errexit is on: the two ask the same question of the same
         // command.
-        if (trap_err_here && exec_condition_reaches(SHELL_EXTRA_ERRTRACE))
+        if (trap_err_here && exec_condition_reaches(SHELL_EXTRA_ERRTRACE, TRAP_ERR))
                 exec_trap_condition(TRAP_ERR);
 
         if (!(shell_options & SHELL_ERREXIT))
@@ -9743,6 +9767,7 @@ static b32 exec_call(positive slot)
 {
         b32 body = exec_functions[slot].body;
         b32 held_function_line;
+        b32 held_context;
         positive saved_count = shell_parameter_count;
         positive saved = 0;
         b32 status;
@@ -9824,6 +9849,7 @@ static b32 exec_call(positive slot)
         // By index and not by address: a definition made inside the body can
         // grow the table, and the table may move when it does.
         exec_function_depth++;
+        held_context = exec_context_enter();
         exec_functions[slot].active++;
         held_function_line = exec_function_line;
         exec_function_line = shell_dash_compat ? exec_functions[slot].line : 0;
@@ -9858,7 +9884,8 @@ static b32 exec_call(positive slot)
 
         // The function is still standing while its RETURN trap runs, which is
         // what lets the action read FUNCNAME and the status it is returning.
-        if (trap_return_here && shell_extra_on(SHELL_EXTRA_FUNCTRACE))
+        if (trap_return_here && (shell_extra_on(SHELL_EXTRA_FUNCTRACE) ||
+                                 trap_condition_owned(TRAP_RETURN)))
         {
                 shell_status = status;
                 exec_trap_condition(TRAP_RETURN);
@@ -9871,6 +9898,7 @@ static b32 exec_call(positive slot)
         exec_function_line = held_function_line;
         parse_release(body);
         shell_local_leave();
+        exec_context_leave(held_context);
         exec_function_depth--;
 
         // return leaves the function and nothing further out.
