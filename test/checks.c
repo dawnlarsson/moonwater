@@ -95425,7 +95425,11 @@ static fn kernel_settings(void)
                        : 77;
 
         if (code == 77)
+        {
+                log_direct(str("bowl: the kernel's settings in a view NOT RUN -- "
+                               "no user and mount namespace for the check\n"));
                 return;
+        }
 
         check("Bowl binds the host kernel's settings read-only in a view",
               code != 1 && !(code & 2));
@@ -96534,7 +96538,11 @@ static fn isolated_root_children(void)
 
         system_remove_at(AT_FDCWD, root, AT_REMOVEDIR);
         if (code == 77)
+        {
+                log_direct(str("bowl: an isolated bowl's pivot NOT RUN -- "
+                               "no user and mount namespace for the check\n"));
                 return;
+        }
         check("An isolated bowl pivots into its root", code != 2);
         check("An isolated bowl does not carry a mount below its root into the view",
               code == 0);
@@ -96583,10 +96591,26 @@ static fn fast_view_nodev(void)
                     system_make_directory_at(AT_FDCWD, target, 0755) < 0)
                         exit(77);
 
-                bowl_become_user();
-                if (system_call(syscall(getuid)) != BOWL_USER_ID ||
-                    system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
-                        exit(77);
+                //      The hardened tier (tight) drops to a real uid 1000 with the
+                //      device groups before it makes its namespace, which needs the
+                //      machine's root and setgroups, and a check in a user namespace of
+                //      its own has neither: bowl_become_user_hardened refused and
+                //      ended the child with 1, which the row read as a bind that was
+                //      not read-only. The namespace that tier then makes is the same
+                //      nested one, made here with the id the check has.
+                if (MOONWATER_STRICT_BOWL >= STRICT_TIGHT)
+                {
+                        if (system_call_1(syscall(unshare), CLONE_NEWUSER | CLONE_NEWNS) < 0 ||
+                            !namespace_root(0, 0))
+                                exit(77);
+                }
+                else
+                {
+                        bowl_become_user();
+                        if (system_call(syscall(getuid)) != BOWL_USER_ID ||
+                            system_call_1(syscall(unshare), CLONE_NEWNS) < 0)
+                                exit(77);
+                }
 
                 if (bowl_bind_ro(source, target))
                         exit(3);
@@ -96604,7 +96628,11 @@ static fn fast_view_nodev(void)
 
         system_remove_at(AT_FDCWD, root, AT_REMOVEDIR);
         if (code == 77)
+        {
+                log_direct(str("bowl: the read-only view over a nodev disk NOT RUN -- "
+                               "no user and mount namespace for the check\n"));
                 return;
+        }
         check("A user's view binds a bowl's tree read-only over a disk mounted nodev",
               code != 3);
         check("and the bind is read-only and still nodev", code == 0);
