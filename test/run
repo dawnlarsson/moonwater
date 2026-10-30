@@ -112,7 +112,10 @@ fi
 TMPDIR=$work
 export TMPDIR
 
-TEST_TALLY="$work/tally"
+#       A lane started by `run -j` counts into a file of its own
+#       (TEST_LANE_TALLY), which the parent reads to know the lane counted
+#       something and then adds to the run's.
+TEST_TALLY=${TEST_LANE_TALLY:-$work/tally}
 export TEST_TALLY
 [ -n "${TEST_SHARED_WORK:-}" ] || : > "$TEST_TALLY"
 
@@ -25327,6 +25330,17 @@ fi
 broken=""
 notrun=""
 
+#       A lane that passed and counted nothing ran nothing: a passing lane
+#       whose checks were all skipped, or whose harness wrote no row, read as
+#       a pass while it hid whatever it was there for. It is a lane that did
+#       not run, and says so.
+nothing_counted()
+{
+        [ "$outcome" = 0 ] && [ "$lane_rows" = 0 ] || return 0
+        printf '  %s passed and counted nothing, so it did not run\n' "$lane"
+        outcome=2
+}
+
 #       Entries nobody has used for two weeks go, and then the older ones
 #       until the cache is under MOONWATER_TEST_CACHE_MB (8192), from the
 #       default directory only: a directory someone named is theirs to clear.
@@ -25403,7 +25417,8 @@ if [ "$jobs" -gt 1 ]; then
 
         # shellcheck disable=SC2016
         one_lane='lane_began=$(date +%s)
-sh "$0" --lane "$1" < /dev/null > "$TEST_SHARED_WORK/lane.$1.log" 2>&1
+: > "$TEST_SHARED_WORK/tally.$1"
+TEST_LANE_TALLY=$TEST_SHARED_WORK/tally.$1 sh "$0" --lane "$1" < /dev/null > "$TEST_SHARED_WORK/lane.$1.log" 2>&1
 echo $? > "$TEST_SHARED_WORK/lane.$1.status"
 echo $(($(date +%s) - lane_began)) > "$TEST_SHARED_WORK/lane.$1.seconds"'
 
@@ -25428,6 +25443,9 @@ echo $(($(date +%s) - lane_began)) > "$TEST_SHARED_WORK/lane.$1.seconds"'
                         "$(cat "$work/lane.$lane.seconds" 2>/dev/null || echo ?)"
                 cat "$work/lane.$lane.log" 2>/dev/null
                 outcome=$(cat "$work/lane.$lane.status" 2>/dev/null || echo 1)
+                lane_rows=$(grep -c . "$work/tally.$lane" 2>/dev/null) || lane_rows=0
+                cat "$work/tally.$lane" >> "$TEST_TALLY" 2>/dev/null
+                nothing_counted
 
                 [ "$outcome" = 0 ] && continue
                 [ "$outcome" = 2 ] && { notrun="$notrun $lane"; continue; }
@@ -25438,8 +25456,11 @@ else
         for lane in $requested; do
                 printf '\n%s -- %s\n' "$lane" "$(describe "$lane")"
 
+                lane_rows=$(grep -c . "$TEST_TALLY") || lane_rows=0
                 "lane_$lane"
                 outcome=$?
+                lane_rows=$(($(grep -c . "$TEST_TALLY") - lane_rows))
+                nothing_counted
 
                 [ "$outcome" = 0 ] && continue
                 [ "$outcome" = 2 ] && { notrun="$notrun $lane"; continue; }
