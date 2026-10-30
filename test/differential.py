@@ -75881,6 +75881,21 @@ def harness_state_cuts(argv):
         ("cpu boost", ["cpu boost on"], "cpu boost off", None),
         ("cpu smt", ["cpu smt on"], "cpu smt off", None),
         ("charge", ["charge limit 90"], "charge limit 80", None),
+        #   The writers the scenes above did not reach: canvas arrange keeps its
+        #   own line (the compositor takes it as it lands), the background, the
+        #   modes, the bluetooth radio's word, the exit list of the settings,
+        #   ntp's two switches, and three more rows of the settings table.
+        ("canvas arrange", ["canvas arrange Virtual-1 Virtual-2"],
+         "canvas arrange Virtual-2@0,0 Virtual-1@off", None),
+        ("canvas background", ["canvas background 112233"], "canvas background 445566", None),
+        ("canvas modes", ["canvas modes largest"], "canvas modes preferred", None),
+        ("bluetooth off", ["bluetooth on"], "bluetooth off", None),
+        ("bind exit", ["bind exit add xx"], "bind exit add yy", None),
+        ("ntp sampling", ["ntp sampling on"], "ntp sampling off", None),
+        ("ntp nts", ["ntp nts on"], "ntp nts only", None),
+        ("mouse acceleration", ["mouse acceleration on"], "mouse acceleration off", None),
+        ("taskbar text", ["taskbar text edge"], "taskbar text center", None),
+        ("canvas cursor size", ["canvas cursor size 2"], "canvas cursor size 3", None),
     ]
     for path, text in {
             "/sys/firmware/acpi/platform_profile": "balanced\n",
