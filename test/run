@@ -594,7 +594,7 @@ coverage_guest()
 qmp_guest_module()
 {
         cat > "$1/qmp_guest.py" <<'PY'
-import json, os, re, socket, subprocess, time
+import json, os, re, socket, subprocess, sys, time
 
 #       The guest's screen: seventy percent of the preferred mode, so the EDID
 #       has to prefer 3658x1543. QEMU's default EDID gives 640x480, where the
@@ -720,6 +720,13 @@ def load(name):
         i = j
     return vals[0], vals[1], d[i + 1:]
 
+#   A kernel message on the serial console lands wherever the kernel prints it, the middle of the shell's own line
+#   too: an image built with the serial profile prints every message at info and up with its time, and "END10:0"
+#   came back as "E[   39.37] [moonwater canvas] screen ...\r\nND10:0", which no answer matched. A message that does
+#   not start a line is taken out before the answer is looked for; one that starts a line is the command's to keep
+#   (dmesg prints its lines that way).
+KERNEL_INSIDE = re.compile(rb"(?<=[^\n])\[\s*\d+\.\d+\] [^\r\n]*\r?\n")
+
 class Shell:
     """The guest's own shell on the serial line, which answers while the display is another program's, and the little the lane asks of it."""
 
@@ -729,8 +736,9 @@ class Shell:
         self.sock.settimeout(1)
         self.tag = 0
         self.heard = b""
+        self.given_up = {}
 
-    def run(self, command, seconds=30):
+    def run(self, command, seconds=30, booting=False):
         self.tag += 1
         mark = self.tag
         self.sock.sendall(("\necho BEG\"%d\"; %s\necho END\"%d\":$?\n" % (mark, command, mark)).encode())
@@ -744,16 +752,31 @@ class Shell:
                 self.heard += chunk
             except socket.timeout:
                 pass
-            found = done.search(seen)
+            self.answered_late(seen)
+            found = done.search(KERNEL_INSIDE.sub(b"", seen))
             if found:
                 text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
                 return text.decode("utf8", "replace").replace("\r", "").strip(), int(found.group(2))
+        # A command with no answer is said, and so is its answer if it comes later: an answer that comes is a slow
+        # guest, and one that never does is a line the shell did not get. Not while the guest boots, which is asked
+        # until it answers.
+        if not booting:
+            self.given_up[mark] = (command, time.time())
+            print("shell: no answer in %d s to %r (host load %.0f)" % (seconds, command[:100], os.getloadavg()[0]),
+                  file=sys.stderr)
         return seen.decode("utf8", "replace").replace("\r", ""), 124
+
+    def answered_late(self, seen):
+        for mark in list(self.given_up):
+            if re.search(rb"END%d:\d+" % mark, KERNEL_INSIDE.sub(b"", seen)):
+                command, when = self.given_up.pop(mark)
+                print("shell: %r answered %.1f s after it was given up on" % (command[:100], time.time() - when),
+                      file=sys.stderr)
 
     def ready(self):
         # Boot has to have got as far as the shell; the line editor is then told to keep out of the way.
         for _ in range(40):
-            if self.run("echo up", 5)[1] == 0:
+            if self.run("echo up", 5, booting=True)[1] == 0:
                 break
         self.run("PS1=; PS2=; stty -echo", 5)
 
@@ -19313,7 +19336,7 @@ def start_script(name):
 def wait_for(marker, seconds):
     stop = time.time() + seconds
     while time.time() < stop:
-        if marker in serial():
+        if marker in KERNEL_INSIDE.sub(b"", serial()):
             return True
         time.sleep(0.2)
     return False
@@ -22867,7 +22890,7 @@ def serial():
 def wait_for(marker, seconds):
     stop = time.time() + seconds
     while time.time() < stop:
-        if marker in serial():
+        if marker in KERNEL_INSIDE.sub(b"", serial()):
             return True
         time.sleep(0.2)
     return False
@@ -23226,7 +23249,7 @@ def run(command, seconds=60):
             seen += shell.recv(65536)
         except socket.timeout:
             pass
-        found = done.search(seen)
+        found = done.search(KERNEL_INSIDE.sub(b"", seen))
         if found:
             text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
             text = text.decode("utf8", "replace").replace("\r", "").strip()
@@ -23572,7 +23595,7 @@ def run(command, seconds=60):
             seen += shell.recv(65536)
         except socket.timeout:
             pass
-        found = done.search(seen)
+        found = done.search(KERNEL_INSIDE.sub(b"", seen))
         if found:
             text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", found.group(1))
             text = text.decode("utf8", "replace").replace("\r", "").strip()
@@ -24375,10 +24398,11 @@ def pump(seconds):
         transcript.extend(chunk)
 
 def wait_for(marker, seconds):
+    # A kernel message the console printed in the middle of the marker is taken out first (KERNEL_INSIDE).
     stop = time.time() + seconds
-    while marker.encode() not in transcript and time.time() < stop:
+    while marker.encode() not in KERNEL_INSIDE.sub(b"", bytes(transcript)) and time.time() < stop:
         pump(0.3)
-    return marker.encode() in transcript
+    return marker.encode() in KERNEL_INSIDE.sub(b"", bytes(transcript))
 
 def ink(name):
     # The desktop's ink at the top left and the panel's tabs along the bottom: the compositor's own picture.
