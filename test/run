@@ -308,7 +308,8 @@ seam_of_path()
         test/insn.c) echo lib net ;;
         test/function_audit.seal) echo - ;;
         test/*) echo engine ;;
-        README.md | THIRD-PARTY | .gitignore | .vscode/* | .github/*) echo - ;;
+        README.md | incident_response.md | THIRD-PARTY | .gitignore | .vscode/* | \
+        .github/*) echo - ;;
         *) echo '?' ;;
         esac
 }
