@@ -14261,13 +14261,16 @@ same 'a build with no firmware line clears the last one' '0:gone' \
 #       The profiles' own lines: a pinned commit, and each line a plain path
 #       with a 64-digit digest, in a profile that also turns on the zstd
 #       reader its .zst files need. The Deck LCD's two rtw88 files, without
-#       either of which an 8822C will not power on, are named.
+#       either of which an 8822C will not power on, are named. Every profile,
+#       arch/ and its siblings included: a line in arch/arm.pi is a line the
+#       build reads as surely as one in wifi, and kernel/profile/* passed the
+#       two directories to grep, which said so and looked in neither.
 fw_commit=$(sed -n 's/^commit=//p' kernel/firmware/apply | grep -E -c '^[0-9a-f]{40}$')
-fw_lines=$(grep -h '^#> firmware' kernel/profile/* | wc -l | tr -d ' ')
-fw_good=$(grep -h '^#> firmware' kernel/profile/* |
+fw_lines=$(grep -r -h '^#> firmware' kernel/profile | wc -l | tr -d ' ')
+fw_good=$(grep -r -h '^#> firmware' kernel/profile |
         grep -E -c '^#> firmware(_licence)? [A-Za-z0-9._/+-]+ [0-9a-f]{64}( [A-Za-z0-9._/+-]+)?$')
 fw_zstd=0
-for profile in $(grep -l '^#> firmware ' kernel/profile/*); do
+for profile in $(grep -r -l '^#> firmware ' kernel/profile); do
         grep -q '^CONFIG_FW_LOADER_COMPRESS_ZSTD=y' "$profile" || fw_zstd=$((fw_zstd + 1))
 done
 fw_deck=$(grep -c '^#> firmware rtw88/rtw8822c_\(wow_\)\{0,1\}fw.bin ' kernel/profile/wifi)
