@@ -83,6 +83,7 @@ typedef int (*taskbar_glass_fn)(void *context, int x, int y, int width, int heig
 static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height);
 static int taskbar_hit(const struct taskbar_view *view, int px, int py);
+static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach);
 static int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages);
 static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, taskbar_glass_fn glass, void *context,
@@ -107,6 +108,8 @@ static inline int taskbar_slot(const struct taskbar_view *view, int which, int *
 { (void)view, (void)which, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline int taskbar_hit(const struct taskbar_view *view, int px, int py)
 { (void)view, (void)px, (void)py; return TASKBAR_HIT_NONE; }
+static inline int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
+{ (void)view, (void)px, (void)py, (void)reach; return TASKBAR_HIT_NONE; }
 static inline int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 static inline unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages)

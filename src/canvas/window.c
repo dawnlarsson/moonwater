@@ -98,6 +98,13 @@
 // A key held down and repeating, and the logo keys, which only the compositor sends.
 #define WINDOW_KEY_REPEAT 128u
 #define WINDOW_KEY_SUPER 256u
+/*
+        A button, a motion or a wheel that a finger on a touch screen made, which only the compositor sends: a program
+        may scroll what a finger drags where a mouse would select. And a release that is no click: the finger that
+        pressed became two fingers or was held for the right button, and what the press would do is not done.
+*/
+#define WINDOW_KEY_TOUCH 512u
+#define WINDOW_KEY_CANCEL 1024u
 
 struct window_key
 {
@@ -607,7 +614,8 @@ struct windows
         // 3 the pointer is drawn in software; 4 no window, or one dragged or resized; 5 it is glass; 6 it is not at the
         // size it drew; 7 not wholly on the output; 8 too short past its corners and close button; 9 it meets the
         // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
-        // refused the overlay's commit; 13 the desktop spans more than one screen, where every frame is composed.
+        // refused the overlay's commit; 13 the desktop spans more than one screen, where every frame is composed; 14 a
+        // finger's mark is drawn over it (`moonwater canvas touch on`).
         unsigned int unscanned;
         // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own,
         // and the overlay: 1 found, -1 none or refused, 0 not yet asked.

@@ -69,6 +69,7 @@ moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: siz
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
+moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [off]
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]

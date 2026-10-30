@@ -116160,6 +116160,462 @@ static void check_compositor_wheel(void)
 }
 
 /*
+        What of a window's line is lit, by a mouse, with what the compositor had before it lit any (so the rows run
+        against it, and fail there): the edge the pointer is over in the hover ink 9a9a9a, an edge held to resize the
+        window in the held ink e4e4e4 (the text's, well over the 4d4d4d of the line with the keys), a corner held along
+        both its edges, all of the line of a window taken by its top, and only the line drawn again when it changes.
+*/
+static void check_compositor_lit(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int inside = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("lit: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+
+    compositor.pointer_x = 47, compositor.pointer_y = 70;
+    compositor_motion();
+    for (unsigned int at = 0; at < compositor.damages; at++)
+        inside += compositor.damage[at][0] <= 110 && compositor.damage[at][2] > 110 && compositor.damage[at][1] <= 70 &&
+                  compositor.damage[at][3] > 70;
+    check("lit: the pointer coming over an edge draws the window's line again, and not the middle of the window",
+          compositor.damages && !inside);
+    compositor_present();
+    check("lit: the edge the pointer is over is lit in the hover ink, and the others are the line with the keys",
+          glass_at(49, 70) == 0x9a9a9au && glass_at(100, 29) == 0x4d4d4du && glass_at(170, 70) == 0x4d4d4du);
+    compositor.pointer_x = 100;
+    compositor_motion();
+    compositor_present();
+    check("lit: off the edge it is the line again", glass_at(49, 70) == 0x4d4d4du);
+
+    compositor.pointer_x = 47;
+    compositor_motion();
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_present();
+    check("lit: pressed, the edge the hand holds is lit in the held ink, well over the line with the keys",
+          glass_at(49, 70) == 0xe4e4e4u && glass_at(100, 29) == 0x4d4d4du && glass_at(100, 110) == 0x4d4d4du);
+    compositor.pointer_x = 37;
+    compositor_motion();
+    compositor_present();
+    check("lit: and it stays lit as the edge moves with the hand", compositor.x[1] == 40 && glass_at(39, 70) == 0xe4e4e4u);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor_present();
+    check("lit: let go, the line is the line with the keys", glass_at(39, 70) == 0x4d4d4du);
+
+    compositor.pointer_x = 38, compositor.pointer_y = 28;
+    compositor_motion();
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_present();
+    check("lit: a corner held is lit along its two edges thirty-two pixels from its square, and no further",
+          glass_at(39, 45) == 0xe4e4e4u && glass_at(60, 29) == 0xe4e4e4u && glass_at(39, 90) == 0x4d4d4du &&
+              glass_at(120, 29) == 0x4d4d4du);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+
+    compositor.pointer_x = 100, compositor.pointer_y = 35;
+    compositor_motion();
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_present();
+    check("lit: a window taken by its top has all of its line lit while it is held",
+          glass_at(39, 70) == 0xe4e4e4u && glass_at(100, 29) == 0xe4e4e4u && glass_at(170, 70) == 0xe4e4e4u &&
+              glass_at(100, 110) == 0xe4e4e4u);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor_present();
+    check("lit: and none once it is let go", glass_at(100, 29) == 0x4d4d4du && glass_at(39, 70) == 0x4d4d4du);
+}
+
+#ifdef COMPOSITOR_TOUCH_SLOP
+/*
+        A touch screen through the compositor's reader, from a pipe that stands for one in slot 0, its events as a
+        multitouch driver and the kernel say them: each finger's slot, id and place, then the kernel's BTN_TOUCH when
+        the first finger lands or the last lifts, then the oldest finger's ABS_X and ABS_Y, then the report's end. Its
+        units are four to a pixel of the 256 by 256 screen. With TOUCH_AS_BEFORE the device is read as it was before
+        touch screens were (a tablet whose BTN_TOUCH is the left button), which is how each row is seen red.
+*/
+static positive touch_clock; // microseconds, the events' stamps
+static int touch_down;      // what BTN_TOUCH said last
+
+static fn touch_feed(unsigned short type, unsigned short code, int value)
+{
+        struct compositor_input_event event = {(long)(touch_clock / 1000000), (long)(touch_clock % 1000000), type, code, value};
+
+        system_write_once(wheel_pipe[1], &event, sizeof(event));
+}
+
+// One report: count fingers, each {slot, id, x, y} with id -1 lifted; the first whose id is not -1 is the oldest.
+static fn touch_report(int count, const int (address_to fingers)[4])
+{
+        int down = 0, oldest = -1;
+
+        for (int at = 0; at < count; at++)
+        {
+                touch_feed(COMPOSITOR_EV_ABS, COMPOSITOR_ABS_MT_SLOT, fingers[at][0]);
+                touch_feed(COMPOSITOR_EV_ABS, COMPOSITOR_ABS_MT_TRACKING_ID, fingers[at][1]);
+                if (fingers[at][1] < 0)
+                        continue;
+                touch_feed(COMPOSITOR_EV_ABS, COMPOSITOR_ABS_MT_POSITION_X, fingers[at][2] * 4);
+                touch_feed(COMPOSITOR_EV_ABS, COMPOSITOR_ABS_MT_POSITION_Y, fingers[at][3] * 4);
+                down = 1;
+                oldest = oldest < 0 ? at : oldest;
+        }
+        if (down != touch_down)
+                touch_feed(COMPOSITOR_EV_KEY, COMPOSITOR_BTN_TOUCH, down);
+        touch_down = down;
+        if (oldest >= 0)
+        {
+                touch_feed(COMPOSITOR_EV_ABS, 0, fingers[oldest][2] * 4);
+                touch_feed(COMPOSITOR_EV_ABS, 1, fingers[oldest][3] * 4);
+        }
+        touch_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+}
+
+// One finger in slot 0, id 1: down or moved to x, y, or lifted; the clock moves on 10 ms.
+static fn touch_one(int x, int y, b32 lift)
+{
+        const int finger[1][4] = {{0, lift ? -1 : 1, x, y}};
+
+        touch_clock += 10000;
+        touch_report(1, finger);
+}
+
+// The events of row since head of a type, with a for a button's code (or any for -1), and the flags they carried.
+static unsigned int touch_seen(int row, unsigned int head, unsigned int type, int a, unsigned int address_to flags)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int count = 0;
+
+        if (flags)
+                address_to flags = 0;
+        for (unsigned int at = head; at != table->event_head[row]; at++)
+                if (table->event_type[row][at % WINDOWS_EVENTS] == type && (a < 0 || table->event_a[row][at % WINDOWS_EVENTS] == a))
+                {
+                        count++;
+                        if (flags)
+                                address_to flags |= table->event_flags[row][at % WINDOWS_EVENTS];
+                }
+        return count;
+}
+
+// The button events of row since head, each its code and whether it went down, as a number to compare: 0x1110 down.
+static unsigned long touch_buttons(int row, unsigned int head)
+{
+        struct windows address_to table = compositor.table;
+        unsigned long made = 0;
+
+        for (unsigned int at = head; at != table->event_head[row]; at++)
+                if (table->event_type[row][at % WINDOWS_EVENTS] == WINDOW_EVENT_BUTTON)
+                        made = made << 16 | (unsigned long)table->event_a[row][at % WINDOWS_EVENTS] << 4 |
+                               (table->event_flags[row][at % WINDOWS_EVENTS] & WINDOW_KEY_DOWN ? 1 : 0) |
+                               (table->event_flags[row][at % WINDOWS_EVENTS] & WINDOW_KEY_CANCEL ? 2 : 0);
+        return made;
+}
+
+static void check_compositor_touch(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int head1, head2, flags = 0;
+    int unchanged;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.hold = -1;
+    compositor.holds = ~0ul;
+    compositor.told_row = COMPOSITOR_NONE;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map() || system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("touch: the table and the device are made", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    table->x[2] = 150, table->y[2] = 120, table->width[2] = 90, table->height[2] = 100;
+    glass_paint(2, 0, 0, 90, 100, 0x206020u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    touch_clock = 1000000;
+    touch_down = 0;
+#ifdef TOUCH_AS_BEFORE
+    // A tablet, its range the screen's, as the reader took a touch screen with an ABS_X before.
+    compositor.absolute_x[0][1] = compositor.absolute_y[0][1] = 1020;
+#else
+    compositor.touchscreen[0] = 1;
+    compositor.screen_touch[0] = (struct compositor_touch_screen){0};
+    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
+    compositor.screen_touch[0].slots = 1;
+    compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
+#endif
+    compositor.pointer_x = 60;
+    compositor.pointer_y = 70;
+
+    /* Pressed where it lands, not where the pointer (or the last finger) was. */
+    head1 = table->event_head[1], head2 = table->event_head[2];
+    touch_one(190, 190, false);
+    check("touch: a finger put down presses the window it lands on, where it lands, and none where the pointer was",
+          touch_buttons(2, head2) == 0x1101 && touch_seen(1, head1, WINDOW_EVENT_BUTTON, -1, null) == 0 &&
+              table->event_type[2][(table->event_head[2] - 2) % WINDOWS_EVENTS] == WINDOW_EVENT_MOTION &&
+              table->event_a[2][(table->event_head[2] - 2) % WINDOWS_EVENTS] == 40 &&
+              table->event_b[2][(table->event_head[2] - 2) % WINDOWS_EVENTS] == 70);
+    touch_seen(2, head2, WINDOW_EVENT_BUTTON, -1, &flags);
+    check("touch: and the press says a finger made it", (flags & WINDOW_KEY_TOUCH) != 0);
+    check("touch: the pointer is hidden while a finger was the last thing used", compositor.touch.hidden);
+
+    /* A finger shakes as it lands: under the slop it moves nothing, and the release is a click where it landed. */
+    head2 = table->event_head[2];
+    touch_one(193, 192, false);
+    touch_one(195, 189, false);
+    check("touch: a finger that shakes under the slop moves nothing", touch_seen(2, head2, WINDOW_EVENT_MOTION, -1, null) == 0 &&
+                                                                        compositor.pointer_x == 190 && compositor.pointer_y == 190);
+    touch_one(195, 189, true);
+    check("touch: lifted, it is the release of the press in the same window, a click", touch_buttons(2, head2) == 0x1100);
+
+    /* Past the slop it is the pointer's motion, told the window it pressed, as a finger's. */
+    head1 = table->event_head[1], head2 = table->event_head[2];
+    touch_one(190, 190, false);
+    touch_one(190, 205, false);
+    touch_seen(2, head2, WINDOW_EVENT_MOTION, -1, &flags);
+    check("touch: moved past the slop, the window it pressed is told where it is now, as a finger's",
+          table->event_type[2][(table->event_head[2] - 1) % WINDOWS_EVENTS] == WINDOW_EVENT_MOTION &&
+              table->event_a[2][(table->event_head[2] - 1) % WINDOWS_EVENTS] == 40 &&
+              table->event_b[2][(table->event_head[2] - 1) % WINDOWS_EVENTS] == 85 && (flags & WINDOW_KEY_TOUCH));
+
+    /* A second finger lands on the other window, and the first lifts: the second never takes the pointer. */
+    {
+        const int both[2][4] = {{0, 1, 190, 205}, {1, 2, 80, 80}};
+        const int second[2][4] = {{0, -1, 0, 0}, {1, 2, 80, 80}};
+        const int none[1][4] = {{1, -1, 0, 0}};
+
+        touch_clock += 10000;
+        touch_report(2, both);
+        touch_clock += 10000;
+        touch_report(2, second);
+        touch_clock += 10000;
+        touch_report(1, none);
+        check("touch: a second finger, left on after the first lifts, does not take the pointer to it",
+              touch_seen(1, head1, WINDOW_EVENT_BUTTON, -1, null) == 0 && touch_seen(1, head1, WINDOW_EVENT_MOTION, -1, null) == 0 &&
+                  compositor.pointer_x == 190 && compositor.pointer_y == 205 && touch_buttons(2, head2) == 0x11011100);
+    }
+
+    /* A window taken by its top moves with the finger from the first move past the slop, the hand's grip kept. */
+    compositor_present();
+    touch_one(170, 125, false);
+    touch_one(170, 110, false);
+    touch_one(172, 90, false);
+    check("touch: a window taken by its top follows the finger, held where the finger took it",
+          compositor.x[2] == 152 && compositor.y[2] == 85);
+    compositor_present();
+    check("touch: and all of its line is lit while it is held", glass_at(151, 140) == COMPOSITOR_INK_LINE_HELD &&
+                                                                  glass_at(200, 84) == COMPOSITOR_INK_LINE_HELD);
+    touch_one(172, 90, true);
+    compositor_present();
+    check("touch: let go, its line is the line with the keys again", glass_at(151, 140) == COMPOSITOR_INK_LINE_LIT &&
+                                                                        compositor.arranged[2] == COMPOSITOR_FLOATING);
+
+    /* A tap on the top of a window at the top of the screen: a click, which raises it and fills nothing. */
+    compositor_put(1, 50, 0);
+    compositor_raise(2);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor.pointer_x = 100, compositor.pointer_y = 3;
+    touch_one(100, 3, false);
+    touch_one(102, 5, false);
+    touch_one(102, 5, true);
+    check("touch: a tap that shakes on the top of a window at the screen's top raises it and fills nothing",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50 && compositor.y[1] == 0 &&
+              compositor.stack[compositor.stacked - 1] == 1);
+    compositor_put(1, 50, 30);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+
+    /* A finger's grip is wider: 12 pixels outside a window's left edge is the edge, and its corner 20 pixels along. */
+    {
+        int width = (int)compositor.w[1], height = (int)compositor.h[1];
+
+        touch_one(38, 70, false);
+        touch_one(18, 70, false);
+        check("touch: twelve pixels outside a window's left edge, a finger takes the edge, and moved it is the window wider",
+              (int)compositor.w[1] == width + 20 && compositor.x[1] == 30 && (int)compositor.h[1] == height);
+        compositor_present();
+        check("touch: the edge it holds is lit in the held ink, and the edges it does not hold are not",
+              glass_at(29, 70) == COMPOSITOR_INK_LINE_HELD && glass_at(100, 29) == COMPOSITOR_INK_LINE_LIT);
+        touch_one(18, 70, true);
+        compositor_want(1, width, height);
+        compositor_put(1, 50, 30);
+        compositor.w[1] = (unsigned int)width;
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        touch_one(47, 50, false);
+        touch_one(30, 30, false);
+        check("touch: a finger three pixels outside the left edge, twenty down from the top, takes the top left corner",
+              compositor.resize == 1 && compositor.edges[1] == (COMPOSITOR_EDGE_LEFT | COMPOSITOR_EDGE_TOP));
+        compositor_present();
+        check("touch: a corner held is lit along both its edges for COMPOSITOR_LIT_REACH, and no further",
+              glass_at(compositor.x[1] - 1, compositor.y[1] + 20) == COMPOSITOR_INK_LINE_HELD &&
+                  glass_at(compositor.x[1] + 20, compositor.y[1] - 1) == COMPOSITOR_INK_LINE_HELD &&
+                  glass_at(compositor.x[1] - 1, compositor.y[1] + 60) == COMPOSITOR_INK_LINE_LIT);
+        touch_one(30, 30, true);
+        compositor_want(1, width, height);
+        compositor.w[1] = (unsigned int)width, compositor.h[1] = (unsigned int)height;
+        compositor_put(1, 50, 30);
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+    }
+
+    /* The close button: a finger that lands on it closes nothing until it lifts there, and one dragged off it nothing. */
+    {
+        int bx = compositor.x[2] + (int)compositor.w[2] - COMPOSITOR_CLOSE_IN - COMPOSITOR_CLOSE / 2;
+        int by = compositor.y[2] + COMPOSITOR_CLOSE_IN + COMPOSITOR_CLOSE / 2;
+
+        touch_one(bx, by, false);
+        unchanged = !(table->state[2] & WINDOW_CLOSING);
+        touch_one(bx - 40, by + 2, false);
+        touch_one(bx - 40, by + 2, true);
+        unchanged = unchanged && !(table->state[2] & WINDOW_CLOSING);
+        touch_one(bx + 1, by + 12, false);
+        touch_one(bx + 1, by + 12, true);
+        check("touch: the close button closes when the finger lifts from it, wider than the X, and not when it lands or is dragged off",
+              unchanged && (table->state[2] & WINDOW_CLOSING));
+        table->state[2] &= ~WINDOW_CLOSING;
+        compositor.state[2] &= ~WINDOW_CLOSING;
+    }
+
+    /* Two fingers: the press is taken back, and moved down together they are the wheel up; tapped, the right button. */
+    {
+        int from[2][4] = {{0, 5, 70, 60}, {1, 6, 110, 60}};
+        const int lifted[2][4] = {{0, -1, 0, 0}, {1, -1, 0, 0}};
+        int sum = 0;
+
+        head1 = table->event_head[1];
+        touch_clock += 10000;
+        touch_report(2, from);
+        for (int step = 1; step <= 6; step++)
+        {
+            from[0][3] = from[1][3] = 60 + step * 8;
+            touch_clock += 10000;
+            touch_report(2, from);
+        }
+        for (unsigned int at = head1; at != table->event_head[1]; at++)
+            if (table->event_type[1][at % WINDOWS_EVENTS] == WINDOW_EVENT_WHEEL && !table->event_b[1][at % WINDOWS_EVENTS])
+                sum += table->event_a[1][at % WINDOWS_EVENTS];
+        check("touch: two fingers moved 48 pixels down together are a notch of the wheel up, what is under them following them",
+              sum == 120 && touch_buttons(1, head1) == 0x11011102);
+        touch_clock += 10000;
+        touch_report(2, lifted);
+        head1 = table->event_head[1];
+        from[0][1] = 7, from[1][1] = 8, from[0][3] = from[1][3] = 60;
+        touch_clock += 10000;
+        touch_report(2, from);
+        touch_clock += 120000;
+        touch_report(2, lifted);
+        check("touch: two fingers tapped together are a click of the right button", touch_buttons(1, head1) == 0x1101110211111110ul);
+    }
+
+    /* Held still for half a second, a finger is the right button there; its left press is taken back first. */
+    head1 = table->event_head[1];
+    touch_one(100, 80, false);
+    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS - 1000000);
+    unchanged = touch_buttons(1, head1) == 0x1101;
+    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    touch_one(100, 80, true);
+    check("touch: held still half a second, a finger is the right button, its left press taken back and its lift nothing",
+          unchanged && touch_buttons(1, head1) == 0x1101110211111110ul);
+
+    /* Its mark, `moonwater canvas touch on`: a disc and a ring round the finger over the windows, gone a second after. */
+    compositor.spots_on = 1;
+    compositor_present();
+    touch_one(100, 80, false);
+    compositor_present();
+    {
+        unsigned int middle = glass_at(100, 80), window = 0x404040u, ring = 0;
+        int radius = COMPOSITOR_SPOT;
+
+        for (int x = 100 - radius; x < 100 - radius + 3; x++)
+            ring = glass_at(x, 80) > ring ? glass_at(x, 80) : ring;
+        check("touch: with canvas touch on, a finger's mark is a faint disc of the held ink over the window, ringed brighter",
+              middle == compositor_mix(window, COMPOSITOR_INK_LINE_HELD, COMPOSITOR_SPOT_FILL) && ring > middle &&
+                  glass_at(100 - radius - 1, 80) == window && glass_at(100 + radius, 80) == window);
+        touch_one(130, 80, false);
+        compositor_present();
+        check("touch: it follows the finger, and where it was is the window again",
+              glass_at(130, 80) == middle && glass_at(85, 80) == window && glass_at(100, 80) != middle);
+        touch_one(130, 80, true);
+        compositor_spots_tick(touch_clock * 1000 + COMPOSITOR_SPOT_FADE_NS / 2);
+        compositor_present();
+        check("touch: lifted, it fades: half way through the second it is half as strong",
+              glass_at(130, 80) == compositor_mix(window, COMPOSITOR_INK_LINE_HELD, COMPOSITOR_SPOT_FILL * 127 / 255));
+        compositor_spots_tick(touch_clock * 1000 + COMPOSITOR_SPOT_FADE_NS);
+        compositor_present();
+        check("touch: and a second after the finger lifted it is gone, the window as it was, and nothing more to draw",
+              glass_at(130, 80) == window && glass_at(130 - radius + 1, 80) == window && !compositor_spots_any(0) &&
+                  !compositor.damages);
+        compositor.spots_on = 0;
+        touch_one(100, 80, false);
+        compositor_present();
+        check("touch: with canvas touch off no mark is drawn", glass_at(100, 80) == window && !compositor_spots_any(0));
+        touch_one(100, 80, true);
+    }
+
+    /* On two screens a touch screen is the machine's own panel, and else the primary: not the space across both. */
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 128, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 128, compositor.screen[1][1] = 0, compositor.screen[1][2] = 128, compositor.screen[1][3] = 256;
+    string_copy((string_address)compositor.output[0].name, (string_address) "HDMI-A-1");
+    string_copy((string_address)compositor.output[1].name, (string_address) "eDP-1");
+    touch_one(254, 254, false);
+    unchanged = compositor.pointer_x == 128 + 1016 * 127 / 1020 && compositor.pointer_y == 254;
+    touch_one(254, 254, true);
+    string_copy((string_address)compositor.output[1].name, (string_address) "DP-2");
+    touch_one(254, 254, false);
+    touch_one(254, 254, true);
+    check("touch: on two screens a finger is on the built-in panel's screen, and with none on the primary's",
+          unchanged && compositor.pointer_x == 1016 * 127 / 1020 && compositor.pointer_y == 254);
+    compositor.outputs = 0;
+
+    /* A mouse moved after a finger shows the pointer again. */
+    compositor.cursor.soft = 1;
+    touch_one(100, 80, false);
+    touch_one(100, 80, true);
+    unchanged = !compositor.cursor.drawn;
+    wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_X, 3);
+    wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+    compositor.touchscreen[0] = 0;
+    compositor_input_read(0);
+    check("touch: no pointer is drawn under a finger, and a mouse moved shows it again", unchanged && compositor.cursor.drawn);
+    compositor.cursor.soft = 0;
+
+    system_close(wheel_pipe[0]);
+    system_close(wheel_pipe[1]);
+    compositor.input_count = 0;
+}
+#endif // COMPOSITOR_TOUCH_SLOP
+
+/*
         Where a placed window goes (compositor_first_put and the rectangles under it). The room of a screen is the
         screen less the taskbar on each of its four edges, and the whole screen with no band or a band elsewhere;
         a window is kept on its screen whatever it asked, its top left on it when it is larger; centre is the
@@ -119326,7 +119782,11 @@ b32 main()
         check_compositor_screens();
         check_compositor_cycle();
         check_compositor_hover();
+        check_compositor_lit();
         check_compositor_wheel();
+#ifdef COMPOSITOR_TOUCH_SLOP
+        check_compositor_touch();
+#endif
         check_compositor_dismiss();
         check_compositor_place();
         check_compositor_remember();
@@ -123015,6 +123475,9 @@ static void check_compositor_scene(void) {
             for(int p=0;p<w*h;p++)body[i][p]=0x400000u|(u32)(i<<16)|(u32)p;
             frames[i]=(struct compositor_frame){RND(W+60)-40,RND(H+60)-40,w,h,1+RND(2),
                 body[i],(unsigned long)w,0,0,0,RND(3)?RND(60):0,RND(3)?RND(4):0,0x203040u+(u32)i,RND(4)?0:RND(16)};
+            /* An edge, a corner or all of its line lit, now and then: drawn in pieces as it is drawn whole. */
+            frames[i].lit=RND(3)?0:(unsigned)RND(32);
+            frames[i].lit_ink=0xe4e4e4u-(u32)i;
         }
         /* The compositor's panel, somewhere among them, as wide as it likes. */
         if(count<COMPOSITOR_FRAMES&&scene%3==0) {
@@ -123036,6 +123499,82 @@ static void check_compositor_scene(void) {
     }
     cc_check(equal);
     #undef RND
+}
+
+/* What the touch work added to the backend and the pointer's rules, on ordinary memory, by gcc and clang alike:
+   a finger's mark, a lit edge and corner, and the edges a point is on. */
+static void check_compositor_touch_backend(void) {
+    enum { W=200, H=150 };
+    static u32 buffer[W*H];
+    struct compositor_target t={buffer,W,W,H,0,0,W,H};
+    int symmetric=1,outside=1,inside=1;
+    for(int scale=1;scale<=3;scale++) {
+        int r=compositor_spot_radius(scale),cx=100,cy=75;
+        compositor_fill(&t,0,0,W,H,0x303030u);
+        compositor_spot_draw(&t,cx,cy,scale,255);
+        for(int dy=0;dy<r+2&&cy+dy<H;dy++)for(int dx=0;dx<r+2;dx++) {
+            u32 a=buffer[(cy+dy)*W+cx+dx],b=buffer[(cy+dy)*W+cx-1-dx],c=buffer[(cy-1-dy)*W+cx+dx],d=buffer[(cy-1-dy)*W+cx-1-dx];
+            symmetric&=a==b&&a==c&&a==d;
+            if(dx>=r||dy>=r)outside&=a==0x303030u;
+        }
+        inside&=buffer[cy*W+cx]==compositor_mix(0x303030u,COMPOSITOR_INK_LINE_HELD,COMPOSITOR_SPOT_FILL);
+    }
+    cc_check(symmetric&&outside&&inside);
+    cc_check(compositor_spot_radius(1)==COMPOSITOR_SPOT&&compositor_spot_radius(4)==COMPOSITOR_SPOT*4);
+    compositor_fill(&t,0,0,W,H,0x303030u);
+    compositor_spot_draw(&t,100,75,1,0);
+    cc_check(buffer[75*W+100]==0x303030u);
+    compositor_spot_draw(&t,100,75,1,128);
+    cc_check(buffer[75*W+100]==compositor_mix(0x303030u,COMPOSITOR_INK_LINE_HELD,COMPOSITOR_SPOT_FILL*128/255));
+    /* A mark at the target's edge writes nothing outside its clip. */
+    {
+        struct compositor_target clip={buffer,W,W,H,50,50,60,60};
+        int clean=1;
+        compositor_fill(&t,0,0,W,H,0x303030u);
+        compositor_spot_draw(&clip,52,52,1,255);
+        for(int y=0;y<H;y++)for(int x=0;x<W;x++)
+            if(x<50||x>=60||y<50||y>=60)clean&=buffer[y*W+x]==0x303030u;
+        cc_check(clean&&buffer[52*W+52]!=0x303030u);
+    }
+    /* A window at 50, 50, its line 1 and its corners 8: the left edge lit whole, and the top left corner lit along both
+       its edges for the reach, the rest of the line its own ink. */
+    {
+        static u32 body[120*80];
+        struct compositor_frame frame;
+        for(int p=0;p<120*80;p++)body[p]=0x404040u;
+        frame=(struct compositor_frame){50,50,60,40,1,body,120,0,0,0,8,1,0x4d4d4du,0};
+        frame.lit=COMPOSITOR_LIT_LEFT;frame.lit_ink=COMPOSITOR_INK_LINE_HELD;
+        compositor_fill(&t,0,0,W,H,0x1e1e1eu);
+        compositor_draw(&t,&frame);
+        cc_check(buffer[70*W+49]==COMPOSITOR_INK_LINE_HELD&&buffer[49*W+80]==0x4d4d4du&&buffer[70*W+110]==0x4d4d4du&&
+                 buffer[90*W+80]==0x4d4d4du);
+        frame=(struct compositor_frame){50,50,120,80,1,body,120,0,0,0,8,1,0x4d4d4du,0};
+        frame.lit=COMPOSITOR_LIT_LEFT|COMPOSITOR_LIT_TOP;frame.lit_ink=COMPOSITOR_INK_LINE_HELD;
+        compositor_fill(&t,0,0,W,H,0x1e1e1eu);
+        compositor_draw(&t,&frame);
+        cc_check(buffer[(49+8+31)*W+49]==COMPOSITOR_INK_LINE_HELD&&buffer[(49+8+32)*W+49]==0x4d4d4du&&
+                 buffer[49*W+49+8+31]==COMPOSITOR_INK_LINE_HELD&&buffer[49*W+49+8+32]==0x4d4d4du&&buffer[100*W+170]==0x4d4d4du);
+    }
+    /* The edges a point is on: with no corner reach what the compositor always said, and a finger's corner. */
+    {
+        int same=1;
+        for(int y=-20;y<120;y++)for(int x=-20;x<140;x++) {
+            unsigned want=0;
+            if(!(x<10-7||x>=110+7||y<20-7||y>=80+7)) {
+                want|=x<10+2?CP_EDGE_LEFT:x>=110-2?CP_EDGE_RIGHT:0;
+                want|=y<20+2?CP_EDGE_TOP:y>=80-2?CP_EDGE_BOTTOM:0;
+            }
+            same&=compositor_edges_at(x,y,10,20,110,80,7,2,2,0)==want;
+        }
+        cc_check(same);
+        cc_check(compositor_edges_at(5,40,10,20,110,80,17,8,2,24)==(CP_EDGE_LEFT|CP_EDGE_TOP)&&
+                 compositor_edges_at(5,50,10,20,110,80,17,8,2,24)==CP_EDGE_LEFT&&
+                 compositor_edges_at(100,85,10,20,110,80,17,8,2,24)==(CP_EDGE_RIGHT|CP_EDGE_BOTTOM)&&
+                 compositor_edges_at(60,25,10,20,110,80,17,8,2,24)==0&&compositor_edges_at(60,0,10,20,110,80,17,8,2,24)==0);
+        cc_check(compositor_past_slop(0,0,5,6,8)==0&&compositor_past_slop(0,0,0,8,8)==1&&compositor_past_slop(10,10,4,4,8)==1);
+        cc_check(compositor_builtin_panel("eDP-1")&&compositor_builtin_panel("LVDS-1")&&compositor_builtin_panel("DSI-2")&&
+                 !compositor_builtin_panel("DP-1")&&!compositor_builtin_panel("HDMI-A-1")&&!compositor_builtin_panel("Virtual-1"));
+    }
 }
 
 #if defined(__riscv)
@@ -123212,6 +123751,7 @@ int main(void) {
     check_compositor_pointer();
     check_compositor_outputs();
     check_compositor_scene();
+    check_compositor_touch_backend();
     printf("  canvas-cells %u of %u\n",checks,checks);
     const char *tally=getenv("TEST_TALLY");
     if(tally){FILE *f=fopen(tally,"a");assert(f);fprintf(f,"canvas-cells %u %u\n",checks,checks);assert(!fclose(f));}

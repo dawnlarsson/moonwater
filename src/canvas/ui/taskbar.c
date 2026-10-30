@@ -219,18 +219,34 @@ static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int 
         return *height > 0 && *width > 0 && lay.across_len > 0 && along >= lay.origin && along + length <= lay.origin + lay.length;
 }
 
-// What is at a point of the band: a tab's number, -2 for the tray, or TASKBAR_HIT_NONE.
-static int taskbar_hit(const struct taskbar_view *view, int px, int py)
+/*
+        What is at a point of the band: a tab's number, -2 for the tray, or TASKBAR_HIT_NONE. With reach, a finger's:
+        each slot reaches that much further toward the middle of its screen and half the gap further along the band
+        either side, so a tab a finger lands on the edge of is still the tab, and nothing is drawn any larger.
+*/
+static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 {
+        int half = reach ? 2 * view->scale : 0;
+
         for (int which = -2; which < (int)view->count; which++)
         {
                 int x, y, width, height;
 
-                if (taskbar_slot(view, which, &x, &y, &width, &height) &&
-                    px >= x && px < x + width && py >= y && py < y + height)
+                if (!taskbar_slot(view, which, &x, &y, &width, &height))
+                        continue;
+                if (taskbar_vertical(view->position))
+                        y -= half, height += 2 * half, width += reach, x -= view->position == TASKBAR_RIGHT ? reach : 0;
+                else
+                        x -= half, width += 2 * half, height += reach, y -= view->position == TASKBAR_TOP ? 0 : reach;
+                if (px >= x && px < x + width && py >= y && py < y + height)
                         return which;
         }
         return TASKBAR_HIT_NONE;
+}
+
+static int taskbar_hit(const struct taskbar_view *view, int px, int py)
+{
+        return taskbar_hit_reach(view, px, py, 0);
 }
 
 // The span: from the first tab (or the tray, with no tabs) to the end of the tray. Answers 0 when there is no tray.

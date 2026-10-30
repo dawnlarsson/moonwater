@@ -44547,7 +44547,8 @@ def harness_moonwater_cli(argv):
                 "canvas cursor shake", "canvas cursor shake off", "canvas cursor shake maybe", "canvas cursor shake on off",
                 "canvas cursor shake default", "canvas cursor shake delay", "canvas cursor shake delay 800",
                 "canvas cursor shake delay 5", "canvas cursor shake delay 800 900", "canvas cursor shake delay default",
-                "keyboard repeat", "keyboard repeat bogus", "keyboard repeat delay", "keyboard repeat delay 300",
+                "canvas touch", "canvas touch on", "canvas touch maybe", "canvas touch on off", "canvas touch default",
+                "keyboard repeat","keyboard repeat bogus", "keyboard repeat delay", "keyboard repeat delay 300",
                 "keyboard repeat delay 50", "keyboard repeat delay 300 400", "keyboard repeat delay default",
                 "keyboard repeat rate", "keyboard repeat rate off", "keyboard repeat rate 0", "keyboard repeat rate 5 6",
                 "keyboard repeat rate default", "mouse", "mouse bogus", "mouse sensitivity", "mouse sensitivity 150",
@@ -44671,6 +44672,9 @@ def harness_moonwater_cli(argv):
             'canvas cursor shake delay',
             'canvas cursor shake delay 800',
             'canvas cursor shake delay default',
+            'canvas touch',
+            'canvas touch on',
+            'canvas touch default',
             'keyboard repeat',
             'keyboard repeat delay',
             'keyboard repeat delay 300',
@@ -44759,6 +44763,7 @@ def harness_moonwater_cli(argv):
             'canvas cursor look sideways',
             'canvas cursor shake maybe',
             'canvas cursor shake delay 5',
+            'canvas touch maybe',
             'keyboard repeat delay 50',
             'keyboard repeat rate 0',
             'mouse sensitivity 5',
@@ -44842,6 +44847,7 @@ def harness_moonwater_cli(argv):
             'canvas cursor bogus',
             'canvas cursor shake on off',
             'canvas cursor shake delay 800 900',
+            'canvas touch on off',
             'keyboard repeat bogus',
             'keyboard repeat delay 300 400',
             'keyboard repeat rate 5 6',
@@ -47232,6 +47238,8 @@ while True:
              "acceleration off", "acceleration on"),
             ("taskbar text", "taskbar.text", "edge", "edge", ["middle", "Center", "left", '""', "edge,center"],
              "text edge", "text center"),
+            ("canvas touch", "canvas.touch", "on", "on", ["maybe", "ON", "1", '""', "on,off"],
+             "touch on", "touch off"),
         ]
 
         def plain_step(label, command):
@@ -48416,7 +48424,7 @@ while True:
             "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
             "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
             "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
-            "usb lock", "usb allow 1-1", "usb class storage allow",
+            "canvas touch on", "usb lock", "usb allow 1-1", "usb class storage allow",
             "usb forget 1-1", "usb log", "usb apply", "usb watch", "usb sideways", "usb class")))
         lines, finished = session(script, nobody=True)
         seen = answers(lines)
@@ -48451,6 +48459,7 @@ while True:
             "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
             "canvas cursor shake off": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
             "canvas cursor shake delay 800": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+            "canvas touch on": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
             "keyboard repeat delay 300": (1, "moonwater keyboard needs root"),
             "keyboard repeat rate off": (1, "moonwater keyboard needs root"),
             "mouse sensitivity 150": (1, "moonwater mouse needs root"),
