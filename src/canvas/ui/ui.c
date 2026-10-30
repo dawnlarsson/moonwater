@@ -28,16 +28,10 @@
 // What text is below the look: documents, history, selections, segmentation (text.c, which says why it is its own file).
 #include "text.c"
 
-#define UI_TEXT 14     // a label, a value
-#define UI_SMALL 12    // a section's header
-#define UI_TITLE 20    // the window's title
-#define UI_ROW 40      // a row
+#define UI_ROW 40      // a row of a list or a column
 #define UI_PAD 16      // the window's margin
-#define UI_INSET 14    // the inset of a panel's content from its edge
-#define UI_RADIUS 8    // a focused row's and a field's corners, as the windows'
-#define UI_SWITCH_W 36 // a switch
-#define UI_SWITCH_H 20
-#define UI_RING 2      // the focus ring's width
+#define UI_INSET 14    // a row's text in from its edges
+#define UI_RADIUS 8    // the windows' corners
 #define UI_SCRATCH_ROWS 96
 
 struct ui
@@ -318,37 +312,6 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
         }
 }
 
-// A rounded rectangle's outline, thickness wide, inside its edge.
-static fn ui_outline(struct ui address_to ui, int x, int y, int width, int height, int radius, int thickness,
-                     unsigned int tone)
-{
-        int inner = radius > thickness ? radius - thickness : 0;
-
-        for (int row = 0; row < height; row++)
-                for (int column = 0; column < width; column++)
-                {
-                        unsigned int outer_cover, inner_cover;
-
-                        if (!ui_in_band(ui, y + row))
-                        {
-                                column = width - 1;
-                                continue;
-                        }
-                        // The middle is not the outline.
-                        if (column >= thickness + inner && column < width - thickness - inner && row >= thickness &&
-                            row < height - thickness)
-                        {
-                                column = width - thickness - inner - 1;
-                                continue;
-                        }
-                        outer_cover = ui_inside_cached(column, row, width, height, radius);
-                        inner_cover = ui_inside_cached(column - thickness, row - thickness, width - 2 * thickness,
-                                                height - 2 * thickness, inner);
-                        if (outer_cover > inner_cover)
-                                ui_dot(ui, x + column, y + row, ui_cover(tone, outer_cover - inner_cover));
-                }
-}
-
 /*
         A run laid a code point at a time: the pen after the last glyph, which
         is the advance font_draw answers for the run so far, kerning and all.
@@ -525,43 +488,12 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
         return width;
 }
 
-// A run of text, whole, drawn as ui_run draws it: its width is answered, and a run of alpha 0 draws nothing.
-static int ui_text(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
-                   unsigned int colour, unsigned int alpha)
-{
-        return ui_run(ui, x, baseline, text, size, bold, colour, alpha, 0, ui->width);
-}
-
-// A run's width, measured.
-static int ui_measure(struct ui address_to ui, string_address text, int size, b32 bold)
-{
-        return ui_text(ui, 0, 0, text, size, bold, 0, 0);
-}
-
 // A run's capital height at size, in whole pixels: font.c's metrics are 16.16.
 static int ui_capital(struct ui address_to ui, int size)
 {
         font_metrics metrics = font_metrics_at(ui->regular, (p32)(size * ui->scale) << 6);
 
         return (int)((metrics.cap_height + 32768) >> 16);
-}
-
-// Where a run of size sits in a band top to top + height: its capitals in the band's middle.
-static int ui_baseline(struct ui address_to ui, int top, int height, int size)
-{
-        int capital = ui_capital(ui, size);
-
-        return top + (height - capital) / 2 + capital;
-}
-
-// The row with the focus: lit, with a ring round it.
-static fn ui_focus(struct ui address_to ui, int x, int y, int width, int height, b32 ring)
-{
-        int radius = (UI_RADIUS - 2) * ui->scale;
-
-        ui_round(ui, x, y, width, height, radius, ui->lit);
-        if (ring)
-                ui_outline(ui, x, y, width, height, radius, UI_RING * ui->scale, ui->ring);
 }
 
 // A logical size in pixels at the window's scale.
@@ -583,7 +515,8 @@ static int ui_px(const struct ui address_to ui, int logical)
             ui_press_move(ui, press, x, y)              true once the press is a drag: target is pressed no more
             ui_press_end(press, cancelled)              what was clicked as the press comes up, or -1
             ui_pressed(press, target)                   whether target is shown pressed now
-            ui_press_fill(ui, x, y, width, height)      how pressed looks: a faint fill of the ink, over what is drawn
+
+        How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
 */
 #define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
 #define UI_SLOP 8    // how far a press moves before it is a drag, as the compositor's finger (COMPOSITOR_TOUCH_SLOP)
@@ -622,9 +555,6 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
 {
         return press->down && !press->dragged && target >= 0 && press->target == target;
 }
-
-// The pressed look is the kit's state layer (defined with the kit's controls, below).
-static fn ui_press_fill(struct ui address_to ui, int x, int y, int width, int height);
 
 static b32 ui_kit_touch; // the event is a finger's (WINDOW_KEY_TOUCH): what it can press is at least UI_TARGET each way
 
@@ -4169,19 +4099,6 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 }
 
 /*
-        How pressed looks, for what is not one of the kit's controls (a row, a list's item): the kit's pressed state
-        layer, the ink at .10 over what is drawn (button:active::after), at the rows' radius, with its edges where
-        they fall.
-*/
-static fn ui_press_fill(struct ui address_to ui, int x, int y, int width, int height)
-{
-        b32 radius = (UI_RADIUS - 2) * ui->scale * 256;
-        struct ui_box box = {x * 256, y * 256, (x + width) * 256, (y + height) * 256, radius, radius};
-
-        ui_kit_fill(ui, &box, ui_mix(0xff000000u | ui->ink, 10, 0), null);
-}
-
-/*
         The scrollbar, every scrolling region's (ui.css's ::-webkit-scrollbar): a
         track 10 wide at the region's right edge, a clear 3 round a pill thumb (4
         wide), the ink at .18 and .30 while hovered or held, shown whenever what
@@ -4813,6 +4730,10 @@ static int ui_popup_pump(struct ui_popup address_to p)
         signal at its edge and a mark before its label (the one in use).
         Sizes are logical pixels, times the window's scale.
 */
+#define UI_GAP1 4            // the kit's gaps ([gap1] to [gap4]): between pieces that go together,
+#define UI_GAP2 8            // between a field and what it lists,
+#define UI_GAP3 12
+#define UI_GAP4 16           // and between groups
 #define UI_PAGE_TOP 60       // a page's title band
 #define UI_PAGE_FOOT 40      // its status line's band
 #define UI_PAGE_INSET 6      // the title and the status line in from the margin
@@ -5092,7 +5013,8 @@ static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_t
                 l->top[at] = y;
                 y += ui_dev(ui, UI_ROW);
         }
-        y += l->count ? ui_dev(ui, UI_SECTION_GAP) : 0;
+        // A list in sections has the gap under its last one too; a list of rows alone ends with its last row.
+        y += l->count && (l->starts[0] & UI_LIST_HEADED) ? ui_dev(ui, UI_SECTION_GAP) : 0;
         l->content = y;
         l->scroll.content = y;
         ui_scroll_set(&l->scroll, l->scroll.scroll);
@@ -5498,6 +5420,7 @@ struct ui_menu
         int x, y, w, h, shown;             // where it is, device pixels, and how many choices show
         int pressed;                       // the choice a finger is on, -1 none
         struct ui_scroll scroll;           // in whole choices
+        struct ui_popmenu list;            // the kit's menu it is drawn as
 };
 
 static int ui_menu_item_height(const struct ui address_to ui, const struct ui_menu address_to m)
@@ -5524,12 +5447,35 @@ static fn ui_menu_add(struct ui address_to ui, struct ui_menu address_to m, cons
 
         if (m->count >= UI_MENU_MOST)
                 return;
-        string_copy_bounded((string_address)m->word[m->count], (string_address)word, UI_MENU_WORD);
-        wide = ui_kit_measure(ui, (string_address)m->word[m->count], UI_BODY_MEDIUM);
+        {
+                positive out = 0;
+
+                for (positive at = 0; word[at] && out + 2 < UI_MENU_WORD; at++)
+                {
+                        m->word[m->count][out++] = word[at];
+                        if (word[at] == '&')
+                                m->word[m->count][out++] = '&';
+                }
+                m->word[m->count][out] = 0;
+        }
+        wide = ui_kit_measure(ui, (string_address)word, UI_BODY_MEDIUM);
         m->widest = wide > m->widest ? wide : m->widest;
         if (current)
                 m->current = m->at = m->count;
         m->count++;
+}
+
+// A word of the menu as it was added (its && the & it was).
+static fn ui_menu_word(const struct ui_menu address_to m, int at, char address_to into, positive room)
+{
+        positive out = 0;
+
+        for (positive k = 0; at >= 0 && at < m->count && m->word[at][k] && out + 1 < room; k++)
+        {
+                into[out++] = m->word[at][k];
+                k += m->word[at][k] == '&' && m->word[at][k + 1] == '&';
+        }
+        into[out] = 0;
 }
 
 /*
@@ -5549,7 +5495,7 @@ static fn ui_menu_place(const struct ui address_to ui, struct ui_menu address_to
                 most = m->count;
         m->shown = m->count < most ? m->count : most;
         m->h = m->shown * item + 2 * pad;
-        m->w = m->widest + ui_dev(ui, 12 + 6 + 10 + 18);
+        m->w = m->widest + 2 * ui_dev(ui, UI_MENU_PAD + 30);
         m->w = m->w < ui_dev(ui, UI_MENU_LEAST) ? ui_dev(ui, UI_MENU_LEAST) : m->w;
         m->w = m->w > width - 2 * margin ? width - 2 * margin : m->w;
         m->x = right - m->w;
@@ -5634,39 +5580,34 @@ static int ui_menu_key(const struct ui address_to ui, struct ui_menu address_to 
 }
 
 /*
-        The menu over everything: the high surface, lifted, 8 round with a hairline; the keys' choice in the secondary
-        container, the row's own one dotted in the accent, a finger's choice pressed, and the scrollbar when not all
-        of it shows.
+        The menu over everything, as the kit's menus are drawn (ui_popmenu_draw, into the picture at the menu's place):
+        the surface container, 8 round with a hairline, the keys' choice in the selection's layer, the row's own one
+        dotted as a radio is; a finger's choice pressed, and the scrollbar when not all of it shows.
 */
 static fn ui_menu_draw(struct ui address_to ui, struct ui_menu address_to m)
 {
-        int item = ui_menu_item_height(ui, m), pad = ui_dev(ui, UI_MENU_PAD), top = ui_menu_top(ui, m);
-        struct ui_box box = {m->x * 256, m->y * 256, (m->x + m->w) * 256, (m->y + m->h) * 256, ui_q8(ui, 8), ui_q8(ui, 8)};
+        struct ui_popmenu address_to list = &m->list;
+        struct ui sub = *ui;
+        int item = ui_menu_item_height(ui, m), pad = ui_dev(ui, UI_MENU_PAD);
 
         if (m->owner < 0)
                 return;
         ui->top = 0;
         ui->bottom = ui->height;
-        ui_kit_shadow(ui, &box, 0, ui_q8(ui, 8), ui_q8(ui, 24), -ui_q8(ui, 6), ui_mix(ui_role(UI_SHADOW), 18, 0));
-        ui_kit_fill(ui, &box, ui_role(UI_SURFACE_HIGH), null);
-        ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
-        for (int k = 0; k < m->shown && top + k < m->count; k++)
-        {
-                int at = top + k, y = m->y + pad + k * item, x = m->x + ui_dev(ui, 4), w = m->w - ui_dev(ui, 8);
-                int dot = ui_dev(ui, 6), inset = ui_dev(ui, 12);
-                struct ui_box face = {x * 256, y * 256, (x + w) * 256, (y + item) * 256, ui_q8(ui, 6), ui_q8(ui, 6)};
-
-                if (at == m->at)
-                        ui_kit_fill(ui, &face, ui_role(UI_SECONDARY_CONTAINER), null);
-                if (at == m->pressed)
-                        ui_kit_fill(ui, &face, ui_mix(ui_role(UI_ON_SURFACE), 10, 0), null);
-                if (at == m->current)
-                        ui_kit_fill(ui, &(struct ui_box){(x + inset) * 256, (y + (item - dot) / 2) * 256, (x + inset + dot) * 256,
-                                                         (y + (item + dot) / 2) * 256, dot * 128, dot * 128}, ui_role(UI_PRIMARY), null);
-                ui_run_in(ui, (const font_face address_to const[]){ui->regular, ui->regular}, x + inset + dot + ui_dev(ui, 10),
-                          ui_kit_baseline(ui, y + (item - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), (string_address)m->word[at], 14,
-                          ui_role(UI_ON_SURFACE) & 0xffffffu, 255, x, x + w - ui_dev(ui, 6), 0);
-        }
+        list->count = 0;
+        for (int at = 0; at < m->count; at++)
+                ui_popmenu_add(list, m->word[at], null, UI_MENU_RADIO | (at == m->current ? UI_MENU_ON : 0), at);
+        list->hot = m->at, list->top = ui_menu_top(ui, m), list->rows_shown = m->shown;
+        list->width = m->w, list->height = m->h, list->touch = m->touch;
+        sub.pixels = ui->pixels + (unsigned long)m->y * ui->pitch + (unsigned long)m->x;
+        sub.width = m->w, sub.height = m->h;
+        sub.top = 0, sub.bottom = m->h;
+        sub.band_top = ui->band_top - m->y, sub.band_bottom = ui->band_bottom - m->y;
+        ui_popmenu_draw(&sub, list);
+        if (m->pressed >= list->top && m->pressed < list->top + m->shown)
+                ui_kit_fill(ui, &(struct ui_box){(m->x + pad) * 256, (m->y + pad + (m->pressed - list->top) * item) * 256, (m->x + m->w - pad) * 256,
+                                                 (m->y + pad + (m->pressed - list->top + 1) * item) * 256, ui_q8(ui, 6), ui_q8(ui, 6)},
+                            ui_mix(ui_role(UI_ON_SURFACE), 10, 0), null);
         if (m->count > m->shown)
                 ui_scroll_draw(ui, &m->scroll);
 }

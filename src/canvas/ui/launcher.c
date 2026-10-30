@@ -34,10 +34,11 @@
         it, as the same chord that opened it does (-x). It has no close button
         (WINDOW_NO_CLOSE). It is glass
         (window.c, WINDOW_GLASS), drawn with the system's pieces (ui.c) and
-        nothing round them: the field is its text and a line under it, the
-        rows are their text, and the row with the focus is lit. It is the one
-        window of its program: a second start finds the first by the
-        program's name and lifts it.
+        nothing round them: the field is the kit's field, and the rows the
+        kit's list, each a label and the quiet word of where it is from, the
+        highlighted one the row the keys are on, with the kit's hover, press
+        and ripple. It is the one window of its program: a second start finds
+        the first by the program's name and lifts it.
 
             launcher [-x] [-f FONT.ttf] [-m MONO.ttf] [-M MONOBOLD.ttf]
 
@@ -52,10 +53,7 @@
 #ifndef MOONWATER_CANVAS_LAUNCHER
 #define MOONWATER_CANVAS_LAUNCHER
 
-#define LAUNCHER_WIDTH 560 // logical pixels, times the scale
-#define LAUNCHER_FIELD 44  // the field's height
-#define LAUNCHER_ROW 40    // a row's: the least a finger's target is, as a settings row
-#define LAUNCHER_GAP 8     // between the field and the list
+#define LAUNCHER_WIDTH 560 // logical pixels, times the scale: the bar's width; its field, its gap and its rows are the kit's
 #define LAUNCHER_ROWS 7    // rows the list shows at most
 #define LAUNCHER_TEXT_SIZE 17        // the field's text, a little larger than a row's
 #define LAUNCHER_TEXT 256  // bytes of the field
@@ -125,7 +123,7 @@ static struct
         char text[LAUNCHER_TEXT];
         struct launcher_entry entry[LAUNCHER_ROWS];
         positive entries;
-        int highlight;
+        struct ui_list list; // the rows, the kit's: its focus is the highlighted row
 
         // The names read from PATH, LAUNCHER_NAME bytes each, and the directory each came from: one mapping.
         char address_to names;
@@ -244,7 +242,7 @@ static fn launcher_search(void)
         unsigned int programs[LAUNCHER_PROGRAMS], ranks[LAUNCHER_ROWS];
         unsigned short best[LAUNCHER_ROWS];
 
-        launcher.highlight = 0;
+        launcher.list.focus = 0;
         launcher.entries = 0;
 
         if (!length)
@@ -555,8 +553,8 @@ static fn launcher_changed(void)
         int height;
 
         launcher_search();
-        height = ui_px(&launcher.ui, UI_PAD) * 2 + ui_px(&launcher.ui, LAUNCHER_FIELD) +
-                 (launcher.entries ? ui_px(&launcher.ui, LAUNCHER_GAP) + (int)launcher.entries * ui_px(&launcher.ui, LAUNCHER_ROW) : 0);
+        height = ui_px(&launcher.ui, UI_PAD) * 2 + ui_px(&launcher.ui, UI_TARGET) +
+                 (launcher.entries ? ui_px(&launcher.ui, UI_GAP2) + (int)launcher.entries * ui_px(&launcher.ui, UI_ROW) : 0);
         launcher.height = height > (int)launcher.own.table->output_height ? (int)launcher.own.table->output_height : height;
         launcher.dirty = true;
 }
@@ -566,7 +564,7 @@ static fn launcher_move(int way)
         int count = (int)launcher.entries;
 
         if (count)
-                launcher.highlight = (launcher.highlight + way + count) % count;
+                launcher.list.focus = (launcher.list.focus + way + count) % count;
         launcher.dirty = true;
 }
 
@@ -585,7 +583,7 @@ static b32 launcher_key(const struct window_event address_to event)
                 return false;
         case LAUNCHER_KEY_ENTER:
         case LAUNCHER_KEY_ENTER_PAD:
-                return !launcher_run(launcher.highlight);
+                return !launcher_run(launcher.list.focus);
         case LAUNCHER_KEY_UP:
                 launcher_move(-1);
                 return true;
@@ -595,7 +593,7 @@ static b32 launcher_key(const struct window_event address_to event)
         case LAUNCHER_KEY_TAB:
         {
                 // The highlighted name, where it is a name.
-                const struct launcher_entry address_to entry = &launcher.entry[launcher.highlight];
+                const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
                 const char address_to name = entry->kind == LAUNCHER_PROGRAM
                                                  ? launcher_name(entry->index)
                                              : entry->kind == LAUNCHER_WINDOW ? launcher_programs[entry->index].label
@@ -657,31 +655,51 @@ static b32 launcher_key(const struct window_event address_to event)
         return true;
 }
 
-// The row under a point of the window, or -1.
-static int launcher_hit(int x, int y)
-{
-        int top = ui_px(&launcher.ui, UI_PAD) + ui_px(&launcher.ui, LAUNCHER_FIELD) + ui_px(&launcher.ui, LAUNCHER_GAP);
-        int row = (y - top) / ui_px(&launcher.ui, LAUNCHER_ROW);
+static fn launcher_describe(int id, struct ui_row address_to row);
 
-        if (y < top || x < ui_px(&launcher.ui, UI_PAD) || x >= launcher.width - ui_px(&launcher.ui, UI_PAD) || row >= (int)launcher.entries)
-                return -1;
-        return row;
+static fn launcher_damaged(int top, int bottom)
+{
+        (void)top, (void)bottom;
+        launcher.dirty = true;
+}
+
+// The rows are the kit's list under the field: the field (a finger's target tall), the kit's gap, and a row for each entry.
+static fn launcher_layout(void)
+{
+        struct ui address_to ui = &launcher.ui;
+        int pad = ui_px(ui, UI_PAD);
+
+        if (!launcher.list.ids)
+        {
+                launcher.list.ids = LAUNCHER_ROWS;
+                launcher.list.describe = launcher_describe;
+                launcher.list.damaged = launcher_damaged;
+                launcher.list.hover = launcher.list.down = -1;
+        }
+        launcher.list.count = (int)launcher.entries;
+        for (int at = 0; at < launcher.list.count; at++)
+                launcher.list.id[at] = (unsigned short)at;
+        ui_list_place(ui, &launcher.list, pad, pad + ui_px(ui, UI_TARGET) + ui_px(ui, UI_GAP2), launcher.width - 2 * pad,
+                      (int)launcher.entries * ui_px(ui, UI_ROW));
+        ui_list_layout(ui, &launcher.list);
 }
 
 static b32 launcher_event(const struct window_event address_to event)
 {
+        int row;
+
+        launcher_layout();
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
                 return launcher_key(event);
         case WINDOW_EVENT_MOTION:
-        {
-                int row = launcher_hit(event->a, event->b);
-
+                row = ui_list_hit(&launcher.ui, &launcher.list, event->a, event->b);
+                ui_list_pointer(&launcher.ui, &launcher.list, WINDOW_EVENT_MOTION, event->a, event->b, false);
                 // The row the pointer is on is the highlighted one, where it has moved to it and not where a key put it.
-                if (row >= 0 && (event->a != launcher.pointer_x || event->b != launcher.pointer_y) && row != launcher.highlight)
+                if (row >= 0 && (event->a != launcher.pointer_x || event->b != launcher.pointer_y) && row != launcher.list.focus)
                 {
-                        launcher.highlight = row;
+                        launcher.list.focus = row;
                         launcher.dirty = true;
                 }
                 launcher.pointer_x = event->a;
@@ -689,40 +707,38 @@ static b32 launcher_event(const struct window_event address_to event)
                 // A finger moved off the slop is no press of the row it landed on.
                 if ((event->flags & WINDOW_KEY_TOUCH) && launcher.press.down && !launcher.press.dragged &&
                     ui_press_move(&launcher.ui, &launcher.press, event->a, event->b))
+                {
+                        ui_list_let_go(&launcher.ui, &launcher.list);
                         launcher.dirty = true;
+                }
                 break;
-        }
         case WINDOW_EVENT_BUTTON:
+                if (event->a != LAUNCHER_BUTTON_LEFT)
+                        break;
+                row = ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y);
                 // A finger: the row it lands on is shown pressed, and run as the finger lifts there, so a finger that
                 // lands on the wrong row and slides off runs nothing.
-                if ((event->flags & WINDOW_KEY_TOUCH) && event->a == LAUNCHER_BUTTON_LEFT)
+                if (event->flags & WINDOW_KEY_TOUCH)
                 {
-                        int row;
-
                         if (event->flags & WINDOW_KEY_DOWN)
                         {
-                                row = launcher_hit(launcher.pointer_x, launcher.pointer_y);
                                 ui_press_begin(&launcher.press, launcher.pointer_x, launcher.pointer_y, row, true);
-                                launcher.highlight = row >= 0 ? row : launcher.highlight;
+                                if (row >= 0)
+                                        launcher.list.focus = launcher.list.down = row;
                                 launcher.dirty = true;
                                 break;
                         }
-                        row = ui_press_end(&launcher.press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                        ui_list_let_go(&launcher.ui, &launcher.list);
                         launcher.dirty = true;
-                        if (row >= 0 && row == launcher_hit(launcher.pointer_x, launcher.pointer_y))
+                        if ((row = ui_press_end(&launcher.press, (event->flags & WINDOW_KEY_CANCEL) != 0)) >= 0 &&
+                            row == ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y))
                                 return !launcher_run(row);
                         break;
                 }
-                if ((event->flags & WINDOW_KEY_DOWN) && event->a == LAUNCHER_BUTTON_LEFT)
-                {
-                        int row = launcher_hit(launcher.pointer_x, launcher.pointer_y);
-
-                        if (row >= 0)
-                        {
-                                launcher.highlight = row;
-                                return !launcher_run(row);
-                        }
-                }
+                // A mouse's press runs its row at once, which the kit shows pressed and rippling till the bar goes.
+                if ((row = ui_list_pointer(&launcher.ui, &launcher.list, WINDOW_EVENT_BUTTON, launcher.pointer_x, launcher.pointer_y,
+                                           (event->flags & WINDOW_KEY_DOWN) != 0)) >= 0)
+                        return !launcher_run(row);
                 break;
         }
         return true;
@@ -754,12 +770,21 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
         }
 }
 
+// A row, for the kit's list: its label and the quiet word of where it is from.
+static fn launcher_describe(int id, struct ui_row address_to row)
+{
+        static char label[LAUNCHER_TEXT + 8];
+
+        if (id < 0 || id >= (int)launcher.entries)
+                return;
+        launcher_label(&launcher.entry[id], label, sizeof(label), &row->note);
+        row->label = label;
+}
+
 static fn launcher_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &launcher.ui;
-        int pad = ui_px(&launcher.ui, UI_PAD), inset = ui_px(&launcher.ui, UI_INSET);
-        int field = ui_px(&launcher.ui, LAUNCHER_FIELD), row = ui_px(&launcher.ui, LAUNCHER_ROW);
-        int top = pad + field + ui_px(&launcher.ui, LAUNCHER_GAP), width = launcher.width - 2 * pad;
+        int pad = ui_px(&launcher.ui, UI_PAD);
 
         ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
 
@@ -772,30 +797,14 @@ static fn launcher_draw(unsigned int address_to pixels)
                         search.kind = UI_INPUT, search.variant = UI_FIELD_BARE, search.focused = 1;
                         search.items[0] = "Search programs, or type a command";
                 }
-                search.x = pad / ui->scale, search.y = pad / ui->scale, search.w = width / ui->scale, search.h = field / ui->scale;
+                search.x = pad / ui->scale, search.y = pad / ui->scale, search.w = (launcher.width - 2 * pad) / ui->scale, search.h = UI_TARGET;
                 string_copy_bounded((string_address)search.text, (string_address)launcher.text, sizeof(search.text));
                 ui_control_draw(ui, &search);
-                (void)inset;
         }
-
-        for (positive at = 0; at < launcher.entries; at++)
-        {
-                int y = top + (int)at * row, baseline = ui_baseline(ui, y, row, UI_TEXT);
-                char label[LAUNCHER_TEXT + 8];
-                const char address_to note;
-                int note_width, right = launcher.width - pad - inset;
-
-                launcher_label(&launcher.entry[at], label, sizeof(label), &note);
-                note_width = ui_measure(ui, (string_address)note, UI_SMALL, false);
-                if ((int)at == launcher.highlight)
-                        ui_focus(ui, pad, y, width, row, false);
-                if (ui_pressed(&launcher.press, (int)at))
-                        ui_press_fill(ui, pad, y, width, row);
-                ui_run(ui, pad + inset, baseline, (string_address)label, UI_TEXT, false, ui->ink, 255, pad + inset,
-                       right - note_width - inset);
-                ui_text(ui, right - note_width, ui_baseline(ui, y, row, UI_SMALL), (string_address)note, UI_SMALL, false,
-                        ui->quiet, 255);
-        }
+        // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field).
+        launcher_layout();
+        launcher.list.lit = true;
+        ui_list_draw(ui, &launcher.list);
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
@@ -869,7 +878,7 @@ static int launcher_open(void)
                 int x, y, width, height;
 
                 windows_output(table, 0, &x, &y, &width, &height);
-                table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, LAUNCHER_FIELD) / 2;
+                table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, UI_TARGET) / 2;
         }
         launcher_frame();
 

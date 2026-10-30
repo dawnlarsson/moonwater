@@ -118540,7 +118540,7 @@ static fn check_launcher(void)
               launcher_list_is("w:Settings,w:Terminal,w:Kernel log,"));
         launcher_type_text("ls");
         check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
-              launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.highlight == 0);
+              launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.list.focus == 0);
         launcher_type_text("ls -l");
         check("launcher: a command line is the command row alone", launcher_list_is("c,"));
         launcher_type_text("xyzzy");
@@ -118590,15 +118590,15 @@ static fn check_launcher(void)
         launcher_type_text(" ls");
         check("launcher: a blank is not the first thing in the field", string_equals((string_address)launcher.text, (string_address) "ls"));
         launcher_pressed(LAUNCHER_KEY_DOWN, 0);
-        check("launcher: Down moves to the next row", launcher.highlight == 1);
+        check("launcher: Down moves to the next row", launcher.list.focus == 1);
         launcher_pressed(LAUNCHER_KEY_UP, 0);
         launcher_pressed(LAUNCHER_KEY_UP, 0);
-        check("launcher: Up from the first row goes round to the last", launcher.highlight == (int)launcher.entries - 1);
+        check("launcher: Up from the first row goes round to the last", launcher.list.focus == (int)launcher.entries - 1);
         launcher_pressed(LAUNCHER_KEY_N, WINDOW_KEY_CONTROL);
-        check("launcher: Control-N is Down", launcher.highlight == 0);
+        check("launcher: Control-N is Down", launcher.list.focus == 0);
         launcher_pressed(LAUNCHER_KEY_DOWN, 0);
         launcher_typed('x');
-        check("launcher: a key typed starts the list again from its top", launcher.highlight == 0 && string_equals((string_address)launcher.text, (string_address) "lsx"));
+        check("launcher: a key typed starts the list again from its top", launcher.list.focus == 0 && string_equals((string_address)launcher.text, (string_address) "lsx"));
         launcher_pressed(LAUNCHER_KEY_BACKSPACE, 0);
         check("launcher: Backspace takes a character back", string_equals((string_address)launcher.text, (string_address) "ls") && launcher.entries == 7);
         launcher_pressed(LAUNCHER_KEY_TAB, 0);
@@ -118642,11 +118642,11 @@ static fn check_launcher(void)
                   string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
         launcher.height = 0;
         launcher_changed();
-        check("launcher: the picture's height follows the list", launcher.height == 2 * UI_PAD + LAUNCHER_FIELD + LAUNCHER_GAP + 3 * LAUNCHER_ROW);
+        check("launcher: the picture's height follows the list", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW);
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
         {
-                int row_y = launcher.ui.scale * (UI_PAD + LAUNCHER_FIELD + LAUNCHER_GAP) + launcher.ui.scale * LAUNCHER_ROW * 3 / 2;
+                int row_y = launcher.ui.scale * (UI_PAD + UI_TARGET + UI_GAP2) + launcher.ui.scale * UI_ROW * 3 / 2;
                 struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, LAUNCHER_WIDTH * launcher.ui.scale / 2, row_y};
 
                 launcher.width = LAUNCHER_WIDTH * launcher.ui.scale;
@@ -118656,12 +118656,12 @@ static fn check_launcher(void)
 
                 launcher_event(&finger);
                 launcher_event(&land);
-                pressed = ui_pressed(&launcher.press, 1) && launcher.highlight == 1;
-                finger.b += 3 * LAUNCHER_ROW * launcher.ui.scale;
+                pressed = ui_pressed(&launcher.press, 1) && launcher.list.focus == 1;
+                finger.b += 3 * UI_ROW * launcher.ui.scale;
                 launcher_event(&finger);
                 check("launcher: a finger shows the row it lands on pressed, and run nothing as it slides off",
                       pressed && !ui_pressed(&launcher.press, 1) && launcher_event(&lift) && !launcher.press.down);
-                check("launcher: a row is a finger's least height", LAUNCHER_ROW >= 40);
+                check("launcher: a row is a finger's least height", UI_ROW >= 40);
         }
 #endif
 
@@ -119704,19 +119704,19 @@ static fn check_settings(string_address regular, string_address bold)
                         check("ui: a field's text stays inside its well, a name longer than the well shows its end", outside == 0);
                 }
 
-                for (int size_at = 0; size_at < 3; size_at++)
-                        for (int face = 0; face < 2; face++)
-                        {
-                                static const int sizes[3] = {UI_SMALL, UI_TEXT, UI_TITLE};
+                // The kit's type roles: a list's label and note, a header, a title, regular and bold.
+                for (int role_at = 0; role_at < 4; role_at++)
+                {
+                        static const int roles[4] = {UI_LABEL_MEDIUM, UI_BODY_MEDIUM, UI_TITLE_SMALL, UI_TITLE_LARGE};
 
-                                ui_clear(&ui);
-                                ui_text(&ui, 10, 40, (string_address) "Settings", sizes[size_at], face, ui.ink, 255);
-                                drawn &= settings_lit(pixels, 320 * 80) > (positive)(sizes[size_at] * 6);
-                        }
-                check("ui: a run of text lights its pixels at every size, in either face", drawn);
-                check("ui: a run's baseline in a band of a row puts its capitals in the band's middle",
-                      ui_baseline(&ui, 100, UI_ROW, UI_TEXT) > 100 + UI_ROW / 2 &&
-                          ui_baseline(&ui, 100, UI_ROW, UI_TEXT) < 100 + UI_ROW * 3 / 4);
+                        ui_clear(&ui);
+                        ui_kit_text(&ui, 10, 40, (string_address) "Settings", roles[role_at], 0xff000000u | ui.ink, 0);
+                        drawn &= settings_lit(pixels, 320 * 80) > (positive)(ui_types[roles[role_at]].size * 6);
+                }
+                check("ui: a run of text lights its pixels in every role, in either face", drawn);
+                check("ui: a role's baseline puts its text in the lower half of its line box, as a row's label is laid",
+                      ui_kit_baseline(&ui, 100, UI_BODY_MEDIUM) > 100 + ui_types[UI_BODY_MEDIUM].line / 2 &&
+                          ui_kit_baseline(&ui, 100, UI_BODY_MEDIUM) < 100 + ui_types[UI_BODY_MEDIUM].line);
 
                 // A list's switch row is the kit's switch: on, its bars are the accent across the pill; off, the control-off colour.
                 ui_clear(&ui);
@@ -125676,6 +125676,32 @@ b32 main()
                         settings_menu_close();
                         settings.editing = -1;
                 }
+        }
+        // The launcher, dark, with ls typed: the kit's field, and the kit's list under it with the pointer over its third row.
+        {
+                static char names[6][LAUNCHER_NAME];
+                static unsigned char from[6];
+                static unsigned short hashed[LAUNCHER_HASH];
+                static struct windows table;
+                static const char address_to const fixture[] = {"ls", "lsblk", "lsof", "less", "false", "also"};
+
+                for (positive at = 0; at < 6; at++)
+                        string_copy((string_address)names[at], (string_address)fixture[at]);
+                memory_zero(&launcher, sizeof(launcher));
+                launcher.names = (char address_to)names, launcher.count = 6, launcher.from = from, launcher.hashed = hashed;
+                launcher.dirs[0] = "/usr/bin", launcher.dir_count = 1;
+                table.output_width = 1920, table.output_height = 1080, table.stride = SETTINGS_GALLERY_W;
+                launcher.own.table = &table;
+                launcher.ui = settings.ui;
+                launcher.ui.opaque = 1;
+                launcher.width = LAUNCHER_WIDTH;
+                string_copy((string_address)launcher.text, (string_address) "ls");
+                launcher_changed();
+                launcher_layout();
+                launcher.list.hover = 2;
+                ui_kit.now += 1000000000ll;
+                launcher_draw(frames_pixels);
+                frames_write((string_address) "launcher", 0, 0, 0, launcher.width, launcher.height);
         }
         string_format(log, "  kit frames: %p frames drawn\n", frames_count);
         return test_report(null);

@@ -2369,7 +2369,7 @@ static fn settings_menu_apply(int at)
         char word[SETTINGS_VALUE];
         int row = settings.menu.owner;
 
-        string_copy_bounded((string_address)word, (string_address)settings.menu.word[at < 0 ? 0 : at], sizeof(word));
+        ui_menu_word(&settings.menu, at < 0 ? 0 : at, word, sizeof(word));
         settings_menu_close();
         if (at >= 0 && !string_equals((string_address)word, (string_address)settings.value[row]))
                 settings_change(row, word);
