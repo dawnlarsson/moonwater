@@ -4057,6 +4057,96 @@ static fn ui_press_fill(struct ui address_to ui, int x, int y, int width, int he
         ui_kit_fill(ui, &box, ui_mix(0xff000000u | ui->ink, 10, 0), null);
 }
 
+/*
+        The scrollbar, every scrolling region's (ui.css's ::-webkit-scrollbar): a
+        track 10 wide at the region's right edge, a clear 3 round a pill thumb (4
+        wide), the ink at .18 and .30 while hovered or held, shown whenever what
+        scrolls is taller than its view and never hidden. The thumb is the view's
+        share of the track (24 at least) where the scroll's share of what is left
+        puts it; it is dragged, a press on the track pages a view toward the
+        press, and the wheel and a finger go on scrolling the region itself. An
+        app gives the region (x its track's left, y and height its view's) and the
+        three numbers, all device pixels; the kit draws it and takes its pointer.
+        The terminal's scrollback and an editor's view take it the same way.
+*/
+#define UI_SCROLL_WIDTH 10
+#define UI_SCROLL_BORDER 3
+#define UI_SCROLL_LEAST 24
+
+struct ui_scroll
+{
+        int x, y, height;            // the track: its left, its top and its height
+        int content, view, scroll;   // what scrolls, what shows of it, how far it is scrolled
+        b32 hover, held;
+        int grab;                    // where in the thumb the hand took it
+};
+
+// The thumb's top and length (device pixels); false when everything shows and there is no bar.
+static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
+{
+        int track = s->height, least = UI_SCROLL_LEAST * ui->scale, rest = s->content - s->view, scroll;
+
+        if (s->content <= s->view || s->view <= 0 || track <= 0)
+                return 0;
+        *length = (int)((b64)track * s->view / s->content);
+        *length = *length < least ? least : *length > track ? track : *length;
+        scroll = s->scroll < 0 ? 0 : s->scroll > rest ? rest : s->scroll;
+        *top = s->y + (int)((b64)(track - *length) * scroll / rest);
+        return 1;
+}
+
+static fn ui_scroll_draw(struct ui address_to ui, const struct ui_scroll address_to s)
+{
+        int top, length, border = UI_SCROLL_BORDER * ui->scale, width = UI_SCROLL_WIDTH * ui->scale;
+        struct ui_box thumb;
+
+        if (!ui_scroll_thumb(ui, s, &top, &length))
+                return;
+        thumb = (struct ui_box){(s->x + border) * 256, (top + border) * 256, (s->x + width - border) * 256, (top + length - border) * 256,
+                                (width / 2 - border) * 256, (width / 2 - border) * 256};
+        ui_kit_fill(ui, &thumb, ui_mix(ui_role(UI_ON_SURFACE), s->hover || s->held ? 30 : 18, 0), null);
+}
+
+/*
+        The pointer on a scrollbar: motion (a held thumb follows the hand; hover lights it), a press (on the thumb it is
+        held, on the track it pages) and a release. Answers the scroll it asks for, or -1 when the event was not its own
+        (a press off it, a motion with nothing held); a press on it that pages answers the new scroll.
+*/
+static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
+{
+        int top, length, rest = s->content - s->view;
+        b32 bar = ui_scroll_thumb(ui, s, &top, &length);
+        b32 on_track = bar && x >= s->x && x < s->x + UI_SCROLL_WIDTH * ui->scale && y >= s->y && y < s->y + s->height;
+
+        if (type == WINDOW_EVENT_MOTION)
+        {
+                s->hover = on_track && y >= top && y < top + length;
+                if (!s->held || !bar)
+                        return -1;
+                if (s->height - length <= 0)
+                        return s->scroll;
+                return (int)((b64)(y - s->grab - s->y) * rest / (s->height - length));
+        }
+        if (type != WINDOW_EVENT_BUTTON)
+                return -1;
+        if (!down)
+        {
+                b32 was = s->held;
+
+                s->held = 0;
+                return was ? s->scroll : -1;
+        }
+        if (!on_track)
+                return -1;
+        if (y >= top && y < top + length)
+        {
+                s->held = 1;
+                s->grab = y - top;
+                return s->scroll;
+        }
+        return y < top ? s->scroll - s->view : s->scroll + s->view;
+}
+
 /* ---- end of the kit's controls ---- */
 
 // Anonymous memory for an app's own state, or a negative errno.

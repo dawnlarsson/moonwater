@@ -3252,13 +3252,68 @@ static b32 settings_key(const struct window_event address_to event)
         worked out at each picture from the row's place.
 */
 static struct ui_control settings_kit[SETTINGS_ROWS];
+static struct ui_control settings_row_kit[SETTINGS_ROWS]; // each row's own kit row: its hover layer and ripple (a switch's is its switch)
 static int settings_kit_down = -1; // the row a press went down on, whose ripple goes out at the release
+
+// The window's scrolling regions, each with the kit's scrollbar: the rows (or a card), and the column of groups.
+#define SETTINGS_SCROLL_ROWS 0
+#define SETTINGS_SCROLL_GROUPS 1
+static struct ui_scroll settings_scrolls[2];
+
+// Where each region's bar is and what it shows, from the layout and the scrolls now (device pixels).
+static fn settings_scrolls_place(void)
+{
+        struct ui_scroll address_to rows = &settings_scrolls[SETTINGS_SCROLL_ROWS], address_to groups = &settings_scrolls[SETTINGS_SCROLL_GROUPS];
+        int top = settings_list_top(), height = settings_list_bottom() - settings_list_top();
+
+        rows->x = settings_pane_right() + (ui_px(&settings.ui, UI_PAD) - ui_px(&settings.ui, UI_SCROLL_WIDTH)) / 2;
+        rows->y = top, rows->height = height, rows->view = height;
+        rows->content = settings_extent();
+        rows->scroll = settings.view ? settings.card_scroll : settings.scroll;
+        groups->x = ui_px(&settings.ui, UI_PAD) + settings_side() + (ui_px(&settings.ui, SETTINGS_GUTTER) - ui_px(&settings.ui, UI_SCROLL_WIDTH)) / 2;
+        groups->y = top, groups->height = height, groups->view = height;
+        groups->content = settings.view ? 0 : settings_side_height();
+        groups->scroll = settings.group_scroll;
+}
+
+// A mouse's motion, press or release on a scrollbar: taken (true) when it was the bar's.
+static b32 settings_scrolls_event(const struct window_event address_to event)
+{
+        b32 taken = false;
+
+        if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
+                return false;
+        settings_scrolls_place();
+        for (int k = 0; k < 2; k++)
+        {
+                struct ui_scroll address_to s = &settings_scrolls[k];
+                b32 lit = s->hover;
+                int y = event->type == WINDOW_EVENT_MOTION ? event->b : settings.pointer_y;
+                int x = event->type == WINDOW_EVENT_MOTION ? event->a : settings.pointer_x;
+                int scroll = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0);
+
+                if (lit != s->hover)
+                        settings_dirty();
+                if (scroll < 0)
+                        continue;
+                taken = true;
+                if (k == SETTINGS_SCROLL_GROUPS)
+                        settings_side_scroll_to(scroll);
+                else
+                        settings_scroll_to(scroll);
+                settings_dirty();
+        }
+        return taken;
+}
 
 // The rows shown changed (a group, the filter, a scroll, a size): each row's control is placed at its next frame, not moved.
 static fn settings_kit_forget(void)
 {
         for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
                 ui_control_forget(&settings_kit[at]);
+                ui_control_forget(&settings_row_kit[at]);
+        }
 }
 
 static b32 settings_row_is(int at, const char address_to path)
@@ -3742,6 +3797,14 @@ static b32 settings_event(const struct window_event address_to event)
 {
         if (settings_gallery.on)
                 return settings_gallery_event(event);
+        // The scrollbars take a mouse's motion, press and release on them (a finger scrolls the region, ui_drag).
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH))
+        {
+                if (event->type == WINDOW_EVENT_MOTION)
+                        settings.pointer_x = event->a, settings.pointer_y = event->b;
+                if (settings_scrolls_event(event))
+                        return true;
+        }
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
@@ -3772,6 +3835,7 @@ static b32 settings_event(const struct window_event address_to event)
                 if (!(event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings_kit_down >= 0)
                 {
                         ui_kit_ripples_exit(&settings_kit[settings_kit_down]);
+                        ui_kit_ripples_exit(&settings_row_kit[settings_kit_down]);
                         settings_kit_down = -1;
                         settings_dirty();
                 }
@@ -3881,11 +3945,15 @@ static fn settings_press_at(void)
                                 return;
                         }
                 }
-                // Any row's press ripples across it from the press, edge to edge (the kit's row).
-                if (settings_kit[row].kind == UI_SWITCH || settings_kit[row].kind == UI_LIST_ROW)
+                // Any row's press ripples across it from the press, edge to edge (the kit's row; a switch's is its switch).
                 {
-                        settings_kit_down = row;
-                        ui_list_row_press(&settings.ui, &settings_kit[row], settings.pointer_x, settings.pointer_y);
+                        struct ui_control address_to kit = settings_kit[row].kind == UI_SWITCH ? &settings_kit[row] : &settings_row_kit[row];
+
+                        if (kit->kind == UI_SWITCH || kit->kind == UI_LIST_ROW)
+                        {
+                                settings_kit_down = row;
+                                ui_list_row_press(&settings.ui, kit, settings.pointer_x, settings.pointer_y);
+                        }
                 }
         }
         if (row != settings.focus)
@@ -4005,7 +4073,7 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         // The kit's row under the row's content: its hover layer and its press ripple, across the pane, edge to edge.
         if (row && row->kind != SETTINGS_SWITCH)
         {
-                struct ui_control address_to kit = &settings_kit[at];
+                struct ui_control address_to kit = &settings_row_kit[at];
 
                 if (kit->kind != UI_LIST_ROW)
                 {
@@ -4311,14 +4379,13 @@ static fn settings_draw_menu(struct ui address_to ui)
                 if (ui_pressed(&settings.press, SETTINGS_PRESS_MENU + which_at))
                         ui_press_fill(ui, x + ui_px(&settings.ui, 4), y + pad + at * item, width - ui_px(&settings.ui, 8), item);
         }
-        // More choices than show: a thin mark at the right edge, where the view is among them.
+        // More choices than show: the kit's scrollbar at the list's right edge.
         if (settings.menu_count > shown)
         {
-                int track = height - 2 * pad, bar = track * shown / settings.menu_count;
+                struct ui_scroll bar = {x + width - ui_px(&settings.ui, UI_SCROLL_WIDTH), y + pad, height - 2 * pad, settings.menu_count * item,
+                                        shown * item, settings.menu_top * item, false, false, 0};
 
-                bar = bar < ui_px(&settings.ui, 10) ? ui_px(&settings.ui, 10) : bar;
-                ui_round(ui, x + width - ui_px(&settings.ui, 5), y + pad + (track - bar) * settings.menu_top / (settings.menu_count - shown),
-                         ui_px(&settings.ui, 2), bar, ui_px(&settings.ui, 1), ui_tone(ui->ink, 110));
+                ui_scroll_draw(ui, &bar);
         }
 }
 
@@ -4364,6 +4431,12 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings_draw_side(ui);
                 settings_draw_list(ui);
         }
+        // Every region that scrolls has the kit's scrollbar while what it holds is taller than it.
+        settings_scrolls_place();
+        ui->top = settings_list_top();
+        ui->bottom = settings_list_bottom();
+        ui_scroll_draw(ui, &settings_scrolls[SETTINGS_SCROLL_ROWS]);
+        ui_scroll_draw(ui, &settings_scrolls[SETTINGS_SCROLL_GROUPS]);
 
         settings_draw_foot(ui, list_bottom);
         if (settings.menu >= 0)

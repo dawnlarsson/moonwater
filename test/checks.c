@@ -124585,6 +124585,44 @@ static fn check_kit_place(void)
                 kept = pixels[244 * 600 + 5] == paper && pixels[214 * 600 + 300] == paper;
                 check("kit row: a press ripples across the whole row, edge to edge, and not past it", reached && kept);
         }
+
+        // The scrollbar: the thumb is the view's share of the track where the scroll puts it, none when all shows, 24 at
+        // least; dragged it scrolls by the content's share of the move; a press on the track pages; it is drawn 4 wide.
+        {
+                struct ui_scroll bar = {100, 10, 200, 1000, 200, 0, false, false, 0};
+                int top = 0, length = 0, scroll;
+                b32 geometry, none, least, dragged, paged, drawn = true;
+                unsigned int paper = 0xff111113u;
+
+                geometry = ui_scroll_thumb(&ui, &bar, &top, &length) && top == 10 && length == 40;
+                bar.scroll = 400;
+                geometry = geometry && ui_scroll_thumb(&ui, &bar, &top, &length) && top == 90 && length == 40;
+                bar.content = 200;
+                none = !ui_scroll_thumb(&ui, &bar, &top, &length);
+                bar.content = 100000;
+                least = ui_scroll_thumb(&ui, &bar, &top, &length) && length == UI_SCROLL_LEAST;
+                bar.content = 1000, bar.scroll = 0;
+                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 15, true);
+                scroll = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 95, true);
+                dragged = bar.held && scroll == 400;
+                bar.scroll = scroll;
+                dragged = dragged && ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 95, false) == 400 && !bar.held &&
+                          ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 150, false) == -1;
+                paged = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 200, true) == 600 &&
+                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 20, true) == 200 &&
+                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true) == -1;
+                bar.scroll = 0;
+                ui_fill(&ui, 90, 0, 30, 220, paper);
+                ui.top = 0, ui.bottom = 300;
+                ui_scroll_draw(&ui, &bar);
+                for (int x = 100; x < 110; x++)
+                        drawn = drawn && (pixels[30 * 600 + x] != paper) == (x >= 103 && x < 107);
+                drawn = drawn && pixels[80 * 600 + 105] == paper;
+                check("kit scrollbar: the thumb is the view's share of the track where the scroll puts it, 24 at least, none when all shows",
+                      geometry && none && least);
+                check("kit scrollbar: dragged it scrolls by the content's share of the move, and a press on the track pages a view", dragged && paged);
+                check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
+        }
 }
 #endif
 
