@@ -266,7 +266,21 @@
         from a vfork or a clone runs it in the parent's frame, so none is
         written in one. A goto that jumps over one skips it without a word
         from the compiler under -Wall: no function that has a goto or a label
-        has one. Ring 0 has none (it has the kernel's guard()). */
+        has one. Ring 0 has none (it has the kernel's guard()).
+
+        clang has no nested functions. It has the defer statement of ISO's
+        TS 25755 instead (clang -fdefer-ts), which is the same thing written
+        as a statement: run at every exit from the scope, after the return
+        value is worked out, the last written first, naming what is above it
+        by reference. A clang without it is told so where scope_exit is
+        used, and nowhere else. */
+#if defined(__clang__)
+#if defined(__STDC_DEFER_TS25755__)
+#define scope_exit(...) _Defer { __VA_ARGS__; }
+#else
+#define scope_exit(...) _Static_assert(0, "scope_exit is clang's defer statement: build with -fdefer-ts")
+#endif
+#else
 #define scope_name_(base, id) base##id
 #define scope_name(base, id) scope_name_(base, id)
 #define scope_exit_at(id, ...) \
@@ -279,6 +293,7 @@
                 __VA_ARGS__; \
         }
 #define scope_exit(...) scope_exit_at(__COUNTER__, __VA_ARGS__)
+#endif
 #endif // KERNEL_MODE
 
 //      One digit for a base that is folded. Anything that is not a digit of
@@ -629,10 +644,12 @@ static inline INLINE p64 hex_digits_word(p64 value)
 #define memory_is_4(source, a, b, c, d)                                      \
         (memory_load_unaligned(p32, (source)) == byte_word_4(a, b, c, d))
 #endif
+/* Its own name: riscv64's memory_is_4 declares _memory_source, and
+   clang refuses one initialised from itself. */
 #define memory_is_5(source, a, b, c, d, e)                                   \
-        ({ __auto_type _memory_source = (source);                            \
-           memory_is_4(_memory_source, a, b, c, d) &&                        \
-               _memory_source[4] == (p8)(e); })
+        ({ __auto_type _memory_source_5 = (source);                          \
+           memory_is_4(_memory_source_5, a, b, c, d) &&                      \
+               _memory_source_5[4] == (p8)(e); })
 
 /* Word, prefix and suffix tests against a literal.  The length is the
    literal's own, so no site counts it by hand and none can count it wrong.
@@ -13894,6 +13911,9 @@ static positive strtoumax(string_address input, string_address address_to stoppe
 
 #pragma GCC push_options
 #pragma GCC optimize("fp-contract=off")
+#if defined(__clang__) // which reads only the ISO spelling, and contracts on arm64 and riscv64
+#pragma STDC FP_CONTRACT OFF
+#endif
 
 /*
         A float seen as its bits.
@@ -16708,6 +16728,9 @@ static decimal atof(string_address input)
 }
 
 #pragma GCC pop_options
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT DEFAULT
+#endif
 
 #endif // decimal_bits == 64
 
@@ -23915,6 +23938,9 @@ time_t mktime(tm address_to broken)
 
 #pragma GCC push_options
 #pragma GCC optimize("fp-contract=off")
+#if defined(__clang__) // which reads only the ISO spelling, and contracts on arm64 and riscv64
+#pragma STDC FP_CONTRACT OFF
+#endif
 
 /*
         A double seen as its bits, and the bits seen as a double.
@@ -26772,6 +26798,9 @@ static decimal modf(decimal, decimal address_to)
     __attribute__((alias("decimal_split_whole")));
 
 #pragma GCC pop_options
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT DEFAULT
+#endif
 
 #endif // !KERNEL_MODE && decimal_bits == 64
 
