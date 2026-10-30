@@ -97390,6 +97390,7 @@ static fn paths(void)
         positive b;
         positive c;
         positive strip;
+        positive left;
         positive slash;
         positive abs;
         positive prefix;
@@ -97427,20 +97428,24 @@ static fn paths(void)
                 }
                 path[used] = 0;
 
+                /* GNU counts a "." component toward --strip-components, as it
+                   counts any other. What is left after the strip is the name:
+                   an absolute `/` alone is the archive root and is kept, a
+                   relative path that reduces to nothing is not, and a strip
+                   count that outlasts the components refuses the member. */
+                left = strip;
+                kept = abs && slash ? 1 : 0;
                 for (at = 0; at < n; at++)
                 {
                         if (string_equals(parts[at], ".."))
                                 climb = true;
+                        else if (left)
+                                left--;
                         else if (!string_equals(parts[at], "."))
                                 kept++;
                 }
-
-                /* Absolute `/` plus only stripped or `.` components is the
-                   archive root and is kept; a relative path that reduces to
-                   nothing is not. */
-                expect = !climb &&
-                    (abs && slash ? strip <= kept : strip < kept);
-                ok = tar_safe_path(path, strip, abs, into, sizeof(into), null);
+                expect = !climb && kept && !left;
+                ok = tar_safe_path(path, strip, abs, false, into, sizeof(into), null);
                 check("tar path component grammar", ok == expect);
                 if (ok && abs && slash)
                         check("an absolute path keeps its leading slash",
