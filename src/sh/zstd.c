@@ -2740,7 +2740,21 @@ zstd_frame_blocks:
                         return_if(size > zstd_block_limit, zstd_fail("zstd raw block too large"));
                         /* Consume a whole block before pausing. The window
                            owns the remainder until the pull reader drains it. */
-                        if (!zstd_in_need(size) || !zstd_put(zstd_in_at(), size))
+                        if (!zstd_in_need(size))
+                        {
+                                /* A raw block is passed on as it comes, so a
+                                   cut one leaves its first bytes behind. */
+                                if (!zstd_pull && zstd_src.eof &&
+                                    zstd_src.have > zstd_src.at)
+                                {
+                                        string_address why = zstd_why;
+
+                                        zstd_put(zstd_in_at(), zstd_src.have - zstd_src.at);
+                                        zstd_why = why;
+                                }
+                                return false;
+                        }
+                        if (!zstd_put(zstd_in_at(), size))
                                 return false;
                         zstd_in_skip(size);
                         if (zstd_paused)
@@ -7736,6 +7750,21 @@ static b32 zstd_one(bipolar in, bipolar out)
         zstd_empty_refused = false;
         if (ok)
                 ok = zstd_flush();
+        else if (zstd_why && (string_equals(zstd_why, "zstd truncated input") ||
+                              string_equals(zstd_why, "zstd trailing garbage")))
+        {
+                /* The reference's last call took the input to its end
+                   without an error, and wrote what it decoded before it saw
+                   the input stop: every block before the cut one. Garbage
+                   after a frame is found by the next frame's header, after
+                   the frame's last byte was written. A stream that is
+                   wrong inside a frame loses the call that found it, which
+                   the buffer here stands for. */
+                string_address why = zstd_why;
+
+                zstd_flush();
+                zstd_why = why;
+        }
         zstd_window_close();
         if (!ok)
         {

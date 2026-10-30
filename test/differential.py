@@ -38593,6 +38593,41 @@ def harness_compression(argv):
                         search_only.chmod(0o700)
 
                     if codec == 'zstd':
+                        # What a broken stream leaves on stdout is what the
+                        # reference writes, where that does not depend on how
+                        # its calls fall: a stream cut anywhere, an
+                        # incompressible one included, whose raw blocks it
+                        # passes on as they come, and a frame with garbage
+                        # after it, whose bytes were written before the
+                        # garbage was found.
+                        zdecode = runner + command(str(farms[label] / codec), codec, True)
+                        zdrawn = random.Random(0x8878)
+                        for kind, body in (('random', zdrawn.randbytes(300000)),
+                                           ('text', bytes(zdrawn.choice(b'abcdefgh ') for _ in range(40000))),
+                                           ('runs', b'x' * 200000 + zdrawn.randbytes(4000))):
+                            whole = call(command(refs[codec], codec, level='1', reference=True), body).stdout
+                            # A body of long runs packs a window past the
+                            # reference's 128 KiB output buffer into few input
+                            # bytes, and where its calls end then decides what
+                            # it wrote: only the frames after it are compared.
+                            for cut in ((7, 12, 20, 600, 70000, len(whole) // 2, len(whole) - 1)
+                                        if kind != 'runs' else ()):
+                                broken = whole[:cut]
+                                ref = call(command(refs[codec], codec, True), broken)
+                                got = call(zdecode, broken)
+                                check('%s/zstd/salvage-cut-%s-%d' % (label, kind, cut),
+                                      (got.returncode != 0) == (ref.returncode != 0) and
+                                      got.stdout == ref.stdout,
+                                      '%d bytes, reference %d; %s' % (len(got.stdout), len(ref.stdout),
+                                                                      got.stderr.decode(errors='replace')))
+                            for tail in (b'garbage!', b'\x28\xb5\x2f'):
+                                ref = call(command(refs[codec], codec, True), whole + tail)
+                                got = call(zdecode, whole + tail)
+                                check('%s/zstd/salvage-after-frame-%s-%d' % (label, kind, len(tail)),
+                                      (got.returncode != 0) == (ref.returncode != 0) and
+                                      got.stdout == ref.stdout,
+                                      '%d bytes, reference %d; %s' % (len(got.stdout), len(ref.stdout),
+                                                                      got.stderr.decode(errors='replace')))
                         named = resolved / 'named-output.zst'
                         source.write_bytes(linked_data)
                         explicit = call(runner + [str(farms[label] / codec), '-k',
