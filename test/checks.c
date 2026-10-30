@@ -41675,6 +41675,109 @@ static b64 sort_shaped(b32 shape, positive index, positive count, b32 draw)
         }
 }
 
+/*
+        The heap sort a quicksort that has used up its budget falls back to is
+        reached only by input that makes the splits bad again and again, and
+        no shape above does. McIlroy's adversary ("A killer adversary for
+        quicksort", 1999) makes that input for any sort that compares through
+        a function: every value starts as gas, a comparison between two gas
+        values turns one of them into the next solid value, and what the sort
+        was shown is the permutation it took the worst of. The array that
+        comes out is then sorted for real, and has to come out sorted, with
+        the same elements, in a number of comparisons nowhere near the square.
+*/
+#define SORT_ADVERSARY_COUNT 4096
+#define SORT_ADVERSARY_GAS 0x7fffffff
+
+static b32 sort_adversary_value[SORT_ADVERSARY_COUNT];
+static b32 sort_adversary_index[SORT_ADVERSARY_COUNT];
+static b32 sort_adversary_real[SORT_ADVERSARY_COUNT];
+static b32 sort_adversary_solid;
+static b32 sort_adversary_candidate;
+static positive sort_adversary_compares;
+
+static b32 sort_adversary_compare(address_any left, address_any right)
+{
+        b32 x = *(b32 address_to)left;
+        b32 y = *(b32 address_to)right;
+
+        sort_adversary_compares++;
+
+        if (sort_adversary_value[x] == SORT_ADVERSARY_GAS &&
+            sort_adversary_value[y] == SORT_ADVERSARY_GAS)
+                sort_adversary_value[x == sort_adversary_candidate ? x : y] =
+                        sort_adversary_solid++;
+
+        if (sort_adversary_value[x] == SORT_ADVERSARY_GAS)
+                sort_adversary_candidate = x;
+        else if (sort_adversary_value[y] == SORT_ADVERSARY_GAS)
+                sort_adversary_candidate = y;
+
+        return sort_adversary_value[x] < sort_adversary_value[y]
+                   ? -1
+                   : sort_adversary_value[x] > sort_adversary_value[y];
+}
+
+static b32 sort_adversary_plain(address_any left, address_any right)
+{
+        b32 x = *(b32 address_to)left;
+        b32 y = *(b32 address_to)right;
+
+        sort_adversary_compares++;
+
+        return x < y ? -1 : x > y;
+}
+
+test(sort_beats_an_adversary_through_the_heap)
+{
+        positive index;
+        positive total = 0;
+        positive after = 0;
+
+        for (index = 0; index < SORT_ADVERSARY_COUNT; index++)
+        {
+                sort_adversary_value[index] = SORT_ADVERSARY_GAS;
+                sort_adversary_index[index] = (b32)index;
+        }
+
+        sort_adversary_solid = 0;
+        sort_adversary_candidate = 0;
+        sort_adversary_compares = 0;
+
+        qsort(sort_adversary_index, SORT_ADVERSARY_COUNT, sizeof(b32),
+              sort_adversary_compare);
+
+        //      What the adversary was still holding back is the largest.
+        for (index = 0; index < SORT_ADVERSARY_COUNT; index++)
+                if (sort_adversary_value[index] == SORT_ADVERSARY_GAS)
+                        sort_adversary_value[index] = sort_adversary_solid++;
+
+        for (index = 0; index < SORT_ADVERSARY_COUNT; index++)
+        {
+                sort_adversary_real[index] = sort_adversary_value[index];
+                total += (positive)(p32)sort_adversary_real[index];
+        }
+
+        //      Sorting the adversary's own run took the heap too, and ended
+        //      in no more than a few times n log n comparisons.
+        fail(sort_adversary_compares < 64 * SORT_ADVERSARY_COUNT * 12);
+
+        sort_adversary_compares = 0;
+        qsort(sort_adversary_real, SORT_ADVERSARY_COUNT, sizeof(b32),
+              sort_adversary_plain);
+
+        for (index = 0; index < SORT_ADVERSARY_COUNT; index++)
+        {
+                after += (positive)(p32)sort_adversary_real[index];
+                fail(sort_adversary_real[index] == (b32)index);
+        }
+
+        fail(total == after);
+        fail(sort_adversary_compares < 64 * SORT_ADVERSARY_COUNT * 12);
+
+        return true;
+}
+
 test(sort_every_shape_at_every_width)
 {
         static const positive counts[] = {0, 1, 2, 3, 5, 8, 12, 13, 17,
@@ -42034,6 +42137,7 @@ test_case test_cases[] = {
         case(environment_clear),
         case(environment_grows_past_its_first_vector),
         case(random_defaults_to_seed_one),
+        case(sort_beats_an_adversary_through_the_heap),
         case(sort_every_shape_at_every_width),
         case(sort_every_record_width_and_base_residue),
         case(sort_leaves_the_degenerate_alone),
@@ -48771,8 +48875,10 @@ b32 main(void)
 
                 cpu_has_bf16 = 0;
                 f32_to_bf16(out, in, 3);
-                check("f32_to_bf16: the first call asks and answers", cpu_has_bf16 != 0 && out[0] == 0x3f80 && out[1] == 0xc020 &&
-                                                                      out[2] == train_bf16(train_bits(in[2])));
+                //      Only a processor with AVX-512 gets as far as asking for
+                //      BF16: the AVX2 and SSE2 bodies are taken first.
+                check("f32_to_bf16: the first call asks and answers", (cpu_has_bf16 != 0 || !cpu_has_avx512) && out[0] == 0x3f80 &&
+                                                                      out[1] == 0xc020 && out[2] == train_bf16(train_bits(in[2])));
         }
         p8 had512 = cpu_has_avx512, had2 = cpu_has_avx2, hadfma = cpu_has_fma, had16 = cpu_has_bf16;
 
