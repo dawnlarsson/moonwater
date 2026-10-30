@@ -44,6 +44,7 @@ import importlib
 import itertools
 import json
 import math
+import operator
 import os
 from pathlib import Path
 import random
@@ -621,18 +622,38 @@ def covering_array(parameters, strength, rng):
             strength = 2
     combos = list(itertools.combinations(range(len(sizes)), strength))
     uncovered = {c: set(itertools.product(*(range(sizes[i]) for i in c))) for c in combos}
-    by_column = {i: [c for c in combos if i in c] for i in range(len(sizes))}
     remaining = sum(len(tuples) for tuples in uncovered.values())
 
+    #   A combination is scored as (its key's getter, its uncovered set): the
+    #   set is the one uncovered holds, so a tuple taken out below is out of
+    #   both, and a combination with nothing left scores nothing without its
+    #   key being made. This is where the time goes -- hundreds of millions of
+    #   lookups for the text and files domains, which a generator expression
+    #   building each key made two minutes each -- and it changes no score and
+    #   no draw from rng, so the rows, and every case identity a pin or a
+    #   ledger entry keys on, are the ones the plain form makes.
+    def getter(c):
+        if len(c) == 1:
+            return lambda row, at=c[0]: (row[at],)
+        return operator.itemgetter(*c)
+
+    scored = {c: (getter(c), uncovered[c]) for c in combos}
+    everything = [scored[c] for c in combos]
+    by_column = {i: [scored[c] for c in combos if i in c] for i in range(len(sizes))}
+
     def hits(row, chosen):
-        return sum(1 for c in chosen if tuple(row[i] for i in c) in uncovered[c])
+        count = 0
+        for key, left in chosen:
+            if left and key(row) in left:
+                count += 1
+        return count
 
     rows = []
     while remaining:
         best, best_hits = None, -1
         for _ in range(8):
             row = [rng.randrange(size) for size in sizes]
-            score = hits(row, combos)
+            score = hits(row, everything)
             if score > best_hits:
                 best, best_hits = row, score
         for column in rng.sample(range(len(sizes)), len(sizes)):
@@ -646,7 +667,7 @@ def covering_array(parameters, strength, rng):
                 score = hits(trial, chosen)
                 if score > current:
                     best, current = trial, score
-        if hits(best, combos) == 0:
+        if hits(best, everything) == 0:
             # Nothing random reached the last tuples: take one directly.
             for c in combos:
                 if uncovered[c]:
@@ -654,10 +675,10 @@ def covering_array(parameters, strength, rng):
                     for i, v in zip(c, values):
                         best[i] = v
                     break
-        for c in combos:
-            key = tuple(best[i] for i in c)
-            if key in uncovered[c]:
-                uncovered[c].discard(key)
+        for key, left in everything:
+            taken = key(best)
+            if taken in left:
+                left.discard(taken)
                 remaining -= 1
         rows.append(best)
     return rows
