@@ -125547,6 +125547,169 @@ b32 main()
 #endif
 
 #ifdef CHECK_terminal
+/*
+        The text widget (ui.c's ui_text_*) with the repository's faces: a field in Inter and a code view in IBM Plex Mono
+        drawn into memory. A caret's x is the pen's (the same x font_draw ends a prefix at, within a pixel), a click at
+        a cluster's x is that cluster, the code view's columns are whole cells, a field is one line (Enter submits, a
+        pasted line end is a blank), the keys reach the engine through the keymap, the hand selects a word and a line,
+        and every mode draws inside its box and nothing outside it.
+*/
+static fn text_widget_check(string_address inter, string_address mono)
+{
+        static struct ui wui;
+        static font_face regular, code;
+        struct ui_text field, view;
+        positive length = 0, bytes;
+        long pixels;
+        static struct ui_text_layout l;
+
+        wui = terminal.ui;
+        bytes = compositor_map_file(inter, &length);
+        check("text widget: Inter loads", bytes && font_load(&regular, (const p8 address_to)bytes, length, 0) == 0);
+        bytes = compositor_map_file(mono, &length);
+        check("text widget: Plex Mono loads", bytes && font_load(&code, (const p8 address_to)bytes, length, 0) == 0);
+        if (failures)
+                return;
+        wui.regular = &regular;
+        wui.bold = &regular;
+        wui.mono = &code;
+        wui.scale = 1;
+        pixels = ui_map(800 * 600 * 4);
+        ui_scratch_fit(&wui, 800);
+        ui_begin(&wui, (unsigned int address_to)pixels, 800, 800, 600);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 1);
+
+        // A field: the caret's x is where the pen is after the text before it.
+        ui_text_open(&field, UI_TEXT_FIELD, (const p8 address_to) "Hello, wide W\xc3\xa9rld", 15, ui_text_keymap());
+        ui_text_draw(&wui, &field, 10, 10, 300, 30, 0);
+        ui_text_layout_line(&wui, &field, 0, &l);
+        {
+                b32 pen_agrees = true, round_trip = true;
+                const font_face address_to faces[2] = {&regular, &regular};
+
+                for (p32 k = 0; k <= l.count; k++)
+                {
+                        int advance = ui_advance(&wui, faces, l.shown, l.shown_at[k], ui_text_em(&wui, &field));
+
+                        pen_agrees &= l.x[k] - advance <= 1 && advance - l.x[k] <= 1;
+                        round_trip &= ui_text_at_x(&l, l.x[k]) == l.offset[k];
+                }
+                check("text widget: a field's caret is at the pen of the text before it", pen_agrees);
+                check("text widget: a click at a cluster's edge is that cluster", round_trip);
+                check("text widget: a field lays out its clusters", l.count == 14);
+        }
+        // The field's rules: Enter submits, a pasted line end is a blank, the keys go through the keymap.
+        {
+                struct window_event enter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 28, '\r'};
+                struct window_event select_all = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, 30, 1};
+                struct window_event letter = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 45, 'x'};
+                p8 text[64];
+
+                field.focused = true;
+                check("text widget: Enter in a field submits", ui_text_event(&wui, &field, &enter, 0, 0) == UI_TEXT_SUBMIT);
+                ui_text_event(&wui, &field, &select_all, 0, 0);
+                check("text widget: Ctrl+A selects all", doc_sel_start(&field.doc.selections[0]) == 0 && doc_sel_end(&field.doc.selections[0]) == 15);
+                ui_text_event(&wui, &field, &letter, 0, 0);
+                check("text widget: typing over a selection replaces it", ui_text_string(&field, text, sizeof(text)) == 1 && text[0] == 'x');
+                doc_paste(&field.doc, (const p8 address_to) "a\nb\r\nc", 6);
+                check("text widget: a field's paste makes line ends blanks",
+                      ui_text_string(&field, text, sizeof(text)) == 6 && !memory_compare(text, "xa b c", 6) && doc_line_count(&field.doc) == 1);
+        }
+        ui_text_close(&field);
+
+        // A code view: columns on whole cells, a tab to its stop, a wide character two cells.
+        ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "int x;\n\tif (\xe4\xb8\xad) {\n}\n", 22, ui_text_keymap());
+        view.doc.language = DOC_LANGUAGE_C;
+        ui_text_draw(&wui, &view, 50, 50, 600, 400, 0x111113);
+        ui_text_layout_line(&wui, &view, 1, &l);
+        {
+                b32 cells = true;
+
+                for (p32 k = 0; k <= l.count; k++)
+                        cells &= l.x[k] % view.cell == 0;
+                check("text widget: the code view's columns are whole cells", cells && view.cell > 0);
+                check("text widget: a tab runs to its stop", l.x[1] == 4 * view.cell);
+                check("text widget: a wide character is two cells", l.x[6] - l.x[5] == 2 * view.cell);
+                check("text widget: the gutter holds the line numbers", view.gutter >= 3 * view.cell && view.left == 50 + view.gutter);
+        }
+        // The hand: a double click takes the word, a triple the line; a drag after a double click grows by words.
+        {
+                struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+                struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+                int x = view.left + view.cell, y = view.top + view.line_height / 2;
+
+                view.own = null;
+                ui_text_event(&wui, &view, &press, x, y);
+                ui_text_event(&wui, &view, &release, x, y);
+                check("text widget: a click puts the caret", view.doc.selections[0].active == 1 && view.doc.selections[0].anchor == 1);
+                ui_text_event(&wui, &view, &press, x, y);
+                ui_text_event(&wui, &view, &release, x, y);
+                check("text widget: a double click takes the word", doc_sel_start(&view.doc.selections[0]) == 0 && doc_sel_end(&view.doc.selections[0]) == 3);
+                ui_text_event(&wui, &view, &press, x, y);
+                ui_text_event(&wui, &view, &release, x, y);
+                check("text widget: a triple click takes the line", doc_sel_start(&view.doc.selections[0]) == 0 && doc_sel_end(&view.doc.selections[0]) == 7);
+        }
+        // Nothing is drawn outside the box: the picture's edges are as they were cleared.
+        {
+                b32 clean = true;
+                const unsigned int address_to picture = (const unsigned int address_to)pixels;
+
+                for (int x = 0; x < 800; x++)
+                        clean &= !picture[x] && !picture[599 * 800 + x];
+                check("text widget: nothing is drawn outside its box", clean);
+        }
+        ui_text_close(&view);
+        compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
+}
+
+/*
+        The terminal's selection on the frame: what a drag marks is marked in the frame's cells (so the frames redraw
+        it), its text is the lines' text with a line end between and the trailing blanks left off, and a rectangle takes
+        its columns.
+*/
+static fn terminal_selection_check(void)
+{
+        static struct window_cell built[80 * 8];
+        p8 address_to text;
+        positive room, length;
+        unsigned int first;
+
+        full_reset();
+        term_bytes((const p8 address_to) "alpha beta  \r\ngamma\r\ndelta", 27);
+        {
+                unsigned int column;
+
+                terminal.view = TERMINAL_LIVE;
+                terminal_place_at(0, 0, &first, &column);
+        }
+        terminal.selecting = true;
+        terminal.select_box = false;
+        terminal.select_anchor_line = first, terminal.select_anchor_column = 6;
+        terminal.select_active_line = first + 1, terminal.select_active_column = 3;
+        length = terminal_select_text(&text, &room);
+        check("terminal: a selection's text has a line end between lines and no trailing blanks",
+              length == 8 && text && !memory_compare(text, "beta\ngam", 8));
+        array_store_release(text, room, length);
+        terminal.select_box = true;
+        terminal.select_anchor_line = first, terminal.select_anchor_column = 1;
+        terminal.select_active_line = first + 2, terminal.select_active_column = 2;
+        length = terminal_select_text(&text, &room);
+        check("terminal: a rectangle takes its columns of each line", length == 8 && text && !memory_compare(text, "lp\nam\nel", 8));
+        array_store_release(text, room, length);
+        terminal.select_box = false;
+        terminal.view = TERMINAL_LIVE;
+        terminal_build(built);
+        {
+                unsigned int marked = 0;
+
+                for (unsigned int at = 0; at < COLUMNS * ROWS; at++)
+                        marked += (built[at].flags & WINDOW_CELL_SELECTED) != 0;
+                check("terminal: the selection is marked in the frame's cells", marked > 0);
+        }
+        terminal.selecting = false;
+        full_reset();
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -125591,6 +125754,8 @@ b32 main()
                 check("fonts: a soft hyphen a shipped face lacks is drawn as nothing, not as its notdef", soft);
         }
 
+        if (program_argument_count() > 3)
+                text_widget_check(program_argument(3), program_argument(1));
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);
         term_palette = terminal_palette;
@@ -125604,7 +125769,11 @@ b32 main()
                 return test_report(null);
         grid_take();
         full_reset();
+        grid_take();
+        full_reset();
         render_surface();
+        cursor_show();
+        terminal_selection_check();
         cursor_show();
 
         //      The glyphs a program prints, btop's among them, each in its own cell of a

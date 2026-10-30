@@ -2454,6 +2454,7 @@ struct ui_control
         b64 spot_gone;
         b64 out_at;                        // the pointer left: hovering ends 200 ms after
         b64 last_frame;
+        struct ui_text address_to edit;    // a field's text widget (the text agent's engine), or none: then text[] as it was
         b64 placed;                        // the kit's epoch it was last placed in; 0 before its first frame
         // The row the control is in, logical pixels: what its press ripples across and its hover lights, edge to edge.
         // None (row_w 0) is the kit's own: the box and the card's padding round it (24 across, 8 down, ui.css's ripple-clip).
@@ -3348,6 +3349,9 @@ static fn ui_field_shadows(int state, b64 address_to into)
         }
 }
 
+struct ui_text;
+static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_to c, int left, int right, int top, int bottom);
+
 static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         int state = c->focused ? UI_FIELD_FOCUS : c->hover ? UI_FIELD_HOVER : UI_FIELD_REST;
@@ -3433,6 +3437,12 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 }
         }
         baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, tall) - ui_dev(ui, 20)) / 2, UI_FIELD);
+        // A field with a text widget behind it: the widget draws the text, its selection and its carets in the well.
+        if (c->edit)
+        {
+                ui_text_field_draw(ui, c, ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), fy, fy + ui_dev(ui, tall));
+                return;
+        }
         if (c->text[0])
         {
                 // Typed in, a line wider than the well shows its end, the caret after it.
@@ -4625,6 +4635,960 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
                 return true;
         }
         return false;
+}
+
+/* ---- text: a field, a text area and the code view, over text.c's documents ---- */
+
+/*
+        One widget for every place text is typed: a field (one line, the kit's UI_INPUT draws the well and this draws
+        what is in it), a text area (lines, wrapped, in the UI's face) and the code view (lines in the mono, a gutter of
+        line numbers, the tokenizer's colours, soft wrap on or off, zoom). The document, its history and selections are
+        text.c's; this is the hand and the pixels.
+
+        The hand: a click puts the caret, a drag selects, Shift with a click extends, a double click takes a word and a
+        drag after it whole words, a triple click a line and whole lines, Alt with a click adds a caret, Alt and Shift
+        with a drag selects a box of columns, the middle button pastes PRIMARY, the right button asks the app for a
+        context menu (ui_text_asks), a finger's tap is a caret and a finger's drag scrolls (thrown, it slows as the
+        kit's lists do), and the wheel scrolls (Ctrl and the wheel zoom the code view). The keys are the keymap's
+        (text.c, overridden by /root/canvas.text.keys); a key that is no binding types its character, and AltGr always
+        types. The caret blinks only while the widget has the keys, never while it moves, and ui_text_tick says when
+        it next needs a frame, so an idle widget wakes nothing. Colours are the kit's roles: the selection, the caret
+        (the accent), the text, the placeholder (the text at 36%), an error's underline.
+
+        Glyphs land on whole pixels: the code view lays its characters on a grid of whole cells (font_cells, and
+        font_draw for a cluster with marks), and a field and an area draw a line with the kit's text, whose caret and
+        selection follow the same pen.
+*/
+#define UI_TEXT_FIELD 0
+#define UI_TEXT_AREA 1
+#define UI_TEXT_CODE 2
+#define UI_TEXT_CLUSTERS 2048 // the clusters of a line laid out at most: past them a line is drawn to there
+#define UI_TEXT_BLINK_NS 530000000ull
+#define UI_TEXT_CLICKS_NS 450000000ull
+#define UI_TEXT_ROWS 512
+
+// What the widget asks of the app after an event: ui_text_event answers these bits.
+#define UI_TEXT_CHANGED 1u    // the text changed
+#define UI_TEXT_MOVED 2u      // only the carets or the view
+#define UI_TEXT_MENU 4u       // the context menu, at menu_x, menu_y
+#define UI_TEXT_SUBMIT 8u     // Enter in a field
+#define UI_TEXT_CANCEL 16u    // Escape in a field with nothing to cancel
+#define UI_TEXT_COMMAND 32u   // a command the app does (find, save, ...): command
+#define UI_TEXT_PASTE 64u     // a paste was asked of the compositor
+
+struct ui_text
+{
+        struct doc doc;
+        int mode;
+        const struct doc_keymap address_to keymap;
+        const struct window_row address_to own; // the window, for the clipboard
+        const char address_to placeholder;
+        const char address_to comment;          // a line comment, for the comment command
+        b32 focused, read_only, wrap, numbers;
+        int size;                               // logical pixels of the text
+        int left, top, right, bottom, gutter;   // the last draw's text box, device pixels
+        int line_height, cell;
+        p64 top_line;
+        int top_row;
+        b64 scroll_x;
+        int clicks, click_x, click_y;
+        positive click_at;
+        b32 dragging, drag_box, touch;
+        int drag_kind;                          // 1 characters, 2 words, 3 lines
+        p64 drag_start, drag_end;
+        p64 box_line, box_column;
+        struct ui_drag kinetic;
+        positive blink_at;
+        b32 caret_off;
+        p32 asks, command;
+        int menu_x, menu_y;
+        int zoom;
+        p8 preedit[64];                         // composition: text an input method is making, drawn at the caret
+        p32 preedit_length;
+};
+
+/*
+        The keys every text widget of a process reads: the defaults (text.c's doc_default_keys) and the lines of
+        /root/canvas.text.keys over them, read the first time a widget asks. The file is the person's own; a line that is
+        not a binding is skipped, so a mistake in it costs that line and not the keys.
+*/
+#define UI_TEXT_KEYS_PATH "/root/canvas.text.keys"
+
+static const struct doc_keymap address_to ui_text_keymap(void)
+{
+        static struct doc_keymap keys;
+        static b32 read;
+
+        if (!read)
+        {
+                static char text[16384];
+                bipolar handle = system_open_at(AT_FDCWD, (string_address)UI_TEXT_KEYS_PATH, FILE_READ | O_CLOEXEC);
+                bipolar got = handle >= 0 ? system_read_once((b32)handle, text, sizeof(text) - 1) : 0;
+
+                if (handle >= 0)
+                        system_close(handle);
+                doc_keymap_defaults(&keys);
+                if (got > 0)
+                        doc_keymap_read(&keys, text, (positive)got);
+                read = true;
+        }
+        return &keys;
+}
+
+// A widget over text (length bytes, kept by the caller while it lives: a field's typed text is the widget's own).
+static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_to text, p64 length, const struct doc_keymap address_to keymap)
+{
+        memory_zero(t, sizeof(*t));
+        if (!doc_open(&t->doc, text, length))
+                return false;
+        t->mode = mode;
+        t->keymap = keymap;
+        t->doc.single_line = mode == UI_TEXT_FIELD;
+        t->doc.auto_close = mode == UI_TEXT_CODE;
+        t->doc.normalize_paste = true;
+        t->size = mode == UI_TEXT_CODE ? 13 : 15;
+        t->numbers = mode == UI_TEXT_CODE;
+        t->wrap = mode == UI_TEXT_AREA;
+        t->comment = "//";
+        return true;
+}
+
+static fn ui_text_close(struct ui_text address_to t)
+{
+        doc_close(&t->doc);
+}
+
+// The whole text into into, room bytes at most, a NUL after it: its length. What a field's owner reads it as.
+static positive ui_text_string(const struct ui_text address_to t, p8 address_to into, positive room)
+{
+        positive length = room ? doc_read(&t->doc, 0, into, room - 1) : 0;
+
+        if (room)
+                into[length] = 0;
+        return length;
+}
+
+// The text replaced, the caret at its end: what an app that sets a field does.
+static fn ui_text_set(struct ui_text address_to t, const p8 address_to text, positive length)
+{
+        doc_replace(&t->doc, 0, doc_length(&t->doc), text, length);
+        doc_select_set(&t->doc, doc_length(&t->doc), doc_length(&t->doc));
+}
+
+/*
+        A line laid out: each cluster's offset in the document and its left edge, in device pixels from the line's start,
+        the last entry the line's end. The display text a line is drawn as goes into shown: a tab as spaces, a control
+        as its control picture, a byte that is not UTF-8 as U+FFFD. Answers how many clusters.
+*/
+struct ui_text_layout
+{
+        p64 offset[UI_TEXT_CLUSTERS + 1];
+        int x[UI_TEXT_CLUSTERS + 1];
+        p32 shown_at[UI_TEXT_CLUSTERS + 1]; // where each cluster starts in shown
+        p8 shown[UI_TEXT_CLUSTERS * 8];
+        p32 shown_length;
+        p32 count;
+};
+
+static const font_face address_to ui_text_face(const struct ui address_to ui, const struct ui_text address_to t)
+{
+        return t->mode == UI_TEXT_CODE && ui->mono ? ui->mono : ui->regular;
+}
+
+static p32 ui_text_em(const struct ui address_to ui, const struct ui_text address_to t)
+{
+        int size = t->size + t->zoom;
+
+        size = size < 6 ? 6 : size > 72 ? 72 : size;
+        return (p32)(size * ui->scale) << 6;
+}
+
+static fn ui_text_layout_line(struct ui address_to ui, const struct ui_text address_to t, p64 line, struct ui_text_layout address_to l)
+{
+        const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
+        p32 em = ui_text_em(ui, t);
+        p64 at = doc_line_start(&t->doc, line), stop = doc_line_end(&t->doc, line), column = 0;
+        struct ui_pen pen;
+        int cell;
+
+        l->count = 0;
+        l->shown_length = 0;
+        // No face loaded (a program that never draws): nothing to lay out.
+        if (!faces[0])
+        {
+                l->offset[0] = at;
+                l->x[0] = 0;
+                l->shown_at[0] = 0;
+                l->shown[0] = 0;
+                return;
+        }
+        cell = (int)font_metrics_at(faces[0], em).cell_width;
+        ui_pen_start(faces, em, &pen);
+        while (at < stop && l->count < UI_TEXT_CLUSTERS)
+        {
+                p64 next = doc_cluster_end(&t->doc, at);
+                p8 cluster[32];
+                positive size = doc_read(&t->doc, at, cluster, next - at < sizeof(cluster) ? (positive)(next - at) : sizeof(cluster));
+                p32 code, width = doc_cluster_width(&t->doc, cluster, size, column);
+                p8 shown[32];
+                positive shown_size = 0;
+
+                doc_decode(cluster, size, &code);
+                if (code == '\t')
+                        for (p32 k = 0; k < width && shown_size < sizeof(shown); k++)
+                                shown[shown_size++] = ' ';
+                else if (code & DOC_INVALID)
+                        shown_size = memory_utf8_encode(shown, 4, 0xfffd);
+                else if (code < 0x20 || code == 0x7f)
+                        shown_size = memory_utf8_encode(shown, 4, code == 0x7f ? 0x2421 : 0x2400 + code);
+                else if (code >= 0x80 && code < 0xa0)
+                        shown_size = memory_utf8_encode(shown, 4, 0xfffd);
+                else
+                        memory_copy(shown, cluster, shown_size = size);
+                l->offset[l->count] = at;
+                l->shown_at[l->count] = l->shown_length;
+                if (t->mode == UI_TEXT_CODE)
+                        l->x[l->count] = (int)column * cell;
+                else
+                {
+                        l->x[l->count] = ui_pen_width(&pen);
+                        for (positive k = 0; k < shown_size;)
+                        {
+                                p32 one;
+
+                                k = font_decode(shown, shown_size, k, &one);
+                                ui_pen_step(ui, faces, em, one, &pen);
+                        }
+                }
+                memory_copy(l->shown + l->shown_length, shown, shown_size);
+                l->shown_length += (p32)shown_size;
+                column += width;
+                l->count++;
+                at = next;
+        }
+        l->offset[l->count] = at;
+        l->shown_at[l->count] = l->shown_length;
+        l->x[l->count] = t->mode == UI_TEXT_CODE ? (int)column * cell : ui_pen_width(&pen);
+        l->shown[l->shown_length] = 0;
+}
+
+// The x of an offset on its laid line (its cluster's left edge).
+static int ui_text_x_of(const struct ui_text_layout address_to l, p64 offset)
+{
+        for (p32 k = 0; k <= l->count; k++)
+                if (l->offset[k] >= offset)
+                        return l->x[k];
+        return l->x[l->count];
+}
+
+// The offset nearest an x on a laid line: the boundary whose edge is closest.
+static p64 ui_text_at_x(const struct ui_text_layout address_to l, int x)
+{
+        for (p32 k = 0; k < l->count; k++)
+                if (x < (l->x[k] + l->x[k + 1]) / 2)
+                        return l->offset[k];
+        return l->offset[l->count];
+}
+
+// The metrics the widget draws with, worked out again for the face, the size and the zoom.
+static fn ui_text_metrics(struct ui address_to ui, struct ui_text address_to t)
+{
+        font_metrics m;
+
+        if (!ui_text_face(ui, t))
+                return;
+        m = font_metrics_at(ui_text_face(ui, t), ui_text_em(ui, t));
+
+        t->line_height = t->mode == UI_TEXT_FIELD ? (int)m.cell_height : (int)m.cell_height + (int)m.cell_height / 4;
+        t->cell = (int)m.cell_width;
+}
+
+// The rows a view shows, and the document line and row the pointer at y is on.
+static int ui_text_rows(const struct ui_text address_to t)
+{
+        return t->line_height ? (t->bottom - t->top) / t->line_height : 1;
+}
+
+/*
+        The view keeps the primary caret in sight: lines scroll so it is between the top and the bottom row, columns so
+        it is inside the text box (a field scrolls sideways only).
+*/
+static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
+{
+        static struct ui_text_layout l;
+        p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
+        int rows = ui_text_rows(t), width = t->right - t->left, x;
+
+        if (t->mode != UI_TEXT_FIELD)
+        {
+                if (line < t->top_line)
+                        t->top_line = line;
+                else if (rows > 0 && line >= t->top_line + (p64)rows)
+                        t->top_line = line - (p64)rows + 1;
+        }
+        if (t->wrap && t->mode != UI_TEXT_FIELD)
+        {
+                t->scroll_x = 0;
+                return;
+        }
+        ui_text_layout_line(ui, t, line, &l);
+        x = ui_text_x_of(&l, caret);
+        if (x - t->scroll_x < 0)
+                t->scroll_x = x - width / 4 > 0 ? x - width / 4 : 0;
+        else if (x - t->scroll_x > width - 2 * ui->scale)
+                t->scroll_x = x - width + width / 4;
+}
+
+// The document offset under device pixels x, y of the widget's text box (clamped to it).
+static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int x, int y)
+{
+        static struct ui_text_layout l;
+        p64 line = t->mode == UI_TEXT_FIELD ? 0 : t->top_line + (p64)((y > t->top ? y - t->top : 0) / (t->line_height ? t->line_height : 1));
+
+        line = line >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : line;
+        ui_text_layout_line(ui, t, line, &l);
+        return ui_text_at_x(&l, x - t->left + (int)t->scroll_x);
+}
+
+// The caret is drawn for the next half second whatever the blink says: it is moving, or just typed at.
+static fn ui_text_wake(struct ui_text address_to t)
+{
+        t->blink_at = clock_monotonic_nanoseconds();
+        t->caret_off = false;
+}
+
+/*
+        The blink: when the widget next needs a frame (0 for never: it has not the keys), the caret turned when its time
+        is up. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys.
+*/
+static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
+{
+        positive due;
+
+        if (!t->focused || t->read_only)
+                return 0;
+        due = t->blink_at + UI_TEXT_BLINK_NS;
+        if (now >= due)
+        {
+                t->caret_off = !t->caret_off;
+                t->blink_at = now;
+                *redraw = true;
+                due = now + UI_TEXT_BLINK_NS;
+        }
+        return due;
+}
+
+// A selection's text to a selection of the clipboard.
+static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
+{
+        p8 address_to text;
+        positive room, length = doc_copy_text(&t->doc, &text, &room);
+
+        if (length && t->own)
+                windows_clip_offer(t->own, which, text, length);
+        array_store_release(text, room, length);
+}
+
+// What the clipboard said: a paste that may be read is typed in as one undo.
+static p32 ui_text_clip(struct ui_text address_to t, const struct window_event address_to event)
+{
+        if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
+                windows_clip_done((unsigned int)event->a);
+        if (event->b == WINDOWS_CLIP_READY && t->own && !t->read_only)
+        {
+                p8 address_to bytes;
+                unsigned long length;
+
+                if (windows_clip_read(t->own, (unsigned int)event->a, &bytes, &length) > 0)
+                {
+                        doc_paste(&t->doc, bytes, length);
+                        windows_clip_free(bytes, length);
+                        ui_text_wake(t);
+                        return UI_TEXT_CHANGED;
+                }
+        }
+        return 0;
+}
+
+// A command of the keymap that needs the view or the clipboard; the rest go to text.c's doc_command.
+static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
+{
+        p64 version = t->doc.version;
+        int page = ui_text_rows(t) > 1 ? ui_text_rows(t) - 1 : 1;
+
+        switch (command)
+        {
+        case DOC_CMD_COPY:
+                ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD);
+                return 0;
+        case DOC_CMD_CUT:
+                if (t->read_only)
+                        return 0;
+                ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD);
+                doc_erase_selections(&t->doc);
+                break;
+        case DOC_CMD_PASTE:
+                if (t->own && !t->read_only)
+                        windows_clip_ask(t->own, WINDOWS_CLIP_CLIPBOARD);
+                return UI_TEXT_PASTE;
+        case DOC_CMD_PAGE_UP: case DOC_CMD_PAGE_DOWN: case DOC_CMD_SELECT_PAGE_UP: case DOC_CMD_SELECT_PAGE_DOWN:
+        {
+                b32 up = command == DOC_CMD_PAGE_UP || command == DOC_CMD_SELECT_PAGE_UP;
+
+                doc_move_vertical(&t->doc, up ? -page : page, command == DOC_CMD_SELECT_PAGE_UP || command == DOC_CMD_SELECT_PAGE_DOWN);
+                t->top_line = up ? (t->top_line > (p64)page ? t->top_line - (p64)page : 0) : t->top_line + (p64)page;
+                break;
+        }
+        case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET:
+                if (t->mode != UI_TEXT_CODE)
+                        return 0;
+                t->zoom = command == DOC_CMD_ZOOM_RESET ? 0 : t->zoom + (command == DOC_CMD_ZOOM_IN ? 1 : -1);
+                t->zoom = t->zoom < -6 ? -6 : t->zoom > 40 ? 40 : t->zoom;
+                ui_text_metrics(ui, t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_WRAP:
+                if (t->mode == UI_TEXT_FIELD)
+                        return 0;
+                t->wrap = !t->wrap;
+                return UI_TEXT_MOVED;
+        case DOC_CMD_MENU:
+        {
+                // The menu at the caret, for a key that asks for it.
+                static struct ui_text_layout l;
+                p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
+
+                ui_text_layout_line(ui, t, line, &l);
+                t->menu_x = t->left + ui_text_x_of(&l, caret) - (int)t->scroll_x;
+                t->menu_y = t->top + (int)(line >= t->top_line ? line - t->top_line + 1 : 1) * t->line_height;
+                return UI_TEXT_MENU;
+        }
+        case DOC_CMD_FOLD: case DOC_CMD_UNFOLD:
+                doc_fold(&t->doc, doc_line_of(&t->doc, t->doc.selections[t->doc.primary].active), command == DOC_CMD_FOLD);
+                return UI_TEXT_MOVED;
+        default:
+                if (t->read_only && command >= DOC_CMD_BACKSPACE && command <= DOC_CMD_SORT_DESCENDING)
+                        return 0;
+                if (t->mode == UI_TEXT_FIELD && (command == DOC_CMD_NEWLINE || command == DOC_CMD_MOVE_LINE_UP || command == DOC_CMD_MOVE_LINE_DOWN ||
+                                                 command == DOC_CMD_COPY_LINE_UP || command == DOC_CMD_COPY_LINE_DOWN || command == DOC_CMD_LINE_BELOW ||
+                                                 command == DOC_CMD_LINE_ABOVE || command == DOC_CMD_TAB))
+                        return command == DOC_CMD_NEWLINE ? UI_TEXT_SUBMIT : 0;
+                if (!doc_command(&t->doc, command, t->comment))
+                {
+                        t->command = command;
+                        return UI_TEXT_COMMAND;
+                }
+        }
+        ui_text_wake(t);
+        ui_text_reveal(ui, t);
+        return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+}
+
+// A key: the keymap's command, or the character typed. AltGr always types; a key with Control or Alt that is no
+// binding is not typed.
+static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event)
+{
+        p32 flags = event->flags, character = (p32)event->b, modifiers = 0, command;
+
+        if (!(flags & WINDOW_KEY_DOWN))
+                return 0;
+        if (!(flags & WINDOW_KEY_ALTGR))
+        {
+                modifiers = (flags & WINDOW_KEY_SHIFT ? DOC_MOD_SHIFT : 0) | (flags & WINDOW_KEY_CONTROL ? DOC_MOD_CONTROL : 0) |
+                            (flags & WINDOW_KEY_ALT ? DOC_MOD_ALT : 0) | (flags & WINDOW_KEY_SUPER ? DOC_MOD_SUPER : 0);
+                command = t->keymap ? doc_keymap_find(t->keymap, (p32)event->a, character, modifiers) : DOC_CMD_NONE;
+                if (command == DOC_CMD_SINGLE && t->mode == UI_TEXT_FIELD && t->doc.selection_count == 1 && !doc_any_selected(&t->doc))
+                        return UI_TEXT_CANCEL;
+                if (command != DOC_CMD_NONE)
+                        return ui_text_command(ui, t, command);
+                if (modifiers & (DOC_MOD_CONTROL | DOC_MOD_ALT | DOC_MOD_SUPER))
+                        return 0;
+        }
+        if (t->read_only || character < 0x20 || character == 0x7f)
+                return 0;
+        {
+                p8 bytes[4];
+                positive size = memory_utf8_encode(bytes, sizeof(bytes), character);
+                p64 version = t->doc.version;
+
+                t->doc.now = clock_monotonic_nanoseconds();
+                doc_type(&t->doc, bytes, size);
+                ui_text_wake(t);
+                ui_text_reveal(ui, t);
+                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+        }
+}
+
+/*
+        The pointer and the wheel. x and y are the window's device pixels; the widget's box is where it was last drawn.
+        Answers what changed, and UI_TEXT_MENU for the right button (menu_x and menu_y say where).
+*/
+static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
+{
+        b32 inside = x >= t->left - t->gutter && x < t->right && y >= t->top && y < t->bottom;
+        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0;
+        positive now = clock_monotonic_nanoseconds();
+
+        if (event->type == WINDOW_EVENT_WHEEL)
+        {
+                if (!inside)
+                        return 0;
+                if ((event->flags & WINDOW_KEY_CONTROL) && t->mode == UI_TEXT_CODE)
+                        return ui_text_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
+                if (event->b)
+                        t->scroll_x = t->scroll_x - (b64)event->a * t->cell * 3 / 120 > 0 ? t->scroll_x - (b64)event->a * t->cell * 3 / 120 : 0;
+                else
+                {
+                        b64 lines = -(b64)event->a * 3 / 120, to = (b64)t->top_line + (lines ? lines : event->a < 0 ? 1 : -1);
+
+                        t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
+                }
+                return UI_TEXT_MOVED;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON)
+        {
+                b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+
+                if (!down)
+                {
+                        b32 was = t->dragging;
+
+                        t->dragging = false;
+                        if (t->touch && ui_drag_let_go(&t->kinetic, now))
+                                return UI_TEXT_MOVED;
+                        if (was && doc_any_selected(&t->doc))
+                                ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
+                        return 0;
+                }
+                if (!inside)
+                        return 0;
+                if (event->a == 0x111)
+                {
+                        p64 at = ui_text_hit(ui, t, x, y);
+                        b32 in_selection = false;
+
+                        for (positive s = 0; s < t->doc.selection_count; s++)
+                                in_selection |= at >= doc_sel_start(&t->doc.selections[s]) && at <= doc_sel_end(&t->doc.selections[s]) &&
+                                                doc_any_selected(&t->doc);
+                        if (!in_selection)
+                                doc_select_set(&t->doc, at, at);
+                        t->menu_x = x, t->menu_y = y;
+                        return UI_TEXT_MENU | UI_TEXT_MOVED;
+                }
+                if (event->a == 0x112)
+                {
+                        p64 at = ui_text_hit(ui, t, x, y);
+
+                        if (t->read_only || !t->own)
+                                return 0;
+                        doc_select_set(&t->doc, at, at);
+                        windows_clip_ask(t->own, WINDOWS_CLIP_PRIMARY);
+                        return UI_TEXT_PASTE | UI_TEXT_MOVED;
+                }
+                if (event->a != 0x110)
+                        return 0;
+                t->touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+                if (t->touch)
+                {
+                        // A finger: a caret where it lands, and a drag scrolls rather than selects.
+                        ui_drag_start(&t->kinetic, y, now);
+                        doc_select_set(&t->doc, ui_text_hit(ui, t, x, y), ui_text_hit(ui, t, x, y));
+                        t->dragging = true;
+                        ui_text_wake(t);
+                        return UI_TEXT_MOVED;
+                }
+                {
+                        b32 again = now - t->click_at < UI_TEXT_CLICKS_NS && (t->click_x - x) * (t->click_x - x) + (t->click_y - y) * (t->click_y - y) <= 16 * ui->scale * ui->scale;
+                        p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
+
+                        t->clicks = again ? t->clicks % 3 + 1 : 1;
+                        t->click_at = now, t->click_x = x, t->click_y = y;
+                        t->drag_box = false;
+                        if (t->clicks == 2)
+                                doc_word_at(&t->doc, at, &start, &finish);
+                        else if (t->clicks == 3)
+                        {
+                                p64 line = doc_line_of(&t->doc, at);
+
+                                start = doc_line_start(&t->doc, line);
+                                finish = doc_line_start(&t->doc, line + 1);
+                        }
+                        if (alt && shift && t->mode != UI_TEXT_FIELD)
+                        {
+                                t->drag_box = true;
+                                t->box_line = doc_line_of(&t->doc, at);
+                                t->box_column = doc_column(&t->doc, at);
+                                doc_select_box(&t->doc, t->box_line, t->box_column, t->box_line, t->box_column);
+                        }
+                        else if (alt && t->clicks == 1)
+                                doc_select_add(&t->doc, at, at);
+                        else if (shift && t->clicks == 1)
+                        {
+                                struct doc_selection address_to primary = &t->doc.selections[t->doc.primary];
+
+                                primary->active = at;
+                                doc_normalize(&t->doc);
+                                doc_seal(&t->doc);
+                        }
+                        else
+                                doc_select_set(&t->doc, start, finish);
+                        t->drag_kind = t->clicks;
+                        t->drag_start = start, t->drag_end = finish;
+                        t->dragging = true;
+                        ui_text_wake(t);
+                        return UI_TEXT_MOVED;
+                }
+        }
+        if (event->type == WINDOW_EVENT_MOTION && t->dragging)
+        {
+                if (t->touch)
+                {
+                        int moved = ui_drag_follow(&t->kinetic, y, now), lines = t->line_height ? -moved / t->line_height : 0;
+                        b64 to = (b64)t->top_line + lines;
+
+                        if (lines)
+                                t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
+                        return lines ? UI_TEXT_MOVED : 0;
+                }
+                {
+                        p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
+                        struct doc_selection address_to primary = &t->doc.selections[t->doc.primary];
+
+                        if (t->drag_box)
+                        {
+                                doc_select_box(&t->doc, t->box_line, t->box_column, doc_line_of(&t->doc, at), doc_column(&t->doc, at));
+                                return UI_TEXT_MOVED;
+                        }
+                        if (t->drag_kind == 2)
+                                doc_word_at(&t->doc, at, &start, &finish);
+                        else if (t->drag_kind == 3)
+                        {
+                                p64 line = doc_line_of(&t->doc, at);
+
+                                start = doc_line_start(&t->doc, line), finish = doc_line_start(&t->doc, line + 1);
+                        }
+                        // The selection grows by its kind from where it began: back to the start of a word or a line
+                        // before it, on to the end of one after it.
+                        if (start < t->drag_start)
+                                primary->anchor = t->drag_end, primary->active = start;
+                        else
+                                primary->anchor = t->drag_start, primary->active = finish > t->drag_end ? finish : t->drag_end;
+                        if (t->drag_kind == 1)
+                                primary->active = at;
+                        doc_normalize(&t->doc);
+                        ui_text_reveal(ui, t);
+                        ui_text_wake(t);
+                        return UI_TEXT_MOVED;
+                }
+        }
+        return 0;
+}
+
+// A thrown finger's scroll, a frame at a time: whether it still moves.
+static b32 ui_text_fling(struct ui_text address_to t, positive now)
+{
+        int moved = ui_drag_step(&t->kinetic, now), lines = t->line_height ? -moved / t->line_height : 0;
+        b64 to = (b64)t->top_line + lines;
+
+        if (lines)
+                t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
+        return t->kinetic.flying;
+}
+
+// Any event of the window the widget may take: keys only while it has the keys; the pointer within its box.
+static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
+{
+        t->asks = 0;
+        if (event->type == WINDOW_EVENT_KEY)
+                return t->focused ? t->asks = ui_text_key(ui, t, event) : 0;
+        if (event->type == WINDOW_EVENT_CLIP)
+                return t->asks = ui_text_clip(t, event);
+        return t->asks = ui_text_pointer(ui, t, event, x, y);
+}
+
+/* ---- drawing ---- */
+
+// The colour of a role of the tokenizer's, from the kit's roles: the text, and the accent and status colours for the rest.
+static unsigned int ui_text_role(int role)
+{
+        switch (role)
+        {
+        case DOC_ROLE_KEYWORD: return ui_role(UI_PRIMARY);
+        case DOC_ROLE_TYPE: return ui_role(UI_INFO);
+        case DOC_ROLE_STRING: return ui_role(UI_SUCCESS);
+        case DOC_ROLE_NUMBER: return ui_role(UI_WARNING);
+        case DOC_ROLE_COMMENT: return ui_role(UI_ON_SURFACE_VARIANT);
+        case DOC_ROLE_PREPROCESSOR: return ui_role(UI_WARNING);
+        case DOC_ROLE_FUNCTION: return ui_role(UI_ON_SURFACE);
+        case DOC_ROLE_VARIABLE: return ui_role(UI_INFO);
+        case DOC_ROLE_INVALID: return ui_role(UI_ERROR);
+        default: return ui_role(UI_ON_SURFACE);
+        }
+}
+
+// Whether offset is inside any selection (an empty one: none).
+static b32 ui_text_selected(const struct ui_text address_to t, p64 offset)
+{
+        for (positive s = 0; s < t->doc.selection_count; s++)
+        {
+                const struct doc_selection address_to sel = &t->doc.selections[s];
+
+                if (offset >= doc_sel_start(sel) && offset < doc_sel_end(sel))
+                        return true;
+        }
+        return false;
+}
+
+/*
+        One laid line on the picture at its baseline: the selection behind it, then the text, then each caret on it.
+        Proportional: the kit's text, cut to the box. The code view: whole cells, a run of one colour at a time.
+*/
+static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, const struct ui_text_layout address_to l, p64 line,
+                            int y, int baseline, unsigned int ground)
+{
+        int origin = t->left - (int)t->scroll_x;
+        unsigned int selection = ui_role(UI_SELECTION), text = ui_role(UI_ON_SURFACE);
+        static struct doc_token tokens[512];
+        positive token_count = t->mode == UI_TEXT_CODE ? doc_tokens(&t->doc, line, tokens, 512) : 0;
+
+        // The selection: one rectangle a run of selected clusters, and a sliver past the end of a line the selection
+        // goes on from.
+        for (p32 k = 0; k < l->count;)
+        {
+                p32 from = k;
+
+                while (k < l->count && ui_text_selected(t, l->offset[k]))
+                        k++;
+                if (k > from)
+                        ui_fill(ui, origin + l->x[from], y, l->x[k] - l->x[from], t->line_height,
+                                ui_tone(selection & 0xffffffu, selection >> 24));
+                else
+                        k++;
+        }
+        if (ui_text_selected(t, l->offset[l->count]) && t->mode != UI_TEXT_FIELD)
+                ui_fill(ui, origin + l->x[l->count], y, t->cell / 2 + ui->scale, t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
+
+        if (t->mode != UI_TEXT_CODE)
+                ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin, baseline, (string_address)l->shown,
+                          t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
+        else
+        {
+                // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn
+                // with font_cells, any other (marks, wide, emoji) a font_draw of its own at its cell.
+                const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
+                font_target target = {ui->pixels, ui->pitch, ui->width, ui->bottom};
+                font_metrics grid = font_metrics_at(faces[0], ui_text_em(ui, t));
+                p32 codes[256];
+                positive token = 0;
+
+                for (p32 k = 0; k < l->count;)
+                {
+                        p64 offset = l->offset[k] - l->offset[0];
+                        unsigned int ink = text;
+                        p32 run = 0, start = k;
+
+                        while (token < token_count && tokens[token].start + tokens[token].length <= offset)
+                                token++;
+                        if (token < token_count && tokens[token].start <= offset)
+                                ink = ui_text_role(tokens[token].role);
+                        while (k < l->count && run < 256)
+                        {
+                                p32 code;
+                                positive size = l->shown_at[k + 1] - l->shown_at[k];
+                                p64 here = l->offset[k] - l->offset[0];
+                                unsigned int ink_here = text;
+                                positive look = token;
+
+                                while (look < token_count && tokens[look].start + tokens[look].length <= here)
+                                        look++;
+                                if (look < token_count && tokens[look].start <= here)
+                                        ink_here = ui_text_role(tokens[look].role);
+                                if (ink_here != ink || (k > start && ui_text_selected(t, l->offset[k]) != ui_text_selected(t, l->offset[start])))
+                                        break;
+                                if (doc_decode(l->shown + l->shown_at[k], size, &code) != size || l->x[k + 1] - l->x[k] != t->cell)
+                                {
+                                        if (k > start)
+                                                break;
+                                        if (origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
+                                                font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
+                                                          (b32)(origin + l->x[k]) << 16, baseline, ink & 0xffffffu, FONT_UNKNOWN);
+                                        k++;
+                                        run = 0;
+                                        goto next;
+                                }
+                                codes[run++] = code;
+                                k++;
+                        }
+                        if (run && origin + l->x[start] < t->right && origin + l->x[k] > t->left - t->cell)
+                        {
+                                unsigned int paper = ui_text_selected(t, l->offset[start])
+                                                         ? window_mix(ground, selection & 0xffffffu, (selection >> 24) * 256 / 255)
+                                                         : ground;
+
+                                font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, origin + l->x[start],
+                                           y + (t->line_height - grid.cell_height) / 2, ink & 0xffffffu, paper);
+                        }
+                next:;
+                }
+        }
+        // Squiggles under what a diagnostic marks: a wave in the error's or the warning's colour.
+        for (positive r = 0; r < t->doc.range_count; r++)
+        {
+                const struct doc_range address_to range = &t->doc.ranges[r];
+                unsigned int colour;
+
+                if (range->kind != DOC_RANGE_ERROR && range->kind != DOC_RANGE_WARNING && range->kind != DOC_RANGE_INFO)
+                        continue;
+                if (range->finish <= l->offset[0] || range->start > l->offset[l->count])
+                        continue;
+                colour = ui_role(range->kind == DOC_RANGE_ERROR ? UI_ERROR : range->kind == DOC_RANGE_WARNING ? UI_WARNING : UI_INFO);
+                for (int x = origin + ui_text_x_of(l, range->start), stop = origin + ui_text_x_of(l, range->finish); x < stop; x++)
+                        ui_fill(ui, x, baseline + 2 * ui->scale + ((x / (2 * ui->scale)) & 1) * ui->scale, 1, ui->scale, ui_tone(colour & 0xffffffu, 255));
+        }
+        // The carets on this line, in the accent, unless it is the blink's off half; a composition's text after the
+        // primary, underlined.
+        if (t->focused && !t->caret_off)
+                for (positive s = 0; s < t->doc.selection_count; s++)
+                {
+                        p64 caret = t->doc.selections[s].active;
+
+                        if (caret < l->offset[0] || caret > l->offset[l->count])
+                                continue;
+                        ui_fill(ui, origin + ui_text_x_of(l, caret), y + ui->scale, t->doc.overwrite ? t->cell : 2 * ui->scale,
+                                t->line_height - 2 * ui->scale, ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 : 255));
+                }
+        if (t->preedit_length && t->focused)
+        {
+                p64 caret = t->doc.selections[t->doc.primary].active;
+
+                if (caret >= l->offset[0] && caret <= l->offset[l->count])
+                {
+                        int x = origin + ui_text_x_of(l, caret);
+                        int wide = ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, x, baseline, t->preedit,
+                                             t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
+
+                        ui_fill(ui, x, baseline + 2 * ui->scale, wide, ui->scale, ui_tone(text & 0xffffffu, 255));
+                }
+        }
+}
+
+/*
+        The widget drawn into the box x, y, width by height (device pixels), its ground already there (a field's well,
+        a window's paper): ground is that colour, for the code view's cells. The rows from the top line down, wrapped
+        when wrap is on, with the gutter's line numbers on the left of a code view.
+*/
+static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int x, int y, int width, int height, unsigned int ground)
+{
+        static struct ui_text_layout l;
+        p64 lines = doc_line_count(&t->doc), line = t->mode == UI_TEXT_FIELD ? 0 : t->top_line;
+        font_metrics m;
+        int row_y;
+
+        ui_text_metrics(ui, t);
+        m = font_metrics_at(ui_text_face(ui, t), ui_text_em(ui, t));
+        t->gutter = 0;
+        if (t->numbers)
+        {
+                int digits = 1;
+
+                for (p64 n = lines; n >= 10; n /= 10)
+                        digits++;
+                t->gutter = (digits + 2) * t->cell;
+        }
+        t->left = x + t->gutter, t->top = y, t->right = x + width, t->bottom = y + height;
+        if (t->mode == UI_TEXT_FIELD)
+                t->top = y + (height - t->line_height) / 2, t->bottom = t->top + t->line_height;
+        if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
+        {
+                unsigned int text = ui_role(UI_ON_SURFACE);
+
+                ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, t->left, t->top + m.baseline, (string_address)t->placeholder,
+                          t->size + t->zoom, text & 0xffffffu, 92, t->left, t->right, 0);
+        }
+        for (row_y = t->top; row_y + t->line_height <= t->bottom + (t->mode == UI_TEXT_FIELD) && line < lines; line++)
+        {
+                p64 hidden_to;
+                int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
+
+                if (doc_hidden(&t->doc, line))
+                        continue;
+                ui_text_layout_line(ui, t, line, &l);
+                // The current line, lit faintly, in a code view with one caret.
+                if (t->mode == UI_TEXT_CODE && t->focused && t->doc.selection_count == 1 &&
+                    doc_line_of(&t->doc, t->doc.selections[0].active) == line && !doc_any_selected(&t->doc))
+                        ui_fill(ui, t->left, row_y, t->right - t->left, t->line_height, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 10));
+                if (t->numbers)
+                {
+                        char number[24];
+                        positive digits = positive_into_string((string_address)number, (positive)(line + 1));
+                        b32 current = doc_line_of(&t->doc, t->doc.selections[t->doc.primary].active) == line;
+                        int wide = (int)digits * t->cell;
+
+                        number[digits] = 0;
+                        ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, t->left - t->cell - wide, baseline,
+                                  (string_address)number, t->size + t->zoom, ui_role(UI_ON_SURFACE) & 0xffffffu, current ? 220 : 110, x, t->left, 0);
+                        if (doc_folded_at(&t->doc, line, &hidden_to))
+                                ui_chevron(ui, x + t->cell / 2, row_y + t->line_height / 2, t->cell / 3, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
+                }
+                if (!t->wrap || t->mode == UI_TEXT_FIELD)
+                {
+                        ui_text_draw_line(ui, t, &l, line, row_y, baseline, ground);
+                        row_y += t->line_height;
+                        continue;
+                }
+                // Wrapped: the line cut where it would pass the box's width, at a blank when one is near, each row
+                // after the first indented as the line is.
+                {
+                        static struct ui_text_layout part;
+                        p32 from = 0, room = (p32)(t->right - t->left);
+                        int indent = 0;
+
+                        while (indent < (int)l.count && (l.shown[l.shown_at[indent]] == ' '))
+                                indent++;
+                        indent = l.x[indent] < (int)room / 2 ? l.x[indent] : 0;
+                        do
+                        {
+                                p32 to = from, blank = 0;
+                                int offset_x = l.x[from] - (from ? indent : 0);
+
+                                while (to < l.count && l.x[to + 1] - offset_x <= (int)room)
+                                {
+                                        if (l.shown[l.shown_at[to]] == ' ')
+                                                blank = to + 1;
+                                        to++;
+                                }
+                                if (to < l.count && blank > from)
+                                        to = blank;
+                                to = to > from ? to : from + 1;
+                                to = to > l.count ? l.count : to;
+                                part.count = to - from;
+                                for (p32 k = 0; k <= part.count; k++)
+                                {
+                                        part.offset[k] = l.offset[from + k];
+                                        part.x[k] = l.x[from + k] - offset_x;
+                                        part.shown_at[k] = l.shown_at[from + k] - l.shown_at[from];
+                                }
+                                part.shown_length = l.shown_at[to] - l.shown_at[from];
+                                memory_copy(part.shown, l.shown + l.shown_at[from], part.shown_length);
+                                part.shown[part.shown_length] = 0;
+                                ui_text_draw_line(ui, t, &part, line, row_y, row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, ground);
+                                row_y += t->line_height;
+                                from = to;
+                        } while (from < l.count && row_y + t->line_height <= t->bottom);
+                }
+        }
+}
+
+/*
+        A kit field (UI_INPUT) with a text widget behind it: the kit draws the well, the glow and the label, and asks
+        this for what is inside it, the box being the well's text area. ui_control.edit names the widget.
+*/
+static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_to c, int left, int right, int top, int bottom)
+{
+        struct ui_text address_to t = c->edit;
+
+        t->focused = c->focused;
+        t->placeholder = c->items[0];
+        ui_text_draw(ui, t, left, top, right - left, bottom - top, ui_role(UI_SURFACE_HIGH) & 0xffffffu);
 }
 
 #endif // MOONWATER_CANVAS_UI

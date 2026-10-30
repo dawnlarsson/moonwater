@@ -704,6 +704,11 @@ static struct
         positive battery_menu_count;
         char filter[SETTINGS_FILTER];
         positive filter_length;
+        // The filter as typed, in a field of the text engine (copied, folded to lower case, into filter as it changes).
+        struct ui_text filter_edit;
+        struct ui_control filter_control;
+        b32 filter_open;
+        int filter_x, filter_y, filter_w;
         char typed[SETTINGS_TYPED];
         char status[SETTINGS_STATUS];
         int width, height, shown;
@@ -2968,6 +2973,8 @@ static fn settings_group_choose(int group)
         settings.feed_due = 0;
         settings.filter[0] = 0;
         settings.filter_length = 0;
+        if (settings.filter_open)
+                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
         settings.scroll = 0;
         settings.confirm = 0;
         settings_refilter();
@@ -3070,24 +3077,50 @@ static fn settings_type(const struct window_event address_to event)
         settings_dirty();
 }
 
-// What is typed with no field open, as a letter of the filter, taken off by Backspace.
+// The filter's field, made the first time it is wanted: one line of the text engine, its clipboard this window's.
+static struct ui_text address_to settings_filter_field(void)
+{
+        if (!settings.filter_open)
+        {
+                ui_text_open(&settings.filter_edit, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
+                settings.filter_edit.own = &settings.own;
+                settings.filter_open = true;
+        }
+        return &settings.filter_edit;
+}
+
+// The filter's text as the rows are matched against it: the field's, folded to lower case.
+static b32 settings_filter_take(void)
+{
+        p8 typed[SETTINGS_FILTER];
+        positive length = ui_text_string(settings_filter_field(), typed, sizeof(typed));
+
+        for (positive at = 0; at < length; at++)
+                typed[at] = (p8)byte_to_lower((b8)typed[at]);
+        if (length == settings.filter_length && !memory_compare(typed, settings.filter, length))
+                return false;
+        memory_copy(settings.filter, typed, length + 1);
+        settings.filter_length = length;
+        return true;
+}
+
+/*
+        What is typed with no field open goes to the filter's field: a letter, Backspace, Ctrl+A and the rest of the
+        text keys, Ctrl+V's paste (whose text comes with the clipboard's answer).
+*/
 static fn settings_filter_key(const struct window_event address_to event)
 {
-        unsigned int c = (unsigned int)event->b;
+        struct ui_text address_to field = settings_filter_field();
 
-        if (event->a == SETTINGS_KEY_BACKSPACE)
+        // A blank is no letter of the filter, as it never was: rows are matched by words that have none.
+        if (event->b == ' ' && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
+                return;
+        field->focused = true;
+        ui_text_key(&settings.ui, field, event);
+        if (!settings_filter_take())
         {
-                if (!settings.filter_length)
-                        return;
-                settings.filter[--settings.filter_length] = 0;
-        }
-        else
-        {
-                if (c <= ' ' || c >= 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) ||
-                    settings.filter_length + 1 >= sizeof(settings.filter))
-                        return;
-                settings.filter[settings.filter_length++] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
-                settings.filter[settings.filter_length] = 0;
+                settings_dirty();
+                return;
         }
         settings.scroll = 0;
         settings.pane = 1;
@@ -3175,6 +3208,8 @@ static b32 settings_key(const struct window_event address_to event)
                 {
                         settings.filter[0] = 0;
                         settings.filter_length = 0;
+                        if (settings.filter_open)
+                                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
                         settings_refilter();
                         return true;
                 }
@@ -3806,6 +3841,25 @@ static b32 settings_event(const struct window_event address_to event)
                         settings.pointer_x = event->a, settings.pointer_y = event->b;
                 if (settings_scrolls_event(event))
                         return true;
+        }
+        // The filter's field takes a press, a drag and a release over it (a selection by the hand), and the clipboard's answers.
+        if (!settings.view && settings.filter_open &&
+            (event->type == WINDOW_EVENT_CLIP ||
+             ((event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
+              (settings.filter_edit.dragging ||
+               (event->type == WINDOW_EVENT_BUTTON && settings.pointer_x >= settings.filter_x && settings.pointer_x < settings.filter_x + settings.filter_w &&
+                settings.pointer_y >= settings.filter_y && settings.pointer_y < settings.filter_y + ui_px(&settings.ui, 28)))) ))
+        {
+                p32 asks = ui_text_event(&settings.ui, &settings.filter_edit, event, settings.pointer_x, settings.pointer_y);
+
+                if (asks && settings_filter_take())
+                {
+                        settings.scroll = 0;
+                        settings.pane = 1;
+                        settings_refilter();
+                }
+                settings_dirty();
+                return true;
         }
         switch (event->type)
         {
@@ -4443,10 +4497,16 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         {
                 int width = ui_px(&settings.ui, SETTINGS_FILTER_W), x = settings.width - left - width, y = ui_px(&settings.ui, 24);
 
-                ui_field(ui, x, y, width, ui_px(&settings.ui, 28), (string_address)settings.filter, settings.editing < 0 && settings.filter_length);
-                if (!settings.filter_length)
-                        ui_run(ui, x + ui_px(&settings.ui, 8), ui_baseline(ui, y, ui_px(&settings.ui, 28), UI_TEXT), (string_address) "Type to filter",
-                               UI_TEXT, false, ui->quiet, 150, x + ui_px(&settings.ui, 8), x + width - ui_px(&settings.ui, 8));
+                struct ui_control address_to c = &settings.filter_control;
+
+                // The kit's bare field, the text engine's field in it (typing, a selection, the clipboard, its carets).
+                settings.filter_x = x, settings.filter_y = y, settings.filter_w = width;
+                c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
+                c->x = x / settings.ui.scale, c->y = y / settings.ui.scale, c->w = width / settings.ui.scale, c->h = 28;
+                c->items[0] = "Type to filter";
+                c->focused = settings.editing < 0 && (settings.filter_length || settings.focused);
+                c->edit = settings_filter_field();
+                ui_control_draw(ui, c);
         }
 
         if (settings.view)
