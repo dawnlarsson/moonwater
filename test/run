@@ -4534,10 +4534,14 @@ freestanding_checks_one()
         name=$target
         runner=$target_runner
 
-        case $source in
-        *.c) target_build freestanding "$source" "$work/$suite.$name" "$name" ;;
-        *)   target_build freestanding_check "$source" "$work/$suite.$name" "$name" ;;
-        esac || return 1
+        if [ -e "$work/$suite.$name.prebuilt" ]; then
+                rm -f "$work/$suite.$name.prebuilt"
+        else
+                case $source in
+                *.c) target_build freestanding "$source" "$work/$suite.$name" "$name" ;;
+                *)   target_build freestanding_check "$source" "$work/$suite.$name" "$name" ;;
+                esac || return 1
+        fi
 
         #       Soft RLIMIT_AS is ignored under qemu-user; native host arch
         #       proves it. Pass --emulated so CHECK_reserve / CHECK_lock /
@@ -4581,10 +4585,34 @@ freestanding_checks_one()
         [ "$status" = 0 ] && [ "$bad" = 0 ]
 }
 
+#       The three machines' builds of a check are one compile each of a whole
+#       program, and they share nothing: they are made side by side first,
+#       and the checks then run one machine at a time as they always did. A
+#       build that fails here is made again in its turn, which is where its
+#       errors are printed.
+freestanding_checks_prebuild()
+{
+        prebuild_pids=
+        for target in x86_64 arm64 riscv64; do
+                (
+                        target_tools "$target" > /dev/null 2>&1 || exit 0
+                        case $2 in
+                        *.c) target_build freestanding "$2" "$work/$1.$target" "$target" ;;
+                        *)   target_build freestanding_check "$2" "$work/$1.$target" "$target" ;;
+                        esac > /dev/null 2>&1 && : > "$work/$1.$target.prebuilt"
+                ) &
+                prebuild_pids="$prebuild_pids $!"
+        done
+        for prebuild_pid in $prebuild_pids; do
+                wait "$prebuild_pid"
+        done
+}
+
 freestanding_checks_lane()
 {
         suite=$1
         source=$2
+        freestanding_checks_prebuild "$suite" "$source"
         target_lane freestanding_checks_one "$suite" "$source"
 }
 
