@@ -129024,12 +129024,27 @@ static fn te_history(positive rounds, positive steps)
                         te_check(te_same(&doc), "history walk", at_step);
                         te_check(doc_line_count(&doc) == te_model_lines(), "history line count", at_step);
                 }
-                // A change after an undo drops the redo.
+                // A change after an undo drops the redo: the text is that change on the state undone to, and one more
+                // undo is that state again.
                 if (at_step > 0)
                 {
                         doc_undo(&doc);
+                        at_step--;
                         doc_replace(&doc, 0, 0, (const p8 address_to) "z", 1);
                         te_check(!doc_redo(&doc), "redo kept after a new change", at_step);
+                        te_model_set(snapshots[at_step], snapshot_length[at_step]);
+                        te_model_replace(0, 0, (const p8 address_to) "z", 1);
+                        te_check(te_same(&doc), "a change after an undo", at_step);
+                        te_check(doc_undo(&doc), "the change after an undo is undone", at_step);
+                        te_model_set(snapshots[at_step], snapshot_length[at_step]);
+                        te_check(te_same(&doc), "undo of the change after an undo", at_step);
+                        // And the undo before it is the step before: the redo dropped is not in the way.
+                        if (at_step > 0)
+                        {
+                                te_check(doc_undo(&doc), "an undo past the change after an undo", at_step);
+                                te_model_set(snapshots[at_step - 1], snapshot_length[at_step - 1]);
+                                te_check(te_same(&doc), "the step before the change after an undo", at_step);
+                        }
                 }
                 doc_close(&doc);
         }
@@ -129134,6 +129149,43 @@ static fn te_commands(positive rounds)
                         }
                         doc_close(&doc);
                 }
+        }
+}
+
+// Lines moved and copied with their carets, against the text and the places written out by hand.
+static fn te_lines(void)
+{
+        static const struct
+        {
+                const char address_to text;
+                p64 anchor, active;
+                p32 command;
+                const char address_to want;
+                p64 want_anchor, want_active;
+        } cases[] = {
+            {"a\nbb\nc", 0, 0, DOC_CMD_MOVE_LINE_DOWN, "bb\na\nc", 3, 3},
+            {"a\nbb\nc", 4, 4, DOC_CMD_MOVE_LINE_UP, "bb\na\nc", 2, 2},
+            {"a\nbb\nc", 3, 4, DOC_CMD_MOVE_LINE_DOWN, "a\nc\nbb", 5, 6},
+            {"a\nbb\nc", 2, 6, DOC_CMD_MOVE_LINE_UP, "bb\nc\na", 0, 4},
+            {"a\r\nb\r\n", 0, 1, DOC_CMD_MOVE_LINE_DOWN, "b\r\na\r\n", 3, 4},
+            {"one\ntwo", 5, 5, DOC_CMD_COPY_LINE_DOWN, "one\ntwo\ntwo", 9, 9},
+            {"one\ntwo", 1, 1, DOC_CMD_COPY_LINE_UP, "one\none\ntwo", 1, 1},
+            {"one\ntwo", 1, 1, DOC_CMD_COPY_LINE_DOWN, "one\none\ntwo", 5, 5},
+            {"x(y)z", 2, 2, DOC_CMD_DELETE_LINES, "", 0, 0},
+        };
+
+        for (p32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        {
+                struct doc doc;
+
+                doc_open(&doc, (const p8 address_to)cases[i].text, string_length((string_address)cases[i].text));
+                doc_select_set(&doc, cases[i].anchor, cases[i].active);
+                doc_command(&doc, cases[i].command, "#");
+                te_model_set((const p8 address_to)cases[i].want, string_length((string_address)cases[i].want));
+                te_check(te_same(&doc) && doc.selection_count == 1 && doc.selections[0].anchor == cases[i].want_anchor &&
+                             doc.selections[0].active == cases[i].want_active,
+                         "lines moved or copied with their carets", i * 1000 + doc.selections[0].active);
+                doc_close(&doc);
         }
 }
 
@@ -130201,6 +130253,20 @@ static fn te_find(positive rounds)
                 }
                 doc_close(&doc);
         }
+        // Captures in a replacement, by hand: $1 $2 the groups, $& and $0 the match, $$ a dollar, \n a line end.
+        {
+                struct doc doc;
+                struct doc_find find = {0};
+                static const p8 with[] = "<$2$1|$&|$0|$$|\\n>";
+
+                doc_open(&doc, (const p8 address_to) "ab xab", 6);
+                doc_find_set(&find, (const p8 address_to) "(a)(b)", 6, DOC_FIND_CASE | DOC_FIND_REGEX);
+                te_check(doc_replace_all(&doc, &find, with, sizeof(with) - 1) == 2, "two replaced with captures", 0);
+                te_model_set((const p8 address_to) "<ba|ab|ab|$|\n> x<ba|ab|ab|$|\n>", 30);
+                te_check(te_same(&doc), "captures in a replacement", doc_length(&doc));
+                doc_find_drop(&find);
+                doc_close(&doc);
+        }
         // Past DOC_REPLACE_BULK matches the replace is one swap of the span: the same text, one undo, carets mapped.
         {
                 struct doc doc;
@@ -130261,6 +130327,29 @@ static fn te_find(positive rounds)
 }
 
 /* ---- bytes as they were ---- */
+
+static fn te_utf8(void)
+{
+        static const struct
+        {
+                const char address_to bytes;
+                p32 length, code;
+        } forms[] = {
+            {"\xc0\x80", 1, DOC_INVALID | 0xc0},     {"\xc1\xbf", 1, DOC_INVALID | 0xc1},     {"\xe0\x80\xaf", 1, DOC_INVALID | 0xe0},
+            {"\xe0\x9f\xbf", 1, DOC_INVALID | 0xe0}, {"\xed\xa0\x80", 1, DOC_INVALID | 0xed}, {"\xf0\x8f\xbf\xbf", 1, DOC_INVALID | 0xf0},
+            {"\xf4\x90\x80\x80", 1, DOC_INVALID | 0xf4}, {"\xf5\x80\x80\x80", 1, DOC_INVALID | 0xf5}, {"\x80", 1, DOC_INVALID | 0x80},
+            {"\xe2\x82", 1, DOC_INVALID | 0xe2},     {"\xc2\x80", 2, 0x80},                {"\xe0\xa0\x80", 3, 0x800},
+            {"\xed\x9f\xbf", 3, 0xd7ff},            {"\xee\x80\x80", 3, 0xe000},           {"\xf0\x90\x80\x80", 4, 0x10000},
+            {"\xf4\x8f\xbf\xbf", 4, 0x10ffff},
+        };
+
+        for (p32 i = 0; i < sizeof(forms) / sizeof(forms[0]); i++)
+        {
+                p32 code, length = doc_decode((const p8 address_to)forms[i].bytes, string_length((string_address)forms[i].bytes), &code);
+
+                te_check(length == forms[i].length && code == forms[i].code, "a UTF-8 form decodes as the standard says", i);
+        }
+}
 
 static fn te_bytes(void)
 {
@@ -130620,11 +130709,11 @@ b32 main(void)
                 }
                 TE_SECTION("buffer", te_buffer(40, 300))
                 TE_SECTION("history", te_history(30, 120))
-                TE_SECTION("commands", te_commands(40))
+                TE_SECTION("commands", te_lines(); te_commands(40))
                 TE_SECTION("carets", te_carets(200))
                 TE_SECTION("boundaries", te_boundaries())
                 TE_SECTION("find", te_find(12))
-                TE_SECTION("bytes", te_bytes())
+                TE_SECTION("bytes", te_utf8(); te_bytes())
                 TE_SECTION("keymap", te_keymap())
                 TE_SECTION("tokens", te_tokens(30))
                 TE_SECTION("sparse", te_sparse())
