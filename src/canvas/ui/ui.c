@@ -2385,7 +2385,8 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_SLIDER_LINE 2
 #define UI_TABS_UNDERLINE 0
 #define UI_TABS_SEGMENTED 1
-#define UI_ITEMS 8
+#define UI_TABS_VERTICAL 2 // the segmented strip stood on its end: a column of items h tall, the pip travelling along y
+#define UI_ITEMS 16
 #define UI_RADIO_PITCH 64 // a radio row and the gap under it (48 + 16, the card's gap)
 
 struct ui_control
@@ -3107,9 +3108,17 @@ static int ui_tab_left(struct ui address_to ui, const struct ui_control address_
         return x;
 }
 
+static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c);
+
 static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         b32 seg = c->variant == UI_TABS_SEGMENTED, live = 0;
+
+        if (c->variant == UI_TABS_VERTICAL)
+        {
+                ui_vtabs_draw(ui, c);
+                return;
+        }
         int height = seg ? 32 : 40, chosen = c->at;
         b64 pip_x, pip_w;
 
@@ -3167,9 +3176,98 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit.busy |= live;
 }
 
+/*
+        Tabs stood on end (UI_TABS_VERTICAL): a column of items h tall and w wide,
+        their text at the left 12 in, the accent pip behind the chosen one sliding
+        up and down to it over .35s --ease-emphasized, the items it rolls over
+        stretched 1.13 along y as it passes (130 ms of flight, anchored at their
+        trailing edge), colours .2s, the hovered one's state layer and a press's
+        ripple: the horizontal strip's every number, on the other axis.
+*/
+static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
+{
+        b32 live = 0;
+        b64 pip_y;
+
+        ui_kit_number_to(&c->pip_y, ui_q(c->at * c->h), 350, &ui_ease);
+        pip_y = ui_q(c->y) + ui_kit_tween(&c->pip_y);
+        {
+                struct ui_box pip = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
+
+                if (!c->disabled)
+                        ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
+                // The keys in the column: the kit's focus ring, 2 out from the chosen item.
+                if (c->focused && !c->disabled)
+                {
+                        struct ui_box ring = pip;
+
+                        ring.x0 -= ui_q8(ui, 2), ring.y0 -= ui_q8(ui, 2), ring.x1 += ui_q8(ui, 2), ring.y1 += ui_q8(ui, 2);
+                        ring.rx += ui_q8(ui, 2), ring.ry += ui_q8(ui, 2);
+                        ui_kit_ring(ui, &ring, ui_q8(ui, 2), ui_role(UI_PRIMARY));
+                }
+        }
+        for (int item = 0; item < c->count; item++)
+        {
+                int y = c->y + item * c->h;
+                b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live);
+                b32 by = ui_q8(ui, y), bh = ui_q8(ui, c->h), anchor = c->dom_origin > 0 ? by : by + bh;
+                struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(y), ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
+                unsigned int ink;
+                b32 middle;
+
+                if (y + c->h + 8 < ui->top / ui->scale || y - 8 > ui->bottom / ui->scale)
+                        continue;
+                ui_kit_colour_to(&c->item_ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
+                ink = ui_kit_colour(&c->item_ink[item]);
+                face = ui_box_transform(face, UI_ONE, dom, 0, anchor, 0, 0);
+                if (c->item == item)
+                {
+                        struct ui_place place = {UI_ONE, dom, 0, anchor, 0, 0};
+                        unsigned int layer;
+
+                        ui_kit_number_to(&c->layer, c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
+                        layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
+                        if (layer)
+                                ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
+                        ui_kit_ripples(ui, c, ui_q8(ui, c->x - 8), by - ui_q8(ui, 8), &place, &face, ink);
+                }
+                // The text at whole pixels where the stretch takes the item's middle.
+                middle = anchor + (b32)ui_qmul(by + bh / 2 - anchor, dom);
+                ui_kit_text(ui, ui_dev(ui, c->x + 12), ui_kit_baseline(ui, middle / 256 - ui_dev(ui, 10), UI_LABEL_LARGE),
+                            (string_address)c->items[item], item == c->at ? UI_LABEL_LARGE : UI_BODY_MEDIUM, ink, 0);
+        }
+        ui_kit.busy |= live;
+}
+
+// The vertical cascade: each item whose middle the pip passes stretches as it does (130 ms of flight).
+static fn ui_vtabs_choose(struct ui_control address_to c, int item)
+{
+        int from = c->at, distance = item > from ? item - from : from - item;
+
+        if (item == from || item < 0 || item >= c->count)
+                return;
+        c->dom_origin = item > from ? 1 : -1;
+        if (!ui_kit.motion)
+                for (int k = 0; k < c->count; k++)
+                {
+                        int along = item > from ? k - from : from - k;
+
+                        if (along < 0 || along > distance)
+                                continue;
+                        ui_stretch_go(&c->item_dom[k], ui_kit.now + (b64)along * 130 * UI_MS / distance, UI_Q2(113));
+                }
+        c->at = item;
+}
+
 // The tabs' cascade: each tab whose middle the pip rolls over stretches as it passes (130 ms of flight).
 static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c, int item)
 {
+        if (c->variant == UI_TABS_VERTICAL)
+        {
+                (void)ui;
+                ui_vtabs_choose(c, item);
+                return;
+        }
         b64 from, to, length;
 
         if (item == c->at)
@@ -3740,6 +3838,8 @@ static int ui_control_hit(struct ui address_to ui, const struct ui_control addre
                                 return k;
                 return -1;
         }
+        if (c->kind == UI_TABS && c->variant == UI_TABS_VERTICAL)
+                return lx >= c->x && lx < c->x + c->w && ly >= c->y && ly < c->y + c->count * c->h ? (ly - c->y) / c->h : -1;
         if (c->kind == UI_TABS)
         {
                 for (int k = 0; k < c->count; k++)

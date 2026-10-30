@@ -3252,7 +3252,9 @@ static b32 settings_key(const struct window_event address_to event)
         worked out at each picture from the row's place.
 */
 static struct ui_control settings_kit[SETTINGS_ROWS];
-static struct ui_control settings_row_kit[SETTINGS_ROWS]; // each row's own kit row: its hover layer and ripple (a switch's is its switch)
+static struct ui_control settings_row_kit[SETTINGS_ROWS];
+static struct ui_control settings_groups_kit; // the column of groups: the kit's tabs on end
+static char settings_group_names[UI_ITEMS][SETTINGS_VALUE]; // each row's own kit row: its hover layer and ripple (a switch's is its switch)
 static int settings_kit_down = -1; // the row a press went down on, whose ripple goes out at the release
 
 // The window's scrolling regions, each with the kit's scrollbar: the rows (or a card), and the column of groups.
@@ -3831,6 +3833,9 @@ static b32 settings_event(const struct window_event address_to event)
                 break;
         }
         case WINDOW_EVENT_BUTTON:
+                // The release: the column's ripple goes out.
+                if (!(event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings_groups_kit.kind)
+                        ui_kit_ripples_exit(&settings_groups_kit);
                 // The release: a switch row's ripple goes out (a finger's as a mouse's).
                 if (!(event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings_kit_down >= 0)
                 {
@@ -3901,6 +3906,12 @@ static fn settings_press_at(void)
         row = settings_group_hit(settings.pointer_x, settings.pointer_y);
         if (row >= 0)
         {
+                // The press ripples its item in the column, the kit's tab.
+                if (settings_groups_kit.kind)
+                        ui_kit_ripple_start(&settings.ui, &settings_groups_kit, settings.pointer_x, settings.pointer_y,
+                                            ui_px(&settings.ui, settings_groups_kit.x),
+                                            ui_px(&settings.ui, settings_groups_kit.y + row * settings_groups_kit.h),
+                                            ui_px(&settings.ui, settings_groups_kit.w), ui_px(&settings.ui, settings_groups_kit.h), 8);
                 settings_edit_end();
                 settings.pane = 0;
                 settings_group_choose(row);
@@ -4225,31 +4236,45 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
 }
 
 // The column of groups at the left: the chosen one lit, the rest plain on the glass.
+/*
+        The column of groups is the kit's tabs stood on end: the chosen group under the accent's pip, which slides up or
+        down to another however it is chosen (a press, the keys, a finger) with the cascade's stretch, and starts on the
+        group the window opens on. While a filter lists the rows of every group none is chosen, and the pip is not drawn.
+*/
+
 static fn settings_draw_side(struct ui address_to ui)
 {
-        int left = ui_px(&settings.ui, UI_PAD), width = settings_side(), height = ui_px(&settings.ui, SETTINGS_GROUP_ROW);
-        int inset = ui_px(&settings.ui, 12), groups = settings_groups();
-        char cut[SETTINGS_VALUE];
+        struct ui_control address_to c = &settings_groups_kit;
+        int width = settings_side(), groups = settings_groups();
 
         ui->top = settings_list_top();
         ui->bottom = settings_list_bottom();
-        for (int group = 0; group < groups; group++)
+        if (!c->kind)
         {
-                int y = settings_list_top() + group * height - settings.group_scroll;
-                // What is typed lists the rows of every group, so none is the chosen one.
-                b32 chosen = group == settings.group && !settings.filter_length;
-
-                if (y + height <= ui->top || y >= ui->bottom)
-                        continue;
-                if (chosen)
-                        ui_focus(ui, left, y + ui_px(&settings.ui, 2), width, height - ui_px(&settings.ui, 4), settings.focused && !settings.pane);
-                if (ui_pressed(&settings.press, SETTINGS_PRESS_GROUP + group))
-                        ui_press_fill(ui, left, y + ui_px(&settings.ui, 2), width, height - ui_px(&settings.ui, 4));
-                ui_text(ui, left + inset, ui_baseline(ui, y, height, UI_TEXT),
-                        settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT | (chosen ? SETTINGS_FIT_BOLD : 0), width - 2 * inset,
-                                     cut, sizeof(cut)),
-                        UI_TEXT, chosen, ui->ink, chosen ? 255 : 210);
+                c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
+                c->at = settings.group;
         }
+        c->count = groups < UI_ITEMS ? groups : UI_ITEMS;
+        for (int group = 0; group < c->count; group++)
+        {
+                string_address name = settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT | SETTINGS_FIT_BOLD,
+                                                   width - ui_px(ui, 24), settings_group_names[group], sizeof(settings_group_names[group]));
+
+                if (name != (string_address)settings_group_names[group])
+                        string_copy_bounded((string_address)settings_group_names[group], name, sizeof(settings_group_names[group]));
+                c->items[group] = settings_group_names[group];
+        }
+        c->x = ui_px(ui, UI_PAD) / ui->scale;
+        c->y = (settings_list_top() - settings.group_scroll) / ui->scale;
+        c->w = width / ui->scale;
+        c->h = SETTINGS_GROUP_ROW;
+        c->disabled = settings.filter_length != 0;
+        c->focused = settings.focused && !settings.pane;
+        c->item = ui_control_hit(ui, c, settings.pointer_x, settings.pointer_y);
+        c->hover = c->item >= 0;
+        if (settings.group != c->at)
+                ui_tabs_choose(ui, c, settings.group); // placed at its first frame, moving after
+        ui_control_draw(ui, c);
 }
 
 // The list: the rows that show, a header to a section, drawn where they are in view.

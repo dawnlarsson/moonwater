@@ -124863,6 +124863,41 @@ static fn check_kit_place(void)
                 check("kit scrollbar: dragged it scrolls by the content's share of the move, and a press on the track pages a view", dragged && paged);
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
         }
+
+        // Tabs stood on end: the pip starts on the chosen item, slides along y to another over .35s with the items it
+        // passes stretched (and only those), rests on it, and a point hits the item it is on.
+        {
+                struct ui_control column;
+                b32 started, travels, cascade, rests, hits;
+                b64 halfway;
+
+                memory_zero(&column, sizeof(column));
+                column.kind = UI_TABS, column.variant = UI_TABS_VERTICAL, column.x = 10, column.y = 10, column.w = 150, column.h = 34, column.count = 12;
+                for (int k = 0; k < 12; k++)
+                        column.items[k] = "Group";
+                column.at = 3;
+                ui.top = 0, ui.bottom = 300;
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &column);
+                started = !ui_kit.busy && ui_tween_at(&column.pip_y, ui_kit.now, &live) == ui_q(3 * 34);
+                ui_tabs_choose(&ui, &column, 6);
+                cascade = column.item_dom[3].at && column.item_dom[5].at && column.item_dom[6].at && !column.item_dom[2].at && !column.item_dom[7].at;
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                ui_control_draw(&ui, &column);
+                ui_kit.now += 150000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &column);
+                halfway = ui_tween_at(&column.pip_y, ui_kit.now, &live);
+                travels = ui_kit.busy && halfway > ui_q(3 * 34) && halfway < ui_q(6 * 34);
+                for (int frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_control_draw(&ui, &column);
+                }
+                rests = !ui_kit.busy && ui_tween_at(&column.pip_y, ui_kit.now, &live) == ui_q(6 * 34);
+                hits = ui_control_hit(&ui, &column, 20, 10 + 5 * 34 + 3) == 5 && ui_control_hit(&ui, &column, 200, 30) == -1;
+                check("kit tabs on end: the pip starts on its item, slides along y to another, the items it passes stretch, and it rests",
+                      started && cascade && travels && rests && hits);
+        }
 }
 #endif
 
