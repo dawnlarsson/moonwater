@@ -2786,6 +2786,15 @@ static b32 settings_key(const struct window_event address_to event)
                 settings.confirm = 0;
         if (event->a != SETTINGS_KEY_DELETE)
                 settings.forget[0] = 0;
+        // With something typed, a move that selects or goes a word at a time is the filter's, as in any field: Shift or
+        // Ctrl with Left, Right, Home or End. Bare, they keep moving in the rows (a step's Left and Right among them).
+        if (settings.filter_length && (event->flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL)) &&
+            (event->a == SETTINGS_KEY_LEFT || event->a == SETTINGS_KEY_RIGHT || event->a == SETTINGS_KEY_HOME ||
+             event->a == SETTINGS_KEY_END))
+        {
+                settings_filter_key(event);
+                return true;
+        }
 
         switch (event->a)
         {
