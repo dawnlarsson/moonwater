@@ -33,7 +33,8 @@
 #           cc -O2 -static -nostdlib -nostartfiles -fno-stack-protector \
 #              -fno-builtin -w -o build src/build/build.c
 #
-#       and it is the whole of what a bare machine needs: a C compiler and an
+#       (clang wants -fdefer-ts as well), and it is the whole of what a bare
+#       machine needs: a C compiler and an
 #       assembler, nothing linked and no library required. Run it yourself and
 #       use ./build directly if you would rather not go through this file.
 #
@@ -95,9 +96,15 @@ if [ "$(uname)" = "Linux" ]; then
                 [ -n "$(find "$here/src" "$here/build.sh" -newer "$tool" -print -quit)" ]; then
                 # Built beside it and renamed over, so a second build.sh
                 # started meanwhile runs the old tool or the new one and
-                # never a half-written file.
+                # never a half-written file. clang has no nested functions,
+                # and scope_exit is its defer statement, which it takes when
+                # asked (src/lib.util.c).
+                defer=
+                case $("$compiler" --version 2> /dev/null) in
+                *clang*) defer=-fdefer-ts ;;
+                esac
                 "$compiler" -O2 -static -nostdlib -nostartfiles \
-                        -fno-stack-protector -fno-builtin -w \
+                        -fno-stack-protector -fno-builtin -w $defer \
                         -o "$tool.$$" "$source" &&
                         mv -f "$tool.$$" "$tool" ||
                         {

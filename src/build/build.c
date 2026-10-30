@@ -2889,6 +2889,41 @@ static string_address build_compiler()
 }
 
 /*
+        Which compiler it is, from its banner: 'c' clang, 'g' gcc, 0 neither
+        or no answer. clang first: it answers "clang version" and also names
+        GCC nowhere, while gcc's banner says gcc and GCC both.
+
+        clang is told -fdefer-ts wherever it compiles the programs: it has no
+        nested functions, and scope_exit (src/lib.util.c) is its defer
+        statement there.
+*/
+static p8 build_compiler_kind(string_address compiler)
+{
+        string_address words[4];
+        positive length;
+
+        words[0] = compiler;
+        words[1] = "--version";
+        words[2] = null;
+
+        if (build_capture_words((string_address address_to)words, build_file_two,
+                                BUILD_FILE_ROOM) < 0)
+                return 0;
+
+        length = string_length((string_address)build_file_two);
+
+        if (memory_search(build_file_two, length, "clang", 5) ||
+            memory_search(build_file_two, length, "Clang", 5))
+                return 'c';
+
+        if (memory_search(build_file_two, length, "gcc", 3) ||
+            memory_search(build_file_two, length, "GCC", 3))
+                return 'g';
+
+        return 0;
+}
+
+/*
         binutils has to match the compiler, not the machine this runs on.
 
         objdump, readelf and objcopy all read the ELF the compiler just
@@ -3107,6 +3142,9 @@ static b32 build_spark(string_address source, string_address output,
         if (mode && word_is(mode, "debug"))
                 words[count++] = "-g";
 
+        if (build_compiler_kind(compiler) == 'c')
+                words[count++] = "-fdefer-ts";
+
         if (hook)
         {
                 words[count++] = "-g";
@@ -3324,31 +3362,15 @@ static string_address build_name_of(string_address path)
 */
 static string_address build_whole_program_flags(string_address compiler)
 {
-        string_address words[4];
-
-        words[0] = compiler;
-        words[1] = "--version";
-        words[2] = null;
-
-        if (build_capture_words((string_address address_to)words, build_file_two,
-                                BUILD_FILE_ROOM) < 0)
-                return "";
-
+        switch (build_compiler_kind(compiler))
         {
-                positive length = string_length((string_address)build_file_two);
-
-                //      clang first: it answers "clang version" and also names
-                //      GCC nowhere, while gcc's banner says gcc and GCC both.
-                if (memory_search(build_file_two, length, "clang", 5) ||
-                    memory_search(build_file_two, length, "Clang", 5))
-                        return "";
-
-                if (memory_search(build_file_two, length, "gcc", 3) ||
-                    memory_search(build_file_two, length, "GCC", 3))
-                        return build_setting_get("whole_program_flags");
+        case 'c':
+                return "-fdefer-ts";
+        case 'g':
+                return build_setting_get("whole_program_flags");
+        default:
+                return "";
         }
-
-        return "";
 }
 
 static b32 build_freestanding_link(string_address source, string_address output,
