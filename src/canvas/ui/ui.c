@@ -33,6 +33,9 @@
 #ifndef MOONWATER_CANVAS_UI
 #define MOONWATER_CANVAS_UI
 
+// What text is below the look: documents, history, selections, segmentation (text.c, which says why it is its own file).
+#include "text.c"
+
 #define UI_TEXT 14     // a label, a value
 #define UI_SMALL 12    // a section's header
 #define UI_TITLE 20    // the window's title

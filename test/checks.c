@@ -128759,6 +128759,1883 @@ b32 main(void)
 #endif
 #endif /* CHECK_spark_entry */
 
+#ifdef CHECK_text_engine
+/*
+        The text engine (src/canvas/ui/text.c) against what it stands for.
+
+        A naive model -- the document as one array of bytes, every edit a copy, every line counted from the start --
+        is driven through the same random edits as the piece tree, and after each the two must agree on every byte,
+        on the line count, and on where lines start and which line an offset is on. The history is walked back and
+        forth against the model's snapshots; every editing command is undone and redone and must give back the text
+        and the selections exactly; an edit at many carets must be the same as the edits made one at a time; the
+        cluster and word boundaries must be the official Unicode test files' (a slice of each is pinned here; the
+        text_tables harness feeds all of them); find must find what the regex engine finds on each line; bytes that
+        are not UTF-8 and CR LF line ends must come back as they went in; a sparse file of a gigabyte must open.
+        `bench` prints the costs instead: opening 100 MB, typing in it, a line lookup, a replace of every match.
+*/
+#include "../src/lib.util.c"
+#include "../src/moonwater/spark.c"
+#include "../src/sh/shell.c"
+
+static positive te_checks, te_failures;
+static p64 te_seed = 0x2545f4914f6cdd1dull;
+
+static fn te_check(bool condition, const char address_to what, positive detail)
+{
+        te_checks++;
+        if (condition)
+                return;
+        te_failures++;
+        if (te_failures <= 40)
+                string_format(log, "FAIL %s (%p)\n", (string_address)what, detail);
+}
+
+static p32 te_next(p32 below)
+{
+        XORSHIFT64(te_seed);
+        return below ? (p32)((te_seed >> 11) % below) : 0;
+}
+
+/* ---- the model ---- */
+
+static p8 address_to te_model;
+static positive te_model_length, te_model_room;
+
+static fn te_model_set(const p8 address_to bytes, positive length)
+{
+        array_store_reserve(te_model, te_model_room, 0, length + 1, 4096);
+        memory_copy(te_model, bytes, length);
+        te_model_length = length;
+}
+
+static fn te_model_replace(positive at, positive removed, const p8 address_to text, positive length)
+{
+        array_store_reserve(te_model, te_model_room, te_model_length, te_model_length - removed + length + 1, 4096);
+        memory_copy(te_model + at + length, te_model + at + removed, te_model_length - at - removed);
+        memory_copy(te_model + at, text, length);
+        te_model_length = te_model_length - removed + length;
+}
+
+// A line end of the model at at: its length, 0 for none.
+static positive te_model_break(positive at)
+{
+        if (te_model[at] == '\n')
+                return 1;
+        if (te_model[at] == '\r')
+                return at + 1 < te_model_length && te_model[at + 1] == '\n' ? 2 : 1;
+        return 0;
+}
+
+static positive te_model_lines(void)
+{
+        positive lines = 1;
+
+        for (positive at = 0; at < te_model_length;)
+        {
+                positive size = te_model_break(at);
+
+                lines += size != 0;
+                at += size ? size : 1;
+        }
+        return lines;
+}
+
+static positive te_model_line_start(positive line)
+{
+        positive at = 0;
+
+        while (line && at < te_model_length)
+        {
+                positive size = te_model_break(at);
+
+                at += size ? size : 1;
+                line -= size != 0;
+        }
+        return at;
+}
+
+static positive te_model_line_of(positive offset)
+{
+        positive line = 0;
+
+        for (positive at = 0; at < offset;)
+        {
+                positive size = te_model_break(at);
+
+                if (size && at + size <= offset)
+                        line++;
+                at += size ? size : 1;
+        }
+        return line;
+}
+
+static b32 te_same(const struct doc address_to doc)
+{
+        static p8 address_to read;
+        static positive read_room;
+
+        if (doc_length(doc) != te_model_length)
+                return false;
+        array_store_reserve(read, read_room, 0, te_model_length + 1, 4096);
+        return doc_read(doc, 0, read, te_model_length) == te_model_length && !memory_compare(read, te_model, te_model_length);
+}
+
+// Random text that is mostly letters, with every kind of line end, multibyte characters, marks and bytes that are not UTF-8.
+static positive te_text(p8 address_to into, positive most)
+{
+        static const char address_to const pieces[] = {"a", "b", "c", " ", "\n", "\r", "\r\n", "\xc3\xa9", "e\xcc\x81", "\xe2\x82",
+                                                       "\xff", "\xf0\x9f\x98\x80", "\t", "xyz", "(", ")", "\xe4\xb8\xad"};
+        positive length = 0, count = te_next((p32)most + 1);
+
+        for (positive i = 0; i < count; i++)
+        {
+                const char address_to piece = pieces[te_next(sizeof(pieces) / sizeof(pieces[0]))];
+                positive size = string_length((string_address)piece);
+
+                if (length + size > most)
+                        break;
+                memory_copy(into + length, piece, size);
+                length += size;
+        }
+        return length;
+}
+
+/* ---- the buffer and the line index against the model ---- */
+
+static fn te_buffer(positive rounds, positive steps)
+{
+        for (positive round = 0; round < rounds; round++)
+        {
+                struct doc doc;
+                p8 start[512], text[64];
+                positive length = te_text(start, sizeof(start));
+
+                doc_open(&doc, start, length);
+                te_model_set(start, length);
+                // A document starting with a byte order mark keeps it aside.
+                if (length >= 3 && start[0] == 0xef && start[1] == 0xbb && start[2] == 0xbf)
+                        te_model_set(start + 3, length - 3);
+                for (positive step = 0; step < steps; step++)
+                {
+                        positive at = te_next((p32)te_model_length + 1), removed = te_next((p32)(te_model_length - at) + 1);
+                        positive size = te_text(text, sizeof(text));
+
+                        removed = te_next(3) ? removed % 8 : removed;
+                        te_check(doc_replace(&doc, at, removed, text, size), "replace refused", step);
+                        te_model_replace(at, removed, text, size);
+                        te_check(doc_length(&doc) == te_model_length, "length", doc_length(&doc));
+                        te_check(doc_line_count(&doc) == te_model_lines(), "line count", doc_line_count(&doc));
+                        for (p32 probe = 0; probe < 4; probe++)
+                        {
+                                positive line = te_next((p32)te_model_lines() + 1), offset = te_next((p32)te_model_length + 1);
+
+                                te_check(doc_line_start(&doc, line) == te_model_line_start(line), "line start", line);
+                                te_check(doc_line_of(&doc, offset) == te_model_line_of(offset), "line of", offset);
+                        }
+                        if (step % 16 == 0 || step + 1 == steps)
+                                te_check(te_same(&doc), "bytes", step);
+                }
+                doc_close(&doc);
+        }
+}
+
+// Every node's counts are its bytes', and its sums its children's and its own: the tree is whole.
+static b32 te_tree_whole(const struct doc address_to doc, p32 node)
+{
+        const struct doc_node address_to n;
+        p32 lf, cr, pairs;
+        p8 edge;
+        struct doc_sums sum;
+
+        if (!node)
+                return true;
+        n = &doc->nodes[node];
+        if (!te_tree_whole(doc, n->left) || !te_tree_whole(doc, n->right))
+                return false;
+        doc_count(doc_piece_bytes(doc, n), n->length, &lf, &cr, &pairs, &edge);
+        if (lf != n->lf || cr != n->cr || pairs != n->pairs || edge != n->edge || !n->length)
+                return false;
+        sum = n->sum;
+        doc_update((struct doc address_to)doc, node);
+        return sum.bytes == n->sum.bytes && sum.lf == n->sum.lf && sum.cr == n->sum.cr && sum.pairs == n->sum.pairs &&
+               sum.edge == n->sum.edge;
+}
+
+/* ---- the history against the model's snapshots ---- */
+
+static fn te_history(positive rounds, positive steps)
+{
+        static p8 address_to snapshots[256];
+        static positive snapshot_length[256], snapshot_room[256];
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                struct doc doc;
+                p8 start[256], text[32];
+                positive length = te_text(start, sizeof(start)), at_step = 0, count;
+
+                if (length >= 3 && start[0] == 0xef)
+                        start[0] = 'a';
+                doc_open(&doc, start, length);
+                te_model_set(start, length);
+                count = steps < 255 ? steps : 255;
+                array_store_reserve(snapshots[0], snapshot_room[0], 0, length + 1, 256);
+                memory_copy(snapshots[0], start, length);
+                snapshot_length[0] = length;
+                for (positive step = 1; step <= count; step++)
+                {
+                        positive at = te_next((p32)te_model_length + 1), removed = te_next(4), size = te_text(text, sizeof(text));
+
+                        removed = removed > te_model_length - at ? te_model_length - at : removed;
+                        // Every step changes something: a step that changed nothing would be no undo, and the walk counts undos.
+                        if (!removed && !size)
+                                text[0] = 'x', size = 1;
+                        doc.now += 2000000000ull;
+                        doc_group_begin(&doc, DOC_KIND_OTHER, 0);
+                        doc_replace(&doc, at, removed, text, size);
+                        // Sometimes a second change in the same group: one undo takes both back.
+                        if (te_next(3) == 0 && te_model_length - removed + size > 0)
+                        {
+                                te_model_replace(at, removed, text, size);
+                                at = te_next((p32)te_model_length + 1);
+                                removed = te_next(2) && at < te_model_length ? 1 : 0;
+                                doc_replace(&doc, at, removed, (const p8 address_to) "Q", 1);
+                                te_model_replace(at, removed, (const p8 address_to) "Q", 1);
+                        }
+                        else
+                                te_model_replace(at, removed, text, size);
+                        doc_group_end(&doc, 0);
+                        te_check(te_tree_whole(&doc, doc.root), "the tree after an edit", step);
+                        array_store_reserve(snapshots[step], snapshot_room[step], 0, te_model_length + 1, 256);
+                        memory_copy(snapshots[step], te_model, te_model_length);
+                        snapshot_length[step] = te_model_length;
+                }
+                at_step = count;
+                for (positive walk = 0; walk < count * 3; walk++)
+                {
+                        b32 back = te_next(2);
+
+                        if (back ? doc_undo(&doc) : doc_redo(&doc))
+                                at_step += back ? (positive)-1 : 1;
+                        else
+                                te_check(back ? at_step == 0 : at_step == count, "undo or redo refused in the middle", at_step);
+                        te_model_set(snapshots[at_step], snapshot_length[at_step]);
+                        te_check(te_tree_whole(&doc, doc.root), back ? "the tree after an undo" : "the tree after a redo", at_step);
+                        te_check(te_same(&doc), "history walk", at_step);
+                        te_check(doc_line_count(&doc) == te_model_lines(), "history line count", at_step);
+                }
+                // A change after an undo drops the redo.
+                if (at_step > 0)
+                {
+                        doc_undo(&doc);
+                        doc_replace(&doc, 0, 0, (const p8 address_to) "z", 1);
+                        te_check(!doc_redo(&doc), "redo kept after a new change", at_step);
+                }
+                doc_close(&doc);
+        }
+}
+
+/* ---- every command undone and redone ---- */
+
+static b32 te_selections_same(const struct doc_selection address_to a, positive count_a, const struct doc_selection address_to b,
+                              positive count_b)
+{
+        if (count_a != count_b)
+                return false;
+        for (positive i = 0; i < count_a; i++)
+                if (a[i].anchor != b[i].anchor || a[i].active != b[i].active)
+                        return false;
+        return true;
+}
+
+static fn te_commands(positive rounds)
+{
+        static const p32 commands[] = {
+            DOC_CMD_BACKSPACE, DOC_CMD_DELETE, DOC_CMD_DELETE_WORD_LEFT, DOC_CMD_DELETE_WORD_RIGHT, DOC_CMD_DELETE_LINE_LEFT,
+            DOC_CMD_DELETE_LINE_RIGHT, DOC_CMD_NEWLINE, DOC_CMD_TAB, DOC_CMD_OUTDENT, DOC_CMD_INDENT, DOC_CMD_MOVE_LINE_UP,
+            DOC_CMD_MOVE_LINE_DOWN, DOC_CMD_COPY_LINE_UP, DOC_CMD_COPY_LINE_DOWN, DOC_CMD_DELETE_LINES, DOC_CMD_JOIN_LINES,
+            DOC_CMD_TRANSPOSE, DOC_CMD_LINE_BELOW, DOC_CMD_LINE_ABOVE, DOC_CMD_COMMENT, DOC_CMD_UPPER, DOC_CMD_LOWER,
+            DOC_CMD_TITLE, DOC_CMD_SORT, DOC_CMD_SORT_DESCENDING};
+        static struct doc_selection before[64], after[64];
+        static p8 address_to after_text;
+        static positive after_room;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                struct doc doc;
+                p8 start[600];
+                positive length = 0, lines = 2 + te_next(8);
+
+                for (positive line = 0; line < lines; line++)
+                {
+                        positive indent = te_next(3) * 4, words = te_next(4);
+
+                        for (positive i = 0; i < indent; i++)
+                                start[length++] = ' ';
+                        for (positive w = 0; w < words; w++)
+                        {
+                                length += te_text(start + length, 8);
+                                start[length++] = ' ';
+                        }
+                        if (line + 1 < lines || te_next(2))
+                        {
+                                static const char address_to const ends[] = {"\n", "\r\n", "\r"};
+                                const char address_to finish = ends[te_next(10) < 8 ? 0 : te_next(3)];
+
+                                memory_copy(start + length, finish, string_length((string_address)finish));
+                                length += string_length((string_address)finish);
+                        }
+                }
+                for (positive c = 0; c < sizeof(commands) / sizeof(commands[0]); c++)
+                {
+                        positive carets = 1 + te_next(3), count_before, count_after;
+                        p32 command = commands[c];
+
+                        doc_open(&doc, start, length);
+                        doc.now = 0;
+                        doc.selection_count = 0;
+                        for (positive k = 0; k < carets; k++)
+                        {
+                                p64 a = te_next((p32)doc_length(&doc) + 1), b = te_next(3) ? a : te_next((p32)doc_length(&doc) + 1);
+
+                                // On cluster boundaries, as every caret the editor makes is.
+                                a = doc_cluster_end(&doc, doc_cluster_start(&doc, a));
+                                b = doc_cluster_end(&doc, doc_cluster_start(&doc, b));
+                                array_store_reserve(doc.selections, doc.selection_room, doc.selection_count, doc.selection_count + 1, 16);
+                                doc.selections[doc.selection_count++] = (struct doc_selection){a, b, -1};
+                        }
+                        doc_normalize(&doc);
+                        count_before = doc.selection_count < 64 ? doc.selection_count : 64;
+                        memory_copy(before, doc.selections, count_before * sizeof(before[0]));
+                        te_model_set(start, length);
+                        doc_command(&doc, command, "//");
+                        count_after = doc.selection_count < 64 ? doc.selection_count : 64;
+                        memory_copy(after, doc.selections, count_after * sizeof(after[0]));
+                        array_store_reserve(after_text, after_room, 0, doc_length(&doc) + 1, 4096);
+                        {
+                                positive after_length = doc_read(&doc, 0, after_text, (positive)doc_length(&doc));
+                                b32 changed = doc.done > 0;
+
+                                if (changed)
+                                {
+                                        te_check(doc_undo(&doc), "undo of a command", command);
+                                        te_check(te_same(&doc), "undo gives the text back", command);
+                                        te_check(te_selections_same(doc.selections, doc.selection_count, before, count_before),
+                                                 "undo gives the selections back", command);
+                                        te_check(doc_redo(&doc), "redo of a command", command);
+                                        te_model_set(after_text, after_length);
+                                        te_check(te_same(&doc), "redo gives the change back", command);
+                                        te_check(te_selections_same(doc.selections, doc.selection_count, after, count_after),
+                                                 "redo gives the selections back", command);
+                                }
+                                else
+                                        te_check(te_same(&doc), "a command that changed nothing kept the text", command);
+                                te_check(doc_line_count(&doc) >= 1, "lines after a command", command);
+                        }
+                        doc_close(&doc);
+                }
+        }
+}
+
+/* ---- an edit at many carets is the edits made one at a time ---- */
+
+static fn te_carets(positive rounds)
+{
+        for (positive round = 0; round < rounds; round++)
+        {
+                struct doc doc;
+                p8 start[300];
+                positive length = 0, carets = 2 + te_next(6), places[8], count = 0;
+                static const p8 typed[] = "xy";
+
+                // ASCII lines, so every offset is a cluster's boundary.
+                for (positive i = 0, n = 20 + te_next(200); i < n; i++)
+                        start[length++] = te_next(8) == 0 ? '\n' : (p8)('a' + te_next(26));
+                doc_open(&doc, start, length);
+                doc.auto_close = false;
+                doc.selection_count = 0;
+                for (positive k = 0; k < carets; k++)
+                {
+                        positive at = te_next((p32)length + 1);
+                        b32 seen = false;
+
+                        for (positive j = 0; j < count; j++)
+                                seen |= places[j] == at;
+                        if (seen)
+                                continue;
+                        places[count++] = at;
+                        array_store_reserve(doc.selections, doc.selection_room, doc.selection_count, doc.selection_count + 1, 16);
+                        doc.selections[doc.selection_count++] = (struct doc_selection){at, at, -1};
+                }
+                doc_normalize(&doc);
+                doc_type(&doc, typed, 2);
+                // The same insertions made one at a time, from the last place to the first.
+                te_model_set(start, length);
+                for (positive i = 0; i < count; i++)
+                        for (positive j = i + 1; j < count; j++)
+                                if (places[j] > places[i])
+                                {
+                                        positive t = places[i];
+
+                                        places[i] = places[j], places[j] = t;
+                                }
+                for (positive i = 0; i < count; i++)
+                        te_model_replace(places[i], 0, typed, 2);
+                te_check(te_same(&doc), "typing at many carets", count);
+                // Every caret after what it typed.
+                for (positive s = 0; s < doc.selection_count; s++)
+                        te_check(doc.selections[s].active >= 2 && te_model[doc.selections[s].active - 2] == 'x' &&
+                                     te_model[doc.selections[s].active - 1] == 'y',
+                                 "a caret after its typing", s);
+                // Backspace at every caret takes back what each typed.
+                doc_delete(&doc, false, DOC_REACH_CLUSTER);
+                doc_delete(&doc, false, DOC_REACH_CLUSTER);
+                te_model_set(start, length);
+                te_check(te_same(&doc), "backspace at many carets", count);
+                doc_close(&doc);
+        }
+}
+
+/* ---- the official boundaries ---- */
+// TEXT_VECTORS BEGIN: every fourth GraphemeBreakTest and every sixth WordBreakTest vector of Unicode 16.0.0, and every
+// one with three regional indicators or a ZWJ, made by differential.py --harness text_tables UCD_DIR --write; a code
+static const p32 text_grapheme_vectors[] = {
+        0x80000020, 0x80000020, 0xffffffff,
+        0x80000020, 0x8000000a, 0xffffffff,
+        0x80000020, 0x200c, 0xffffffff,
+        0x80000020, 0x80000600, 0xffffffff,
+        0x80000020, 0x80001100, 0xffffffff,
+        0x80000020, 0x800011a8, 0xffffffff,
+        0x80000020, 0x8000ac01, 0xffffffff,
+        0x80000020, 0x80000904, 0xffffffff,
+        0x80000020, 0x80000915, 0xffffffff,
+        0x80000020, 0x300, 0xffffffff,
+        0x80000020, 0x94d, 0xffffffff,
+        0x80000020, 0x200d, 0xffffffff,
+        0x80000020, 0x308, 0x200d, 0xffffffff,
+        0x80000020, 0x80000378, 0xffffffff,
+        0x8000000d, 0x8000000d, 0xffffffff,
+        0x8000000d, 0x80000001, 0xffffffff,
+        0x8000000d, 0x8001f1e6, 0xffffffff,
+        0x8000000d, 0x80000a03, 0xffffffff,
+        0x8000000d, 0x80001160, 0xffffffff,
+        0x8000000d, 0x8000ac00, 0xffffffff,
+        0x8000000d, 0x80000903, 0xffffffff,
+        0x8000000d, 0x80000d4e, 0xffffffff,
+        0x8000000d, 0x8000231a, 0xffffffff,
+        0x8000000d, 0x80000900, 0xffffffff,
+        0x8000000d, 0x8000200d, 0xffffffff,
+        0x8000000d, 0x80000308, 0x200d, 0xffffffff,
+        0x8000000a, 0x80000020, 0xffffffff,
+        0x8000000a, 0x8000000a, 0xffffffff,
+        0x8000000a, 0x8000200c, 0xffffffff,
+        0x8000000a, 0x80000600, 0xffffffff,
+        0x8000000a, 0x80001100, 0xffffffff,
+        0x8000000a, 0x800011a8, 0xffffffff,
+        0x8000000a, 0x8000ac01, 0xffffffff,
+        0x8000000a, 0x80000904, 0xffffffff,
+        0x8000000a, 0x80000915, 0xffffffff,
+        0x8000000a, 0x80000300, 0xffffffff,
+        0x8000000a, 0x8000094d, 0xffffffff,
+        0x8000000a, 0x8000200d, 0xffffffff,
+        0x8000000a, 0x80000308, 0x200d, 0xffffffff,
+        0x8000000a, 0x80000378, 0xffffffff,
+        0x80000001, 0x8000000d, 0xffffffff,
+        0x80000001, 0x80000001, 0xffffffff,
+        0x80000001, 0x8001f1e6, 0xffffffff,
+        0x80000001, 0x80000a03, 0xffffffff,
+        0x80000001, 0x80001160, 0xffffffff,
+        0x80000001, 0x8000ac00, 0xffffffff,
+        0x80000001, 0x80000903, 0xffffffff,
+        0x80000001, 0x80000d4e, 0xffffffff,
+        0x80000001, 0x8000231a, 0xffffffff,
+        0x80000001, 0x80000900, 0xffffffff,
+        0x80000001, 0x8000200d, 0xffffffff,
+        0x80000001, 0x80000308, 0x200d, 0xffffffff,
+        0x8000200c, 0x80000020, 0xffffffff,
+        0x8000200c, 0x8000000a, 0xffffffff,
+        0x8000200c, 0x200c, 0xffffffff,
+        0x8000200c, 0x80000600, 0xffffffff,
+        0x8000200c, 0x80001100, 0xffffffff,
+        0x8000200c, 0x800011a8, 0xffffffff,
+        0x8000200c, 0x8000ac01, 0xffffffff,
+        0x8000200c, 0x80000904, 0xffffffff,
+        0x8000200c, 0x80000915, 0xffffffff,
+        0x8000200c, 0x300, 0xffffffff,
+        0x8000200c, 0x94d, 0xffffffff,
+        0x8000200c, 0x200d, 0xffffffff,
+        0x8000200c, 0x308, 0x200d, 0xffffffff,
+        0x8000200c, 0x80000378, 0xffffffff,
+        0x8001f1e6, 0x8000000d, 0xffffffff,
+        0x8001f1e6, 0x80000001, 0xffffffff,
+        0x8001f1e6, 0x1f1e6, 0xffffffff,
+        0x8001f1e6, 0xa03, 0xffffffff,
+        0x8001f1e6, 0x80001160, 0xffffffff,
+        0x8001f1e6, 0x8000ac00, 0xffffffff,
+        0x8001f1e6, 0x903, 0xffffffff,
+        0x8001f1e6, 0x80000d4e, 0xffffffff,
+        0x8001f1e6, 0x8000231a, 0xffffffff,
+        0x8001f1e6, 0x900, 0xffffffff,
+        0x8001f1e6, 0x200d, 0xffffffff,
+        0x8001f1e6, 0x308, 0x200d, 0xffffffff,
+        0x80000600, 0x20, 0xffffffff,
+        0x80000600, 0x8000000a, 0xffffffff,
+        0x80000600, 0x200c, 0xffffffff,
+        0x80000600, 0x600, 0xffffffff,
+        0x80000600, 0x1100, 0xffffffff,
+        0x80000600, 0x11a8, 0xffffffff,
+        0x80000600, 0xac01, 0xffffffff,
+        0x80000600, 0x904, 0xffffffff,
+        0x80000600, 0x915, 0xffffffff,
+        0x80000600, 0x300, 0xffffffff,
+        0x80000600, 0x94d, 0xffffffff,
+        0x80000600, 0x200d, 0xffffffff,
+        0x80000600, 0x308, 0x200d, 0xffffffff,
+        0x80000600, 0x378, 0xffffffff,
+        0x80000a03, 0x8000000d, 0xffffffff,
+        0x80000a03, 0x80000001, 0xffffffff,
+        0x80000a03, 0x8001f1e6, 0xffffffff,
+        0x80000a03, 0xa03, 0xffffffff,
+        0x80000a03, 0x80001160, 0xffffffff,
+        0x80000a03, 0x8000ac00, 0xffffffff,
+        0x80000a03, 0x903, 0xffffffff,
+        0x80000a03, 0x80000d4e, 0xffffffff,
+        0x80000a03, 0x8000231a, 0xffffffff,
+        0x80000a03, 0x900, 0xffffffff,
+        0x80000a03, 0x200d, 0xffffffff,
+        0x80000a03, 0x308, 0x200d, 0xffffffff,
+        0x80001100, 0x80000020, 0xffffffff,
+        0x80001100, 0x8000000a, 0xffffffff,
+        0x80001100, 0x200c, 0xffffffff,
+        0x80001100, 0x80000600, 0xffffffff,
+        0x80001100, 0x1100, 0xffffffff,
+        0x80001100, 0x800011a8, 0xffffffff,
+        0x80001100, 0xac01, 0xffffffff,
+        0x80001100, 0x80000904, 0xffffffff,
+        0x80001100, 0x80000915, 0xffffffff,
+        0x80001100, 0x300, 0xffffffff,
+        0x80001100, 0x94d, 0xffffffff,
+        0x80001100, 0x200d, 0xffffffff,
+        0x80001100, 0x308, 0x200d, 0xffffffff,
+        0x80001100, 0x80000378, 0xffffffff,
+        0x80001160, 0x8000000d, 0xffffffff,
+        0x80001160, 0x80000001, 0xffffffff,
+        0x80001160, 0x8001f1e6, 0xffffffff,
+        0x80001160, 0xa03, 0xffffffff,
+        0x80001160, 0x1160, 0xffffffff,
+        0x80001160, 0x8000ac00, 0xffffffff,
+        0x80001160, 0x903, 0xffffffff,
+        0x80001160, 0x80000d4e, 0xffffffff,
+        0x80001160, 0x8000231a, 0xffffffff,
+        0x80001160, 0x900, 0xffffffff,
+        0x80001160, 0x200d, 0xffffffff,
+        0x80001160, 0x308, 0x200d, 0xffffffff,
+        0x800011a8, 0x80000020, 0xffffffff,
+        0x800011a8, 0x8000000a, 0xffffffff,
+        0x800011a8, 0x200c, 0xffffffff,
+        0x800011a8, 0x80000600, 0xffffffff,
+        0x800011a8, 0x80001100, 0xffffffff,
+        0x800011a8, 0x11a8, 0xffffffff,
+        0x800011a8, 0x8000ac01, 0xffffffff,
+        0x800011a8, 0x80000904, 0xffffffff,
+        0x800011a8, 0x80000915, 0xffffffff,
+        0x800011a8, 0x300, 0xffffffff,
+        0x800011a8, 0x94d, 0xffffffff,
+        0x800011a8, 0x200d, 0xffffffff,
+        0x800011a8, 0x308, 0x200d, 0xffffffff,
+        0x800011a8, 0x80000378, 0xffffffff,
+        0x8000ac00, 0x8000000d, 0xffffffff,
+        0x8000ac00, 0x80000001, 0xffffffff,
+        0x8000ac00, 0x8001f1e6, 0xffffffff,
+        0x8000ac00, 0xa03, 0xffffffff,
+        0x8000ac00, 0x1160, 0xffffffff,
+        0x8000ac00, 0x8000ac00, 0xffffffff,
+        0x8000ac00, 0x903, 0xffffffff,
+        0x8000ac00, 0x80000d4e, 0xffffffff,
+        0x8000ac00, 0x8000231a, 0xffffffff,
+        0x8000ac00, 0x900, 0xffffffff,
+        0x8000ac00, 0x200d, 0xffffffff,
+        0x8000ac00, 0x308, 0x200d, 0xffffffff,
+        0x8000ac01, 0x80000020, 0xffffffff,
+        0x8000ac01, 0x8000000a, 0xffffffff,
+        0x8000ac01, 0x200c, 0xffffffff,
+        0x8000ac01, 0x80000600, 0xffffffff,
+        0x8000ac01, 0x80001100, 0xffffffff,
+        0x8000ac01, 0x11a8, 0xffffffff,
+        0x8000ac01, 0x8000ac01, 0xffffffff,
+        0x8000ac01, 0x80000904, 0xffffffff,
+        0x8000ac01, 0x80000915, 0xffffffff,
+        0x8000ac01, 0x300, 0xffffffff,
+        0x8000ac01, 0x94d, 0xffffffff,
+        0x8000ac01, 0x200d, 0xffffffff,
+        0x8000ac01, 0x308, 0x200d, 0xffffffff,
+        0x8000ac01, 0x80000378, 0xffffffff,
+        0x80000903, 0x8000000d, 0xffffffff,
+        0x80000903, 0x80000001, 0xffffffff,
+        0x80000903, 0x8001f1e6, 0xffffffff,
+        0x80000903, 0xa03, 0xffffffff,
+        0x80000903, 0x80001160, 0xffffffff,
+        0x80000903, 0x8000ac00, 0xffffffff,
+        0x80000903, 0x903, 0xffffffff,
+        0x80000903, 0x80000d4e, 0xffffffff,
+        0x80000903, 0x8000231a, 0xffffffff,
+        0x80000903, 0x900, 0xffffffff,
+        0x80000903, 0x200d, 0xffffffff,
+        0x80000903, 0x308, 0x200d, 0xffffffff,
+        0x80000904, 0x80000020, 0xffffffff,
+        0x80000904, 0x8000000a, 0xffffffff,
+        0x80000904, 0x200c, 0xffffffff,
+        0x80000904, 0x80000600, 0xffffffff,
+        0x80000904, 0x80001100, 0xffffffff,
+        0x80000904, 0x800011a8, 0xffffffff,
+        0x80000904, 0x8000ac01, 0xffffffff,
+        0x80000904, 0x80000904, 0xffffffff,
+        0x80000904, 0x80000915, 0xffffffff,
+        0x80000904, 0x300, 0xffffffff,
+        0x80000904, 0x94d, 0xffffffff,
+        0x80000904, 0x200d, 0xffffffff,
+        0x80000904, 0x308, 0x200d, 0xffffffff,
+        0x80000904, 0x80000378, 0xffffffff,
+        0x80000d4e, 0x8000000d, 0xffffffff,
+        0x80000d4e, 0x80000001, 0xffffffff,
+        0x80000d4e, 0x1f1e6, 0xffffffff,
+        0x80000d4e, 0xa03, 0xffffffff,
+        0x80000d4e, 0x1160, 0xffffffff,
+        0x80000d4e, 0xac00, 0xffffffff,
+        0x80000d4e, 0x903, 0xffffffff,
+        0x80000d4e, 0xd4e, 0xffffffff,
+        0x80000d4e, 0x231a, 0xffffffff,
+        0x80000d4e, 0x900, 0xffffffff,
+        0x80000d4e, 0x200d, 0xffffffff,
+        0x80000d4e, 0x308, 0x200d, 0xffffffff,
+        0x80000915, 0x80000020, 0xffffffff,
+        0x80000915, 0x8000000a, 0xffffffff,
+        0x80000915, 0x200c, 0xffffffff,
+        0x80000915, 0x80000600, 0xffffffff,
+        0x80000915, 0x80001100, 0xffffffff,
+        0x80000915, 0x800011a8, 0xffffffff,
+        0x80000915, 0x8000ac01, 0xffffffff,
+        0x80000915, 0x80000904, 0xffffffff,
+        0x80000915, 0x80000915, 0xffffffff,
+        0x80000915, 0x300, 0xffffffff,
+        0x80000915, 0x94d, 0xffffffff,
+        0x80000915, 0x200d, 0xffffffff,
+        0x80000915, 0x308, 0x200d, 0xffffffff,
+        0x80000915, 0x80000378, 0xffffffff,
+        0x8000231a, 0x8000000d, 0xffffffff,
+        0x8000231a, 0x80000001, 0xffffffff,
+        0x8000231a, 0x8001f1e6, 0xffffffff,
+        0x8000231a, 0xa03, 0xffffffff,
+        0x8000231a, 0x80001160, 0xffffffff,
+        0x8000231a, 0x8000ac00, 0xffffffff,
+        0x8000231a, 0x903, 0xffffffff,
+        0x8000231a, 0x80000d4e, 0xffffffff,
+        0x8000231a, 0x8000231a, 0xffffffff,
+        0x8000231a, 0x900, 0xffffffff,
+        0x8000231a, 0x200d, 0xffffffff,
+        0x8000231a, 0x308, 0x200d, 0xffffffff,
+        0x80000300, 0x80000020, 0xffffffff,
+        0x80000300, 0x8000000a, 0xffffffff,
+        0x80000300, 0x200c, 0xffffffff,
+        0x80000300, 0x80000600, 0xffffffff,
+        0x80000300, 0x80001100, 0xffffffff,
+        0x80000300, 0x800011a8, 0xffffffff,
+        0x80000300, 0x8000ac01, 0xffffffff,
+        0x80000300, 0x80000904, 0xffffffff,
+        0x80000300, 0x80000915, 0xffffffff,
+        0x80000300, 0x300, 0xffffffff,
+        0x80000300, 0x94d, 0xffffffff,
+        0x80000300, 0x200d, 0xffffffff,
+        0x80000300, 0x308, 0x200d, 0xffffffff,
+        0x80000300, 0x80000378, 0xffffffff,
+        0x80000900, 0x8000000d, 0xffffffff,
+        0x80000900, 0x80000001, 0xffffffff,
+        0x80000900, 0x8001f1e6, 0xffffffff,
+        0x80000900, 0xa03, 0xffffffff,
+        0x80000900, 0x80001160, 0xffffffff,
+        0x80000900, 0x8000ac00, 0xffffffff,
+        0x80000900, 0x903, 0xffffffff,
+        0x80000900, 0x80000d4e, 0xffffffff,
+        0x80000900, 0x8000231a, 0xffffffff,
+        0x80000900, 0x900, 0xffffffff,
+        0x80000900, 0x200d, 0xffffffff,
+        0x80000900, 0x308, 0x200d, 0xffffffff,
+        0x8000094d, 0x80000020, 0xffffffff,
+        0x8000094d, 0x8000000a, 0xffffffff,
+        0x8000094d, 0x200c, 0xffffffff,
+        0x8000094d, 0x80000600, 0xffffffff,
+        0x8000094d, 0x80001100, 0xffffffff,
+        0x8000094d, 0x800011a8, 0xffffffff,
+        0x8000094d, 0x8000ac01, 0xffffffff,
+        0x8000094d, 0x80000904, 0xffffffff,
+        0x8000094d, 0x80000915, 0xffffffff,
+        0x8000094d, 0x300, 0xffffffff,
+        0x8000094d, 0x94d, 0xffffffff,
+        0x8000094d, 0x200d, 0xffffffff,
+        0x8000094d, 0x308, 0x200d, 0xffffffff,
+        0x8000094d, 0x80000378, 0xffffffff,
+        0x8000200d, 0x80000020, 0xffffffff,
+        0x8000200d, 0x308, 0x80000020, 0xffffffff,
+        0x8000200d, 0x8000000d, 0xffffffff,
+        0x8000200d, 0x308, 0x8000000d, 0xffffffff,
+        0x8000200d, 0x8000000a, 0xffffffff,
+        0x8000200d, 0x308, 0x8000000a, 0xffffffff,
+        0x8000200d, 0x80000001, 0xffffffff,
+        0x8000200d, 0x308, 0x80000001, 0xffffffff,
+        0x8000200d, 0x200c, 0xffffffff,
+        0x8000200d, 0x308, 0x200c, 0xffffffff,
+        0x8000200d, 0x8001f1e6, 0xffffffff,
+        0x8000200d, 0x308, 0x8001f1e6, 0xffffffff,
+        0x8000200d, 0x80000600, 0xffffffff,
+        0x8000200d, 0x308, 0x80000600, 0xffffffff,
+        0x8000200d, 0xa03, 0xffffffff,
+        0x8000200d, 0x308, 0xa03, 0xffffffff,
+        0x8000200d, 0x80001100, 0xffffffff,
+        0x8000200d, 0x308, 0x80001100, 0xffffffff,
+        0x8000200d, 0x80001160, 0xffffffff,
+        0x8000200d, 0x308, 0x80001160, 0xffffffff,
+        0x8000200d, 0x800011a8, 0xffffffff,
+        0x8000200d, 0x308, 0x800011a8, 0xffffffff,
+        0x8000200d, 0x8000ac00, 0xffffffff,
+        0x8000200d, 0x308, 0x8000ac00, 0xffffffff,
+        0x8000200d, 0x8000ac01, 0xffffffff,
+        0x8000200d, 0x308, 0x8000ac01, 0xffffffff,
+        0x8000200d, 0x903, 0xffffffff,
+        0x8000200d, 0x308, 0x903, 0xffffffff,
+        0x8000200d, 0x80000904, 0xffffffff,
+        0x8000200d, 0x308, 0x80000904, 0xffffffff,
+        0x8000200d, 0x80000d4e, 0xffffffff,
+        0x8000200d, 0x308, 0x80000d4e, 0xffffffff,
+        0x8000200d, 0x80000915, 0xffffffff,
+        0x8000200d, 0x308, 0x80000915, 0xffffffff,
+        0x8000200d, 0x8000231a, 0xffffffff,
+        0x8000200d, 0x308, 0x8000231a, 0xffffffff,
+        0x8000200d, 0x300, 0xffffffff,
+        0x8000200d, 0x308, 0x300, 0xffffffff,
+        0x8000200d, 0x900, 0xffffffff,
+        0x8000200d, 0x308, 0x900, 0xffffffff,
+        0x8000200d, 0x94d, 0xffffffff,
+        0x8000200d, 0x308, 0x94d, 0xffffffff,
+        0x8000200d, 0x200d, 0xffffffff,
+        0x8000200d, 0x308, 0x200d, 0xffffffff,
+        0x8000200d, 0x80000378, 0xffffffff,
+        0x8000200d, 0x308, 0x80000378, 0xffffffff,
+        0x80000378, 0x80000020, 0xffffffff,
+        0x80000378, 0x8000000a, 0xffffffff,
+        0x80000378, 0x200c, 0xffffffff,
+        0x80000378, 0x80000600, 0xffffffff,
+        0x80000378, 0x80001100, 0xffffffff,
+        0x80000378, 0x800011a8, 0xffffffff,
+        0x80000378, 0x8000ac01, 0xffffffff,
+        0x80000378, 0x80000904, 0xffffffff,
+        0x80000378, 0x80000915, 0xffffffff,
+        0x80000378, 0x300, 0xffffffff,
+        0x80000378, 0x94d, 0xffffffff,
+        0x80000378, 0x200d, 0xffffffff,
+        0x80000378, 0x308, 0x200d, 0xffffffff,
+        0x80000378, 0x80000378, 0xffffffff,
+        0x80000020, 0x200d, 0x80000646, 0xffffffff,
+        0x80000646, 0x200d, 0x80000020, 0xffffffff,
+        0x8000ac01, 0x11a8, 0x80001100, 0xffffffff,
+        0x8001f1e6, 0x1f1e7, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x1f1e7, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x1f1e7, 0x200d, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x200d, 0x8001f1e7, 0x1f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x1f1e7, 0x8001f1e8, 0x1f1e9, 0x80000062, 0xffffffff,
+        0x80000061, 0x200d, 0xffffffff,
+        0x80000061, 0x903, 0x80000062, 0xffffffff,
+        0x80000061, 0x1f3ff, 0x8001f476, 0x200d, 0x1f6d1, 0xffffffff,
+        0x8001f476, 0x1f3ff, 0x308, 0x200d, 0x1f476, 0x1f3ff, 0xffffffff,
+        0x8001f6d1, 0x200d, 0x1f6d1, 0xffffffff,
+        0x80000061, 0x200d, 0x8001f6d1, 0xffffffff,
+        0x80002701, 0x200d, 0x2701, 0xffffffff,
+        0x80000061, 0x200d, 0x80002701, 0xffffffff,
+        0x80000915, 0x94d, 0x94d, 0x924, 0xffffffff,
+        0x80000915, 0x94d, 0x200d, 0x924, 0xffffffff,
+        0x80000915, 0x93c, 0x200d, 0x94d, 0x924, 0xffffffff,
+        0x80000915, 0x93c, 0x94d, 0x200d, 0x924, 0xffffffff,
+        0x80000915, 0x94d, 0x924, 0x94d, 0x92f, 0xffffffff,
+        0x80000915, 0x94d, 0x94d, 0x924, 0xffffffff,
+};
+static const p32 text_word_vectors[] = {
+        0x80000001, 0x80000001, 0xffffffff,
+        0x80000001, 0x8000000b, 0xffffffff,
+        0x80000001, 0x8000003a, 0xffffffff,
+        0x80000001, 0x80000030, 0xffffffff,
+        0x80000001, 0x800005d0, 0xffffffff,
+        0x80000001, 0x8000231a, 0xffffffff,
+        0x80000001, 0x300, 0xffffffff,
+        0x80000001, 0x200d, 0xffffffff,
+        0x80000001, 0x308, 0x200d, 0xffffffff,
+        0x80000001, 0x80000061, 0x8000003a, 0xffffffff,
+        0x80000001, 0x80000061, 0x8000002c, 0xffffffff,
+        0x80000001, 0x80000031, 0x8000002c, 0xffffffff,
+        0x8000000d, 0x8000000d, 0xffffffff,
+        0x8000000d, 0x80003031, 0xffffffff,
+        0x8000000d, 0x8000002c, 0xffffffff,
+        0x8000000d, 0x8000005f, 0xffffffff,
+        0x8000000d, 0x80000022, 0xffffffff,
+        0x8000000d, 0x80000020, 0xffffffff,
+        0x8000000d, 0x8000200d, 0xffffffff,
+        0x8000000d, 0x80000308, 0x200d, 0xffffffff,
+        0x8000000d, 0x80000061, 0x80000027, 0xffffffff,
+        0x8000000d, 0x80000031, 0x8000003a, 0xffffffff,
+        0x8000000d, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x8000000a, 0x8000000a, 0xffffffff,
+        0x8000000a, 0x80000041, 0xffffffff,
+        0x8000000a, 0x8000002e, 0xffffffff,
+        0x8000000a, 0x8001f1e6, 0xffffffff,
+        0x8000000a, 0x80000027, 0xffffffff,
+        0x8000000a, 0x800000ad, 0xffffffff,
+        0x8000000a, 0x8000200d, 0xffffffff,
+        0x8000000a, 0x80000308, 0x200d, 0xffffffff,
+        0x8000000a, 0x80000061, 0x2060, 0xffffffff,
+        0x8000000a, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x8000000a, 0x80000031, 0x80000027, 0xffffffff,
+        0x8000000b, 0x80000001, 0xffffffff,
+        0x8000000b, 0x8000000b, 0xffffffff,
+        0x8000000b, 0x8000003a, 0xffffffff,
+        0x8000000b, 0x80000030, 0xffffffff,
+        0x8000000b, 0x800005d0, 0xffffffff,
+        0x8000000b, 0x8000231a, 0xffffffff,
+        0x8000000b, 0x80000300, 0xffffffff,
+        0x8000000b, 0x8000200d, 0xffffffff,
+        0x8000000b, 0x80000308, 0x200d, 0xffffffff,
+        0x8000000b, 0x80000061, 0x8000003a, 0xffffffff,
+        0x8000000b, 0x80000061, 0x8000002c, 0xffffffff,
+        0x8000000b, 0x80000031, 0x8000002c, 0xffffffff,
+        0x80003031, 0x8000000d, 0xffffffff,
+        0x80003031, 0x3031, 0xffffffff,
+        0x80003031, 0x8000002c, 0xffffffff,
+        0x80003031, 0x5f, 0xffffffff,
+        0x80003031, 0x80000022, 0xffffffff,
+        0x80003031, 0x80000020, 0xffffffff,
+        0x80003031, 0x200d, 0xffffffff,
+        0x80003031, 0x308, 0x200d, 0xffffffff,
+        0x80003031, 0x80000061, 0x80000027, 0xffffffff,
+        0x80003031, 0x80000031, 0x8000003a, 0xffffffff,
+        0x80003031, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x80000041, 0x8000000a, 0xffffffff,
+        0x80000041, 0x41, 0xffffffff,
+        0x80000041, 0x8000002e, 0xffffffff,
+        0x80000041, 0x8001f1e6, 0xffffffff,
+        0x80000041, 0x80000027, 0xffffffff,
+        0x80000041, 0xad, 0xffffffff,
+        0x80000041, 0x200d, 0xffffffff,
+        0x80000041, 0x308, 0x200d, 0xffffffff,
+        0x80000041, 0x61, 0x2060, 0xffffffff,
+        0x80000041, 0x61, 0x80000027, 0x2060, 0xffffffff,
+        0x80000041, 0x31, 0x80000027, 0xffffffff,
+        0x8000003a, 0x80000001, 0xffffffff,
+        0x8000003a, 0x8000000b, 0xffffffff,
+        0x8000003a, 0x8000003a, 0xffffffff,
+        0x8000003a, 0x80000030, 0xffffffff,
+        0x8000003a, 0x800005d0, 0xffffffff,
+        0x8000003a, 0x8000231a, 0xffffffff,
+        0x8000003a, 0x300, 0xffffffff,
+        0x8000003a, 0x200d, 0xffffffff,
+        0x8000003a, 0x308, 0x200d, 0xffffffff,
+        0x8000003a, 0x80000061, 0x8000003a, 0xffffffff,
+        0x8000003a, 0x80000061, 0x8000002c, 0xffffffff,
+        0x8000003a, 0x80000031, 0x8000002c, 0xffffffff,
+        0x8000002c, 0x8000000d, 0xffffffff,
+        0x8000002c, 0x80003031, 0xffffffff,
+        0x8000002c, 0x8000002c, 0xffffffff,
+        0x8000002c, 0x8000005f, 0xffffffff,
+        0x8000002c, 0x80000022, 0xffffffff,
+        0x8000002c, 0x80000020, 0xffffffff,
+        0x8000002c, 0x200d, 0xffffffff,
+        0x8000002c, 0x308, 0x200d, 0xffffffff,
+        0x8000002c, 0x80000061, 0x80000027, 0xffffffff,
+        0x8000002c, 0x80000031, 0x8000003a, 0xffffffff,
+        0x8000002c, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x8000002e, 0x8000000a, 0xffffffff,
+        0x8000002e, 0x80000041, 0xffffffff,
+        0x8000002e, 0x8000002e, 0xffffffff,
+        0x8000002e, 0x8001f1e6, 0xffffffff,
+        0x8000002e, 0x80000027, 0xffffffff,
+        0x8000002e, 0xad, 0xffffffff,
+        0x8000002e, 0x200d, 0xffffffff,
+        0x8000002e, 0x308, 0x200d, 0xffffffff,
+        0x8000002e, 0x80000061, 0x2060, 0xffffffff,
+        0x8000002e, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x8000002e, 0x80000031, 0x80000027, 0xffffffff,
+        0x80000030, 0x80000001, 0xffffffff,
+        0x80000030, 0x8000000b, 0xffffffff,
+        0x80000030, 0x8000003a, 0xffffffff,
+        0x80000030, 0x30, 0xffffffff,
+        0x80000030, 0x5d0, 0xffffffff,
+        0x80000030, 0x8000231a, 0xffffffff,
+        0x80000030, 0x300, 0xffffffff,
+        0x80000030, 0x200d, 0xffffffff,
+        0x80000030, 0x308, 0x200d, 0xffffffff,
+        0x80000030, 0x61, 0x8000003a, 0xffffffff,
+        0x80000030, 0x61, 0x8000002c, 0xffffffff,
+        0x80000030, 0x31, 0x8000002c, 0xffffffff,
+        0x8000005f, 0x8000000d, 0xffffffff,
+        0x8000005f, 0x3031, 0xffffffff,
+        0x8000005f, 0x8000002c, 0xffffffff,
+        0x8000005f, 0x5f, 0xffffffff,
+        0x8000005f, 0x80000022, 0xffffffff,
+        0x8000005f, 0x80000020, 0xffffffff,
+        0x8000005f, 0x200d, 0xffffffff,
+        0x8000005f, 0x308, 0x200d, 0xffffffff,
+        0x8000005f, 0x61, 0x80000027, 0xffffffff,
+        0x8000005f, 0x31, 0x8000003a, 0xffffffff,
+        0x8000005f, 0x31, 0x8000002e, 0x2060, 0xffffffff,
+        0x8001f1e6, 0x8000000a, 0xffffffff,
+        0x8001f1e6, 0x80000041, 0xffffffff,
+        0x8001f1e6, 0x8000002e, 0xffffffff,
+        0x8001f1e6, 0x1f1e6, 0xffffffff,
+        0x8001f1e6, 0x80000027, 0xffffffff,
+        0x8001f1e6, 0xad, 0xffffffff,
+        0x8001f1e6, 0x200d, 0xffffffff,
+        0x8001f1e6, 0x308, 0x200d, 0xffffffff,
+        0x8001f1e6, 0x80000061, 0x2060, 0xffffffff,
+        0x8001f1e6, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x8001f1e6, 0x80000031, 0x80000027, 0xffffffff,
+        0x800005d0, 0x80000001, 0xffffffff,
+        0x800005d0, 0x8000000b, 0xffffffff,
+        0x800005d0, 0x8000003a, 0xffffffff,
+        0x800005d0, 0x30, 0xffffffff,
+        0x800005d0, 0x5d0, 0xffffffff,
+        0x800005d0, 0x8000231a, 0xffffffff,
+        0x800005d0, 0x300, 0xffffffff,
+        0x800005d0, 0x200d, 0xffffffff,
+        0x800005d0, 0x308, 0x200d, 0xffffffff,
+        0x800005d0, 0x61, 0x8000003a, 0xffffffff,
+        0x800005d0, 0x61, 0x8000002c, 0xffffffff,
+        0x800005d0, 0x31, 0x8000002c, 0xffffffff,
+        0x80000022, 0x8000000d, 0xffffffff,
+        0x80000022, 0x80003031, 0xffffffff,
+        0x80000022, 0x8000002c, 0xffffffff,
+        0x80000022, 0x8000005f, 0xffffffff,
+        0x80000022, 0x80000022, 0xffffffff,
+        0x80000022, 0x80000020, 0xffffffff,
+        0x80000022, 0x200d, 0xffffffff,
+        0x80000022, 0x308, 0x200d, 0xffffffff,
+        0x80000022, 0x80000061, 0x80000027, 0xffffffff,
+        0x80000022, 0x80000031, 0x8000003a, 0xffffffff,
+        0x80000022, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x80000027, 0x8000000a, 0xffffffff,
+        0x80000027, 0x80000041, 0xffffffff,
+        0x80000027, 0x8000002e, 0xffffffff,
+        0x80000027, 0x8001f1e6, 0xffffffff,
+        0x80000027, 0x80000027, 0xffffffff,
+        0x80000027, 0xad, 0xffffffff,
+        0x80000027, 0x200d, 0xffffffff,
+        0x80000027, 0x308, 0x200d, 0xffffffff,
+        0x80000027, 0x80000061, 0x2060, 0xffffffff,
+        0x80000027, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x80000027, 0x80000031, 0x80000027, 0xffffffff,
+        0x8000231a, 0x80000001, 0xffffffff,
+        0x8000231a, 0x8000000b, 0xffffffff,
+        0x8000231a, 0x8000003a, 0xffffffff,
+        0x8000231a, 0x80000030, 0xffffffff,
+        0x8000231a, 0x800005d0, 0xffffffff,
+        0x8000231a, 0x8000231a, 0xffffffff,
+        0x8000231a, 0x300, 0xffffffff,
+        0x8000231a, 0x200d, 0xffffffff,
+        0x8000231a, 0x308, 0x200d, 0xffffffff,
+        0x8000231a, 0x80000061, 0x8000003a, 0xffffffff,
+        0x8000231a, 0x80000061, 0x8000002c, 0xffffffff,
+        0x8000231a, 0x80000031, 0x8000002c, 0xffffffff,
+        0x80000020, 0x8000000d, 0xffffffff,
+        0x80000020, 0x80003031, 0xffffffff,
+        0x80000020, 0x8000002c, 0xffffffff,
+        0x80000020, 0x8000005f, 0xffffffff,
+        0x80000020, 0x80000022, 0xffffffff,
+        0x80000020, 0x20, 0xffffffff,
+        0x80000020, 0x200d, 0xffffffff,
+        0x80000020, 0x308, 0x200d, 0xffffffff,
+        0x80000020, 0x80000061, 0x80000027, 0xffffffff,
+        0x80000020, 0x80000031, 0x8000003a, 0xffffffff,
+        0x80000020, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x800000ad, 0x8000000a, 0xffffffff,
+        0x800000ad, 0x80000041, 0xffffffff,
+        0x800000ad, 0x8000002e, 0xffffffff,
+        0x800000ad, 0x8001f1e6, 0xffffffff,
+        0x800000ad, 0x80000027, 0xffffffff,
+        0x800000ad, 0xad, 0xffffffff,
+        0x800000ad, 0x200d, 0xffffffff,
+        0x800000ad, 0x308, 0x200d, 0xffffffff,
+        0x800000ad, 0x80000061, 0x2060, 0xffffffff,
+        0x800000ad, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x800000ad, 0x80000031, 0x80000027, 0xffffffff,
+        0x80000300, 0x80000001, 0xffffffff,
+        0x80000300, 0x8000000b, 0xffffffff,
+        0x80000300, 0x8000003a, 0xffffffff,
+        0x80000300, 0x80000030, 0xffffffff,
+        0x80000300, 0x800005d0, 0xffffffff,
+        0x80000300, 0x8000231a, 0xffffffff,
+        0x80000300, 0x300, 0xffffffff,
+        0x80000300, 0x200d, 0xffffffff,
+        0x80000300, 0x308, 0x200d, 0xffffffff,
+        0x80000300, 0x80000061, 0x8000003a, 0xffffffff,
+        0x80000300, 0x80000061, 0x8000002c, 0xffffffff,
+        0x80000300, 0x80000031, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x80000001, 0xffffffff,
+        0x8000200d, 0x308, 0x80000001, 0xffffffff,
+        0x8000200d, 0x8000000d, 0xffffffff,
+        0x8000200d, 0x308, 0x8000000d, 0xffffffff,
+        0x8000200d, 0x8000000a, 0xffffffff,
+        0x8000200d, 0x308, 0x8000000a, 0xffffffff,
+        0x8000200d, 0x8000000b, 0xffffffff,
+        0x8000200d, 0x308, 0x8000000b, 0xffffffff,
+        0x8000200d, 0x80003031, 0xffffffff,
+        0x8000200d, 0x308, 0x80003031, 0xffffffff,
+        0x8000200d, 0x80000041, 0xffffffff,
+        0x8000200d, 0x308, 0x80000041, 0xffffffff,
+        0x8000200d, 0x8000003a, 0xffffffff,
+        0x8000200d, 0x308, 0x8000003a, 0xffffffff,
+        0x8000200d, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x308, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x8000002e, 0xffffffff,
+        0x8000200d, 0x308, 0x8000002e, 0xffffffff,
+        0x8000200d, 0x80000030, 0xffffffff,
+        0x8000200d, 0x308, 0x80000030, 0xffffffff,
+        0x8000200d, 0x8000005f, 0xffffffff,
+        0x8000200d, 0x308, 0x8000005f, 0xffffffff,
+        0x8000200d, 0x8001f1e6, 0xffffffff,
+        0x8000200d, 0x308, 0x8001f1e6, 0xffffffff,
+        0x8000200d, 0x800005d0, 0xffffffff,
+        0x8000200d, 0x308, 0x800005d0, 0xffffffff,
+        0x8000200d, 0x80000022, 0xffffffff,
+        0x8000200d, 0x308, 0x80000022, 0xffffffff,
+        0x8000200d, 0x80000027, 0xffffffff,
+        0x8000200d, 0x308, 0x80000027, 0xffffffff,
+        0x8000200d, 0x231a, 0xffffffff,
+        0x8000200d, 0x308, 0x8000231a, 0xffffffff,
+        0x8000200d, 0x80000020, 0xffffffff,
+        0x8000200d, 0x308, 0x80000020, 0xffffffff,
+        0x8000200d, 0xad, 0xffffffff,
+        0x8000200d, 0x308, 0xad, 0xffffffff,
+        0x8000200d, 0x300, 0xffffffff,
+        0x8000200d, 0x308, 0x300, 0xffffffff,
+        0x8000200d, 0x200d, 0xffffffff,
+        0x8000200d, 0x308, 0x200d, 0xffffffff,
+        0x8000200d, 0x80000061, 0x2060, 0xffffffff,
+        0x8000200d, 0x308, 0x80000061, 0x2060, 0xffffffff,
+        0x8000200d, 0x80000061, 0x8000003a, 0xffffffff,
+        0x8000200d, 0x308, 0x80000061, 0x8000003a, 0xffffffff,
+        0x8000200d, 0x80000061, 0x80000027, 0xffffffff,
+        0x8000200d, 0x308, 0x80000061, 0x80000027, 0xffffffff,
+        0x8000200d, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x8000200d, 0x308, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x8000200d, 0x80000061, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x308, 0x80000061, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x80000031, 0x8000003a, 0xffffffff,
+        0x8000200d, 0x308, 0x80000031, 0x8000003a, 0xffffffff,
+        0x8000200d, 0x80000031, 0x80000027, 0xffffffff,
+        0x8000200d, 0x308, 0x80000031, 0x80000027, 0xffffffff,
+        0x8000200d, 0x80000031, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x308, 0x80000031, 0x8000002c, 0xffffffff,
+        0x8000200d, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x8000200d, 0x308, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x80000061, 0x2060, 0x8000000a, 0xffffffff,
+        0x80000061, 0x2060, 0x41, 0xffffffff,
+        0x80000061, 0x2060, 0x8000002e, 0xffffffff,
+        0x80000061, 0x2060, 0x8001f1e6, 0xffffffff,
+        0x80000061, 0x2060, 0x80000027, 0xffffffff,
+        0x80000061, 0x2060, 0xad, 0xffffffff,
+        0x80000061, 0x2060, 0x200d, 0xffffffff,
+        0x80000061, 0x2060, 0x308, 0x200d, 0xffffffff,
+        0x80000061, 0x2060, 0x61, 0x2060, 0xffffffff,
+        0x80000061, 0x2060, 0x61, 0x80000027, 0x2060, 0xffffffff,
+        0x80000061, 0x2060, 0x31, 0x80000027, 0xffffffff,
+        0x80000061, 0x8000003a, 0x80000001, 0xffffffff,
+        0x80000061, 0x8000003a, 0x8000000b, 0xffffffff,
+        0x80000061, 0x8000003a, 0x8000003a, 0xffffffff,
+        0x80000061, 0x8000003a, 0x80000030, 0xffffffff,
+        0x80000061, 0x3a, 0x5d0, 0xffffffff,
+        0x80000061, 0x8000003a, 0x8000231a, 0xffffffff,
+        0x80000061, 0x8000003a, 0x300, 0xffffffff,
+        0x80000061, 0x8000003a, 0x200d, 0xffffffff,
+        0x80000061, 0x8000003a, 0x308, 0x200d, 0xffffffff,
+        0x80000061, 0x3a, 0x61, 0x8000003a, 0xffffffff,
+        0x80000061, 0x3a, 0x61, 0x8000002c, 0xffffffff,
+        0x80000061, 0x8000003a, 0x80000031, 0x8000002c, 0xffffffff,
+        0x80000061, 0x80000027, 0x8000000d, 0xffffffff,
+        0x80000061, 0x80000027, 0x80003031, 0xffffffff,
+        0x80000061, 0x80000027, 0x8000002c, 0xffffffff,
+        0x80000061, 0x80000027, 0x8000005f, 0xffffffff,
+        0x80000061, 0x80000027, 0x80000022, 0xffffffff,
+        0x80000061, 0x80000027, 0x80000020, 0xffffffff,
+        0x80000061, 0x80000027, 0x200d, 0xffffffff,
+        0x80000061, 0x80000027, 0x308, 0x200d, 0xffffffff,
+        0x80000061, 0x27, 0x61, 0x80000027, 0xffffffff,
+        0x80000061, 0x80000027, 0x80000031, 0x8000003a, 0xffffffff,
+        0x80000061, 0x80000027, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x8000000a, 0xffffffff,
+        0x80000061, 0x27, 0x2060, 0x41, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x8000002e, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x8001f1e6, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x80000027, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0xad, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x200d, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x308, 0x200d, 0xffffffff,
+        0x80000061, 0x27, 0x2060, 0x61, 0x2060, 0xffffffff,
+        0x80000061, 0x27, 0x2060, 0x61, 0x80000027, 0x2060, 0xffffffff,
+        0x80000061, 0x80000027, 0x2060, 0x80000031, 0x80000027, 0xffffffff,
+        0x80000061, 0x8000002c, 0x80000001, 0xffffffff,
+        0x80000061, 0x8000002c, 0x8000000b, 0xffffffff,
+        0x80000061, 0x8000002c, 0x8000003a, 0xffffffff,
+        0x80000061, 0x8000002c, 0x80000030, 0xffffffff,
+        0x80000061, 0x8000002c, 0x800005d0, 0xffffffff,
+        0x80000061, 0x8000002c, 0x8000231a, 0xffffffff,
+        0x80000061, 0x8000002c, 0x300, 0xffffffff,
+        0x80000061, 0x8000002c, 0x200d, 0xffffffff,
+        0x80000061, 0x8000002c, 0x308, 0x200d, 0xffffffff,
+        0x80000061, 0x8000002c, 0x80000061, 0x8000003a, 0xffffffff,
+        0x80000061, 0x8000002c, 0x80000061, 0x8000002c, 0xffffffff,
+        0x80000061, 0x8000002c, 0x80000031, 0x8000002c, 0xffffffff,
+        0x80000031, 0x8000003a, 0x8000000d, 0xffffffff,
+        0x80000031, 0x8000003a, 0x80003031, 0xffffffff,
+        0x80000031, 0x8000003a, 0x8000002c, 0xffffffff,
+        0x80000031, 0x8000003a, 0x8000005f, 0xffffffff,
+        0x80000031, 0x8000003a, 0x80000022, 0xffffffff,
+        0x80000031, 0x8000003a, 0x80000020, 0xffffffff,
+        0x80000031, 0x8000003a, 0x200d, 0xffffffff,
+        0x80000031, 0x8000003a, 0x308, 0x200d, 0xffffffff,
+        0x80000031, 0x8000003a, 0x80000061, 0x80000027, 0xffffffff,
+        0x80000031, 0x8000003a, 0x80000031, 0x8000003a, 0xffffffff,
+        0x80000031, 0x8000003a, 0x80000031, 0x8000002e, 0x2060, 0xffffffff,
+        0x80000031, 0x80000027, 0x8000000a, 0xffffffff,
+        0x80000031, 0x80000027, 0x80000041, 0xffffffff,
+        0x80000031, 0x80000027, 0x8000002e, 0xffffffff,
+        0x80000031, 0x80000027, 0x8001f1e6, 0xffffffff,
+        0x80000031, 0x80000027, 0x80000027, 0xffffffff,
+        0x80000031, 0x80000027, 0xad, 0xffffffff,
+        0x80000031, 0x80000027, 0x200d, 0xffffffff,
+        0x80000031, 0x80000027, 0x308, 0x200d, 0xffffffff,
+        0x80000031, 0x80000027, 0x80000061, 0x2060, 0xffffffff,
+        0x80000031, 0x80000027, 0x80000061, 0x80000027, 0x2060, 0xffffffff,
+        0x80000031, 0x27, 0x31, 0x80000027, 0xffffffff,
+        0x80000031, 0x8000002c, 0x80000001, 0xffffffff,
+        0x80000031, 0x8000002c, 0x8000000b, 0xffffffff,
+        0x80000031, 0x8000002c, 0x8000003a, 0xffffffff,
+        0x80000031, 0x2c, 0x30, 0xffffffff,
+        0x80000031, 0x8000002c, 0x800005d0, 0xffffffff,
+        0x80000031, 0x8000002c, 0x8000231a, 0xffffffff,
+        0x80000031, 0x8000002c, 0x300, 0xffffffff,
+        0x80000031, 0x8000002c, 0x200d, 0xffffffff,
+        0x80000031, 0x8000002c, 0x308, 0x200d, 0xffffffff,
+        0x80000031, 0x8000002c, 0x80000061, 0x8000003a, 0xffffffff,
+        0x80000031, 0x8000002c, 0x80000061, 0x8000002c, 0xffffffff,
+        0x80000031, 0x2c, 0x31, 0x8000002c, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x8000000d, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x80003031, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x8000002c, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x8000005f, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x80000022, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x80000020, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x200d, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x308, 0x200d, 0xffffffff,
+        0x80000031, 0x8000002e, 0x2060, 0x80000061, 0x80000027, 0xffffffff,
+        0x80000031, 0x2e, 0x2060, 0x31, 0x8000003a, 0xffffffff,
+        0x80000031, 0x2e, 0x2060, 0x31, 0x8000002e, 0x2060, 0xffffffff,
+        0x80000020, 0x200d, 0x80000646, 0xffffffff,
+        0x80000646, 0x200d, 0x80000020, 0xffffffff,
+        0x80000671, 0x644, 0x631, 0x64e, 0x651, 0x62d, 0x650, 0x64a, 0x645, 0x650, 0x80000020, 0x800006dd, 0x661, 0xffffffff,
+        0x800005d0, 0x27, 0xffffffff,
+        0x80000041, 0x5f, 0x30, 0x5f, 0x3031, 0x5f, 0xffffffff,
+        0x8001f1e6, 0x1f1e7, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x1f1e7, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x1f1e7, 0x200d, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x200d, 0x1f1e7, 0x8001f1e8, 0x80000062, 0xffffffff,
+        0x80000061, 0x8001f1e6, 0x1f1e7, 0x8001f1e8, 0x1f1e9, 0x80000062, 0xffffffff,
+        0x8001f6d1, 0x200d, 0x1f6d1, 0xffffffff,
+        0x80000061, 0x200d, 0x1f6d1, 0xffffffff,
+        0x80002701, 0x200d, 0x2701, 0xffffffff,
+        0x80000061, 0x200d, 0x2701, 0xffffffff,
+        0x8001f476, 0x1f3ff, 0x308, 0x200d, 0x1f476, 0x1f3ff, 0xffffffff,
+        0x8000200d, 0x1f6d1, 0x1f3ff, 0xffffffff,
+        0x8000200d, 0x1f6d1, 0xffffffff,
+        0x8000200d, 0x1f6d1, 0xffffffff,
+        0x80000061, 0x308, 0x200d, 0x308, 0x62, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000003a, 0x8000003a, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000003a, 0x8000002e, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000003a, 0x8000002c, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000002e, 0x8000003a, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000002e, 0x8000002e, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000002e, 0x8000002c, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000002c, 0x8000003a, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000002c, 0x8000002e, 0x80000061, 0xffffffff,
+        0x80000031, 0x5f, 0x31, 0x8000002c, 0x8000002c, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000003a, 0x8000003a, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000003a, 0x8000002e, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000003a, 0x8000002c, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000002e, 0x8000003a, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000002e, 0x8000002e, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000002e, 0x8000002c, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000002c, 0x8000003a, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000002c, 0x8000002e, 0x80000061, 0xffffffff,
+        0x80000061, 0x5f, 0x31, 0x8000002c, 0x8000002c, 0x80000061, 0xffffffff,
+};
+// TEXT_VECTORS END
+
+// A vector's code points as UTF-8 into bytes, with each one's offset: how many code points.
+static positive te_vector(const p32 address_to words, p8 address_to bytes, positive address_to length, p32 address_to offsets,
+                          p8 address_to cuts)
+{
+        positive count = 0;
+
+        *length = 0;
+        for (; words[count] != 0xffffffffu; count++)
+        {
+                offsets[count] = (p32)*length;
+                cuts[count] = (p8)(words[count] >> 31);
+                *length += memory_utf8_encode(bytes + *length, 4, words[count] & 0x1fffff);
+        }
+        offsets[count] = (p32)*length;
+        return count;
+}
+
+static fn te_boundaries(void)
+{
+        positive vectors = 0;
+
+        for (const p32 address_to words = text_grapheme_vectors; words < text_grapheme_vectors + sizeof(text_grapheme_vectors) / 4;)
+        {
+                p8 bytes[128], cuts[40];
+                p32 offsets[41];
+                positive length, count = te_vector(words, bytes, &length, offsets, cuts), at = 0, point = 0;
+                struct doc doc;
+                b32 same = true;
+
+                doc_open(&doc, bytes, length);
+                // Forward: every cluster's end is the next break the file marks.
+                while (at < length)
+                {
+                        p64 finish = doc_cluster_end(&doc, at);
+
+                        point++;
+                        while (point < count && !cuts[point])
+                                point++;
+                        same &= finish == offsets[point];
+                        at = finish > at ? finish : length;
+                }
+                // Backward: every cluster's start, from the end.
+                at = length;
+                point = count;
+                while (at > 0)
+                {
+                        p64 start = doc_cluster_start(&doc, at);
+
+                        point--;
+                        while (point > 0 && !cuts[point])
+                                point--;
+                        same &= start == offsets[point];
+                        at = start < at ? start : 0;
+                }
+                te_check(same, "grapheme vector", vectors);
+                doc_close(&doc);
+                words += count + 1;
+                vectors++;
+        }
+        for (const p32 address_to words = text_word_vectors; words < text_word_vectors + sizeof(text_word_vectors) / 4;)
+        {
+                p16 props[40];
+                p8 breaks[41];
+                positive count = 0;
+                b32 same = true;
+
+                while (words[count] != 0xffffffffu)
+                {
+                        props[count] = doc_props(words[count] & 0x1fffff);
+                        count++;
+                }
+                doc_word_breaks(props, count, breaks);
+                for (positive i = 1; i < count; i++)
+                        same &= breaks[i] == (words[i] >> 31);
+                te_check(same, "word vector", vectors);
+                words += count + 1;
+                vectors++;
+        }
+        // Backspace: the last mark of a letter, a whole emoji sequence.
+        {
+                struct doc doc;
+                static const p8 marks[] = "e\xcc\x81\xcc\x82", family[] = "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9";
+
+                doc_open(&doc, marks, sizeof(marks) - 1);
+                te_check(doc_backspace_start(&doc, doc_length(&doc)) == 3, "backspace takes the last mark", 0);
+                te_check(doc_cluster_start(&doc, doc_length(&doc)) == 0, "the marks are one cluster", 0);
+                doc_close(&doc);
+                doc_open(&doc, family, sizeof(family) - 1);
+                te_check(doc_backspace_start(&doc, doc_length(&doc)) == 0, "backspace takes a whole emoji sequence", 0);
+                doc_close(&doc);
+        }
+}
+
+/* ---- find against the regex engine ---- */
+
+static fn te_find(positive rounds)
+{
+        static const char address_to const patterns[] = {"a", "ab", "a.b", "[ab]+", "(a|b)c", "b*", "c$", "^a", "x[^a]y", "(ab)+c",
+                                                         "\xc3\xa9", ".", "a{2,3}", "(a)(b)?"};
+        static p8 replaced[65536];
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                struct doc doc;
+                p8 start[400];
+                positive length = 0;
+
+                for (positive i = 0, n = 50 + te_next(300); i < n; i++)
+                {
+                        p32 pick = te_next(12);
+
+                        if (pick == 0)
+                                start[length++] = '\n';
+                        else if (pick == 1 && length + 2 < sizeof(start))
+                                start[length++] = 0xc3, start[length++] = 0xa9;
+                        else
+                                start[length++] = (p8)("abcxy "[te_next(6)]);
+                }
+                doc_open(&doc, start, length);
+                te_model_set(start, length);
+                for (positive p = 0; p < sizeof(patterns) / sizeof(patterns[0]); p++)
+                {
+                        struct doc_find find = {0};
+                        positive pattern_length = string_length((string_address)patterns[p]), found = 0, expected = 0;
+                        p64 at = 0, s, e;
+                        b32 same = true;
+
+                        te_check(doc_find_set(&find, (const p8 address_to)patterns[p], pattern_length, DOC_FIND_CASE | DOC_FIND_REGEX),
+                                 "pattern compiles", p);
+                        // The engine on each line of the model, every match after the last (an empty one moves on a character).
+                        for (positive line = 0; line < te_model_lines(); line++)
+                        {
+                                positive line_start = te_model_line_start(line), finish = line_start;
+
+                                while (finish < te_model_length && te_model[finish] != '\n')
+                                        finish++;
+                                for (positive from = 0; from <= finish - line_start;)
+                                {
+                                        p64 want_s, want_e;
+                                        p8 bytes[512];
+
+                                        memory_copy(bytes, te_model + line_start, finish - line_start);
+                                        bytes[finish - line_start] = 0;
+                                        if (rx_find(&regex_match, &find.program, REGEX_LONGEST, true, bytes, finish - line_start, from) != RX_MATCH)
+                                                break;
+                                        want_s = line_start + regex_slots[0];
+                                        want_e = line_start + regex_slots[1];
+                                        expected++;
+                                        if (doc_find_next(&doc, &find, at, false, false, &s, &e))
+                                        {
+                                                same &= s == want_s && e == want_e;
+                                                found++;
+                                                at = e > s ? e : s + 1;
+                                                while (at < te_model_length && (te_model[at] & 0xc0) == 0x80)
+                                                        at++;
+                                        }
+                                        else
+                                                same = false;
+                                        from = regex_slots[1] > regex_slots[0] ? regex_slots[1] : regex_slots[0] + 1;
+                                        while (from < finish - line_start && (bytes[from] & 0xc0) == 0x80)
+                                                from++;
+                                }
+                        }
+                        te_check(same && found == expected, "find against the regex engine", p);
+                        // Replace every match: the same text the model makes by hand.
+                        {
+                                positive out = 0, replaced_count, model_at = 0;
+                                static const p8 with[] = "<$1|$&>";
+
+                                for (positive line = 0; line < te_model_lines(); line++)
+                                {
+                                        positive line_start = te_model_line_start(line), finish = line_start, from = 0;
+                                        p8 bytes[512];
+
+                                        while (finish < te_model_length && te_model[finish] != '\n')
+                                                finish++;
+                                        memory_copy(bytes, te_model + line_start, finish - line_start);
+                                        bytes[finish - line_start] = 0;
+                                        while (from <= finish - line_start &&
+                                               rx_find(&regex_match, &find.program, REGEX_LONGEST, true, bytes, finish - line_start, from) == RX_MATCH)
+                                        {
+                                                positive ms = regex_slots[0], me = regex_slots[1];
+
+                                                memory_copy(replaced + out, te_model + model_at, line_start + ms - model_at);
+                                                out += line_start + ms - model_at;
+                                                out += doc_find_replacement(&find, bytes, with, sizeof(with) - 1, replaced + out, 4096);
+                                                model_at = line_start + me;
+                                                from = me > ms ? me : ms + 1;
+                                                while (from < finish - line_start && (bytes[from] & 0xc0) == 0x80)
+                                                        from++;
+                                        }
+                                }
+                                memory_copy(replaced + out, te_model + model_at, te_model_length - model_at);
+                                out += te_model_length - model_at;
+                                replaced_count = doc_replace_all(&doc, &find, with, sizeof(with) - 1);
+                                {
+                                        p8 keep[400];
+                                        positive keep_length = te_model_length;
+
+                                        memory_copy(keep, te_model, keep_length);
+                                        te_model_set(replaced, out);
+                                        te_check(te_same(&doc), "replace all against the model", p);
+                                        te_check(replaced_count == expected, "replace all counts every match", replaced_count * 100000 + expected);
+                                        // One undo takes every replacement back.
+                                        if (replaced_count)
+                                                doc_undo(&doc);
+                                        te_model_set(keep, keep_length);
+                                        if (!te_same(&doc) && te_failures == 0)
+                                        {
+                                                static p8 got[4096];
+                                                positive got_length = doc_read(&doc, 0, got, sizeof(got)), first = 0;
+
+                                                while (first < got_length && first < keep_length && got[first] == keep[first])
+                                                        first++;
+                                                string_format(log, "DEBUG pattern %p: replaced %p, undone to %p bytes, model %p, first difference %p, done %p groups %p\n",
+                                                              p, replaced_count, got_length, keep_length, first, (positive)doc.done, (positive)doc.group_count);
+                                                for (positive k = first > 8 ? first - 8 : 0; k < first + 8 && k < got_length; k++)
+                                                        string_format(log, "%p:%p/%p ", k, (positive)got[k], (positive)(k < keep_length ? keep[k] : 0));
+                                                string_format(log, "\n");
+                                        }
+                                        te_check(te_same(&doc), "replace all is one undo", p);
+                                }
+                        }
+                        doc_find_drop(&find);
+                }
+                doc_close(&doc);
+        }
+        // Past DOC_REPLACE_BULK matches the replace is one swap of the span: the same text, one undo, carets mapped.
+        {
+                struct doc doc;
+                struct doc_find find = {0};
+                static p8 many[30000], want[60000];
+                positive length = 0, want_length = 0, count;
+
+                for (positive i = 0; i < 6000; i++)
+                {
+                        many[length++] = (p8)(i % 7 ? 'a' : 'x');
+                        many[length++] = (p8)(i % 3 ? '\n' : ' ');
+                }
+                for (positive i = 0; i < length; i++)
+                        if (many[i] == 'a')
+                                want[want_length++] = 'b', want[want_length++] = 'b';
+                        else
+                                want[want_length++] = many[i];
+                doc_open(&doc, many, length);
+                doc_select_set(&doc, length - 1, length - 1);
+                doc_find_set(&find, (const p8 address_to) "a", 1, DOC_FIND_CASE);
+                count = doc_replace_all(&doc, &find, (const p8 address_to) "bb", 2);
+                te_model_set(want, want_length);
+                te_check(count > DOC_REPLACE_BULK && te_same(&doc), "a replace of thousands of matches", count);
+                te_check(doc.selections[0].active == want_length - 1, "the caret after thousands of replaces", doc.selections[0].active);
+                te_check(doc_undo(&doc), "undo of thousands of replaces", 0);
+                te_model_set(many, length);
+                te_check(te_same(&doc) && doc.selections[0].active == length - 1, "thousands of replaces are one undo", 0);
+                doc_find_drop(&find);
+                doc_close(&doc);
+        }
+        // Without case: a plain query found whatever its case (through the engine's folding).
+        {
+                struct doc doc;
+                struct doc_find find = {0};
+                static const p8 text[] = "one Two tWO \xc3\x89t\xc3\xa9 two";
+                p64 s = 0, e = 0;
+                b32 found;
+
+                doc_open(&doc, text, sizeof(text) - 1);
+                doc_find_set(&find, (const p8 address_to) "TWO", 3, 0);
+                found = doc_find_next(&doc, &find, 0, false, false, &s, &e);
+                te_check(found && s == 4 && e == 7, "find without case", found * 1000 + s);
+                found = doc_find_next(&doc, &find, e, false, false, &s, &e);
+                te_check(found && s == 8, "find without case, again", found * 1000 + s);
+                te_check(doc_find_set(&find, (const p8 address_to) "\xc3\xa9t\xc3\xa9", 5, 0), "a query beyond ASCII compiles", find.failed);
+                found = doc_find_next(&doc, &find, 0, false, false, &s, &e);
+                te_check(found && s == 12 && e == 17, "find without case beyond ASCII", found * 1000 + s);
+                doc_find_set(&find, (const p8 address_to) "two", 3, DOC_FIND_CASE | DOC_FIND_WORD);
+                found = doc_find_next(&doc, &find, 0, false, false, &s, &e);
+                te_check(found && s == 18, "find a whole word", found * 1000 + s);
+                found = doc_find_next(&doc, &find, 18, true, true, &s, &e);
+                te_check(found && s == 18, "find backward, wrapping", found * 1000 + s);
+                doc_find_set(&find, (const p8 address_to) "wo", 2, DOC_FIND_CASE | DOC_FIND_WORD);
+                te_check(!doc_find_next(&doc, &find, 0, false, true, &s, &e), "part of a word is no whole word", s);
+                doc_find_drop(&find);
+                doc_close(&doc);
+        }
+}
+
+/* ---- bytes as they were ---- */
+
+static fn te_bytes(void)
+{
+        static const p8 strange[] = "ok\xff\xfe \xc0\x80 \xed\xa0\x80 \xf4\x90\x80\x80 \xe2\x82 end\r\n\xef\xbb\xbf mid\r";
+        struct doc doc;
+        positive steps = 0;
+
+        doc_open(&doc, strange, sizeof(strange) - 1);
+        te_model_set(strange, sizeof(strange) - 1);
+        // Every byte that is not UTF-8 is a cluster of its own, and stepping over the text and back lands where it started.
+        {
+                p64 at = 0, clusters = 0;
+
+                while (at < doc_length(&doc))
+                {
+                        p64 next = doc_cluster_end(&doc, at);
+
+                        te_check(doc_cluster_start(&doc, next) == at, "a step back lands where a step forward began", at);
+                        at = next, clusters++;
+                }
+                te_check(clusters > 20, "bytes that are not UTF-8 are clusters", clusters);
+        }
+        // Edits at the start leave the rest exactly as it was.
+        for (; steps < 50; steps++)
+        {
+                p8 text[16];
+                positive size = te_text(text, sizeof(text)), removed = te_next(2);
+
+                doc_replace(&doc, 0, removed, text, size);
+                te_model_replace(0, removed, text, size);
+        }
+        te_check(te_same(&doc), "bytes that are not UTF-8 kept", steps);
+        doc_close(&doc);
+
+        // CR LF: the file's line end is what Enter types, a pair is one line end even across two pieces.
+        {
+                static const p8 crlf[] = "one\r\ntwo\r\n";
+
+                doc_open(&doc, crlf, sizeof(crlf) - 1);
+                te_check(doc.eol == DOC_EOL_CRLF, "a CR LF file", doc.eol);
+                te_check(doc_line_count(&doc) == 3, "CR LF lines", doc_line_count(&doc));
+                doc_select_set(&doc, 3, 3);
+                doc_newline(&doc);
+                te_model_set((const p8 address_to) "one\r\n\r\ntwo\r\n", 12);
+                te_check(te_same(&doc), "Enter types CR LF", 0);
+                doc_close(&doc);
+                doc_open(&doc, (const p8 address_to) "a\rb\rc", 5);
+                te_check(doc.eol == DOC_EOL_CR && doc_line_count(&doc) == 3, "a CR file", doc_line_count(&doc));
+                doc_replace(&doc, 2, 0, (const p8 address_to) "\n", 1);
+                te_check(doc_line_count(&doc) == 3 && doc_line_start(&doc, 1) == 3, "a LF typed after a CR makes one line end", doc_line_start(&doc, 1));
+                doc_close(&doc);
+        }
+        // A byte order mark is held aside.
+        doc_open(&doc, (const p8 address_to) "\xef\xbb\xbfhi", 5);
+        te_check(doc.bom && doc_length(&doc) == 2, "a byte order mark is held aside", doc_length(&doc));
+        doc_close(&doc);
+}
+
+/* ---- a gigabyte, sparse ---- */
+
+static fn te_sparse(void)
+{
+        static const char path[] = "text-engine-sparse.tmp";
+        bipolar handle = (bipolar)system_open_at_mode(AT_FDCWD, (string_address)path, FILE_READ_WRITE | FILE_CREATE | O_TRUNC | O_CLOEXEC, 0600);
+        p64 size = 1ull << 30;
+        positive started, opened;
+        long mapped;
+        struct doc doc;
+
+        if (handle < 0)
+        {
+                string_format(log, "sparse gigabyte: NOT RUN, no file here\n");
+                return;
+        }
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        if (system_call_2(syscall(ftruncate), (positive)handle, size) < 0)
+        {
+                system_close(handle);
+                string_format(log, "sparse gigabyte: NOT RUN, no room\n");
+                return;
+        }
+        system_call_4(syscall(pwrite64), (positive)handle, (positive)"end\n", 4, size - 4);
+        mapped = (long)system_call_6(syscall(mmap), 0, size, 1, 2, (positive)handle, 0);
+        system_close(handle);
+        if (mapped < 0 && mapped > -4096)
+        {
+                string_format(log, "sparse gigabyte: NOT RUN, no mapping\n");
+                return;
+        }
+        started = clock_monotonic_nanoseconds();
+        te_check(doc_open(&doc, (const p8 address_to)mapped, size), "a sparse gigabyte opens", 0);
+        opened = clock_monotonic_nanoseconds();
+        te_check(doc_length(&doc) == size && doc_line_count(&doc) == 2, "its length and lines", doc_line_count(&doc));
+        te_check(doc_byte(&doc, size - 4) == 'e' && doc_line_start(&doc, 1) == size, "its end", doc_line_start(&doc, 1));
+        doc_select_set(&doc, size / 2, size / 2);
+        doc_type(&doc, (const p8 address_to) "x", 1);
+        te_check(doc_length(&doc) == size + 1 && doc_byte(&doc, size / 2) == 'x', "typing in its middle", 0);
+        string_format(log, "sparse gigabyte opened in %p ms\n", (opened - started) / 1000000);
+        doc_close(&doc);
+        system_call_2(syscall(munmap), (positive)mapped, size);
+}
+
+/* ---- the keymap ---- */
+
+static fn te_keymap(void)
+{
+        static struct doc_keymap map;
+
+        doc_keymap_defaults(&map);
+        te_check(map.count == sizeof(doc_default_keys) / sizeof(doc_default_keys[0]), "every default binding parses", map.count);
+        te_check(doc_keymap_find(&map, 44, 26, DOC_MOD_CONTROL) == DOC_CMD_UNDO, "ctrl+z", 0);
+        te_check(doc_keymap_find(&map, 44, 26, DOC_MOD_CONTROL | DOC_MOD_SHIFT) == DOC_CMD_REDO, "ctrl+shift+z", 0);
+        // German QWERTZ: the key Linux calls Y types z, so ctrl+z follows the layout.
+        te_check(doc_keymap_find(&map, 21, 26, DOC_MOD_CONTROL) == DOC_CMD_UNDO, "ctrl+z on another layout", 0);
+        te_check(doc_keymap_find(&map, 105, 0, 0) == DOC_CMD_LEFT, "left", 0);
+        te_check(doc_keymap_find(&map, 105, 0, DOC_MOD_SHIFT | DOC_MOD_CONTROL) == DOC_CMD_SELECT_WORD_LEFT, "ctrl+shift+left", 0);
+        te_check(doc_keymap_find(&map, 14, 8, DOC_MOD_CONTROL) == DOC_CMD_DELETE_WORD_LEFT, "ctrl+backspace is not ctrl+h", 0);
+        te_check(doc_keymap_find(&map, 8, '/', DOC_MOD_CONTROL | DOC_MOD_SHIFT) == DOC_CMD_COMMENT, "ctrl+/ typed with shift", 0);
+        te_check(doc_keymap_find(&map, 26, '{', DOC_MOD_CONTROL | DOC_MOD_SHIFT) == DOC_CMD_FOLD, "ctrl+{", 0);
+        te_check(doc_keymap_find(&map, 30, 'a', 0) == DOC_CMD_NONE, "a letter alone is typing", 0);
+        {
+                static const char text[] = "ctrl+t none\nctrl+shift+u upper\nnot a binding\n# a remark\n";
+
+                te_check(doc_keymap_read(&map, text, sizeof(text) - 1) == 1, "a keymap file's bad line is counted", 0);
+                te_check(doc_keymap_find(&map, 20, 20, DOC_MOD_CONTROL) == DOC_CMD_NONE, "none takes a binding away", 0);
+                te_check(doc_keymap_find(&map, 22, 21, DOC_MOD_CONTROL | DOC_MOD_SHIFT) == DOC_CMD_UPPER, "a binding added", 0);
+        }
+}
+
+/* ---- tokens: the states an edit leaves are those a tokenizing from the start finds ---- */
+
+static fn te_tokens(positive rounds)
+{
+        static struct doc_token one[512], two[512];
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                struct doc doc, fresh;
+                static const char address_to const pieces[] = {"int x;", "/*", "*/", "\"s\\", "\"", "\n", " ", "// c", "{", "}", "a"};
+                p8 start[400];
+                positive length = 0;
+
+                for (positive i = 0, n = 30 + te_next(100); i < n; i++)
+                {
+                        const char address_to piece = pieces[te_next(sizeof(pieces) / sizeof(pieces[0]))];
+                        positive size = string_length((string_address)piece);
+
+                        if (length + size >= sizeof(start))
+                                break;
+                        memory_copy(start + length, piece, size);
+                        length += size;
+                }
+                doc_open(&doc, start, length);
+                doc.language = DOC_LANGUAGE_C;
+                for (positive step = 0; step < 20; step++)
+                {
+                        p8 text[8];
+                        positive size = 0, at = te_next((p32)doc_length(&doc) + 1), removed = te_next(3);
+                        const char address_to piece = pieces[te_next(sizeof(pieces) / sizeof(pieces[0]))];
+                        p64 lines;
+
+                        // The view looks at some lines between edits.
+                        for (p32 look = 0; look < 3; look++)
+                                doc_tokens(&doc, te_next((p32)doc_line_count(&doc)), one, 512);
+                        size = string_length((string_address)piece);
+                        memory_copy(text, piece, size);
+                        removed = removed > doc_length(&doc) - at ? doc_length(&doc) - at : removed;
+                        doc_replace(&doc, at, removed, text, size);
+                        lines = doc_line_count(&doc);
+                        // A fresh document of the same text tokenizes from nothing.
+                        {
+                                static p8 copy[1024];
+                                positive copy_length = doc_read(&doc, 0, copy, sizeof(copy));
+                                b32 same = true;
+
+                                doc_open(&fresh, copy, copy_length);
+                                fresh.language = DOC_LANGUAGE_C;
+                                for (p64 line = 0; line < lines; line++)
+                                {
+                                        positive a = doc_tokens(&doc, line, one, 512), b = doc_tokens(&fresh, line, two, 512);
+
+                                        same &= a == b && !memory_compare(one, two, a * sizeof(one[0]));
+                                }
+                                te_check(same, "tokens after an edit are tokens from the start", step);
+                                doc_close(&fresh);
+                        }
+                }
+                doc_close(&doc);
+        }
+}
+
+/* ---- what it costs ---- */
+
+static fn te_bench(void)
+{
+        positive size = 100u << 20, at = 0, started, took;
+        p8 address_to file = null;
+        positive room = 0;
+        struct doc doc;
+
+        array_store_reserve(file, room, 0, size, 4096);
+        // 100 MB of code-shaped lines.
+        while (at < size)
+        {
+                static const char line[] = "        if (value > limit) return compute(value, limit) + offset; // note\n";
+                positive take = sizeof(line) - 1 < size - at ? sizeof(line) - 1 : size - at;
+
+                memory_copy(file + at, line, take);
+                at += take;
+        }
+        started = clock_monotonic_nanoseconds();
+        doc_open(&doc, file, size);
+        took = clock_monotonic_nanoseconds() - started;
+        string_format(log, "open 100 MB: %p us, %p lines\n", took / 1000, doc_line_count(&doc));
+        {
+                p64 line = doc_line_count(&doc) / 2;
+
+                started = clock_monotonic_nanoseconds();
+                for (positive i = 0; i < 100000; i++)
+                        line ^= doc_line_start(&doc, (line + i * 7919) % doc_line_count(&doc)) & 1;
+                took = clock_monotonic_nanoseconds() - started;
+                string_format(log, "line start: %p ns a lookup\n", took / 100000);
+        }
+        doc_select_set(&doc, doc_line_start(&doc, doc_line_count(&doc) / 2), doc_line_start(&doc, doc_line_count(&doc) / 2));
+        started = clock_monotonic_nanoseconds();
+        for (positive i = 0; i < 10000; i++)
+        {
+                doc.now += 100000000;
+                doc_type(&doc, (const p8 address_to) "x", 1);
+        }
+        took = clock_monotonic_nanoseconds() - started;
+        string_format(log, "typing in the middle: %p ns a key\n", took / 10000);
+        started = clock_monotonic_nanoseconds();
+        for (positive i = 0; i < 10000; i++)
+                doc_delete(&doc, false, DOC_REACH_CLUSTER);
+        took = clock_monotonic_nanoseconds() - started;
+        string_format(log, "backspace in the middle: %p ns a key\n", took / 10000);
+        {
+                struct doc_find find = {0};
+                positive count;
+
+                doc_find_set(&find, (const p8 address_to) "limit", 5, DOC_FIND_CASE);
+                started = clock_monotonic_nanoseconds();
+                count = doc_replace_all(&doc, &find, (const p8 address_to) "bound", 5);
+                took = clock_monotonic_nanoseconds() - started;
+                string_format(log, "replace all: %p matches in %p ms\n", count, took / 1000000);
+                started = clock_monotonic_nanoseconds();
+                doc_undo(&doc);
+                took = clock_monotonic_nanoseconds() - started;
+                string_format(log, "undo of it: %p ms\n", took / 1000000);
+        }
+        doc_close(&doc);
+}
+
+/*
+        `vectors`: test vectors on standard input, one a line, G or W and then the words as the pinned ones are written
+        (hex, bit 31 a boundary before): the text_tables harness feeds every vector of the official files through it.
+*/
+static b32 te_vectors_in(void)
+{
+        static p8 input[1 << 20];
+        positive length = 0, failures = 0, count = 0;
+        long got;
+
+        while (length < sizeof(input) - 1 && (got = (long)system_read_once(0, input + length, sizeof(input) - 1 - length)) > 0)
+                length += (positive)got;
+        input[length] = 0;
+        for (positive at = 0; at < length;)
+        {
+                p32 words[64];
+                positive n = 0;
+                p8 kind = input[at];
+
+                at++;
+                while (at < length && input[at] != '\n' && n < 63)
+                {
+                        p32 value = 0;
+
+                        while (input[at] == ' ')
+                                at++;
+                        if (input[at] == '\n' || !input[at])
+                                break;
+                        while (byte_is_digit((b8)input[at]) || (input[at] | 32) - 'a' < 6u)
+                                value = value << 4 | (p32)(byte_is_digit((b8)input[at]) ? input[at] - '0' : (input[at] | 32) - 'a' + 10), at++;
+                        words[n++] = value;
+                }
+                words[n] = 0xffffffffu;
+                at++;
+                if (!n)
+                        continue;
+                count++;
+                if (kind == 'G')
+                {
+                        p8 bytes[256], cuts[64];
+                        p32 offsets[65];
+                        positive size, points = te_vector(words, bytes, &size, offsets, cuts), point = 0;
+                        p64 here = 0;
+                        struct doc doc;
+                        b32 same = true;
+
+                        doc_open(&doc, bytes, size);
+                        while (here < size)
+                        {
+                                p64 next = doc_cluster_end(&doc, here);
+
+                                point++;
+                                while (point < points && !cuts[point])
+                                        point++;
+                                same &= next == offsets[point];
+                                here = next > here ? next : size;
+                        }
+                        doc_close(&doc);
+                        failures += !same;
+                }
+                else
+                {
+                        p16 props[64];
+                        p8 breaks[65];
+                        b32 same = true;
+
+                        for (positive i = 0; i < n; i++)
+                                props[i] = doc_props(words[i] & 0x1fffff);
+                        doc_word_breaks(props, n, breaks);
+                        for (positive i = 1; i < n; i++)
+                                same &= breaks[i] == (words[i] >> 31);
+                        failures += !same;
+                }
+        }
+        string_format(log, "vectors: %p, %p failures\n", count, failures);
+        log_flush();
+        return failures != 0;
+}
+
+b32 main(void)
+{
+        b32 bench = program_argument_count() > 1 && string_equals(program_argument(1), "bench");
+
+        if (program_argument_count() > 1 && string_equals(program_argument(1), "vectors"))
+                return te_vectors_in();
+
+        if (bench)
+        {
+                te_bench();
+                log_flush();
+                return 0;
+        }
+        {
+                // One section by name, or every one; each says what it found as it ends.
+                string_address only = program_argument_count() > 1 ? program_argument(1) : null;
+#define TE_SECTION(name, call)                                                                                \
+                if (!only || string_equals(only, name))                                                       \
+                {                                                                                             \
+                        positive before = te_failures;                                                        \
+                        call;                                                                                 \
+                        string_format(log, "%s: %p failures\n", (string_address)name, te_failures - before); \
+                        log_flush();                                                                          \
+                }
+                TE_SECTION("buffer", te_buffer(40, 300))
+                TE_SECTION("history", te_history(30, 120))
+                TE_SECTION("commands", te_commands(40))
+                TE_SECTION("carets", te_carets(200))
+                TE_SECTION("boundaries", te_boundaries())
+                TE_SECTION("find", te_find(12))
+                TE_SECTION("bytes", te_bytes())
+                TE_SECTION("keymap", te_keymap())
+                TE_SECTION("tokens", te_tokens(30))
+                TE_SECTION("sparse", te_sparse())
+#undef TE_SECTION
+        }
+        string_format(log, "text engine: %p checks, %p failures\n", te_checks, te_failures);
+        log_flush();
+        return te_failures != 0;
+}
+#endif
+
 #ifdef CHECK_canvas_cells
 /* The compositor's CPU backend and the library's cell and glyph bodies, with ordinary memory instead of DRM. */
 #include <assert.h>

@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang"
 
 describe()
 {
@@ -207,6 +207,7 @@ describe()
         compression) echo "gzip/xz/zstd and a tar member×codec grammar against the system tools" ;;
         audit) echo "the verified builtin repairs, as pure-state regressions" ;;
         regex) echo "fixed-graph searches against their VM fallback, with captures and resource limits on three machines" ;;
+        editing) echo "the text engine against a naive model: edits, history, carets, Unicode's boundary tests, find against the regex engine, on three machines" ;;
         reuse_shell) echo "shared utility formatting, bounded sinks and skip edge policies" ;;
         table) echo "shared table escaping, field widths and multiline boundaries on three machines" ;;
         leaving)  echo "what a program writes on the way out, and what a child must not write twice" ;;
@@ -5642,6 +5643,13 @@ lane_audit()
 }
 
 lane_regex() { freestanding_checks_lane regex regex; }
+
+#       The text engine under fields, text areas and the editor (src/canvas/ui/text.c): the piece tree and its line
+#       index against a byte array through random edits, the history walked against snapshots, every editing command
+#       undone and redone, many carets against one at a time, the official Unicode grapheme and word test vectors (a
+#       pinned slice; differential.py --harness text_tables UCD_DIR checks all of them and the table), find against
+#       the regex engine line by line, bytes that are not UTF-8 and CR LF kept, and a sparse gigabyte opened.
+lane_editing() { freestanding_checks_lane text_engine text_engine; }
 
 
 lane_slurp()
