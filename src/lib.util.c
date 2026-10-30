@@ -1204,9 +1204,32 @@ static COLD bipolar system_make_directory_exact_at(
                 return handle;
         }
 
+        //      mkdir asks for nothing above the sticky bit, so a set-group bit
+        //      on what it made came from the parent, and the exact mode keeps
+        //      it the way a plain mkdir does: GNU mkdir -m 0755 under a
+        //      set-group parent makes 2755. The statx record is the kernel's
+        //      fixed 256 bytes with the mask first and the mode at byte 28.
+        p8 record[256];
+        p32 answered = 0;
+        p16 inherited = 0;
+
+        memory_fill(record, 0, sizeof(record));
+        if (system_stat_at(handle, (string_address)"", AT_EMPTY_PATH, 0x002,
+                           record) >= 0)
+        {
+                memory_copy(address_of answered, record, sizeof(answered));
+                if (answered & 0x002)
+                {
+                        memory_copy(address_of inherited, record + 28,
+                                    sizeof(inherited));
+                        inherited &= 02000;
+                }
+        }
+
         bipolar set = system_call_4(
             syscall(fchmodat2), (positive)handle,
-            (positive)(string_address)"", mode & 01777, AT_EMPTY_PATH);
+            (positive)(string_address)"", (mode & 01777) | inherited,
+            AT_EMPTY_PATH);
 
         system_close(handle);
         if (set < 0)
