@@ -58831,6 +58831,11 @@ static bipolar net_test_random_fill(address_any into, positive length, positive 
 static bipolar net_test_slurp_regular_at(bipolar directory, string_address path,
                                          p8 address_to into, positive capacity, positive flags)
 {
+        //      The resolver's configuration is the read the count is for: the
+        //      state words under /root and /run/moonwater are other reads.
+        if (string_length(path) < 15 ||
+            (memory_compare(path, "/root/", 6) && memory_compare(path, "/run/moonwater/", 15)))
+                net_slurp_calls++;
         if (net_slurp_text)
         {
                 positive length = min(string_length(net_slurp_text), capacity);
