@@ -997,6 +997,239 @@ def reads_unreadable(case, spec):
     return False
 
 
+# ----------------------------------------------------------------------------
+#       Host confinement: a program that talks to the machine it runs on.
+# ----------------------------------------------------------------------------
+#
+#       A case runs the real program with real arguments, beside ours, in a
+#       directory of its own. Most programs touch nothing else. A few reach
+#       the host through a name that is not in the directory:
+#
+#         logger      datagrams to /dev/log, which on a systemd machine is
+#                     journald's socket, and journald wall-broadcasts an
+#                     EMERGENCY record to every logged-in terminal ("Broadcast
+#                     message from systemd-journald"): -p 0 and --prio-prefix
+#                     over a line that begins <0> are both in the grammar;
+#         wall write  the terminals utmp and logind list, written as the user
+#                     who owns them, so a message lands over whatever the
+#                     owner has on screen;
+#         dmesg       -C -c -D -E -n clear the kernel ring or move the console
+#                     level, for a process that holds CAP_SYSLOG;
+#         ctrlaltdel pivot_root hostname date poweroff reboot
+#                     set the Ctrl-Alt-Del action, the root, the name and the
+#                     clock, or stop the machine, for a process that holds the
+#                     capability (the builtins the shell has for the last two
+#                     do not check an option before they try).
+#
+#       Each runs, the reference and ours alike, in a user and mount namespace
+#       of its own that maps the runner to itself. The mounts are private to
+#       the case and go with it:
+#         - the syslog and journal endpoints are a canary (a socket a helper
+#           process of this runner reads and counts), so the program connects,
+#           sends and is answered as before and the records land on the canary;
+#         - /run/systemd is an empty tmpfs holding only those endpoints and
+#           the marker that systemd booted the host, so libsystemd sees a
+#           machine with no sessions and no logind;
+#         - /run/utmp is empty and /dev/pts is a devpts of its own, so there is
+#           no terminal to write to that the case did not make;
+#       and the exec leaves a runner that is not uid 0 with no capability, as
+#       it had outside, while uid 0 holds its capabilities over the namespace
+#       only and cannot reach the host's ring, clock, name or Ctrl-Alt-Del.
+#       Both programs get the same environment, so the comparison means what it
+#       did; a path the host lacks is lacking for both and fails the same way.
+#
+#       Where this cannot be made (no user namespaces) the case is not run and
+#       counts as absent: reaching the host is not an alternative.
+#       harness_host_confinement holds all of it.
+CLONE_NEWNS = 0x00020000
+CLONE_NEWUSER = 0x10000000
+MS_NOSUID, MS_NODEV, MS_NOEXEC, MS_BIND, MS_REC, MS_PRIVATE = 2, 4, 8, 4096, 16384, 1 << 18
+
+#       The programs run confined, by the name a case carries.
+HOST_CONFINED = frozenset(("logger", "wall", "write", "dmesg", "ctrlaltdel", "pivot_root", "hostname", "date",
+                           "poweroff", "reboot"))
+
+#       The other programs whose arguments name the machine, and why each is
+#       safe without it. A name in the specs that is in neither table fails
+#       harness_host_confinement, so a new one has to choose.
+HOST_SAFE = {
+    "kill": "signals pids the grammar picks: 999999 (absent), 1 (refused to anyone but root), the case's own $$",
+    "renice": "pid 1 and absent pids, refused to anyone but root; the _live row niceness a child of its own",
+    "ionice": "pid 1 and absent pids, refused to anyone but root; the _live row works on a child of its own",
+    "chrt": "pid 1 and absent pids, refused to anyone but root; the observer is the case's own child",
+    "taskset": "pid 1 and absent pids, refused to anyone but root; the observer is the case's own child",
+    "uclampset": "pid 1 and absent pids, refused to anyone but root; the observer is the case's own child",
+    "choom": "pid 1 and absent pids, refused to anyone but root; the observer is the case's own child",
+    "prlimit": "the case's own child and pid 1 (refused to anyone but root)",
+    "mount": "the _live rows make a mount namespace of their own; a plain run is refused to anyone but root",
+    "umount": "the _live rows make a mount namespace of their own; a plain run is refused to anyone but root",
+    "nsenter": "joins the namespaces of the case's own holder; -t 1 is refused to anyone but root",
+    "unshare": "makes namespaces for its child only",
+    "mesg": "stdin is a file, not a terminal; mesg_live gives a pty of its own",
+    "mesg_live": "a pty of its own",
+    "rfkill": "/dev/rfkill is written by its owner and the rfkill group only",
+    "blockdev": "ioctls on /dev/null and fixture files",
+    "addpart": "BLKPG on /dev/null and fixture files: refused",
+    "delpart": "BLKPG on /dev/null and fixture files: refused",
+    "resizepart": "BLKPG on /dev/null and fixture files: refused",
+    "wipefs": "fixture image files only",
+    "mkswap": "fixture image files only",
+    "swaplabel": "fixture image files only",
+    "chroot": "affects its own child only",
+    "setpriv": "changes the privileges of its own child only",
+    "script": "a pty of its own, the typescript in /dev/null",
+    "sync": "flushes caches and changes nothing visible",
+}
+
+#       The endpoints a program can send a record to, and the socket type
+#       each answers: journald's, and /dev/log wherever it points.
+HOST_ENDPOINTS = (("/run/systemd/journal/dev-log", "dgram"), ("/run/systemd/journal/socket", "dgram"),
+                  ("/run/systemd/journal/syslog", "dgram"), ("/run/systemd/journal/stdout", "stream"),
+                  ("/run/systemd/journal/io.systemd.journal", "stream"))
+
+#       A helper process reads what the endpoints are sent, so a sender never
+#       blocks on a full queue, and writes a line per record to a file the
+#       runner counts.
+CANARY_SOURCE = r'''
+import os, selectors, socket, sys
+folder = sys.argv[1]
+log = os.open(os.path.join(folder, "received"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+sel = selectors.DefaultSelector()
+datagram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+datagram.bind(os.path.join(folder, "dgram"))
+datagram.setblocking(False)
+stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+stream.bind(os.path.join(folder, "stream"))
+stream.listen(64)
+stream.setblocking(False)
+sel.register(datagram, selectors.EVENT_READ, "dgram")
+sel.register(stream, selectors.EVENT_READ, "accept")
+sys.stdout.write("ready\n")
+sys.stdout.flush()
+while True:
+    for key, _ in sel.select():
+        sock, kind = key.fileobj, key.data
+        try:
+            if kind == "accept":
+                peer, _ = sock.accept()
+                peer.setblocking(False)
+                sel.register(peer, selectors.EVENT_READ, "stream")
+                continue
+            data = sock.recv(65536)
+        except (BlockingIOError, ConnectionError):
+            continue
+        if kind == "stream" and not data:
+            sel.unregister(sock)
+            sock.close()
+            continue
+        os.write(log, kind.encode() + b" %d " % len(data) + data[:160].replace(b"\n", b"|") + b"\n")
+'''
+
+
+def host_unshare(plan):
+    """In the forked child, before exec: a user namespace mapping the runner
+    to itself, a mount namespace under it, then the private mounts the plan
+    asks for."""
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def need(result, what):
+        if result != 0:
+            raise OSError(ctypes.get_errno(), what)
+
+    def mount(source, target, kind, flags, data):
+        need(libc.mount(source.encode() if source else None, target.encode(),
+                        kind.encode() if kind else None, flags,
+                        data.encode() if data else None), "mount " + target)
+
+    uid, gid = os.getuid(), os.getgid()
+    need(libc.unshare(CLONE_NEWUSER | CLONE_NEWNS), "unshare")
+    for name, text in (("setgroups", "deny"), ("uid_map", "%d %d 1" % (uid, uid)),
+                       ("gid_map", "%d %d 1" % (gid, gid))):
+        with open("/proc/self/" + name, "w") as handle:
+            handle.write(text)
+    mount(None, "/", None, MS_REC | MS_PRIVATE, None)
+    if plan["systemd"]:
+        mount("tmpfs", "/run/systemd", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=755,size=64k")
+        os.mkdir("/run/systemd/journal", 0o755)
+        if plan.get("system"):
+            #       sd_booted(): logger's --socket-errors=auto reads it, and a
+            #       host that is booted by systemd stays booted by it here.
+            os.mkdir("/run/systemd/system", 0o755)
+    for target, kind in plan["endpoints"]:
+        if not os.path.lexists(target):
+            os.close(os.open(target, os.O_WRONLY | os.O_CREAT, 0o666))
+        mount(plan["folder"] + "/" + kind, target, None, MS_BIND, None)
+    if plan["utmp"]:
+        mount(plan.get("utmp_file") or plan["folder"] + "/empty", plan["utmp"], None, MS_BIND, None)
+    if plan["pts"]:
+        mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,ptmxmode=0666,mode=0620")
+
+
+class Confinement:
+    """The canary and the plan of the private mounts, for one runner."""
+
+    def __init__(self, root):
+        self.folder = Path(root) / "canary"
+        self.process = None
+        self.refusal = None
+        self.planned = None
+
+    def plan(self):
+        """What this host has that the mounts replace: asked once, in the
+        parent, since the tmpfs over /run/systemd hides it from the child."""
+        endpoints = []
+        systemd = os.path.isdir("/run/systemd")
+        if systemd:
+            endpoints = [(path, kind) for path, kind in HOST_ENDPOINTS if os.path.lexists(path)]
+        syslog = os.path.realpath("/dev/log") if os.path.lexists("/dev/log") else None
+        if syslog and not syslog.startswith("/run/systemd/") and stat.S_ISSOCK(os.stat(syslog).st_mode):
+            endpoints.append((syslog, "dgram"))
+        return {"folder": str(self.folder), "systemd": systemd, "endpoints": endpoints,
+                "system": os.path.isdir("/run/systemd/system"),
+                "utmp": os.path.realpath("/run/utmp") if os.path.lexists("/run/utmp") else None,
+                "pts": os.path.isdir("/dev/pts")}
+
+    def start(self):
+        """None when confined runs are possible, else the reason they are not."""
+        if self.planned is not None or self.refusal is not None:
+            return self.refusal
+        try:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            (self.folder / "empty").write_bytes(b"")
+            self.process = subprocess.Popen(
+                [sys.executable, "-I", "-c", CANARY_SOURCE, str(self.folder)], stdout=subprocess.PIPE,
+                stdin=subprocess.DEVNULL, start_new_session=True, preexec_fn=_die_with_parent)
+            if self.process.stdout.readline() != b"ready\n":
+                raise OSError("the canary did not come up")
+            plan = self.plan()
+            probe = subprocess.run(["true"], preexec_fn=lambda: host_unshare(plan), timeout=20,
+                                   capture_output=True)
+            if probe.returncode:
+                raise OSError("a confined true ended with status %d" % probe.returncode)
+            self.planned = plan
+        except (OSError, subprocess.SubprocessError) as error:
+            self.refusal = "no user and mount namespace to confine in (%s)" % error
+            print("  NOTE the programs that reach the host are not run: " + self.refusal)
+            self.stop()
+        return self.refusal
+
+    def stop(self):
+        if self.process is not None:
+            try:
+                self.process.kill()
+            except OSError:
+                pass
+            self.process.wait()
+            self.process = None
+
+    def received(self):
+        try:
+            return (self.folder / "received").read_bytes().splitlines()
+        except OSError:
+            return []
+
+
 class Runner:
     """Both programs in the same recreated directory, one after the other."""
 
@@ -1007,6 +1240,7 @@ class Runner:
         self.emulator = emulator
         self.locale = locale
         self.names = self.root / "names"
+        self.confinement = Confinement(self.root)
         self.shell = None
         if self.farm:
             self.shell = self.resolve_shell()
@@ -1052,7 +1286,17 @@ class Runner:
             return None
         return ([reference], [str(candidate)], case.utility)
 
+    @staticmethod
+    def confined(case):
+        """Whether the case's program reaches the host unless it is held in
+        the private mounts (see Host confinement above)."""
+        return (case.family if case.mode else case.utility) in HOST_CONFINED
+
     def run_one(self, prefix, argv0, case, spec, worker):
+        confined = self.confined(case)
+        if confined and self.confinement.start():
+            return {"status": -256, "timeout": False, "stdout": b"",
+                    "stderr": self.confinement.refusal.encode(), "effects": {}}
         directory = self.root / f"w{worker}"
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
@@ -1102,8 +1346,9 @@ class Runner:
                 process = subprocess.Popen(argv, executable=executable, cwd=directory,
                                            env=environment, stdin=source, stdout=out,
                                            stderr=err, start_new_session=True,
-                                           preexec_fn=_limits)
-            except OSError as error:
+                                           preexec_fn=(lambda: (_limits(), host_unshare(self.confinement.planned)))
+                                           if confined else _limits)
+            except (OSError, subprocess.SubprocessError) as error:
                 return {"status": -256, "timeout": False, "stdout": b"",
                         "stderr": str(error).encode(), "effects": {}}
             timed_out = False
@@ -1140,6 +1385,8 @@ class Runner:
         if programs is None:
             return None, None
         reference, candidate, name = programs
+        if self.confined(case) and self.confinement.start():
+            return None, None
         want = self.run_one(reference, name, case, spec, worker)
         got = self.run_one(candidate, name, case, spec, worker)
         return want, got
@@ -11047,7 +11294,11 @@ def files_hostname_set(farm):
                        'if [ "$(uname -n)" = "$(cat "$0.before")" ]; then echo same; else uname -n; fi; exit $s',
                        str(work / "u")] + [str(program)] + words
         else:
-            command = [str(program)] + words
+            #       Outside a namespace of its own to set the name in, a user
+            #       namespace that owns no UTS namespace: the kernel says EPERM
+            #       to uid 0 as it does to anyone, so a run as root cannot
+            #       rename the machine.
+            command = [unshare, "-U", str(program)] + words
         ran = subprocess.run(command, capture_output=True, timeout=10, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
         first = ran.stderr.decode(errors="replace").split("\n")[0]
         first = re.sub(r"^[^:\s]*hostname: ", "hostname: ", first)
@@ -11064,7 +11315,7 @@ def files_hostname_set(farm):
     try:
         for argv, text in cases:
             for inside in (True, False):
-                if inside and not unshare:
+                if not unshare:
                     continue
                 # Outside a namespace a set that would succeed says EPERM,
                 # and a bare listing says the machine's name, which is not
@@ -42657,6 +42908,202 @@ def harness_mount_names(argv):
           % (passed, checks, len(names)))
     write_tally("mount-names", passed, checks)
     return 0 if passed == checks else 1
+
+
+#       Names whose programs act on the machine itself. A spec that runs one
+#       of these has to say, in HOST_CONFINED or HOST_SAFE, what keeps the
+#       case off the host.
+HOST_WATCH = frozenset((
+    "wall write mesg dmesg logger shutdown reboot poweroff halt hostname hostnamectl date hwclock timedatectl "
+    "sysctl swapon swapoff mount umount losetup renice ionice chrt kill nsenter login mail at crontab rfkill "
+    "ctrlaltdel pivot_root chroot taskset uclampset choom prlimit unshare blockdev addpart delpart resizepart "
+    "wipefs mkswap swaplabel script sync setpriv su sudo").split())
+
+HOST_CONFINEMENT_PROBE = r'''
+import json, os, sys
+folder, plan = sys.argv[1], json.loads(sys.argv[2])
+out = {"endpoints": {}, "uid": os.getuid()}
+for path, kind in plan["endpoints"]:
+    out["endpoints"][path] = [os.stat(path).st_ino, os.stat(folder + "/" + kind).st_ino]
+out["utmp"] = os.stat(plan["utmp"]).st_size if plan["utmp"] else None
+out["pts"] = sorted(os.listdir("/dev/pts")) if plan["pts"] else None
+out["systemd"] = sorted(os.listdir("/run/systemd")) if plan["systemd"] else None
+out["cap"] = [line for line in open("/proc/self/status") if line.startswith("CapEff")][0].split()[1]
+out["userns"] = os.stat("/proc/self/ns/user").st_ino
+print(json.dumps(out))
+'''
+
+
+def harness_host_confinement(argv):
+    """The programs that reach the host are held off it, and a canary says so.
+
+    A logger case sends real records; with -p 0 or <0> on a line, journald
+    broadcasts them to every terminal ("Broadcast message from
+    systemd-journald"). wall and write write to terminals. This runs the
+    confinement a Runner gives them (see Host confinement) and asks:
+      - in the namespace, every syslog and journal endpoint of this host is the
+        canary's socket (same inode), /run/utmp is empty, /dev/pts holds no
+        terminal, /run/systemd holds only the journal directory, and the
+        runner has no capability over the host;
+      - the logger cases of the grammar that are loud (-p 0 with -u /dev/log,
+        --prio-prefix over <0> lines) reach the canary, once per record per
+        program, and not the host: the journal has no record of them and no
+        terminal receives a word;
+      - a pty listed in a utmp does receive wall (the control, so the empty
+        result below means something), and with the host's utmp it does not;
+      - every spec program that acts on the machine is confined or argues why
+        not (HOST_SAFE).
+    farm is optional; with it ours runs beside the reference.
+    """
+    import pty
+    import select
+    check = Checks()
+    farm = Path(argv[0]) if argv else None
+
+    #       The programs that act on the machine, each held or argued.
+    named = {}
+    for domain, (utilities, _, _) in SPECS.items():
+        for utility in utilities:
+            named.setdefault(utility.name, domain)
+    for name, domain in sorted(named.items()):
+        base = name[:-5] if name.endswith("_live") else name
+        if base in HOST_WATCH or name in HOST_WATCH:
+            check(name in HOST_CONFINED or base in HOST_CONFINED or name in HOST_SAFE or base in HOST_SAFE,
+                  "%s (%s) acts on the machine and is neither confined nor argued safe" % (name, domain))
+    check(all(HOST_SAFE.values()), "every HOST_SAFE name argues why")
+    check(HOST_CONFINED.isdisjoint(HOST_SAFE), "a program is confined or argued safe, not both")
+    unrun = sorted(name for name in HOST_WATCH if name not in named)
+    print("  not run by any spec: %s" % " ".join(unrun))
+
+    with tempfile.TemporaryDirectory(prefix="host-confinement-") as temporary:
+        runner = Runner(farm if farm and farm.is_dir() else None, Path(temporary) / "main")
+        refusal = runner.confinement.start()
+        if refusal:
+            print("host confinement: NOT RUN -- " + refusal)
+            return 2
+        try:
+            plan = runner.confinement.planned
+            folder = runner.confinement.folder
+
+            def inside(plan_used, command):
+                return subprocess.run(command, preexec_fn=lambda: host_unshare(plan_used), capture_output=True,
+                                      timeout=30, stdin=subprocess.DEVNULL)
+
+            seen = inside(plan, [sys.executable, "-I", "-c", HOST_CONFINEMENT_PROBE, str(folder), json.dumps(plan)])
+            try:
+                got = json.loads(seen.stdout)
+            except ValueError:
+                got = None
+                check(False, "the probe inside the namespace answered nothing: %r" % seen.stderr[-200:])
+            if got is not None:
+                for path, (found, canary) in sorted(got["endpoints"].items()):
+                    check(found == canary, "%s is the canary's socket in the namespace (inode %d, canary %d)"
+                          % (path, found, canary))
+                check(bool(plan["endpoints"]) or not os.path.lexists("/dev/log"),
+                      "a /dev/log this host has is among the endpoints held")
+                check(got["utmp"] in (0, None), "/run/utmp is empty in the namespace (%r bytes)" % got["utmp"])
+                check(got["pts"] is None or set(got["pts"]) <= {"ptmx"},
+                      "/dev/pts holds no terminal of the host in the namespace: %r" % got["pts"])
+                check(got["systemd"] is None or
+                      got["systemd"] == sorted(["journal"] + (["system"] if plan["system"] else [])),
+                      "/run/systemd holds only the journal (and the empty system marker) in the namespace: %r"
+                      % got["systemd"])
+                check(got["userns"] != os.stat("/proc/self/ns/user").st_ino, "the namespace is a user namespace of its own")
+                if got["uid"] != 0:
+                    check(int(got["cap"], 16) == 0, "the runner holds no capability in the namespace: %s" % got["cap"])
+
+            #       Loud records, sent only once the endpoints are known to be the canary's.
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            token = "mwcanary%d" % os.getpid()
+            INPUTS["canary_prefixed"] = ("<0>%s-prefixed-emerg\n<7>%s-prefixed-debug\n" % (token, token)).encode()
+            try:
+                if check.failures == 0:
+                    spec = spec_utilities(load_spec("misc")).get("logger")
+                    asked = ((["-p", "0", "-t", token, "-u", "/dev/log", token + "-emerg"], "empty", 1),
+                             (["-p", "emerg", "-t", token, token + "-emerg-name"], "empty", 1),
+                             (["--prio-prefix", "-t", token], "canary_prefixed", 2),
+                             (["-p", "user.debug", "-t", token, token + "-plain"], "empty", 1))
+                    reference = runner.reference_for("logger", spec)
+                    programs = 0
+                    for argv_, stdin, records in asked:
+                        case = Case("misc", "logger", argv_, stdin, "misc")
+                        before = len([line for line in runner.confinement.received() if token.encode() in line])
+                        pair = runner.programs(case, spec) if farm else None
+                        if reference is None:
+                            check(False, "no reference logger on this host")
+                            break
+                        if pair:
+                            want, got_ = runner.pair(case, spec)
+                            ran = 2
+                            check(want["status"] == 0 and got_["status"] == 0,
+                                  "logger %s ended 0 beside the reference's (%r, %r)"
+                                  % (" ".join(argv_), want["status"], got_["status"]))
+                        else:
+                            want = runner.run_one([reference], "logger", case, spec, 0)
+                            ran = 1
+                            check(want["status"] == 0, "logger %s ended 0 (%r)" % (" ".join(argv_), want["status"]))
+                        deadline = time.monotonic() + 3
+                        while time.monotonic() < deadline and \
+                                len([line for line in runner.confinement.received() if token.encode() in line]) \
+                                < before + ran * records:
+                            time.sleep(0.05)
+                        arrived = len([line for line in runner.confinement.received() if token.encode() in line]) - before
+                        check(arrived == ran * records,
+                              "logger %s: %d records reached the canary, %d were sent"
+                              % (" ".join(argv_), arrived, ran * records))
+                        programs = max(programs, ran)
+                    time.sleep(0.5)
+                    journal = subprocess.run(["journalctl", "--no-pager", "-o", "cat", "--since", stamp],
+                                             capture_output=True, timeout=60) if shutil.which("journalctl") else None
+                    if journal is None or journal.returncode or journal.stderr.strip():
+                        print("  the host journal is not readable here; the inodes above are the proof")
+                    else:
+                        check(token.encode() not in journal.stdout,
+                              "no record of the logger cases reached the host journal")
+            finally:
+                INPUTS.pop("canary_prefixed", None)
+
+            #       A receiver on a terminal that utmp lists.
+            walls = [str(path) for path in (shutil.which("wall"), farm / "wall" if farm else None)
+                     if path and Path(path).exists()]
+            master, slave = pty.openpty()
+            try:
+                line = os.ttyname(slave)[len("/dev/"):]
+                os.fchmod(slave, 0o620)
+                user = os.environ.get("USER") or str(os.getuid())
+                try:
+                    import pwd
+                    user = pwd.getpwuid(os.getuid()).pw_name
+                except (ImportError, KeyError):
+                    pass
+                listed = folder / "utmp.listed"
+                listed.write_bytes(misc_utmp_record(7, os.getpid(), line, user, "", int(time.time()), identity="mw1"))
+                control = dict(plan, utmp_file=str(listed), pts=False, endpoints=[], system=False)
+                nothing = dict(plan, pts=False)
+
+                def heard(plan_used, wall, message):
+                    inside(plan_used, [wall, "-t", "3", message])
+                    got_ = b""
+                    while select.select([master], [], [], 0.3)[0]:
+                        got_ += os.read(master, 4096)
+                    return got_
+
+                for wall in walls:
+                    label = "ours" if farm and wall.startswith(str(farm)) else "the reference"
+                    told = heard(control, wall, token + "-control")
+                    if not plan["utmp"]:
+                        print("  this host has no utmp; wall's receiver is not exercised")
+                        break
+                    check(token.encode() in told, "control: wall (%s) writes to a terminal utmp lists" % label)
+                    for name, used in (("an empty utmp", nothing), ("the confinement", plan)):
+                        check(token.encode() not in heard(used, wall, token + "-" + name.split()[-1]),
+                              "wall (%s) under %s writes to no terminal" % (label, name))
+            finally:
+                os.close(master)
+                os.close(slave)
+        finally:
+            runner.confinement.stop()
+    return check.verdict("host confinement:", "host-confinement")
 
 
 def harness_sort_spill_names(argv):
@@ -97385,6 +97832,7 @@ HARNESS_CHECKS = {
     "text_tables": harness_text_tables,
     "sort_spill_names": harness_sort_spill_names,
     "mount_names": harness_mount_names,
+    "host_confinement": harness_host_confinement,
     "host_writes": harness_host_writes,
     "net_sysctl": harness_net_sysctl,
     "moonwater_cli": harness_moonwater_cli,
