@@ -414,6 +414,27 @@ after. Box run as above.
 
 **Still open.** Nothing further; the three-letter and shorter codes are a
 separate space (`link_code_shaped`) and were never names.
+### MW-2026-044: the locked tier left SMT on for processors the kernel counts as unaffected
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-10-30 (4f011e7b) |
+| Class | Hardening that did not take: a boot parameter that does less than its name |
+| Attacker | A local program in a locked-tier machine, using sibling-thread (SMT) side channels |
+| Reachable | The locked tier's kernel command line (`sec_locked`), on any processor the kernel does not list as vulnerable to an SMT-sensitive attack (found on a Zen 5) |
+
+**What happened.** The locked tier asked for `mitigations=auto,nosmt`. `nosmt`
+under `mitigations=` disables simultaneous multithreading only on processors
+the kernel counts as vulnerable. On a processor it counts as unaffected,
+including the Zen 5 the tier lane boots on, SMT stayed on, so a locked machine
+ran sibling threads of different programs on one core with the tier's own name
+saying otherwise.
+
+**The fix.** `nosmt=force`, which turns SMT off whatever the processor is.
+
+**Test.** The tier lane's SMT row: the old locked image was 15 of 16 (the SMT
+row red), the new one is 16 of 16 in three boots.
+
 ### MW-2026-050: the compositor's window table was handed to any program
 
 | | |
