@@ -447,6 +447,7 @@ typedef struct
         p32 pair_turns, generation;
         p32 point_count, contour_count, components;
         b32 left_side;
+        p64 still;              // contours the snap leaves alone (the dots, font_dots places them)
         b32 band, rows, stride, width, grain, cross, wound, x, y;
         b32 cell_x, cell_y;
         p32 cover, area, gathered, used[5];
@@ -1482,7 +1483,7 @@ static p32 font_runs(const font_engine address_to e, b64 slack, b64 least, font_
         for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
         {
                 p32 last = e->contour[c].last, n = last - first + 1;
-                if (last <= first)
+                if (last <= first || (c < 64 && (e->still >> c & 1)))
                         continue;
 
                 //      Start where an edge is not vertical, so that no run is
@@ -1774,11 +1775,34 @@ static inline bool font_gap_kept(b64 was, b64 now)
         return now >= 0 && (was < FONT_ONE / 2 || now >= FONT_ONE);
 }
 
-static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 widest,
-                         const b64 address_to fixed, p32 fixes, b64 whole_from, bool loose)
+//      Whether the snap leaves a contour where it is (a dot, font_dots's).
+static inline bool font_still(const font_engine address_to e, p32 contour)
+{
+        return contour < 64 && (e->still >> contour & 1);
+}
+
+//      The least and most x of the points the snap moves.
+static fn font_reach(const font_engine address_to e, b64 address_to lowest, b64 address_to highest)
+{
+        p32 first = 0;
+
+        *lowest = (b64)1 << 62, *highest = -*lowest;
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+                for (p32 i = first; i <= e->contour[c].last && !font_still(e, c); i++)
+                {
+                        *lowest = e->points[i].x < *lowest ? e->points[i].x : *lowest;
+                        *highest = e->points[i].x > *highest ? e->points[i].x : *highest;
+                }
+}
+
+//      snapped, when not null, takes each stem that stayed snapped as four
+//      places -- its two edges as they were and as they are now -- and the
+//      count of them is the answer.
+static p32 font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 widest,
+                          const b64 address_to fixed, p32 fixes, b64 whole_from, bool loose, b64 address_to snapped)
 {
         if (normal <= 0 || normal >= (b64)e->snap_widest * (FONT_ONE / 64))
-                return;
+                return 0;
 
         font_run run[2 * FONT_STEMS];
         b64 stem[2 * FONT_STEMS], to[2 * FONT_STEMS];
@@ -1841,13 +1865,9 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         //      wide for them is let go. Pushed out, the round sides of % went a
         //      pixel past both ends at every size, out of its cell.
         {
-                b64 lowest = (b64)1 << 62, highest = -lowest;
+                b64 lowest, highest;
 
-                for (p32 i = 0; i < e->point_count; i++)
-                {
-                        lowest = e->points[i].x < lowest ? e->points[i].x : lowest;
-                        highest = e->points[i].x > highest ? e->points[i].x : highest;
-                }
+                font_reach(e, &lowest, &highest);
                 lowest &= ~(b64)(FONT_ONE - 1);
                 highest = (highest + FONT_ONE - 1) & ~(b64)(FONT_ONE - 1);
                 for (p32 s = 0; s < stems && !loose; s++)
@@ -1927,18 +1947,20 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
         //      Two edges to a stem, room for the sixteen fixed lines and the
         //      glyph's two ends, and the edges no stem took.
         b64 from[4 * FONT_STEMS + 18], onto[4 * FONT_STEMS + 18];
-        b64 lowest = (b64)1 << 62, highest = -lowest;
-        p32 edges = 0;
-        for (p32 i = 0; i < e->point_count; i++)
-        {
-                lowest = e->points[i].x < lowest ? e->points[i].x : lowest;
-                highest = e->points[i].x > highest ? e->points[i].x : highest;
-        }
+        b64 lowest, highest;
+        p32 edges = 0, held = 0;
+        font_reach(e, &lowest, &highest);
         for (p32 s = 0; s < stems; s++)
                 if (!dropped[s])
                 {
                         from[edges] = stem[2 * s], onto[edges++] = to[2 * s];
                         from[edges] = stem[2 * s + 1], onto[edges++] = to[2 * s + 1];
+                        if (snapped)
+                        {
+                                snapped[4 * held] = stem[2 * s], snapped[4 * held + 1] = stem[2 * s + 1];
+                                snapped[4 * held + 2] = to[2 * s], snapped[4 * held + 3] = to[2 * s + 1];
+                                held++;
+                        }
                 }
         //      The stems' edges are in order already; the lines and the ends
         //      go in between them where they keep the map in order, and are
@@ -2004,30 +2026,33 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
                 edges++;
         }
         if (!edges)
-                return;
+                return held;
 
-        for (p32 i = 0; i < e->point_count; i++)
-        {
-                b64 x = e->points[i].x;
-                p32 k = 0;
-
-                while (k < edges && from[k] < x)
-                        k++;
-                if (k == 0)
-                        x += onto[0] - from[0];
-                else if (k == edges)
-                        x += onto[edges - 1] - from[edges - 1];
-                else if (from[k] == x)
-                        x = onto[k];
-                else
+        p32 first = 0;
+        for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
+                for (p32 i = first; i <= e->contour[c].last && !font_still(e, c); i++)
                 {
-                        //      In doubles, which a hostile font's coordinates cannot
-                        //      overflow and which every machine rounds alike.
-                        f64 t = (f64)(x - from[k - 1]) * (f64)(onto[k] - onto[k - 1]) / (f64)(from[k] - from[k - 1]);
-                        x = onto[k - 1] + (b64)(t < 0 ? t - 0.5 : t + 0.5);
+                        b64 x = e->points[i].x;
+                        p32 k = 0;
+
+                        while (k < edges && from[k] < x)
+                                k++;
+                        if (k == 0)
+                                x += onto[0] - from[0];
+                        else if (k == edges)
+                                x += onto[edges - 1] - from[edges - 1];
+                        else if (from[k] == x)
+                                x = onto[k];
+                        else
+                        {
+                                //      In doubles, which a hostile font's coordinates cannot
+                                //      overflow and which every machine rounds alike.
+                                f64 t = (f64)(x - from[k - 1]) * (f64)(onto[k] - onto[k - 1]) / (f64)(from[k] - from[k - 1]);
+                                x = onto[k - 1] + (b64)(t < 0 ? t - 0.5 : t + 0.5);
+                        }
+                        e->points[i].x = x;
                 }
-                e->points[i].x = x;
-        }
+        return held;
 }
 
 //      An edge of a vertical stem is a run of the outline at one x a sixth
@@ -2044,13 +2069,15 @@ static fn font_snap_axis(font_engine address_to e, b64 normal, b64 least, b64 wi
 
 //      Vertical stems, for a cell's whole-pixel pen. heavier is what a
 //      synthetic bold added to every stem, so the standard grows with it.
-static fn font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier)
+//      snapped takes the stems that stayed snapped, as font_snap_axis says.
+static p32 font_snap(font_engine address_to e, const font_face address_to face, p32 size, b32 standard, b64 heavier,
+                     b64 address_to snapped)
 {
         b64 scale = (b64)size * (FONT_ONE / 64);
         b64 normal = font_divide((b64)standard * scale, (b64)face->units << FONT_EXACT) + heavier;
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
-        font_snap_axis(e, normal, x_height / FONT_ROUND_RUN, scale / 4, null, 0, FONT_ONE * 3 / 4, false);
+        return font_snap_axis(e, normal, x_height / FONT_ROUND_RUN, scale / 4, null, 0, FONT_ONE * 3 / 4, false, snapped);
 }
 
 //      And a bar's edge the same: the tops and bottoms of o, e, a, s, g, 3
@@ -2059,22 +2086,46 @@ static fn font_snap(font_engine address_to e, const font_face address_to face, p
 #define FONT_ROUND_BAR 6
 
 /*
-        Dots: a contour of ink (not a counter, and inside no other contour's
-        box) half a pixel to two and a half across either way and no more
-        than twice as long one way as the other -- the dots of . : ; ! ? i
-        and j -- made whole pixels each way and set on the grid about its
-        centre. A dot of 1.2 px fell on two rows and two columns at most
-        places and was a grey blot; code is full of them. Which contours are
-        dots, and their sizes, are taken before the stems are snapped
-        (font_dots_measure), whose map stretches a dot beside a stem (the dot
-        of ! at 10 px went from 1.0 to 2.04 px wide); where each goes is its
-        centre after them, so the dot of i stays over its stem.
+        Dots: a contour of ink (not a counter, and neither inside another
+        contour's box nor holding one) from half a pixel to a quarter of the
+        em across either way (FONT_DOT_MOST) and no more than twice as long
+        one way as the other -- the dots of . : ; ! ? i and j, and of umlauts
+        -- made whole pixels each way and set on the grid. A dot of 1.2 px
+        fell on two rows and two columns at most places and was a grey blot;
+        code is full of them.
+
+        Which contours are dots, and their sizes, are taken before the stems
+        are snapped (font_dots_measure), and the snap leaves them where they
+        are: its map stretched a dot beside a stem (the dot of ! at 10 px went
+        from 1.0 to 2.04 px wide), and the knots of a stem it overhung cut
+        through it, so its two halves came out different greys.
+
+        A dot over a stem that stayed snapped -- i, j, the dots of u and of !
+        -- is set on the stem as it is now: as wide as the stem and as many
+        whole pixels more each side as the dot is wider by half, so its
+        middle is the stem's. Rounded on its own, a dot of 1.6 px was two
+        pixels over a stem of one, and which side its extra column went to
+        was the side its centre rounded to, which the pen's eighth decided:
+        the dot of i stood a pixel right of its stem at half the places it
+        was drawn at 12 to 18 px. Any other dot is set about its centre.
 */
 #define FONT_DOTS 16
 
-//      Whether another contour's box holds this one's: the dot of a dotted
+//      The widest dot: a quarter of the em, from two and a half pixels, as
+//      it always was, to six, i's at 40 to 64 px. Up to two and a half only,
+//      a dot of 2.6 px (Inter's at 24 px, a title at twice the scale, Plex
+//      Mono Bold's darkened at 13 px) was a stem of its own, snapped about
+//      its own middle, and stood off the stem under it by up to 0.8 px. Not a
+//      part of the em, the whole body of Plex Mono's i at 10 px (4.5 by 7 px)
+//      was a dot.
+#define FONT_DOT_LEAST (FONT_ONE * 5 / 2)
+#define FONT_DOT_MOST (FONT_ONE * 6)
+
+//      Whether another contour's box holds this one's -- the dot of a dotted
 //      zero, which whole pixels would set off its centre (at 10 px it lies
-//      between two columns) and the zero would read as a ring.
+//      between two columns) and the zero would read as a ring -- or this
+//      one's box holds another's: the outside of a ring, of o or of a small
+//      circle of %, whose inside would not follow it.
 static bool font_dot_inside(const font_engine address_to e, p32 contour, b64 left, b64 bottom, b64 right, b64 top)
 {
         p32 first = 0;
@@ -2083,7 +2134,7 @@ static bool font_dot_inside(const font_engine address_to e, p32 contour, b64 lef
         {
                 b64 l = (b64)1 << 62, b = l, r = -l, t = -l;
 
-                if (c == contour)
+                if (c == contour || e->contour[c].last < first)
                         continue;
                 for (p32 i = first; i <= e->contour[c].last; i++)
                 {
@@ -2092,17 +2143,22 @@ static bool font_dot_inside(const font_engine address_to e, p32 contour, b64 lef
                         b = e->points[i].y < b ? e->points[i].y : b;
                         t = e->points[i].y > t ? e->points[i].y : t;
                 }
-                if (l <= left && r >= right && b <= bottom && t >= top)
+                if ((l <= left && r >= right && b <= bottom && t >= top) ||
+                    (left <= l && right >= r && bottom <= b && top >= t))
                         return true;
         }
         return false;
 }
 
-static fn font_dots_measure(const font_engine address_to e, b64 address_to sizes)
+//      Each dot's width and height in sizes, two to a contour (zero for one
+//      that is not a dot), and the dots left out of the snap.
+static fn font_dots_measure(font_engine address_to e, p32 size, b64 address_to sizes)
 {
         f64 whole = 0;
         p32 first = 0;
+        b64 most = (b64)size * (FONT_ONE / 64) / 4;
 
+        most = most < FONT_DOT_LEAST ? FONT_DOT_LEAST : most > FONT_DOT_MOST ? FONT_DOT_MOST : most;
         memory_zero(sizes, 2 * FONT_DOTS * sizeof(b64));
         for (p32 c = 0; c < e->contour_count; first = e->contour[c++].last + 1u)
                 for (p32 i = first; i <= e->contour[c].last; i++)
@@ -2133,26 +2189,52 @@ static fn font_dots_measure(const font_engine address_to e, b64 address_to sizes
 
                 b64 width = right - left, height = top - bottom;
                 if ((area < 0) != (whole < 0) || width < FONT_ONE / 2 || height < FONT_ONE / 2 ||
-                    width > FONT_ONE * 5 / 2 || height > FONT_ONE * 5 / 2 || width > 2 * height || height > 2 * width ||
+                    width > most || height > most || width > 2 * height || height > 2 * width ||
                     font_dot_inside(e, c, left, bottom, right, top))
                         continue;
-                sizes[2 * c] = font_round(width) < FONT_ONE ? FONT_ONE : font_round(width);
-                sizes[2 * c + 1] = font_round(height) < FONT_ONE ? FONT_ONE : font_round(height);
+                sizes[2 * c] = width;
+                sizes[2 * c + 1] = height;
+                e->still |= (p64)1 << c;
         }
 }
 
-static fn font_dots(font_engine address_to e, const b64 address_to sizes)
+//      The dots placed, after both snaps, against the stems that stayed
+//      snapped (kept, four places a stem as font_snap_axis gives them, stems
+//      of them) and the fitted lines (fixes of them).
+static fn font_dots(font_engine address_to e, const b64 address_to sizes, const b64 address_to kept, p32 stems,
+                    const b64 address_to lines, p32 fixes)
 {
+        //      Each dot's box as it is (left, bottom, right, top) and as it
+        //      will be (x, y, across, up), and whether a stem holds it.
+        b64 box[FONT_DOTS][8];
+        bool held[FONT_DOTS] = {0};
         p32 first = 0;
 
         for (p32 c = 0; c < e->contour_count && c < FONT_DOTS; first = e->contour[c++].last + 1u)
         {
                 p32 last = e->contour[c].last;
                 b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
-                b64 across = sizes[2 * c], up = sizes[2 * c + 1];
+                b64 across = font_round(sizes[2 * c]), up = font_round(sizes[2 * c + 1]);
 
-                if (!across)
+                if (!sizes[2 * c])
                         continue;
+                across = across < FONT_ONE ? FONT_ONE : across;
+                up = up < FONT_ONE ? FONT_ONE : up;
+
+                //      A dot about as tall as it is wide (within a quarter) is
+                //      square, the whole side nearest its area: rounded each way
+                //      on its own, a dot of 1.6 by 1.41 px (Plex Mono's at 14 px)
+                //      was a dash two pixels long, and ä wore two of them.
+                bool square = 4 * sizes[2 * c] <= 5 * sizes[2 * c + 1] && 4 * sizes[2 * c + 1] <= 5 * sizes[2 * c];
+                if (square)
+                {
+                        f64 area = (f64)sizes[2 * c] * (f64)sizes[2 * c + 1];
+
+                        across = FONT_ONE;
+                        while ((f64)across * (f64)across + (f64)(across + FONT_ONE) * (f64)(across + FONT_ONE) < 2 * area)
+                                across += FONT_ONE;
+                        up = across;
+                }
                 for (p32 i = first; i <= last; i++)
                 {
                         left = e->points[i].x < left ? e->points[i].x : left;
@@ -2161,21 +2243,153 @@ static fn font_dots(font_engine address_to e, const b64 address_to sizes)
                         top = e->points[i].y > top ? e->points[i].y : top;
                 }
 
-                b64 width = right - left, height = top - bottom;
                 b64 x = ((left + right - across + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
                 b64 y = ((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
 
-                if (width <= 0 || height <= 0)
-                        continue;
-                for (p32 i = first; i <= last; i++)
+                //      The stem under its middle, the one it overlaps most: the
+                //      two dots of i with diaeresis each overhang its stem, and
+                //      set on it both were one.
+                b64 most = 0;
+                p32 under = stems;
+                for (p32 s = 0; s < stems; s++)
                 {
-                        f64 u = (f64)(e->points[i].x - left) * (f64)across / (f64)width;
-                        f64 v = (f64)(e->points[i].y - bottom) * (f64)up / (f64)height;
+                        b64 from = left > kept[4 * s] ? left : kept[4 * s];
+                        b64 to = right < kept[4 * s + 1] ? right : kept[4 * s + 1];
 
-                        e->points[i].x = x + (b64)(u + 0.5);
-                        e->points[i].y = y + (b64)(v + 0.5);
+                        if (to - from > most && 2 * kept[4 * s] <= left + right && left + right <= 2 * kept[4 * s + 1])
+                                most = to - from, under = s;
+                }
+                if (under < stems)
+                {
+                        b64 low = kept[4 * under + 2], high = kept[4 * under + 3], stem = high - low;
+
+                        held[c] = true;
+                        if (!(stem & (FONT_ONE - 1)) && !(low & (FONT_ONE - 1)))
+                        {
+                                //      Whole pixels more each side while that
+                                //      is nearer the dot's own area than one
+                                //      fewer (2.0 px over a stem of one is one
+                                //      pixel, not a blot of three), and as tall
+                                //      as keeps its shape: a round dot of 1.6
+                                //      px over a stem of one is one pixel each
+                                //      way, not a bar of two.
+                                b64 more = 0;
+                                f64 dot = (f64)sizes[2 * c] * (f64)sizes[2 * c];
+
+                                while (more < FONT_DOT_MOST && (f64)(stem + 2 * more) * (f64)(stem + 2 * more) +
+                                                                       (f64)(stem + 2 * more + 2 * FONT_ONE) *
+                                                                           (f64)(stem + 2 * more + 2 * FONT_ONE) <
+                                                                   2 * dot)
+                                        more += FONT_ONE;
+
+                                if (square || stem + 2 * more != across)
+                                {
+                                        up = square ? stem + 2 * more
+                                                    : font_round((b64)((f64)sizes[2 * c + 1] * (f64)(stem + 2 * more) /
+                                                                       (f64)sizes[2 * c] + 0.5));
+                                        up = up < FONT_ONE ? FONT_ONE : up;
+                                        y = ((bottom + top - up + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                                }
+                                across = stem + 2 * more;
+                                x = low - more;
+                        }
+                        else
+                                x = ((low + high - across + FONT_ONE) >> (FONT_SHIFT + 1)) << FONT_SHIFT;
+                }
+
+                //      A dot clear of a fitted line under it -- i's and j's
+                //      of the x-height, an umlaut's of the cap height -- keeps a
+                //      pixel of air over it: rounded down onto the line, the
+                //      dot of Plex Mono Bold's i at 11 px stood on its stem
+                //      (and at 9 px dark, where the fit took the x-height to
+                //      0.2 px under it; the dots of A with diaeresis, 0.02 px
+                //      over the cap height at 10 px dark, stood on its apex).
+                //      A dot on the baseline -- under . ! ? : -- stays on it,
+                //      whatever its height came to.
+                for (p32 f = 0; f < fixes; f++)
+                        if (f && bottom >= lines[f] - FONT_ONE / 8 && y < lines[f] + FONT_ONE)
+                                y = lines[f] + FONT_ONE;
+                        else if (!f && bottom > lines[f] - FONT_ONE / 8 && bottom < lines[f] + FONT_ONE / 8)
+                                y = lines[f];
+                        else if (!f && bottom >= lines[f] + FONT_ONE / 8 && y < lines[f] + FONT_ONE)
+                                y = lines[f] + FONT_ONE;
+
+                b64 place[8] = {left, bottom, right, top, x, y, across, up};
+                memory_copy(box[c], place, sizeof(place));
+        }
+
+        //      Two dots side by side and apart (by a sixteenth of a pixel; the
+        //      dots of ä are 0.21 px apart darkened at 8 px) -- an umlaut, a
+        //      diaeresis -- keep a pixel between them. Each rounded
+        //      about its own middle, the two of A with diaeresis at 14 px, 1.0
+        //      px apart, met in a bar four pixels long, and ä read as a with
+        //      a macron: the one rounded the further toward the other, and
+        //      held by no stem, goes back.
+        for (p32 a = 0; a < e->contour_count && a < FONT_DOTS; a++)
+                for (p32 b = 0; b < e->contour_count && b < FONT_DOTS; b++)
+                {
+                        if (!sizes[2 * a] || !sizes[2 * b] || box[a][2] > box[b][0] ||
+                            box[b][0] - box[a][2] < FONT_ONE / 16 || box[a][5] >= box[b][5] + box[b][7] ||
+                            box[b][5] >= box[a][5] + box[a][7] || box[b][4] - (box[a][4] + box[a][6]) >= FONT_ONE ||
+                            (held[a] && held[b]))
+                                continue;
+
+                        //      Twins, as the dots of an umlaut are, are one size:
+                        //      the size of the one a stem holds, else the larger,
+                        //      the other set about its own middle again. Over
+                        //      the stem of a at 8 px one dot of ä was two pixels
+                        //      wide and the other one.
+                        if (4 * (sizes[2 * a] - sizes[2 * b]) <= sizes[2 * a] &&
+                            4 * (sizes[2 * b] - sizes[2 * a]) <= sizes[2 * b] &&
+                            4 * (sizes[2 * a + 1] - sizes[2 * b + 1]) <= sizes[2 * a + 1] &&
+                            4 * (sizes[2 * b + 1] - sizes[2 * a + 1]) <= sizes[2 * b + 1])
+                        {
+                                p32 big = held[a] ? a : held[b] ? b : box[a][6] * box[a][7] >= box[b][6] * box[b][7] ? a : b;
+                                p32 other = big == a ? b : a;
+
+                                if (box[other][6] != box[big][6] || box[other][7] != box[big][7])
+                                {
+                                        box[other][4] = ((box[other][0] + box[other][2] - box[big][6] + FONT_ONE) >> (FONT_SHIFT + 1))
+                                                        << FONT_SHIFT;
+                                        box[other][5] = box[big][5] + (((box[other][1] + box[other][3] - box[big][1] -
+                                                                         box[big][3] + FONT_ONE) >>
+                                                                        (FONT_SHIFT + 1))
+                                                                       << FONT_SHIFT);
+                                        box[other][6] = box[big][6];
+                                        box[other][7] = box[big][7];
+                                }
+                                if (box[b][4] - (box[a][4] + box[a][6]) >= FONT_ONE)
+                                        continue;
+                        }
+
+                        //      How far each middle went toward the other, rounded.
+                        b64 went_a = 2 * box[a][4] + box[a][6] - box[a][0] - box[a][2];
+                        b64 went_b = box[b][0] + box[b][2] - 2 * box[b][4] - box[b][6];
+                        b64 need = FONT_ONE - (box[b][4] - (box[a][4] + box[a][6]));
+
+                        if (!held[a] && (held[b] || went_a >= went_b))
+                                box[a][4] -= need;
+                        else
+                                box[b][4] += need;
+                }
+
+        first = 0;
+        for (p32 c = 0; c < e->contour_count && c < FONT_DOTS; first = e->contour[c++].last + 1u)
+        {
+                b64 width = box[c][2] - box[c][0], height = box[c][3] - box[c][1];
+
+                if (!sizes[2 * c] || width <= 0 || height <= 0)
+                        continue;
+                for (p32 i = first; i <= e->contour[c].last; i++)
+                {
+                        f64 u = (f64)(e->points[i].x - box[c][0]) * (f64)box[c][6] / (f64)width;
+                        f64 v = (f64)(e->points[i].y - box[c][1]) * (f64)box[c][7] / (f64)height;
+
+                        e->points[i].x = box[c][4] + (b64)(u + 0.5);
+                        e->points[i].y = box[c][5] + (b64)(v + 0.5);
                 }
         }
+        e->still = 0;
 }
 
 //      Horizontal bars, for any fitted text: its baseline is a whole pixel.
@@ -2189,7 +2403,7 @@ static fn font_bars(font_engine address_to e, const font_face address_to face, p
         b64 x_height = font_divide((b64)(face->x_height > 0 ? face->x_height : face->units / 2) * scale, face->units);
 
         font_swap_axes(e);
-        font_snap_axis(e, normal, x_height / FONT_ROUND_BAR, scale / 4, fixed, fixes, FONT_BAR_WHOLE, true);
+        font_snap_axis(e, normal, x_height / FONT_ROUND_BAR, scale / 4, fixed, fixes, FONT_BAR_WHOLE, true, null);
         font_swap_axes(e);
 }
 
@@ -3313,6 +3527,7 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
 {
         e->point_count = e->contour_count = e->components = 0;
         e->clip = false;
+        e->still = 0;
         *box = (font_bitmap){0};
         if (size >= FONT_SIZE_LIMIT)
                 return FONT_TOO_LARGE;
@@ -3399,9 +3614,10 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
         //      Stems under three quarters of a pixel (Plex Mono at 8 and 9 px) are thickened across to a whole
         //      pixel and snapped whole: grown in both directions the bars and the lines would move, and snapped
         //      whole at their own width the diagonal between two black stems, N's, faded to nothing.
-        b64 dots[2 * FONT_DOTS];
+        b64 dots[2 * FONT_DOTS], kept[4 * FONT_STEMS];
+        p32 stems = 0;
         if (style & 1)
-                font_dots_measure(e, dots);
+                font_dots_measure(e, size, dots);
         b64 thin = 0;
         if (standard && !(style & 8))
         {
@@ -3410,12 +3626,12 @@ static b32 font_shape(font_engine address_to e, const font_face address_to face,
                 thin = normal >= FONT_ONE / 2 && normal < FONT_ONE * 3 / 4 && FONT_THIN_TO > normal ? FONT_THIN_TO - normal : 0;
                 if (thin > 0)
                         font_embolden(e, (f32)thin, true);
-                font_snap(e, face, size, standard, heavier + thin);
+                stems = font_snap(e, face, size, standard, heavier + thin, kept);
         }
         if (fixes && zones[3])
                 font_bars(e, face, size, zones[3], lines, fixes, heavier);
         if (style & 1)
-                font_dots(e, dots);
+                font_dots(e, dots, kept, stems, lines, fixes);
 
         b64 left = (b64)1 << 62, bottom = left, right = -left, top = -left;
         for (p32 i = 0; i < e->point_count; i++)

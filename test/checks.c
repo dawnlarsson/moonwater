@@ -112543,7 +112543,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
 
                 snap_load(stem, 4, turned);
-                font_snap(&engine, &face, size, snap_standard(1229), 0);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, null);
                 bool snapped = true;
                 for (p32 i = 0; i < 4; i++)
                         snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
@@ -112564,7 +112564,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(1485), 0);
+                font_snap(&engine, &face, size, snap_standard(1485), 0, null);
                 check("snap: a 1.45 px stem is the whole pixel nearest its centre",
                       engine.points[0].x == 2048 && engine.points[2].x == 3072);
         }
@@ -112576,7 +112576,7 @@ static fn check_snap()
                                        2560, 9216, 2560, 1024, 4000, 1024, 4000, 0};
 
                 snap_load(bracket, 8, false);
-                font_snap(&engine, &face, size, snap_standard(1229), 0);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, null);
                 check("snap: a bracket's stem snaps and its arms' ends stay",
                       engine.points[0].x == 1024 && engine.points[4].x == 2048 && engine.points[2].x == 4000 &&
                           engine.points[7].x == 4000);
@@ -112594,7 +112594,7 @@ static fn check_snap()
                 engine.contour[1].last = 7;
                 for (p32 i = 0; i < 8; i++)
                         engine.points[i] = (font_point){two[2 * i], two[2 * i + 1], 1};
-                font_snap(&engine, &face, size, snap_standard(1229), 0);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, null);
                 check("snap: a counter half a pixel wide is not shut",
                       engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
                           engine.points[0].x < engine.points[2].x);
@@ -112606,14 +112606,14 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2150, 10240, 2150, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(819), 0);
+                font_snap(&engine, &face, size, snap_standard(819), 0, null);
                 check("snap: a 0.8 px stem is a whole pixel", engine.points[0].x == 1024 && engine.points[2].x == 2048);
         }
         {
                 const b32 stem[] = {1331, 0, 1331, 10240, 1945, 10240, 1945, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(614), 0);
+                font_snap(&engine, &face, size, snap_standard(614), 0, null);
                 check("snap: a 0.6 px stem keeps its width with an edge on a pixel",
                       engine.points[0].x == 1434 && engine.points[2].x == 2048);
         }
@@ -112911,9 +112911,9 @@ static fn check_invariants(void)
         //      cells and drawn text.
         static const p32 ceiling[4][3][3] = {
             {{116, 26, 11}, {78, 22, 4}, {76, 24, 0}},
-            {{245, 28, 0}, {263, 25, 0}, {258, 28, 0}},
-            {{82, 11, 0}, {78, 14, 0}, {89, 13, 0}},
-            {{127, 27, 0}, {108, 16, 0}, {111, 17, 0}},
+            {{155, 28, 0}, {167, 25, 0}, {158, 28, 0}},
+            {{82, 10, 0}, {78, 14, 0}, {89, 13, 0}},
+            {{126, 27, 0}, {107, 16, 0}, {111, 17, 0}},
         };
         static const string_address paths[3] = {"dark cells", "light cells", "drawn text"};
         static p8 file[1 << 20];
@@ -112979,6 +112979,138 @@ static fn check_invariants(void)
                 }
         }
         log_flush();
+}
+
+/*
+        Dots, over the faces this tree ships at 8 to 32 px, as dark drawn
+        text and light drawn text at every eighth and as light and dark cells
+        (each at the eighth that centres it), from the bitmap the engine
+        caches:
+          i and j    the dot -- the band of ink rows above the first empty
+                     row -- is over the middle of the stem, the ink of the
+                     rows a third to two thirds down the x-height, within a
+                     quarter of a pixel, and stands clear of it (the band
+                     under half the glyph's height). Rounded on its own, a dot
+                     of 1.6 px over a stem of one was two pixels, its extra
+                     column on the side the pen's eighth rounded it to;
+          umlauts    the two dots of a diaeresis are two runs of columns at
+                     half ink or more, not one: rounded each about its own
+                     middle, they met in a bar.
+*/
+static font_engine dots_engine;
+static p8 dots_bitmap[256 * 256];
+static p8 dots_file[1 << 20];
+
+//      The glyph for code drawn into dots_bitmap; false when it is empty or too large to look at.
+static bool dots_draw(const font_face address_to face, p32 code, p32 size, p32 phase, p32 style, font_bitmap address_to box)
+{
+        if (font_shape(&dots_engine, face, font_glyph(face, code), size, phase, style, box) < 0 || box->width <= 0 ||
+            box->height <= 0 || box->width * box->height > 256 * 256)
+                return false;
+        memory_zero(dots_bitmap, (positive)box->width * (positive)box->height);
+        font_raster(&dots_engine, box->width, box->height, dots_bitmap, (positive)box->width);
+        return true;
+}
+
+//      The rows of ink at the top, down to the first empty row.
+static b32 dots_band(const font_bitmap address_to box)
+{
+        b32 band = 0;
+
+        for (bool any = true; band < box->height && any; band++)
+        {
+                any = false;
+                for (b32 c = 0; c < box->width; c++)
+                        any = any || dots_bitmap[band * box->width + c];
+        }
+        return band;
+}
+
+//      Twice the ink-weighted middle, in pixels times 256, of rows from to to; -1 with no ink.
+static b64 dots_middle(const font_bitmap address_to box, b32 from, b32 to)
+{
+        b64 mass = 0, moment = 0;
+
+        for (b32 r = from < 0 ? 0 : from; r < to && r < box->height; r++)
+                for (b32 c = 0; c < box->width; c++)
+                        mass += dots_bitmap[r * box->width + c], moment += dots_bitmap[r * box->width + c] * (2 * c + 1);
+        return mass ? moment * 256 / mass : -1;
+}
+
+static fn check_dots(void)
+{
+        static const string_address faces[4] = {"fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf",
+                                                 "fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf",
+                                                 "fonts/inter/Inter-Regular.ttf", "fonts/inter/Inter-Bold.ttf"};
+        static const p32 umlauts[] = {0xe4, 0xf6, 0xfc, 0xeb, 0xef, 0xff, 0xc4, 0xd6, 0xdc};
+        positive stems = 0, off = 0, pairs = 0, fused = 0;
+
+        font_start(&dots_engine, null, 0, 0);
+        for (p32 f = 0; f < 4; f++)
+        {
+                bipolar got = file_slurp_regular_at(AT_FDCWD, faces[f], dots_file, sizeof(dots_file), 0);
+                font_face face;
+
+                if (got <= 0 || font_load(&face, dots_file, (positive)got, 0) != 0)
+                {
+                        check("dots: the face this tree ships loads", false);
+                        continue;
+                }
+                for (p32 px = 8; px <= 32; px++)
+                {
+                        p32 size = px * 64;
+                        font_metrics grid = font_metrics_at(&face, size);
+                        b32 x_height = (grid.x_height + 0x8000) >> 16;
+
+                        //      Eight eighths of drawn text dark and light, then a light and a dark cell.
+                        for (p32 way = 0; way < 18; way++)
+                        {
+                                p32 style = way < 8 || way == 17 ? 7 : 5;
+                                font_bitmap box;
+
+                                for (p32 k = 0; k < 2 + sizeof(umlauts) / sizeof(umlauts[0]); k++)
+                                {
+                                        p32 code = k == 0 ? 'i' : k == 1 ? 'j' : umlauts[k - 2];
+                                        p32 phase = way < 16 ? way & 7
+                                                             : (p32)font_eighths(((grid.cell_width << 16) -
+                                                                                  font_advance(&face, font_glyph(&face, code), size)) / 2) & 7;
+
+                                        if (!dots_draw(&face, code, size, phase, style, &box))
+                                                continue;
+                                        b32 band = dots_band(&box);
+                                        if (k < 2)
+                                        {
+                                                b32 below = box.top - x_height;
+                                                b64 dot = dots_middle(&box, 0, band);
+                                                b64 stem = dots_middle(&box, below + x_height * 3 / 10, below + x_height * 7 / 10);
+
+                                                stems++;
+                                                off += band > box.height / 2 || dot < 0 || stem < 0 || dot - stem > 128 || stem - dot > 128;
+                                                continue;
+                                        }
+
+                                        b32 runs = 0;
+                                        bool in = false;
+                                        for (b32 c = 0; c < box.width; c++)
+                                        {
+                                                p32 most = 0;
+
+                                                for (b32 r = 0; r < band; r++)
+                                                        most = dots_bitmap[r * box.width + c] > most ? dots_bitmap[r * box.width + c] : most;
+                                                runs += most >= 128 && !in;
+                                                in = most >= 128;
+                                        }
+                                        pairs++;
+                                        fused += runs < 2;
+                                }
+                        }
+                }
+        }
+        if (off || fused)
+                string_format(log, "  dots: %p of %p i and j off their stem or on it, %p of %p umlauts one blot\n", off, stems,
+                              fused, pairs);
+        check("dots: the dot of i and j is over the middle of its stem and clear of it, at every eighth and in cells", stems && !off);
+        check("dots: the two dots of an umlaut stay two", pairs && !fused);
 }
 
 /*
@@ -114012,9 +114144,10 @@ static p64 line_hash(p64 hash, const p32 address_to pixels, positive count)
 /*
         Upright text is the bytes it was before text could be turned: every
         line above, hashed, against the hash the engine made then, the same
-        on all three machines.
+        on all three machines; made again when dots were set on the
+        stems under them (i, j, the umlauts of the lines, the colon).
 */
-#define LINE_UPRIGHT 13976847403197385133ull
+#define LINE_UPRIGHT 8196395136233378904ull
 
 static fn check_upright(void)
 {
@@ -114366,6 +114499,7 @@ b32 main()
         check_synthetic(&one, &two);
         check_polarity(&two);
         check_invariants();
+        check_dots();
         check_upright();
         check_turned();
         check_cells(&small_engine, &two);
@@ -115498,8 +115632,9 @@ static p64 band_hash(p64 hash)
     return hash;
 }
 
-/* A bottom and a top band are the bytes they were before a band on a side could turn its text. */
-#define BAND_UPRIGHT 15291459019951173845ull
+/* A bottom and a top band are the bytes they were before a band on a side could turn its text,
+   made again when dots were set on the stems under them. */
+#define BAND_UPRIGHT 3704624447264607136ull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
