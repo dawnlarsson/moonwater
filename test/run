@@ -16571,8 +16571,8 @@ disk_checks()
 #       be written whole.
 #
 #       A guest on pipes is started beside the stick, asked to update (or
-#       install), and killed outright a few milliseconds after it says it is
-#       writing the build, with QEMU gone mid-write. What is left on the disk
+#       install), and killed outright part way through its write, with QEMU
+#       gone mid-write. What is left on the disk
 #       is read from here, with a FAT reader that is not Moonwater's: the
 #       loader is the image the disk had or the one it was given, never
 #       between, no cluster chain of a file that is kept runs out, and a
@@ -16582,11 +16582,19 @@ disk_checks()
 #       says so, and one that stops short of its own sections is refused with
 #       the disk as it was.
 #
-#       The grid of cut times is where the write is, which is a few hundred
-#       milliseconds on a disk that answers at once; rows say that some cut
-#       landed with the copy begun and the old loader still the loader, and
-#       some after the new one was in place, so a grid that missed the write
-#       does not pass for one that held.
+#       Where a cut lands is measured in the disk's own writes, not in time.
+#       A run with no cut is made first, and QEMU's count of the bytes the
+#       disk took from the trigger to the command's last line is the length
+#       of the write; the cuts come at fractions of it (MOONWATER_CUT_PERCENT,
+#       MOONWATER_CUT_INSTALL_PERCENT), each when the count, polled over QMP,
+#       reaches its share. The grid used to be milliseconds after the trigger,
+#       0 to 70, and the update's write is seconds long and as long as the
+#       host is loaded: the new loader is read off a USB stick before it is
+#       renamed into place, so no cut ever landed after it, and the row saying
+#       so was red on every run. Rows still say that some cut landed with the
+#       copy begun and the old loader still the loader, and some after the
+#       new one was in place, so a grid that missed the write does not pass
+#       for one that held.
 #
 cat > "$work/fatjudge.py" <<'PY'
 import hashlib, re, struct, sys
@@ -16768,24 +16776,66 @@ elif mode == 'judge':
     print('fat-ok' if not errors else 'fat-bad %s' % '; '.join(errors[:4]))
 PY
 cat > "$work/cutboot.py" <<'PY'
-import os, re, subprocess, sys, threading, time
+import json, os, re, socket, subprocess, sys, threading, time
 
-# cutboot.py LOG TRIGGER K_MS COMMANDS LIMIT -- QEMU...
+# cutboot.py LOG TRIGGER BYTES COMMANDS LIMIT -- QEMU...
 # A guest started with its console on pipes, given COMMANDS at its first
-# prompt, and killed outright K_MS after TRIGGER first shows on the console
-# (never, when K_MS is negative). Says what became of it, and the time of
-# every line the moonwater command said, from the trigger, in LOG.times.
+# prompt, and killed outright once its disk (the drive with id "disk") has
+# taken BYTES bytes of writes since TRIGGER first showed on the console
+# (never, when BYTES is negative). Says what became of it: written-N, the
+# bytes the disk had taken from the trigger to the last line the moonwater
+# command said, which for a run with no cut is the length of the write; and
+# the time of every line the command said, from the trigger, in LOG.times.
+# BYTES may be pull:N instead: once the stick (the drive with id "stick") has
+# given N bytes of reads since the trigger, the device with id "stickdev" is
+# unplugged over QMP and the guest goes on with its commands (pulled-yes).
 log, trigger, k, commands, limit = sys.argv[1:6]
-k, limit = int(k), float(limit)
+pull = k.startswith('pull:')
+k, limit = int(k[5:] if pull else k), float(limit)
 argv = sys.argv[sys.argv.index('--') + 1:]
 trigger = trigger.encode()
+#       QEMU's own count of what the disk took, the one clock a cut can be
+#       set by that does not run at the host's pace.
+qmp = log + '.qmp'
+argv += ['-qmp', 'unix:%s,server=on,wait=off' % qmp]
 p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT)
 out = open(log, 'wb')
 times = open(log + '.times', 'w')
 seen = bytearray()
-state = {'sent': False, 'fired': None}
+state = {'sent': False, 'fired': None, 'said': 0}
 begun = time.monotonic()
+
+def connect():
+    while p.poll() is None and time.monotonic() - begun < 30:
+        try:
+            s = socket.socket(socket.AF_UNIX)
+            s.connect(qmp)
+            f = s.makefile('rwb')
+            f.readline()
+            ask(f, {'execute': 'qmp_capabilities'})
+            return f
+        except OSError:
+            time.sleep(0.01)
+    return None
+
+def ask(f, what):
+    f.write((json.dumps(what) + '\n').encode())
+    f.flush()
+    while True:
+        line = f.readline()
+        if not line:
+            raise OSError('qmp closed')
+        answer = json.loads(line)
+        if 'event' not in answer:
+            return answer
+
+def counts(f):
+    drives = dict((drive.get('device'), drive['stats'])
+                  for drive in ask(f, {'execute': 'query-blockstats'}).get('return', []))
+    if 'disk' not in drives:
+        raise OSError('no drive called disk')
+    return drives['disk']['wr_bytes'], drives.get('stick', {}).get('rd_bytes', 0)
 
 def reader():
     taken = 0
@@ -16812,24 +16862,51 @@ def reader():
                 times.write('%d %s\n' % ((time.monotonic() - state['fired']) * 1000,
                                          line.decode('latin-1', 'replace').strip()))
                 times.flush()
+                state['said'] += 1
 
 thread = threading.Thread(target=reader, daemon=True)
 thread.start()
 cut = False
-while p.poll() is None and time.monotonic() - begun < limit:
-    if k >= 0 and state['fired'] is not None:
-        time.sleep(k / 1000.0)
-        p.kill()
-        cut = True
+pulled = False
+control = connect()
+base = None
+read_base = 0
+now = 0
+said = 0
+at_said = None
+while control and p.poll() is None and time.monotonic() - begun < limit:
+    try:
+        now, got = counts(control)
+        if state['fired'] is not None and base is None:
+            base, read_base = now, got
+        if base is not None and state['said'] != said:
+            said = state['said']
+            at_said = now - base
+        if pull and not pulled and base is not None and got - read_base >= k:
+            ask(control, {'execute': 'device_del', 'arguments': {'id': 'stickdev'}})
+            pulled = True
+        elif not pull and k >= 0 and base is not None and now - base >= k:
+            p.kill()
+            cut = True
+            break
+    except (OSError, ValueError):
         break
-    time.sleep(0.002)
+    time.sleep(0.001)
+#       Without the count no cut can be placed: the guest runs out its
+#       commands, and counted-no says why the rows that wanted a cut are red.
+while not control and p.poll() is None and time.monotonic() - begun < limit:
+    time.sleep(0.05)
 if p.poll() is None:
     p.kill()
 p.wait()
 thread.join(5)
 print('fired-%s' % ('yes' if state['fired'] else 'no'))
 print('killed-%s' % ('yes' if cut else 'no'))
+print('pulled-%s' % ('yes' if pulled else 'no'))
 print('ms-%d' % ((time.monotonic() - state['fired']) * 1000 if state['fired'] else -1))
+print('counted-%s' % ('yes' if control else 'no'))
+print('written-%d' % (at_said if at_said is not None else -1))
+print('cut-at-%d' % (now - base if base is not None else -1))
 PY
 
 if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
@@ -16847,7 +16924,8 @@ if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
                 { echo "== $1"; cat "$work/$1" "$work/$1.console.times" 2> /dev/null; } >&2
         }
 
-        #       A guest cut at k ms: install_cut NAME K DISK COMMANDS [QEMU ARGS].
+        #       A guest cut once its disk has taken K bytes since the trigger
+        #       (never, for -1): install_cut NAME K DISK COMMANDS [QEMU ARGS].
         #       What the disk holds afterwards is judged against old_sha and
         #       the image, and said in the file NAME.
         install_cut()
@@ -16914,35 +16992,50 @@ cat /tmp/again
 poweroff
 COMMANDS
 
+        #       The update's write, measured: the same update with no cut.
+        cp --sparse=always "$work/cutbase.img" "$work/cut.img" || exit 1
+        # shellcheck disable=SC2086
+        install_cut cutuwhole -1 "$work/cut.img" "$work/cutupdate.commands" $stick
+        cut_whole=$(sed -n 's/^written-\([0-9][0-9]*\)$/\1/p' "$work/cutuwhole")
+        says cutuwhole 'an update with no cut: the disk'"'"'s writes are counted' 'counted-yes'
+        says cutuwhole 'and it ends with this build'"'"'s loader'       'image-new'
+        if [ "${cut_whole:-0}" -gt 0 ]; then
+                won
+        else
+                lost 'power cuts' "the uncut update wrote nothing the count saw ($(grep '^written-' "$work/cutuwhole"))"
+                cut_whole=0
+        fi
+
         landed_begun=0
         landed_after=0
-        for k in ${MOONWATER_CUT_MS:-0 10 20 30 40 50 60 70}; do
+        for f in ${MOONWATER_CUT_PERCENT:-0 15 30 45 60 75 90 100}; do
+                k=$((cut_whole * f / 100))
                 rm -f "$work/cut.img"
                 cp --sparse=always "$work/cutbase.img" "$work/cut.img" || exit 1
                 # shellcheck disable=SC2086
-                install_cut "cutu$k" "$k" "$work/cut.img" "$work/cutupdate.commands" $stick
-                says "cutu$k" "update cut at $k ms: the guest was writing" 'fired-yes'
-                says "cutu$k" "update cut at $k ms: the loader is old or new, never torn" 'image-whole'
-                never "cutu$k" "update cut at $k ms: the FAT's chains hold" 'fat-bad'
-                if grep -q 'image-old' "$work/cutu$k" && ! grep -q 'leftover-none' "$work/cutu$k"; then
+                install_cut "cutu$f" "$k" "$work/cut.img" "$work/cutupdate.commands" $stick
+                says "cutu$f" "update cut at $f% of its write: the guest was writing" 'fired-yes'
+                says "cutu$f" "update cut at $f% of its write: the loader is old or new, never torn" 'image-whole'
+                never "cutu$f" "update cut at $f% of its write: the FAT's chains hold" 'fat-bad'
+                if grep -q 'image-old' "$work/cutu$f" && ! grep -q 'leftover-none' "$work/cutu$f"; then
                         landed_begun=$((landed_begun + 1))
                 fi
-                ! grep -q 'image-new' "$work/cutu$k" || landed_after=$((landed_after + 1))
+                ! grep -q 'image-new' "$work/cutu$f" || landed_after=$((landed_after + 1))
 
                 #       Asked again, the disk is updated whatever the cut left.
-                cp "$work/cutagain.commands" "$work/again$k.commands"
+                cp "$work/cutagain.commands" "$work/again$f.commands"
                 install_disk=$work/cut.img
                 # shellcheck disable=SC2086
-                install_boot "again$k" $stick
-                cut_show "again$k"
+                install_boot "again$f" $stick
+                cut_show "again$f"
                 python3 "$work/fatjudge.py" judge "$work/cut.img" "$install_short" "$old_sha" \
-                        "$loader_sha" >> "$work/again$k" 2>&1
-                disk_checks "again$k"
+                        "$loader_sha" >> "$work/again$f" 2>&1
+                disk_checks "again$f"
                 install_disk=""
-                says "again$k" "update after a cut at $k ms succeeds" 'again-40'
-                says "again$k" "and the disk has this build's loader" 'image-new'
-                says "again$k" "and nothing is left beside the loaders" 'leftover-none'
-                says "again$k" "and the FAT's chains hold" 'fat-ok'
+                says "again$f" "update after a cut at $f% succeeds" 'again-40'
+                says "again$f" "and the disk has this build's loader" 'image-new'
+                says "again$f" "and nothing is left beside the loaders" 'leftover-none'
+                says "again$f" "and the FAT's chains hold" 'fat-ok'
         done
         if [ "$landed_begun" -gt 0 ]; then
                 won
@@ -16954,6 +17047,28 @@ COMMANDS
         else
                 lost 'power cuts' 'no cut landed after the new loader was in place'
         fi
+
+        #       The stick taken out while the update reads the new loader off
+        #       it, half the image read: the update says it failed, the disk
+        #       keeps the loader it had and nothing beside it, and the
+        #       machine goes on to its power off.
+        cat > "$work/pull.commands" <<'COMMANDS'
+this line is eaten by the console
+moonwater setup update nvme0n1
+printf 'pull-%s\n' $(( $? + 40 ))
+poweroff
+COMMANDS
+        cp --sparse=always "$work/cutbase.img" "$work/cut.img" || exit 1
+        install_cut pull "pull:$(($(wc -c < "$image") / 2))" "$work/cut.img" \
+                "$work/pull.commands" \
+                -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
+                -device usb-storage,bus=xhci.0,drive=stick,removable=on,id=stickdev
+        says pull 'the stick was pulled half way through the update'"'"'s read' 'pulled-yes'
+        says pull.console 'and the update said it failed' 'pull-41'
+        says pull 'the disk keeps the loader it had'     'image-old'
+        says pull 'and nothing beside it'                'leftover-none'
+        says pull 'and its FAT holds'                    'fat-ok'
+        says pull.console 'and the machine went on to its power off' 'reboot: Power down'
 
         #       What a cut leaves is not always a file the FAT driver can be
         #       trusted with: a staging file whose directory entry is on the
@@ -17070,39 +17185,58 @@ COMMANDS
         landed_copy=0
         landed_image=0
         cut_trigger='partitioning and formatting'
-        for k in ${MOONWATER_CUT_INSTALL_MS:-0 30 70 120 170 185 200 215 230 260}; do
+
+        #       The install's write, measured as the update's was.
+        rm -f "$work/cut.img"
+        truncate -s 4G "$work/cut.img" || exit 1
+        # shellcheck disable=SC2086
+        install_cut cutiwhole -1 "$work/cut.img" "$work/cutinstall.commands" $stick
+        cut_data cutiwhole "$work/cut.img"
+        cut_whole=$(sed -n 's/^written-\([0-9][0-9]*\)$/\1/p' "$work/cutiwhole")
+        says cutiwhole 'an install with no cut: the disk'"'"'s writes are counted' 'counted-yes'
+        says cutiwhole 'and it ends with the loader'      'image-new'
+        says cutiwhole 'and all of its data'              'data-whole'
+        if [ "${cut_whole:-0}" -gt 0 ]; then
+                won
+        else
+                lost 'power cuts' "the uncut install wrote nothing the count saw ($(grep '^written-' "$work/cutiwhole"))"
+                cut_whole=0
+        fi
+
+        for f in ${MOONWATER_CUT_INSTALL_PERCENT:-0 10 25 40 55 70 85 92 97 100}; do
+                k=$((cut_whole * f / 100))
                 rm -f "$work/cut.img"
                 truncate -s 4G "$work/cut.img" || exit 1
                 # shellcheck disable=SC2086
-                install_cut "cuti$k" "$k" "$work/cut.img" "$work/cutinstall.commands" $stick
-                cut_data "cuti$k" "$work/cut.img"
-                says "cuti$k" "install cut at $k ms: the guest was installing" 'fired-yes'
-                says "cuti$k" "install cut at $k ms: no loader, or a whole one" 'image-whole'
-                never "cuti$k" "install cut at $k ms: the FAT's chains hold" 'fat-bad'
-                if grep -q 'image-new' "$work/cuti$k"; then
-                        says "cuti$k" "install cut at $k ms: a disk with its loader has all its data" 'data-whole'
+                install_cut "cuti$f" "$k" "$work/cut.img" "$work/cutinstall.commands" $stick
+                cut_data "cuti$f" "$work/cut.img"
+                says "cuti$f" "install cut at $f% of its write: the guest was installing" 'fired-yes'
+                says "cuti$f" "install cut at $f% of its write: no loader, or a whole one" 'image-whole'
+                never "cuti$f" "install cut at $f% of its write: the FAT's chains hold" 'fat-bad'
+                if grep -q 'image-new' "$work/cuti$f"; then
+                        says "cuti$f" "install cut at $f% of its write: a disk with its loader has all its data" 'data-whole'
                         landed_image=$((landed_image + 1))
-                elif grep -q 'image-absent' "$work/cuti$k" && grep -q 'copying /root' "$work/cuti$k.console"; then
+                elif grep -q 'image-absent' "$work/cuti$f" && grep -q 'copying /root' "$work/cuti$f.console"; then
                         landed_copy=$((landed_copy + 1))
                 fi
-                cp "$work/cutredo.commands" "$work/redo$k.commands"
+                cp "$work/cutredo.commands" "$work/redo$f.commands"
                 install_disk=$work/cut.img
                 # shellcheck disable=SC2086
-                install_boot "redo$k" $stick
-                cut_show "redo$k"
+                install_boot "redo$f" $stick
+                cut_show "redo$f"
                 python3 "$work/fatjudge.py" judge "$work/cut.img" "$install_short" none \
-                        "$loader_sha" >> "$work/redo$k" 2>&1
-                disk_checks "redo$k"
+                        "$loader_sha" >> "$work/redo$f" 2>&1
+                disk_checks "redo$f"
                 install_disk=""
-                if grep -q 'image-absent' "$work/cuti$k"; then
-                        says "redo$k" "a disk cut before its loader is not attached" 'redone-40'
+                if grep -q 'image-absent' "$work/cuti$f"; then
+                        says "redo$f" "a disk cut before its loader is not attached" 'redone-40'
                 fi
-                if grep -q 'image-absent' "$work/cuti$k" && ! grep -q 'no-partitions' "$work/cuti$k"; then
-                        says "redo$k" "and is asked about, not trusted" 'verdict- ksa'
+                if grep -q 'image-absent' "$work/cuti$f" && ! grep -q 'no-partitions' "$work/cuti$f"; then
+                        says "redo$f" "and is asked about, not trusted" 'verdict- ksa'
                 fi
-                says "redo$k" "a disk after the cut at $k ms comes out of an install whole" 'image-new'
-                says "redo$k" "and nothing left beside the loader" 'leftover-none'
-                says "redo$k" "and the FAT's chains hold" 'fat-ok'
+                says "redo$f" "a disk after the cut at $f% comes out of an install whole" 'image-new'
+                says "redo$f" "and nothing left beside the loader" 'leftover-none'
+                says "redo$f" "and the FAT's chains hold" 'fat-ok'
         done
         cut_trigger=""
         if [ "$landed_copy" -gt 0 ]; then
