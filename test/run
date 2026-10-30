@@ -21543,8 +21543,11 @@ def routing(shell, tag, mouse):
         if stopped:
             time.sleep(0.5)
             shell.run("kill -CONT %s" % " ".join(first), 10)
-        time.sleep(2)
-        got = turned(shell, one)[before:]
+        #   All of it is in the window's file once the window has read its ring and written it: waited for, as a
+        #   loaded host leaves a program that was stopped a while behind; a turn that never comes is still short.
+        got, _ = until(lambda: (lambda turns: turns if sum(a for a, b in turns if b == 0) <= -150 * 120 else None)(
+            turned(shell, one)[before:]), 20)
+        got = got or turned(shell, one)[before:]
         notches = sum(a for a, b in got if b == 0)
         out.append(("W1.%s%s a swipe of 150 notches 6 ms apart reaches %s whole" % ("12" if stopped else "11", tag,
                     "a window that was not reading while it came" if stopped else "a window"),
@@ -21624,25 +21627,32 @@ def changed(one, other, x1, y1, x2, y2):
 #   tablet puts the pointer on it, which is the motion that comes before a person turns the wheel.
 empty = picture("w1-empty")
 type_text("seq 1 400\n")
-time.sleep(3)
-live = picture("w1-live")
-rows = [y for y in range(0, H * 2 // 3) if changed(empty, live, 0, y, W, y + 1) > 20]
-cols = [x for x in range(0, W) if changed(empty, live, x, 0, x + 1, H * 2 // 3) > 8]
+#   The numbers are on the screen when two pictures in a row are the same and not the empty one: a loaded host draws
+#   them late, and a picture taken in the middle is not the live screen the wheel is turned back to.
+def settled_text(was=[None]):
+    now = picture("w1-live")
+    still = was[0] is not None and now[2] == was[0][2] and now[2] != empty[2]
+    was[0] = now
+    return now if still else None
+live, _ = until(settled_text, 30)
+rows = [y for y in range(0, H * 2 // 3) if changed(empty, live, 0, y, W, y + 1) > 20] if live else []
+cols = [x for x in range(0, W) if changed(empty, live, x, 0, x + 1, H * 2 // 3) > 8] if live else []
 if rows and cols:
     tl, tt, tr, tb = cols[0] + 4, rows[0] + 4, cols[-1] - 4, rows[-1] - 4
-else:
-    tl, tt, tr, tb = W * 44 // 100 + 10, H * 14 // 100 + 40, W * 44 // 100 + 330, H * 14 // 100 + 340
-place((tl + tr) // 2, (tt + tb) // 2)
-turn("wheel-up", 3)
-scrolled = picture("w1-scrolled")
-n = changed(live, scrolled, tl, tt, tr, tb)
+    place((tl + tr) // 2, (tt + tb) // 2)
+    turn("wheel-up", 3)
+    scrolled = picture("w1-scrolled")
+    n = changed(live, scrolled, tl, tt, tr, tb)
 out.append(("W1.5 the wheel scrolls the terminal back through what it has said",
+            "the numbers typed into the terminal were not drawn in 30 s" if not (rows and cols) else
             "yes" if n > 300 else "%d pixels changed in %d-%d,%d-%d" % (n, tl, tr, tt, tb), "yes"))
 said(shell, "W1.5")
-turn("wheel-down", 8)
-back = picture("w1-back")
-n = changed(live, back, tl, tt, tr, tb)
-out.append(("W1.6 and turned back it is the live screen again", "yes" if n < 150 else "%d pixels differ" % n, "yes"))
+if rows and cols:
+    turn("wheel-down", 8)
+    back = picture("w1-back")
+    n = changed(live, back, tl, tt, tr, tb)
+out.append(("W1.6 and turned back it is the live screen again", "the terminal's text was not found" if not (rows and cols) else
+            "yes" if n < 150 else "%d pixels differ" % n, "yes"))
 said(shell, "W1.6")
 
 #   A menu a command opened under a pointer that has not moved since: the settings window comes up in the middle of
