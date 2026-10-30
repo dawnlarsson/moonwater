@@ -2598,7 +2598,7 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         face = ui_box_transform(face, sx, sy, ox, oy, tx, ty);
         ui_kit_fill(ui, &face, fill, null);
         if (c->variant == UI_BUTTON_OUTLINED && !c->disabled)
-                ui_kit_ring(ui, &face, ui_q8(ui, 1), ui_role(c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
+                ui_kit_ring(ui, &face, ui_q8(ui, 1), ui_role(c->focused ? UI_PRIMARY : c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
         if (layer)
                 ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
         {
@@ -3765,17 +3765,18 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 return null;
         if (down)
         {
+                // A press takes the focus from wherever it was: a field's, and a button's (a click focuses a button in Chrome).
+                for (int k = 0; k < count; k++)
+                        controls[k].focused = 0;
                 for (int k = 0; k < count; k++)
                 {
                         struct ui_control address_to c = &controls[k];
                         int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
 
                         if (hit < 0)
-                        {
-                                if (c->kind == UI_INPUT && c->focused)
-                                        c->focused = 0;
                                 continue;
-                        }
+                        if (c->kind == UI_BUTTON)
+                                c->focused = 1; // button[outlined]:focus: its border is the accent
                         ui_kit_held = c;
                         c->down = 1;
                         c->moved = 0;
