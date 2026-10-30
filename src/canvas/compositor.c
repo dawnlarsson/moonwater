@@ -7589,6 +7589,11 @@ static void compositor_leave(int row)
         if (compositor.lit_row == row)
                 compositor.lit_row = COMPOSITOR_NONE, compositor.lit_edges = compositor.lit_held = 0;
         compositor.touch.closing = compositor.touch.closing == row ? COMPOSITOR_NONE : compositor.touch.closing;
+        // A button held over the window that went is let go nowhere: the row is the next program's, which never had
+        // the press (compositor_release).
+        for (unsigned int index = 0; index < 8; index++)
+                if (compositor.button_row[index] == row)
+                        compositor.button_down &= (unsigned char)~(1u << index);
         // The stack is one shorter, so an Alt-Tab under way ends here, on the window it stopped on, as letting go of
         // Alt would have ended it: that window is brought back if it was put away, and has the keys.
         if (compositor.cycle)

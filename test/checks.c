@@ -117091,6 +117091,24 @@ static void check_compositor_wheel(void)
                                                                              compositor.pointer_y == 40);
     }
     compositor.touchpad[0] = 0;
+
+    /*
+            A button held over a window whose program goes is let go nowhere: the row is the next program's, which
+            never had the press, and a release with no press is a click it did not get (a terminal reports it).
+    */
+    {
+        unsigned int head;
+
+        compositor.grab = COMPOSITOR_NONE;
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_leave(1);
+        glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+        compositor_present();
+        table->event_tail[1] = head = table->event_head[1];
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+        check("release: a button held over a window that went is not let go in the next window in its row",
+              table->event_head[1] == head && !compositor.button_down);
+    }
     system_close(wheel_pipe[0]);
     system_close(wheel_pipe[1]);
     compositor.input_count = 0;
