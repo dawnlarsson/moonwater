@@ -88055,8 +88055,13 @@ static fn publication(void)
 */
 static bipolar wls_command(struct link_session address_to s, bool deaf)
 {
-        bipolar child = system_fork();
+        b32 ends[2];
+        bipolar child;
+        p8 told = 0;
 
+        if (system_pipe(ends, 0) < 0)
+                return -1;
+        child = system_fork();
         if (!child)
         {
                 timespec pause = {deaf ? 0 : 30, deaf ? 300000000 : 0};
@@ -88067,10 +88072,19 @@ static bipolar wls_command(struct link_session address_to s, bool deaf)
                 //      hands every child a SIGHUP that is ignored.
                 (void)system_call_4(syscall(rt_sigaction), 1, (positive)ignore,
                                     0, 8);
+                //      And it is said once that it is so, since a hangup that
+                //      came before it was a hangup to an ignoring process.
+                system_close((bipolar)ends[0]);
+                (void)system_write_all((positive)ends[1], address_of told, 1);
+                system_close((bipolar)ends[1]);
                 (void)system_call_2(syscall(nanosleep),
                                     (positive)address_of pause, 0);
                 exit(0);
         }
+        system_close((bipolar)ends[1]);
+        if (child > 0)
+                (void)system_read_retry((positive)ends[0], address_of told, 1);
+        system_close((bipolar)ends[0]);
         if (child < 0 || !link_session_open(s))
                 return -1;
         s->kind = LINK_KIND_RUN;
