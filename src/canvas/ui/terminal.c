@@ -555,7 +555,10 @@ static void terminal_build(struct window_cell address_to into)
 /*
         The columns of a row that differ: the first and one past the last, or
         both zero when they are the same. A wide character is two cells that
-        change together, so a span never starts on the second.
+        change together, so a span never starts on the second; and a half of
+        one whose other half changed is drawn again too, since a half alone is
+        drawn blank (a delete of characters from the right half of a pair left
+        the left half's ink on the screen, where a full draw has none).
 */
 static void terminal_span(const struct window_cell address_to now, const struct window_cell address_to old,
                           unsigned int address_to first, unsigned int address_to last)
@@ -574,10 +577,10 @@ static void terminal_span(const struct window_cell address_to now, const struct 
         while (*(const terminal_word address_to)(now + stop - 1) == *(const terminal_word address_to)(old + stop - 1))
                 stop--;
 
-        if (start && (now[start].flags & WINDOW_CELL_WIDE_RIGHT))
+        if (start && ((now[start].flags & WINDOW_CELL_WIDE_RIGHT) || (now[start - 1].flags & WINDOW_CELL_WIDE)))
                 start--;
 
-        if (stop < COLUMNS && (now[stop - 1].flags & WINDOW_CELL_WIDE))
+        if (stop < COLUMNS && ((now[stop - 1].flags & WINDOW_CELL_WIDE) || (now[stop].flags & WINDOW_CELL_WIDE_RIGHT)))
                 stop++;
 
         address_to first = start;
@@ -733,9 +736,13 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                             !(cell->flags & (WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT) && !pair);
                 b32 decor = (cell->flags & (WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR)) != 0;
 
+                // The same as the buffer has, and so are the halves it pairs with: a half whose other half changed
+                // is drawn again, whole or blank as it now is.
                 if (old && *(const terminal_word address_to)cell == *(const terminal_word address_to)(old + at) &&
-                    (cells == 1 ||
-                     *(const terminal_word address_to)(cell + 1) == *(const terminal_word address_to)(old + at + 1)))
+                    (!(cell->flags & WINDOW_CELL_WIDE) || at + 1 >= COLUMNS ||
+                     *(const terminal_word address_to)(cell + 1) == *(const terminal_word address_to)(old + at + 1)) &&
+                    (!(cell->flags & WINDOW_CELL_WIDE_RIGHT) || !at ||
+                     *(const terminal_word address_to)(cell - 1) == *(const terminal_word address_to)(old + at - 1)))
                 {
                         at += cells - 1;
                         glyph = decor = false;

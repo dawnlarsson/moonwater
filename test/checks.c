@@ -125214,13 +125214,19 @@ static fn check_kit_place(void)
 
 static p32 address_to render_frame(void)
 {
-        int slot = terminal.shown < 0 ? 0 : 1 - terminal.shown;
+        p32 address_to buffer;
 
-        (void)slot;
         terminal.own.table->shown[0] = terminal.own.table->frame[0];
         if (!terminal_frame())
                 return null;
-        return windows_buffer(terminal.own.table, 0, terminal.shown);
+        buffer = windows_buffer(terminal.own.table, 0, terminal.shown);
+        // The compositor takes every frame the terminal shows, so the screen the frames are held to takes this one
+        // too: it did not, and the next frame's damage, which is only what changed since this one, landed on a
+        // screen that still had the never-drawn colour round it. Which first frame of the stream that was depended
+        // on the stream: one that drew everything hid it, and a stream advanced 40000 draws showed it at frame 0.
+        if (render_screen)
+                render_apply(buffer);
+        return buffer;
 }
 
 #ifdef CHECK_kit_frames
@@ -125848,13 +125854,10 @@ static fn text_widget_check(string_address inter, string_address mono)
         what it answers chosen is always an item that can be chosen, the keys never leave the hot item on a separator,
         a header or a disabled item, Escape and Left close it, a mnemonic chooses its item, and it draws inside its size.
 */
-// The menu's own random stream: the frames check's is the frames check's.
-static p64 menu_state = 0x6a09e667f3bcc909ull;
-
+// The check's one random stream: what the menu draws from it moves where the frames check starts, which any start holds.
 static p32 menu_next(p32 below)
 {
-        XORSHIFT64(menu_state);
-        return below ? (p32)((menu_state >> 11) % below) : 0;
+        return render_next(below);
 }
 
 static fn menu_check(struct ui address_to wui)
@@ -126196,6 +126199,20 @@ b32 main()
         for (positive step = 0; step < 40000; step++)
                 if (!render_step(&compared, &wrong, step))
                         refused++;
+
+        //      What the stream left is no later check's to start from: a grid of one row, the alternate screen, a
+        //      program's pointer modes or a view scrolled back failed the killed and pointer rows for some starts of
+        //      the stream. The grid of 30 by 8 again, then the emulator reset in it (reset first, the screen's lines
+        //      were blanked at the stream's width and each folded in two at 30), the view live and a window of its own.
+        cursor_hide();
+        window->columns = 30;
+        window->rows = 8;
+        regrid(-1);
+        full_reset();
+        terminal_view_clamp();
+        terminal_view_live();
+        render_surface();
+        cursor_show();
 
         check_forced();
         check_frames_refused();
