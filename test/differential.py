@@ -81018,10 +81018,21 @@ def harness_guest_scenarios(argv):
     lines = []
     lines.append("cp /root/wifi /tmp/scen-radio.kept 2>/dev/null; scen_radio_had=$?")
     lines.append("rm -f /root/wifi /root/wifi.power /run/moonwater/wifi.last")
-    # The machine as it is: no radio, so add saves and says so at once.
-    lines.append("moonwater wifi add scen-none passpass1 > /tmp/sc.got 2>&1; scen_status 'radio add, no radio' 1 $?")
-    lines.append("scen_count 'radio add says why' 1 \"$(grep -c 'saved; wifi: no wireless hardware found' /tmp/sc.got)\"")
+    # The machine as it is: no radio, and wifi off, as a machine with no
+    # word and no saved network has had it since radios are off until
+    # moonwater wifi on (92e99fb7): add saves, pins the word off so that the
+    # network it saved does not raise the radio at the next boot, and says
+    # wifi on joins it. This family wanted the no-hardware answer here, and
+    # every boot lane since was red on it.
+    lines.append("moonwater wifi add scen-none passpass1 > /tmp/sc.got 2>&1; scen_status 'radio add, off' 0 $?")
+    lines.append("scen_count 'radio add says it is off' 1 \"$(grep -c 'wifi saved scen-none; wifi is off, moonwater wifi on joins it' /tmp/sc.got)\"")
     lines.append("scen_count 'radio add saved it' 1 \"$(grep -c -x scen-none /root/wifi)\"")
+    lines.append("scen_count 'radio add pinned it off' 1 \"$(grep -c -x off /root/wifi.power)\"")
+    lines.append("moonwater status > /tmp/sc.got 2>&1; scen_count 'radio status says off' 1 \"$(grep -c -x '  wifi: switched off (moonwater wifi on)' /tmp/sc.got)\"")
+    # Switched on, the radio that is not there is said at once.
+    lines.append("echo on > /root/wifi.power")
+    lines.append("moonwater wifi add scen-none2 passpass1 > /tmp/sc.got 2>&1; scen_status 'radio add, no radio' 1 $?")
+    lines.append("scen_count 'radio add says why' 1 \"$(grep -c 'saved; wifi: no wireless hardware found' /tmp/sc.got)\"")
     lines.append("moonwater status > /tmp/sc.got 2>&1; scen_count 'radio status says why' 1 \"$(grep -c -x '  wifi: no wireless hardware found' /tmp/sc.got)\"")
     # The password kept out of argv: from standard input with -, and none
     # at all when nobody is at a terminal; a 64-digit key is a key.
