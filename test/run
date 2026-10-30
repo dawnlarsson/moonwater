@@ -7838,6 +7838,23 @@ VERDICT_PROBE
         floodlight_masked_proc || misc_failed=1
         floodlight_hardened || misc_failed=1
 
+        #       logger sends real records and wall and write write to real
+        #       terminals; journald broadcasts an emergency record to every
+        #       login ("Broadcast message from systemd-journald"). The grammar
+        #       runs them confined: the syslog and journal endpoints are a
+        #       canary's, utmp is empty and /dev/pts is the case's own. This
+        #       asks that it is so, before anything loud is sent, and the cases
+        #       are not run if it is not (status 1). 2 is no user namespace
+        #       here, where the runner skips those cases itself.
+        python3 test/differential.py --harness host_confinement "$farm"
+        case $? in
+        0 | 2) ;;
+        *)
+                note "host confinement failed: the misc grammar is not run, it would reach the host"
+                return 1
+                ;;
+        esac
+
         differential_domain misc "$farm" || misc_failed=1
         return "$misc_failed"
 }
