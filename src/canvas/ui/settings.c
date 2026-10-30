@@ -152,9 +152,10 @@
 #define SETTINGS_HEIGHT 520
 #define SETTINGS_SIDE_MOST 170 // the groups' column, a third of the window at most
 #define SETTINGS_SIDE_LEAST 88
-#define SETTINGS_GROUP_ROW 34  // a group in that column
+#define SETTINGS_GROUP_ROW 40  // a group in that column: the least a finger's target is (UI_TARGET's floor), as a row is
 #define SETTINGS_GUTTER 14     // between the column and the rows
 #define SETTINGS_MENU_ITEM 30  // a choice in the list a choice row opens
+#define SETTINGS_MENU_TOUCH 44 // and in one a finger opened (UI_TARGET)
 #define SETTINGS_MENU_PAD 6    // above the first and under the last
 #define SETTINGS_MENU_LEAST 140 // the list's width, at least
 #define SETTINGS_TOP 60     // the title's band
@@ -687,6 +688,17 @@ static struct
         unsigned int ground;
         int pointer_x, pointer_y;
         b32 focused, dirty;
+        /*
+                A finger (WINDOW_KEY_TOUCH): its press, shown pressed at once and done when it comes up where it went
+                down; past the slop it drags what it went down on (drag_what, one of SETTINGS_DRAG_*), the rows, the
+                column of groups, the card or the list a choice opened, which follows it and goes on when thrown;
+                drag_left is a dragged list's move under a whole choice. menu_touch: the list a choice opened was
+                opened by a finger, and its choices are a finger's height.
+        */
+        struct ui_press press;
+        struct ui_drag drag;
+        int drag_what, drag_left;
+        b32 menu_touch, touching;
 
         // What a command said, as a card in place of the list: lines cut to the window's width.
         b32 view;
@@ -2515,9 +2527,15 @@ static fn settings_menu_close(void)
         room there; a list taller than either is cut and scrolls. False
         when its row is not in view.
 */
+// A choice's height in the list: a finger's when a finger opened it.
+static int settings_menu_item_height(void)
+{
+        return ui_px(&settings.ui, settings.menu_touch ? SETTINGS_MENU_TOUCH : SETTINGS_MENU_ITEM);
+}
+
 static b32 settings_menu_box(int address_to x, int address_to y, int address_to width, int address_to height, int address_to shown)
 {
-        int pos = settings_pos(settings.menu), item = ui_px(&settings.ui, SETTINGS_MENU_ITEM), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
+        int pos = settings_pos(settings.menu), item = settings_menu_item_height(), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
         int row_top, below, above, most, count = settings.menu_count;
 
         if (pos < 0)
@@ -2551,7 +2569,7 @@ static b32 settings_menu_box(int address_to x, int address_to y, int address_to 
 // The choice under a point of the window, or -1.
 static int settings_menu_item(int px, int py)
 {
-        int x, y, width, height, shown, item = ui_px(&settings.ui, SETTINGS_MENU_ITEM);
+        int x, y, width, height, shown, item = settings_menu_item_height();
 
         if (settings.menu < 0 || !settings_menu_box(&x, &y, &width, &height, &shown) || px < x || px >= x + width ||
             py < y + ui_px(&settings.ui, SETTINGS_MENU_PAD) || py >= y + height - ui_px(&settings.ui, SETTINGS_MENU_PAD))
@@ -2618,6 +2636,7 @@ static fn settings_menu_open(int row)
                 settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
         settings.menu = row;
         settings.focus = row;
+        settings.menu_touch = settings.touching;
         settings.menu_count = (int)settings_options(which);
         settings.menu_at = 0;
         settings.menu_top = 0;
@@ -3212,11 +3231,143 @@ static int settings_group_hit(int x, int y)
         return group;
 }
 
+/*
+        A finger's press is numbered by what it went down on: a row by its number, a group and a choice of the open list
+        past them; and what it drags when it moves.
+*/
+#define SETTINGS_PRESS_GROUP (SETTINGS_ALL + 1)
+#define SETTINGS_PRESS_MENU (SETTINGS_PRESS_GROUP + 64)
+#define SETTINGS_PRESS_CARD (SETTINGS_PRESS_MENU + 256)
+#define SETTINGS_DRAG_ROWS 0
+#define SETTINGS_DRAG_GROUPS 1
+#define SETTINGS_DRAG_CARD 2
+#define SETTINGS_DRAG_MENU 3
+
+static int settings_press_target(int x, int y)
+{
+        int at;
+
+        if (settings.menu >= 0)
+                return (at = settings_menu_item(x, y)) >= 0 && at < settings.menu_count ? SETTINGS_PRESS_MENU + at : -1;
+        if (settings.view)
+                return SETTINGS_PRESS_CARD;
+        if ((at = settings_group_hit(x, y)) >= 0)
+                return SETTINGS_PRESS_GROUP + at;
+        return settings_hit(x, y);
+}
+
+// The list a finger drags from a point: the open choices, the card, the column of groups, or the rows.
+static int settings_drag_of(int x, int y)
+{
+        int mx, my, width, height, shown;
+
+        if (settings.menu >= 0 && settings_menu_box(&mx, &my, &width, &height, &shown) && x >= mx && x < mx + width && y >= my &&
+            y < my + height)
+                return SETTINGS_DRAG_MENU;
+        if (settings.view)
+                return SETTINGS_DRAG_CARD;
+        return x < settings_pane_left() - ui_px(&settings.ui, SETTINGS_GUTTER) / 2 ? SETTINGS_DRAG_GROUPS : SETTINGS_DRAG_ROWS;
+}
+
+// What a finger dragged moves by pixels, its own way: false when it moved no further (an end of the list).
+static b32 settings_drag_by(int pixels)
+{
+        int before, item = settings_menu_item_height();
+
+        if (!pixels)
+                return true;
+        switch (settings.drag_what)
+        {
+        case SETTINGS_DRAG_MENU:
+        {
+                long total = (long)settings.drag_left + pixels;
+                int steps = (int)(total / item);
+
+                settings.drag_left = (int)(total - (long)steps * item);
+                before = settings.menu_top;
+                if (steps && settings.menu >= 0)
+                        settings_menu_scroll(settings.menu_top - steps);
+                return !steps || settings.menu_top != before;
+        }
+        case SETTINGS_DRAG_GROUPS:
+                before = settings.group_scroll;
+                settings_side_scroll_to(settings.group_scroll - pixels);
+                return settings.group_scroll != before;
+        default:
+                before = settings.view ? settings.card_scroll : settings.scroll;
+                settings_scroll_to(before - pixels);
+                return (settings.view ? settings.card_scroll : settings.scroll) != before;
+        }
+}
+
+// A thrown list's next move, from the tick: how long until the next, or -1 once it is still.
+static long settings_throw(void)
+{
+        if (!settings.drag.flying)
+                return -1;
+        if (!settings_drag_by(ui_drag_step(&settings.drag, clock_monotonic_nanoseconds())))
+                ui_drag_stop(&settings.drag);
+        return settings.drag.flying ? UI_DRAG_FRAME_NS : -1;
+}
+
+static fn settings_press_at(void);
+
+/*
+        A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the list it went down
+        on, which follows it; up, the press is done where it went down if it did not move off it (as a mouse's press is
+        done at once) and the list is thrown if it was moving; and a press taken back does nothing.
+*/
+static fn settings_finger(const struct window_event address_to event)
+{
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                if (!settings.press.down)
+                        return;
+                if (!settings.press.dragged && ui_press_move(&settings.ui, &settings.press, event->a, event->b))
+                {
+                        ui_drag_start(&settings.drag, settings.press.y, clock_monotonic_nanoseconds());
+                        settings_dirty();
+                }
+                if (settings.press.dragged)
+                        settings_drag_by(ui_drag_follow(&settings.drag, event->b, clock_monotonic_nanoseconds()));
+                return;
+        }
+        if (event->a != SETTINGS_BUTTON_LEFT)
+                return;
+        if (event->flags & WINDOW_KEY_DOWN)
+        {
+                ui_drag_stop(&settings.drag);
+                settings.drag_what = settings_drag_of(settings.pointer_x, settings.pointer_y);
+                settings.drag_left = 0;
+                ui_press_begin(&settings.press, settings.pointer_x, settings.pointer_y,
+                               settings_press_target(settings.pointer_x, settings.pointer_y), true);
+                settings_dirty();
+                return;
+        }
+        if (settings.press.dragged)
+                ui_drag_let_go(&settings.drag, clock_monotonic_nanoseconds());
+        if (settings.press.down)
+        {
+                int x = settings.press.x, y = settings.press.y, clicked = ui_press_end(&settings.press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+
+                settings_dirty();
+                // Done where it went down, as a mouse's press is: the target it was shown on is what is under that point.
+                if (clicked >= 0 && clicked == settings_press_target(x, y))
+                {
+                        settings.pointer_x = x, settings.pointer_y = y;
+                        settings.touching = true;
+                        settings_press_at();
+                        settings.touching = false;
+                }
+        }
+}
+
 static b32 settings_event(const struct window_event address_to event)
 {
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
+                ui_drag_stop(&settings.drag);
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
         {
@@ -3224,6 +3375,11 @@ static b32 settings_event(const struct window_event address_to event)
 
                 settings.pointer_x = event->a;
                 settings.pointer_y = event->b;
+                if (event->flags & WINDOW_KEY_TOUCH)
+                {
+                        settings_finger(event);
+                        break;
+                }
                 // The pointer over a choice of the list puts the keys' choice there.
                 over = settings.menu >= 0 ? settings_menu_item(event->a, event->b) : -1;
                 if (over >= 0 && over != settings.menu_at && over < settings.menu_count)
@@ -3234,64 +3390,18 @@ static b32 settings_event(const struct window_event address_to event)
                 break;
         }
         case WINDOW_EVENT_BUTTON:
-        {
-                int row;
-
+                if (event->flags & WINDOW_KEY_TOUCH)
+                {
+                        settings_finger(event);
+                        break;
+                }
                 if (!(event->flags & WINDOW_KEY_DOWN) || event->a != SETTINGS_BUTTON_LEFT)
                         break;
-                // A press on a choice of the list sets it; a press anywhere else only closes the list.
-                if (settings.menu >= 0)
-                {
-                        int chosen = settings_menu_item(settings.pointer_x, settings.pointer_y);
-
-                        if (chosen >= 0 && chosen < settings.menu_count)
-                                settings_menu_apply(chosen);
-                        else
-                                settings_menu_close();
-                        break;
-                }
-                // A press on the card of what a command said is done with it.
-                if (settings.view)
-                {
-                        settings_card_leave();
-                        break;
-                }
-                // A press on a group chooses it; the keys are then in the column, and Enter goes to its rows.
-                row = settings_group_hit(settings.pointer_x, settings.pointer_y);
-                if (row >= 0)
-                {
-                        settings_edit_end();
-                        settings.pane = 0;
-                        settings_group_choose(row);
-                        settings_dirty();
-                        break;
-                }
-                row = settings_hit(settings.pointer_x, settings.pointer_y);
-                if (settings.editing >= 0 && row != settings.editing)
-                        settings_edit_end();
-                if (row < 0)
-                        break;
-                if (row != settings.focus)
-                {
-                        settings.confirm = 0;
-                        if (row >= SETTINGS_ANY)
-                                settings_say((string_address)settings_text(row));
-                        else if (settings.focus >= SETTINGS_ANY)
-                                settings_say((string_address) "");
-                }
-                settings.focus = row;
-                settings.pane = 1;
-                settings_dirty();
-                if (settings.editing != row)
-                {
-                        // A step pressed left of its value's middle goes back.
-                        int middle = settings_pane_right() - ui_px(&settings.ui, UI_INSET + 40);
-
-                        settings_activate(row, settings_kind(row) == SETTINGS_STEP && settings.pointer_x < middle ? -1 : 1);
-                }
+                ui_drag_stop(&settings.drag);
+                settings_press_at();
                 break;
-        }
         case WINDOW_EVENT_WHEEL:
+                ui_drag_stop(&settings.drag);
                 // The list scrolls under the wheel, and nothing else does while it is open.
                 if (settings.menu >= 0)
                 {
@@ -3314,6 +3424,63 @@ static b32 settings_event(const struct window_event address_to event)
                 break;
         }
         return true;
+}
+
+// A press at the pointer, a mouse's at once and a finger's as it comes up where it went down: what it is on is done.
+static fn settings_press_at(void)
+{
+        int row;
+
+        // A press on a choice of the list sets it; a press anywhere else only closes the list.
+        if (settings.menu >= 0)
+        {
+                int chosen = settings_menu_item(settings.pointer_x, settings.pointer_y);
+
+                if (chosen >= 0 && chosen < settings.menu_count)
+                        settings_menu_apply(chosen);
+                else
+                        settings_menu_close();
+                return;
+        }
+        // A press on the card of what a command said is done with it.
+        if (settings.view)
+        {
+                settings_card_leave();
+                return;
+        }
+        // A press on a group chooses it; the keys are then in the column, and Enter goes to its rows.
+        row = settings_group_hit(settings.pointer_x, settings.pointer_y);
+        if (row >= 0)
+        {
+                settings_edit_end();
+                settings.pane = 0;
+                settings_group_choose(row);
+                settings_dirty();
+                return;
+        }
+        row = settings_hit(settings.pointer_x, settings.pointer_y);
+        if (settings.editing >= 0 && row != settings.editing)
+                settings_edit_end();
+        if (row < 0)
+                return;
+        if (row != settings.focus)
+        {
+                settings.confirm = 0;
+                if (row >= SETTINGS_ANY)
+                        settings_say((string_address)settings_text(row));
+                else if (settings.focus >= SETTINGS_ANY)
+                        settings_say((string_address) "");
+        }
+        settings.focus = row;
+        settings.pane = 1;
+        settings_dirty();
+        if (settings.editing != row)
+        {
+                // A step pressed left of its value's middle goes back.
+                int middle = settings_pane_right() - ui_px(&settings.ui, UI_INSET + 40);
+
+                settings_activate(row, settings_kind(row) == SETTINGS_STEP && settings.pointer_x < middle ? -1 : 1);
+        }
 }
 
 /* ---- the picture ---- */
@@ -3413,6 +3580,9 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         if (at == settings.focus && (settings.pane || settings.filter_length))
                 ui_focus(ui, left + ui_px(&settings.ui, 3), y + ui_px(&settings.ui, 2), right - left - ui_px(&settings.ui, 6), height - ui_px(&settings.ui, 4),
                          settings.focused && settings.pane);
+        if (ui_pressed(&settings.press, at))
+                ui_press_fill(ui, left + ui_px(&settings.ui, 3), y + ui_px(&settings.ui, 2), right - left - ui_px(&settings.ui, 6),
+                              height - ui_px(&settings.ui, 4));
 
         if (settings_item(at))
         {
@@ -3527,6 +3697,8 @@ static fn settings_draw_side(struct ui address_to ui)
                         continue;
                 if (chosen)
                         ui_focus(ui, left, y + ui_px(&settings.ui, 2), width, height - ui_px(&settings.ui, 4), settings.focused && !settings.pane);
+                if (ui_pressed(&settings.press, SETTINGS_PRESS_GROUP + group))
+                        ui_press_fill(ui, left, y + ui_px(&settings.ui, 2), width, height - ui_px(&settings.ui, 4));
                 ui_text(ui, left + inset, ui_baseline(ui, y, height, UI_TEXT),
                         settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT | (chosen ? SETTINGS_FIT_BOLD : 0), width - 2 * inset,
                                      cut, sizeof(cut)),
@@ -3640,7 +3812,7 @@ static fn settings_draw_foot(struct ui address_to ui, int top)
 // The list a choice opened, over everything else: the choices in view, the keys' lit, the value's dotted.
 static fn settings_draw_menu(struct ui address_to ui)
 {
-        int x, y, width, height, shown, item = ui_px(&settings.ui, SETTINGS_MENU_ITEM), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
+        int x, y, width, height, shown, item = settings_menu_item_height(), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
         const struct settings_row address_to which = &settings_rows[settings.menu];
         char word[SETTINGS_VALUE];
 
@@ -3658,6 +3830,8 @@ static fn settings_draw_menu(struct ui address_to ui)
                 ui_option(ui, x + ui_px(&settings.ui, 4), y + pad + at * item, width - ui_px(&settings.ui, 8), item, (string_address)word,
                           which_at == settings.menu_at,
                           string_equals((string_address)word, (string_address)settings.value[settings.menu]));
+                if (ui_pressed(&settings.press, SETTINGS_PRESS_MENU + which_at))
+                        ui_press_fill(ui, x + ui_px(&settings.ui, 4), y + pad + at * item, width - ui_px(&settings.ui, 8), item);
         }
         // More choices than show: a thin mark at the right edge, where the view is among them.
         if (settings.menu_count > shown)
@@ -3838,6 +4012,13 @@ static int settings_open(void)
 // The settings' timers: a verb's time, the due reading of a feed, and the descriptor of a verb running. 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
 {
+        // A list thrown by a finger moves a frame at a time until it is still.
+        {
+                long thrown = settings_throw();
+
+                if (thrown >= 0 && (timeout < 0 || thrown < timeout))
+                        timeout = thrown;
+        }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {
                 positive now = clock_monotonic_nanoseconds(), left;

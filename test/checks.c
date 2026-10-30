@@ -118701,6 +118701,69 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: a press anywhere else only closes the list: no change, no group chosen, nothing activated",
                               settings.menu < 0 && settings.queued == 0 && settings.group == 0 && settings.pane == 1 && settings.editing < 0);
 
+#ifdef UI_TARGET
+                        /*
+                                A finger: what it lands on shows pressed and is done as it lifts there, not as it lands; a
+                                list a finger opened has choices a finger's height; a finger dragged over the rows moves
+                                them its own way, sets nothing and, let go moving, throws them; one taken back does nothing.
+                        */
+                        {
+                                struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+                                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0};
+                                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0};
+                                int pos = settings_pos(kb), scrolled, opened;
+
+                                finger.a = (settings_pane_left() + settings_pane_right()) / 2;
+                                finger.b = settings_list_top() + settings.top[pos] - settings.scroll + ui_px(&settings.ui, UI_ROW) / 2;
+                                settings_event(&finger);
+                                settings_event(&land);
+                                check("settings: a finger on a choice row shows it pressed at once and opens nothing yet",
+                                      settings.menu < 0 && ui_pressed(&settings.press, kb));
+                                settings_event(&lift);
+                                opened = settings.menu == kb && settings.menu_touch && !ui_pressed(&settings.press, kb);
+                                settings_menu_box(&x, &y, &width, &height, &shown);
+                                check("settings: lifted there, it opens the list, its choices a finger's 44 pixels high",
+                                      opened && height == 10 * ui_px(&settings.ui, SETTINGS_MENU_TOUCH) + 2 * ui_px(&settings.ui, SETTINGS_MENU_PAD));
+                                finger.a = x + width / 2;
+                                finger.b = y + ui_px(&settings.ui, SETTINGS_MENU_PAD) + 3 * ui_px(&settings.ui, SETTINGS_MENU_TOUCH) + 4;
+                                settings_event(&finger);
+                                settings_event(&land);
+                                scrolled = settings.queued == 0 && settings.menu == kb;
+                                settings_event(&lift);
+                                check("settings: a finger on a choice sets it as it lifts, not as it lands",
+                                      scrolled && settings.menu < 0 && settings.queued == 1 &&
+                                          string_equals((string_address)settings.queue[0].value, (string_address) "se"));
+                                settings.queued = 0;
+
+                                settings.height = 220;
+                                settings_refilter();
+                                settings_scroll_to(0);
+                                finger.a = (settings_pane_left() + settings_pane_right()) / 2;
+                                finger.b = settings_list_top() + ui_px(&settings.ui, 60);
+                                settings_event(&finger);
+                                settings_event(&land);
+                                for (int step = 1; step <= 6; step++)
+                                {
+                                        finger.b -= ui_px(&settings.ui, 5);
+                                        settings_event(&finger);
+                                }
+                                scrolled = settings.scroll;
+                                settings_event(&lift);
+                                check("settings: a finger dragged 30 pixels up the rows moves them 30 its way and sets nothing",
+                                      scrolled == ui_px(&settings.ui, 30) &&
+                                          settings.queued == 0 && settings.menu < 0 && settings.editing < 0);
+                                check("settings: let go while moving, the rows are thrown, and a press stops them",
+                                      settings.drag.flying && (settings_event(&land), !settings.drag.flying));
+                                lift.flags |= WINDOW_KEY_CANCEL;
+                                settings_event(&lift);
+                                lift.flags &= ~WINDOW_KEY_CANCEL;
+                                check("settings: a finger's press the compositor took back does nothing", settings.queued == 0 && settings.menu < 0);
+                                settings.height = SETTINGS_HEIGHT;
+                                settings_refilter();
+                                settings_scroll_to(0);
+                        }
+#endif
+
                         // A list taller than the room is cut and scrolls: the keys' choice and the first in view go together.
                         settings.height = 220;
                         settings_refilter();
