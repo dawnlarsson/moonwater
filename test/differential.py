@@ -40922,6 +40922,15 @@ static bipolar file_read_once_at(bipolar dir, string_address path, void *into, p
     (void)dir; (void)path; (void)into; (void)room;
     return -2;
 }
+/*  A guest's own file, read as the guest names it (src/bowl.c reads its
+    conf files this way since the reads stopped going through the host's
+    resolution); it sits above this window, and here there is nothing on
+    disk for it to read either. */
+static bipolar bowl_slurp_in_root(string_address root, string_address path, p8 *into, positive room) {
+    (void)root; (void)path;
+    if (room) into[0] = 0;
+    return -2;
+}
 #define memory_compare(a, b, n) memcmp((a), (b), (n))
 static fn bowl_udev_groups(void) {}
 static bipolar bowl_mkdir(string_address path) {
