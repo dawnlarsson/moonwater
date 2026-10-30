@@ -5549,7 +5549,7 @@ static inline INLINE address_any copy_running_windows(address_any destination,
                                 : "=m"(*(p8(address_to)[])destination)
                                 : [from] "r"(source), [to] "r"(destination),
                                   [lo] "r"(size - 32), [hi] "r"(size - 16),
-                                  "m"(*(const p8(address_to)[])source)
+                                  "m"(*(const p8(address_to)[size])source)
                                 : "v0", "v1", "v2", "v3", "v4", "v5");
                         return destination;
                 }
@@ -5565,7 +5565,7 @@ static inline INLINE address_any copy_running_windows(address_any destination,
                         : "=m"(*(p8(address_to)[])destination)
                         : [from] "r"(source), [to] "r"(destination),
                           [lo] "r"(size - 32), [hi] "r"(size - 16),
-                          "m"(*(const p8(address_to)[])source)
+                          "m"(*(const p8(address_to)[size])source)
                         : "v0", "v1", "v2", "v3");
                 return destination;
         }
@@ -5576,7 +5576,7 @@ static inline INLINE address_any copy_running_windows(address_any destination,
                 : "=m"(*(p8(address_to)[])destination)
                 : [from] "r"(source), [to] "r"(destination),
                   [back] "r"(size - 16),
-                  "m"(*(const p8(address_to)[])source)
+                  "m"(*(const p8(address_to)[size])source)
                 : "v0", "v1");
         return destination;
 #else

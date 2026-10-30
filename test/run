@@ -1067,10 +1067,20 @@ freestanding()
 
         coverage_build "$architecture" "$output" || return 1
 
+        #       MW_CLANG=1 builds the checks of the three-machine lanes
+        #       (target_lane, which is most of the library's) with clang and
+        #       lld as target_tools names them, and lld has no
+        #       --no-warn-rwx-segments. The library takes both compilers, and
+        #       only a lane built by each says so:
+        #
+        #           MW_CLANG=1 sh test/run verify hex utf8
+        rwx_flag=-Wl,--no-warn-rwx-segments
+        case $compiler in *clang*) rwx_flag= ;; esac
+
         # shellcheck disable=SC2086
         if build_cached "$output" $compiler -O2 -static -nostdlib -nostartfiles \
                 -fno-stack-protector -fno-builtin "$@" -w -T src/build/spark.ld \
-                -Wl,-e,_start -Wl,--build-id=none -Wl,--no-warn-rwx-segments \
+                -Wl,-e,_start -Wl,--build-id=none $rwx_flag \
                 $coverage_args -o "$output" "$source_file"
         then
                 coverage_keep "$output"
@@ -3051,6 +3061,56 @@ lane_standard()
                 tally bare-mnemonic 1 1
         fi
 
+        #       The library has to build with clang as well as with gcc: lib.c
+        #       and, through test/checks.c, the userspace half of lib.util.c,
+        #       for each of the three machines. A construct only gcc takes
+        #       (an incomplete array behind an "m" operand, for one) is a
+        #       build that fails here and nowhere else. A machine the clang
+        #       found has no back end for is said and left out.
+        clang_found=
+        for clang_try in "${CLANG:-clang}" /opt/homebrew/opt/llvm/bin/clang \
+                /usr/local/opt/llvm/bin/clang
+        do
+                if command -v "$clang_try" > /dev/null 2>&1; then
+                        clang_found=$(command -v "$clang_try")
+                        break
+                fi
+        done
+        if [ -z "$clang_found" ]; then
+                note "clang-library: NOT RUN -- no clang"
+        else
+                for clang_machine in x86_64 aarch64 riscv64; do
+                        if ! "$clang_found" --target=$clang_machine-linux-gnu \
+                                -x c -c -o /dev/null /dev/null > /dev/null 2>&1
+                        then
+                                note "clang-library $clang_machine: NOT RUN -- this clang has no such back end"
+                                continue
+                        fi
+                        clang_flags=
+                        [ "$clang_machine" != riscv64 ] ||
+                                clang_flags="-march=rv64imafd_zicsr_zicntr -mabi=lp64d"
+                        clang_ok=1
+                        # shellcheck disable=SC2086
+                        "$clang_found" --target=$clang_machine-linux-gnu $clang_flags \
+                                -O1 -c -ffreestanding -fno-builtin -w \
+                                -DSTANDARD_NO_PLATFORM -o /dev/null src/lib.c \
+                                2> "$work/clang-library.err" || clang_ok=0
+                        # shellcheck disable=SC2086
+                        "$clang_found" --target=$clang_machine-linux-gnu $clang_flags \
+                                -O1 -c -ffreestanding -fno-builtin -w \
+                                -DCHECK_exact -o /dev/null test/checks.c \
+                                2>> "$work/clang-library.err" || clang_ok=0
+                        if [ "$clang_ok" = 1 ]; then
+                                tally "clang-library-$clang_machine" 1 1
+                        else
+                                tally "clang-library-$clang_machine" 0 1
+                                note "the library does not build with clang for $clang_machine:"
+                                sed 's/^/    /' "$work/clang-library.err" | head -10
+                                failed=$((failed + 1))
+                        fi
+                done
+        fi
+
         floor_outcome=0
         riscv_floor || floor_outcome=$?
         case $floor_outcome in
@@ -3168,8 +3228,21 @@ target_tools()
                 target_compiler=${target_runner#qemu-}-linux-gnu-gcc
         fi
 
+        #       MW_CLANG=1: the same machines through clang and lld, one
+        #       compiler for all three (it is every target's cross compiler).
+        target_tool_list="$target_compiler $target_runner"
+        if [ -n "${MW_CLANG:-}" ]; then
+                case $target in
+                x86_64)  clang_triple=x86_64-linux-gnu ;;
+                arm64)   clang_triple=aarch64-linux-gnu ;;
+                riscv64) clang_triple=riscv64-linux-gnu ;;
+                esac
+                target_compiler="${CLANG:-clang} --target=$clang_triple -fuse-ld=lld"
+                target_tool_list="${CLANG:-clang} ld.lld $target_runner"
+        fi
+
         #       A target whose tools are not here did not run, and says so.
-        for tool in $target_compiler $target_runner; do
+        for tool in $target_tool_list; do
                 command -v "$tool" > /dev/null 2>&1 ||
                         {
                                 if [ "${MOONWATER_REQUIRE_ARCHES:-0}" = 1 ]; then
