@@ -272,6 +272,17 @@ attacker gets its invariants here once there is a lane that proves them.
   names) and a boot of the tier's image; `build verify-config` reports an
   option a tier asked for and did not get, and the build says so for every
   tier on all three architectures.
+- **The pinned kernel source carries its own security fixes, and a tripwire
+  holds the pin to them.** The image is built from one Linux tree (currently
+  7.3, `artifacts/linux-7.3.tar.xz`, `git archive` commit `c03c1a14`); Moonwater
+  touches networking only through the read-only `mw_net_silent_gate` RST/ICMP
+  guard in `kernel/kernel.c`, which alters no free. A fetch that moves the pin
+  forward must keep the fixes the pinned tree already carries: the `kernel_cve`
+  row of `sh test/run kit` reads the tarball (or the extracted tree) and fails
+  if the IPv4 TCP connection-setup options (`inet->inet_opt`, `ireq->ireq_opt`)
+  revert to a plain `kfree()` from the `kfree_rcu()` that the fix for
+  CVE-2026-98432 installed (`e3f33b0a1d89`, shipped in 7.2.10 and 7.3). The
+  verdict and a deferred KASAN reproduction recipe are in `incident_response.md`.
 - **Mounts:** the kernel module mounts `/proc` and `/sys` `nosuid,nodev,noexec`
   and `/dev` `nosuid,noexec`, init mounts `/dev/pts` `nosuid,noexec` and
   `/dev/shm` `nosuid,nodev` (`noexec` as well at the locked tier, which also

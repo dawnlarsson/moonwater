@@ -797,9 +797,41 @@ promise about later code.
 | WPS setup bypass (Broadcom, Oct 2026) | Not exposed | No WPS code |
 | Unbound source-port side channel; DNS cache poisoning in general | Not exposed | The stub draws a CSPRNG source port per query on its own connected socket, randomizes the question's letter case, checks the ID and the echoed question |
 | PwnEscape, CVE-2026-99999 (kernel IPv4 checksum offset, Oct 2026) | Not reachable as configured | The profiles have no TUN or vhost; AF_PACKET with a virtio header needs CAP_NET_RAW. Kernel pinned at 7.3; confirm `ip_check_csum_start` is in the tarball at the next fetch |
+| CVE-2026-98432 (kernel IPv4 TCP use-after-free: `tcp_v4_syn_recv_sock` hands `ireq->ireq_opt` to the child socket by pointer, and a plain `kfree()` races a replayed-SYN reader; kernel CNA CVSS 9.8, Oct 2026) | Not vulnerable (upstream fix present) | Pinned Linux 7.3 (tarball git-archive `c03c1a14`, sha256 `87363c2…`) carries the fix `e3f33b0a1d89` (Dumazet; shipped in 7.2.10 and 7.3). Every free of a published `ip_options_rcu` is RCU-deferred: `inet_sock_destruct` `kfree_rcu` (net/ipv4/af_inet.c:164), `tcp_v4_reqsk_destructor` `kfree_rcu` (net/ipv4/tcp_ipv4.c:1212), IP_OPTIONS replace `kfree_rcu(old, rcu)` (net/ipv4/ip_sockglue.c:1110). Both readers are under `rcu_read_lock`: `tcp_v4_send_synack` (tcp_ipv4.c:1195) and `inet_csk_route_req` (inet_connection_sock.c:767). `tcp_v4_syn_recv_sock` keeps a single owner (tcp_ipv4.c:1765/1788); the syncookie (syncookies.c:446) and reuseport-migration (`inet_reqsk_clone` + `reqsk_migrate_reset`, inet_connection_sock.c:913/975) paths share the same RCU-deferred free. IPv6 duplicates (`ipv6_dup_options`, net/ipv6/tcp_ipv6.c) so it is unaffected. Our only net edit is the read-only `mw_net_silent_gate` RST/ICMP guard; the built tree is byte-identical to the pristine tarball on af_inet.c/inet_connection_sock.c/ip_sockglue.c/syncookies.c, and tcp_ipv4.c differs only by that guard, not the option path. MPTCP/NETLABEL/NETFILTER are off under allnoconfig in every profile combination. Tripwire: `sh test/run kit` row `kernel_cve` goes red if a later fetch reverts `inet_opt`/`ireq_opt` to a plain `kfree` (proven green on 7.3, red on the pre-fix free). KASAN soak deferred (shared box under load avg 22); recipe below |
 | NTP time shifting (published attacks on ntpd, 2021 and after) | Bounded | A set clock steps at most 2 s on one server's word; a bigger step needs a second server; no step goes back before the last authenticated time. No cumulative cap across polls (about 2 s per poll, polls at 4 to 30 minutes) |
 | Wi-Fi downgrade and Dragonblood (WPA3 to WPA2, SAE timing) | Read, not exercised today | SAE with hash-to-element, hunting fixed at 40 whole passes, PMF required where offered, and a network joined with WPA3 is never joined with WPA2 (`src/sh/host.c`) |
 | Output file named by the server (wget CVE-2016-4971 and the Content-Disposition family); a symlink planted where the file will go | Not exposed | A hostile local server against the built shell: `Content-Disposition` names with `../`, with an absolute path and with `filename*`, and redirects to `..%2f`, `/../` and a query holding `../`. Every file landed inside the working directory, named from the requested URL, not from the header or the redirect. A `Location` holding a newline or ESC byte is refused. An existing `index.html` symlink was not followed (wget wrote `index.html.1`, the target was unchanged) |
 | Hostile server: redirect loops, huge or many headers, lengths past 2^64, slow drip | Bounded | 20 redirections, then exit 8. The head is capped at 16 KiB (`HTTP_HEAD_MAX`): a 64 MiB header line and 2 million headers were refused in under a second at 13 to 14 MB resident. `Content-Length: 99999999999999999999` and a chunk size of 2^64-1 are refused. A one-byte-per-half-second drip is held for as long as the read timeout resets, as GNU wget does |
 | Unsigned bootstrap downloads | Not exposed | Every bowl row is a compiled-in SHA-256 or a pinned OpenPGP key; a row that pins nothing is refused (`src/bowl.c`) |
 | SSH (Terrapin, regreSSHion) | Not applicable | No SSH implementation in the tree; OpenSSH inside a bowl is the distribution's package |
+
+## CVE-2026-98432 dynamic proof (deferred)
+
+The source verdict above was read from the pinned tarball and from the built
+tree, and the `kernel_cve` tripwire in `sh test/run kit` fails if a later fetch
+reverts the two frees to a plain `kfree()`. A KASAN runtime soak was not run:
+the shared box was at load average 22 with ~3 GB free while another workload
+held it, and a sanitizer kernel build (needed twice, once mutated) would have
+contended destructively. The recipe for the owner, when the box is free:
+
+1. Seed a copy tree: `git archive` HEAD into `/home/dawn/cve98432-tree/src`,
+   `cp -a` `artifacts/linux-7.3.tar.xz` and its `.sign` in from
+   `/home/dawn/kde-fix-tree/artifacts`, then
+   `taskset -c 24-31 sudo sh build.sh arch/x64 debug_none limbo sec_default serial sec_sanitize`
+   (add `desktop wifi` only if the association path is wanted; loopback alone
+   exercises the race).
+2. Boot it like the `ring0` lane (`-enable-kvm -smp 4`, `-serial stdio`,
+   `console=ttyS0 panic=-1`). In the guest, run an exerciser that opens a TCP
+   listener on loopback, connects clients whose SYNs carry Record Route /
+   Timestamp options (`setsockopt(IP_OPTIONS)`), completes and closes the child
+   on one thread while other threads replay the captured SYN to the same
+   4-tuple via `IP_HDRINCL` raw sockets so `tcp_check_req -> tcp_v4_send_synack`
+   runs concurrently; also set `net.ipv4.tcp_syncookies=2` and drive the
+   listener-overflow path. Require zero KASAN reports for 5-10 minutes.
+3. Prove the test can fail: in a scratch build only, change
+   `inet_sock_destruct` (net/ipv4/af_inet.c:164) back to the plain
+   `kfree(rcu_dereference_protected(inet->inet_opt, 1));` and, if the race is
+   too narrow in the time budget, add a scratch-only `udelay()` between the
+   child's detach and free. KASAN should then report a slab-use-after-free in
+   `ip_options_build` / `tcp_v4_send_synack` / `inet_csk_route_req`. Say plainly
+   if the window was widened.
