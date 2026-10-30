@@ -7875,13 +7875,59 @@ static bool __attribute__((__noinline__)) bowl_bin_taken(string_address name)
                !string_equals(current, from);
 }
 
+/*
+        Where a bowl keeps its profiles' markers, as the bowl names it: resolved
+        inside its root, so a link on the way stays in the guest. The markers
+        were opened, read and removed by the path joined onto the root, which
+        the host resolves, and a package's script runs as the guest's root
+        between an install's first look and its last write (the packages go in
+        between the marker made and the launchers noted in it): a guest that
+        made var/lib/moonwater/profile a link to /root by then had the launcher
+        names appended to /root/desktop, the machine's choice of desktop, and a
+        remove took that file away. A FIFO there is opened without waiting.
+*/
+static bipolar bowl_profile_state(string_address root)
+{
+        return bowl_open_in_root(root, BOWL_PROFILE_STATE,
+                                 FILE_READ | O_DIRECTORY | O_CLOEXEC);
+}
+
 /* Opened to add to, never to start over: an install run again finds every
    launcher already there, notes nothing, and would leave a truncated marker
    empty for remove to find. */
-static bipolar bowl_profile_marker_open(string_address path)
+static bipolar bowl_profile_marker_open(string_address root, string_address name,
+                                        positive opening)
 {
-        return system_open_at_mode(AT_FDCWD, path,
-                                   FILE_APPEND | O_CLOEXEC | O_NOFOLLOW, 0644);
+        bipolar state = bowl_profile_state(root);
+        bipolar marker;
+
+        if (state < 0)
+                return state;
+        marker = system_open_at_mode(state, name, opening | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+                                     0644);
+        system_close(state);
+        return marker;
+}
+
+/* Whether a bowl keeps the profile's marker, the name itself and not what a link there names. */
+static bool bowl_profile_marked(string_address root, string_address name)
+{
+        bipolar marker = bowl_profile_marker_open(root, name, O_PATH);
+
+        if (marker < 0)
+                return false;
+        system_close(marker);
+        return true;
+}
+
+static fn bowl_profile_forget(string_address root, string_address name)
+{
+        bipolar state = bowl_profile_state(root);
+
+        if (state < 0)
+                return;
+        system_remove_at(state, name, 0);
+        system_close(state);
 }
 
 static fn bowl_profile_note(bipolar marker, string_address name)
@@ -8047,7 +8093,7 @@ static b32 bowl_profile_mark(string_address root, string_address name)
 
         failed = bowl_mkdir_parents(state);
         return_if(failed < 0, bowl_fail(state, failed));
-        marker = bowl_profile_marker_open(marker_path);
+        marker = bowl_profile_marker_open(root, name, FILE_APPEND);
         return_if(marker < 0, bowl_fail(marker_path, marker));
         system_close(marker);
         return 0;
@@ -8068,7 +8114,7 @@ static b32 bowl_profile_expose(string_address root, string_address name)
         failed = bowl_mkdir_parents(state);
         return_if(failed < 0, bowl_fail(state, failed));
 
-        marker = bowl_profile_marker_open(marker_path);
+        marker = bowl_profile_marker_open(root, name, FILE_APPEND);
         return_if(marker < 0, bowl_fail(marker_path, marker));
 
         bowl_quiet = true;
@@ -8323,14 +8369,14 @@ static fn bowl_profile_drop(string_address root, string_address name)
                 system_remove_at(AT_FDCWD, link, 0);
 }
 
-static b32 bowl_profile_unexpose(string_address root, string_address marker)
+static b32 bowl_profile_unexpose(string_address root, string_address profile,
+                                  string_address marker)
 {
         p8 chunk[4096];
         p8 name[BOWL_SHEBANG_LIMIT];
         positive have = 0;
         bool whole = true;
-        bipolar handle = system_open_at(AT_FDCWD, marker,
-                                        FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        bipolar handle = bowl_profile_marker_open(root, profile, FILE_READ);
         bipolar got;
 
         if (handle < 0)
@@ -8382,10 +8428,10 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                         return bowl_refuse("a profile cannot use that "
                                            "distribution yet\n");
                 if (profile->libraries &&
-                    system_access_at(AT_FDCWD, marker, 0) < 0)
+                    !bowl_profile_marked(distro->root, profile->name))
                         continue;
 
-                failed = bowl_profile_unexpose(distro->root, marker);
+                failed = bowl_profile_unexpose(distro->root, profile->name, marker);
                 if (!failed && bowl_has(distro->root, distro->marker))
                         failed = bowl_profile_packages(
                             distro, distro->remove, part->packages,
@@ -8394,7 +8440,7 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                         return failed;
 
                 // Last, so a remove that stopped part way can be run again.
-                system_remove_at(AT_FDCWD, marker, 0);
+                bowl_profile_forget(distro->root, profile->name);
         }
 
         // The script goes only if it is the one install wrote.
@@ -8447,13 +8493,8 @@ static b32 bowl_profile_list(void)
                 {
                         const struct bowl_distro address_to distro =
                             bowl_find_distro(part->distro);
-                        p8 marker[BOWL_PATH_LIMIT];
-
                         bool here = distro &&
-                                    bowl_profile_marker(marker, sizeof(marker),
-                                                        distro->root,
-                                                        profile->name) &&
-                                    system_access_at(AT_FDCWD, marker, 0) >= 0;
+                                    bowl_profile_marked(distro->root, profile->name);
 
                         if (profile->libraries)
                                 installed |= here;

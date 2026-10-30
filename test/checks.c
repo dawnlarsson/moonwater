@@ -95981,8 +95981,9 @@ static fn profiles(void)
 
         unpack_path(first, "profa", "");
         unpack_path(second, "profb", "");
-        unpack_path(marker, "profa", "/marker");
+        unpack_path(marker, "profa", BOWL_PROFILE_STATE "/marker");
         unpack_directory(first, "/usr/bin");
+        unpack_directory(first, BOWL_PROFILE_STATE);
         unpack_directory(second, "/usr/bin");
         bool made = unpack_write(first, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
                     unpack_write(second, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
@@ -95993,30 +95994,29 @@ static fn profiles(void)
         string_copy_bounded(text, "profatool\nprofbtool\n../profbtool\nprofnone\n", sizeof text);
         string_append_bounded(text, long_name, sizeof text);
         string_append_bounded(text, "\n", sizeof text);
-        made &= unpack_write(first, "/marker", text, 0644);
+        made &= unpack_write(first, BOWL_PROFILE_STATE "/marker", text, 0644);
 
         check("Two bowls' launchers stand before a remove", made);
-        check("Remove reads a marker without error", bowl_profile_unexpose(first, marker) == 0);
+        check("Remove reads a marker without error",
+              bowl_profile_unexpose(first, "marker", marker) == 0);
         check("Remove takes a launcher that still names this bowl",
               system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profatool", 0) < 0);
         check("Remove leaves another bowl's launcher alone, named or climbed to",
               system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profbtool", 0) == 0);
-        p8 kept[256];
-        unpack_path(kept, "profa", "/kept");
-        made = unpack_write(first, "/kept", "one\n", 0644);
-        bipolar noted = bowl_profile_marker_open(kept);
+        made = unpack_write(first, BOWL_PROFILE_STATE "/kept", "one\n", 0644);
+        bipolar noted = bowl_profile_marker_open(first, "kept", FILE_APPEND);
         bowl_profile_note(noted, "two");
         if (noted >= 0)
                 system_close(noted);
         check("A marker is added to by a second install, not started over",
-              made && noted >= 0 && unpack_says(first, "/kept", "one\ntwo\n"));
+              made && noted >= 0 && unpack_says(first, BOWL_PROFILE_STATE "/kept", "one\ntwo\n"));
         p8 aimed[256];
         p8 pointer[256];
         unpack_path(aimed, "profa", "/aimed");
-        unpack_path(pointer, "profa", "/pointer");
+        unpack_path(pointer, "profa", BOWL_PROFILE_STATE "/pointer");
         made = unpack_write(first, "/aimed", "keep\n", 0644) &&
                system_symbolic_link_at(aimed, AT_FDCWD, pointer) == 0;
-        bipolar through = bowl_profile_marker_open(pointer);
+        bipolar through = bowl_profile_marker_open(first, "pointer", FILE_APPEND);
         if (through >= 0)
         {
                 bowl_profile_note(through, "evil");
@@ -96025,7 +96025,55 @@ static fn profiles(void)
         check("A marker the bowl made a link is not written through",
               made && through < 0 && unpack_says(first, "/aimed", "keep\n"));
         check("A marker that is missing is a profile that exposed nothing",
-              bowl_profile_unexpose(first, "/tmp/moonwater-bowl-check/no-such-marker") == 0);
+              bowl_profile_unexpose(first, "no-such-marker", marker) == 0);
+
+        /*
+                The directory of the markers made a link by the guest, to a
+                directory of the host's (absolute, which the host would follow):
+                a marker is not made there, not read from there and not removed
+                from there, and a FIFO for a marker holds nothing. A package's
+                script, as the guest's root, can make that link between an
+                install's first look and its last write.
+        */
+        {
+                p8 guest[256];
+                p8 host_side[256];
+                p8 state[256];
+
+                unpack_path(guest, "profg", "");
+                unpack_path(host_side, "profh", "");
+                unpack_path(state, "profg", BOWL_PROFILE_STATE);
+                unpack_directory(guest, "/var/lib/moonwater");
+                unpack_directory(host_side, "");
+                unpack_directory(guest, "/usr/bin");
+                made = unpack_write(host_side, "/desktop", "profgtool\n", 0644) &&
+                       unpack_write(guest, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
+                       bowl_expose_program(guest, "/usr/bin/tool", "profgtool", false) == 0 &&
+                       system_symbolic_link_at(host_side, AT_FDCWD, state) == 0;
+                bipolar opened = bowl_profile_marker_open(guest, "fresh", FILE_APPEND);
+
+                if (opened >= 0)
+                        system_close(opened);
+                check("A link the guest made of the markers' directory is not followed out of the bowl to make one",
+                      made && opened < 0 && !unpack_says(host_side, "/fresh", ""));
+                check("nor to read one, and the launcher a host file names stays",
+                      bowl_profile_unexpose(guest, "desktop", state) == 0 &&
+                          system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profgtool", 0) == 0);
+                bowl_profile_forget(guest, "desktop");
+                check("nor to remove one", unpack_says(host_side, "/desktop", "profgtool\n"));
+                bowl_profile_drop(guest, "profgtool");
+
+                system_remove_at(AT_FDCWD, state, 0);
+                unpack_directory(guest, BOWL_PROFILE_STATE);
+                string_append_bounded(state, "/desktop", sizeof state);
+                made = system_call_4(syscall(mknodat), (positive)(bipolar)AT_FDCWD,
+                                     (positive)state, 0010644, 0) == 0;
+                check("A FIFO for a marker holds neither a remove nor an install",
+                      made && bowl_profile_unexpose(guest, "desktop", state) == 0 &&
+                          bowl_profile_marker_open(guest, "desktop", FILE_APPEND) < 0);
+                bowl_forget_path(guest);
+                bowl_forget_path(host_side);
+        }
 
         /*
                 The script is written where a link may have been planted: the

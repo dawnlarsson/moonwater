@@ -46077,6 +46077,22 @@ def harness_moonwater_cli(argv):
               "a FIFO at a bowl's /etc/passwd or among its bus service files holds neither bowl bus run nor bowl bus",
               repr((held, lines[-4:])))
 
+        # A profile's markers are the bowl's files, found inside the bowl: a
+        # guest that made the directory they are kept in a link to /root
+        # (absolute, which the host followed) had bowl profile remove take
+        # /root/desktop, the machine's choice of desktop, away, and an install
+        # append its launcher names to it.
+        lines, finished = session(
+            "cp /tmp/moonwater /tmp/bowl; mkdir -p /bowls/alpine/var/lib/moonwater\n"
+            "ln -s /root /bowls/alpine/var/lib/moonwater/profile; echo on > /root/desktop\n"
+            "timeout 20 /tmp/bowl profile desktop remove > /dev/null 2>&1; echo \"@@ remove $?\"\n"
+            "echo '@@ kept'; cat /root/desktop; echo '@@end'\n"
+            "rm -rf /bowls/alpine /tmp/bowl /root/desktop\n")
+        check(finished and block("kept") == ["on"] and "@@ remove 124" not in lines and
+              any(line.startswith("@@ remove ") for line in lines),
+              "a link a guest made of its profiles' markers does not let bowl profile remove take a file of the host's",
+              repr((block("kept"), [line for line in lines if line.startswith("@@ remove")])))
+
         # A FIFO at /etc/localtime, or at a bowl's, is not the zone's file and
         # is replaced by it: the read that asks whether the file already says
         # the same does not wait for a writer, so timezone answers.
