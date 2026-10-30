@@ -43143,6 +43143,19 @@ typedef union
         p128 bits;
 } number_extended_shape;
 
+//      The bits of a long double, with what the compiler knew of where they
+//      came from taken away: their compare against the bits of an infinity
+//      or a NaN is something clang turns back into a long double compare, a
+//      call to __eqtf2 or __unordtf2 that a freestanding link has no library
+//      to answer.
+static p128 number_extended_bits(number_extended_shape shape)
+{
+        p128 bits = shape.bits;
+
+        __asm__("" : "+m"(bits));
+        return bits;
+}
+
 typedef struct
 {
         const char address_to input;
@@ -43556,19 +43569,19 @@ number_case(extended)
                 wide.value = strtod(input, null);
                 extended.value = strtold(input, null);
 
-                number_say(number_extended_same(extended.bits,
+                number_say(number_extended_same(number_extended_bits(extended),
                                                 number_widened(wide.bits)),
                            input);
         }
 
         //      The specials, in whichever format the machine has.
         extended.value = strtold(text("inf"), null);
-        number_say(number_extended_same(extended.bits,
+        number_say(number_extended_same(number_extended_bits(extended),
                                         number_widened(0x7ff0000000000000ULL)),
                    text("strtold inf"));
 
         extended.value = strtold(text("-inf"), null);
-        number_say(number_extended_same(extended.bits,
+        number_say(number_extended_same(number_extended_bits(extended),
                                         number_widened(0xfff0000000000000ULL)),
                    text("strtold -inf"));
 
@@ -43577,12 +43590,12 @@ number_case(extended)
         //      significand that is not zero.
         extended.value = strtold(text("nan"), null);
 #if __LDBL_MANT_DIG__ == 64
-        number_say(((p64)(extended.bits >> 64) & 0x7fff) == 0x7fff &&
-                           (p64)extended.bits != 0,
+        number_say(((p64)(number_extended_bits(extended) >> 64) & 0x7fff) == 0x7fff &&
+                           (p64)number_extended_bits(extended) != 0,
                    text("strtold nan"));
 #else
-        number_say(((p64)(extended.bits >> 112) & 0x7fff) == 0x7fff &&
-                           (extended.bits & ((((p128)1 << 112) - 1))) != 0,
+        number_say(((p64)(number_extended_bits(extended) >> 112) & 0x7fff) == 0x7fff &&
+                           (number_extended_bits(extended) & ((((p128)1 << 112) - 1))) != 0,
                    text("strtold nan"));
 #endif
 
@@ -43597,7 +43610,7 @@ number_case(extended)
                 char *stop;
                 errno = 99;
                 extended.value = strtold(edges[i].input, &stop);
-                number_say(number_extended_same(extended.bits, number_widened(edges[i].bits)),
+                number_say(number_extended_same(number_extended_bits(extended), number_widened(edges[i].bits)),
                            text("extended dispatch bits"));
                 number_say((positive)(stop - edges[i].input) == edges[i].stop,
                            text("extended dispatch end pointer"));
@@ -43664,7 +43677,7 @@ number_case(page_edge_names)
                                                alias.bits == wide.bits &&
                                                narrow.bits == 0x7f800000u &&
                                                number_extended_same(
-                                                   extended.bits,
+                                                   number_extended_bits(extended),
                                                    number_widened(wide.bits)),
                                            text("page-edge infinity values"));
                         }
@@ -43673,14 +43686,14 @@ number_case(page_edge_names)
                                 bool extended_nan;
 #if __LDBL_MANT_DIG__ == 64
                                 extended_nan =
-                                    ((p64)(extended.bits >> 64) & 0x7fff) ==
+                                    ((p64)(number_extended_bits(extended) >> 64) & 0x7fff) ==
                                         0x7fff &&
-                                    (p64)extended.bits != 0;
+                                    (p64)number_extended_bits(extended) != 0;
 #else
                                 extended_nan =
-                                    ((p64)(extended.bits >> 112) & 0x7fff) ==
+                                    ((p64)(number_extended_bits(extended) >> 112) & 0x7fff) ==
                                         0x7fff &&
-                                    (extended.bits & (((p128)1 << 112) - 1)) != 0;
+                                    (number_extended_bits(extended) & (((p128)1 << 112) - 1)) != 0;
 #endif
                                 number_say(
                                     (wide.bits & 0x7ff0000000000000ULL) ==
