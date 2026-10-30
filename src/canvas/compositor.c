@@ -237,8 +237,6 @@ static const unsigned char *compositor_corner_mask(int radius)
 {
         unsigned char *mask;
 
-        if (radius < 1 || radius > COMPOSITOR_MASK_MOST)
-                return compositor_corner_none;
         if (!compositor_corner_masks)
         {
                 compositor_corner_masks = compositor_map_zeroed(COMPOSITOR_MASKS_BYTES);
@@ -528,6 +526,12 @@ static void compositor_draw(const struct compositor_target *t,
         compositor_contents(&part, frame);
 
         const unsigned char *outer = compositor_corner_mask(r), *inner = ri ? compositor_corner_mask(ri) : 0;
+        // The corners the hand holds, a bit each, decided once: nothing at all is asked of them with nothing lit.
+        unsigned int lit_corners = 0;
+
+        if (frame->lit)
+                for (int corner = 0; corner < 4; corner++)
+                        lit_corners |= (unsigned int)compositor_corner_lit(frame, corner) << corner;
         unsigned int tab = frame->builtin ? taskbar_tab_ink(frame->slot, frame->slot >= 0 &&
                                                                                     frame->slot < (int)frame->mark_count
                                                                                 ? frame->marks[frame->slot]
@@ -539,7 +543,7 @@ static void compositor_draw(const struct compositor_target *t,
                 int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
                 int x1 = cx > t->x1 ? cx : t->x1, y1 = cy > t->y1 ? cy : t->y1;
                 int x2 = cx + r < t->x2 ? cx + r : t->x2, y2 = cy + r < t->y2 ? cy + r : t->y2;
-                unsigned int edge = frame->lit && compositor_corner_lit(frame, corner) ? frame->lit_ink : frame->edge;
+                unsigned int edge = lit_corners >> corner & 1 ? frame->lit_ink : frame->edge;
 
                 if (frame->square & (1 << corner))
                 {
@@ -928,13 +932,15 @@ static int compositor_spot_radius(int scale)
 static void compositor_spot_draw(const struct compositor_target *t, int cx, int cy, int scale, unsigned int alpha)
 {
         int radius = compositor_spot_radius(scale), ring = scale < 1 ? 1 : scale, inner = radius - ring;
-        const unsigned char *outer_mask = compositor_corner_mask(radius), *inner_mask = compositor_corner_mask(inner);
         int x1 = cx - radius > t->x1 ? cx - radius : t->x1, y1 = cy - radius > t->y1 ? cy - radius : t->y1;
         int x2 = cx + radius < t->x2 ? cx + radius : t->x2, y2 = cy + radius < t->y2 ? cy + radius : t->y2;
         unsigned int fill = COMPOSITOR_SPOT_FILL * alpha / 255, edge = COMPOSITOR_SPOT_RING * alpha / 255;
+        const unsigned char *outer_mask, *inner_mask;
 
-        if (!alpha || inner < 1)
+        if (!alpha || inner < 1 || x2 <= x1 || y2 <= y1)
                 return;
+        outer_mask = compositor_corner_mask(radius);
+        inner_mask = compositor_corner_mask(inner);
         for (int py = y1; py < y2; py++)
         {
                 // The pixel's place in the quarter it is mirrored into: 0 at the disc's outside, radius - 1 at its middle.
@@ -2521,6 +2527,7 @@ static struct
                 its alpha, and what was damaged for it last (x, y, width; a width of 0 none).
         */
         int spots_on;
+        unsigned int spots_shown, spots_fading; // a bit a slot: its mark is drawn, and it is fading
         struct
         {
                 int x, y, on;
@@ -8628,6 +8635,8 @@ static void compositor_spot_set(int slot, int x, int y)
         compositor.spot[slot].y = y;
         compositor.spot[slot].on = 1;
         compositor.spot[slot].alpha = 255;
+        compositor.spots_shown |= 1u << slot;
+        compositor.spots_fading &= ~(1u << slot);
         compositor_spot_redraw(slot);
 }
 
@@ -8638,15 +8647,13 @@ static void compositor_spot_lift(int slot, positive now)
                 return;
         compositor.spot[slot].on = 2;
         compositor.spot[slot].lifted = now;
+        compositor.spots_fading |= 1u << slot;
 }
 
 // Whether any mark is drawn, and whether any is fading, which is a frame to draw each period until it is gone.
 static int compositor_spots_any(int fading)
 {
-        for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
-                if (compositor.spot[slot].on && (!fading || compositor.spot[slot].on == 2))
-                        return 1;
-        return 0;
+        return (fading ? compositor.spots_fading : compositor.spots_shown) != 0;
 }
 
 // The fading marks at now: each fainter by the time since its finger lifted, and gone after COMPOSITOR_SPOT_FADE_NS.
@@ -8665,6 +8672,8 @@ static void compositor_spots_tick(positive now)
                         compositor_spot_undraw((int)slot);
                         compositor.spot[slot].on = 0;
                         compositor.spot[slot].alpha = 0;
+                        compositor.spots_shown &= ~(1u << slot);
+                        compositor.spots_fading &= ~(1u << slot);
                         continue;
                 }
                 alpha = (unsigned int)((COMPOSITOR_SPOT_FADE_NS - since) * 255 / COMPOSITOR_SPOT_FADE_NS);
@@ -8684,6 +8693,7 @@ static void compositor_spots_clear(void)
                 compositor_spot_undraw((int)slot);
                 compositor.spot[slot].on = 0;
         }
+        compositor.spots_shown = compositor.spots_fading = 0;
 }
 
 // The masks a mark is drawn with, made before the scene's bands, which draw marks into their slices at once.
@@ -8698,6 +8708,8 @@ static void compositor_spots_ready(void)
 // The marks over a target the scene was composed into and may be read (a slice of a scene composed apart).
 static void compositor_spots_draw(const struct compositor_target *t)
 {
+        if (!compositor.spots_shown)
+                return;
         for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
                 if (compositor.spot[slot].on)
                         compositor_spot_draw(t, compositor.spot[slot].x, compositor.spot[slot].y, compositor.scale,
