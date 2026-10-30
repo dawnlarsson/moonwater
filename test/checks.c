@@ -74703,6 +74703,25 @@ static fn nts_ke_pieces(void)
                       (reply[at] = 0, nts_ke_reply(reply, at + 1, &state) != NTS_KE_OK));
         }
 
+        /* The longest cookie a state holds is kept, and one byte more is
+           dropped without refusing the reply. */
+        {
+                positive at = 0;
+                bipolar verdict;
+
+                memory_fill(cookie, 0x5a, sizeof cookie);
+                at = nts_record(reply, at, 0x8001, zero2, 2);
+                at = nts_record(reply, at, 0x8004, aead, 2);
+                at = nts_record(reply, at, 5, cookie, NTS_COOKIE_MAX + 1);
+                at = nts_record(reply, at, 5, cookie, NTS_COOKIE_MAX);
+                at = nts_record(reply, at, 0x8000, zero2, 0);
+                verdict = nts_ke_reply(reply, at, &state);
+                check("a cookie of the most a cookie may be is kept and one byte more is not",
+                      verdict == NTS_KE_OK && state.count == 1 &&
+                          state.length[0] == NTS_COOKIE_MAX &&
+                          state.cookie[0][NTS_COOKIE_MAX - 1] == 0x5a);
+        }
+
         check("host names: letters, digits, dots and hyphens, between labels",
               !nts_name_ok((const p8 address_to)"a.-b", 4) &&
                   !nts_name_ok((const p8 address_to)"a-.b", 4) &&
