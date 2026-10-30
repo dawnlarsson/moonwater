@@ -14650,28 +14650,37 @@ fi
 #       The kernel source is here only during a build, so where it is not this
 #       says so and counts nothing (the Mac and the rsync test copies have no
 #       linux/ tree and no tarball).
+#
+#       The source read is the release build.c pins and no other: the linux/
+#       tree the build patched when it is that release (a tree of the release
+#       before stays until the next build replaces it), else the pinned
+#       tarball. Any linux-*.tar.xz used to do, and artifacts/ keeps the old
+#       tarball beside the new one after a move, so the glob's first match --
+#       the older release, 7.2.x sorting before 7.3 -- was the one judged.
 group kernel_cve
 kernel_cve_src=
-if [ -f linux/net/ipv4/af_inet.c ]; then
+kernel_cve_pin=$(sed -n 's/^ *{"kernel_version", "\([0-9][0-9.]*\)"},$/\1/p' src/build/build.c)
+kernel_cve_tree=$(awk -F ' *= *' '
+        $1 == "VERSION" { v = $2 } $1 == "PATCHLEVEL" { p = $2 } $1 == "SUBLEVEL" { s = $2 }
+        END { if (v != "") { printf "%s.%s", v, p; if (s != "" && s != "0") printf ".%s", s } }' \
+        linux/Makefile 2>/dev/null)
+if [ -z "$kernel_cve_pin" ]; then
+        lost 'pinned release' 'no kernel_version line in src/build/build.c to read'
+elif [ "$kernel_cve_tree" = "$kernel_cve_pin" ] && [ -f linux/net/ipv4/af_inet.c ]; then
         kernel_cve_src=linux
-else
-        for kernel_cve_tb in artifacts/linux-*.tar.xz; do
-                [ -f "$kernel_cve_tb" ] || continue
-                kernel_cve_src=$work/kernel-cve-src
-                kernel_cve_top=$(tar -tf "$kernel_cve_tb" 2>/dev/null |
-                        head -1 | cut -d/ -f1)
-                mkdir -p "$kernel_cve_src/net/ipv4"
-                for kernel_cve_f in af_inet.c tcp_ipv4.c ip_sockglue.c; do
-                        tar --occurrence=1 -xOf "$kernel_cve_tb" \
-                                "$kernel_cve_top/net/ipv4/$kernel_cve_f" \
-                                > "$kernel_cve_src/net/ipv4/$kernel_cve_f" \
-                                2>/dev/null
-                done
-                break
-        done
+elif [ -f "artifacts/linux-$kernel_cve_pin.tar.xz" ]; then
+        kernel_cve_src=$work/kernel-cve-src
+        mkdir -p "$kernel_cve_src"
+        tar -xf "artifacts/linux-$kernel_cve_pin.tar.xz" -C "$kernel_cve_src" \
+                --strip-components=1 --occurrence=1 \
+                "linux-$kernel_cve_pin/net/ipv4/af_inet.c" \
+                "linux-$kernel_cve_pin/net/ipv4/tcp_ipv4.c" \
+                "linux-$kernel_cve_pin/net/ipv4/ip_sockglue.c" 2> /dev/null
 fi
-if [ -z "$kernel_cve_src" ]; then
-        printf '  %-10s %s\n' kernel_cve 'no kernel source, not checked'
+if [ -z "$kernel_cve_pin" ]; then
+        :
+elif [ -z "$kernel_cve_src" ]; then
+        not_run_part "kit: kernel_cve -- no Linux $kernel_cve_pin source here (linux/ is ${kernel_cve_tree:-absent}, no artifacts/linux-$kernel_cve_pin.tar.xz)"
 else
         kernel_cve_ok=1
         grep -q -F 'kfree_rcu(rcu_dereference_protected(inet->inet_opt, 1), rcu)' \
