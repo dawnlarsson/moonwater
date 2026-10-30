@@ -115215,6 +115215,9 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #if MOONWATER_UI_LAUNCHER
 #include "../src/canvas/ui/launcher.c"
 #endif
+#if MOONWATER_UI_EDITOR
+#include "../src/canvas/ui/editor.c"
+#endif
 #if MOONWATER_UI_TASKBAR
 #include "../src/canvas/ui/taskbar.c"
 #endif
@@ -125688,6 +125691,7 @@ b32 main()
         and every mode draws inside its box and nothing outside it.
 */
 static fn menu_check(struct ui address_to wui);
+static fn editor_check(struct ui address_to wui);
 
 static fn text_widget_check(string_address inter, string_address mono)
 {
@@ -125799,6 +125803,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         ui_text_close(&view);
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
         menu_check(&wui);
+        editor_check(&wui);
 }
 
 
@@ -125877,6 +125882,93 @@ static fn menu_check(struct ui address_to wui)
         check("menu: only an item that can be chosen is ever chosen", chosen_ok);
         check("menu: the keys keep the hot item on one that can be chosen", hot_ok);
         compositor_call(syscall(munmap), (positive)pixels, 600 * 900 * 4, 0, 0, 0, 0);
+}
+
+
+/*
+        The editor's files: a FIFO and a device are refused, a link is followed to its file and a save writes that file
+        (the link stays a link), the mode and the byte order mark are kept, a save is a rename (the old bytes are whole
+        until the new are), and a hundred megabytes open and paint their first screen: the time is printed.
+*/
+static fn editor_check(struct ui address_to wui)
+{
+        static const char dir[] = "editor-check.tmp";
+        char path[96], link_path[96], fifo[96];
+        bipolar handle;
+        error_stat facts;
+        positive started;
+
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        string_copy((string_address)path, (string_address) "editor-check.tmp/file.c");
+        string_copy((string_address)link_path, (string_address) "editor-check.tmp/link.c");
+        string_copy((string_address)fifo, (string_address) "editor-check.tmp/fifo");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "\xef\xbb\xbfint x;\r\n", 11);
+        system_close(handle);
+        system_call_3(syscall(symlinkat), (positive) "file.c", (positive)AT_FDCWD, (positive)link_path);
+        system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)fifo, 0010600, 0);
+        editor.ui = *wui;
+        editor.count = 0;
+        check("editor: a FIFO is refused", !editor_open((string_address)fifo));
+        check("editor: a device is refused", !editor_open((string_address) "/dev/null"));
+        check("editor: a link opens its file", editor_open((string_address)link_path) && editor.count == 1);
+        check("editor: the byte order mark is held aside and the line ends are CR LF",
+              editor.tabs[0].view.doc.bom && editor.tabs[0].view.doc.eol == DOC_EOL_CRLF && doc_length(&editor.tabs[0].view.doc) == 8);
+        doc_select_set(&editor.tabs[0].view.doc, 0, 0);
+        doc_type(&editor.tabs[0].view.doc, (const p8 address_to) "// ", 3);
+        check("editor: a save succeeds", editor_save(&editor.tabs[0]));
+        {
+                char got[64];
+                bipolar read_handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+                bipolar length = system_read_once((b32)read_handle, got, sizeof(got));
+                char target[64];
+                bipolar linked = system_call_4(syscall(readlinkat), (positive)AT_FDCWD, (positive)link_path, (positive)target, sizeof(target));
+
+                fstat((b32)read_handle, address_of facts);
+                system_close(read_handle);
+                check("editor: the save wrote the link's file, with its mark and line ends", length == 14 && !memory_compare(got, "\xef\xbb\xbf// int x;\r\n", 14));
+                check("editor: the link is still a link", linked == 6 && !memory_compare(target, "file.c", 6));
+                check("editor: the file's mode is kept", (facts.st_mode & 07777) == 0640);
+                check("editor: saved, the document is clean", !doc_dirty(&editor.tabs[0].view.doc));
+        }
+        editor_close_tab();
+        // A hundred megabytes: open and the first screen drawn.
+        {
+                static const char big[] = "editor-check.tmp/big.c";
+                static char line[] = "        if (value > limit) return compute(value, limit) + offset; // note\n";
+                static p8 chunk[1 << 20];
+                long pixels = ui_map(1600 * 1000 * 4);
+
+                for (positive at = 0; at < sizeof(chunk); at++)
+                        chunk[at] = (p8)line[at % (sizeof(line) - 1)];
+                handle = system_open_at_mode(AT_FDCWD, (string_address)big, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                for (int k = 0; k < 100; k++)
+                        system_write_all((b32)handle, chunk, sizeof(chunk));
+                system_close(handle);
+                started = clock_monotonic_nanoseconds();
+                check("editor: a hundred megabytes open", editor_open((string_address)big));
+                ui_begin(&editor.ui, (unsigned int address_to)pixels, 1600, 1600, 1000);
+                ui_text_draw(&editor.ui, &editor_now()->view, 0, 0, 1600, 1000, 0x111113);
+                string_format(log, "  editor: 100 MB opened and its first screen drawn in %p ms\n", (clock_monotonic_nanoseconds() - started) / 1000000);
+                check("editor: a hundred megabytes are mapped, not read", editor_now()->mapped == 100u << 20);
+                // A key in the middle of it: the time a keystroke and its line's layout take.
+                started = clock_monotonic_nanoseconds();
+                doc_select_set(&editor_now()->view.doc, 50u << 20, 50u << 20);
+                for (int k = 0; k < 1000; k++)
+                {
+                        doc_type(&editor_now()->view.doc, (const p8 address_to) "x", 1);
+                        editor_now()->view.top_line = doc_line_of(&editor_now()->view.doc, 50u << 20);
+                        ui_text_draw(&editor.ui, &editor_now()->view, 0, 0, 1600, 1000, 0x111113);
+                }
+                string_format(log, "  editor: a key typed and the view drawn again in %p us\n", (clock_monotonic_nanoseconds() - started) / 1000 / 1000);
+                editor_close_tab();
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)big, 0);
+                compositor_call(syscall(munmap), (positive)pixels, 1600 * 1000 * 4, 0, 0, 0, 0);
+        }
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)fifo, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 
 /*

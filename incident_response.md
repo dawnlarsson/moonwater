@@ -41,6 +41,20 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-080: the clipboard and paste were designed against snooping and paste injection before either existed
+
+| | |
+|---|---|
+| Status | Designed in, 2026-10-30; no exposure (Canvas had no clipboard and no paste before) |
+| Class | Clipboard snooping, clipboard hijack, terminal paste injection (ESC [ 201 ~), hostile copied text on a terminal |
+| Moonwater exposure window | none |
+| Landed by | `76914efe` (service, terminal paste filter, SECURITY.md), `6839ce20` (seal) |
+| Tests that fail without it | `CHECK_text_engine` section `clipboard`: dropping the focus rule turns 225 checks red, the seal check 2, the gesture rule 165, the ESC filter 4172 |
+
+**Why an entry with no incident.** The threat model is in `SECURITY.md` (The clipboard). The defences were planted as
+bugs before landing, as step 4 of the procedure asks of a fix: each was removed in a scratch copy and the check went
+red. Open: bowl programs have no clipboard (a Wayland bridge is undecided); OSC 52 is refused on purpose.
+
 ### MW-2026-001: eMudhra intermediate CA keys computable by anyone
 
 | | |

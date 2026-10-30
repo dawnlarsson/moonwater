@@ -27,6 +27,11 @@
 #define MOONWATER_UI_TASKBAR 1
 #endif
 
-#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR)
+// The editor: files in the text engine's code view, tabs, find, a status bar and a context menu.
+#ifndef MOONWATER_UI_EDITOR
+#define MOONWATER_UI_EDITOR 1
+#endif
+
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR)
 
 #endif

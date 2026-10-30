@@ -204,6 +204,9 @@ SHELL_TOOL(GENERAL, xargs, file_xargs)
 SHELL_TOOL(GENERAL, yes, file_yes)
 SHELL_TOOL(SYSTEM, compositor, compositor_main)
 SHELL_TOOL(SYSTEM, edit, system_edit)
+#if MOONWATER_UI_EDITOR
+SHELL_TOOL(SYSTEM, editor, editor_main)
+#endif
 SHELL_TOOL(SYSTEM, init, system_init)
 SHELL_TOOL(SYSTEM, klog, klog_main)
 #if MOONWATER_UI_LAUNCHER
