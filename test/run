@@ -16018,6 +16018,11 @@ guest = Guest([
     "-device", "usb-storage,bus=xhci.0,drive=stick,removable=on",
     "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off",
     "-serial", "chardev:console"] +
+    #   A keyboard for the volume key flood below: the x86 board has its
+    #   PS/2 one, and arm64's virt board has none, so QMP's send-key there
+    #   pressed nothing and the flood's row was red on every arm64 boot.
+    (["-device", "usb-kbd,bus=xhci.0"]
+     if os.environ["MOONWATER_POWER_EMULATOR"] == "qemu-system-aarch64" else []) +
     (["-serial", "file:" + os.environ["MOONWATER_POWER_COVERAGE"]]
      if os.environ.get("MOONWATER_POWER_COVERAGE") else []) + [
     "-append", "console=" + tty + " drm_client_lib.active= moonwater.desktop=none"],
