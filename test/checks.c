@@ -116119,6 +116119,91 @@ static void check_compositor_dismiss(void)
 }
 
 /*
+        The tray (the clock and the battery) pressed twice quickly opens the settings: a window named settings that is
+        up is brought up and given the keys, and with none the script is asked to start it. One press, a press of the
+        middle button, and two too far apart do nothing.
+*/
+static void check_compositor_tray(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct taskbar_view view;
+    int tx, ty, tw, th;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("tray: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 20;
+    table->y[1] = 20;
+    table->width[1] = 100;
+    table->height[1] = 60;
+    glass_paint(1, 0, 0, 100, 60, 0x404040u, true);
+    table->x[2] = 140;
+    table->y[2] = 20;
+    table->width[2] = 100;
+    table->height[2] = 60;
+    memory_copy((void *)table->name[2], "settings", sizeof("settings"));
+    glass_paint(2, 0, 0, 100, 60, 0x606060u, true);
+    compositor_present();
+    compositor_focus(1);
+
+    view = compositor_band_view();
+    if (!taskbar_slot(&view, -2, &tx, &ty, &tw, &th))
+    {
+        check("tray: the band has a tray", false);
+        return;
+    }
+    compositor.pointer_x = tx + tw / 2;
+    compositor.pointer_y = ty + th / 2;
+    compositor_pointer_clamp();
+
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("tray: one press does nothing", compositor.focus == 1 && !compositor.settings_asked);
+    compositor_button(COMPOSITOR_BTN_MIDDLE, 1);
+    compositor_button(COMPOSITOR_BTN_MIDDLE, 0);
+    check("tray: nor does the middle button after it", compositor.focus == 1 && !compositor.settings_asked);
+
+    compositor.tray_ns = 0;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("tray: two presses bring up the settings window that is open, and ask for no other", compositor.focus == 2 && !compositor.settings_asked);
+
+    compositor_focus(1);
+    compositor.tray_ns = 0;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.tray_ns -= COMPOSITOR_AGAIN_NS + 1;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("tray: two too far apart are two single presses", compositor.focus == 1 && !compositor.settings_asked);
+
+    memory_zero((void *)table->name[2], WINDOWS_NAME);
+    compositor.tray_ns = 0;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("tray: with no settings window open, two presses ask the script for one", compositor.settings_asked == 1 && compositor.focus == 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("tray: a third press right after the pair starts a new one", compositor.settings_asked == 1);
+}
+
+/*
         The pointer's motion, as a window hears it. A window that said it wants
         none (windows_hover) is told nothing of a motion over it, and the program
         is not woken for it; one held down, or pressed over, is told all the same.
@@ -120205,6 +120290,7 @@ b32 main()
         check_ui_press();
 #endif
         check_compositor_dismiss();
+        check_compositor_tray();
         check_compositor_place();
         check_compositor_remember();
 #if MOONWATER_UI_LAUNCHER

@@ -2233,6 +2233,7 @@ struct compositor_poll
 // Two presses on a window's top are a pair when the second comes this soon after the first,
 // and a drag that ends this near the edge of the output fills it or half of it.
 #define COMPOSITOR_AGAIN_NS 400000000ull
+#define COMPOSITOR_TRAY (-2) // taskbar_hit's answer for the tray
 
 // The band at a window's edges a press resizes it by -- six pixels outside them and two inside, so a hand
 // a pixel short of a line one pixel wide still has it -- and the step a new window is put down and across
@@ -2454,6 +2455,8 @@ static struct
 
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
         positive press_ns; // when the last press on a window's top was
+        positive tray_ns;  // when the last press on the tray was (0 after the second of a pair)
+        unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
         int drag_x, drag_y;
         int drag_moved; // the window being moved has moved: only then is where it is let go an arrangement
         // The window being resized, how large it was and where the hand took hold.
@@ -7819,12 +7822,13 @@ static void compositor_keys_read(void)
         }
 }
 
-// A chord pressed: said to the script, which runs what it is bound to; a script that does not listen hears nothing.
-static void compositor_key_fire(unsigned int which)
+// A name said to the script on the FIFO, a line: a chord pressed, or a thing done to the desktop that the script
+// starts a program for (tray_double). A script that does not listen hears nothing.
+static void compositor_script_say(const char *name)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FIRE, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
         char line[34];
-        positive length = string_length((string_address)compositor_keys.chord[which]);
+        positive length = string_length((string_address)name);
 
         if (handle < 0)
         {
@@ -7832,10 +7836,45 @@ static void compositor_key_fire(unsigned int which)
                                 (string_address) "");
                 return;
         }
-        memory_copy(line, compositor_keys.chord[which], length);
+        if (length > sizeof(line) - 2)
+                length = sizeof(line) - 2;
+        memory_copy(line, name, length);
         line[length] = '\n';
         system_write_once(handle, line, length + 1);
         system_close(handle);
+}
+
+// A chord pressed: said to the script, which runs what it is bound to.
+static void compositor_key_fire(unsigned int which)
+{
+        compositor_script_say(compositor_keys.chord[which]);
+}
+
+/*
+        The tray, the clock and the battery, pressed twice quickly: the settings. A window of that name that is
+        up is brought up and given the keys; with none, the script is told (tray_double) and starts it, since
+        everything on the desktop is started by the machine script and by nothing else.
+*/
+static void compositor_settings_open(void)
+{
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                const volatile char *name = compositor.table->name[row];
+                static const char settings[] = "settings";
+                unsigned int at = 0;
+
+                if (!compositor.showing[row])
+                        continue;
+                while (at < sizeof(settings) && name[at] == settings[at] && settings[at])
+                        at++;
+                if (at == sizeof(settings) - 1 && !name[at])
+                {
+                        compositor_reveal(row);
+                        return;
+                }
+        }
+        compositor.settings_asked++;
+        compositor_script_say("tray_double");
 }
 
 // What is held on every keyboard, as the flags a key event carries.
@@ -8164,6 +8203,21 @@ static void compositor_button(unsigned int code, int down)
               compositor.pointer_y >= compositor.y[compositor.focus] &&
               compositor.pointer_y < compositor.y[compositor.focus] + (int)compositor.h[compositor.focus]))
                 compositor_close(compositor.focus);
+
+        // The tray takes no press but a pair of left ones, which open the settings (compositor_settings_open).
+        if (tab == COMPOSITOR_TRAY && code == COMPOSITOR_BTN_LEFT)
+        {
+                positive when = clock_monotonic_nanoseconds();
+
+                if (compositor.tray_ns && when - compositor.tray_ns <= COMPOSITOR_AGAIN_NS)
+                {
+                        compositor.tray_ns = 0;
+                        compositor_settings_open();
+                }
+                else
+                        compositor.tray_ns = when;
+                return;
+        }
 
         // A press on a window's tab brings the window up, and a middle press asks it to go. The tray takes none.
         if (tab >= 0)

@@ -134,6 +134,14 @@ function desktop_launcher {
   desktop_run /launcher -x ${desktop_text:+-f "$desktop_text"} -m "$desktop_face" ${desktop_bold:+-M "$desktop_bold"}
 }
 
+# The settings, started by the compositor's saying tray_double: the clock and the battery pressed twice. The compositor
+# brings up a settings window that is already open and says nothing then.
+function desktop_settings {
+  desktop_font
+  [ -n "$desktop_text" ] || return
+  desktop_run /settings -f "$desktop_text"
+}
+
 # The key_ functions, for the compositor to listen for, and the FIFO it names a
 # pressed one on; the listener runs what it names.
 function desktop_keys_list {
@@ -151,6 +159,7 @@ function desktop_keys_answer {
     while IFS= read -r desktop_pressed; do
       case $desktop_pressed in
       key_*) declare -F "$desktop_pressed" > /dev/null && "$desktop_pressed" ;;
+      tray_double) desktop_settings ;;
       esac
     done < /run/moonwater/keys.fire
   done
