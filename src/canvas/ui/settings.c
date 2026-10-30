@@ -50,14 +50,16 @@
         in, is not run by the first Enter: the window says so and runs it
         when the same Enter is pressed again, and any other key asks again.
 
-        It is glass (window.c, WINDOW_GLASS) drawn with the system's own
-        pieces (ui.c). The groups are listed at the left, one for each
-        section of rows and All commands last, and the rows of the group
-        chosen are at the right, each section a header and its rows on the
-        glass with no box or rule round them. The column of groups is a
-        third of the window at most (it is never more than half of it, and
-        a name too long for it is cut with three dots), and the keys are
-        in it or in the rows, whichever the lit one is: the window opens
+        It is a page of the kit (ui.c), and says only what it shows: the
+        groups, one for each section of rows and All commands last, are the
+        page's column at the left, and the rows of the group chosen are the
+        kit's list at the right, each row its label, its value and the kind
+        of value it is (settings_describe), in sections with their headers.
+        Everything else -- the sizes, the type, the theme's colours, the row
+        the keys are on, the hover, the press and its ripple, the menu a
+        choice opens, the field a row is typed in, every scrollbar, the wheel
+        and a finger's drag and throw -- is the kit's. The keys are in the
+        column or in the rows, whichever the lit one is: the window opens
         with them in the rows, on the first.
 
         The keys. Tab and Shift-Tab go between the column and the rows.
@@ -147,25 +149,9 @@
 #define SETTINGS_PROBE 512    // one line, cut
 #define SETTINGS_NONE 0xffffu
 
-// In logical pixels, times the scale.
+// The size the window opens at, logical pixels; every other size in it is the kit's (ui.c, the page).
 #define SETTINGS_WIDTH 700
 #define SETTINGS_HEIGHT 520
-#define SETTINGS_SIDE_MOST 170 // the groups' column, a third of the window at most
-#define SETTINGS_SIDE_LEAST 88
-#define SETTINGS_GROUP_ROW 40  // a group in that column: the least a finger's target is (UI_TARGET's floor), as a row is
-#define SETTINGS_GUTTER 14     // between the column and the rows
-#define SETTINGS_MENU_ITEM 30  // a choice in the list a choice row opens
-#define SETTINGS_MENU_TOUCH 44 // and in one a finger opened (UI_TARGET)
-#define SETTINGS_MENU_PAD 6    // above the first and under the last
-#define SETTINGS_MENU_LEAST 140 // the list's width, at least
-#define SETTINGS_TOP 60     // the title's band
-#define SETTINGS_HEADER 34  // a section's header over its card
-#define SETTINGS_GAP 10     // under a card
-#define SETTINGS_FOOT 40    // the lines that say what happened
-#define SETTINGS_FIELD_W 220
-#define SETTINGS_FILTER_W 190
-#define SETTINGS_CARD_LINE 20
-#define SETTINGS_CARD_PAD 10
 #define SETTINGS_QUEUE 8 // changes that may wait for the verb running
 #define SETTINGS_NAME_ROW 0 // the machine's name, the first row: a name is letters, digits and hyphens, under 32
 #define SETTINGS_NAME_MOST 31
@@ -688,49 +674,40 @@ static struct
         int feed_list; // the feed whose verb is being run
         char forget[SETTINGS_ITEM_LABEL], joining[SETTINGS_ITEM_LABEL];
 
-        // The rows that show, in order, and where each is in the list, from the list's top.
-        unsigned short visible[SETTINGS_ALL];
-        positive visible_count;
-        int top[SETTINGS_ALL];
-        int content;            // how tall the list is
-        int focus, editing, scroll;
-        int group, group_scroll; // the group whose rows are at the right, and how far the column of groups is scrolled
+        /*
+                The window is the kit's page (ui.c): the column of groups at the left, the list of the rows of the
+                group chosen at the right (its places are the rows that show, in order, and its focus the row the
+                keys are on), the menu a choice opens, a finger on any of them, and the card's lines.
+        */
+        struct ui_page page;
+        struct ui_list list;
+        struct ui_menu menu;
+        struct ui_finger finger;
+        struct ui_scroll card;
+        int editing;             // the row typed in, -1 none
+        int group;               // the group whose rows are at the right
         b32 pane;                // where the keys are: 0 the column of groups, 1 the rows
-
-        // The list a choice opens: its row (none is -1), the choice the keys are on, the first in view, how many, how wide.
-        int menu, menu_at, menu_top, menu_count, menu_width;
-        int wheel[3];            // what the wheel has turned under a whole unit, for the choice list, the groups and the rows
+        b32 touching;            // a finger's press is being done: what it opens is a finger's
+        char head[SETTINGS_VALUE]; // the verb of a command being typed, as its row's label
+        char accents[SETTINGS_VALUE]; // the accents' colours, a blank apart, as the swatches' words
         struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
         positive battery_menu_count;
         char filter[SETTINGS_FILTER];
         positive filter_length;
-        // The filter as typed, in a field of the text engine (copied, folded to lower case, into filter as it changes).
+        // The filter as typed, in a field of the text engine (copied, folded to lower case, into filter as it changes),
+        // which is the page's search field.
         struct ui_text filter_edit;
-        struct ui_control filter_control;
         b32 filter_open;
-        int filter_x, filter_y, filter_w;
         char typed[SETTINGS_TYPED];
         char status[SETTINGS_STATUS];
         int width, height, shown;
         unsigned int ground;
-        int pointer_x, pointer_y;
         b32 focused, dirty;
-        /*
-                A finger (WINDOW_KEY_TOUCH): its press, shown pressed at once and done when it comes up where it went
-                down; past the slop it drags what it went down on (drag_what, one of SETTINGS_DRAG_*), the rows, the
-                column of groups, the card or the list a choice opened, which follows it and goes on when thrown;
-                drag_left is a dragged list's move under a whole choice. menu_touch: the list a choice opened was
-                opened by a finger, and its choices are a finger's height.
-        */
-        struct ui_press press;
-        struct ui_drag drag;
-        int drag_what, drag_left;
-        b32 menu_touch, touching;
 
         // What a command said, as a card in place of the list: lines cut to the window's width.
         b32 view;
         positive card_length;
-        int card_lines, card_scroll;
+        int card_lines;
         char card_title[SETTINGS_STATUS];
 
         // The command that asked for a second Enter: its row (one more than it, none is 0) and what was typed.
@@ -763,22 +740,7 @@ static struct
         unsigned int wrap_card;
 } settings;
 
-// A cut a fit made, kept with the text, size, room and scale it was made for: a text laid out once per frame it is drawn in.
-#define SETTINGS_CUTS 128
-#define SETTINGS_CUT_WHOLE 1 // the text fits whole
-#define SETTINGS_CUT_DOTS 2  // the first cut bytes, and the dots
-#define SETTINGS_CUT_ONE 3   // the first cut bytes, and no dots: no prefix fits with them
-
-// A bit of the size a text is fitted at, for a text that is drawn bold: its width is measured bold, and it is a cut of its own.
-#define SETTINGS_FIT_BOLD 0x10000
-
-struct settings_cut
-{
-        char text[SETTINGS_VALUE];
-        positive length, cut, capacity;
-        int size, room, scale;
-        unsigned char kind;
-};
+_Static_assert(SETTINGS_ALL <= UI_LIST_MOST, "every row the window shows is a place of the kit's list");
 
 /*
         What is kept in a mapping made when the window opens and not in the
@@ -795,7 +757,6 @@ static struct settings_large
         unsigned short card_at[SETTINGS_CARD_LINES], card_size[SETTINGS_CARD_LINES];
         char split[SETTINGS_TYPED * 2];
         struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
-        struct settings_cut cuts[SETTINGS_CUTS];
 } address_to settings_large;
 
 static b32 settings_map(void)
@@ -825,8 +786,6 @@ static void settings_rows_add(int address_to top, int address_to bottom, int fro
         *top = from < *top ? from : *top;
         *bottom = to > *bottom ? to : *bottom;
 }
-
-static fn settings_kit_forget(void);
 
 // The picture may have changed anywhere: the next one is drawn whole.
 static fn settings_dirty(void)
@@ -987,10 +946,7 @@ static int settings_group_of(int row)
 // Where a row is in the rows that show, or -1.
 static int settings_pos(int row)
 {
-        for (positive at = 0; at < settings.visible_count; at++)
-                if (settings.visible[at] == row)
-                        return (int)at;
-        return -1;
+        return ui_list_at(&settings.list, row);
 }
 
 // Whether text has what is typed in the filter, whatever the case.
@@ -1022,241 +978,60 @@ static b32 settings_matches(int row)
                (row == SETTINGS_ANY && settings_has("anything", settings.filter, size));
 }
 
-// Where each visible row is: a header over the first of a section, a gap under the last.
+static fn settings_describe(int id, struct ui_row address_to row);
+
+// The page laid out for the window's size: the kit's bands, its column and the list in the body.
 static fn settings_layout(void)
 {
-        int y = 0;
+        struct ui address_to ui = &settings.ui;
 
-        for (positive at = 0; at < settings.visible_count; at++)
+        // What the list shows is the app's: its rows, described by settings_describe, and where a change is drawn again.
+        if (!settings.list.ids)
         {
-                int start = settings_section_start(settings.visible[at]);
-
-                if (!at || settings_section_start(settings.visible[at - 1]) != start)
-                        y += ui_px(&settings.ui, SETTINGS_HEADER);
-                settings.top[at] = y;
-                y += ui_px(&settings.ui, UI_ROW);
-                if (at + 1 == settings.visible_count || settings_section_start(settings.visible[at + 1]) != start)
-                        y += ui_px(&settings.ui, SETTINGS_GAP);
-        }
-        settings.content = y;
-}
-
-static int settings_list_top(void)
-{
-        return ui_px(&settings.ui, SETTINGS_TOP);
-}
-
-static int settings_list_bottom(void)
-{
-        return settings.height - ui_px(&settings.ui, SETTINGS_FOOT);
-}
-
-// The column of groups at the left: a third of the window, between a least and a most, and never more than half of it.
-static int settings_side(void)
-{
-        int side = settings.width * 30 / 100;
-
-        side = side < ui_px(&settings.ui, SETTINGS_SIDE_LEAST) ? ui_px(&settings.ui, SETTINGS_SIDE_LEAST) : side;
-        side = side > ui_px(&settings.ui, SETTINGS_SIDE_MOST) ? ui_px(&settings.ui, SETTINGS_SIDE_MOST) : side;
-        return side > settings.width / 2 ? settings.width / 2 : side;
-}
-
-// Where the rows are: from after the column to the window's margin.
-static int settings_pane_left(void)
-{
-        return ui_px(&settings.ui, UI_PAD) + settings_side() + ui_px(&settings.ui, SETTINGS_GUTTER);
-}
-
-static int settings_pane_right(void)
-{
-        return settings.width - ui_px(&settings.ui, UI_PAD);
-}
-
-// How tall the column of groups is, and how far it can be scrolled.
-static int settings_side_height(void)
-{
-        return settings_groups() * ui_px(&settings.ui, SETTINGS_GROUP_ROW);
-}
-
-static fn settings_side_scroll_to(int scroll)
-{
-        int most = settings_side_height() - (settings_list_bottom() - settings_list_top());
-
-        most = most < 0 ? 0 : most;
-        scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
-        if (scroll != settings.group_scroll)
-        {
-                settings.group_scroll = scroll;
-                settings_changed(settings_list_top(), settings_list_bottom());
-        }
-}
-
-// The chosen group kept in sight in a column that does not fit.
-static fn settings_side_reveal(void)
-{
-        int top = settings.group * ui_px(&settings.ui, SETTINGS_GROUP_ROW), height = ui_px(&settings.ui, SETTINGS_GROUP_ROW);
-        int room = settings_list_bottom() - settings_list_top();
-
-        if (top < settings.group_scroll)
-                settings_side_scroll_to(top);
-        else if (top + height > settings.group_scroll + room)
-                settings_side_scroll_to(top + height - room);
-        else
-                settings_side_scroll_to(settings.group_scroll);
-}
-
-/*
-        The cut of a text at size to room: the longest prefix, ending before a
-        character, that with "..." after it fits, found by a search over the
-        prefixes (a prefix's width grows with it), and where none fits, the
-        first character alone. The text itself when it fits. The cut is kept
-        with its text, size, room, scale and capacity, so a text drawn again
-        is not laid out again.
-*/
-static unsigned int settings_cut_slot(string_address text, positive length, int size, int room, int scale)
-{
-        unsigned int hash = 2166136261u;
-
-        for (positive at = 0; at < length; at++)
-                hash = (hash ^ (unsigned char)text[at]) * 16777619u;
-        hash = (hash ^ (unsigned int)size) * 16777619u;
-        hash = (hash ^ (unsigned int)room) * 16777619u;
-        hash = (hash ^ (unsigned int)scale) * 16777619u;
-        return (hash ^ hash >> 15) & (SETTINGS_CUTS - 1);
-}
-
-// The kind of cut a text makes at size in room, and its cut in bytes, which the search makes.
-static unsigned char settings_cut_find(struct ui address_to ui, string_address text, positive length, int size, int room,
-                                       char address_to fitted, positive capacity, positive address_to cut)
-{
-        positive n = length < capacity ? length : capacity - 1, low = 1, high, best = 0;
-        b32 bold = (size & SETTINGS_FIT_BOLD) != 0;
-
-        size &= SETTINGS_FIT_BOLD - 1;
-        if (ui_measure(ui, text, size, bold) <= room)
-        {
-                *cut = length;
-                return SETTINGS_CUT_WHOLE;
-        }
-        if (n <= 1)
-        {
-                *cut = n;
-                return SETTINGS_CUT_ONE;
-        }
-        high = n - 1;
-        while (low <= high)
-        {
-                positive mid = (low + high) / 2, at = mid;
-
-                // The prefix ends before a whole character: a continuation byte after it means its character is cut.
-                while (at > 1 && (((unsigned char)text[at]) & 0xc0) == 0x80)
-                        at--;
-                memory_copy(fitted, text, at);
-                fitted[at] = 0;
-                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
-                if (ui_measure(ui, (string_address)fitted, size, bold) <= room)
+                settings.list.ids = (int)SETTINGS_ALL;
+                settings.list.describe = settings_describe;
+                settings.list.damaged = settings_changed;
+                settings.list.empty = "Nothing matches what is typed";
+                settings.list.hover = settings.list.down = -1;
+                for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
                 {
-                        best = at;
-                        low = mid + 1;
-                }
-                else
-                        high = mid - 1;
-        }
-        if (best)
-        {
-                *cut = best;
-                return SETTINGS_CUT_DOTS;
-        }
-        *cut = 1;
-        return SETTINGS_CUT_ONE;
-}
-
-static string_address settings_fit(struct ui address_to ui, string_address text, int size, int room, char address_to fitted,
-                                   positive capacity)
-{
-        positive length = string_length(text), cut = 0;
-        unsigned char kind = 0;
-        struct settings_cut address_to memo = null;
-        b32 found = false;
-
-        if (length < SETTINGS_VALUE)
-        {
-                memo = &settings_large->cuts[settings_cut_slot(text, length, size, room, ui->scale)];
-                if (memo->kind && memo->length == length && memo->size == size && memo->room == room && memo->scale == ui->scale &&
-                    memo->capacity == capacity && !memory_compare(memo->text, text, length))
-                {
-                        kind = memo->kind;
-                        cut = memo->cut;
-                        found = true;
+                        if (k)
+                                string_append_bounded((string_address)settings.accents, (string_address) " ", sizeof(settings.accents));
+                        string_append_bounded((string_address)settings.accents, (string_address)settings_accents[k].colour, sizeof(settings.accents));
                 }
         }
-        if (!found)
-        {
-                kind = settings_cut_find(ui, text, length, size, room, fitted, capacity, &cut);
-                if (memo)
-                {
-                        memory_copy(memo->text, text, length);
-                        memo->length = length;
-                        memo->size = size;
-                        memo->room = room;
-                        memo->scale = ui->scale;
-                        memo->capacity = capacity;
-                        memo->cut = cut;
-                        memo->kind = kind;
-                }
-        }
-        if (kind == SETTINGS_CUT_WHOLE)
-                return text;
-        memory_copy(fitted, text, cut);
-        fitted[cut] = 0;
-        if (kind == SETTINGS_CUT_DOTS)
-                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
-        return (string_address)fitted;
+        settings.page.column_on = true;
+        settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
+        ui_page_layout(ui, &settings.page, settings.width, settings.height);
+        ui_list_place(ui, &settings.list, settings.page.left, settings.page.top, settings.page.right - settings.page.left,
+                      settings.page.bottom - settings.page.top);
+        ui_list_layout(ui, &settings.list);
+        // The card has the body's band and the whole width: the column is not shown with it.
+        settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
+        settings.card.y = settings.page.top, settings.card.height = settings.card.view = settings.page.bottom - settings.page.top;
+        settings.card.content = ui_lines_height(ui, settings.card_lines);
+        ui_scroll_set(&settings.card, settings.card.scroll);
 }
 
-// How tall what scrolls is: the list, or the card of what a command said.
-static int settings_extent(void)
-{
-        return settings.view ? settings.card_lines * ui_px(&settings.ui, SETTINGS_CARD_LINE) + 2 * ui_px(&settings.ui, SETTINGS_CARD_PAD)
-                             : settings.content;
-}
-
+// The list or the card scrolled, and drawn again.
 static fn settings_scroll_to(int scroll)
 {
-        int most = settings_extent() - (settings_list_bottom() - settings_list_top());
-        int address_to now = settings.view ? &settings.card_scroll : &settings.scroll;
-
-        settings_kit_forget(); // the rows scrolled in are placed, not moved
-
-        most = most < 0 ? 0 : most;
-        scroll = scroll > most ? most : scroll;
-        scroll = scroll < 0 ? 0 : scroll;
-        if (scroll != address_to now)
-        {
-                address_to now = scroll;
-                settings_changed(settings_list_top(), settings_list_bottom());
-        }
+        if (ui_scroll_set(settings.view ? &settings.card : &settings.list.scroll, scroll))
+                settings_changed(settings.page.top, settings.page.bottom);
 }
 
 // The row with the focus kept in sight.
 static fn settings_reveal(void)
 {
-        int at = settings_pos(settings.focus);
-        int top, height = ui_px(&settings.ui, UI_ROW), room = settings_list_bottom() - settings_list_top();
+        if (!settings.view)
+                ui_list_reveal(&settings.ui, &settings.list);
+}
 
-        if (at < 0 || settings.view)
-                return;
-        top = settings.top[at];
-        // A section's first row brings its header with it.
-        if (!at || settings_section_start(settings.visible[at - 1]) != settings_section_start(settings.focus))
-        {
-                top -= ui_px(&settings.ui, SETTINGS_HEADER);
-                height += ui_px(&settings.ui, SETTINGS_HEADER);
-        }
-        if (top < settings.scroll)
-                settings_scroll_to(top);
-        else if (top + height > settings.scroll + room)
-                settings_scroll_to(top + height - room);
+// The chosen group kept in sight in a column that does not fit.
+static fn settings_side_reveal(void)
+{
+        if (ui_page_column_reveal(&settings.ui, &settings.page, settings.group))
+                settings_changed(settings.page.top, settings.page.bottom);
 }
 
 /*
@@ -1266,13 +1041,12 @@ static fn settings_reveal(void)
 */
 static fn settings_rebuild(void)
 {
-        settings_kit_forget(); // the rows of another group or filter are placed, not moved
-        positive count = 0;
+        int count = 0;
 
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
         for (positive row = 0; row < settings_rows_count(); row++)
                 if (settings.filter_length ? settings_matches((int)row) : settings_group_of((int)row) == settings.group)
-                        settings.visible[count++] = (unsigned short)row;
+                        settings.list.id[count++] = (unsigned short)row;
         // The rows of a list come after, each in the group of its feed.
         for (int list = 0; list < SETTINGS_LISTS; list++)
                 for (int at = 0; at < settings.item_count[list]; at++)
@@ -1280,15 +1054,14 @@ static fn settings_rebuild(void)
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
                         if (settings.filter_length ? settings_matches(row) : settings_group_of(row) == settings.group)
-                                settings.visible[count++] = (unsigned short)row;
+                                settings.list.id[count++] = (unsigned short)row;
                 }
-        settings.visible_count = count;
-        if (settings.menu >= 0 && settings_pos(settings.menu) < 0)
-                settings.menu = -1;
-        if (settings_pos(settings.focus) < 0 && count)
-                settings.focus = settings.visible[0];
+        settings.list.count = count;
+        if (settings.menu.owner >= 0 && settings_pos(settings.menu.owner) < 0)
+                settings.menu.owner = -1;
+        if (settings_pos(settings.list.focus) < 0 && count)
+                settings.list.focus = settings.list.id[0];
         settings_layout();
-        settings_scroll_to(settings.scroll);
         settings_dirty();
 }
 
@@ -1572,7 +1345,7 @@ static int settings_card_width(positive from, positive to)
         size = size >= sizeof(probe) ? sizeof(probe) - 1 : size;
         memory_copy(probe, settings_large->card + from, size);
         probe[size] = 0;
-        return ui_measure(&settings.ui, (string_address)probe, UI_TEXT, false);
+        return ui_kit_measure(&settings.ui, (string_address)probe, UI_BODY_MEDIUM);
 }
 
 /*
@@ -1589,7 +1362,7 @@ struct settings_run
 static int settings_run_width(struct ui address_to ui, struct settings_run address_to run, positive from, positive to)
 {
         const font_face address_to faces[2] = {ui->regular, ui->regular};
-        p32 em = (p32)(UI_TEXT * ui->scale) << 6;
+        p32 em = (p32)(ui_types[UI_BODY_MEDIUM].size * ui->scale) << 6;
 
         if (from != run->from || to < run->at)
         {
@@ -1680,8 +1453,9 @@ static fn settings_card_open(const char address_to title)
         settings_card_fill();
         string_copy_bounded((string_address)settings.card_title, (string_address)title, sizeof(settings.card_title));
         settings.view = true;
-        settings.card_scroll = 0;
+        settings.card.scroll = 0;
         settings_wrap();
+        settings_layout();
         settings_dirty();
 }
 
@@ -1689,7 +1463,6 @@ static fn settings_card_leave(void)
 {
         settings.view = false;
         settings.status[0] = 0;
-        settings_scroll_to(settings.scroll);
         settings_dirty();
 }
 
@@ -1698,7 +1471,7 @@ static fn settings_card_leave(void)
 static fn settings_say(string_address text)
 {
         string_copy_bounded((string_address)settings.status, text, sizeof(settings.status));
-        settings_changed(settings_list_bottom(), settings.height);
+        settings_changed(settings.page.bottom, settings.height);
 }
 
 /*
@@ -2218,9 +1991,9 @@ static fn settings_feed_read(b32 killed, b32 failed)
         else
                 changed = false;
         before = settings_list_sum(list);
-        if (settings_list_of(settings.focus) == list && settings_item(settings.focus))
-                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.focus)->label, sizeof(keep));
-        at = settings.focus - (int)SETTINGS_LIST - list * SETTINGS_LIST_ROWS;
+        if (settings_list_of(settings.list.focus) == list && settings_item(settings.list.focus))
+                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.list.focus)->label, sizeof(keep));
+        at = settings.list.focus - (int)SETTINGS_LIST - list * SETTINGS_LIST_ROWS;
 
         if (settings_feeds[feed].kind == SETTINGS_FEED_WIFI)
                 settings_feed_wifi();
@@ -2240,7 +2013,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
                                 found = each;
                                 break;
                         }
-                settings.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + (found < 0 ? 0 : found);
+                settings.list.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + (found < 0 ? 0 : found);
         }
         settings_rebuild();
 }
@@ -2551,217 +2324,66 @@ static positive settings_options(const struct settings_row address_to row)
 
 static fn settings_menu_close(void)
 {
-        if (settings.menu < 0)
+        if (settings.menu.owner < 0)
                 return;
-        settings.menu = -1;
+        settings.menu.owner = -1;
         settings_say((string_address) "");
         settings_dirty();
 }
 
-/*
-        Where the list is: x, y, width, height, and how many choices show.
-        Under its row, right edges together, or over it when there is more
-        room there; a list taller than either is cut and scrolls. False
-        when its row is not in view.
-*/
-// A choice's height in the list: a finger's when a finger opened it.
-static int settings_menu_item_height(void)
+// The menu placed under its row (or over it), its right edge at the row's: false when its row is not in the list.
+static b32 settings_menu_place(void)
 {
-        return ui_px(&settings.ui, settings.menu_touch ? SETTINGS_MENU_TOUCH : SETTINGS_MENU_ITEM);
-}
+        int at = settings_pos(settings.menu.owner), top;
 
-static b32 settings_menu_box(int address_to x, int address_to y, int address_to width, int address_to height, int address_to shown)
-{
-        int pos = settings_pos(settings.menu), item = settings_menu_item_height(), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
-        int row_top, below, above, most, count = settings.menu_count;
-
-        if (pos < 0)
+        if (at < 0 || settings.ui.scale <= 0)
                 return false;
-        row_top = settings_list_top() + settings.top[pos] - settings.scroll;
-        below = settings.height - ui_px(&settings.ui, 8) - (row_top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4));
-        above = row_top + ui_px(&settings.ui, 4) - ui_px(&settings.ui, 8);
-        // Under the row, or over it when there is more room there; with room on neither side for all of it, slid up over
-        // the row when it fits the window so, and else cut to the larger side.
-        most = (below >= above ? below : above) - 2 * pad;
-        most = most / item < 1 ? 1 : most / item;
-        if (count > most && count * item + 2 * pad <= settings.height - ui_px(&settings.ui, 16))
-                most = count;
-        address_to shown = count < most ? count : most;
-        address_to height = address_to shown * item + 2 * pad;
-        address_to width = settings.menu_width > settings.width - ui_px(&settings.ui, 16) ? settings.width - ui_px(&settings.ui, 16) : settings.menu_width;
-        address_to x = settings_pane_right() - ui_px(&settings.ui, UI_INSET) - address_to width;
-        address_to x = address_to x < ui_px(&settings.ui, 8) ? ui_px(&settings.ui, 8) : address_to x;
-        if (address_to height <= below)
-                address_to y = row_top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4);
-        else if (address_to height <= above)
-                address_to y = row_top + ui_px(&settings.ui, 4) - address_to height;
-        else
-        {
-                address_to y = settings.height - ui_px(&settings.ui, 8) - address_to height;
-                address_to y = address_to y < ui_px(&settings.ui, 8) ? ui_px(&settings.ui, 8) : address_to y;
-        }
+        top = ui_list_row_y(&settings.list, at);
+        ui_menu_place(&settings.ui, &settings.menu, top, top + ui_px(&settings.ui, UI_ROW), settings.page.right - ui_px(&settings.ui, UI_INSET),
+                      settings.width, settings.height);
         return true;
 }
 
-// The choice under a point of the window, or -1.
-static int settings_menu_item(int px, int py)
-{
-        int x, y, width, height, shown, item = settings_menu_item_height();
-
-        if (settings.menu < 0 || !settings_menu_box(&x, &y, &width, &height, &shown) || px < x || px >= x + width ||
-            py < y + ui_px(&settings.ui, SETTINGS_MENU_PAD) || py >= y + height - ui_px(&settings.ui, SETTINGS_MENU_PAD))
-                return -1;
-        return settings.menu_top + (py - y - ui_px(&settings.ui, SETTINGS_MENU_PAD)) / item;
-}
-
-/*
-        A turn of the wheel, in 120ths of a notch, as whole units of per_notch to a notch: the list's steps or a
-        column's pixels. What is under a unit stays for the next event, so a wheel that reports in fifteenths of a
-        notch moves a list as far as one that reports whole notches, and an event too small for a unit is not lost.
-        which is 0 for the choice list, 1 for the column of groups, 2 for the rows.
-*/
-static int settings_wheel_take(int which, int delta, int per_notch)
-{
-        long total = (long)settings.wheel[which] + (long)delta * per_notch;
-        int units = (int)(total / 120);
-
-        settings.wheel[which] = (int)(total - (long)units * 120);
-        return units;
-}
-
-// The first choice in view moved to where the keys' choice shows, or by a wheel's steps.
-static fn settings_menu_scroll(int top)
-{
-        int x, y, width, height, shown, most;
-
-        if (!settings_menu_box(&x, &y, &width, &height, &shown))
-                return;
-        most = settings.menu_count - shown;
-        settings.menu_top = top > most ? most : top < 0 ? 0 : top;
-        // The keys' choice stays in view.
-        if (settings.menu_at < settings.menu_top)
-                settings.menu_at = settings.menu_top;
-        else if (settings.menu_at >= settings.menu_top + shown)
-                settings.menu_at = settings.menu_top + shown - 1;
-        settings_dirty();
-}
-
-// The keys on choice at, kept in view.
-static fn settings_menu_go(int at)
-{
-        int x, y, width, height, shown;
-
-        at = at < 0 ? 0 : at >= settings.menu_count ? settings.menu_count - 1 : at;
-        settings.menu_at = at;
-        if (settings_menu_box(&x, &y, &width, &height, &shown))
-        {
-                if (at < settings.menu_top)
-                        settings.menu_top = at;
-                else if (at >= settings.menu_top + shown)
-                        settings.menu_top = at - shown + 1;
-        }
-        settings_dirty();
-}
-
+// A choice's menu: its words, the one the row has now where the keys start (a value none of them is starts at the first).
 static fn settings_menu_open(int row)
 {
         const struct settings_row address_to which = &settings_rows[row];
         char word[SETTINGS_VALUE];
-        int widest = 0;
 
         if (which->flags & SETTINGS_BATTERIES)
                 settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
-        settings.menu = row;
-        settings.focus = row;
-        settings.menu_touch = settings.touching;
-        settings.menu_count = (int)settings_options(which);
-        settings.menu_at = 0;
-        settings.menu_top = 0;
-        settings.wheel[0] = 0;
+        settings.list.focus = row;
+        ui_menu_open(&settings.menu, row, settings.touching);
         for (int at = 0; settings_choice(which, (positive)at, word, sizeof(word)); at++)
-        {
-                int wide = ui_measure(&settings.ui, (string_address)word, UI_TEXT, false);
-
-                widest = wide > widest ? wide : widest;
-                // The one the row has now is where the keys start; a value that is none of them starts at the first.
-                if (string_equals((string_address)word, (string_address)settings.value[row]))
-                        settings.menu_at = at;
-        }
-        settings.menu_width = widest + ui_px(&settings.ui, 12 + 6 + 10 + 18);
-        settings.menu_width = settings.menu_width < ui_px(&settings.ui, SETTINGS_MENU_LEAST) ? ui_px(&settings.ui, SETTINGS_MENU_LEAST) : settings.menu_width;
+                ui_menu_add(&settings.ui, &settings.menu, word, string_equals((string_address)word, (string_address)settings.value[row]));
         settings_reveal();
-        settings_menu_go(settings.menu_at);
+        if (settings_menu_place())
+                ui_menu_go(&settings.ui, &settings.menu, settings.menu.at);
         settings_say((string_address) "Up and Down choose, Enter sets it, Escape leaves it");
         settings_dirty();
 }
 
-// The choice the keys are on, set, and the list closed; a choice the row has already sends nothing.
+// The choice the keys are on, set, and the menu closed; a choice the row has already sends nothing.
 static fn settings_menu_apply(int at)
 {
-        const struct settings_row address_to which = &settings_rows[settings.menu];
         char word[SETTINGS_VALUE];
-        int row = settings.menu;
+        int row = settings.menu.owner;
 
+        string_copy_bounded((string_address)word, (string_address)settings.menu.word[at < 0 ? 0 : at], sizeof(word));
         settings_menu_close();
-        if (settings_choice(which, (positive)at, word, sizeof(word)) &&
-            !string_equals((string_address)word, (string_address)settings.value[row]))
+        if (at >= 0 && !string_equals((string_address)word, (string_address)settings.value[row]))
                 settings_change(row, word);
 }
 
-// A key with the list open.
+// A key with the menu open: it has every key.
 static fn settings_menu_key(const struct window_event address_to event)
 {
-        int x, y, width, height, shown = 1;
-        unsigned int c = (unsigned int)event->b;
-
-        settings_menu_box(&x, &y, &width, &height, &shown);
-        switch (event->a)
+        settings_menu_place();
+        switch (ui_menu_key(&settings.ui, &settings.menu, (int)event->a, (unsigned int)event->b, event->flags))
         {
-        case SETTINGS_KEY_ESCAPE:
-                settings_menu_close();
-                return;
-        case SETTINGS_KEY_ENTER:
-        case SETTINGS_KEY_ENTER_PAD:
-        case SETTINGS_KEY_SPACE:
-                settings_menu_apply(settings.menu_at);
-                return;
-        case SETTINGS_KEY_UP:
-                settings_menu_go(settings.menu_at - 1);
-                return;
-        case SETTINGS_KEY_DOWN:
-                settings_menu_go(settings.menu_at + 1);
-                return;
-        case SETTINGS_KEY_HOME:
-                settings_menu_go(0);
-                return;
-        case SETTINGS_KEY_END:
-                settings_menu_go(settings.menu_count - 1);
-                return;
-        case SETTINGS_KEY_PAGE_UP:
-                settings_menu_go(settings.menu_at - shown);
-                return;
-        case SETTINGS_KEY_PAGE_DOWN:
-                settings_menu_go(settings.menu_at + shown);
-                return;
-        }
-        // A letter or a digit: the next choice after the keys' that starts with it, round to the first.
-        if (c > ' ' && c < 0x7f && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
-        {
-                const struct settings_row address_to which = &settings_rows[settings.menu];
-                char word[SETTINGS_VALUE];
-
-                c = c >= 'A' && c <= 'Z' ? c + 32 : c;
-                for (int step = 1; step <= settings.menu_count; step++)
-                {
-                        int at = (settings.menu_at + step) % settings.menu_count;
-
-                        if (settings_choice(which, (positive)at, word, sizeof(word)) &&
-                            (unsigned char)(word[0] >= 'A' && word[0] <= 'Z' ? word[0] + 32 : word[0]) == c)
-                        {
-                                settings_menu_go(at);
-                                return;
-                        }
-                }
+        case UI_MENU_CLOSED: settings_menu_close(); break;
+        case UI_MENU_CHOSEN: settings_menu_apply(settings.menu.at); break;
+        default: settings_dirty();
         }
 }
 
@@ -2839,7 +2461,7 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
 // Delete on a saved network or a kept device forgets it, when it is pressed twice.
 static fn settings_forget(void)
 {
-        const struct settings_item address_to item = settings_item(settings.focus);
+        const struct settings_item address_to item = settings_item(settings.list.focus);
         char line[SETTINGS_STATUS];
 
         if (!item || !(item->flags & SETTINGS_ITEM_SAVED) || (item->kind != SETTINGS_NETWORK && item->kind != SETTINGS_DEVICE))
@@ -2909,50 +2531,22 @@ static fn settings_activate(int row, int way)
                 settings_change(row, next);
 }
 
-// The row's place on the glass, if it is in the list: what a move of the focus changes.
-static fn settings_row_changed(int row)
+// The status as the keys come to a row from another: a command says what it does, and leaving one clears it.
+static fn settings_said_of(int before)
 {
-        int at = settings_pos(row);
-
-        if (at < 0)
-                settings_changed(0, 0);
-        else
-                settings_changed(settings_list_top() + settings.top[at] - settings.scroll,
-                                 settings_list_top() + settings.top[at] - settings.scroll + ui_px(&settings.ui, UI_ROW));
-}
-
-// The list a choice opens, where the keys' choice moved: its box.
-static fn settings_menu_changed(void)
-{
-        int x, y, width, height, shown;
-
-        // A scale of none has no box to measure (settings_menu_box divides by an item's height): the whole picture then.
-        if (settings.ui.scale > 0 && settings_menu_box(&x, &y, &width, &height, &shown))
-                settings_changed(y, y + height);
-        else
-                settings_dirty();
+        if (settings.list.focus >= SETTINGS_ANY)
+                settings_say((string_address)settings_text(settings.list.focus));
+        else if (before >= SETTINGS_ANY)
+                settings_say((string_address) "");
 }
 
 // The focus moved by whole rows of the ones that show; a command row has what it does in the status.
 static fn settings_move(int by)
 {
-        int at = settings_pos(settings.focus), last = (int)settings.visible_count - 1, before = settings.focus;
+        int before = settings.list.focus;
 
-        if (last < 0)
-                return;
-        at = (at < 0 ? 0 : at) + by;
-        at = at < 0 ? 0 : at > last ? last : at;
-        settings.focus = settings.visible[at];
-        if (settings.focus != before)
-        {
-                settings_row_changed(before);
-                settings_row_changed(settings.focus);
-                if (settings.focus >= SETTINGS_ANY)
-                        settings_say((string_address)settings_text(settings.focus));
-                else if (before >= SETTINGS_ANY)
-                        settings_say((string_address) "");
-        }
-        settings_reveal();
+        if (ui_list_move(&settings.ui, &settings.list, by))
+                settings_said_of(before);
 }
 
 /*
@@ -2975,13 +2569,13 @@ static fn settings_group_choose(int group)
         settings.filter_length = 0;
         if (settings.filter_open)
                 ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
-        settings.scroll = 0;
+        settings.list.scroll.scroll = 0;
         settings.confirm = 0;
         settings_refilter();
-        if (settings.visible_count)
-                settings.focus = settings.visible[0];
+        if (settings.list.count)
+                settings.list.focus = settings.list.id[0];
         settings_side_reveal();
-        settings_say((string_address)(settings.focus >= SETTINGS_ANY ? settings_text(settings.focus) : ""));
+        settings_say((string_address)(settings.list.focus >= SETTINGS_ANY ? settings_text(settings.list.focus) : ""));
         settings_dirty();
 }
 
@@ -2989,8 +2583,8 @@ static fn settings_group_choose(int group)
 static fn settings_rows_enter(void)
 {
         settings.pane = 1;
-        if (settings_pos(settings.focus) < 0 && settings.visible_count)
-                settings.focus = settings.visible[0];
+        if (settings_pos(settings.list.focus) < 0 && settings.list.count)
+                settings.list.focus = settings.list.id[0];
         settings_reveal();
         settings_dirty();
 }
@@ -3122,13 +2716,13 @@ static fn settings_filter_key(const struct window_event address_to event)
                 settings_dirty();
                 return;
         }
-        settings.scroll = 0;
+        settings.list.scroll.scroll = 0;
         settings.pane = 1;
         settings_refilter();
         // The keys are on the first row that matches.
-        if (settings.visible_count)
+        if (settings.list.count)
         {
-                settings.focus = settings.visible[0];
+                settings.list.focus = settings.list.id[0];
                 settings_reveal();
         }
 }
@@ -3139,31 +2733,19 @@ static b32 settings_steps(int row)
         return row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_STEP;
 }
 
-// A key on the card of what a command said: it scrolls, and Escape, Enter, Space or Backspace go back to the list.
+// A key on the card of what a command said: it scrolls as a page of text does, and Escape, Enter, Space or Backspace go back to the list.
 static fn settings_card_key(const struct window_event address_to event)
 {
-        int line = ui_px(&settings.ui, SETTINGS_CARD_LINE), page = settings_list_bottom() - settings_list_top();
+        b32 moved = false;
 
+        if (ui_lines_key(&settings.ui, &settings.card, (int)event->a, &moved))
+        {
+                if (moved)
+                        settings_changed(settings.page.top, settings.page.bottom);
+                return;
+        }
         switch (event->a)
         {
-        case SETTINGS_KEY_UP:
-                settings_scroll_to(settings.card_scroll - line);
-                break;
-        case SETTINGS_KEY_DOWN:
-                settings_scroll_to(settings.card_scroll + line);
-                break;
-        case SETTINGS_KEY_PAGE_UP:
-                settings_scroll_to(settings.card_scroll - page);
-                break;
-        case SETTINGS_KEY_PAGE_DOWN:
-                settings_scroll_to(settings.card_scroll + page);
-                break;
-        case SETTINGS_KEY_HOME:
-                settings_scroll_to(0);
-                break;
-        case SETTINGS_KEY_END:
-                settings_scroll_to(settings_extent());
-                break;
         case SETTINGS_KEY_ESCAPE:
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
@@ -3179,8 +2761,8 @@ static b32 settings_key(const struct window_event address_to event)
 {
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
-        // The list a choice opened has every key.
-        if (settings.menu >= 0)
+        // The menu a choice opened has every key.
+        if (settings.menu.owner >= 0)
         {
                 settings_menu_key(event);
                 return true;
@@ -3227,26 +2809,26 @@ static b32 settings_key(const struct window_event address_to event)
         case SETTINGS_KEY_END:
         case SETTINGS_KEY_PAGE_UP:
         case SETTINGS_KEY_PAGE_DOWN:
-        {
-                int whole = (int)settings.visible_count, by;
-
-                by = event->a == SETTINGS_KEY_UP ? -1 : event->a == SETTINGS_KEY_DOWN ? 1 : event->a == SETTINGS_KEY_HOME ? -whole
-                     : event->a == SETTINGS_KEY_END ? whole : event->a == SETTINGS_KEY_PAGE_UP ? -5 : 5;
+                // The kit's moves: a row at a time, a view, an end in the rows; a group, three, an end in the column.
                 if (settings.pane)
-                        settings_move(by);
+                {
+                        int before = settings.list.focus;
+                        b32 moved = false;
+
+                        ui_list_key(&settings.ui, &settings.list, (int)event->a, &moved);
+                        if (moved)
+                                settings_said_of(before);
+                }
                 else
-                        settings_group_choose(event->a == SETTINGS_KEY_HOME ? 0
-                                              : event->a == SETTINGS_KEY_END ? settings_groups() - 1
-                                                                             : settings.group + (by < 0 ? -1 : 1) * (by > 1 || by < -1 ? 3 : 1));
+                        settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.group));
                 break;
-        }
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
         case SETTINGS_KEY_SPACE:
                 if (!settings.pane)
                         settings_rows_enter();
-                else if (settings_pos(settings.focus) >= 0)
-                        settings_activate(settings.focus, 1);
+                else if (settings_pos(settings.list.focus) >= 0)
+                        settings_activate(settings.list.focus, 1);
                 break;
         case SETTINGS_KEY_DELETE:
                 if (settings.pane)
@@ -3254,8 +2836,8 @@ static b32 settings_key(const struct window_event address_to event)
                 break;
         case SETTINGS_KEY_LEFT:
                 // A step moves; on a switch and on any other row Left goes back to the column.
-                if (settings.pane && settings_steps(settings.focus))
-                        settings_activate(settings.focus, -1);
+                if (settings.pane && settings_steps(settings.list.focus))
+                        settings_activate(settings.list.focus, -1);
                 else if (settings.pane)
                 {
                         settings.pane = 0;
@@ -3265,8 +2847,8 @@ static b32 settings_key(const struct window_event address_to event)
         case SETTINGS_KEY_RIGHT:
                 if (!settings.pane)
                         settings_rows_enter();
-                else if (settings_steps(settings.focus))
-                        settings_activate(settings.focus, 1);
+                else if (settings_steps(settings.list.focus))
+                        settings_activate(settings.list.focus, 1);
                 break;
         default:
                 settings_filter_key(event);
@@ -3274,182 +2856,100 @@ static b32 settings_key(const struct window_event address_to event)
         return true;
 }
 
-/* ---- the kit in the rows ---- */
-
-/*
-        The rows are drawn with the kit's controls where the kit has one: a
-        switch is the kit's switch (its bars grow across it over .2s when the
-        verb says it changed, hovered 1.05 and pressed 1.1, a press ripples the
-        row in the accent), the theme and the motion are the kit's segmented
-        tabs (a press on a segment sets it), and the accent is a row of swatches
-        of its named accents, the one it is ringed. Each row keeps its control,
-        and its motion, while the window is open; where the control is drawn is
-        worked out at each picture from the row's place.
-*/
-static struct ui_control settings_kit[SETTINGS_ROWS];
-static struct ui_control settings_row_kit[SETTINGS_ROWS];
-static struct ui_control settings_groups_kit; // the column of groups: the kit's tabs on end
-static char settings_group_names[UI_ITEMS][SETTINGS_VALUE]; // each row's own kit row: its hover layer and ripple (a switch's is its switch)
-static int settings_kit_down = -1; // the row a press went down on, whose ripple goes out at the release
-
-// The window's scrolling regions, each with the kit's scrollbar: the rows (or a card), and the column of groups.
-#define SETTINGS_SCROLL_ROWS 0
-#define SETTINGS_SCROLL_GROUPS 1
-static struct ui_scroll settings_scrolls[2];
-
-// Where each region's bar is and what it shows, from the layout and the scrolls now (device pixels).
-static fn settings_scrolls_place(void)
-{
-        struct ui_scroll address_to rows = &settings_scrolls[SETTINGS_SCROLL_ROWS], address_to groups = &settings_scrolls[SETTINGS_SCROLL_GROUPS];
-        int top = settings_list_top(), height = settings_list_bottom() - settings_list_top();
-
-        rows->x = settings_pane_right() + (ui_px(&settings.ui, UI_PAD) - ui_px(&settings.ui, UI_SCROLL_WIDTH)) / 2;
-        rows->y = top, rows->height = height, rows->view = height;
-        rows->content = settings_extent();
-        rows->scroll = settings.view ? settings.card_scroll : settings.scroll;
-        groups->x = ui_px(&settings.ui, UI_PAD) + settings_side() + (ui_px(&settings.ui, SETTINGS_GUTTER) - ui_px(&settings.ui, UI_SCROLL_WIDTH)) / 2;
-        groups->y = top, groups->height = height, groups->view = height;
-        groups->content = settings.view ? 0 : settings_side_height();
-        groups->scroll = settings.group_scroll;
-}
-
-// A mouse's motion, press or release on a scrollbar: taken (true) when it was the bar's.
-static b32 settings_scrolls_event(const struct window_event address_to event)
-{
-        b32 taken = false;
-
-        if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
-                return false;
-        settings_scrolls_place();
-        for (int k = 0; k < 2; k++)
-        {
-                struct ui_scroll address_to s = &settings_scrolls[k];
-                b32 lit = s->hover;
-                int y = event->type == WINDOW_EVENT_MOTION ? event->b : settings.pointer_y;
-                int x = event->type == WINDOW_EVENT_MOTION ? event->a : settings.pointer_x;
-                int scroll = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0);
-
-                if (lit != s->hover)
-                        settings_dirty();
-                if (scroll < 0)
-                        continue;
-                taken = true;
-                if (k == SETTINGS_SCROLL_GROUPS)
-                        settings_side_scroll_to(scroll);
-                else
-                        settings_scroll_to(scroll);
-                settings_dirty();
-        }
-        return taken;
-}
-
-// The rows shown changed (a group, the filter, a scroll, a size): each row's control is placed at its next frame, not moved.
-static fn settings_kit_forget(void)
-{
-        for (positive at = 0; at < SETTINGS_ROWS; at++)
-        {
-                ui_control_forget(&settings_kit[at]);
-                ui_control_forget(&settings_row_kit[at]);
-        }
-}
+/* ---- the rows, as the kit draws them ---- */
 
 static b32 settings_row_is(int at, const char address_to path)
 {
         return at >= 0 && at < (int)SETTINGS_ROWS && settings_rows[at].path && string_equals((string_address)settings_rows[at].path, (string_address)path);
 }
 
-// A row drawn as the kit's segmented tabs: the theme and the motion.
-static b32 settings_row_segmented(int at)
+/*
+        What a row shows, for the kit's list: its label, its section and the section's header, and its value as the kind
+        the verb gives it -- a switch is the kit's switch (it moves when the verb says it changed), the theme and the
+        motion the kit's segmented tabs, the accent a swatch for each named accent, a choice opens a menu, a step moves
+        either way, and a field typed in is the kit's field. A network is its name, marked when it is the one joined,
+        with what is said of it, what it asks for and the bars of its signal; a device kept, the row that keeps
+        another, the line the verb said that is no row; a command, and whether it asks first. A value not read yet,
+        not on this machine or not understood says so, quietly.
+*/
+static fn settings_describe(int id, struct ui_row address_to row)
 {
-        return settings_row_is(at, SETTING_THEME_PATH) || settings_row_is(at, SETTING_MOTION_PATH);
-}
+        const struct settings_row address_to which = id < SETTINGS_ANY ? &settings_rows[id] : null;
+        const struct settings_item address_to item = settings_item(id);
+        unsigned int state = which ? settings.state[id] : SETTINGS_READ;
+        const char address_to shown = which ? settings.value[id] : "";
 
-// The accent's row, drawn as swatches.
-static b32 settings_row_swatches(int at)
-{
-        return settings_row_is(at, SETTING_ACCENT_PATH) && settings_rows[at].kind == SETTINGS_CHOICE;
-}
-
-// A row's control, made the first time it is drawn: a switch, or tabs of the row's choices.
-static struct ui_control address_to settings_kit_of(int at)
-{
-        struct ui_control address_to c = &settings_kit[at];
-
-        if (!c->kind)
+        row->section = settings_section_start(id);
+        row->header = settings_section(id);
+        row->label = settings_label(id);
+        if (id == settings.editing)
         {
-                memory_zero(c, sizeof(*c));
-                if (settings_row_segmented(at))
+                const struct settings_generic address_to generic = settings_generic_of(id);
+
+                row->kind = UI_ROW_FIELD, row->typed = settings.typed;
+                if (item)
                 {
-                        c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED;
+                        row->label = item->kind == SETTINGS_ADD ? "Name of the device" : settings.joining;
+                        row->masked = item->kind == SETTINGS_NETWORK;
                 }
-                else
-                        c->kind = UI_SWITCH;
-                c->label = "";
-                ui_control_start(c);
-        }
-        return c;
-}
-
-// The choices of a row, as tabs' items: the words of its choices, kept in the control's text.
-static fn settings_kit_items(struct ui_control address_to c, int at)
-{
-        char address_to into = c->text;
-        positive left = sizeof(c->text);
-
-        c->count = 0;
-        for (positive k = 0; k < UI_ITEMS; k++)
-        {
-                positive length;
-
-                if (!settings_word(settings_rows[at].choices, k, into, left))
-                        break;
-                c->items[c->count++] = into;
-                length = string_length((string_address)into) + 1;
-                into += length, left -= length;
-        }
-}
-
-// The width of a row's segmented tabs, logical pixels.
-static int settings_kit_tabs_width(struct ui address_to ui, struct ui_control address_to c)
-{
-        return c->count ? ui_tab_left(ui, c, c->count - 1) - c->x + ui_tab_width(ui, c, c->count - 1) : 0;
-}
-
-// The swatches: each named accent a 20 circle 8 apart, the last at the right edge; which is under x, or -1.
-#define SETTINGS_SWATCH 20
-#define SETTINGS_SWATCH_GAP 8
-static int settings_swatch_at(int right, int x)
-{
-        positive count = sizeof(settings_accents) / sizeof(settings_accents[0]);
-        int left = right - (int)count * ui_px(&settings.ui, SETTINGS_SWATCH + SETTINGS_SWATCH_GAP) + ui_px(&settings.ui, SETTINGS_SWATCH_GAP);
-
-        if (x < left || x >= right)
-                return -1;
-        return (x - left) / ui_px(&settings.ui, SETTINGS_SWATCH + SETTINGS_SWATCH_GAP);
-}
-
-static fn settings_draw_swatches(struct ui address_to ui, int at, int right, int middle)
-{
-        positive count = sizeof(settings_accents) / sizeof(settings_accents[0]);
-        int size = ui_px(ui, SETTINGS_SWATCH), step = ui_px(ui, SETTINGS_SWATCH + SETTINGS_SWATCH_GAP);
-        int left = right - (int)count * step + ui_px(ui, SETTINGS_SWATCH_GAP);
-
-        for (positive k = 0; k < count; k++)
-        {
-                long colour = window_colour_parse((string_address)settings_accents[k].colour);
-                b32 x = (left + (int)k * step) * 256, y = (middle - size / 2) * 256, s = size * 256;
-                struct ui_box dot = {x, y, x + s, y + s, s / 2, s / 2};
-
-                ui_kit_fill(ui, &dot, 0xff000000u | (unsigned int)colour, null);
-                // The accent it is: a ring of the ink round it, 2 out.
-                if (string_equals((string_address)settings.value[at], (string_address)settings_accents[k].name))
+                else if (!which)
                 {
-                        struct ui_box ring = {x - 3 * 256 * ui->scale, y - 3 * 256 * ui->scale, x + s + 3 * 256 * ui->scale,
-                                              y + s + 3 * 256 * ui->scale, s / 2 + 3 * 256 * ui->scale, s / 2 + 3 * 256 * ui->scale};
+                        // A command being typed: its verb, and the field for what follows it, which says what it takes.
+                        const char address_to hint = generic ? settings_large->pool + generic->command + generic->verb : "VERB [ARGUMENTS]";
 
-                        ui_kit_ring(ui, &ring, 2 * 256 * ui->scale, 0xff000000u | ui->ink);
+                        if (generic)
+                        {
+                                memory_copy(settings.head, settings_large->pool + generic->command, generic->verb);
+                                settings.head[generic->verb] = 0;
+                        }
+                        else
+                                string_copy_bounded((string_address)settings.head, (string_address) "moonwater", sizeof(settings.head));
+                        while (*hint == ' ')
+                                hint++;
+                        row->label = settings.head, row->placeholder = hint, row->head = true;
                 }
+                return;
         }
+        if (item)
+        {
+                if (item->kind == SETTINGS_NETWORK)
+                {
+                        row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
+                        row->note = item->flags & SETTINGS_ITEM_JOINED ? "joined" : item->flags & SETTINGS_ITEM_SAVED ? "saved" : null;
+                        row->value = item->security[0] ? item->security : null;
+                        row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1;
+                        row->dim = !(item->flags & SETTINGS_ITEM_HEARD);
+                }
+                else if (item->kind == SETTINGS_DEVICE)
+                        row->value = "kept";
+                row->dim |= item->kind == SETTINGS_NOTE;
+                return;
+        }
+        if (!which)
+        {
+                row->value = settings_row_asks(id) ? "asks first" : null;
+                return;
+        }
+        row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT;
+        row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? "not on this machine"
+                     : state == SETTINGS_FAILED || !shown[0] ? "unknown" : shown;
+        if (state != SETTINGS_READ)
+                return;
+        if (which->kind == SETTINGS_SWITCH)
+                row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on");
+        else if (settings_row_is(id, SETTING_THEME_PATH) || settings_row_is(id, SETTING_MOTION_PATH))
+                row->kind = UI_ROW_TABS, row->words = which->choices, row->at = (int)setting_place(which->choices, (string_address)shown);
+        else if (settings_row_is(id, SETTING_ACCENT_PATH) && which->kind == SETTINGS_CHOICE)
+        {
+                row->kind = UI_ROW_SWATCHES, row->words = settings.accents;
+                for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
+                        if (string_equals((string_address)shown, (string_address)settings_accents[k].name))
+                                row->at = (int)k;
+        }
+        else if (which->kind == SETTINGS_CHOICE)
+                row->kind = UI_ROW_CHOICE;
+        else if (which->kind == SETTINGS_STEP)
+                row->kind = UI_ROW_STEP;
 }
 
 /* ---- the gallery ---- */
@@ -3473,7 +2973,8 @@ static struct
 {
         b32 on;
         struct ui_control control[SETTINGS_GALLERY_MOST];
-        int count, scroll, wheel;
+        int count;
+        struct ui_scroll scroll; // the page, device pixels: the wheel, the keys and its scrollbar move it
 } settings_gallery;
 
 static struct ui_control address_to settings_gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
@@ -3593,10 +3094,12 @@ static fn settings_gallery_build(void)
                 ui_control_start(&settings_gallery.control[at]);
 }
 
+static fn settings_gallery_place(void);
+
 // The page drawn into the rows of the band: the paper, then every control, the scroll taken off their places.
 static fn settings_gallery_draw(struct ui address_to ui)
 {
-        int right = 0, row_y = -1;
+        int right = 0, row_y = -1, scroll = settings_gallery.scroll.scroll / ui->scale;
 
         ui->top = 0;
         ui->bottom = ui->height;
@@ -3614,218 +3117,201 @@ static fn settings_gallery_draw(struct ui address_to ui)
                         else if (c->x < 0)
                                 c->x = 761;
                 }
-                c->y = y - settings_gallery.scroll;
+                c->y = y - scroll;
                 if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height / ui->scale)
                         ui_control_draw(ui, c);
                 c->y = y;
                 if (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD)
                         right = c->x + c->w, row_y = c->y;
         }
+        settings_gallery_place();
+        ui_scroll_draw(ui, &settings_gallery.scroll);
 }
 
-// The page scrolled to scroll logical pixels, inside it.
-static fn settings_gallery_scroll_to(int scroll)
+// The page's region: the window, over the whole page's height.
+static fn settings_gallery_place(void)
 {
-        int most = SETTINGS_GALLERY_H - settings.height / settings.ui.scale;
+        struct ui_scroll address_to s = &settings_gallery.scroll;
 
-        scroll = scroll > most ? most : scroll;
-        scroll = scroll < 0 ? 0 : scroll;
-        if (scroll != settings_gallery.scroll)
-        {
-                settings_gallery.scroll = scroll;
-                settings_dirty();
-        }
+        s->x = settings.width - ui_px(&settings.ui, UI_SCROLL_WIDTH), s->y = 0, s->height = s->view = settings.height;
+        s->content = ui_px(&settings.ui, SETTINGS_GALLERY_H);
+        ui_scroll_set(s, s->scroll);
 }
 
-// The pointer and the wheel on the page: the kit's controls take them, in page pixels.
+// The pointer, the wheel and the keys on the page: the kit's controls take the pointer, in page pixels; the region the rest.
 static b32 settings_gallery_event(const struct window_event address_to event)
 {
-        int offset = settings_gallery.scroll * settings.ui.scale;
+        struct ui_scroll address_to s = &settings_gallery.scroll;
+        int offset = s->scroll / settings.ui.scale;
+        b32 moved = false;
 
+        settings_gallery_place();
         if (event->type == WINDOW_EVENT_KEY)
         {
                 if ((event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_KEY_ESCAPE)
                         return false;
                 if ((event->flags & WINDOW_KEY_DOWN) && (event->a == SETTINGS_KEY_DOWN || event->a == SETTINGS_KEY_UP))
-                        settings_gallery_scroll_to(settings_gallery.scroll + (event->a == SETTINGS_KEY_DOWN ? 40 : -40));
-                return true;
+                        moved = ui_scroll_set(s, s->scroll + (event->a == SETTINGS_KEY_DOWN ? 1 : -1) * ui_px(&settings.ui, UI_ROW));
         }
-        if (event->type == WINDOW_EVENT_WHEEL)
+        else if (event->type == WINDOW_EVENT_WHEEL)
+                moved = !event->b && ui_scroll_wheel(&settings.ui, s, event->a);
+        else if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
-                if (!event->b)
-                        settings_gallery_scroll_to(settings_gallery.scroll - settings_wheel_take(2, event->a, 40) * 40 / 40);
-                return true;
-        }
-        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
-        {
+                int y = event->type == WINDOW_EVENT_MOTION ? event->b : settings.page.pointer_y, bar;
+
                 if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
                         return true;
-                // The controls are drawn with the scroll taken off; the pointer is put on the page.
-                for (int at = 0; at < settings_gallery.count; at++)
-                        settings_gallery.control[at].y -= settings_gallery.scroll;
-                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, (int)event->type, event->a,
-                               event->type == WINDOW_EVENT_MOTION ? event->b : settings.pointer_y, (event->flags & WINDOW_KEY_DOWN) != 0, event->flags);
-                for (int at = 0; at < settings_gallery.count; at++)
-                        settings_gallery.control[at].y += settings_gallery.scroll;
                 if (event->type == WINDOW_EVENT_MOTION)
-                        settings.pointer_x = event->a, settings.pointer_y = event->b;
-                (void)offset;
-                settings_dirty();
+                        settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
+                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, event->type == WINDOW_EVENT_MOTION ? event->a : settings.page.pointer_x, y,
+                                        (event->flags & WINDOW_KEY_DOWN) != 0);
+                if (bar >= 0)
+                        moved = ui_scroll_set(s, bar) || true;
+                else
+                {
+                        // The controls are drawn with the scroll taken off; the pointer is put on the page.
+                        for (int at = 0; at < settings_gallery.count; at++)
+                                settings_gallery.control[at].y -= offset;
+                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, (int)event->type, event->a, y,
+                                       (event->flags & WINDOW_KEY_DOWN) != 0, event->flags);
+                        for (int at = 0; at < settings_gallery.count; at++)
+                                settings_gallery.control[at].y += offset;
+                        moved = true;
+                }
         }
+        if (moved)
+                settings_dirty();
         return true;
 }
 
-// The row under a point of the window, or -1.
-static int settings_hit(int x, int y)
-{
-        int list = y - settings_list_top() + settings.scroll;
+/* ---- the pointer and a finger ---- */
 
-        if (y < settings_list_top() || y >= settings_list_bottom() || x < settings_pane_left() || x >= settings_pane_right())
-                return -1;
-        for (positive at = 0; at < settings.visible_count; at++)
-                if (list >= settings.top[at] && list < settings.top[at] + ui_px(&settings.ui, UI_ROW))
-                        return settings.visible[at];
-        return -1;
-}
-
-// The group under a point of the window, or -1.
-static int settings_group_hit(int x, int y)
-{
-        int group = (y - settings_list_top() + settings.group_scroll) / ui_px(&settings.ui, SETTINGS_GROUP_ROW);
-
-        if (y < settings_list_top() || y >= settings_list_bottom() || x < ui_px(&settings.ui, UI_PAD) ||
-            x >= ui_px(&settings.ui, UI_PAD) + settings_side() || group >= settings_groups())
-                return -1;
-        return group;
-}
-
-/*
-        A finger's press is numbered by what it went down on: a row by its number, a group and a choice of the open list
-        past them; and what it drags when it moves.
-*/
+// A press is numbered by what it went down on: a row by its number, a group and a choice of the open menu past them, and the card.
 #define SETTINGS_PRESS_GROUP (SETTINGS_ALL + 1)
 #define SETTINGS_PRESS_MENU (SETTINGS_PRESS_GROUP + 64)
 #define SETTINGS_PRESS_CARD (SETTINGS_PRESS_MENU + 256)
-#define SETTINGS_DRAG_ROWS 0
-#define SETTINGS_DRAG_GROUPS 1
-#define SETTINGS_DRAG_CARD 2
-#define SETTINGS_DRAG_MENU 3
 
 static int settings_press_target(int x, int y)
 {
         int at;
 
-        if (settings.menu >= 0)
-                return (at = settings_menu_item(x, y)) >= 0 && at < settings.menu_count ? SETTINGS_PRESS_MENU + at : -1;
+        if (settings.menu.owner >= 0)
+                return (at = ui_menu_item(&settings.ui, &settings.menu, x, y)) >= 0 ? SETTINGS_PRESS_MENU + at : -1;
         if (settings.view)
                 return SETTINGS_PRESS_CARD;
-        if ((at = settings_group_hit(x, y)) >= 0)
+        if ((at = ui_page_column_hit(&settings.ui, &settings.page, x, y)) >= 0)
                 return SETTINGS_PRESS_GROUP + at;
-        return settings_hit(x, y);
+        return ui_list_hit(&settings.ui, &settings.list, x, y);
 }
 
-// The list a finger drags from a point: the open choices, the card, the column of groups, or the rows.
-static int settings_drag_of(int x, int y)
+// The region under a point, which the wheel turns and a finger drags: the open menu, the card, the column, or the rows.
+static struct ui_scroll address_to settings_region(int x, int y)
 {
-        int mx, my, width, height, shown;
+        const struct ui_menu address_to m = &settings.menu;
 
-        if (settings.menu >= 0 && settings_menu_box(&mx, &my, &width, &height, &shown) && x >= mx && x < mx + width && y >= my &&
-            y < my + height)
-                return SETTINGS_DRAG_MENU;
+        if (m->owner >= 0 && x >= m->x && x < m->x + m->w && y >= m->y && y < m->y + m->h)
+                return &settings.menu.scroll;
         if (settings.view)
-                return SETTINGS_DRAG_CARD;
-        return x < settings_pane_left() - ui_px(&settings.ui, SETTINGS_GUTTER) / 2 ? SETTINGS_DRAG_GROUPS : SETTINGS_DRAG_ROWS;
+                return &settings.card;
+        return x < settings.page.left - ui_px(&settings.ui, UI_COLUMN_GUTTER) / 2 ? &settings.page.column_scroll : &settings.list.scroll;
 }
 
-// What a finger dragged moves by pixels, its own way: false when it moved no further (an end of the list).
-static b32 settings_drag_by(int pixels)
+// A region moved: drawn again (the menu keeps the keys' choice in view as it goes).
+static fn settings_region_moved(const struct ui_scroll address_to region)
 {
-        int before, item = settings_menu_item_height();
-
-        if (!pixels)
-                return true;
-        switch (settings.drag_what)
+        if (region == &settings.menu.scroll)
         {
-        case SETTINGS_DRAG_MENU:
-        {
-                long total = (long)settings.drag_left + pixels;
-                int steps = (int)(total / item);
-
-                settings.drag_left = (int)(total - (long)steps * item);
-                before = settings.menu_top;
-                if (steps && settings.menu >= 0)
-                        settings_menu_scroll(settings.menu_top - steps);
-                return !steps || settings.menu_top != before;
+                settings_menu_place();
+                settings_dirty();
         }
-        case SETTINGS_DRAG_GROUPS:
-                before = settings.group_scroll;
-                settings_side_scroll_to(settings.group_scroll - pixels);
-                return settings.group_scroll != before;
-        default:
-                before = settings.view ? settings.card_scroll : settings.scroll;
-                settings_scroll_to(before - pixels);
-                return (settings.view ? settings.card_scroll : settings.scroll) != before;
-        }
+        else
+                settings_changed(settings.page.top, settings.page.bottom);
 }
 
-// A thrown list's next move, from the tick: how long until the next, or -1 once it is still.
-static long settings_throw(void)
+// A mouse's motion, press or release on a scrollbar (the menu's, the rows' or the card's, the column's): true when it was a bar's.
+static b32 settings_bars(const struct window_event address_to event)
 {
-        if (!settings.drag.flying)
-                return -1;
-        if (!settings_drag_by(ui_drag_step(&settings.drag, clock_monotonic_nanoseconds())))
-                ui_drag_stop(&settings.drag);
-        return settings.drag.flying ? UI_DRAG_FRAME_NS : -1;
+        struct ui_scroll address_to bars[3] = {&settings.menu.scroll, settings.view ? &settings.card : &settings.list.scroll,
+                                               &settings.page.column_scroll};
+        b32 taken = false;
+
+        if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
+                return false;
+        for (int k = settings.menu.owner >= 0 ? 0 : 1; k < (settings.menu.owner >= 0 ? 1 : settings.view ? 2 : 3); k++)
+        {
+                b32 lit = bars[k]->hover;
+                int scroll = ui_scroll_pointer(&settings.ui, bars[k], (int)event->type, settings.page.pointer_x, settings.page.pointer_y,
+                                               (event->flags & WINDOW_KEY_DOWN) != 0);
+
+                if (lit != bars[k]->hover)
+                        settings_region_moved(bars[k]);
+                if (scroll < 0)
+                        continue;
+                taken = true;
+                ui_scroll_set(bars[k], scroll);
+                settings_region_moved(bars[k]);
+        }
+        return taken;
 }
 
 static fn settings_press_at(void);
 
 /*
-        A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the list it went down
-        on, which follows it; up, the press is done where it went down if it did not move off it (as a mouse's press is
-        done at once) and the list is thrown if it was moving; and a press taken back does nothing.
+        A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the region it went
+        down on, which follows it; up, the press is done where it went down if it did not move off it (as a mouse's
+        press is done at once), and the region is thrown if it was moving; a press taken back does nothing.
 */
 static fn settings_finger(const struct window_event address_to event)
 {
+        int x = settings.page.pointer_x, y = settings.page.pointer_y;
+
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                if (!settings.press.down)
-                        return;
-                if (!settings.press.dragged && ui_press_move(&settings.ui, &settings.press, event->a, event->b))
+                b32 dragged = settings.finger.press.dragged;
+
+                if (ui_finger_move(&settings.ui, &settings.finger, event->a, event->b))
                 {
-                        ui_drag_start(&settings.drag, settings.press.y, clock_monotonic_nanoseconds());
-                        settings_dirty();
+                        if (!dragged && settings.finger.press.dragged)
+                        {
+                                ui_list_let_go(&settings.ui, &settings.list);
+                                settings.menu.pressed = -1;
+                        }
+                        settings_region_moved(settings.finger.region);
                 }
-                if (settings.press.dragged)
-                        settings_drag_by(ui_drag_follow(&settings.drag, event->b, clock_monotonic_nanoseconds()));
                 return;
         }
         if (event->a != SETTINGS_BUTTON_LEFT)
                 return;
         if (event->flags & WINDOW_KEY_DOWN)
         {
-                ui_drag_stop(&settings.drag);
-                settings.drag_what = settings_drag_of(settings.pointer_x, settings.pointer_y);
-                settings.drag_left = 0;
-                ui_press_begin(&settings.press, settings.pointer_x, settings.pointer_y,
-                               settings_press_target(settings.pointer_x, settings.pointer_y), true);
+                int target = settings_press_target(x, y);
+
+                ui_finger_down(&settings.finger, x, y, target, settings_region(x, y));
+                // What it is on shows pressed at once: a row, a choice of the menu.
+                if (target >= 0 && target < SETTINGS_PRESS_GROUP)
+                        settings.list.down = target;
+                else if (target >= SETTINGS_PRESS_MENU && target < SETTINGS_PRESS_CARD)
+                        settings.menu.pressed = target - SETTINGS_PRESS_MENU;
                 settings_dirty();
                 return;
         }
-        if (settings.press.dragged)
-                ui_drag_let_go(&settings.drag, clock_monotonic_nanoseconds());
-        if (settings.press.down)
         {
-                int x = settings.press.x, y = settings.press.y, clicked = ui_press_end(&settings.press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                int clicked;
 
+                x = settings.finger.press.x, y = settings.finger.press.y;
+                clicked = ui_finger_up(&settings.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                ui_list_let_go(&settings.ui, &settings.list);
+                settings.menu.pressed = -1;
                 settings_dirty();
                 // Done where it went down, as a mouse's press is: the target it was shown on is what is under that point.
                 if (clicked >= 0 && clicked == settings_press_target(x, y))
                 {
-                        settings.pointer_x = x, settings.pointer_y = y;
+                        settings.page.pointer_x = x, settings.page.pointer_y = y;
                         settings.touching = true;
                         settings_press_at();
                         settings.touching = false;
+                        ui_list_let_go(&settings.ui, &settings.list);
+                        ui_kit_ripples_exit(&settings.page.column);
                 }
         }
 }
@@ -3834,27 +3320,25 @@ static b32 settings_event(const struct window_event address_to event)
 {
         if (settings_gallery.on)
                 return settings_gallery_event(event);
-        // The scrollbars take a mouse's motion, press and release on them (a finger scrolls the region, ui_drag).
-        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH))
-        {
-                if (event->type == WINDOW_EVENT_MOTION)
-                        settings.pointer_x = event->a, settings.pointer_y = event->b;
-                if (settings_scrolls_event(event))
-                        return true;
-        }
+        if (event->type == WINDOW_EVENT_MOTION)
+                settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
+        // The scrollbars take a mouse's motion, press and release on them (a finger drags the region itself).
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH) &&
+            settings_bars(event))
+                return true;
         // The filter's field takes a press, a drag and a release over it (a selection by the hand), and the clipboard's answers.
         if (!settings.view && settings.filter_open &&
             (event->type == WINDOW_EVENT_CLIP ||
              ((event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
               (settings.filter_edit.dragging ||
-               (event->type == WINDOW_EVENT_BUTTON && settings.pointer_x >= settings.filter_x && settings.pointer_x < settings.filter_x + settings.filter_w &&
-                settings.pointer_y >= settings.filter_y && settings.pointer_y < settings.filter_y + ui_px(&settings.ui, 28)))) ))
+               (event->type == WINDOW_EVENT_BUTTON &&
+                ui_control_hit(&settings.ui, &settings.page.search, settings.page.pointer_x, settings.page.pointer_y) >= 0)))))
         {
-                p32 asks = ui_text_event(&settings.ui, &settings.filter_edit, event, settings.pointer_x, settings.pointer_y);
+                p32 asks = ui_text_event(&settings.ui, &settings.filter_edit, event, settings.page.pointer_x, settings.page.pointer_y);
 
                 if (asks && settings_filter_take())
                 {
-                        settings.scroll = 0;
+                        settings.list.scroll.scroll = 0;
                         settings.pane = 1;
                         settings_refilter();
                 }
@@ -3864,38 +3348,40 @@ static b32 settings_event(const struct window_event address_to event)
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
-                ui_drag_stop(&settings.drag);
+                ui_drag_stop(&settings.finger.drag);
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
-        {
-                int over;
-
-                settings.pointer_x = event->a;
-                settings.pointer_y = event->b;
                 if (event->flags & WINDOW_KEY_TOUCH)
                 {
                         settings_finger(event);
                         break;
                 }
-                // The pointer over a choice of the list puts the keys' choice there.
-                over = settings.menu >= 0 ? settings_menu_item(event->a, event->b) : -1;
-                if (over >= 0 && over != settings.menu_at && over < settings.menu_count)
+                // Over the menu the keys' choice follows the pointer; over the rows and the column, what is under it is lit.
+                if (settings.menu.owner >= 0)
                 {
-                        settings.menu_at = over;
-                        settings_menu_changed();
+                        int over = ui_menu_item(&settings.ui, &settings.menu, event->a, event->b);
+
+                        if (over >= 0 && over != settings.menu.at)
+                        {
+                                settings.menu.at = over;
+                                settings_dirty();
+                        }
+                }
+                else if (!settings.view)
+                {
+                        ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_MOTION, event->a, event->b, false);
+                        if (ui_control_hit(&settings.ui, &settings.page.column, event->a, event->b) != settings.page.column.item)
+                                settings_changed(settings.page.top, settings.page.bottom);
                 }
                 break;
-        }
         case WINDOW_EVENT_BUTTON:
-                // The release: the column's ripple goes out.
-                if (!(event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings_groups_kit.kind)
-                        ui_kit_ripples_exit(&settings_groups_kit);
-                // The release: a switch row's ripple goes out (a finger's as a mouse's).
-                if (!(event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings_kit_down >= 0)
+                if (event->a != SETTINGS_BUTTON_LEFT)
+                        break;
+                // The release: the column's ripple and the row's go out (a finger's as a mouse's).
+                if (!(event->flags & WINDOW_KEY_DOWN))
                 {
-                        ui_kit_ripples_exit(&settings_kit[settings_kit_down]);
-                        ui_kit_ripples_exit(&settings_row_kit[settings_kit_down]);
-                        settings_kit_down = -1;
+                        ui_kit_ripples_exit(&settings.page.column);
+                        ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, settings.page.pointer_x, settings.page.pointer_y, false);
                         settings_dirty();
                 }
                 if (event->flags & WINDOW_KEY_TOUCH)
@@ -3903,33 +3389,23 @@ static b32 settings_event(const struct window_event address_to event)
                         settings_finger(event);
                         break;
                 }
-                if (!(event->flags & WINDOW_KEY_DOWN) || event->a != SETTINGS_BUTTON_LEFT)
-                        break;
-                ui_drag_stop(&settings.drag);
-                settings_press_at();
+                if (event->flags & WINDOW_KEY_DOWN)
+                {
+                        ui_drag_stop(&settings.finger.drag);
+                        settings_press_at();
+                }
                 break;
         case WINDOW_EVENT_WHEEL:
-                ui_drag_stop(&settings.drag);
-                // The list scrolls under the wheel, and nothing else does while it is open.
-                if (settings.menu >= 0)
-                {
-                        if (!event->b)
-                        {
-                                // A notch is a step, counted over the events that make it up.
-                                int notches = settings_wheel_take(0, event->a, 1);
+        {
+                // The menu turns under the wheel, and nothing else does while it is open; else what is under the pointer.
+                struct ui_scroll address_to region = settings.menu.owner >= 0 ? &settings.menu.scroll
+                                                                               : settings_region(settings.page.pointer_x, settings.page.pointer_y);
 
-                                if (notches)
-                                        settings_menu_scroll(settings.menu_top - notches);
-                        }
-                        break;
-                }
-                // The column of groups or the rows, whichever is under the pointer; a card has all the window.
-                if (!event->b && !settings.view && settings.pointer_x < settings_pane_left() - ui_px(&settings.ui, SETTINGS_GUTTER) / 2)
-                        settings_side_scroll_to(settings.group_scroll - settings_wheel_take(1, event->a, ui_px(&settings.ui, SETTINGS_GROUP_ROW)));
-                else if (!event->b)
-                        settings_scroll_to((settings.view ? settings.card_scroll : settings.scroll) -
-                                           settings_wheel_take(2, event->a, ui_px(&settings.ui, UI_ROW)));
+                ui_drag_stop(&settings.finger.drag);
+                if (!event->b && ui_scroll_wheel(&settings.ui, region, event->a))
+                        settings_region_moved(region);
                 break;
+        }
         }
         return true;
 }
@@ -3937,14 +3413,14 @@ static b32 settings_event(const struct window_event address_to event)
 // A press at the pointer, a mouse's at once and a finger's as it comes up where it went down: what it is on is done.
 static fn settings_press_at(void)
 {
-        int row;
+        int x = settings.page.pointer_x, y = settings.page.pointer_y, row, before = settings.list.focus;
 
-        // A press on a choice of the list sets it; a press anywhere else only closes the list.
-        if (settings.menu >= 0)
+        // A press on a choice of the menu sets it; a press anywhere else only closes the menu.
+        if (settings.menu.owner >= 0)
         {
-                int chosen = settings_menu_item(settings.pointer_x, settings.pointer_y);
+                int chosen = ui_menu_item(&settings.ui, &settings.menu, x, y);
 
-                if (chosen >= 0 && chosen < settings.menu_count)
+                if (chosen >= 0)
                         settings_menu_apply(chosen);
                 else
                         settings_menu_close();
@@ -3956,524 +3432,67 @@ static fn settings_press_at(void)
                 settings_card_leave();
                 return;
         }
-        // A press on a group chooses it; the keys are then in the column, and Enter goes to its rows.
-        row = settings_group_hit(settings.pointer_x, settings.pointer_y);
+        // A press on a group chooses it, rippling it; the keys are then in the column, and Enter goes to its rows.
+        row = ui_page_column_hit(&settings.ui, &settings.page, x, y);
         if (row >= 0)
         {
-                // The press ripples its item in the column, the kit's tab.
-                if (settings_groups_kit.kind)
-                        ui_kit_ripple_start(&settings.ui, &settings_groups_kit, settings.pointer_x, settings.pointer_y,
-                                            ui_px(&settings.ui, settings_groups_kit.x),
-                                            ui_px(&settings.ui, settings_groups_kit.y + row * settings_groups_kit.h),
-                                            ui_px(&settings.ui, settings_groups_kit.w), ui_px(&settings.ui, settings_groups_kit.h), 8);
+                ui_page_column_press(&settings.ui, &settings.page, row, x, y);
                 settings_edit_end();
                 settings.pane = 0;
                 settings_group_choose(row);
                 settings_dirty();
                 return;
         }
-        row = settings_hit(settings.pointer_x, settings.pointer_y);
+        // A row: the kit gives it the keys, shows it pressed and ripples it from the press.
+        row = ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, x, y, true);
         if (settings.editing >= 0 && row != settings.editing)
                 settings_edit_end();
         if (row < 0)
                 return;
-        // The kit's rows: a segment or a swatch is set where it is pressed; a switch's row ripples from the press.
-        if (row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
-        {
-                int right = settings_pane_right() - ui_px(&settings.ui, UI_INSET);
-
-                if (settings_row_segmented(row) && settings_kit[row].kind == UI_TABS)
-                {
-                        struct ui_control address_to c = &settings_kit[row];
-                        int hit = ui_control_hit(&settings.ui, c, settings.pointer_x, settings.pointer_y);
-                        char word[SETTINGS_VALUE];
-
-                        if (hit >= 0 && settings_word(settings_rows[row].choices, (positive)hit, word, sizeof(word)))
-                        {
-                                settings.focus = row;
-                                settings.pane = 1;
-                                settings_change(row, word);
-                                settings_dirty();
-                                return;
-                        }
-                }
-                if (settings_row_swatches(row))
-                {
-                        int hit = settings_swatch_at(right, settings.pointer_x);
-
-                        if (hit >= 0)
-                        {
-                                settings.focus = row;
-                                settings.pane = 1;
-                                settings_change(row, settings_accents[hit].name);
-                                settings_dirty();
-                                return;
-                        }
-                }
-                // Any row's press ripples across it from the press, edge to edge (the kit's row; a switch's is its switch).
-                {
-                        struct ui_control address_to kit = settings_kit[row].kind == UI_SWITCH ? &settings_kit[row] : &settings_row_kit[row];
-
-                        if (kit->kind == UI_SWITCH || kit->kind == UI_LIST_ROW)
-                        {
-                                settings_kit_down = row;
-                                ui_list_row_press(&settings.ui, kit, settings.pointer_x, settings.pointer_y);
-                        }
-                }
-        }
-        if (row != settings.focus)
+        if (row != before)
         {
                 settings.confirm = 0;
-                if (row >= SETTINGS_ANY)
-                        settings_say((string_address)settings_text(row));
-                else if (settings.focus >= SETTINGS_ANY)
-                        settings_say((string_address) "");
+                settings_said_of(before);
         }
-        settings.focus = row;
         settings.pane = 1;
         settings_dirty();
-        if (settings.editing != row)
+        // A segment or a swatch is set where it is pressed.
+        if (settings.list.part >= 0 && row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
         {
-                // A step pressed left of its value's middle goes back.
-                int middle = settings_pane_right() - ui_px(&settings.ui, UI_INSET + 40);
+                char word[SETTINGS_VALUE];
 
-                settings_activate(row, settings_kind(row) == SETTINGS_STEP && settings.pointer_x < middle ? -1 : 1);
+                if (settings_row_is(row, SETTING_ACCENT_PATH) && settings.list.part < (int)(sizeof(settings_accents) / sizeof(settings_accents[0])))
+                        settings_change(row, settings_accents[settings.list.part].name);
+                else if (settings_word(settings_rows[row].choices, (positive)settings.list.part, word, sizeof(word)))
+                        settings_change(row, word);
+                return;
         }
+        if (settings.editing != row)
+                settings_activate(row, settings.list.way);
 }
 
 /* ---- the picture ---- */
 
+// One line of the card.
+static const char address_to settings_card_line(int at, char address_to into, positive room)
+{
+        positive size = settings_large->card_size[at];
+
+        size = size >= room ? room - 1 : size;
+        memory_copy(into, settings_large->card + settings_large->card_at[at], size);
+        into[size] = 0;
+        return into;
+}
+
 /*
-        A row of a list: a network (a dot when it is the one joined, its
-        name, what it is as a word, what it asks for and the bars of its
-        signal), a device kept, the line the verb said that is no row, or
-        the row that keeps another device; with its field when a passphrase
-        or a name is being typed, shown as dots when it is a passphrase.
+        The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): the kit's page
+        (its title, the search field that shows the filter, the status line), then the column of groups and the rows of
+        the group chosen, or the card, and over them the menu a choice opened. settings_paint calls it only for a band
+        with rows in it.
 */
-static fn settings_draw_item(struct ui address_to ui, int at, int y, const struct settings_item address_to item)
-{
-        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, UI_INSET);
-        int height = ui_px(&settings.ui, UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT), edge = right - inset, gap = ui_px(&settings.ui, 10);
-        int text_left = left + inset;
-        char cut[SETTINGS_ITEM_LABEL], mask[SETTINGS_ITEM_LABEL * 3 + 1];
-        const char address_to words;
-
-        if (at == settings.editing)
-        {
-                int width = ui_px(&settings.ui, SETTINGS_FIELD_W), wide;
-                string_address label = item->kind == SETTINGS_ADD ? (string_address) "Name of the device" : (string_address)settings.joining;
-                positive dots = 0;
-
-                wide = ui_text(ui, text_left, baseline,
-                               settings_fit(ui, label, UI_TEXT, (right - left) / 2, cut, sizeof(cut)), UI_TEXT, false, ui->ink, 255);
-                width = width > right - inset - (text_left + wide + gap) ? right - inset - (text_left + wide + gap) : width;
-                width = width < ui_px(&settings.ui, 100) ? ui_px(&settings.ui, 100) : width;
-                // A passphrase is shown as a dot for each character, and never as it is.
-                if (item->kind == SETTINGS_NETWORK)
-                {
-                        for (positive each = 0; settings.typed[each] && dots + 1 < SETTINGS_ITEM_LABEL; each++)
-                                if (((unsigned char)settings.typed[each] & 0xc0) != 0x80)
-                                {
-                                        memory_copy(mask + dots * 3, "\xe2\x80\xa2", 3);
-                                        dots++;
-                                }
-                        mask[dots * 3] = 0;
-                }
-                ui_field(ui, edge - width, y + ui_px(&settings.ui, 7), width, height - ui_px(&settings.ui, 14),
-                         item->kind == SETTINGS_NETWORK ? (string_address)mask : (string_address)settings.typed, true);
-                return;
-        }
-
-        if (item->kind == SETTINGS_NETWORK)
-        {
-                unsigned int alpha = item->flags & SETTINGS_ITEM_HEARD ? 255 : 150;
-
-                if (item->flags & SETTINGS_ITEM_HEARD)
-                {
-                        ui_signal(ui, edge, y + height / 2, item->bars);
-                        edge -= ui_px(&settings.ui, 18) + gap;
-                }
-                if (item->security[0])
-                {
-                        edge -= ui_text(ui, edge - ui_measure(ui, (string_address)item->security, UI_SMALL, false), baseline,
-                                        (string_address)item->security, UI_SMALL, false, ui->quiet, alpha) + gap;
-                }
-                words = item->flags & SETTINGS_ITEM_JOINED ? "joined" : item->flags & SETTINGS_ITEM_SAVED ? "saved" : null;
-                if (words)
-                        edge -= ui_text(ui, edge - ui_measure(ui, (string_address)words, UI_SMALL, false), baseline, (string_address)words,
-                                        UI_SMALL, false, item->flags & SETTINGS_ITEM_JOINED ? ui->ink : ui->quiet, 255) + gap;
-                if (item->flags & SETTINGS_ITEM_JOINED)
-                {
-                        ui_round(ui, text_left, y + (height - ui_px(&settings.ui, 7)) / 2, ui_px(&settings.ui, 7), ui_px(&settings.ui, 7), ui_px(&settings.ui, 3),
-                                 ui_tone(ui->ink, 235));
-                        text_left += ui_px(&settings.ui, 17);
-                }
-                ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
-                        UI_TEXT, false, ui->ink, alpha);
-                return;
-        }
-        if (item->kind == SETTINGS_DEVICE)
-        {
-                edge -= ui_text(ui, edge - ui_measure(ui, (string_address) "kept", UI_SMALL, false), baseline, (string_address) "kept",
-                                UI_SMALL, false, ui->quiet, 255) + gap;
-                ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
-                        UI_TEXT, false, ui->ink, 255);
-                return;
-        }
-        ui_text(ui, text_left, baseline, settings_fit(ui, (string_address)item->label, UI_TEXT, edge - text_left, cut, sizeof(cut)),
-                UI_TEXT, false, item->kind == SETTINGS_NOTE ? ui->quiet : ui->ink, 255);
-}
-
-static fn settings_draw_row(struct ui address_to ui, int at, int y)
-{
-        const struct settings_row address_to row = at < SETTINGS_ANY ? &settings_rows[at] : null;
-        int left = settings_pane_left(), right = settings_pane_right(), inset = ui_px(&settings.ui, UI_INSET);
-        int height = ui_px(&settings.ui, UI_ROW), baseline = ui_baseline(ui, y, height, UI_TEXT);
-        char cut[SETTINGS_VALUE];
-        unsigned int state = row ? settings.state[at] : SETTINGS_READ;
-        b32 usable = state == SETTINGS_READ || state == SETTINGS_FAILED;
-        string_address shown = row ? (string_address)settings.value[at] : (string_address) "";
-        int wide;
-
-        // The kit's row under the row's content: its hover layer and its press ripple, across the pane, edge to edge.
-        if (row && row->kind != SETTINGS_SWITCH)
-        {
-                struct ui_control address_to kit = &settings_row_kit[at];
-
-                if (kit->kind != UI_LIST_ROW)
-                {
-                        memory_zero(kit, sizeof(*kit));
-                        kit->kind = UI_LIST_ROW;
-                }
-                kit->row_x = left / ui->scale, kit->row_y = y / ui->scale, kit->row_w = (right - left) / ui->scale, kit->row_h = height / ui->scale;
-                kit->x = kit->row_x, kit->y = kit->row_y, kit->w = kit->row_w, kit->h = kit->row_h;
-                kit->hover = settings.pointer_x >= left && settings.pointer_x < right && settings.pointer_y >= y && settings.pointer_y < y + height;
-                ui_control_draw(ui, kit);
-        }
-
-        if (at == settings.focus && (settings.pane || settings.filter_length))
-                ui_focus(ui, left + ui_px(&settings.ui, 3), y + ui_px(&settings.ui, 2), right - left - ui_px(&settings.ui, 6), height - ui_px(&settings.ui, 4),
-                         settings.focused && settings.pane);
-        if (ui_pressed(&settings.press, at))
-                ui_press_fill(ui, left + ui_px(&settings.ui, 3), y + ui_px(&settings.ui, 2), right - left - ui_px(&settings.ui, 6),
-                              height - ui_px(&settings.ui, 4));
-
-        if (settings_item(at))
-        {
-                settings_draw_item(ui, at, y, settings_item(at));
-                return;
-        }
-
-        // A command being typed: its verb at the left, and the field after it for what follows.
-        if (!row && at == settings.editing)
-        {
-                const struct settings_generic address_to generic = settings_generic_of(at);
-                char head[SETTINGS_VALUE];
-                int x, width;
-
-                if (generic)
-                {
-                        memory_copy(head, settings_large->pool + generic->command, generic->verb);
-                        head[generic->verb] = 0;
-                }
-                else
-                        string_copy_bounded((string_address)head, (string_address) "moonwater", sizeof(head));
-                wide = ui_text(ui, left + inset, baseline,
-                               settings_fit(ui, (string_address)head, UI_TEXT, (right - left) / 3, cut, sizeof(cut)), UI_TEXT, false,
-                               ui->ink, 255);
-                x = left + inset + wide + ui_px(&settings.ui, 10);
-                width = right - inset - x;
-                if (width < ui_px(&settings.ui, 100))
-                {
-                        width = ui_px(&settings.ui, 100);
-                        x = right - inset - width;
-                }
-                ui_field(ui, x, y + ui_px(&settings.ui, 7), width, height - ui_px(&settings.ui, 14), (string_address)settings.typed, true);
-                if (!settings.typed[0])
-                {
-                        const char address_to hint = generic ? settings_large->pool + generic->command + generic->verb : "VERB [ARGUMENTS]";
-
-                        while (*hint == ' ')
-                                hint++;
-                        ui_run(ui, x + ui_px(&settings.ui, 8), baseline, (string_address)hint, UI_TEXT, false, ui->quiet, 150,
-                               x + ui_px(&settings.ui, 8), x + width - ui_px(&settings.ui, 8));
-                }
-                return;
-        }
-
-        // A label leaves its value a third of the row at least: a long one is cut, and the value is not.
-        {
-                int room = right - left - 2 * inset - (row && row->kind == SETTINGS_SWITCH ? ui_px(&settings.ui, UI_SWITCH_W) : (right - left) / 3);
-
-                wide = ui_text(ui, left + inset, baseline,
-                               settings_fit(ui, (string_address)settings_label(at), UI_TEXT, room < ui_px(&settings.ui, 40) ? ui_px(&settings.ui, 40) : room,
-                                            cut, sizeof(cut)),
-                               UI_TEXT, false, ui->ink, usable ? 255 : 130);
-        }
-
-        if (!row)
-        {
-                if (settings_row_asks(at))
-                        ui_value(ui, right - inset, baseline, (string_address) "asks first", UI_VALUE_PLAIN, true);
-                return;
-        }
-
-        if (state == SETTINGS_UNREAD)
-                shown = (string_address) "...";
-        else if (state == SETTINGS_ABSENT)
-                shown = (string_address) "not on this machine";
-        else if (state == SETTINGS_FAILED || !shown[0])
-                shown = (string_address) "unknown";
-
-        if (at == settings.editing)
-        {
-                int width = ui_px(&settings.ui, SETTINGS_FIELD_W), room = right - inset - (left + inset + wide + ui_px(&settings.ui, 10));
-
-                // A long label leaves the field what room it has.
-                width = width > room ? (room < ui_px(&settings.ui, 100) ? ui_px(&settings.ui, 100) : room) : width;
-                ui_field(ui, right - inset - width, y + ui_px(&settings.ui, 7), width, height - ui_px(&settings.ui, 14),
-                         (string_address)settings.typed, true);
-                return;
-        }
-
-        if (row->kind == SETTINGS_SWITCH && state == SETTINGS_READ)
-        {
-                // The kit's switch: its pill's right edge at the row's inset, in the row's middle; the row's label is the row's own.
-                struct ui_control address_to c = settings_kit_of(at);
-
-                c->on = string_equals(shown, (string_address) "on");
-                c->x = (right - inset) / ui->scale - 52;
-                c->w = 52;
-                c->y = (y + height / 2) / ui->scale - 24;
-                c->h = 48;
-                // Its row is the pane's, edge to edge: what its press ripples across.
-                c->row_x = left / ui->scale, c->row_y = y / ui->scale, c->row_w = (right - left) / ui->scale, c->row_h = height / ui->scale;
-                c->hover = settings.pointer_x >= right - inset - ui_px(ui, 52) && settings.pointer_x < right - inset &&
-                           settings.pointer_y >= y && settings.pointer_y < y + height;
-                c->down = settings_kit_down == at;
-                ui_control_draw(ui, c);
-        }
-        else if (settings_row_segmented(at) && state == SETTINGS_READ)
-        {
-                // The theme and the motion: the kit's segmented tabs, the value's segment chosen.
-                struct ui_control address_to c = settings_kit_of(at);
-                long place;
-
-                settings_kit_items(c, at);
-                place = setting_place(settings_rows[at].choices, shown);
-                if (place >= 0 && place != c->at)
-                {
-                        if (c->pip_x.placed)
-                                ui_tabs_choose(ui, c, (int)place);
-                        else
-                                c->at = (int)place;
-                }
-                c->y = (y + height / 2) / ui->scale - 16;
-                c->x = 0;
-                c->x = (right - inset) / ui->scale - settings_kit_tabs_width(ui, c);
-                ui_control_draw(ui, c);
-        }
-        else if (settings_row_swatches(at) && state == SETTINGS_READ)
-                settings_draw_swatches(ui, at, right - inset, y + height / 2);
-        else
-        {
-                // A value longer than the room the label leaves is cut at its end and says so.
-                int room = right - inset - (left + inset + wide + ui_px(&settings.ui, 16));
-
-                shown = settings_fit(ui, shown, UI_TEXT, room, cut, sizeof(cut));
-                ui_value(ui, right - inset, baseline, shown,
-                         state != SETTINGS_READ ? UI_VALUE_PLAIN : row->kind == SETTINGS_CHOICE ? UI_VALUE_LIST
-                                                                  : row->kind == SETTINGS_STEP   ? UI_VALUE_STEP
-                                                                                                 : UI_VALUE_PLAIN,
-                         usable);
-        }
-}
-
-// The column of groups at the left: the chosen one lit, the rest plain on the glass.
-/*
-        The column of groups is the kit's tabs stood on end: the chosen group under the accent's pip, which slides up or
-        down to another however it is chosen (a press, the keys, a finger) with the cascade's stretch, and starts on the
-        group the window opens on. While a filter lists the rows of every group none is chosen, and the pip is not drawn.
-*/
-
-static fn settings_draw_side(struct ui address_to ui)
-{
-        struct ui_control address_to c = &settings_groups_kit;
-        int width = settings_side(), groups = settings_groups();
-
-        ui->top = settings_list_top();
-        ui->bottom = settings_list_bottom();
-        if (!c->kind)
-        {
-                c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
-                c->at = settings.group;
-        }
-        c->count = groups < UI_ITEMS ? groups : UI_ITEMS;
-        for (int group = 0; group < c->count; group++)
-        {
-                string_address name = settings_fit(ui, (string_address)settings_group_name(group), UI_TEXT | SETTINGS_FIT_BOLD,
-                                                   width - ui_px(ui, 24), settings_group_names[group], sizeof(settings_group_names[group]));
-
-                if (name != (string_address)settings_group_names[group])
-                        string_copy_bounded((string_address)settings_group_names[group], name, sizeof(settings_group_names[group]));
-                c->items[group] = settings_group_names[group];
-        }
-        c->x = ui_px(ui, UI_PAD) / ui->scale;
-        c->y = (settings_list_top() - settings.group_scroll) / ui->scale;
-        c->w = width / ui->scale;
-        c->h = SETTINGS_GROUP_ROW;
-        c->disabled = settings.filter_length != 0;
-        c->focused = settings.focused && !settings.pane;
-        c->item = ui_control_hit(ui, c, settings.pointer_x, settings.pointer_y);
-        c->hover = c->item >= 0;
-        if (settings.group != c->at)
-                ui_tabs_choose(ui, c, settings.group); // placed at its first frame, moving after
-        ui_control_draw(ui, c);
-}
-
-// The list: the rows that show, a header to a section, drawn where they are in view.
-static fn settings_draw_list(struct ui address_to ui)
-{
-        int left = settings_pane_left();
-        int list_top = settings_list_top(), list_bottom = settings_list_bottom();
-        positive at = 0;
-
-        ui->top = list_top;
-        ui->bottom = list_bottom;
-        if (!settings.visible_count)
-        {
-                ui_text(ui, left + ui_px(&settings.ui, UI_INSET), ui_baseline(ui, list_top, ui_px(&settings.ui, UI_ROW), UI_TEXT),
-                        (string_address) "Nothing matches what is typed", UI_TEXT, false, ui->quiet, 255);
-                return;
-        }
-        while (at < settings.visible_count)
-        {
-                int start = settings_section_start(settings.visible[at]);
-                positive last = at;
-                int y = list_top + settings.top[at] - settings.scroll, rows;
-
-                while (last + 1 < settings.visible_count && settings_section_start(settings.visible[last + 1]) == start)
-                        last++;
-                rows = (int)(last - at + 1) * ui_px(&settings.ui, UI_ROW);
-                // A section with some of it in view: its header and the rows of it in view, plain on the glass.
-                if (y + rows > list_top - ui_px(&settings.ui, SETTINGS_HEADER) && y - ui_px(&settings.ui, SETTINGS_HEADER) < list_bottom)
-                {
-                        ui_header(ui, left + ui_px(&settings.ui, 6), y - ui_px(&settings.ui, SETTINGS_HEADER), ui_px(&settings.ui, SETTINGS_HEADER),
-                                  (string_address)settings_section(settings.visible[at]));
-                        for (positive each = at; each <= last; each++)
-                        {
-                                int row_y = list_top + settings.top[each] - settings.scroll;
-
-                                if (row_y + ui_px(&settings.ui, UI_ROW) <= list_top || row_y >= list_bottom)
-                                        continue;
-                                settings_draw_row(ui, settings.visible[each], row_y);
-                        }
-                }
-                at = last + 1;
-        }
-}
-
-// What a command said, as the lines of the card.
-static fn settings_draw_card(struct ui address_to ui)
-{
-        int left = ui_px(&settings.ui, UI_PAD);
-        int line = ui_px(&settings.ui, SETTINGS_CARD_LINE), pad = ui_px(&settings.ui, SETTINGS_CARD_PAD);
-        int top = settings_list_top() - settings.card_scroll;
-        char text[SETTINGS_PROBE];
-
-        ui->top = settings_list_top();
-        ui->bottom = settings_list_bottom();
-        for (int at = 0; at < settings.card_lines; at++)
-        {
-                int y = top + pad + at * line;
-                positive size = settings_large->card_size[at];
-
-                if (y + line <= ui->top || y >= ui->bottom)
-                        continue;
-                size = size >= sizeof(text) ? sizeof(text) - 1 : size;
-                memory_copy(text, settings_large->card + settings_large->card_at[at], size);
-                text[size] = 0;
-                ui_text(ui, left + ui_px(&settings.ui, UI_INSET), ui_baseline(ui, y, line, UI_TEXT), (string_address)text, UI_TEXT, false, ui->ink,
-                        255);
-        }
-}
-
-// The status line, or two where it does not fit one.
-static fn settings_draw_foot(struct ui address_to ui, int top)
-{
-        int left = ui_px(&settings.ui, UI_PAD) + ui_px(&settings.ui, 6), room = settings.width - left - ui_px(&settings.ui, UI_PAD);
-        int half = ui_px(&settings.ui, SETTINGS_FOOT) / 2;
-        char first[SETTINGS_STATUS];
-        positive length = string_length((string_address)settings.status), cut = 0;
-
-        ui->top = top;
-        ui->bottom = settings.height;
-        if (ui_measure(ui, (string_address)settings.status, UI_SMALL, false) <= room)
-        {
-                ui_text(ui, left, ui_baseline(ui, top, ui_px(&settings.ui, SETTINGS_FOOT), UI_SMALL), (string_address)settings.status,
-                        UI_SMALL, false, ui->quiet, 255);
-                return;
-        }
-        // The longest start that fits, ending at a blank.
-        for (positive at = 1; at < length; at++)
-        {
-                if (settings.status[at] != ' ')
-                        continue;
-                memory_copy(first, settings.status, at);
-                first[at] = 0;
-                if (ui_measure(ui, (string_address)first, UI_SMALL, false) > room)
-                        break;
-                cut = at;
-        }
-        if (!cut)
-                cut = length;
-        memory_copy(first, settings.status, cut);
-        first[cut] = 0;
-        ui_text(ui, left, ui_baseline(ui, top, half, UI_SMALL), (string_address)first, UI_SMALL, false, ui->quiet, 255);
-        ui_text(ui, left, ui_baseline(ui, top + half, half, UI_SMALL), (string_address)settings.status + cut + (cut < length),
-                UI_SMALL, false, ui->quiet, 255);
-}
-
-// The list a choice opened, over everything else: the choices in view, the keys' lit, the value's dotted.
-static fn settings_draw_menu(struct ui address_to ui)
-{
-        int x, y, width, height, shown, item = settings_menu_item_height(), pad = ui_px(&settings.ui, SETTINGS_MENU_PAD);
-        const struct settings_row address_to which = &settings_rows[settings.menu];
-        char word[SETTINGS_VALUE];
-
-        if (!settings_menu_box(&x, &y, &width, &height, &shown))
-                return;
-        ui->top = 0;
-        ui->bottom = settings.height;
-        ui_menu(ui, x, y, width, height);
-        for (int at = 0; at < shown; at++)
-        {
-                int which_at = settings.menu_top + at;
-
-                if (!settings_choice(which, (positive)which_at, word, sizeof(word)))
-                        break;
-                ui_option(ui, x + ui_px(&settings.ui, 4), y + pad + at * item, width - ui_px(&settings.ui, 8), item, (string_address)word,
-                          which_at == settings.menu_at,
-                          string_equals((string_address)word, (string_address)settings.value[settings.menu]));
-                if (ui_pressed(&settings.press, SETTINGS_PRESS_MENU + which_at))
-                        ui_press_fill(ui, x + ui_px(&settings.ui, 4), y + pad + at * item, width - ui_px(&settings.ui, 8), item);
-        }
-        // More choices than show: the kit's scrollbar at the list's right edge.
-        if (settings.menu_count > shown)
-        {
-                struct ui_scroll bar = {x + width - ui_px(&settings.ui, UI_SCROLL_WIDTH), y + pad, height - 2 * pad, settings.menu_count * item,
-                                        shown * item, settings.menu_top * item, false, false, 0};
-
-                ui_scroll_draw(ui, &bar);
-        }
-}
-
-// The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): settings_paint calls it only for a band with rows in it.
 static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int band_bottom)
 {
         struct ui address_to ui = &settings.ui;
-        int left = ui_px(&settings.ui, UI_PAD);
-        int list_top = settings_list_top(), list_bottom = settings_list_bottom();
 
         ui->pixels = pixels;
         ui->pitch = settings.own.table->stride;
@@ -4488,44 +3507,25 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings_gallery_draw(ui);
                 return;
         }
-        ui_clear(ui);
-        ui_title(ui, left + ui_px(&settings.ui, 6), ui_px(&settings.ui, 8), list_top - ui_px(&settings.ui, 8),
-                 settings.view ? (string_address)settings.card_title : (string_address) "Settings");
-
-        // The filter, at the right of the title and under where the window is taken hold of.
-        if (!settings.view)
-        {
-                int width = ui_px(&settings.ui, SETTINGS_FILTER_W), x = settings.width - left - width, y = ui_px(&settings.ui, 24);
-
-                struct ui_control address_to c = &settings.filter_control;
-
-                // The kit's bare field, the text engine's field in it (typing, a selection, the clipboard, its carets).
-                settings.filter_x = x, settings.filter_y = y, settings.filter_w = width;
-                c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-                c->x = x / settings.ui.scale, c->y = y / settings.ui.scale, c->w = width / settings.ui.scale, c->h = 28;
-                c->items[0] = "Type to filter";
-                c->focused = settings.editing < 0 && (settings.filter_length || settings.focused);
-                c->edit = settings_filter_field();
-                ui_control_draw(ui, c);
-        }
-
+        settings.page.title = settings.view ? settings.card_title : "Settings";
+        settings.page.status = settings.status;
+        // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
+        // clipboard, its carets), with the keys while no row is typed in.
+        settings.page.search.items[0] = settings.view ? null : "Type to filter";
+        settings.page.search.edit = settings.view ? null : settings_filter_field();
+        ui_page_draw(ui, &settings.page, settings.filter, settings.editing < 0 && (settings.filter_length || settings.focused));
         if (settings.view)
-                settings_draw_card(ui);
+                ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
         else
         {
-                settings_draw_side(ui);
-                settings_draw_list(ui);
+                ui_page_groups(ui, &settings.page, settings_group_name, settings_groups());
+                ui_page_column(ui, &settings.page, settings.group, settings.focused && !settings.pane, settings.filter_length != 0);
+                settings.list.lit = settings.pane || settings.filter_length;
+                settings.list.keys = settings.focused && settings.pane;
+                ui_list_draw(ui, &settings.list);
         }
-        // Every region that scrolls has the kit's scrollbar while what it holds is taller than it.
-        settings_scrolls_place();
-        ui->top = settings_list_top();
-        ui->bottom = settings_list_bottom();
-        ui_scroll_draw(ui, &settings_scrolls[SETTINGS_SCROLL_ROWS]);
-        ui_scroll_draw(ui, &settings_scrolls[SETTINGS_SCROLL_GROUPS]);
-
-        settings_draw_foot(ui, list_bottom);
-        if (settings.menu >= 0)
-                settings_draw_menu(ui);
+        if (settings.menu.owner >= 0 && settings_menu_place())
+                ui_menu_draw(ui, &settings.menu);
 }
 
 /*
@@ -4612,15 +3612,13 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings.width = (int)(width > table->output_width ? table->output_width : width);
         settings.height = (int)(height > table->output_height ? table->output_height : height);
         ui_scratch_fit(&settings.ui, (unsigned int)settings.width);
-        settings_layout();
-        settings_scroll_to(settings.view ? settings.card_scroll : settings.scroll);
-        settings_side_reveal();
-        // An open list of choices shows as many as the window holds now: its first in view is held to that, or a window
-        // made taller than the list was cut for shows empty slots under the choices and a position mark off its track.
-        if (settings.menu >= 0)
-                settings_menu_scroll(settings.menu_top);
         if (settings.view)
                 settings_wrap();
+        settings_layout();
+        settings_side_reveal();
+        // An open menu shows as many choices as the window holds now, placed again for it.
+        if (settings.menu.owner >= 0)
+                settings_menu_place();
         settings_dirty();
 }
 
@@ -4664,10 +3662,13 @@ static int settings_open(void)
 // The settings' timers: a verb's time, the due reading of a feed, and the descriptor of a verb running. 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
 {
-        // A list thrown by a finger moves a frame at a time until it is still.
+        // A region thrown by a finger moves a frame at a time until it is still.
         {
-                long thrown = settings_throw();
+                b32 moved;
+                long thrown = ui_finger_throw(&settings.finger, &moved);
 
+                if (moved)
+                        settings_region_moved(settings.finger.region);
                 if (thrown >= 0 && (timeout < 0 || thrown < timeout))
                         timeout = thrown;
         }
@@ -4757,7 +3758,7 @@ static b32 settings_main()
         settings.shown = -1;
         settings.output = -1;
         settings.pane = 1; // the keys start in the rows, on the first of them
-        settings.menu = -1;
+        settings.menu.owner = -1;
         settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
