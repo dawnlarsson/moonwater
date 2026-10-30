@@ -11334,7 +11334,7 @@ static positive check_render_reuse()
                 for (positive n = 0; n < array_count(lengths); n++)
                         for (positive w = 0; w < array_count(widths); w++)
                         {
-                                positive used = 1, cells = 1;
+                                positive used = widths[w] ? 1 : 0, cells = used;
                                 expected[0] = ' ';
                                 edit_prompt_length = lengths[n];
                                 edit_columns = widths[w];
@@ -11344,7 +11344,9 @@ static positive check_render_reuse()
                                 //      a DEL, a C1 control (in UTF-8 or
                                 //      alone) and what is not UTF-8 are one
                                 //      question mark each; nothing else moves.
-                                for (positive at = 0; at < lengths[n];)
+                                //      The bar is cut where the first
+                                //      character does not fit its width.
+                                for (positive at = 0; used && at < lengths[n];)
                                 {
                                         positive taken;
                                         p32 value;
@@ -11353,13 +11355,16 @@ static positive check_render_reuse()
                                                                 &value) &&
                                                     value >= 0x20 && value != 0x7f &&
                                                     (value < 0x80 || value >= 0xa0);
+                                        positive width = safe ? unicode_width(value, UNICODE_WIDTH_TERMINAL) : 1;
 
+                                        if (cells + width > widths[w])
+                                                break;
                                         if (safe)
                                                 for (positive k = 0; k < taken; k++)
                                                         expected[used++] = edit_prompt_text[at + k];
                                         else
                                                 expected[used++] = '?';
-                                        cells++;
+                                        cells += width;
                                         at += taken;
                                 }
                                 while (cells < widths[w])
@@ -12482,6 +12487,13 @@ b32 main()
                         for (unsigned int r = 0; r < ROWS; r++)
                                 say_row(r);
                 }
+                else if (string_compare(verb, (string_address) "full") == 0)
+                {
+                        //      Every row drawn again, whatever the editor thinks the terminal has.
+                        edit_repaint_all();
+                        edit_draw();
+                        settle();
+                }
                 else if (string_compare(verb, (string_address) "cursor") == 0)
                 {
                         edit_draw();
@@ -12931,6 +12943,9 @@ group gutter
 same 'numbers'         '[1 ab]|[2 cd]|[3 ef]' 40 6 text 'ab\ncd\nef' row 0 row 1 row 2
 same 'past the end'    '[~]'            40 6 text 'ab' row 1
 same 'status line'     '0,7'            40 6 text 'ab' attr 5,0
+#       A bar wider than the window is cut at its edge: past it the terminal
+#       wrapped on the bottom row, scrolling the text up under the editor.
+same 'a long name keeps the rows' '[1 ab]|[2 cd]|[~]' 20 6 path 'a-name-longer-than-the-window.txt' text 'ab\ncd' row 0 row 1 row 2
 
 group scroll
 #       Six rows is five of text, so a seventh line is off the bottom and the
@@ -13099,6 +13114,46 @@ group rows
 same 'one row typed'   '1'              40 6 text 'ab\ncd\nef' draw keys 'X' painted
 same 'first draw is all' '5'            40 6 text 'ab\ncd\nef' draw painted
 same 'nothing changed' '0'              40 6 text 'ab\ncd\nef' draw draw painted
+
+group redraw
+#       A row is drawn only when its bytes changed, so a stream of keystrokes
+#       drawn a key at a time has to leave the screen a repaint of every row
+#       draws of the same buffer: a row skipped wrongly, or a scroll the
+#       editor did not know the terminal made, is a row that differs. Streams
+#       of forty keys from a seed (MINSTD, the same on every machine): typing,
+#       wide and combining characters, motion, selection, the clipboard, undo
+#       and redo, carets, the prompt.
+redraw_text='alpha beta\ngamma\n\tdelta epsilon zeta eta theta iota\nkappa\nlambda mu\nnu\nxi omicron\npi'
+redraw_bad=0
+redraw_first=
+for redraw_seed in $(seq 1 200); do
+        redraw_args=$(awk -v seed="$redraw_seed" 'BEGIN {
+                n = split("a b c x y z 0 1 \\n \\n <bs> <bs> <del> <left> <right> <up> <down> <home> <end> " \
+                          "<pgup> <pgdn> <tab> <s-left> <s-right> <s-up> <s-down> <c-left> <c-right> <c-home> " \
+                          "<c-end> <a-up> <a-down> <esc> ^z ^y ^c ^x ^v ^a ^l ^g \\xe4\\xb8\\x80 e\\xcc\\x81", key, " ")
+                x = seed * 7919 % 2147483647
+                for (i = 0; i < 40; i++) {
+                        x = x * 48271 % 2147483647
+                        printf "keys %s ", key[x % n + 1]
+                }
+        }')
+        # shellcheck disable=SC2086
+        redraw_out=$(${TEST_RUNNER:-} "$work/edit" 20 6 text "$redraw_text" $redraw_args dump full dump 2>&1)
+        redraw_status=$?
+        redraw_drawn=$(printf '%s\n' "$redraw_out" | sed -n '1,6p' | tr '\n' '|')
+        redraw_whole=$(printf '%s\n' "$redraw_out" | sed -n '7,12p' | tr '\n' '|')
+        if [ "$redraw_status" != 0 ] || [ "$redraw_drawn" != "$redraw_whole" ] ||
+           [ "$(printf '%s\n' "$redraw_out" | wc -l)" -lt 12 ]; then
+                redraw_bad=$((redraw_bad + 1))
+                [ -n "$redraw_first" ] ||
+                        redraw_first="seed $redraw_seed status $redraw_status: drawn $redraw_drawn repainted $redraw_whole keys $redraw_args"
+        fi
+done
+if [ "$redraw_bad" = 0 ]; then
+        won
+else
+        lost "drawn a key at a time" "$redraw_bad of 200 differ from a repaint; $redraw_first"
+fi
 
 #
 #       The file, back out again.

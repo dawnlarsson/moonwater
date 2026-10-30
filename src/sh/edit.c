@@ -1847,6 +1847,7 @@ static p8 edit_status_bytes[EDIT_COLUMNS_MAX * 4];
 static byte_store edit_status_output = {
     edit_status_bytes, sizeof(edit_status_bytes), 0};
 static positive edit_status_cells;
+static bool edit_status_cut; // a character did not fit, and nothing after it is put either
 
 static fn edit_status_put(address_any data, positive length)
 {
@@ -1864,13 +1865,24 @@ static fn edit_status_put(address_any data, positive length)
                                         address_of value) &&
                             value >= 0x20 && value != 0x7f &&
                             (value < 0x80 || value >= 0xa0);
+                positive cells = safe ? unicode_width(value, UNICODE_WIDTH_TERMINAL) : 1;
 
+                //      The bar is the bottom row and no wider: past the last
+                //      column the terminal wraps, and a wrap on the bottom
+                //      row scrolls every row of text up under an editor that
+                //      thinks each is where it drew it. Cut where the first
+                //      character does not fit, and nothing after it put.
+                if (edit_status_cut || edit_status_cells + cells > edit_columns)
+                {
+                        edit_status_cut = true;
+                        return;
+                }
                 if (!byte_store_append_exact(address_of edit_status_output,
                                              safe ? (address_any)(text + at)
                                                   : (address_any)"?",
                                              safe ? used : 1))
                         return;
-                edit_status_cells++;
+                edit_status_cells += cells;
                 at += used;
         }
 }
@@ -1886,6 +1898,7 @@ static fn edit_status_build()
 {
         edit_status_output.used = 0;
         edit_status_cells = 0;
+        edit_status_cut = false;
 
         if (edit_prompt_active)
         {
