@@ -24076,7 +24076,13 @@ out.append(("with Chromium added by apt", "yes" if added == 0 else "no, status %
 linked, _ = run("ls -l /bin/chromium /bowls/bin/chromium 2>&1 | grep -c chromium", 30)
 out.append(("what apt added has a launcher and a link in /bin, with nobody having typed its name",
             last(linked) or "no answer", "2"))
-bus, _ = run("bowl bus 2>&1 | tail -1; dbus-send --system --print-reply --dest=org.freedesktop.DBus "
+#       Through a pipe, as a person reads it: the relay the verb leaves behind outlives it, and one that kept the
+#       pipe it was started on held the reader (tail) for good, the shell with it, and every row after this one.
+started, started_status = run("bowl bus 2>&1 | tail -1", 120)
+out.append(("bowl bus returns when its output is a pipe, with the relay it leaves running",
+            "yes" if started_status == 0 and "the system bus is running" in started else "no, status %d: %s" % (started_status, last(started)[-100:]),
+            "yes"))
+bus, _ = run("dbus-send --system --print-reply --dest=org.freedesktop.DBus "
              "/org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 | tail -5", 120)
 out.append(("the system bus is on /run/dbus/system_bus_socket and answers ListNames",
             "yes" if '"org.freedesktop.DBus"' in bus else "no: " + bus[-200:], "yes"))

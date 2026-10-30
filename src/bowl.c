@@ -7443,7 +7443,23 @@ static fn bowl_bus_relay(bipolar client, bipolar upstream)
 /* The socket the clients open, for as long as the machine is up. */
 static DEAD_END fn bowl_bus_accept(bipolar listener)
 {
+        bipolar nowhere = system_open_at_mode(AT_FDCWD, "/dev/null",
+                                              FILE_READ_WRITE | O_CLOEXEC, 0);
+
         system_call(syscall(setsid));
+
+        /* It outlives the command that started it, and it was started with
+           that command's input and output: left on a pipe (bowl bus | tail
+           -1) it holds the pipe open for good and the reader never sees the
+           end, left on a terminal it holds the terminal. The daemon the
+           configuration forks lets go of them the same way. */
+        if (nowhere > 2)
+        {
+                system_duplicate(nowhere, 0, 0);
+                system_duplicate(nowhere, 1, 0);
+                system_duplicate(nowhere, 2, 0);
+                system_close(nowhere);
+        }
 
         for (;;)
         {
