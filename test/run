@@ -11780,6 +11780,13 @@ static positive check_line_ranges()
                                 if (order[row] == original[i].anchor_line - anchor_boundary)
                                         mapped[i].anchor_line = row + anchor_boundary;
                         }
+                        //      A boundary after rows that are now the last is
+                        //      the end of the file: the last row's end, not a
+                        //      row past it.
+                        if (caret_boundary && mapped[i].line >= total)
+                                mapped[i].line = total - 1, mapped[i].column = 2;
+                        if (anchor_boundary && mapped[i].anchor_line >= total)
+                                mapped[i].anchor_line = total - 1, mapped[i].anchor_column = 2;
                 }
                 if (original_count == 2 && (mapped[0].line > mapped[1].line ||
                         (mapped[0].line == mapped[1].line && mapped[0].column > mapped[1].column)))
@@ -12861,6 +12868,11 @@ same 'up'              'cd|ab'          40 6 text 'ab\ncd' keys '<down><a-up>' b
 same 'caret goes too'  '1,0'            40 6 text 'ab\ncd' keys '<a-down>' carets
 same 'at the bottom'   'ab|cd'          40 6 text 'ab\ncd' keys '<down><a-down>' buffer
 same 'undone whole'    'ab|cd'          40 6 text 'ab\ncd' keys '<a-down>^z' buffer
+#       A selection that ends at the start of the next line, its line moved
+#       to be the last: the end is the end of the file. It was put one line
+#       past the last, and the next key that edited there crashed the editor.
+same 'a selection to the next line, moved last' '2,2' 40 6 text 'ab\ncd' keys '<c-end>\n<up><end><s-down><a-down>' carets
+same 'and a delete there' 'ab||cd'      40 6 text 'ab\ncd' keys '<c-end>\n<up><end><s-down><a-down><del>' buffer
 
 group copy
 same 'down'            'ab|ab|cd'       40 6 text 'ab\ncd' keys '<s-a-down>' buffer

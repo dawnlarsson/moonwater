@@ -2806,6 +2806,15 @@ static struct edit_place edit_line_shift(struct edit_place place, bool boundary,
         else if (!copy && line == (up ? first - 1 : last + 1))
                 line = up ? last : first;
         place.line = line + boundary;
+        /* A boundary after a block that is now the end of the file is the
+           start of no line: it is the end of the file, the end of the
+           block's last line. Left one past the last line, the next edit at
+           the caret spliced lines that are not there. */
+        if (boundary && edit_line_count && place.line >= edit_line_count)
+        {
+                place.line = edit_line_count - 1;
+                place.column = edit_lines[place.line].length;
+        }
         return place;
 }
 
