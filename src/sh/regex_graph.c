@@ -2310,7 +2310,7 @@ static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, b
                                (program->flags & RX_IGNORE_CASE) != 0,
                                hints->literal_anchors))
                 return RX_NO_MATCH;
-        if (hints->extra_length && !start && !match->literal_known && !match->work_yield &&
+        if (hints->extra_length && !start && !match->work_yield &&
             !text_literal_find(bytes, length, 0, (string_address)hints->extra, hints->extra_length,
                                (program->flags & RX_IGNORE_CASE) != 0, hints->extra_anchors))
                 return RX_NO_MATCH;

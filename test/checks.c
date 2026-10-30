@@ -134187,6 +134187,33 @@ b32 main(void)
                         }
                 }
         }
+        /*
+                A line without the second string a back-reference pattern
+                cannot match without is no match, also when the caller (grep
+                finding the longest string in a block) has already found the
+                first: (a+)\1+b over a line of a thousand a's walked past
+                the graph's ceiling and grep said "regular expression too
+                complex" where GNU answers at once. The first string is the
+                a's, the second is the b.
+        */
+        {
+                static p8 line[5000];
+                memory_fill(line, 'a', sizeof(line));
+                regex_pool.used = (rx_mark){0};
+                regex_program program;
+                bool compiled = rx_compile(&regex_pool, &program, "(a+)\\1+b", true, false, true,
+                                           REGEX_POLICY_DEFAULT);
+                proof_check(compiled);
+                for (b32 known = 0; compiled && known < 2; known++)
+                {
+                        rx_match found = regex_match;
+                        found.work_limit = 100000;
+                        found.literal_known = known;
+                        proof_check(program.hints->extra_length == 1 && program.hints->extra[0] == 'b');
+                        proof_check(rx_find(&found, &program, REGEX_FIRST, false, line, sizeof(line), 0) ==
+                                    RX_NO_MATCH);
+                }
+        }
         string_format(log, "%p checks, %p failures\n", proof_checks, proof_failures);
         log_flush();
         return proof_failures != 0;
