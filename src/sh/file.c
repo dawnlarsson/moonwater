@@ -39116,52 +39116,6 @@ static fn cp_pair(string_address source, string_address destination)
                         file_backup_kind = 0;
                 }
         }
-        positive source_flags =
-            kind == MODE_DIRECTORY
-                ? FILE_READ | O_DIRECTORY | O_CLOEXEC
-                : kind == MODE_LINK || cp_hard || cp_symbolic ||
-                          cp_attributes_only ||
-                          (cp_recursive && !cp_copy_contents &&
-                           kind != MODE_FILE)
-                      ? O_PATH | O_CLOEXEC
-                      : FILE_READ | (kind == MODE_FILE ? O_NONBLOCK : 0);
-        if (!follow)
-                source_flags |= O_NOFOLLOW;
-        //      What the descriptor says of itself, read once by the open that
-        //      proved it is the name's inode, is what the copy is told.
-        file_facts pinned_facts;
-        source_pinned = file_open_same_facts(
-            source_directory, source_leaf, address_of source_facts,
-            source_flags, address_of pinned_facts);
-        //      A directory that will not open is still made, empty, with the
-        //      mode it had: file_copy_one opens it again and says so.
-        bool blind = kind == MODE_DIRECTORY && source_pinned == -ERROR_ACCESS;
-
-        if (source_pinned < 0 && !blind)
-        {
-                //      A file that is there but will not open is GNU's open
-                //      of the source, after the arrow -v writes for it.
-                bool unopened = kind != MODE_DIRECTORY && !(source_flags & O_PATH) &&
-                                source_pinned == -ERROR_ACCESS;
-
-                if (unopened && cp_loud)
-                        file_backup_told(source, destination, (string_address) "'",
-                                         (string_address) "' -> '");
-                if (unopened)
-                        string_format(log_error,
-                                      "cp: cannot open %w for reading: %s\n",
-                                      writer_shell_quoted_name, source,
-                                      file_reason(source_pinned));
-                else
-                        string_format(log_error,
-                                      kind == MODE_DIRECTORY
-                                          ? "cp: cannot access '%w': %s\n"
-                                          : "cp: cannot stat '%w': %s\n",
-                                      writer_terminal_quoted_name, source,
-                                      file_reason(source_pinned));
-                cp_status = 1;
-                goto finish;
-        }
         // As file_copy_one looks, so the decision and the copy agree.
         positive destination_length = string_length(destination);
         bool destination_slashed =
@@ -39284,6 +39238,61 @@ static fn cp_pair(string_address source, string_address destination)
                 goto finish;
         }
 
+        /*
+                The source is opened when the copy is known to be wanted, as
+                GNU opens it: after the destination has been weighed (-n,
+                -u, -i and a name already there say no without ever touching
+                the source) and before the backup is made. A source that
+                cannot be read, or a fifo nobody writes to, is no obstacle to
+                a copy that is skipped, and a backup is not made for one that
+                cannot be opened.
+        */
+        positive source_flags =
+            kind == MODE_DIRECTORY
+                ? FILE_READ | O_DIRECTORY | O_CLOEXEC
+                : kind == MODE_LINK || cp_hard || cp_symbolic ||
+                          cp_attributes_only ||
+                          (cp_recursive && !cp_copy_contents &&
+                           kind != MODE_FILE)
+                      ? O_PATH | O_CLOEXEC
+                      : FILE_READ | (kind == MODE_FILE ? O_NONBLOCK : 0);
+        if (!follow)
+                source_flags |= O_NOFOLLOW;
+        //      What the descriptor says of itself, read once by the open that
+        //      proved it is the name's inode, is what the copy is told.
+        file_facts pinned_facts;
+        source_pinned = file_open_same_facts(
+            source_directory, source_leaf, address_of source_facts,
+            source_flags, address_of pinned_facts);
+        //      A directory that will not open is still made, empty, with the
+        //      mode it had: file_copy_one opens it again and says so.
+        bool blind = kind == MODE_DIRECTORY && source_pinned == -ERROR_ACCESS;
+
+        if (source_pinned < 0 && !blind)
+        {
+                //      A file that is there but will not open is GNU's open
+                //      of the source, after the arrow -v writes for it.
+                bool unopened = kind != MODE_DIRECTORY && !(source_flags & O_PATH) &&
+                                source_pinned == -ERROR_ACCESS;
+
+                if (unopened && cp_loud)
+                        file_backup_told(source, destination, (string_address) "'",
+                                         (string_address) "' -> '");
+                if (unopened)
+                        string_format(log_error,
+                                      "cp: cannot open %w for reading: %s\n",
+                                      writer_shell_quoted_name, source,
+                                      file_reason(source_pinned));
+                else
+                        string_format(log_error,
+                                      kind == MODE_DIRECTORY
+                                          ? "cp: cannot access '%w': %s\n"
+                                          : "cp: cannot stat '%w': %s\n",
+                                      writer_terminal_quoted_name, source,
+                                      file_reason(source_pinned));
+                cp_status = 1;
+                goto finish;
+        }
         file_backup_source = source;
         file_backup_source_facts = address_of source_facts;
         if (!refuse_dangling &&

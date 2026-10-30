@@ -12024,6 +12024,39 @@ def files_chmod_link_operand(farm):
     return passed, total, notes
 
 
+def files_cp_skip_before_open(farm):
+    """cp weighs the destination before it opens the source: -n, -u and
+    --update=none skip a name that is there without ever touching the source,
+    so a source nobody can read is no error when the copy is skipped (the
+    reference answers 0 and says nothing), and one that is not skipped is the
+    open that fails. A fifo nobody writes to is the same case, but would hang
+    the check, so it is the unreadable file that stands for it."""
+    def setup(root):
+        (root / "src").mkdir()
+        (root / "dst").mkdir()
+        (root / "src" / "a").write_text("a\n")
+        (root / "src" / "a").chmod(0)
+        (root / "dst" / "a").write_text("old\n")
+        (root / "src" / "n").write_text("n\n")
+        (root / "src" / "n").chmod(0)
+
+    def modes(root):
+        return files_tree_modes(root) + [(p.name, p.read_text()) for p in sorted((root / "dst").iterdir())]
+
+    passed = total = 0
+    notes = []
+    for args in (["-n", "src/a", "dst"], ["-u", "src/a", "dst"], ["--update=none", "src/a", "dst"],
+                 ["--update=none-fail", "src/a", "dst"], ["-n", "src/a", "src/n", "dst"],
+                 ["src/a", "dst"], ["-b", "src/a", "dst"], ["-u", "src/n", "dst"]):
+        answers = files_pair(farm, "cp", args, setup, collect=modes)
+        total += 1
+        if answers[0] == answers[1]:
+            passed += 1
+        else:
+            notes.append(f"cp {' '.join(args)}: reference {answers[0][0]} {answers[0][2]!r} ours {answers[1][0]} {answers[1][2]!r}")
+    return passed, total, notes
+
+
 def files_write_error_stdout(farm):
     """A write error on standard output: the reference says what failed and
     exits 1. Each tool here writes to /dev/full and must say so on standard
@@ -12261,7 +12294,7 @@ FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, fi
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
                 files_address_cap, files_kill_bash_word, files_tar_short_archive, files_tar_utf8_names, files_find_write_error, files_ls_address_cap,
                 files_floor_address_cap, files_daystart_zones, files_statfs_names,
-                files_deep_walks, files_parents_deep, files_chmod_link_operand, files_write_error_stdout,
+                files_deep_walks, files_parents_deep, files_chmod_link_operand, files_cp_skip_before_open, files_write_error_stdout,
                 files_exec_refusals, files_regex_switch,
                 files_codec_operands, files_mode_words, files_chmod_unreadable_report,
                 files_whereis_directories_option, files_du_long_name_list)
