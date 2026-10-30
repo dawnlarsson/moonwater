@@ -1366,6 +1366,12 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         for (unsigned int at = 0; at < WINDOWS_NAME; at++)
                 table->name[row][at] = 0;
         __atomic_store_n(&table->moved[row], 0u, __ATOMIC_RELEASE);
+        // A popup's parent and anchor were the menu's that last had the row: kept, the next window there was put at
+        // the menu's anchor as a popup of its window, with no tab and never the keys. A watch of the clipboard too
+        // is its program's; the serials only count up, and the compositor reads them against what it last saw.
+        table->popup_parent[row] = table->popup_flags[row] = 0;
+        table->popup_x[row] = table->popup_y[row] = table->popup_w[row] = table->popup_h[row] = 0;
+        __atomic_store_n(&table->clip_watch[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
 }

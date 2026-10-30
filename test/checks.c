@@ -58142,6 +58142,16 @@ static fn windows_header(void)
         check("a reset row has no placement, no name to its last byte and no move left",
               !table.place[3] && !table.place_x[3] && !table.place_screen[3] && !table.name[3][0] && !table.name[3][14] &&
                   !table.moved[3]);
+
+        // A menu had the row: the window that takes it next is no popup of the menu's window, at the menu's anchor.
+        table.popup_parent[3] = 2;
+        table.popup_x[3] = 273, table.popup_y[3] = 248, table.popup_w[3] = 9, table.popup_h[3] = 9;
+        table.popup_flags[3] = WINDOW_POPUP_POINT;
+        table.clip_watch[3] = 1;
+        windows_reset_row(&table, 3);
+        check("a reset row is no popup: no parent, anchor or flags left from the menu that had it, and no clipboard watch",
+              !table.popup_parent[3] && !table.popup_x[3] && !table.popup_y[3] && !table.popup_w[3] && !table.popup_h[3] &&
+                  !table.popup_flags[3] && !table.clip_watch[3]);
 }
 
 /*
