@@ -8124,12 +8124,15 @@ static void compositor_magnify(positive now)
 }
 
 // The pointer, to a window: where it is in the window's picture.
+// Told only when the place went in the ring: one a full ring refused is not taken as told, or the wheel after the
+// program has caught up (compositor_wheel) would turn at the place it had before.
 static void compositor_pointer_to(int row)
 {
-        compositor.told_row = row;
-        compositor.told_x = compositor.pointer_x - compositor.x[row];
-        compositor.told_y = compositor.pointer_y - compositor.y[row];
-        compositor_post(row, WINDOW_EVENT_MOTION, 0, compositor.told_x, compositor.told_y);
+        int x = compositor.pointer_x - compositor.x[row], y = compositor.pointer_y - compositor.y[row];
+
+        compositor.told_row = compositor_post(row, WINDOW_EVENT_MOTION, 0, x, y) ? row : COMPOSITOR_NONE;
+        compositor.told_x = x;
+        compositor.told_y = y;
 }
 
 static void compositor_motion(void)

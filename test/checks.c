@@ -116971,6 +116971,30 @@ static void check_compositor_wheel(void)
     }
     table->event_tail[1] = table->event_head[1];
 
+    /*
+            A place the ring had no room for (full, its last event not a motion) is not taken as told: the wheel after
+            the program has read the ring tells it first, or the program turns it where the pointer was before.
+    */
+    {
+        unsigned int head;
+
+        compositor_pointer_to(1);
+        table->event_tail[1] = table->event_head[1];
+        for (int at = 0; at < WINDOWS_EVENTS; at++)
+            compositor_post(1, WINDOW_EVENT_KEY, 0, 30, 0);
+        compositor.pointer_x = 90;
+        compositor_pointer_to(1);
+        table->event_tail[1] = head = table->event_head[1];
+        wheel_notch(1);
+        compositor_input_read(0);
+        check("wheel: a place a full ring had no room for is told before the next turn, not taken as told",
+              table->event_type[1][head % WINDOWS_EVENTS] == WINDOW_EVENT_MOTION &&
+                  table->event_a[1][head % WINDOWS_EVENTS] == 40 &&
+                  table->event_type[1][(head + 1) % WINDOWS_EVENTS] == WINDOW_EVENT_WHEEL);
+        table->event_tail[1] = table->event_head[1];
+        compositor.pointer_x = 60;
+    }
+
     /* With no window under the pointer, and when the kernel had to drop what was not read in time. */
     compositor.pointer_x = 5;
     compositor.pointer_y = 5;
