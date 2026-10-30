@@ -6469,6 +6469,48 @@ static fn ui_text_set(struct ui_text address_to t, const p8 address_to text, pos
 }
 
 /*
+        Composition, for an input method to come: the text it is making is shown at the primary caret, underlined, and
+        is no part of the document until it is committed (typed in, one undo of its own) or cancelled. What is shown is
+        whole UTF-8 characters with no control among them (C0, DEL, C1), at most the room it has; anything else is
+        refused and the composition left as it was. Answers whether it was taken.
+*/
+static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_to text, positive length)
+{
+        positive at = 0;
+
+        if (length >= sizeof(t->preedit) || t->read_only)
+                return false;
+        while (at < length)
+        {
+                p32 code;
+                positive size = doc_decode(text + at, length - at, &code);
+
+                if (!size || (code & DOC_INVALID) || code < 0x20 || (code >= 0x7f && code < 0xa0))
+                        return false;
+                at += size;
+        }
+        memory_copy(t->preedit, text, length);
+        t->preedit_length = (p32)length;
+        t->blink_at = clock_monotonic_nanoseconds(), t->caret_off = false;
+        return true;
+}
+
+// The composition typed in at the carets, as if it had been typed, and gone; or gone with nothing typed.
+static p32 SPARE ui_text_preedit_end(struct ui_text address_to t, b32 commit)
+{
+        p64 version = t->doc.version;
+
+        if (commit && t->preedit_length && !t->read_only)
+        {
+                t->doc.now = clock_monotonic_nanoseconds();
+                doc_type(&t->doc, t->preedit, t->preedit_length);
+        }
+        t->preedit_length = 0;
+        t->blink_at = clock_monotonic_nanoseconds(), t->caret_off = false;
+        return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+}
+
+/*
         A line laid out: each cluster's offset in the document and its left edge, in device pixels from the line's start,
         the last entry the line's end. The display text a line is drawn as goes into shown: a tab as spaces, a control
         as its control picture, a byte that is not UTF-8 as U+FFFD. Answers how many clusters.

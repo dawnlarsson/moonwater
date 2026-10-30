@@ -125801,6 +125801,43 @@ static fn text_widget_check(string_address inter, string_address mono)
         }
         ui_text_close(&field);
 
+        // Composition for an input method: shown at the caret and no part of the text until committed (one edit of
+        // its own) or cancelled; a control in it (ESC, C1's CSI, a line end) is refused, and so is text past its room.
+        {
+                const unsigned int address_to picture = (const unsigned int address_to)pixels;
+                positive inked = 0, bare = 0;
+                p8 typed[16];
+
+                ui_text_open(&field, UI_TEXT_FIELD, (const p8 address_to) "ab", 2, ui_text_keymap());
+                doc_select_set(&field.doc, 2, 2);
+                field.focused = true;
+
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+                ui_text_draw(&wui, &field, 10, 300, 300, 30, 0);
+                for (int y = 300; y < 330; y++)
+                        for (int x = 10; x < 310; x++)
+                                bare += picture[(positive)y * 800 + (positive)x] != 0;
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+                check("composition: whole characters with no control are taken", ui_text_preedit(&field, (const p8 address_to) "n\xc3\xaf", 3));
+                ui_text_draw(&wui, &field, 10, 300, 300, 30, 0);
+                for (int y = 300; y < 330; y++)
+                        for (int x = 10; x < 310; x++)
+                                inked += picture[(positive)y * 800 + (positive)x] != 0;
+                check("composition: refused with ESC, a C1 control, a line end, or past its room",
+                      !ui_text_preedit(&field, (const p8 address_to) "a\x1b[201~", 7) && !ui_text_preedit(&field, (const p8 address_to) "a\xc2\x9b", 3) &&
+                      !ui_text_preedit(&field, (const p8 address_to) "a\nb", 3) &&
+                      !ui_text_preedit(&field, (const p8 address_to) "0123456789012345678901234567890123456789012345678901234567890123456789", 70) &&
+                      field.preedit_length == 3);
+                check("composition: drawn, and no part of the text", inked > bare && doc_length(&field.doc) == 2);
+                check("composition: committed it is typed in at the caret, and gone", ui_text_preedit_end(&field, true) == UI_TEXT_CHANGED &&
+                      ui_text_string(&field, typed, sizeof(typed)) == 5 && !memory_compare(typed, "abn\xc3\xaf", 5) && !field.preedit_length);
+                ui_text_preedit(&field, (const p8 address_to) "zz", 2);
+                check("composition: cancelled nothing is typed", ui_text_preedit_end(&field, false) == UI_TEXT_MOVED && doc_length(&field.doc) == 5 &&
+                      !field.preedit_length);
+                ui_text_close(&field);
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+        }
+
         // A code view: columns on whole cells, a tab to its stop, a wide character two cells.
         ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "int x;\n\tif (\xe4\xb8\xad) {\n}\n", 22, ui_text_keymap());
         view.doc.language = DOC_LANGUAGE_C;
