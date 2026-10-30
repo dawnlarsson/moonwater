@@ -51135,17 +51135,34 @@ def harness_moonwater_cli_fuzz(argv):
 
 
 def harness_moonwater_lock(argv):
-    """A moonwater command that waits for the machine's lock lets go at once.
+    """A moonwater command that waits for the machine's lock sleeps until the
+    holder lets go, and is woken by the letting go however the holder goes.
 
     In the cli harness's sandbox a holder takes /run/moonwater/lock and keeps
-    it for 280 to 302 ms (the hold moves, so the waiter's poll phase does
-    too); `moonwater bind init remove zzz` starts 50 ms in, takes the lock
-    only after the holder lets go, refuses (the line is not there) and writes
-    nothing. The lag is the time from the holder's release to the command's
-    exit: the wake and the command's own work after the lock, which is the
-    same on every run. A waiter that polls every 10 ms adds its phase to
-    that, a median near 5 ms on the box; one that hears the holder's close
-    adds almost nothing. The median of fifteen has to come in under the bound.
+    it for 280 to 302 ms; `moonwater bind init remove zzz` starts at once,
+    takes the lock only after the holder lets go, refuses (the line is not
+    there) and writes nothing. What is judged is what the waiter does, not how
+    long the box took to run it:
+
+      - While the lock is held the waiter is asleep. Its voluntary context
+        switches from 120 ms in to the release are counted: one that sleeps in
+        the kernel until the release has none, a 10 ms poll has about sixteen
+        and a 2 ms one about eighty.
+      - A holder that goes without unlocking (killed, or ended with the lock
+        held, so the kernel closes the file) wakes it too. The kernel tells a
+        watch of the file about the close before it drops the lock, and a
+        waiter that slept on such a watch tried while the lock was still there
+        and slept on to its thirty seconds: 17 of 1,500 on the box. Here the
+        holder goes at the idle policy on the waiter's own CPU, so the waiter
+        runs between the close and the lock's going every time (40 of 40 slept
+        on, on the box, before the waiter slept in flock), and has to be done
+        within 5 s of the holder.
+      - A holder that keeps the lock past the thirty seconds has the command
+        refused, in words, not before them, with nothing kept.
+
+    The lags from release to exit are printed and not judged: a median held
+    under 2 ms measured the box's load (3.6 ms on a loaded box, from a waiter
+    the release woke all the same).
     """
     import platform
     import statistics
@@ -51161,27 +51178,78 @@ def harness_moonwater_lock(argv):
         print("moonwater lock: NOT RUN -- no unprivileged user namespaces here")
         return 2
 
-    #       The bound sits between what a 10 ms poll costs (a median of 4.6 to
-    #       5.0 ms over fifteen, on the box) and what a watch costs (a median
-    #       of 0.3 ms): the parent fails it and the watch passes it.
-    bound_ms = 2.0
     script = """python3 - <<'PYEOF'
 import fcntl, os, subprocess, time
 os.makedirs("/run/moonwater", exist_ok=True)
+WAITER = ["/tmp/moonwater", "bind", "init", "remove", "zzz"]
+def switches(pid):
+    try:
+        with open("/proc/%d/status" % pid) as status:
+            for line in status:
+                if line.startswith("voluntary_ctxt_switches:"):
+                    return int(line.split()[1])
+    except OSError:
+        return None
 for trial in range(15):
     hold = 0.280 + ((trial * 37) % 23) / 1000
     held = open("/run/moonwater/lock", "a+")
     fcntl.flock(held, fcntl.LOCK_EX)
-    child = subprocess.Popen(["/tmp/moonwater", "bind", "init", "remove", "zzz"],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    began = time.monotonic()
+    child = subprocess.Popen(WAITER, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
-    time.sleep(hold)
+    time.sleep(max(0, 0.120 - (time.monotonic() - began)))
+    first = switches(child.pid)
+    time.sleep(max(0, hold - (time.monotonic() - began)))
+    last = switches(child.pid)
     released = time.time_ns()
     fcntl.flock(held, fcntl.LOCK_UN)
     held.close()
     code = child.wait()
     ended = time.time_ns()
-    print("LAG %d %.3f" % (code, (ended - released) / 1e6))
+    print("LAG %d %.3f %s" % (code, (ended - released) / 1e6,
+                              "?" if first is None or last is None else last - first), flush=True)
+everywhere = os.sched_getaffinity(0)
+os.sched_setaffinity(0, {min(everywhere)})
+for trial in range(10):
+    ready, told = os.pipe()
+    holder = os.fork()
+    if holder == 0:
+        os.close(ready)
+        handle = os.open("/run/moonwater/lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        os.write(told, b"x")
+        time.sleep(0.1)
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+        os._exit(0)
+    os.close(told)
+    os.read(ready, 1)
+    os.close(ready)
+    child = subprocess.Popen(WAITER, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    os.waitpid(holder, 0)
+    gone = time.monotonic()
+    try:
+        code = child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+        code = "asleep"
+    print("GONE %s %.3f" % (code, time.monotonic() - gone), flush=True)
+os.sched_setaffinity(0, everywhere)
+def kept():
+    return sorted((os.path.join(top, name), open(os.path.join(top, name), "rb").read())
+                  for top, _, names in os.walk("/root") for name in names)
+before = kept()
+held = open("/run/moonwater/lock", "a+")
+fcntl.flock(held, fcntl.LOCK_EX)
+began = time.monotonic()
+child = subprocess.Popen(["/tmp/moonwater", "bind", "init", "add", "zzz"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+said = child.communicate(timeout=90)[0]
+took = time.monotonic() - began
+fcntl.flock(held, fcntl.LOCK_UN)
+held.close()
+print("LONG %d %.1f %d %r" % (child.returncode, took, kept() == before, said[-200:]), flush=True)
 PYEOF
 """
     checks = Checks()
@@ -51195,15 +51263,26 @@ PYEOF
         laps = [line.split() for line in lines if line.startswith("LAG ")]
         lags = [float(lap[2]) for lap in laps]
         codes = [int(lap[1]) for lap in laps]
+        woken = [lap[3] for lap in laps]
         check(finished and len(lags) == 15 and set(codes) == {1},
               "the waiter gets the lock after the holder lets go and is refused", (finished, codes, lines[-4:]))
+        check(len(woken) == 15 and all(count.isdigit() and int(count) <= 3 for count in woken),
+              "while the lock is held the waiter sleeps, woken by nothing but the release "
+              "(voluntary switches from 120 ms in to the release, each of fifteen at most 3)", woken)
         if lags:
-            median = statistics.median(lags)
-            print("  lag ms, median %.2f, p90 %.2f, lags %s" % (
-                median, sorted(lags)[int(len(lags) * 0.9)], " ".join("%.2f" % x for x in lags)))
-            check(median < bound_ms,
-                  f"a waiter wakes within {bound_ms:g} ms of the release (median of {len(lags)})",
-                  f"median {median:.2f} ms, lags {sorted(round(x, 2) for x in lags)}")
+            print("  lag ms (not judged), median %.2f, p90 %.2f, lags %s; switches while held %s" % (
+                statistics.median(lags), sorted(lags)[int(len(lags) * 0.9)],
+                " ".join("%.2f" % x for x in lags), " ".join(woken)))
+        gone = [line.split() for line in lines if line.startswith("GONE ")]
+        check(len(gone) == 10 and all(found[1] == "1" for found in gone),
+              "a holder that goes without unlocking wakes the waiter, which takes the lock and is "
+              "refused within 5 s of it (ten holders at the idle policy on the waiter's CPU)",
+              [" ".join(found[1:]) for found in gone] or lines[-4:])
+        long = [line.split(None, 4) for line in lines if line.startswith("LONG ")]
+        check(len(long) == 1 and long[0][1] != "0" and 29.5 <= float(long[0][2]) < 60 and
+              long[0][3] == "1" and "another moonwater command is changing" in long[0][4],
+              "a holder that keeps the lock past thirty seconds has the command refused in words, "
+              "not before, with nothing kept", long or lines[-4:])
 
     return checks.verdict("moonwater lock", "moonwater-lock")
 

@@ -108,7 +108,6 @@ static fn host_prefix(bool label)
 #endif
 #define HOST_LOCK HOST_STATE "/lock"
 #define HOST_LOCK_WAIT_NS ((p64)30000000000)
-#define HOST_LOCK_POLL_NS ((p64)10000000)
 /* How deep the install measures what it will copy before it refuses to guess. */
 #define HOST_MEASURE_DEPTH 128
 
@@ -687,6 +686,85 @@ static bipolar host_lock_open(string_address path)
                                    0600);
 }
 
+/*
+        A lock file held, waited for asleep in the kernel's flock, which the
+        holder's letting go wakes, and ended at a time by an alarm. The machine's
+        lock was waited for on an inotify watch of its file, and a close is heard
+        before the kernel drops the lock it held (__fput says so to the watch,
+        then takes the lock away): a waiter woken by the close of a holder that
+        went without unlocking (a command killed, or ended with the lock held)
+        tried while the lock was still there, and slept until its thirty seconds
+        ran out for a release it had already been told of -- 17 waits of 1,500
+        on the box. The radio and clock locks were polled every two milliseconds
+        for half a second. The alarm rings again every 50 ms after its time, so a
+        ring that lands before the flock is entered is not the only one.
+
+        0 once the lock is held; -EAGAIN when nanoseconds went by first (0 waits
+        for ever); another error as flock gives it. A timer of this process's own
+        (flock -w arms one) is left alone, and the wait is then a poll.
+*/
+#define HOST_TIMER_REAL 0
+#define HOST_LOCK_RING_AGAIN_US 50000
+
+static volatile bool host_lock_rang;
+
+static fn host_lock_ring(b32 number)
+{
+        (void)number;
+        host_lock_rang = true;
+}
+
+static bipolar host_lock_take(bipolar handle, p64 nanoseconds)
+{
+        signal_interval span = {0};
+        signal_interval before = {0};
+        positive previous[4];
+        positive mask = 0;
+        positive unblock = (positive)1 << (SIGALRM - 1);
+        p64 started;
+        bipolar locked;
+
+        if (!nanoseconds)
+        {
+                do
+                        locked = system_call_2(syscall(flock), (positive)handle,
+                                               RADIO_LOCK_EX);
+                while (locked == -EINTR);
+                return locked;
+        }
+
+        if (system_call_2(syscall(getitimer), HOST_TIMER_REAL,
+                          (positive)address_of before) < 0 ||
+            before.first_seconds || before.first_microseconds ||
+            !system_signal_install(SIGALRM, (positive)host_lock_ring,
+                                   SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART,
+                                   SIGNAL_CATCH_RESTORER, previous))
+        {
+                started = system_clock_ns(HOST_CLOCK_BOOTTIME);
+                while ((locked = system_call_2(syscall(flock), (positive)handle,
+                                               RADIO_LOCK_EX | RADIO_LOCK_NB)) == -EAGAIN &&
+                       system_clock_ns(HOST_CLOCK_BOOTTIME) - started < nanoseconds)
+                        host_pause(2000000);
+                return locked;
+        }
+
+        host_lock_rang = false;
+        span.first_seconds = (bipolar)(nanoseconds / 1000000000);
+        span.first_microseconds = (bipolar)((nanoseconds % 1000000000 + 999) / 1000);
+        span.repeat_microseconds = HOST_LOCK_RING_AGAIN_US;
+        system_signal_mask(SIG_UNBLOCK, address_of unblock, address_of mask,
+                           SIGNAL_KERNEL_SET_BYTES);
+        system_call_3(syscall(setitimer), HOST_TIMER_REAL, (positive)address_of span, 0);
+        do
+                locked = system_call_2(syscall(flock), (positive)handle, RADIO_LOCK_EX);
+        while (locked == -EINTR && !host_lock_rang);
+        memory_zero(address_of span, sizeof(span));
+        system_call_3(syscall(setitimer), HOST_TIMER_REAL, (positive)address_of span, 0);
+        system_signal_mask(SIG_SETMASK, address_of mask, null, SIGNAL_KERNEL_SET_BYTES);
+        system_signal_action(SIGALRM, previous, null, SIGNAL_KERNEL_SET_BYTES);
+        return locked == -EINTR ? -EAGAIN : locked;
+}
+
 static bipolar host_lock(string_address path, bool wait)
 {
         bipolar handle = host_lock_open(path);
@@ -704,18 +782,14 @@ static bipolar host_lock(string_address path, bool wait)
         //      A holder that lets go within the half second it takes to notice a wait is
         //      not worth a line: the output of a verb that met another for a moment is the
         //      output of one that did not.
-        for (positive turn = 0; locked == -EAGAIN && wait && turn < 250; turn++)
-        {
-                host_pause(2000000);
-                locked = system_call_2(syscall(flock), (positive)handle,
-                                       RADIO_LOCK_EX | RADIO_LOCK_NB);
-        }
+        if (locked == -EAGAIN && wait)
+                locked = host_lock_take(handle, 500000000);
         if (locked == -EAGAIN && wait)
         {
                 host_say(log, host_label "waiting for another moonwater command to let go of %s\n",
                          path);
                 log_flush();
-                locked = system_call_2(syscall(flock), (positive)handle, RADIO_LOCK_EX);
+                locked = host_lock_take(handle, 0);
         }
         if (locked < 0)
         {
@@ -886,28 +960,13 @@ static bipolar host_held = -1;
 static positive host_held_count;
 
 /*
-        A holder lets go by closing the lock file (after the flock that frees
-        it, and the kernel closes it when the holder exits), and a close after
-        a write or a read is an event on a watch of the file. So a command that
-        cannot have the lock waits on that watch for the time it has left, and
-        not on a timer that wakes every 10 ms to ask again. The watch stands
-        before each try, so a release that lands between a try and the wait is
-        already queued and the wait returns at once. Where no watch can be
-        made, the wait is the poll it was.
+        A command that cannot have the lock sleeps in the kernel's flock until
+        the holder lets go, for HOST_LOCK_WAIT_NS at most (host_lock_take).
 */
-#define HOST_LOCK_EVENTS (0x010 | 0x008 | 0x02000000)
-
-static bipolar host_lock_watch(void)
-{
-        return host_watch_open(HOST_LOCK, HOST_LOCK_EVENTS);
-}
-
 static bool host_acquire(void)
 {
         bipolar handle;
-        bipolar notify = -1;
         bipolar locked;
-        p64 started;
 
         if (host_held_count)
         {
@@ -924,46 +983,18 @@ static bool host_acquire(void)
                 return true;
         }
 
-        // The one descriptor is kept for the whole wait: closing it would be
-        // an event on the watch, and the wait would hear its own try.
-        started = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        for (;;)
+        locked = system_call_2(syscall(flock), (positive)handle,
+                               RADIO_LOCK_EX | RADIO_LOCK_NB);
+        if (locked == -EAGAIN)
+                locked = host_lock_take(handle, HOST_LOCK_WAIT_NS);
+        if (locked == -EAGAIN)
         {
-                locked = system_call_2(syscall(flock), (positive)handle,
-                                       RADIO_LOCK_EX | RADIO_LOCK_NB);
-                if (locked != -EAGAIN)
-                        break;
-
-                if (notify < 0 && (notify = host_lock_watch()) >= 0)
-                        continue;
-
-                p64 waited = system_clock_ns(HOST_CLOCK_BOOTTIME) - started;
-
-                if (waited >= HOST_LOCK_WAIT_NS)
-                {
-                        if (notify >= 0)
-                                system_close((positive)notify);
-                        system_close((positive)handle);
-                        host_say(log_error, host_label "another moonwater command is changing "
-                                                       "this machine's settings or disks; "
-                                                       "try again in a moment\n");
-                        return false;
-                }
-
-                if (notify < 0)
-                {
-                        host_pause(HOST_LOCK_POLL_NS);
-                        continue;
-                }
-
-                p64 left = HOST_LOCK_WAIT_NS - waited;
-                timespec span = {left / 1000000000, left % 1000000000};
-
-                host_watch_wait(notify, address_of span);
+                system_close((positive)handle);
+                host_say(log_error, host_label "another moonwater command is changing "
+                                               "this machine's settings or disks; "
+                                               "try again in a moment\n");
+                return false;
         }
-
-        if (notify >= 0)
-                system_close((positive)notify);
         if (locked < 0)
         {
                 // Not held and not refused: as host_lock's error, the lock is
