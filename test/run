@@ -17365,6 +17365,11 @@ moonwater setup install nvme0n1 > /tmp/refused 2>&1
 no
 printf 'unconfirmed-%s\n' $(( $? + 40 ))
 printf 'typed-%s\n' $(( $(grep -c 'Type nvme0n1 to go on' /tmp/refused) * 7 ))
+moonwater setup install nvme0n1 > /tmp/long 2>&1
+nvme0n1                                                          junk
+printf 'long-refused-%s\n' $(( $? + 40 ))
+printf 'long-asked-%s\n' $(( $(grep -c 'Type nvme0n1 to go on' /tmp/long) * 7 ))
+printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme0n1p') + 30 ))
 moonwater setup install nvme0n1 < /dev/null > /tmp/unasked 2>&1
 printf 'unasked-%s\n' $(( $? + 40 ))
 printf 'asked-%s\n' $(( $(grep -c 'nothing here can be asked' /tmp/unasked) * 7 ))
@@ -17398,7 +17403,9 @@ sed -e "s|LINK_HOST_KEY|$link_host_key|" -e "s|LINK_LAN_SECRET|$link_lan_secret|
 #       the install makes two, in both copies of the GPT. The install takes
 #       the whole disk: the kernel then sees its two partitions and no third,
 #       and sfdisk and e2fsck read the disk after as the install left it.
+live_parts=30
 if command -v sfdisk > /dev/null 2>&1; then
+        live_parts=33
         printf '%s\n' 'label: gpt' \
                 'size=260MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="EFI system partition"' \
                 'size=16MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE, name="Microsoft reserved partition"' \
@@ -17417,6 +17424,14 @@ says live 'status finds no install'     'status-none-7'
 says live 'status finds the stick'      'status-stick-7'
 says live 'a wrong answer typed at the terminal writes nothing' 'unconfirmed-41'
 says live 'the terminal was asked for the disk'"'"'s name' 'typed-7'
+#       Typed at the terminal, which is where a name is asked for: the one
+#       NVMe disk of this boot is nvme0n1 whatever the probe order, so the
+#       line can carry its name (the hostile boot's four controllers cannot
+#       say which is which before the commands are written, and a line piped
+#       in instead is refused before anything is asked).
+says live 'a confirmation that runs past the line is not the name' 'long-refused-41'
+says live 'and it was asked at the terminal'   'long-asked-7'
+says live 'and nothing was erased for it'      "long-parts-$live_parts"
 says live 'a script with nothing to ask is refused' 'unasked-41'
 says live 'and told the word that goes with it' 'asked-7'
 says live 'removable media is refused'  'removable-41'
@@ -17670,9 +17685,6 @@ printf 'small-refused-%s\n' $(( $? + 40 ))
 printf 'small-said-%s\n' $(( $(grep -c "$small would hold" /tmp/small) * 7 ))
 printf 'small-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${small}p") + 30 ))
 rm -f /root/big
-printf '%s%62s\n' "$disk" junk | moonwater setup install $disk > /tmp/long 2>&1
-printf 'long-refused-%s\n' $(( $? + 40 ))
-printf 'long-parts-%s\n' $(( $(ls /sys/class/block | grep -c "^${disk}p") + 30 ))
 eio=$(nvme_of moonwater5)
 moonwater setup install $eio yes > /tmp/eio 2>&1
 printf 'eio-refused-%s\n' $(( $? + 40 ))
@@ -17759,8 +17771,6 @@ says hostile 'the data to keep is more than a GiB' 'big-1700'
 says hostile 'data that does not fit is refused'   'small-refused-41'
 says hostile 'and the refusal says how much'       'small-said-7'
 says hostile 'and the disk is left as it was'      'small-parts-30'
-says hostile 'a confirmation that runs past the line is not the name' 'long-refused-41'
-says hostile 'and nothing was erased for it'       'long-parts-30'
 says hostile 'an install onto a disk whose writes fail stops' 'eio-refused-41'
 says hostile 'and says the table is taken off'     'eio-said-7'
 says hostile 'and the kernel sees no partition on it' 'eio-parts-30'
