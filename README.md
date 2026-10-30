@@ -53,6 +53,11 @@ moonwater window PLACE... COMMAND...   run COMMAND, its first window put where P
                                        center, at X,Y, maximized, fullscreen, screen N,
                                        size WxH, name NAME (what it is remembered by)
 moonwater window move PID|NAME PLACE...  put the windows of a program, or of a name, where PLACE says
+moonwater clipboard [primary]          what the clipboard holds and who copied it, never the text (root)
+moonwater clipboard get [primary]      the copied text: exact to a file or a pipe, escaped to a terminal (root)
+moonwater clipboard set [primary] [TEXT]  copy TEXT, or standard input (root)
+moonwater clipboard clear              empty both selections and the history (root)
+moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel
 moonwater name [NEW|random]            what this machine is called, like space-wizard
@@ -73,6 +78,9 @@ moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer la
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
+moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
+moonwater canvas clipboard history [N|default]  copies the compositor keeps in memory, never on a disk, 0 to 32 [0]
+moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 16 MiB [16]
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]

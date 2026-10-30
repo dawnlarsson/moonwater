@@ -25066,15 +25066,15 @@ static b32 host_window(string_address address_to arguments, positive count)
 }
 
 /*
-        moonwater clipboard [get|set|clear|watch|history] [primary] [TEXT]: the compositor's clipboard from the command
-        line, root's alone -- a script's door to what a person copied is a door to their passwords, and the table it
-        goes through is root's. Alone it says what each selection holds (its length and who copied it, never the text);
-        get writes the text (exactly, to a file or a pipe; to a terminal with its controls escaped); set copies TEXT, or
-        standard input, as a sealed memfd the compositor takes; clear empties both and the history; watch says a line
-        each time something is copied; history lists what the compositor keeps (canvas clipboard history N). What is
-        printed to a terminal is escaped: C0 and C1 controls, DEL and the bidirectional overrides are \xNN or \u{N}, so
-        copied text cannot move the cursor, retitle the window or reorder the line it is read on, and a line of watch is
-        at most CLIP_LINE characters.
+        moonwater clipboard [get|set|clear|watch] [primary] [TEXT]: the compositor's clipboard from the command line,
+        root's alone -- a script's door to what a person copied is a door to their passwords, and the table it goes
+        through is root's. Alone it says what each selection holds (its length and who copied it, never the text); get
+        writes the text (exactly, to a file or a pipe; to a terminal with its controls escaped); set copies TEXT, or
+        standard input, as a sealed memfd the compositor takes, and refuses what is over the limit rather than cutting
+        it; clear empties both and the history (canvas clipboard history N, which nothing reads back yet); watch says a
+        line each time something is copied. What is printed to a terminal is escaped: C0 and C1 controls, DEL and the
+        bidirectional overrides are \xNN or \u{N}, so copied text cannot move the cursor, retitle the window or reorder
+        the line it is read on, and a line of watch is at most CLIP_LINE characters.
 */
 #define HOST_CLIP_LINE 120
 #define HOST_CLIP_WAIT_MS 2000
@@ -25189,7 +25189,7 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
         b32 status = 0;
 
         if (!string_equals(verb, "get") && !string_equals(verb, "set") && !string_equals(verb, "clear") &&
-            !string_equals(verb, "watch") && !string_equals(verb, "history") && count > 2)
+            !string_equals(verb, "watch") && count > 2)
         {
                 if (!string_equals(verb, "primary"))
                         return host_usage();
@@ -25259,8 +25259,12 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                         {
                                 positive size = string_length(arguments[word]);
 
+                                // Words past the limit refuse the copy below, never copy a cut text.
                                 if (length + size + 1 > table->clip_limit)
+                                {
+                                        length = table->clip_limit + 1;
                                         break;
+                                }
                                 if (word > at)
                                         input[length++] = ' ';
                                 memory_copy(input + length, arguments[word], size);
@@ -25304,7 +25308,7 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                 else
                         host_say(log, host_label "the clipboard is empty\n");
         }
-        else if (string_equals(verb, "watch"))
+        else
         {
                 unsigned int seen = table->clip_serial[which];
 
@@ -25339,9 +25343,6 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                         system_call_2(syscall(nanosleep), (positive)address_of nap, 0);
                 }
         }
-        else
-                host_say(log, "  the history is kept in the compositor's memory: %s\n",
-                         (string_address) "moonwater canvas clipboard history says how many");
         window_call(WINDOW_SYS_MUNMAP, mapped, (long)sizeof(struct windows), 0, 0, 0, 0);
         return status;
 }
