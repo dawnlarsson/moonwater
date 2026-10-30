@@ -17736,7 +17736,10 @@ says update 'answering keeps the disk'   'verdict-1n0emvn ksid'
 says update 'the data came with it'      'updated-root-dnoces'
 says update 'the disk has this build'    'status-updated-5'
 says update 'the old image was kept'     'previous-differs-9'
-says update 'an update keeps the disk settings' 'nvme0n1 keeps its own settings'
+#       The command's own line, as cat wrote it to the console: the one row
+#       here that is the program's words and not a marker printed after it,
+#       and so the one a kernel line can cut in two (see says_whole).
+says_whole update 'an update keeps the disk settings' 'nvme0n1 keeps its own settings'
 disk_checks update
 
 #
