@@ -3949,7 +3949,64 @@ lane_script()
         need_shell || return 1
         python3 test/differential.py --harness moonwater_script --shell "$shell_binary"
 }
-lane_leaving()   { freestanding_checks_lane leaving leaving; }
+#       The environment checks start from whatever vector the kernel hands
+#       the process, and the stdlib family copies it with room for eight more
+#       and grows past that: where a setenv grows depends on how many entries
+#       the process was started with. So the one binary runs once for each
+#       size from none to forty, under env -i, and every size has to agree.
+leaving_environments_one()
+{
+        leaving_runner=$target_runner
+        leaving_binary=$work/leaving.$target
+        leaving_bad=0
+        leaving_total=0
+        leaving_env_command=$(command -v env)
+
+        #       Every size on the machine itself; an emulator starts in about
+        #       three seconds, so it takes the sizes at the edges of the
+        #       slack and of the growth after it (the arithmetic is the same
+        #       on every machine).
+        if [ -z "$leaving_runner" ]; then
+                leaving_sizes=$(seq 0 40)
+        else
+                leaving_runner=$(command -v "$leaving_runner")
+                leaving_sizes="0 8 24 25 33"
+        fi
+
+        for leaving_size in $leaving_sizes; do
+                leaving_fill=
+                leaving_index=0
+                while [ "$leaving_index" -lt "$leaving_size" ]; do
+                        leaving_fill="$leaving_fill LEAVING_FILL_$leaving_index=x"
+                        leaving_index=$((leaving_index + 1))
+                done
+                leaving_total=$((leaving_total + 1))
+                # shellcheck disable=SC2086
+                if ! "$leaving_env_command" -i $leaving_fill $leaving_runner \
+                        "$leaving_binary" > "$work/leaving.$target.env" 2>&1
+                then
+                        note "$target: leaving fails with $leaving_size environment entries:"
+                        sed -n '/FAILED/p' "$work/leaving.$target.env" | sed 's/^/    /' | head -5
+                        leaving_bad=$((leaving_bad + 1))
+                fi
+        done
+
+        tally "leaving-environments-$target" "$((leaving_total - leaving_bad))" "$leaving_total"
+        [ "$leaving_bad" = 0 ]
+}
+
+lane_leaving()
+{
+        freestanding_checks_lane leaving leaving
+        leaving_outcome=$?
+        target_lane leaving_environments_one
+        case $? in
+        0) ;;
+        2) [ "$leaving_outcome" != 0 ] || leaving_outcome=2 ;;
+        *) leaving_outcome=1 ;;
+        esac
+        return "$leaving_outcome"
+}
 #       strtod and strtof against glibc, over generated text.
 #
 #       test/checks.c's CHECK_number_differential walks seeded blocks of

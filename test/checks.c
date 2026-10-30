@@ -42771,7 +42771,10 @@ test(environ_holds_the_kernel_vector_before_anything_asks)
 {
         fail(!is_null(leaving_environ_at_start));
         fail(leaving_environ_at_start == program_environment_list());
-        fail(!is_null(leaving_environ_at_start[0]));
+
+        //      An empty environment is a vector that is its null alone, and
+        //      is still the kernel's vector: the lane runs this under
+        //      environments of every size from none, so no entry is assumed.
 
         return true;
 }
@@ -42808,7 +42811,9 @@ test(environ_agrees_with_getenv_entry_by_entry)
                 seen++;
         }
 
-        fail(seen > 0);
+        //      Every entry there was agreed; with an empty environment there
+        //      were none, and that agrees too.
+        (void)seen;
 
         return true;
 }
@@ -42907,15 +42912,20 @@ test(environ_follows_setenv_through_a_growth)
 
 //      unsetenv moves entries about inside the vector it was given, so the
 //      pointer must not move and the name must be gone from what environ
-//      names rather than only from what getenv looks at.
+//      names rather than only from what getenv looks at. The pointer is
+//      taken after the setenv: that call may be the one that grows the
+//      vector and publishes a new one, and whether it is depends on how many
+//      entries the process was started with (24 made it so, and the row
+//      failed for a lane whose environment held that many).
 test(environ_follows_unsetenv_without_moving)
 {
-        string_address address_to before = environ;
+        string_address address_to before;
         string_address address_to walk;
         positive left = 0;
 
         fail(setenv(text("LEAVING_GOING"), text("here"), 1) == 0);
         fail(!is_null(getenv(text("LEAVING_GOING"))));
+        before = environ;
         fail(unsetenv(text("LEAVING_GOING")) == 0);
         fail(is_null(getenv(text("LEAVING_GOING"))));
         fail(environ == before);
