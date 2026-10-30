@@ -17351,6 +17351,7 @@ printf 'dotdot-%s\n' $(( $(grep -c 'there is no disk called' /tmp/r3) * 7 ))
 moonwater setup install nvme0n1 yes > /tmp/install 2>&1
 printf 'installed-%s\n' $(( $? + 40 ))
 cat /tmp/install
+printf 'parts-%s\n' $(( $(ls /sys/class/block | grep -c '^nvme0n1p') + 30 ))
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
 printf 'bound-%s\n' "$(rev < /root/probe)"
 printf 'mounts-%s\n' $(( $(grep -c -e ' /root ' -e ' /home ' -e ' /bowls ' /proc/self/mounts) * 11 ))
@@ -17364,6 +17365,23 @@ link_lan_secret=lan-secret-$$-$(date +%s)
 sed -e "s|LINK_HOST_KEY|$link_host_key|" -e "s|LINK_LAN_SECRET|$link_lan_secret|" \
         "$work/live.commands" > "$work/live.keyed" &&
         mv "$work/live.keyed" "$work/live.commands"
+
+#       The disk the session installs on is not blank: it carries another
+#       system's table, as a machine's own disk does when Moonwater comes to
+#       it -- an EFI system partition, a reserved one and a root, three where
+#       the install makes two, in both copies of the GPT. The install takes
+#       the whole disk: the kernel then sees its two partitions and no third,
+#       and sfdisk and e2fsck read the disk after as the install left it.
+if command -v sfdisk > /dev/null 2>&1; then
+        printf '%s\n' 'label: gpt' \
+                'size=260MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="EFI system partition"' \
+                'size=16MiB, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE, name="Microsoft reserved partition"' \
+                'type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"' |
+                sfdisk -q "$work/disk.img" > "$work/foreign" 2>&1 ||
+                lost 'foreign table' "sfdisk did not write it: $(head -3 "$work/foreign" | tr '\n' ' ')"
+else
+        not_run_part 'install: the install over another system'"'"'s table -- no sfdisk (the disk is blank)'
+fi
 
 # shellcheck disable=SC2086
 install_boot live $stick
@@ -17379,6 +17397,7 @@ says live 'removable media is refused'  'removable-41'
 says live 'a partition is refused for the disk it is on' 'partition-7'
 says live 'a name that climbs out of /dev is no disk' 'dotdot-7'
 says live 'the install succeeds'        'installed-40'
+says live 'and the disk has its two partitions, none of the table before' 'parts-32'
 says live 'the session keeps the disk'  'verdict-1n0emvn ksid'
 says live 'live files went along'       'bound-emoh'
 says live 'three directories are bound' 'mounts-33'
