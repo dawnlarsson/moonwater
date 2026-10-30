@@ -6092,15 +6092,17 @@ static void compositor_theme_read(void)
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
-        compositor.theme_word = string_equals((string_address)word, (string_address) "dark") ? 1
-                                : string_equals((string_address)word, (string_address) "auto") ? 2 : 0;
+        // Dark is the theme when nothing is kept (and when what is kept is none of the words).
+        compositor.theme_word = string_equals((string_address)word, (string_address) "light") ? 0
+                                : string_equals((string_address)word, (string_address) "auto") ? 2 : 1;
         compositor_word(SETTING_ACCENT_PATH, word, sizeof(word));
         if (word[0] && !string_equals((string_address)word, (string_address) "reset") && !string_equals((string_address)word, (string_address) "default"))
                 accent = window_colour_parse((string_address)word);
         compositor_word(SETTING_MOTION_PATH, word, sizeof(word));
         motion = string_equals((string_address)word, (string_address) "reduced");
+        // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
-                             accent < 0 ? 0xff8800u : (unsigned int)accent, motion);
+                             accent < 0 ? 0xffffffu : (unsigned int)accent, motion);
 }
 
 // Auto, again by the clock: a minute's wake is enough.

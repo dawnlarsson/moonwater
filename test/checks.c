@@ -124788,6 +124788,17 @@ static fn check_kit_theme(void)
                 }
         string_format(log, "  kit theme: every on-role over 8192 themes, the weakest %p hundredths\n", weakest);
         check("kit theme: every on-role is 4.5:1 or more on its role, light and dark, for 4096 accents", !failed);
+        {
+                const struct settings_row address_to theme_row = setting_by_path((string_address)SETTING_THEME_PATH);
+                const struct settings_row address_to accent_row = setting_by_path((string_address)SETTING_ACCENT_PATH);
+
+                ui_theme_make(&theme, 1, UI_ACCENT_STANDARD);
+                check("kit theme: the standard is dark with a white accent, its fills white with the dark ink on them",
+                      theme_row && accent_row && string_equals((string_address)theme_row->standard, (string_address) "dark") &&
+                          string_equals((string_address)accent_row->standard, (string_address) "#ffffff") &&
+                          theme.role[UI_PRIMARY] == 0xffffffffu && theme.role[UI_ON_PRIMARY] == UI_INK && theme.role[UI_SURFACE] == 0xff111113u &&
+                          ui_contrast(theme.role[UI_ON_PRIMARY], theme.role[UI_PRIMARY]) >= 450);
+        }
 
         // A turn: light to dark over .2s --ease from the first frame, the roles between the two halfway.
         memory_zero(&ui_kit, sizeof(ui_kit));

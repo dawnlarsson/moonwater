@@ -1656,7 +1656,8 @@ static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to l
 #define UI_THEME_LIGHT 0u
 #define UI_THEME_DARK 1u
 #define UI_THEME_AUTO 2u
-#define UI_ACCENT_DAWN 0xff8800u // --dawn-500, the mark
+#define UI_ACCENT_DAWN 0xff8800u // --dawn-500, the mark: one accent of the choices
+#define UI_ACCENT_STANDARD 0xffffffu // the accent when none is chosen: white, on the dark theme (the standard)
 #define UI_INK 0xff18181bu       // --ink
 
 struct ui_theme
@@ -4387,7 +4388,8 @@ static int ui_app_run(struct ui_app address_to app)
         }
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
-        ui_kit_theme(table->theme, table->accent ? table->accent : UI_ACCENT_DAWN, table->motion);
+        // A table the compositor has not themed yet is the standard: dark, white.
+        ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], app->title, WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
         table->glass[row] = app->glass;
@@ -4437,7 +4439,7 @@ static int ui_app_run(struct ui_app address_to app)
                 if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 {
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
-                        ui_kit_theme(table->theme, table->accent ? table->accent : UI_ACCENT_DAWN, table->motion);
+                        ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_app_changed(app);
                 }
                 if (table->want_width[row] && table->want_height[row] &&

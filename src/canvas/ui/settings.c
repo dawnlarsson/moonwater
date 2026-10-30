@@ -277,9 +277,9 @@ static const struct settings_ink settings_inks[] = {
     {"forest", "163a26"},  {"plum", "3b1f4a"},   {"light-grey", "d4d4d8"}, {"white", "ffffff"},
 };
 
-// The accents (canvas theme accent), named as the background's inks are: the kit's amber first, its standard.
+// The accents (canvas theme accent), named as the background's inks are: white first, the standard, then the kit's amber.
 static const struct settings_ink settings_accents[] = {
-    {"amber", "ff8800"}, {"blue", "2563eb"}, {"green", "16a34a"}, {"violet", "7c3aed"}, {"rose", "e11d48"}, {"graphite", "52525b"},
+    {"white", "ffffff"}, {"amber", "ff8800"}, {"blue", "2563eb"}, {"green", "16a34a"}, {"violet", "7c3aed"}, {"rose", "e11d48"}, {"graphite", "52525b"},
 };
 
 // The named inks of a row of them: the accent's, or the background's.
