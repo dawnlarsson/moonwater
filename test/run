@@ -17741,7 +17741,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, u1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -21654,6 +21654,93 @@ else
                 same "$name" "$want" "$got"
         done < "$work/s1-answers"
         sed -n 's/^s1 /  canvas       /p' "$work/s1-why"
+fi
+fi
+
+#       The UI kit (src/canvas/ui/ui.c) on a plain boot's desktop, a guest of its own: moonwater settings gallery
+#       opens the kit's gallery, on the light theme's paper with the accent's fills; moonwater canvas theme dark
+#       turns the open window to the dark theme without a restart, accent a colour turns its fills, and default
+#       puts both back. Read off the screen: the paper at the gallery's top left and the fills it shows.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = u1 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/u1-answers" 2>"$work/u1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/u1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def pids(name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+def counts(name):
+    """The pixels of the screen near the paper's colours and the accent: (light paper, dark paper, amber, blue)."""
+    shot(name, 1.5)
+    width, height, data = load(name)
+    light = dark = amber = blue = 0
+    for at in range(0, width * height * 3, 3 * 7):
+        r, g, b = data[at:at + 3]
+        light += abs(r - 0xf7) < 6 and abs(g - 0xf7) < 6 and abs(b - 0xf8) < 6
+        dark += abs(r - 0x11) < 6 and abs(g - 0x11) < 6 and abs(b - 0x13) < 6
+        amber += r > 0xf0 and 0x78 < g < 0x98 and b < 0x20
+        blue += r < 0x40 and 0x50 < g < 0x70 and b > 0xd0
+    return light, dark, amber, blue
+
+until(lambda: len(pids("terminal")) == 1, 60)
+time.sleep(2)
+shell.run("moonwater canvas theme default; moonwater canvas theme accent reset", 10)
+opened = shell.run("moonwater settings gallery; echo status $?", 15)[0]
+until(lambda: len(pids("settings")) == 1, 15)
+time.sleep(2)
+light, dark, amber, blue = counts("u1-light")
+out.append(("U1.1 moonwater settings gallery opens the kit's gallery on the light theme's paper, with the accent's fills",
+            "yes" if "status 0" in opened and light > 20000 and amber > 300 else "%s, %d paper, %d amber" % (opened[-40:], light, amber), "yes"))
+shell.run("moonwater canvas theme dark", 10)
+time.sleep(2)
+light2, dark2, amber2, _ = counts("u1-dark")
+out.append(("U1.2 moonwater canvas theme dark turns the open gallery to the dark theme without a restart",
+            "yes" if dark2 > 20000 and light2 < light // 4 and amber2 > 300 and len(pids("settings")) == 1
+            else "%d dark, %d light (was %d), %d amber, %d windows" % (dark2, light2, light, amber2, len(pids("settings"))), "yes"))
+shell.run("moonwater canvas theme accent 2563eb", 10)
+time.sleep(2)
+_, _, amber3, blue3 = counts("u1-blue")
+out.append(("U1.3 canvas theme accent turns its fills to the accent",
+            "yes" if blue3 > 300 and amber3 < amber2 // 4 else "%d blue, %d amber" % (blue3, amber3), "yes"))
+shell.run("moonwater canvas theme default; moonwater canvas theme accent reset", 10)
+time.sleep(2)
+light4, _, amber4, _ = counts("u1-back")
+out.append(("U1.4 default and reset put the light theme and the amber back",
+            "yes" if light4 > 20000 and amber4 > 300 else "%d paper, %d amber" % (light4, amber4), "yes"))
+said = shell.run("moonwater canvas theme; moonwater canvas motion", 10)[0]
+out.append(("U1.5 the verbs say the theme and the motion", "yes" if "theme light" in said and "motion full" in said else said[-80:], "yes"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/u1-answers" ]; then
+        same "the UI kit boot answered" "yes" "no"
+        sed 's/^/    /' "$work/u1-why" | tail -5
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/u1-answers"
 fi
 fi
 

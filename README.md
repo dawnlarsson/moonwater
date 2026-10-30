@@ -47,7 +47,7 @@ moonwater bind init remove ID|"command"  stop running one at boot
 moonwater canvas                       whether Canvas is on, and the screens it draws on
 moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
 moonwater desktop start|stop           begin the chosen desktop now, or end its session
-moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, the UI kit's every control
+moonwater settings [gallery]           the settings window, on the desktop of the compositor; gallery, every control of the UI kit
 moonwater window                       the windows on the desktop: name, pid, place, size, title
 moonwater window PLACE... COMMAND...   run COMMAND, its first window put where PLACE says:
                                        center, at X,Y, maximized, fullscreen, screen N,

@@ -24061,7 +24061,7 @@ static const host_row host_rows[] = {
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
-    {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, the UI kit's every control", 'b'},
+    {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, every control of the UI kit", 'b'},
     {null, "window", "the windows on the desktop: name, pid, place, size, title", 'b'},
     {null, "window PLACE... COMMAND...", "run COMMAND, its first window put where PLACE says:", 'b'},
     {null, "", "center, at X,Y, maximized, fullscreen, screen N,", 'b'},
