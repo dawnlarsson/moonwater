@@ -114603,7 +114603,7 @@ b32 main()
 }
 #endif
 
-#ifdef CHECK_terminal
+#if defined(CHECK_terminal) || defined(CHECK_kit_frames)
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"
 #include "../src/canvas/window.c"
@@ -124122,6 +124122,249 @@ static p32 address_to render_frame(void)
         return windows_buffer(terminal.own.table, 0, terminal.shown);
 }
 
+#ifdef CHECK_kit_frames
+/*
+        The kit's frames, for the filmstrips: not a check, a renderer. The settings window's gallery (the kit's
+        every control at the places the kit's demo page has them in Chrome) is drawn on the light theme at scale
+        1, driven through ui_kit_pointer by the same events at the same times as the reference recording drove
+        the page (scratchpad kit/ref/record.mjs: hover, press, release), with a frame every 1/60 s, and the
+        frames at the recording's shot times are written as PPM crops of the same rectangles:
+
+            kit-frames REGULAR.ttf BOLD.ttf MONO.ttf OUTDIR [SCENARIO]
+
+        A frame is ui_kit.now at the frame's time, then the page drawn whole.
+*/
+static unsigned int frames_pixels[SETTINGS_GALLERY_W * SETTINGS_GALLERY_H], frames_scratch[1400 * UI_SCRATCH_ROWS];
+static p8 frames_atlas[1024 * 1024];
+static font_face frames_faces[3];
+static string_address frames_dir;
+static b64 frames_now;
+static positive frames_count;
+
+static fn frames_at(b64 ms_millionths) // a frame at a time in nanoseconds
+{
+        ui_kit.now = ms_millionths;
+        ui_kit.busy = 0;
+        ui_kit_turn();
+        settings.ui.band_top = settings.ui.band_bottom = 0;
+        settings_gallery_draw(&settings.ui);
+        frames_count++;
+}
+
+static fn frames_write(string_address name, int ms, int x, int y, int w, int h)
+{
+        p8 path[256], head[64];
+        positive length = 0;
+        bipolar handle;
+        static p8 row[3 * 1400];
+
+        string_copy_bounded(path, frames_dir, sizeof(path));
+        string_append_bounded(path, (string_address) "/", sizeof(path));
+        string_append_bounded(path, name, sizeof(path));
+        string_append_bounded(path, (string_address) "-", sizeof(path));
+        {
+                p8 digits[8] = "0000";
+                positive n = positive_into_string(digits + 4, (positive)ms);
+
+                string_append_bounded(path, digits + n, sizeof(path)); // four places, zero filled
+        }
+        string_append_bounded(path, (string_address) ".ppm", sizeof(path));
+        handle = system_open_at_mode(AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle < 0)
+                return;
+        string_copy(head, (string_address) "P6\n");
+        length = 3;
+        length += positive_into_string(head + length, (positive)w);
+        head[length++] = ' ';
+        length += positive_into_string(head + length, (positive)h);
+        string_copy(head + length, (string_address) "\n255\n");
+        length += 5;
+        system_write_once((b32)handle, head, length);
+        for (int yy = y; yy < y + h; yy++)
+        {
+                for (int xx = x; xx < x + w; xx++)
+                {
+                        unsigned int pixel = frames_pixels[(positive)yy * SETTINGS_GALLERY_W + (positive)xx];
+
+                        row[(xx - x) * 3] = (p8)(pixel >> 16), row[(xx - x) * 3 + 1] = (p8)(pixel >> 8), row[(xx - x) * 3 + 2] = (p8)pixel;
+                }
+                system_write_once((b32)handle, row, (positive)w * 3);
+        }
+        system_close(handle);
+}
+
+// The events of a scenario: what the recording did, in its milliseconds from its start.
+#define FRAMES_MOVE 1
+#define FRAMES_DOWN 2
+#define FRAMES_UP 3
+#define FRAMES_SHOT 4
+struct frames_step
+{
+        int ms_x100; // hundredths of a millisecond
+        int what, x, y;
+};
+
+static fn frames_run(string_address name, const struct frames_step address_to steps, int count, int cx, int cy, int cw, int ch)
+{
+        int at = 0, since = steps[0].ms_x100; // since: the last event's time, which a shot is named after
+        b64 next = (b64)steps[0].ms_x100 * 10000;
+
+        settings_gallery_build();
+        ui_kit.busy = 0;
+        // An event at its own time; a frame every 1/60 s from the last event (a shot is the frame at its time).
+        while (at < count)
+        {
+                const struct frames_step address_to e = &steps[at];
+                b64 when = (b64)e->ms_x100 * 10000;
+
+                if (e->what == FRAMES_SHOT && when <= next + 1000000)
+                {
+                        at++;
+                        frames_at(when);
+                        frames_write(name, (e->ms_x100 - since + 50) / 100, cx, cy, cw, ch);
+                        next = when + 16666667;
+                        continue;
+                }
+                if (e->what != FRAMES_SHOT && when <= next)
+                {
+                        at++;
+                        since = e->ms_x100;
+                        ui_kit.now = when;
+                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count,
+                                       e->what == FRAMES_MOVE ? WINDOW_EVENT_MOTION : WINDOW_EVENT_BUTTON, e->x, e->y, e->what == FRAMES_DOWN, 0);
+                        next = when + 16666667;
+                        continue;
+                }
+                frames_at(next);
+                next += 16666667;
+        }
+}
+
+b32 main()
+{
+        positive size = 0, bytes;
+        long engine;
+
+        if (program_argument_count() < 5)
+        {
+                string_format(log, "  kit-frames REGULAR BOLD MONO OUTDIR [SCENARIO]\n");
+                return test_report(null);
+        }
+        frames_dir = program_argument(4);
+        engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        settings.ui.engine = (font_engine address_to)engine;
+        font_start(settings.ui.engine, frames_atlas, 1024, 1024);
+        for (int k = 0; k < 3; k++)
+        {
+                bytes = compositor_map_file(program_argument((positive)k + 1), &size);
+                check("kit frames: the faces load", bytes && font_load(&frames_faces[k], (const p8 address_to)bytes, size, 0) == 0);
+        }
+        if (failures)
+                return test_report(null);
+        settings.ui.regular = &frames_faces[0];
+        settings.ui.bold = &frames_faces[1];
+        settings.ui.mono = &frames_faces[2];
+        settings.ui.scratch = frames_scratch;
+        settings.ui.scratch_width = 1400;
+        settings.ui.scale = 1;
+        settings.ui.pixels = frames_pixels;
+        settings.ui.pitch = SETTINGS_GALLERY_W;
+        settings.ui.width = SETTINGS_GALLERY_W;
+        settings.ui.height = settings.height = SETTINGS_GALLERY_H;
+        settings.width = SETTINGS_GALLERY_W;
+        settings_gallery.on = 1;
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+
+        // The shots each recording took, after its release (or change), in hundredths of a millisecond.
+#define SHOT(ms) {(int)((ms) * 100), FRAMES_SHOT, 0, 0}
+        {
+                // The switch: Offline cache, pressed near its pill and let go (record.mjs "switch").
+                static const struct frames_step steps[] = {
+                    {200000, FRAMES_MOVE, 661, 177}, {221000, FRAMES_DOWN, 661, 177}, {241000, FRAMES_UP, 661, 177},
+                    SHOT(2410 + 16.67), SHOT(2410 + 33.33), SHOT(2410 + 50), SHOT(2410 + 66.67), SHOT(2410 + 100), SHOT(2410 + 133.33),
+                    SHOT(2410 + 166.67), SHOT(2410 + 233.33), SHOT(2410 + 300), SHOT(2410 + 400)};
+
+                frames_run((string_address) "switch", steps, sizeof(steps) / sizeof(steps[0]), 381, 145, 330, 64);
+        }
+        {
+                // The radios: RISC-V chosen from x86-64 (record.mjs "radio").
+                static const struct frames_step steps[] = {
+                    {200000, FRAMES_MOVE, 305, 871}, {221000, FRAMES_DOWN, 305, 871}, {231000, FRAMES_UP, 305, 871},
+                    SHOT(2310 + 16.67), SHOT(2310 + 50), SHOT(2310 + 83.33), SHOT(2310 + 116.67), SHOT(2310 + 150), SHOT(2310 + 200),
+                    SHOT(2310 + 250), SHOT(2310 + 300), SHOT(2310 + 400), SHOT(2310 + 500)};
+
+                frames_run((string_address) "radio", steps, sizeof(steps) / sizeof(steps[0]), 25, 707, 330, 210);
+        }
+        {
+                // The segmented tabs: Stopped chosen from All (record.mjs "tabs"); its middle is where the kit lays it.
+                struct ui_control address_to tabs = null;
+                int x, y;
+
+                settings_gallery_build();
+                for (int k = 0; k < settings_gallery.count; k++)
+                        if (settings_gallery.control[k].kind == UI_TABS)
+                                tabs = &settings_gallery.control[k];
+                x = tabs ? ui_tab_left(&settings.ui, tabs, 2) + ui_tab_width(&settings.ui, tabs, 2) / 2 : 0;
+                y = tabs ? tabs->y + 16 : 0;
+                {
+                        struct frames_step steps[] = {
+                            {200000, FRAMES_MOVE, x, y}, {221000, FRAMES_DOWN, x, y}, {224000, FRAMES_UP, x, y},
+                            SHOT(2240 + 16.67), SHOT(2240 + 33.33), SHOT(2240 + 50), SHOT(2240 + 66.67), SHOT(2240 + 100), SHOT(2240 + 150),
+                            SHOT(2240 + 200), SHOT(2240 + 250), SHOT(2240 + 350), SHOT(2240 + 450)};
+
+                        frames_run((string_address) "tabs", steps, sizeof(steps) / sizeof(steps[0]), 753, 81, 239, 48);
+                }
+        }
+        {
+                // The slider: Log verbosity pressed a fifth along and let go (record.mjs "slider").
+                static const struct frames_step steps[] = {
+                    {200000, FRAMES_MOVE, 461, 322}, {221000, FRAMES_DOWN, 461, 322}, {231000, FRAMES_UP, 461, 322},
+                    SHOT(2310 + 16.67), SHOT(2310 + 33.33), SHOT(2310 + 50), SHOT(2310 + 66.67), SHOT(2310 + 100), SHOT(2310 + 150),
+                    SHOT(2310 + 200), SHOT(2310 + 250), SHOT(2310 + 300), SHOT(2310 + 400)};
+
+                frames_run((string_address) "slider", steps, sizeof(steps) / sizeof(steps[0]), 381, 258, 330, 104);
+        }
+        {
+                // The field: Node name hovered, then pressed into (record.mjs "input").
+                static const struct frames_step steps[] = {
+                    {200000, FRAMES_MOVE, 78, 171}, {240000, FRAMES_DOWN, 78, 171}, {240000, FRAMES_UP, 78, 171},
+                    SHOT(2400 + 16.67), SHOT(2400 + 33.33), SHOT(2400 + 50), SHOT(2400 + 66.67), SHOT(2400 + 100), SHOT(2400 + 133.33),
+                    SHOT(2400 + 166.67), SHOT(2400 + 200), SHOT(2400 + 250), SHOT(2400 + 300)};
+
+                frames_run((string_address) "input", steps, sizeof(steps) / sizeof(steps[0]), 24, 107, 332, 108);
+        }
+        {
+                // The ripple: Logs pressed at 10, 8 and let go 120 ms on (record.mjs "ripple").
+                static const struct frames_step steps[] = {
+                    {200000, FRAMES_MOVE, 576, 727}, {201000, FRAMES_DOWN, 576, 727}, {213000, FRAMES_UP, 576, 727},
+                    SHOT(2130 + 16.67), SHOT(2130 + 50), SHOT(2130 + 83.33), SHOT(2130 + 116.67), SHOT(2130 + 150), SHOT(2130 + 200),
+                    SHOT(2130 + 250), SHOT(2130 + 300)};
+
+                frames_run((string_address) "ripple", steps, sizeof(steps) / sizeof(steps[0]), 554, 707, 87, 60);
+        }
+        {
+                // A press and a release of Deploy, still (record.mjs "press"): the state layer and the fill.
+                static const struct frames_step steps[] = {
+                    {200000, FRAMES_MOVE, 442, 737}, {230000, FRAMES_DOWN, 442, 737},
+                    SHOT(2300 + 16.67), SHOT(2300 + 50), SHOT(2300 + 100), SHOT(2300 + 200)};
+                static const struct frames_step up[] = {
+                    {200000, FRAMES_MOVE, 442, 737}, {230000, FRAMES_DOWN, 442, 737}, {260000, FRAMES_UP, 442, 737},
+                    SHOT(2600 + 16.67), SHOT(2600 + 50), SHOT(2600 + 100), SHOT(2600 + 200), SHOT(2600 + 300), SHOT(2600 + 400)};
+
+                frames_run((string_address) "press-down", steps, sizeof(steps) / sizeof(steps[0]), 393, 707, 99, 60);
+                frames_run((string_address) "press-up", up, sizeof(up) / sizeof(up[0]), 393, 707, 99, 60);
+        }
+        // The whole page at rest, for the gallery side by side.
+        settings_gallery_build();
+        frames_at(5000000000ll);
+        frames_at(5016666667ll);
+        frames_write((string_address) "gallery", 0, 0, 0, SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+        string_format(log, "  kit frames: %p frames drawn\n", frames_count);
+        return test_report(null);
+}
+#endif
+
+#ifdef CHECK_terminal
 b32 main()
 {
         string_address paths[1];
@@ -124322,6 +124565,7 @@ b32 main()
         string_format(log, "  %p frames compared\n", compared);
         return test_report(null);
 }
+#endif
 #endif
 
 #ifdef CHECK_probe

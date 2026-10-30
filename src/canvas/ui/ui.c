@@ -418,9 +418,10 @@ static int ui_advance(struct ui address_to ui, const font_face address_to const 
 */
 /*
         The run in a face of the caller's (faces is it and the regular, for what
-        it has not), with a stroke: the kit's -webkit-text-stroke, a 256th of a
-        quarter pixel a side, which widens the coverage itself by its neighbours'
-        and never moves a glyph off its whole pixel. 0 is no stroke.
+        it has not), with a stroke: the kit's -webkit-text-stroke .5px is 64, a
+        pixel taking half its strongest neighbour's cover (measured against
+        Chrome's stroke by eye on the filmstrips), which never moves a glyph off
+        its whole pixel. 0 is no stroke.
 */
 static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                      string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
@@ -507,7 +508,7 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                                                 c = light ? v : 255 - v;
                                                 most = c > most ? c : most;
                                         }
-                                        cover += most * stroke / 256;
+                                        cover += most * stroke / 128;
                                         cover = cover > 255 ? 255 : cover;
                                 }
                                 bit = cover & 63;
@@ -1302,31 +1303,33 @@ struct ui_tween
         b64 want_duration;
         const struct ui_bezier address_to ease;
         b32 pending, kind;
+        b32 placed; // it has a value: CSS does not transition an element's first style, so the first value is put, not set
 };
 
-// A colour 0xaarrggbb as a tween's value: each channel premultiplied, 8.8.
+// A colour 0xaarrggbb as a tween's value: alpha and each channel premultiplied by it, 8.8 each, a 16-bit lane apiece.
 static b64 ui_tween_colour(unsigned int argb)
 {
-        p64 a = argb >> 24, out = a << 56 | a << 48;
+        p64 a = argb >> 24, out = a << 56;
 
         for (int shift = 0; shift < 24; shift += 8)
                 out |= (((p64)(argb >> shift & 255) * a * 256 + 127) / 255) << (shift * 2);
         return (b64)out;
 }
 
-// And back: 0xaarrggbb, not premultiplied, rounded.
+// And back: 0xaarrggbb, the alpha divided out again, rounded.
 static unsigned int ui_tween_argb(b64 value)
 {
-        p64 v = (p64)value, a = v >> 48 & 0xffff;
-        unsigned int out = (unsigned int)((a + 128) >> 8) << 24;
+        p64 v = (p64)value, a = v >> 48 & 0xffff, alpha = (a + 128) >> 8;
+        unsigned int out;
 
         if (!a)
                 return 0;
+        out = (unsigned int)(alpha > 255 ? 255 : alpha) << 24;
         for (int shift = 0; shift < 24; shift += 8)
         {
-                p64 c = ((v >> (shift * 2) & 0xffff) * 256 + a / 2) / a;
+                p64 c = ((v >> (shift * 2) & 0xffff) * 255 + a / 2) / a;
 
-                out |= (unsigned int)((c + 128) >> 8 > 255 ? 255 : (c + 128) >> 8) << shift;
+                out |= (unsigned int)(c > 255 ? 255 : c) << shift;
         }
         return out;
 }
@@ -1353,6 +1356,7 @@ static fn ui_tween_put(struct ui_tween address_to t, b64 value, b32 kind)
         t->from = t->to = t->adjusted = t->want = value;
         t->kind = kind;
         t->factor = UI_ONE;
+        t->placed = 1;
 }
 
 // The value wanted from now on, over duration ns on ease (0: at once).
@@ -2416,22 +2420,15 @@ struct ui_control
 static inline b32 ui_dev(const struct ui address_to ui, int logical) { return logical * ui->scale; }
 static inline b32 ui_q8(const struct ui address_to ui, int logical) { return logical * ui->scale * 256; }
 
+// A control before its first frame: its transitions have no value yet, so the first frame puts each at its state's.
 static fn ui_control_start(struct ui_control address_to c)
 {
-        ui_tween_put(&c->layer, 0, UI_TWEEN_NUMBER);
-        ui_tween_put(&c->fill, 0, UI_TWEEN_COLOUR);
-        ui_tween_put(&c->ink, 0, UI_TWEEN_COLOUR);
-        ui_tween_put(&c->label_ink, 0, UI_TWEEN_COLOUR);
-        ui_tween_put(&c->stroke, 0, UI_TWEEN_NUMBER);
-        ui_tween_put(&c->scale, UI_ONE, UI_TWEEN_NUMBER);
         ui_tween_put(&c->extent, c->on ? UI_ONE : 0, UI_TWEEN_NUMBER);
-        ui_tween_put(&c->shadow, 0, UI_TWEEN_NUMBER);
         ui_tween_put(&c->spot, 0, UI_TWEEN_NUMBER);
         for (int k = 0; k < UI_ITEMS; k++)
-        {
-                ui_tween_put(&c->item_ink[k], 0, UI_TWEEN_COLOUR);
                 ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
-        }
+        if (c->kind == UI_PROGRESS && c->value >= 0)
+                ui_tween_put(&c->extent, c->value, UI_TWEEN_NUMBER);
         c->hover_x = -1;
         c->item = -1;
         c->pip_squash = c->pip_press = 0;
@@ -2454,15 +2451,21 @@ static inline unsigned int ui_kit_colour(struct ui_tween address_to t)
         return ui_tween_argb(ui_kit_tween(t));
 }
 
-// A colour to transition to over the kit's .2s (or at once with reduced motion).
+// A colour to transition to over the kit's .2s (or at once with reduced motion); its first is where it starts.
 static inline fn ui_kit_colour_to(struct ui_tween address_to t, unsigned int argb, int ms, const struct ui_bezier address_to ease)
 {
-        ui_tween_set(t, ui_tween_colour(argb), ui_kit.motion ? 0 : ms * UI_MS, ease);
+        if (!t->placed)
+                ui_tween_put(t, ui_tween_colour(argb), UI_TWEEN_COLOUR);
+        else
+                ui_tween_set(t, ui_tween_colour(argb), ui_kit.motion ? 0 : ms * UI_MS, ease);
 }
 
 static inline fn ui_kit_number_to(struct ui_tween address_to t, b64 value, int ms, const struct ui_bezier address_to ease)
 {
-        ui_tween_set(t, value, ui_kit.motion ? 0 : ms * UI_MS, ease);
+        if (!t->placed)
+                ui_tween_put(t, value, UI_TWEEN_NUMBER);
+        else
+                ui_tween_set(t, value, ui_kit.motion ? 0 : ms * UI_MS, ease);
 }
 
 /*
@@ -2663,11 +2666,6 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         // The row's ripple, in the accent: its clip runs to the card's edges (24 past the row) and 8 above and below.
         clip = ui_box_transform((struct ui_box){rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), rx + rw + ui_q8(ui, 24), ry + rh + ui_q8(ui, 8), 0, 0},
                                 sx, sy, ox, oy, tx, ty);
-        {
-                struct ui_place place = {sx, sy, ox, oy, tx, ty};
-
-                ui_kit_ripples(ui, c, rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), &place, &clip, ui_role(UI_PRIMARY));
-        }
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, ui_role(UI_CONTROL_OFF), null);
         if (fill_w > 0)
@@ -2687,6 +2685,12 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         baseline = ui_kit_baseline(ui, (oy + ty) / 256 - ui_dev(ui, 12), UI_BODY_LARGE);
         ui_kit_text(ui, x, baseline, (string_address)c->label, UI_BODY_LARGE, c->disabled ? ui_mix(label, 38, 0) : label,
                     (unsigned int)(ui_kit_tween(&c->stroke) >> UI_Q));
+        // The ripple, in the accent, over the row: its clip is the label's last child, so it lies over the bars and the text.
+        {
+                struct ui_place place = {sx, sy, ox, oy, tx, ty};
+
+                ui_kit_ripples(ui, c, rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), &place, &clip, ui_role(UI_PRIMARY));
+        }
 }
 
 /*
@@ -2741,12 +2745,6 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                 rest = ui_kit_tween(&c->item_scale[item]);
                 clip = ui_box_transform((struct ui_box){rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), rx + rw + ui_q8(ui, 24), ry + rh + ui_q8(ui, 8), 0, 0},
                                         row_sx, row_sy, rx + rw / 2, oy, row_tx, row_ty);
-                if (lrow)
-                {
-                        struct ui_place place = {row_sx, row_sy, rx + rw / 2, oy, row_tx, row_ty};
-
-                        ui_kit_ripples(ui, c, rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), &place, &clip, ui_role(UI_PRIMARY));
-                }
                 // The rest circle: scale(rest) about its middle, inside the bars' scaleY(dom) scale(hover) about the origin.
                 if (rest > 0)
                 {
@@ -2767,6 +2765,12 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                 }
                 ui_kit_text(ui, x, baseline, (string_address)c->items[item], UI_BODY_LARGE, label,
                             item == c->at || (lrow && c->hover) ? 64 : 0);
+                if (lrow)
+                {
+                        struct ui_place place = {row_sx, row_sy, rx + rw / 2, oy, row_tx, row_ty};
+
+                        ui_kit_ripples(ui, c, rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), &place, &clip, ui_role(UI_PRIMARY));
+                }
         }
         ui_kit.busy |= live;
         // The pip.
@@ -2936,6 +2940,26 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                 ui_kit_fill(ui, &rest, off, null);
         if (ratio > 0)
                 ui_kit_fill(ui, &fill, accent, null);
+
+        // The thumb's halo: the pointer on the thumb (its box, 20 hovered), a ring of 10 at 8% round it; pressed, 14 at 12%.
+        {
+                b32 thumb_x = rx + stop, hx = c->pointer_x * 256;
+                b32 on_thumb = (c->hover || c->down) && hx >= thumb_x - ui_q8(ui, thumb) / 2 && hx < thumb_x + ui_q8(ui, thumb) / 2;
+                b64 halo;
+
+                ui_kit_number_to(&c->shadow, on_thumb ? (c->down ? UI_Q2(12) : UI_Q2(8)) : 0, 200, &ui_ease);
+                ui_kit_number_to(&c->extent, on_thumb ? ui_q(c->down ? 14 : 10) : 0, 200, &ui_ease);
+                halo = ui_kit_tween(&c->shadow);
+                if (halo > 0)
+                {
+                        b32 r = ui_q8(ui, thumb) / 2 + (b32)((ui_kit_tween(&c->extent) * ui->scale) >> 22);
+                        struct ui_box ring = {thumb_x - r, track_y - r, thumb_x + r, track_y + r, r, r};
+
+                        ring = ui_box_transform(ring, sx, sy, ox, oy, tx, ty);
+                        // The ring and the thumb's own background, both the accent at the halo's share.
+                        ui_kit_fill(ui, &ring, ui_mix(accent, (unsigned int)((halo * 100 + UI_HALF) >> UI_Q), 0), null);
+                }
+        }
 
         // The ghost: hovered and not dragged, from the value to where a press would land, in the accent at 40%.
         if (c->hover && !c->down && c->hover_x >= 0)
@@ -3798,6 +3822,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                         changed = c;
                                 c->spot_x = x / ui->scale - c->x;
                                 ui_tween_put(&c->spot, UI_Q2(10), UI_TWEEN_NUMBER);
+                                c->hover_x = -1; // v(B): the hover preview is over till the pointer moves again
                         }
                         break;
                 }
