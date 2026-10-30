@@ -13588,6 +13588,14 @@ static b32 exec_loop(b32 index, bool until)
                         break;
                 }
 
+                //      A continue that lands in the condition is dash's ask
+                //      the condition again; bash takes it for the condition's
+                //      own answer, 0, so `until continue` ends and `while
+                //      continue` runs its body.
+                if (shell_bash_compat && exec_signal == EXEC_SIGNAL_CONTINUE &&
+                    exec_signal_level <= 1)
+                        exec_signal = EXEC_SIGNAL_NONE;
+
                 if (exec_signal)
                 {
                         if (exec_loop_again())
