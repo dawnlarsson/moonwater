@@ -2796,8 +2796,9 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         }
         ui_kit.busy |= live;
         // The pip.
-        ui_kit_number_to(&c->pip_y, ui_q(ui_radio_row_y(c, c->at) + c->h / 2), 400, &ui_ease);
-        pip_y = ui_kit_tween(&c->pip_y);
+        // The pip's place is the group's own (from its top), so a group the layout moves takes its pip with it at once.
+        ui_kit_number_to(&c->pip_y, ui_q(ui_radio_row_y(c, c->at) - c->y + c->h / 2), 400, &ui_ease);
+        pip_y = ui_q(c->y) + ui_kit_tween(&c->pip_y);
         if (c->pip_squash == 1)
                 c->pip_squash = ui_kit.now;
         if (c->pip_press == 1)
@@ -3096,9 +3097,10 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 
                 ui_kit_fill(ui, &hair, ui_role(UI_OUTLINE_VARIANT), null);
         }
-        ui_kit_number_to(&c->pip_x, ui_q(ui_tab_left(ui, c, chosen) + (seg ? 0 : 8)), 350, &ui_ease);
+        // The pip's place is the strip's own (from its left), so a strip the layout moves takes its pip with it at once.
+        ui_kit_number_to(&c->pip_x, ui_q(ui_tab_left(ui, c, chosen) - c->x + (seg ? 0 : 8)), 350, &ui_ease);
         ui_kit_number_to(&c->pip_w, ui_q(ui_tab_width(ui, c, chosen) - (seg ? 0 : 16)), 350, &ui_ease);
-        pip_x = ui_kit_tween(&c->pip_x);
+        pip_x = ui_q(c->x) + ui_kit_tween(&c->pip_x);
         pip_w = ui_kit_tween(&c->pip_w);
         {
                 struct ui_box pip = seg ? ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2)

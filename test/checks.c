@@ -124284,7 +124284,7 @@ static fn check_kit_place(void)
         tabs.at = 2;
         ui_kit.busy = 0;
         ui_control_draw(&ui, &tabs);
-        tabs_still = !ui_kit.busy && ui_tween_at(&tabs.pip_x, ui_kit.now, &live) == ui_q(ui_tab_left(&ui, &tabs, 2));
+        tabs_still = !ui_kit.busy && ui_tween_at(&tabs.pip_x, ui_kit.now, &live) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
 
         memory_zero(&radios, sizeof(radios));
         radios.kind = UI_RADIOS, radios.x = 20, radios.y = 120, radios.w = 300, radios.h = 48, radios.count = 3;
@@ -124318,6 +124318,22 @@ static fn check_kit_place(void)
         check("kit place: tabs and radios given their chosen item start with the pip on it", tabs_still && radios_still);
         check("kit place: a control shown again after a change it did not see is placed, not moved", forgot_still);
         check("kit place: a change after the first frame moves, and the kit settled (a resize) puts it at its end at once", change_moves && settled);
+
+        // A resize moves the controls (the layout is laid again): the pips go with their strip and group, nothing lerps.
+        {
+                b32 moved_still;
+
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &tabs);
+                ui_control_draw(&ui, &radios);
+                tabs.x += 37, tabs.y += 11, radios.x += 37, radios.y += 23;
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                ui_control_draw(&ui, &tabs);
+                ui_control_draw(&ui, &radios);
+                moved_still = !ui_kit.busy && ui_tween_at(&tabs.pip_x, ui_kit.now, &live) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
+                check("kit place: a control the layout moves (a resize) is drawn where it is with its pip, nothing animating from its old place",
+                      moved_still);
+        }
 }
 #endif
 
