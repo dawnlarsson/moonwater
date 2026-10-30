@@ -10,8 +10,34 @@
 #           sh test/run --plan --changed   the lanes that would run, and none run
 #           sh test/run --all           every lane this machine can run (asked
 #                                       for on purpose; a terminal asks again)
+#           sh test/run --gate          the pre-land gate, minutes and not hours
+#           sh test/run --gate --watch REPO   the gate on each commit REPO's
+#                                       main gains, a line of verdict for each
 #
 #       An empty command line is refused: it is every lane, which is hours.
+#
+#       The gate is what to run before landing on main, and what broke main
+#       when it was not run: the shell and CHECK_terminal built by gcc, the
+#       arm64 and riscv64 shells built by their cross compilers, the audit
+#       seal, lib.c against its inventory, the engine's self-test, the
+#       host_writes harness, and the moonwater command's pages, README and
+#       settings table held to each other with its refusals to somebody who
+#       is not root (moonwater_cli --smoke). The builds run side by side and
+#       the build cache answers the ones a change did not touch; it is under
+#       five minutes on the shared box at a load of 40 (its own line says how
+#       long). It is one lane, gate, in the engine seam's apart list, so
+#       `sh test/run gate` is the same run.
+#
+#       --watch polls `git -C REPO rev-parse main` (MOONWATER_GATE_BRANCH for
+#       another branch) every MOONWATER_GATE_POLL seconds (60), and gates each
+#       commit main gained since the last look, oldest first, in a tree of its
+#       own from git archive, printing one line a commit: the commit, PASS or
+#       FAIL, how long, and the rows that failed. The log of a failed one is
+#       kept in MOONWATER_GATE_LOGS (~/.cache/moonwater-gate). It starts from
+#       main as it is (MOONWATER_GATE_FROM=REV starts earlier), runs in the
+#       foreground and stops at Ctrl-C; nothing is left running. On the box:
+#
+#           taskset -c 24-31 nice -n 5 sh test/run --gate --watch /path/to/repo
 #
 #           sh test/run bench           every benchmark
 #           sh test/run bench floor     only the benchmarks named
@@ -125,9 +151,9 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang"
 
 describe()
 {
@@ -192,6 +218,8 @@ describe()
         probe)    echo "what only a separate process can prove: arguments, status, regions" ;;
         stack)    echo "what each function puts on the stack, and what a deep walk costs" ;;
         differential_oracle) echo "the differential engine's own checks: comparison, covering arrays, ledger and shrinking" ;;
+        clang)    echo "the shell built by clang for three machines and run, as gcc builds it: lib.c and the code the programs share take only what both compilers take (NOT RUN without clang, a cross ld or qemu-user)" ;;
+        gate)     echo "the pre-land gate: the gcc, arm64 and riscv64 shells and CHECK_terminal built, the audit seal, the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
         text)     echo "the text utilities against GNU coreutils, every option combination the grammar reaches, and tr's threaded pieces on one processor and on all" ;;
         files)    echo "the file utilities against coreutils, by output and by effect on the directory" ;;
         misc)     echo "the utilities that are neither text nor files -- dd, diff, ps, the checksums, the process wrappers -- against the system's own" ;;
@@ -262,7 +290,7 @@ seam_lanes()
         machine) echo "machine cli script bowl storage_io storage_format" ;;
         desktop) echo "term edit font canvas sleep" ;;
         image) echo "kit switches boot install" ;;
-        engine) echo "differential_oracle" ;;
+        engine) echo "differential_oracle clang" ;;
         *) return 1 ;;
         esac
 }
@@ -274,6 +302,7 @@ seam_apart()
         tools) echo "scale" ;;
         desktop) echo "desktop chrome" ;;
         image) echo "ring0 tier usb firewall" ;;
+        engine) echo "gate" ;;
         *) ;;
         esac
 }
@@ -932,6 +961,22 @@ freestanding()
         arm64) set -- "$@" -mno-outline-atomics ;;
         riscv64) set -- "$@" -march=rv64imafd_zicsr_zicntr -mabi=lp64d ;;
         esac
+
+        #       clang has no nested functions, and scope_exit is its defer
+        #       statement (src/lib.util.c), which it takes when asked: so any
+        #       lane runs under CC=clang. A clang too old for it (Apple's 21)
+        #       is not asked, and builds what uses no scope_exit. Asked once
+        #       for each compiler.
+        if [ "$compiler" != "${compiler_asked:-}" ]; then
+                compiler_asked=$compiler
+                compiler_defer=
+                case $($compiler --version 2> /dev/null) in
+                *clang*)
+                        $compiler -fdefer-ts -E -x c /dev/null > /dev/null 2>&1 &&
+                                compiler_defer=-fdefer-ts ;;
+                esac
+        fi
+        [ -z "$compiler_defer" ] || set -- "$@" "$compiler_defer"
 
         #       MW_UBSAN=1 builds every program and check with the compiler's
         #       undefined-behaviour checks and traps at the first one, which
@@ -6104,6 +6149,193 @@ lane_differential_oracle()
         oracle_status=$?
         grep '^differential-oracle ' "$work/oracle.tally" >> "$TEST_TALLY"
         return "$oracle_status"
+}
+
+#       The shell built by clang, which has to build it as gcc does: lib.c and
+#       the code the programs share take only what both compilers take, and
+#       scope_exit is clang's defer statement (freestanding passes it
+#       -fdefer-ts). Nothing else built it with clang, and it did not build:
+#       a GNU nested function in fourteen files, gcc's names for four vector
+#       builtins, a target pragma clang does not read and a macro variable
+#       initialised from itself on riscv64. One build a machine, the foreign
+#       two linked by their own binutils' ld and run under qemu-user, each
+#       asked a line of shell and a utility through its multicall name.
+clang_one()
+{
+        clang_target=$1
+        case $clang_target in
+        x86_64) clang_triple=x86_64-linux-gnu ;;
+        arm64) clang_triple=aarch64-linux-gnu ;;
+        riscv64) clang_triple=riscv64-linux-gnu ;;
+        esac
+        clang_runner=qemu-${clang_triple%%-*}
+        clang_ld=
+        if [ "$host_system" = Linux ] && [ "$host_arch" = "$clang_target" ]; then
+                clang_runner=
+        else
+                for clang_tool in "$clang_runner" "$clang_triple-ld"; do
+                        command -v "$clang_tool" > /dev/null 2>&1 && continue
+                        note "clang $clang_target: NOT RUN -- no $clang_tool"
+                        return 2
+                done
+                clang_ld="--ld-path=$(command -v "$clang_triple-ld")"
+        fi
+
+        clang_saved=$compiler
+        compiler="clang --target=$clang_triple $clang_ld"
+        build_label="programs/shell.c by clang for $clang_target"
+        freestanding programs/shell.c "$work/clang-shell.$clang_target" "$clang_target"
+        clang_built=$?
+        build_label=
+        compiler=$clang_saved
+        if [ "$clang_built" != 0 ]; then
+                tally "clang-shell-$clang_target" 0 1
+                return 1
+        fi
+
+        mkdir -p "$work/clang-bin.$clang_target" &&
+                ln -sf "$work/clang-shell.$clang_target" "$work/clang-bin.$clang_target/sort" ||
+                return 1
+        clang_said=$($clang_runner "$work/clang-shell.$clang_target" \
+                -c 'printf "%s|" "$((6 * 7))" "${0##*/}"' 2>&1)
+        clang_sorted=$(printf 'b\na\n' |
+                $clang_runner "$work/clang-bin.$clang_target/sort" 2>&1 | tr '\n' ,)
+        [ "$clang_said" = "42|clang-shell.$clang_target|" ] && [ "$clang_sorted" = "a,b," ]
+        verdict "clang-shell-$clang_target" - \
+                'the clang shell for $clang_target answered [$clang_said] and sort [$clang_sorted]'
+        [ "$clang_said" = "42|clang-shell.$clang_target|" ] && [ "$clang_sorted" = "a,b," ]
+}
+
+lane_clang()
+{
+        if ! command -v clang > /dev/null 2>&1; then
+                note "clang: NOT RUN -- no clang here"
+                return 2
+        fi
+        #       Three whole-program compiles that share nothing, side by side.
+        net_outcome=0
+        job maybe clang_one x86_64
+        job maybe clang_one arm64
+        job maybe clang_one riscv64
+        jobs_wait
+        return "$net_outcome"
+}
+
+#       The pre-land gate (the header says what is in it and why). A row
+#       counted once: the command's status, and its last lines when it failed.
+gate_row()
+{
+        gate_name=$1
+        shift
+        "$@" > "$work/gate.$gate_name.out" 2>&1
+        gate_status=$?
+        if [ "$gate_status" = 0 ]; then
+                tally "gate-$gate_name" 1 1
+        else
+                tally "gate-$gate_name" 0 1
+                note "gate $gate_name: status $gate_status"
+                tail -n 15 "$work/gate.$gate_name.out" | sed 's/^/    /'
+        fi
+        return "$gate_status"
+}
+
+gate_cross()
+{
+        target_tools "$1" || return 1
+        build_label="programs/shell.c for $1"
+        target_build freestanding programs/shell.c "$work/gate-shell.$1" "$1"
+}
+
+gate_terminal()
+{
+        freestanding_check terminal "$work/terminal-check" || return 1
+        "$work/terminal-check" fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf \
+                fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf fonts/inter/Inter-Regular.ttf \
+                fonts/inter/Inter-Bold.ttf
+}
+
+gate_inventory()
+{
+        mkdir -p "$work/gate-inventory/platform" &&
+                cp src/lib.c "$work/gate-inventory/lib.c" &&
+                cp src/platform/*.inc "$work/gate-inventory/platform/" || return 1
+        python3 test/assembly/inventory.py "$work/gate-inventory/lib.c" > /dev/null || return 1
+        cmp src/lib.c "$work/gate-inventory/lib.c" ||
+                { echo "src/lib.c differs from its generator (python3 test/assembly/inventory.py src/lib.c)"; return 1; }
+        python3 test/assembly/inventory.py --check --target all src/lib.c > /dev/null
+}
+
+lane_gate()
+{
+        gate_began=$(date +%s)
+        net_outcome=0
+        job hard gate_row shell-x86_64 need_shell
+        job hard gate_row shell-arm64 gate_cross arm64
+        job hard gate_row shell-riscv64 gate_cross riscv64
+        job hard gate_row terminal gate_terminal
+        job hard gate_row seal python3 test/function_audit.py --check
+        job hard gate_row inventory gate_inventory
+        job hard gate_row engine lane_differential_oracle
+        job hard gate_row host-writes python3 test/differential.py --harness host_writes
+        jobs_wait
+        if [ -x "$work/shell" ]; then
+                gate_row cli-smoke python3 test/differential.py --harness moonwater_cli --smoke \
+                        --shell "$work/shell" || net_outcome=1
+        else
+                tally gate-cli-smoke 0 1
+                note "gate cli-smoke: no shell to run it with"
+                net_outcome=1
+        fi
+        note "gate: $(($(date +%s) - gate_began)) s"
+        return "$net_outcome"
+}
+
+#       One commit of REPO through the gate in a tree of its own, and its line.
+gate_commit()
+{
+        gate_tree=$(mktemp -d "$work/gate-commit.XXXXXX") || return 1
+        gate_short=$(git -C "$1" rev-parse --short=10 "$2")
+        gate_subject=$(git -C "$1" log -1 --format=%s "$2" | cut -c 1-72)
+        gate_started=$(date +%s)
+        if git -C "$1" archive "$2" | tar -x -C "$gate_tree"; then
+                (cd "$gate_tree" && sh test/run --gate) > "$gate_tree.log" 2>&1
+                gate_status=$?
+        else
+                echo "git archive $2 failed" > "$gate_tree.log"
+                gate_status=1
+        fi
+        gate_seconds=$(($(date +%s) - gate_started))
+        gate_red=$(awk '$(NF-1) == "of" && $(NF-2) != $NF && $1 ~ /^gate-/ { printf " %s", $1 }' \
+                "$gate_tree.log")
+        if [ "$gate_status" = 0 ]; then
+                printf '%s PASS %4ss %s\n' "$gate_short" "$gate_seconds" "$gate_subject"
+        else
+                mkdir -p "$gate_logs" && cp "$gate_tree.log" "$gate_logs/$gate_short.log"
+                printf '%s FAIL %4ss %s --%s (log %s)\n' "$gate_short" "$gate_seconds" \
+                        "$gate_subject" "${gate_red:- the run}" "$gate_logs/$gate_short.log"
+        fi
+        rm -rf "$gate_tree" "$gate_tree.log"
+}
+
+gate_watch()
+{
+        gate_branch=${MOONWATER_GATE_BRANCH:-main}
+        gate_poll=${MOONWATER_GATE_POLL:-60}
+        gate_logs=${MOONWATER_GATE_LOGS:-${HOME:-/tmp}/.cache/moonwater-gate}
+        gate_seen=$(git -C "$1" rev-parse "${MOONWATER_GATE_FROM:-$gate_branch}") ||
+                { echo "run: --watch wants a repository with a $gate_branch" >&2; return 2; }
+        echo "gate: watching $1 $gate_branch from $(git -C "$1" rev-parse --short=10 "$gate_seen"), every ${gate_poll}s; Ctrl-C stops"
+        while :; do
+                gate_now=$(git -C "$1" rev-parse "$gate_branch" 2> /dev/null) || gate_now=$gate_seen
+                if [ "$gate_now" != "$gate_seen" ]; then
+                        for gate_new in $(git -C "$1" rev-list --reverse --first-parent \
+                                "$gate_seen..$gate_now"); do
+                                gate_commit "$1" "$gate_new"
+                        done
+                        gate_seen=$gate_now
+                fi
+                sleep "$gate_poll"
+        done
 }
 
 #       sort cuts its work into fixed blocks and hands them to the pool, so
@@ -24930,6 +25162,7 @@ requested=""
 changed=0
 changed_base=""
 plan=0
+gate_repo=""
 
 while [ "$#" -gt 0 ]; do
         case $1 in
@@ -24948,6 +25181,11 @@ while [ "$#" -gt 0 ]; do
                 requested="$requested $(seam_lanes "$2")"
                 shift ;;
         --plan) plan=1 ;;
+        --gate) requested="$requested gate" ;;
+        --watch)
+                [ "$#" -ge 2 ] || { echo "run: --watch wants a repository" >&2; exit 2; }
+                gate_repo=$2
+                shift ;;
         --changed) changed=1 ;;
         --changed=*) changed=1; changed_base=${1#--changed=} ;;
         -*) echo "run: no option called $1" >&2; exit 2 ;;
@@ -24955,6 +25193,14 @@ while [ "$#" -gt 0 ]; do
         esac
         shift
 done
+
+#       The gate on every commit a repository's main gains, until Ctrl-C.
+if [ -n "$gate_repo" ]; then
+        [ "$(echo $requested)" = gate ] && [ "$changed" = 0 ] && [ "$everything" = 0 ] ||
+                { echo "run: --watch goes with --gate and nothing else" >&2; exit 2; }
+        gate_watch "$gate_repo"
+        exit $?
+fi
 
 if [ "$changed" = 1 ]; then
         seams_unmapped=""

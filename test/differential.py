@@ -44657,6 +44657,8 @@ def harness_moonwater_cli(argv):
     #       What builds the shell again at the bowl's tight tier, for the rows of
     #       moonwater security packages and sudo there.
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"))
+    #       Only the pages and the refusals, for the pre-land gate.
+    parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args(argv)
     if platform.system() != "Linux":
         print("moonwater cli: NOT RUN -- Linux namespaces")
@@ -44696,6 +44698,213 @@ def harness_moonwater_cli(argv):
         check(finished and len(zones) > 300 and len(codes) > 100 and layouts,
                      "timezone list and keyboard list name what can be set",
                      f"{len(zones)} zones, {len(codes)} codes, layouts {layouts}")
+
+        #       The pages, the README and the settings table held to each other,
+        #       and what each verb says to somebody who is not root: one session
+        #       each, here and in the gate's subset (--smoke, `sh test/run --gate`),
+        #       which runs these and nothing else.
+        def pages_and_refusals():
+            # The pages. One table of rows draws the main page, a wrong word's
+            # page and `help VERB`, and a lane holds them to the dispatcher: every
+            # verb it answers to (bar init's own, boot ask and machine) has a page
+            # of its own, and the rows of the pages name those verbs and no other.
+            # The README shows some of the rows, and each is a row of the pages,
+            # word for word.
+            host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
+            verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
+            dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)(?:, (?:true|false))?\}', verb_table)
+            public = [verb for verb in dispatched if verb not in ("boot", "ask", "machine")]
+            check(len(public) > 20 and "status" in public and "help" in public and "link" in public,
+                  "the dispatcher's table names the verbs", repr(dispatched))
+
+            def page_rows(out):
+                rows = []
+                for line in out:
+                    if line.startswith(" " * 36) and rows:
+                        rows[-1][1] += " " + line.strip()
+                        continue
+                    found = re.match(r"^  (\S.*?)(?:  +(\S.*))?$", line)
+                    if found and not line.startswith("   "):
+                        rows.append([found.group(1), found.group(2) or ""])
+                return [(command, " ".join(text.split())) for command, text in rows]
+
+            lines, finished = session("".join(say("help " + verb) for verb in public) + say("help") +
+                                      say("help bogus") + say("help wifi extra") + say("-h") + say("--help") +
+                                      say("wifi sideways") + say("link bogus!") + say("bogus"))
+            seen = answers(lines)
+            on_pages = set()
+            for verb in public:
+                got = seen.get("help " + verb, {"out": [], "status": None})
+                rows = page_rows(got["out"])
+                check(got["status"] == 0 and rows and all(
+                          command.split()[0] == verb or verb in ("sleep", "hibernate") and command.startswith("sleep")
+                          for command, _ in rows),
+                      f"help {verb} is that verb's page", repr(got)[:300])
+                on_pages.update(rows)
+            rows_readme = []
+            for fenced in (HARNESS_ROOT / "README.md").read_text().split("```sh\n")[1:]:
+                for line in fenced.split("```", 1)[0].splitlines():
+                    if line.startswith("moonwater "):
+                        found = re.match(r"^moonwater (\S.*?)(?:  +(\S.*))?$", line)
+                        rows_readme.append([found.group(1), found.group(2) or ""])
+                    elif line.startswith(" " * 39) and rows_readme:
+                        rows_readme[-1][1] += " " + line.strip()
+            in_readme = {(command, " ".join(text.split())) for command, text in rows_readme}
+            check(in_readme and in_readme <= on_pages,
+                  "the README's rows are rows of the pages, word for word",
+                  "only in the README: %r" % sorted(in_readme - on_pages)[:4])
+            check(("cpu online|offline N", "hotplug one processor") in in_readme,
+                  "the README shows the cpu online and offline rows the pages have",
+                  repr(sorted(command for command, _ in in_readme if command.startswith("cpu"))))
+            #       And the other way for the verbs of the clock, the zone, ntp,
+            #       the keyboard and the name: every row of their pages has its line
+            #       in the README, as `timezone auto` had not.
+            readme_commands = {command for command, _ in in_readme}
+            clock_rows = sorted(command for command, _ in on_pages
+                                if command.split()[0] in ("timezone", "ntp", "keyboard", "name", "time"))
+            check(clock_rows and all(command in readme_commands for command in clock_rows),
+                  "the README has a line for every row of the time, timezone, ntp, keyboard and name pages",
+                  [command for command in clock_rows if command not in readme_commands])
+            #       The gate above reads one way: a page row the README lacks is a verb nobody reads about.
+            #       The usb page is also asked of the README row by row, so a row added to the page is
+            #       written in the README too (usb apply was on the page and not in the README).
+            usb_page = page_rows(seen.get("help usb", {"out": []})["out"])
+            check(len(usb_page) >= 5 and all(row in in_readme for row in usb_page),
+                  "every row of the usb page is a row of the README, word for word",
+                  "missing from the README: %r" % [row for row in usb_page if row not in in_readme])
+            #       The settings table (src/sh/registry.c) is where a setting is written once: its row of the
+            #       pages and its line in the README are asked of it, each setting the window lists is a row
+            #       of it and the window keeps no list of its own, and a verb it names has its marker on the
+            #       main page and a place in the dispatcher.
+            registry_source = (HARNESS_ROOT / "src/sh/registry.c").read_text()
+            table_rows = [(usage, " ".join(text.split())) for usage, text in
+                          re.findall(r'\.usage = "((?:[^"\\]|\\.)*)",\s*\.help = "((?:[^"\\]|\\.)*)"', registry_source)]
+            check(len(table_rows) >= 32 and ("canvas cursor shake delay [MS|default]",
+                  "how long it stays large after the last shake, 100 to 10000 ms [1200]") in table_rows,
+                  "the settings table has its rows", repr(table_rows[:3]))
+            check(all(row in on_pages for row in table_rows),
+                  "every row of the settings table is a row of the pages", repr([row for row in table_rows if row not in on_pages][:4]))
+            check(all(row in in_readme for row in table_rows),
+                  "and every one has its row in the README, word for word", repr([row for row in table_rows if row not in in_readme][:4]))
+            #       The keyboard row of that table is the layouts of the keyboard table (host.c, asked as keyboard list):
+            #       its help names every one, and its menu names each layout once, leaving out gb, sv and nb, which
+            #       are the same layouts as uk, se and no under their country's name.
+            keyboard_row = re.search(r'"Keyboard", .*?\{"keyboard"\}, "((?:[a-z]{2} ?)+)", 0, null,\s*\.usage = "[^"]*",\s*'
+                                     r'\.help = "([^"]*)"', registry_source, re.S)
+            menu = keyboard_row.group(1).split() if keyboard_row else []
+            helped = [word for word in keyboard_row.group(2).split() if not word.startswith("[")] if keyboard_row else []
+            check(len(layouts) == 13 and sorted(helped) == sorted(layouts) and set(menu) < set(layouts) and
+                  set(layouts) - set(menu) == {"gb", "sv", "nb"} and len(menu) == len(set(menu)),
+                  "the keyboard row's help names the layouts keyboard list does, and its menu all but the spellings gb, sv and nb",
+                  repr((layouts, menu, helped)))
+            markers = set(re.findall(r'\{null, "@(\w+)", null, \'r\'\}', host_source))
+            check({usage.split()[0] for usage, _ in table_rows} <= markers,
+                  "every verb of the table has its marker on the main page", repr(sorted({u.split()[0] for u, _ in table_rows} - markers)))
+            settings_source = (HARNESS_ROOT / "src/canvas/ui/settings.c").read_text()
+            check("settings_rows[] =" not in settings_source and "struct settings_row\n{" not in settings_source and
+                  "SETTINGS_FIELD, 0" not in settings_source,
+                  "the settings window keeps no list of rows: its rows are the table's", "")
+            #       A quote in a row is read by GitHub's highlighter as the start of
+            #       a string and colours the rest of the README's block with it.
+            check(not any("'" in command or "'" in text for command, text in on_pages),
+                  "no row of any page holds an apostrophe",
+                  repr(sorted(row for row in on_pages if "'" in row[0] or "'" in row[1])[:3]))
+            first_words = {command.split()[0] for command, _ in on_pages}
+            check(first_words <= set(dispatched) and {v for v in public if v != "hibernate"} <= first_words,
+                  "the pages name every verb the dispatcher answers to, and no other",
+                  repr((sorted(first_words - set(dispatched)), sorted(set(public) - first_words))))
+
+            check(seen["help wifi extra"]["status"] == 2 and page_rows(seen["help wifi extra"]["out"]) ==
+                  [("help [VERB]", "these commands, or the page of one")],
+                  "help with too many words is help's own usage", repr(seen["help wifi extra"]))
+            check(seen["help"]["status"] == 0 and any("Settings stay in the image" in line for line in seen["help"]["out"]) and
+                  any("this session as one page" in line for line in seen["help"]["out"]),
+                  "help alone is the page", repr(seen["help"])[:200])
+            for word in ("help bogus", "-h", "--help", "bogus"):
+                check(seen[word]["status"] == 2 and any("this session as one page" in line for line in seen[word]["out"]),
+                      f"`{word}` is a usage page and exits 2", repr(seen[word])[:200])
+            check(seen["wifi sideways"]["status"] == 2 and
+                  any("wifi add SSID" in line for line in seen["wifi sideways"]["out"]) and
+                  not any("this session as one page" in line or "bluetooth" in line for line in seen["wifi sideways"]["out"]),
+                  "a wrong word to a verb prints that verb's rows and no others", repr(seen["wifi sideways"])[:300])
+
+            # Who is asked is judged after what is asked, and a refusal says which
+            # verb needs root. Nobody's wired sideways was "moonwater needs root"
+            # and a 1, as was every radio word, and the bare reading of a switch
+            # that is not there answered 1 for brightness and charge and said so
+            # in words that belonged to setting it.
+            session("chmod 700 /root; rm -rf /sys/class /sys/devices /sys/firmware /sys/power\n")
+            script = ("".join(say(command) for command in (
+                "wired sideways", "wifi sideways", "wifi add", "wifi on", "wifi add x", "wifi remove x",
+                "bluetooth add", "bluetooth sideways", "bluetooth add x", "wired off", "priority internet cable",
+                "priority sideways", "priority internet wired", "wipe", "bind init add x", "link", "link on x",
+                "link add x", "link push b f", "link run b", "link help", "link leave", "link a@b",
+                "link a@b abc-def", "name keeper",
+                "cpu online 0", "cpu online x", "charge limit", "charge limit 5", "brightness bogus", "brightness 50",
+                "power bogus", "power powersave", "brightness", "charge", "power", "ntp sideways", "ntp off",
+                "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "setup use /dev/", "setup install /dev/", "bios reboot",
+                "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine", "machine extra",
+                "latency", "latency sideways", "latency reset extra", "canvas background 112233",
+                "canvas scale 2", "canvas modes preferred",
+                "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
+                "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
+                "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
+                "canvas touch on", "usb lock", "usb allow 1-1", "usb class storage allow",
+                "usb forget 1-1", "usb log", "usb apply", "usb watch", "usb sideways", "usb class")))
+            lines, finished = session(script, nobody=True)
+            seen = answers(lines)
+            wanted = {
+                "wired sideways": (2, ""), "wifi sideways": (2, ""), "wifi add": (2, ""), "wifi on": (1, "moonwater wifi needs root"),
+                "wifi add x": (1, "moonwater wifi needs root"), "wifi remove x": (1, "moonwater wifi needs root"),
+                "bluetooth add": (2, ""), "bluetooth sideways": (2, ""), "bluetooth add x": (1, "moonwater bluetooth needs root"),
+                "wired off": (1, "moonwater wired needs root"), "priority internet cable": (2, ""), "priority sideways": (2, ""),
+                "priority internet wired": (1, "moonwater priority needs root"), "wipe": (1, "moonwater wipe needs root"),
+                "bind init add x": (1, "moonwater bind needs root"), "link": (1, "moonwater link needs root"),
+                "link on x": (2, ""), "link add x": (2, ""), "link push b f": (2, ""), "link run b": (2, ""),
+                "link help": (2, ""), "link leave": (2, ""), "link a@b": (2, ""),
+                "link a@b abc-def": (1, "a@b is not a machine name"),
+                "name keeper": (1, "moonwater name needs root"), "cpu online 0": (1, "cpu 0 stays"),
+                "cpu online x": (2, ""), "charge limit": (2, ""), "charge limit 5": (1, "no battery"),
+                "brightness bogus": (2, ""), "brightness 50": (1, "moonwater brightness needs root"),
+                "power bogus": (2, ""), "power powersave": (1, "moonwater power needs root"),
+                "brightness": (0, "no backlight"), "charge": (0, "no battery"), "power": (0, "no power profile"),
+                "ntp sideways": (2, ""), "ntp off": (1, "moonwater ntp needs root"), "keyboard xx": (1, "moonwater keyboard needs root"),
+                "timezone Mars/Olympus": (1, "moonwater timezone needs root"), "setup install x": (1, "moonwater setup needs root"),
+                "setup bogus": (2, ""), "setup use /dev/": (2, ""), "setup install /dev/": (2, ""),
+                "bios reboot": (1, "moonwater bios needs root"), "airplane on": (1, "moonwater airplane needs root"),
+                "sleep": (1, ""), "time sync": (1, "moonwater time needs root"), "boot": (1, "moonwater boot needs root"),
+                "boot extra": (2, ""), "ask": (1, "moonwater ask needs root"), "machine": (1, "moonwater machine needs root"),
+                "machine extra": (2, ""),
+                "latency": (1, "moonwater latency needs root"), "latency sideways": (2, ""),
+                "latency reset extra": (2, ""),
+                "canvas scale 2": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                "canvas modes preferred": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
+                "canvas cursor size 2": (1, "needs root (CAP_SYS_ADMIN)"),
+                "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
+                "canvas cursor shake off": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                "canvas cursor shake delay 800": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                "canvas touch on": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                "keyboard repeat delay 300": (1, "moonwater keyboard needs root"),
+                "keyboard repeat rate off": (1, "moonwater keyboard needs root"),
+                "mouse sensitivity 150": (1, "moonwater mouse needs root"),
+                "mouse acceleration off": (1, "moonwater mouse needs root"),
+                "taskbar text edge": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
+                "taskbar text sideways": (1, "taskbar text is center or edge, not sideways"),
+                "usb lock": (1, "moonwater usb needs root"), "usb allow 1-1": (1, "moonwater usb needs root"),
+                "usb class storage allow": (1, "moonwater usb needs root"), "usb forget 1-1": (1, "moonwater usb needs root"),
+                "usb log": (1, "moonwater usb needs root"), "usb apply": (1, "moonwater usb needs root"),
+                "usb watch": (1, "moonwater usb needs root"), "usb sideways": (2, ""), "usb class": (0, "classes: storage"),
+            }
+            for command, (status, words) in wanted.items():
+                got = seen.get(command, {"out": [], "status": None})
+                check(got["status"] == status and words in "\n".join(got["out"]),
+                      f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""),
+                      repr(got)[:240])
+
+        if args.smoke:
+            pages_and_refusals()
+            return checks.verdict("moonwater cli smoke", "moonwater-cli-smoke")
 
         # Every verb with good, bad and surplus arguments: an answer, never a signal.
         walk = ["", "status", "status extra", "-h", "--help", "-h extra", "bogus",
@@ -48473,203 +48682,7 @@ while True:
               "init:" not in page and "exit:" not in page,
               "status does not make the settings up for a caller who cannot read them", page[:600])
 
-        # The pages. One table of rows draws the main page, a wrong word's
-        # page and `help VERB`, and a lane holds them to the dispatcher: every
-        # verb it answers to (bar init's own, boot ask and machine) has a page
-        # of its own, and the rows of the pages name those verbs and no other.
-        # The README shows some of the rows, and each is a row of the pages,
-        # word for word.
-        host_source = (HARNESS_ROOT / "src/sh/host.c").read_text()
-        verb_table = src_slice(host_source, "host_verbs[] = {", "\n        };")
-        dispatched = re.findall(r'\{"(\w+)", \w+, (?:true|false)(?:, (?:true|false))?\}', verb_table)
-        public = [verb for verb in dispatched if verb not in ("boot", "ask", "machine")]
-        check(len(public) > 20 and "status" in public and "help" in public and "link" in public,
-              "the dispatcher's table names the verbs", repr(dispatched))
-
-        def page_rows(out):
-            rows = []
-            for line in out:
-                if line.startswith(" " * 36) and rows:
-                    rows[-1][1] += " " + line.strip()
-                    continue
-                found = re.match(r"^  (\S.*?)(?:  +(\S.*))?$", line)
-                if found and not line.startswith("   "):
-                    rows.append([found.group(1), found.group(2) or ""])
-            return [(command, " ".join(text.split())) for command, text in rows]
-
-        lines, finished = session("".join(say("help " + verb) for verb in public) + say("help") +
-                                  say("help bogus") + say("help wifi extra") + say("-h") + say("--help") +
-                                  say("wifi sideways") + say("link bogus!") + say("bogus"))
-        seen = answers(lines)
-        on_pages = set()
-        for verb in public:
-            got = seen.get("help " + verb, {"out": [], "status": None})
-            rows = page_rows(got["out"])
-            check(got["status"] == 0 and rows and all(
-                      command.split()[0] == verb or verb in ("sleep", "hibernate") and command.startswith("sleep")
-                      for command, _ in rows),
-                  f"help {verb} is that verb's page", repr(got)[:300])
-            on_pages.update(rows)
-        rows_readme = []
-        for fenced in (HARNESS_ROOT / "README.md").read_text().split("```sh\n")[1:]:
-            for line in fenced.split("```", 1)[0].splitlines():
-                if line.startswith("moonwater "):
-                    found = re.match(r"^moonwater (\S.*?)(?:  +(\S.*))?$", line)
-                    rows_readme.append([found.group(1), found.group(2) or ""])
-                elif line.startswith(" " * 39) and rows_readme:
-                    rows_readme[-1][1] += " " + line.strip()
-        in_readme = {(command, " ".join(text.split())) for command, text in rows_readme}
-        check(in_readme and in_readme <= on_pages,
-              "the README's rows are rows of the pages, word for word",
-              "only in the README: %r" % sorted(in_readme - on_pages)[:4])
-        check(("cpu online|offline N", "hotplug one processor") in in_readme,
-              "the README shows the cpu online and offline rows the pages have",
-              repr(sorted(command for command, _ in in_readme if command.startswith("cpu"))))
-        #       And the other way for the verbs of the clock, the zone, ntp,
-        #       the keyboard and the name: every row of their pages has its line
-        #       in the README, as `timezone auto` had not.
-        readme_commands = {command for command, _ in in_readme}
-        clock_rows = sorted(command for command, _ in on_pages
-                            if command.split()[0] in ("timezone", "ntp", "keyboard", "name", "time"))
-        check(clock_rows and all(command in readme_commands for command in clock_rows),
-              "the README has a line for every row of the time, timezone, ntp, keyboard and name pages",
-              [command for command in clock_rows if command not in readme_commands])
-        #       The gate above reads one way: a page row the README lacks is a verb nobody reads about.
-        #       The usb page is also asked of the README row by row, so a row added to the page is
-        #       written in the README too (usb apply was on the page and not in the README).
-        usb_page = page_rows(seen.get("help usb", {"out": []})["out"])
-        check(len(usb_page) >= 5 and all(row in in_readme for row in usb_page),
-              "every row of the usb page is a row of the README, word for word",
-              "missing from the README: %r" % [row for row in usb_page if row not in in_readme])
-        #       The settings table (src/sh/registry.c) is where a setting is written once: its row of the
-        #       pages and its line in the README are asked of it, each setting the window lists is a row
-        #       of it and the window keeps no list of its own, and a verb it names has its marker on the
-        #       main page and a place in the dispatcher.
-        registry_source = (HARNESS_ROOT / "src/sh/registry.c").read_text()
-        table_rows = [(usage, " ".join(text.split())) for usage, text in
-                      re.findall(r'\.usage = "((?:[^"\\]|\\.)*)",\s*\.help = "((?:[^"\\]|\\.)*)"', registry_source)]
-        check(len(table_rows) >= 32 and ("canvas cursor shake delay [MS|default]",
-              "how long it stays large after the last shake, 100 to 10000 ms [1200]") in table_rows,
-              "the settings table has its rows", repr(table_rows[:3]))
-        check(all(row in on_pages for row in table_rows),
-              "every row of the settings table is a row of the pages", repr([row for row in table_rows if row not in on_pages][:4]))
-        check(all(row in in_readme for row in table_rows),
-              "and every one has its row in the README, word for word", repr([row for row in table_rows if row not in in_readme][:4]))
-        #       The keyboard row of that table is the layouts of the keyboard table (host.c, asked as keyboard list):
-        #       its help names every one, and its menu names each layout once, leaving out gb, sv and nb, which
-        #       are the same layouts as uk, se and no under their country's name.
-        keyboard_row = re.search(r'"Keyboard", .*?\{"keyboard"\}, "((?:[a-z]{2} ?)+)", 0, null,\s*\.usage = "[^"]*",\s*'
-                                 r'\.help = "([^"]*)"', registry_source, re.S)
-        menu = keyboard_row.group(1).split() if keyboard_row else []
-        helped = [word for word in keyboard_row.group(2).split() if not word.startswith("[")] if keyboard_row else []
-        check(len(layouts) == 13 and sorted(helped) == sorted(layouts) and set(menu) < set(layouts) and
-              set(layouts) - set(menu) == {"gb", "sv", "nb"} and len(menu) == len(set(menu)),
-              "the keyboard row's help names the layouts keyboard list does, and its menu all but the spellings gb, sv and nb",
-              repr((layouts, menu, helped)))
-        markers = set(re.findall(r'\{null, "@(\w+)", null, \'r\'\}', host_source))
-        check({usage.split()[0] for usage, _ in table_rows} <= markers,
-              "every verb of the table has its marker on the main page", repr(sorted({u.split()[0] for u, _ in table_rows} - markers)))
-        settings_source = (HARNESS_ROOT / "src/canvas/ui/settings.c").read_text()
-        check("settings_rows[] =" not in settings_source and "struct settings_row\n{" not in settings_source and
-              "SETTINGS_FIELD, 0" not in settings_source,
-              "the settings window keeps no list of rows: its rows are the table's", "")
-        #       A quote in a row is read by GitHub's highlighter as the start of
-        #       a string and colours the rest of the README's block with it.
-        check(not any("'" in command or "'" in text for command, text in on_pages),
-              "no row of any page holds an apostrophe",
-              repr(sorted(row for row in on_pages if "'" in row[0] or "'" in row[1])[:3]))
-        first_words = {command.split()[0] for command, _ in on_pages}
-        check(first_words <= set(dispatched) and {v for v in public if v != "hibernate"} <= first_words,
-              "the pages name every verb the dispatcher answers to, and no other",
-              repr((sorted(first_words - set(dispatched)), sorted(set(public) - first_words))))
-
-        check(seen["help wifi extra"]["status"] == 2 and page_rows(seen["help wifi extra"]["out"]) ==
-              [("help [VERB]", "these commands, or the page of one")],
-              "help with too many words is help's own usage", repr(seen["help wifi extra"]))
-        check(seen["help"]["status"] == 0 and any("Settings stay in the image" in line for line in seen["help"]["out"]) and
-              any("this session as one page" in line for line in seen["help"]["out"]),
-              "help alone is the page", repr(seen["help"])[:200])
-        for word in ("help bogus", "-h", "--help", "bogus"):
-            check(seen[word]["status"] == 2 and any("this session as one page" in line for line in seen[word]["out"]),
-                  f"`{word}` is a usage page and exits 2", repr(seen[word])[:200])
-        check(seen["wifi sideways"]["status"] == 2 and
-              any("wifi add SSID" in line for line in seen["wifi sideways"]["out"]) and
-              not any("this session as one page" in line or "bluetooth" in line for line in seen["wifi sideways"]["out"]),
-              "a wrong word to a verb prints that verb's rows and no others", repr(seen["wifi sideways"])[:300])
-
-        # Who is asked is judged after what is asked, and a refusal says which
-        # verb needs root. Nobody's wired sideways was "moonwater needs root"
-        # and a 1, as was every radio word, and the bare reading of a switch
-        # that is not there answered 1 for brightness and charge and said so
-        # in words that belonged to setting it.
-        session("chmod 700 /root; rm -rf /sys/class /sys/devices /sys/firmware /sys/power\n")
-        script = ("".join(say(command) for command in (
-            "wired sideways", "wifi sideways", "wifi add", "wifi on", "wifi add x", "wifi remove x",
-            "bluetooth add", "bluetooth sideways", "bluetooth add x", "wired off", "priority internet cable",
-            "priority sideways", "priority internet wired", "wipe", "bind init add x", "link", "link on x",
-            "link add x", "link push b f", "link run b", "link help", "link leave", "link a@b",
-            "link a@b abc-def", "name keeper",
-            "cpu online 0", "cpu online x", "charge limit", "charge limit 5", "brightness bogus", "brightness 50",
-            "power bogus", "power powersave", "brightness", "charge", "power", "ntp sideways", "ntp off",
-            "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "setup use /dev/", "setup install /dev/", "bios reboot",
-            "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine", "machine extra",
-            "latency", "latency sideways", "latency reset extra", "canvas background 112233",
-            "canvas scale 2", "canvas modes preferred",
-            "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
-            "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
-            "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
-            "canvas touch on", "usb lock", "usb allow 1-1", "usb class storage allow",
-            "usb forget 1-1", "usb log", "usb apply", "usb watch", "usb sideways", "usb class")))
-        lines, finished = session(script, nobody=True)
-        seen = answers(lines)
-        wanted = {
-            "wired sideways": (2, ""), "wifi sideways": (2, ""), "wifi add": (2, ""), "wifi on": (1, "moonwater wifi needs root"),
-            "wifi add x": (1, "moonwater wifi needs root"), "wifi remove x": (1, "moonwater wifi needs root"),
-            "bluetooth add": (2, ""), "bluetooth sideways": (2, ""), "bluetooth add x": (1, "moonwater bluetooth needs root"),
-            "wired off": (1, "moonwater wired needs root"), "priority internet cable": (2, ""), "priority sideways": (2, ""),
-            "priority internet wired": (1, "moonwater priority needs root"), "wipe": (1, "moonwater wipe needs root"),
-            "bind init add x": (1, "moonwater bind needs root"), "link": (1, "moonwater link needs root"),
-            "link on x": (2, ""), "link add x": (2, ""), "link push b f": (2, ""), "link run b": (2, ""),
-            "link help": (2, ""), "link leave": (2, ""), "link a@b": (2, ""),
-            "link a@b abc-def": (1, "a@b is not a machine name"),
-            "name keeper": (1, "moonwater name needs root"), "cpu online 0": (1, "cpu 0 stays"),
-            "cpu online x": (2, ""), "charge limit": (2, ""), "charge limit 5": (1, "no battery"),
-            "brightness bogus": (2, ""), "brightness 50": (1, "moonwater brightness needs root"),
-            "power bogus": (2, ""), "power powersave": (1, "moonwater power needs root"),
-            "brightness": (0, "no backlight"), "charge": (0, "no battery"), "power": (0, "no power profile"),
-            "ntp sideways": (2, ""), "ntp off": (1, "moonwater ntp needs root"), "keyboard xx": (1, "moonwater keyboard needs root"),
-            "timezone Mars/Olympus": (1, "moonwater timezone needs root"), "setup install x": (1, "moonwater setup needs root"),
-            "setup bogus": (2, ""), "setup use /dev/": (2, ""), "setup install /dev/": (2, ""),
-            "bios reboot": (1, "moonwater bios needs root"), "airplane on": (1, "moonwater airplane needs root"),
-            "sleep": (1, ""), "time sync": (1, "moonwater time needs root"), "boot": (1, "moonwater boot needs root"),
-            "boot extra": (2, ""), "ask": (1, "moonwater ask needs root"), "machine": (1, "moonwater machine needs root"),
-            "machine extra": (2, ""),
-            "latency": (1, "moonwater latency needs root"), "latency sideways": (2, ""),
-            "latency reset extra": (2, ""),
-            "canvas scale 2": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
-            "canvas modes preferred": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
-            "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
-            "canvas cursor size 2": (1, "needs root (CAP_SYS_ADMIN)"),
-            "canvas cursor look dark": (1, "needs root (CAP_SYS_ADMIN)"),
-            "canvas cursor shake off": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
-            "canvas cursor shake delay 800": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
-            "canvas touch on": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
-            "keyboard repeat delay 300": (1, "moonwater keyboard needs root"),
-            "keyboard repeat rate off": (1, "moonwater keyboard needs root"),
-            "mouse sensitivity 150": (1, "moonwater mouse needs root"),
-            "mouse acceleration off": (1, "moonwater mouse needs root"),
-            "taskbar text edge": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
-            "taskbar text sideways": (1, "taskbar text is center or edge, not sideways"),
-            "usb lock": (1, "moonwater usb needs root"), "usb allow 1-1": (1, "moonwater usb needs root"),
-            "usb class storage allow": (1, "moonwater usb needs root"), "usb forget 1-1": (1, "moonwater usb needs root"),
-            "usb log": (1, "moonwater usb needs root"), "usb apply": (1, "moonwater usb needs root"),
-            "usb watch": (1, "moonwater usb needs root"), "usb sideways": (2, ""), "usb class": (0, "classes: storage"),
-        }
-        for command, (status, words) in wanted.items():
-            got = seen.get(command, {"out": [], "status": None})
-            check(got["status"] == status and words in "\n".join(got["out"]),
-                  f"as nobody, `moonwater {command}` exits {status}" + (f" and says {words}" if words else ""),
-                  repr(got)[:240])
+        pages_and_refusals()
 
         # Output is for whoever reads it. Into a pipe or a file there are no
         # escapes in anything the command says, where the label was bold and
