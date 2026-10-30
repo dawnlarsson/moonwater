@@ -74028,6 +74028,33 @@ static positive overlay_entry(p8 address_to at, p8 kind, p16 id, const p8 addres
         return 8 + padded;
 }
 
+/* An overlay file holding one anchor entry of the shape given: its curve, the
+   last of the three zero bytes after it (the one a reader that stops at the
+   first nonzero byte still lines the rest up behind), its exponent, and a key of key_length bytes, the first of
+   them key_first and the rest 0x11. Whether it reads, into into. */
+static bool overlay_anchor_reads(tls_overlay address_to into, p8 curve, p8 pad,
+                                 p32 exponent, positive key_length, p8 key_first)
+{
+        static p8 file[TLS_OVERLAY_HEAD + 8 + 40 + 520];
+        static p8 entry[40 + 520];
+
+        memory_zero(entry, sizeof entry);
+        entry[0] = curve;
+        entry[3] = pad;
+        for (positive k = 0; k < 4; k++)
+                entry[4 + k] = (p8)(exponent >> (8 * k));
+        memory_fill(entry + 8, 0x22, 32);
+        memory_fill(entry + 40, 0x11, key_length);
+        if (key_length)
+                entry[40] = key_first;
+        return tls_overlay_read(file,
+                                overlay_file(file, null,
+                                             overlay_entry(file + TLS_OVERLAY_HEAD,
+                                                           TLS_OVERLAY_TRUST, TLS_OVERLAY_BY_HAND,
+                                                           entry, 40 + key_length)),
+                                into);
+}
+
 static fn tls_trust_anchor_chains(void)
 {
         static const char atlas_hex[] =
@@ -74598,6 +74625,128 @@ static fn tls_trust_anchor_chains(void)
                               broken == array_count(breaks) + 3 &&
                                   tls_overlay_read(file, used, address_of overlay) &&
                                   overlay.anchors == 1 && overlay.anchor[0].exponent == 65537);
+                }
+
+                //      The edges of what an added anchor may be: a point of its
+                //      curve's size and no exponent, or a modulus of 2048 to 4096
+                //      bits that starts with a byte and has an odd exponent from 3
+                //      up; and a byte out of place in the rest of the entry.
+                {
+                        static const struct
+                        {
+                                p8 curve;
+                                p8 pad;
+                                p32 exponent;
+                                positive length;
+                                p8 first;
+                                bool reads;
+                        } shapes[] = {
+                            {1, 0, 0, 64, 0x11, true},       {1, 0, 0, 63, 0x11, false},
+                            {1, 0, 0, 65, 0x11, false},      {1, 0, 1, 64, 0x11, false},
+                            {1, 1, 0, 64, 0x11, false},      {2, 0, 0, 96, 0x11, true},
+                            {2, 0, 0, 95, 0x11, false},      {2, 0, 0, 97, 0x11, false},
+                            {2, 0, 5, 96, 0x11, false},      {2, 1, 0, 96, 0x11, false},
+                            {3, 0, 65537, 256, 0x11, true},  {3, 0, 65537, 255, 0x11, false},
+                            {3, 0, 65537, 512, 0x11, true},  {3, 0, 65537, 513, 0x11, false},
+                            {3, 0, 65537, 256, 0, false},    {3, 0, 3, 256, 0x11, true},
+                            {3, 0, 1, 256, 0x11, false},     {3, 0, 2, 256, 0x11, false},
+                            {3, 0, 4, 256, 0x11, false},     {3, 0, 0xffffffffu, 256, 0x11, true},
+                            {3, 1, 65537, 256, 0x11, false}, {0, 0, 0, 64, 0x11, false},
+                            {4, 0, 0, 64, 0x11, false},
+                        };
+                        positive wrong = 0;
+
+                        for (positive i = 0; i < array_count(shapes); i++)
+                                wrong += overlay_anchor_reads(address_of overlay, shapes[i].curve,
+                                                              shapes[i].pad, shapes[i].exponent,
+                                                              shapes[i].length, shapes[i].first) !=
+                                         shapes[i].reads;
+                        check("an added anchor reads at the sizes and exponents anchors.inc "
+                              "keeps and at none beside them", wrong == 0);
+
+                        /* Too little of an entry to hold its Name: refused. */
+                        wrong = 0;
+                        for (positive short_text = 0; short_text < 40; short_text += 3)
+                        {
+                                memory_zero(anchor_entry, sizeof anchor_entry);
+                                anchor_entry[0] = 1;
+                                used = TLS_OVERLAY_HEAD +
+                                       overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_TRUST, 1,
+                                                     anchor_entry, short_text);
+                                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                                wrong += tls_overlay_read(file, used, address_of overlay);
+                        }
+                        check("an anchor entry too short for its Name and key is refused", wrong == 0);
+
+                        /* A block with a byte too many, an anchor by an id that is
+                           not by hand, nine anchors where eight is the most. */
+                        used = TLS_OVERLAY_HEAD +
+                               overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_BLOCK, 1, name, 32);
+                        file[TLS_OVERLAY_HEAD + 4] = 33;
+                        file[used++] = 0;
+                        file[used++] = 0;
+                        file[used++] = 0;
+                        file[used++] = 0;
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        wrong = tls_overlay_read(file, used, address_of overlay);
+                        memory_zero(anchor_entry, sizeof anchor_entry);
+                        anchor_entry[0] = 1;
+                        memory_fill(anchor_entry + 8, 0x22, 32);
+                        memory_fill(anchor_entry + 40, 0x11, 64);
+                        used = TLS_OVERLAY_HEAD +
+                               overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_TRUST, 2,
+                                             anchor_entry, 40 + 64);
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        wrong += tls_overlay_read(file, used, address_of overlay);
+                        for (positive count = 1; count <= TLS_OVERLAY_ANCHORS + 1; count++)
+                        {
+                                used = TLS_OVERLAY_HEAD;
+                                for (positive i = 0; i < count; i++)
+                                        used += overlay_entry(file + used, TLS_OVERLAY_TRUST, 1,
+                                                              anchor_entry, 40 + 64);
+                                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                                wrong += tls_overlay_read(file, used, address_of overlay) !=
+                                         (count <= TLS_OVERLAY_ANCHORS);
+                        }
+                        check("a block of 33 bytes and an anchor by another id are refused, and "
+                              "so is the ninth anchor", wrong == 0);
+
+                        /* Settled, only the anchors that were read are judged: the
+                           slot after the last stays as it was. */
+                        used = TLS_OVERLAY_HEAD +
+                               overlay_entry(file + TLS_OVERLAY_HEAD, TLS_OVERLAY_TRUST, 1,
+                                             anchor_entry, 40 + 64);
+                        overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                        wrong = !tls_overlay_read(file, used, address_of overlay);
+                        tls_overlay_settle(address_of overlay);
+                        check("settling judges the anchors read and not the slot after them",
+                              !wrong && !overlay.anchor[0].refused && !overlay.anchor[1].refused);
+
+                        /* What a block refuses is exactly the digests it holds:
+                           none for an overlay without blocks, one block and the
+                           empty slot after it, and sixty-four with the bytes after
+                           them. */
+                        memory_zero(served, sizeof served);
+                        wrong = 0;
+                        for (positive count = 0; count <= TLS_OVERLAY_BLOCKS; count += 1 + 62 * (count > 0))
+                        {
+                                used = TLS_OVERLAY_HEAD;
+                                for (positive i = 0; i < count; i++)
+                                {
+                                        digest[0] = (p8)(i + 1);
+                                        used += overlay_entry(file + used, TLS_OVERLAY_BLOCK, 1, digest, 32);
+                                }
+                                overlay_file(file, null, used - TLS_OVERLAY_HEAD);
+                                wrong += !tls_overlay_read(file, used, address_of overlay);
+                                wrong += tls_overlay_refuses(address_of overlay, served);
+                                if (count)
+                                {
+                                        digest[0] = (p8)count;
+                                        wrong += !tls_overlay_refuses(address_of overlay, digest);
+                                }
+                        }
+                        check("an overlay refuses the digests it holds, and the empty slots after "
+                              "them are not digests", wrong == 0);
                 }
                 memory_zero(address_of tls_overlay_now, sizeof tls_overlay_now);
                 certum_cert.sig[certum_cert.sig_length - 1] ^= 1;
