@@ -2612,6 +2612,18 @@ static int compositor_most_height(void)
         return compositor.most_h ? compositor.most_h : compositor.height;
 }
 
+/*
+        The bytes of one window's buffer, for the session: rows stride pixels long, as many as the tallest screen
+        connected at the start, lit or dark (room_h). A screen dark at the start (arranged off, or past what the card
+        could scan out) is lit later by an arrangement, and a window may then be as tall as it is.
+*/
+static unsigned long compositor_buffer_room(void)
+{
+        int rows = compositor.room_h > compositor_most_height() ? compositor.room_h : compositor_most_height();
+
+        return ((unsigned long)compositor_stride() * (unsigned long)rows * 4 + 4095) & ~4095ul;
+}
+
 // How many screens the desktop spans: at least one.
 static int compositor_output_count(void)
 {
@@ -9293,10 +9305,9 @@ static void compositor_table_outputs(void)
 static int compositor_table(void)
 {
         unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
-        // Every window's buffer as large as the largest window may be, a row of it stride pixels: for the session,
+        // Every window's buffer as large as the largest window may ever be, a row of it stride pixels: for the session,
         // as the table is sealed at its size and mapped by every window.
-        unsigned long buffer = ((unsigned long)compositor_stride() * (unsigned long)compositor_most_height() * 4 + 4095) &
-                               ~4095ul;
+        unsigned long buffer = compositor_buffer_room();
         unsigned long bytes = header + buffer * 2 * WINDOWS;
         long handle, mapped;
         p8 name[48];

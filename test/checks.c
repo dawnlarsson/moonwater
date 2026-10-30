@@ -115866,6 +115866,12 @@ static void check_compositor_screens(void)
     memory_copy(compositor.output[1].name, names[1], sizeof(names[1]));
     compositor.stride = compositor.most_w = SCREENS_A_W;
     compositor.room_h = compositor.most_h = SCREENS_H;
+    //  B dark at the start (arranged off): the largest a window may be is A, and the table made then has to have room
+    //  for B, which an arrangement lights later and a window then fills.
+    compositor.most_h = SCREENS_A_H;
+    check("screens: a window's buffer has room for the tallest screen connected at the start, lit or dark",
+          compositor_buffer_room() / 4 / SCREENS_A_W >= SCREENS_H);
+    compositor.most_h = SCREENS_H;
     if (mapped < 0 && mapped > -4096)
     {
         check("screens: the table is mapped", false);
